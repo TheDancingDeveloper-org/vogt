@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
+RECEIPT_VALIDATOR = REPO_ROOT / "scripts" / "validate_deployment_receipt.py"
 
 
 def _without_comments(text: str) -> str:
@@ -1224,11 +1226,71 @@ def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> N
     assert "actions/workflows/${DEPLOY_WORKFLOW}/dispatches" in workflow
     assert "image_digest" in workflow
     assert "vogt-deployment-receipt" in workflow
-    assert "desired_state_commit" in workflow
-    assert "migration_limits" in workflow
     assert "KOMODO_API" not in workflow
     assert "sigstore/cosign-installer@v3" in workflow
     assert "cosign verify" in workflow
+
+
+def test_production_handoff_uses_real_url_and_deterministic_correlation() -> None:
+    workflow = (WORKFLOWS / "deploy-production.yml").read_text(encoding="utf-8")
+    assert (
+        "RECEIPT_RUN: ${{ github.server_url }}/${{ github.repository }}"
+        "/actions/runs/${{ github.run_id }}"
+    ) in workflow
+    assert 'RECEIPT_RUN: "${GITHUB_SERVER_URL}' not in workflow
+    assert "DISPATCH_ID: ${{ github.run_id }}-${{ github.run_attempt }}" in workflow
+    assert "dispatch_id: $dispatch_id" in workflow
+    assert "display_title" in workflow
+    assert 'run.get("head_branch") == deploy_ref' in workflow
+    assert "set the estate workflow run-name to include dispatch_id" in workflow
+
+
+def test_production_handoff_validates_and_reports_the_receipt() -> None:
+    workflow = (WORKFLOWS / "deploy-production.yml").read_text(encoding="utf-8")
+    assert "scripts/validate_deployment_receipt.py" in workflow
+    assert "deploy/vogt-deployment-receipt.schema.json" in workflow
+    assert "GITHUB_STEP_SUMMARY" in workflow
+    assert "actions/upload-artifact@v7" in workflow
+    assert "vogt-prod-deployment-receipt-${{ inputs.tag }}" in workflow
+
+
+def test_production_receipt_validator_accepts_schema_and_rejects_invalid_receipts(
+    tmp_path: Path,
+) -> None:
+    valid = {
+        "source_repository": "TheDancingDeveloper-org/vogt",
+        "source_sha": "a" * 40,
+        "source_tag": "v0.3.0",
+        "image_digest": "sha256:" + "b" * 64,
+        "desired_state_commit": "c" * 40,
+        "deployment_id": "komodo-123",
+        "live_smoke": {"status": "passed"},
+        "rollback_plan": "revert the desired-state commit",
+        "migration_limits": "restore the pre-release backup",
+    }
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(json.dumps(valid), encoding="utf-8")
+    schema = REPO_ROOT / "deploy/vogt-deployment-receipt.schema.json"
+
+    accepted = subprocess.run(
+        [sys.executable, str(RECEIPT_VALIDATOR), str(receipt), str(schema)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+
+    invalid = dict(valid)
+    invalid.pop("migration_limits")
+    receipt.write_text(json.dumps(invalid), encoding="utf-8")
+    rejected = subprocess.run(
+        [sys.executable, str(RECEIPT_VALIDATOR), str(receipt), str(schema)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert rejected.returncode == 1
+    assert "migration_limits" in rejected.stderr
 
 
 def test_dev_deploy_is_immutable_and_receipt_gated() -> None:
