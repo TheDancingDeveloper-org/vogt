@@ -64,8 +64,8 @@ jobs:
         id: deployment-token
         uses: actions/create-github-app-token@v2
         with:
-          app-id: ${{ secrets.VOGT_DEV_DEPLOYMENT_APP_ID }}
-          private-key: ${{ secrets.VOGT_DEV_DEPLOYMENT_APP_PRIVATE_KEY }}
+          app-id: ${{ secrets.VOGT_DEV_GITHUB_APP_ID }}
+          private-key: ${{ secrets.VOGT_DEV_GITHUB_APP_PEM }}
           owner: ${{ vars.VOGT_DEV_DEPLOYMENT_OWNER }}
           repositories: ${{ vars.VOGT_DEV_DEPLOYMENT_REPOSITORY_NAME }}
           permission-actions: write
