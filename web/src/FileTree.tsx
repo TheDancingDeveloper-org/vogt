@@ -307,16 +307,16 @@ const FileTree: Component<Props> = (props) => {
   const [gitStatus, { refetch: refetchGitStatus }] = createResource(
     () => (isActive() ? "active" : undefined),
     async () => {
-    try {
-      const status = await api.gitStatus("");
-      return status.is_repo === false ? [] : status.entries;
-    } catch {
-      // File browsing is independent of Git. A non-repository workspace or a
-      // local Git read failure removes optional markers, never the file tree.
-      return [];
-    }
+      try {
+        const status = await api.gitStatus("");
+        return status.is_repo === false ? [] : status.entries;
+      } catch {
+        // File browsing is independent of Git. A non-repository workspace or a
+        // local Git read failure removes optional markers, never the file tree.
+        return [];
+      }
     },
-  });
+  );
   const statusMap = createMemo(() => buildStatusMap(gitStatus() ?? []));
   // Search query is hoisted to the module store so it survives a tab switch.
   const searchQuery = fileTreeSearch;
