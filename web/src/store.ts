@@ -122,6 +122,8 @@ function nextReconnectDelay(): number {
 
 /** Callers waiting to hear that vogt-core changed (FR-U10). */
 const vogtListeners = new Set<(seq: number) => void>();
+export type VogtChangedEvent = Extract<ServerEvent, { type: "vogt-changed" }>;
+const vogtEventListeners = new Set<(event: VogtChangedEvent) => void>();
 
 /**
  * Subscribe to vogt-core's changes, as republished on the engine's stream.
@@ -136,8 +138,16 @@ export function onVogtChanged(listener: (seq: number) => void): () => void {
   return () => vogtListeners.delete(listener);
 }
 
-function notifyVogtChanged(seq: number): void {
-  for (const listener of vogtListeners) listener(seq);
+export function onVogtChangedEvent(
+  listener: (event: VogtChangedEvent) => void,
+): () => void {
+  vogtEventListeners.add(listener);
+  return () => vogtEventListeners.delete(listener);
+}
+
+function notifyVogtChanged(event: VogtChangedEvent): void {
+  for (const listener of vogtListeners) listener(event.seq);
+  for (const listener of vogtEventListeners) listener(event);
 }
 
 /** Callers waiting to hear that a session exited (a PTY the engine killed). */
@@ -207,7 +217,7 @@ export function startEventStream(): void {
           // has no opinion about a work item. Recorded here so the switch is
           // exhaustive and a future reader is not left wondering whether the
           // event was forgotten or ignored.
-          notifyVogtChanged(ev.seq);
+          notifyVogtChanged(ev);
           break;
       }
     },
