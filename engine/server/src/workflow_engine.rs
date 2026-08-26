@@ -19,9 +19,11 @@
 //!
 //! The generic contract below remains provisional. Fabro's concrete manifest
 //! routes and payloads are documented in [`FabroConfig`], covered by wire-shape
-//! tests, and live-smoked against Fabro 0.254. The newer immutable workflow
-//! intent lane is retained for servers that expose it and shares the same
-//! lifecycle, question, steering, and SSE mappings.
+//! tests, and live-smoked against Fabro 0.254. Its newer immutable workflow
+//! intent lane was live-smoked against Fabro 0.337.0-nightly.1 on 2026-08-26
+//! against Vogt's `dev` branch, covering version-backed Git-target creation,
+//! run start, durable run-branch/timeline checkpoints, attach SSE, and a
+//! terminal conclusion. The generic contract remains separate and unverified.
 //!
 //! ## PROVISIONAL generic workflow-engine REST contract
 //!
@@ -92,6 +94,15 @@
 //! folder target is intentionally reported without checkpoint branches: the
 //! Fabro 0.254 contract executes it in place and explicitly does not create
 //! Fabro Git checkpoints.
+//!
+//! The immutable workflow-intent lane was live-smoked against Fabro
+//! 0.337.0-nightly.1 on 2026-08-26 using the public Vogt `dev` target. The
+//! run cloned the repository, completed successfully, exposed its
+//! `fabro/run/<run-id>` branch and `start@1` timeline checkpoint, and replayed
+//! `run.started`, `stage.completed`, `checkpoint.completed`, and
+//! `run.completed` records through `/attach`. The no-model smoke incurred no
+//! charge; billing projection when Fabro supplies a value remains covered by
+//! the wire-shape tests below.
 
 use std::future::Future;
 use std::pin::Pin;
