@@ -44,11 +44,6 @@ import {
   backlog,
   bugs,
   createWork,
-  listActors,
-  listInitiatives,
-  listLabels,
-  listProjects,
-  listWorkflows,
   startSession,
   suppressSubject,
   transitionWork,
@@ -57,6 +52,7 @@ import {
   type RankedEntry,
   type RankedView,
 } from "./vogtApi";
+import { taxonomy } from "./taxonomyCache";
 import { openWorkItemTab } from "./tabs";
 import {
   ViewAgeBadge,

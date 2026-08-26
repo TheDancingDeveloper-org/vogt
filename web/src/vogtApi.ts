@@ -30,6 +30,7 @@ import {
   STABLE_READ_POLICY,
   type CacheFetchResult,
 } from "./swr";
+import { invalidateTaxonomy } from "./taxonomyInvalidation";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -176,9 +177,13 @@ async function call<T>(
       signal,
     );
   }
-
   const result = await read(signal);
-  if (method !== "GET") invalidate();
+  if (method !== "GET") {
+    invalidate();
+    if (operation === "project.register" || operation === "project.import") {
+      invalidateTaxonomy("projects");
+    }
+  }
   if (result === "not-modified") {
     throw new Error("unexpected conditional response for uncached read");
   }
