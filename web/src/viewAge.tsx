@@ -46,6 +46,7 @@ import {
   type Accessor,
 } from "solid-js";
 import { onVogtChanged } from "./store";
+import { onWake } from "./wakeCoordinator";
 
 /** How old a view with no poll may be before it stops calling itself current. */
 export const DEFAULT_STALE_AFTER_MS = 60_000;
@@ -260,12 +261,10 @@ export function onVogtLive(handler: () => void, options: LiveOptions = {}): void
     // A hidden tab skips the nudges above, so coming back is the moment its
     // answer is furthest from current — this is FR-U10's "reconcile on
     // reconnect" for the reader who never saw the disconnection.
-    const onVisibility = () => {
-      if (document.visibilityState !== "visible") return;
+    const stop = onWake(() => {
       if (options.when && !options.when()) return;
       handler();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    onCleanup(() => document.removeEventListener("visibilitychange", onVisibility));
+    });
+    onCleanup(stop);
   });
 }

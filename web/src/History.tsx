@@ -23,6 +23,7 @@ import {
 } from "./historyPins";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { sessionsStore } from "./store";
+import { onWake } from "./wakeCoordinator";
 import {
   historyMatchKey,
   historyResultUrl,
@@ -223,12 +224,11 @@ const History: Component<Props> = (props) => {
         refreshPins();
       }
     };
-    const onFocus = () => refreshPins();
     window.addEventListener("storage", onStorage);
-    window.addEventListener("focus", onFocus);
+    const stopWake = onWake(() => refreshPins());
     onCleanup(() => {
       window.removeEventListener("storage", onStorage);
-      window.removeEventListener("focus", onFocus);
+      stopWake();
     });
   });
 

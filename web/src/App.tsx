@@ -109,6 +109,7 @@ import {
   type PlaceMetric,
 } from "./placeMetrics";
 import { createNow, onVogtLive } from "./viewAge";
+import { noteForeground } from "./wakeCoordinator";
 import {
   activityClass,
   activityLabel,
@@ -617,6 +618,7 @@ const App: Component = () => {
         setAuthState("authenticated");
         await refreshSessions();
         startEventStream();
+        noteForeground("boot");
         void placeMetrics.refresh();
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
@@ -636,6 +638,7 @@ const App: Component = () => {
     setBase(base);
     await refreshSessions();
     startEventStream();
+    noteForeground("boot");
     setAuthError(null);
     setAuthState("authenticated");
     void placeMetrics.refresh();
