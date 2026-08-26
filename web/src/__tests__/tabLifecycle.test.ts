@@ -4,6 +4,7 @@ import {
   hasUnsavedWork,
   protectDirtyEditorExit,
   shouldMountTab,
+  terminalPaneParked,
   tabRetention,
 } from "../tabLifecycle";
 import type { Tab } from "../tabs";
@@ -25,6 +26,12 @@ const history: Tab = { id: "history", kind: "history", label: "History" };
 const tasks: Tab = { id: "tasks", kind: "tasks", label: "Tasks", dirty: true };
 
 describe("Sessions tab resource policy", () => {
+  it("parks every inactive workspace pane but keeps the selected pane live", () => {
+    expect(terminalPaneParked(true, true)).toBe(false);
+    expect(terminalPaneParked(true, false)).toBe(true);
+    expect(terminalPaneParked(false, true)).toBe(true);
+  });
+
   it("retains every terminal but only the active non-terminal tool", () => {
     expect(tabRetention(terminal)).toBe("always");
     expect(tabRetention(editor)).toBe("active");

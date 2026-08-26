@@ -2745,6 +2745,79 @@ async fn ws_attach_echoes_input_and_replays_on_reattach() {
 }
 
 #[tokio::test]
+async fn ws_ping_returns_the_session_output_position() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "ping",
+            "command": ["/bin/sh", "-c", "stty -echo; exec /bin/cat"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut ws = ws_attach(&base, &id).await;
+    while let Some(Ok(message)) = ws.next().await {
+        if let Message::Text(text) = message {
+            if serde_json::from_str::<Value>(&text).unwrap()["type"] == "snapshot-done" {
+                break;
+            }
+        }
+    }
+
+    ws.send(Message::Binary(b"ping-output\n".to_vec().into()))
+        .await
+        .unwrap();
+    let _ = collect_binary_until(&mut ws, b"ping-output", Duration::from_secs(2)).await;
+    let detail: Value = client
+        .get(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let expected_pos = detail["scrollback_pos"].as_u64().unwrap();
+
+    ws.send(Message::Text(
+        json!({"type": "ping", "id": 19}).to_string().into(),
+    ))
+    .await
+    .unwrap();
+    let pong = loop {
+        let message = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .expect("pong arrives")
+            .unwrap()
+            .unwrap();
+        if let Message::Text(text) = message {
+            let value: Value = serde_json::from_str(&text).unwrap();
+            if value["type"] == "pong" {
+                break value;
+            }
+        }
+    };
+    assert_eq!(pong["id"], 19);
+    assert_eq!(pong["pos"], expected_pos);
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
 async fn ws_reattach_replays_only_output_after_a_valid_cursor() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()
