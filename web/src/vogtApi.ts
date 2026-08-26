@@ -22,6 +22,7 @@
 import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
 import { fetchWithRetry } from "./transport";
 import { DEADLINE_MS } from "./deadlines";
+import { cacheIdentity, cacheKey, cachedRead, invalidate, STABLE_READ_POLICY } from "./swr";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -123,32 +124,55 @@ async function call<T>(
     body = JSON.stringify(params);
   }
 
-  const res = await fetchWithRetry(
-    url,
-    { method, headers, body, signal },
-    { deadlineMs: DEADLINE_MS[method === "GET" ? "list" : "detail"] },
-  );
-  const text = await res.text();
-  if (!res.ok) {
-    let message = text;
-    try {
-      const parsed = JSON.parse(text);
-      message = parsed?.error?.message ?? text;
-    } catch {
-      // A non-JSON body from a proxy hop; the status still carries meaning.
+  const read = async (requestSignal?: AbortSignal): Promise<T> => {
+    const res = await fetchWithRetry(
+      url,
+      { method, headers, body, signal: requestSignal },
+      { deadlineMs: DEADLINE_MS[method === "GET" ? "list" : "detail"] },
+    );
+    const text = await res.text();
+    if (!res.ok) {
+      let message = text;
+      try {
+        const parsed = JSON.parse(text);
+        message = parsed?.error?.message ?? text;
+      } catch {
+        // A non-JSON body from a proxy hop; the status still carries meaning.
+      }
+      if (isAbsent(res.status)) throw new VogtUnavailable(res.status, message);
+      // A 401 from behind the front door is the same fact as a 401 from the
+      // engine's own API — the one credential the browser holds is dead — so it
+      // ends the session once for the whole shell rather than becoming one
+      // stranded panel per Vogt surface (#195). Everything else, a 403 most of
+      // all, stays the caller's to render: the credential is fine, and it is
+      // the capability the reader needs told about.
+      reportAuthResponse(res.status, message);
+      throw new ApiError(res.status, message);
     }
-    if (isAbsent(res.status)) throw new VogtUnavailable(res.status, message);
-    // A 401 from behind the front door is the same fact as a 401 from the
-    // engine's own API — the one credential the browser holds is dead — so it
-    // ends the session once for the whole shell rather than becoming one
-    // stranded panel per Vogt surface (#195). Everything else, a 403 most of
-    // all, stays the caller's to render: the credential is fine, and it is
-    // the capability the reader needs told about.
-    reportAuthResponse(res.status, message);
-    throw new ApiError(res.status, message);
+    return text ? (JSON.parse(text) as T) : (undefined as T);
+  };
+
+  if (method === "GET" && STABLE_READ_OPERATIONS.has(operation)) {
+    return cachedRead(
+      cacheKey(cacheIdentity(getBase(), token), operation, params),
+      read,
+      STABLE_READ_POLICY,
+      signal,
+    );
   }
-  return text ? (JSON.parse(text) as T) : (undefined as T);
+
+  const result = await read(signal);
+  if (method !== "GET") invalidate();
+  return result;
 }
+
+const STABLE_READ_OPERATIONS = new Set<VogtOperation>([
+  "project.list",
+  "workflow.list",
+  "label.list",
+  "initiative.list",
+  "actor.list",
+]);
 
 // -- the shapes the surfaces read ------------------------------------------
 //

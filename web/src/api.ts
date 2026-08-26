@@ -3,6 +3,13 @@
 import { fetchWithRetry } from "./transport";
 import { DEADLINE_MS, type OpClass } from "./deadlines";
 import { isDemoMode, runtimeTransport, type RuntimeSocket } from "./runtimeTransport";
+import {
+  cacheIdentity,
+  cacheKey,
+  cachedRead,
+  invalidate,
+  PUBLIC_CONFIG_POLICY,
+} from "./swr";
 
 export type ActivityState =
   | "idle"
@@ -151,6 +158,7 @@ function publishAuthRejection(rejection: AuthRejection) {
   // filtered by `source` precisely so a tab never hears its own — so this
   // tab's listeners are called here, in-process, and the channel carries the
   // same fact to the others.
+  invalidate();
   for (const listener of [...authRejectedListeners]) listener(rejection);
   postAuthMessage({ type: "auth-rejected", source: AUTH_SOURCE_ID, ...rejection });
 }
@@ -185,6 +193,7 @@ export function getToken(): string {
 export function setToken(token: string) {
   if (token) localStorage.setItem(TOKEN_KEY, token);
   else localStorage.removeItem(TOKEN_KEY);
+  invalidate();
   broadcastAuthState();
 }
 
@@ -200,6 +209,7 @@ export function getBase(): string {
 export function setBase(base: string) {
   if (base) localStorage.setItem(BASE_KEY, base.replace(/\/+$/, ""));
   else localStorage.removeItem(BASE_KEY);
+  invalidate();
   broadcastAuthState();
 }
 
@@ -214,6 +224,7 @@ export function clearStoredAuth() {
   } catch {
     /* localStorage unavailable */
   }
+  invalidate();
   // Announcing a clear that cleared nothing makes every other tab reload for
   // a change that did not happen — which is what two tabs handling the same
   // 401 do, each clearing after the other, reloading the tab that is already
@@ -224,6 +235,7 @@ export function clearStoredAuth() {
 export function subscribeAuthState(onChange: () => void): () => void {
   const onStorage = (event: StorageEvent) => {
     if (event.key === null || event.key === TOKEN_KEY || event.key === BASE_KEY) {
+      invalidate();
       onChange();
     }
   };
@@ -236,6 +248,7 @@ export function subscribeAuthState(onChange: () => void): () => void {
       channel.addEventListener("message", (event: MessageEvent<AuthStateMessage>) => {
         const data = event.data;
         if (data?.type === "auth-state" && data.source !== AUTH_SOURCE_ID) {
+          invalidate();
           onChange();
         }
       });
@@ -271,6 +284,7 @@ export function subscribeAuthRejected(
       channel.addEventListener("message", (event: MessageEvent<AuthMessage>) => {
         const data = event.data;
         if (data?.type === "auth-rejected" && data.source !== AUTH_SOURCE_ID) {
+          invalidate();
           onRejected({ status: data.status, detail: data.detail });
         }
       });
@@ -324,6 +338,7 @@ async function req<T>(
   }, { deadlineMs: DEADLINE_MS[opClass] });
   const text = await res.text();
   if (!res.ok) throw refused(res.status, text);
+  if (method !== "GET") invalidate();
   return text ? (JSON.parse(text) as T) : (undefined as T);
 }
 
@@ -905,9 +920,15 @@ export const api = {
 
   // Public — no token required.
   publicConfig: (signal?: AbortSignal) =>
-    fetchWithRetry(`${getBase()}/api/config`, { signal }, {
-      deadlineMs: DEADLINE_MS.metadata,
-    }).then((r) => r.json() as Promise<PublicConfig>),
+    cachedRead(
+      cacheKey(cacheIdentity(getBase(), getToken()), "api.config"),
+      (requestSignal) =>
+        fetchWithRetry(`${getBase()}/api/config`, { signal: requestSignal }, {
+          deadlineMs: DEADLINE_MS.metadata,
+        }).then((r) => r.json() as Promise<PublicConfig>),
+      PUBLIC_CONFIG_POLICY,
+      signal,
+    ),
   operationalStatus: (signal?: AbortSignal) =>
     req<OperationalStatus>("GET", "/api/status", undefined, signal, "metadata"),
 

@@ -13,6 +13,7 @@ import { clearToolDrafts } from "../toolDrafts";
 import { clearPendingAction } from "../pendingAction";
 import { resetRailSections } from "../railSections";
 import { resetFileTreeState } from "../fileTreeState";
+import { invalidate } from "../swr";
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
@@ -60,6 +61,7 @@ if (!window.matchMedia) {
 
 afterEach(() => {
   localStorage.clear();
+  invalidate();
   clearEditorDrafts();
   clearToolDrafts();
   clearPendingAction();
