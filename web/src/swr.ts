@@ -33,11 +33,22 @@ export const PUBLIC_CONFIG_POLICY: CachePolicy = Object.freeze({
 
 interface CacheEntry<T> {
   value: T;
+  etag: string | null;
   fetchedAt: number;
   stamp: CacheStamp;
   backgroundFailures: number;
   nextRetryAt: number | null;
 }
+
+export interface CacheFetchResult<T> {
+  value: T;
+  etag: string | null;
+}
+
+export type ConditionalCacheLoader<T> = (
+  etag: string | null,
+  signal?: AbortSignal,
+) => Promise<CacheFetchResult<T> | "not-modified">;
 
 interface CacheStamp {
   all: number;
@@ -116,19 +127,25 @@ export function cacheKey(
 
 async function load<T>(
   key: string,
-  loader: (signal?: AbortSignal) => Promise<T>,
+  loader: ConditionalCacheLoader<T>,
   signal: AbortSignal | undefined,
 ): Promise<T> {
   const existing = inFlight.get(key);
   if (existing) return existing as Promise<T>;
 
   const stamp = stampFor(key);
+  const previous = entries.get(key) as CacheEntry<T> | undefined;
   const request = Promise.resolve()
-    .then(() => loader(signal))
-    .then((value) => {
+    .then(() => loader(previous?.etag ?? null, signal))
+    .then((result) => {
+      const value = result === "not-modified" ? previous?.value : result.value;
+      if (value === undefined) {
+        throw new Error("conditional response has no cached value");
+      }
       if (sameStamp(stamp, stampFor(key))) {
         entries.set(key, {
           value,
+          etag: result === "not-modified" ? previous?.etag ?? null : result.etag,
           fetchedAt: Date.now(),
           stamp,
           backgroundFailures: 0,
@@ -163,6 +180,31 @@ async function load<T>(
 export async function cachedRead<T>(
   key: string,
   loader: (signal?: AbortSignal) => Promise<T>,
+  policy: CachePolicy,
+  signal?: AbortSignal,
+): Promise<T> {
+  return cachedReadWithLoader(
+    key,
+    (_etag, requestSignal) =>
+      loader(requestSignal).then((value) => ({ value, etag: null })),
+    policy,
+    signal,
+  );
+}
+
+/** Read through the cache while retaining and revalidating an HTTP validator. */
+export async function cachedReadWithValidator<T>(
+  key: string,
+  loader: ConditionalCacheLoader<T>,
+  policy: CachePolicy,
+  signal?: AbortSignal,
+): Promise<T> {
+  return cachedReadWithLoader(key, loader, policy, signal);
+}
+
+async function cachedReadWithLoader<T>(
+  key: string,
+  loader: ConditionalCacheLoader<T>,
   policy: CachePolicy,
   signal?: AbortSignal,
 ): Promise<T> {
