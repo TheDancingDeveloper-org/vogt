@@ -38,6 +38,7 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 let latest: Wake | null = null;
 
 const listeners = new Set<(wake: Wake) => void>();
+const visibilityListeners = new Set<(visible: boolean) => void>();
 const telemetry: WakeTelemetry[] = [];
 const inFlight = new Map<string, {
   token: number;
@@ -76,6 +77,13 @@ export function currentWake(): Wake | null {
 export function onWake(listener: (wake: Wake) => void): () => void {
   listeners.add(listener);
   return () => listeners.delete(listener);
+}
+
+/** Share page visibility edges without giving every retained pane a DOM listener. */
+export function onPageVisibility(listener: (visible: boolean) => void): () => void {
+  visibilityListeners.add(listener);
+  listener(visible());
+  return () => visibilityListeners.delete(listener);
 }
 
 /** Share a resource read during one wake and record its client-side timing. */
@@ -119,7 +127,9 @@ export const wakeLog: ReadonlyArray<WakeTelemetry> = telemetry;
 
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") noteForeground("visibility");
+    const isVisible = document.visibilityState === "visible";
+    for (const listener of visibilityListeners) listener(isVisible);
+    if (isVisible) noteForeground("visibility");
   });
 }
 

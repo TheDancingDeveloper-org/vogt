@@ -15,6 +15,14 @@ export function shouldMountTab(tab: Tab, activeTabId: string | null): boolean {
   return tab.id === activeTabId;
 }
 
+/** Retain terminal/xterm state while parking the socket for inactive panes. */
+export function terminalPaneParked(
+  workspaceActive: boolean,
+  paneActive: boolean,
+): boolean {
+  return !workspaceActive || !paneActive;
+}
+
 export function hasUnsavedWork(tabs: readonly Tab[]): boolean {
   return tabs.some((tab) =>
     (tab.kind === "editor" || tab.kind === "tasks") && Boolean(tab.dirty),
