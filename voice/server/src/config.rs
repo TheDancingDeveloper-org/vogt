@@ -10,7 +10,8 @@ pub struct Config {
     #[arg(long, env = "VOGT_VOICE_BIND", default_value = "0.0.0.0:8000")]
     pub bind: SocketAddr,
 
-    /// Directory reserved for downloaded model weights by future backends.
+    /// Directory reserved for model weights. The native model paths below are
+    /// explicit mounts; this directory is not populated automatically.
     #[arg(
         long,
         env = "VOGT_VOICE_MODEL_CACHE_DIR",
@@ -29,6 +30,21 @@ pub struct Config {
     /// Advertised default TTS voice.
     #[arg(long, env = "VOGT_VOICE_TTS_VOICE", default_value = "alloy")]
     pub tts_voice: String,
+
+    /// Optional GGML Whisper model file for the in-process STT backend. When
+    /// absent, STT remains unconfigured unless an executable command is set.
+    #[arg(long, env = "VOGT_VOICE_STT_MODEL_PATH")]
+    pub stt_model_path: Option<PathBuf>,
+
+    /// Optional Piper JSON model configuration for the in-process TTS
+    /// backend. The neighboring ONNX file is loaded by piper-rs. When absent,
+    /// TTS remains unconfigured unless an executable command is set.
+    #[arg(long, env = "VOGT_VOICE_TTS_MODEL_CONFIG_PATH")]
+    pub tts_model_config_path: Option<PathBuf>,
+
+    /// Number of native Whisper decoder threads.
+    #[arg(long, env = "VOGT_VOICE_THREADS", default_value = "2")]
+    pub threads: usize,
 
     /// JSON argv for the optional STT executable. `{audio}`, `{model}`,
     /// `{language}`, and `{prompt}` are available placeholders. There is no
@@ -85,5 +101,27 @@ mod tests {
         assert!(parse_command("whisper").is_err());
         assert!(parse_command("[]").is_err());
         assert!(parse_command("[\"whisper\\u0000\"]").is_err());
+    }
+
+    #[test]
+    fn native_model_paths_and_thread_count_are_configurable() {
+        let config = Config::parse_from([
+            "vogt-voice",
+            "--stt-model-path",
+            "/models/ggml-base.en.bin",
+            "--tts-model-config-path",
+            "/models/en_US-lessac-medium.onnx.json",
+            "--threads",
+            "4",
+        ]);
+        assert_eq!(
+            config.stt_model_path,
+            Some(PathBuf::from("/models/ggml-base.en.bin"))
+        );
+        assert_eq!(
+            config.tts_model_config_path,
+            Some(PathBuf::from("/models/en_US-lessac-medium.onnx.json"))
+        );
+        assert_eq!(config.threads, 4);
     }
 }

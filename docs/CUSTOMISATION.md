@@ -237,6 +237,25 @@ Notes:
 This is an ordinary Layer 2 overlay: it states only the speech wiring and the
 two services, and it composes with any other overlay you already layer.
 
+For a Vogt-owned runtime, use `deploy/voice.firstparty.overlay.yml` instead:
+it builds the Rust `vogt-voice` image from `voice/Dockerfile`, mounts a
+read-only operator model directory, and points both audio halves at the one
+sidecar. Set these values in `deploy/.env` before starting it:
+
+```dotenv
+VOGT_VOICE_MODEL_DIR=/srv/vogt/voice-models
+VOGT_VOICE_STT_MODEL_FILE=ggml-base.en.bin
+VOGT_VOICE_TTS_MODEL_CONFIG_FILE=en_US-lessac-medium.onnx.json
+```
+
+The Piper JSON file must have its neighboring ONNX file under the same stem
+(for example `voice.onnx.json` beside `voice.onnx`). The native sidecar accepts
+WAV, WebM/Opus, and Ogg audio for STT and returns WAV for TTS; it loads both
+models at startup and does not download weights. Its `/health` probe remains
+`503` until a required
+model is valid. See [`../voice/README.md`](../voice/README.md) for the native
+model and request details.
+
 ### Giving the front door its core token in one deploy
 
 A fronted deployment needs a token the front door presents to the core, so

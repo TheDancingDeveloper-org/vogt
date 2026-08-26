@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use axum::{
-    extract::{Multipart, State},
-    http::{header, HeaderValue},
+    extract::{DefaultBodyLimit, Multipart, State},
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -13,10 +13,11 @@ use serde_json::json;
 use vogt_voice_models::{ConfiguredModelCache, ModelCache, ModelInfo};
 use vogt_voice_stt::{
     SubprocessTranscriber, TranscriptionBackend, TranscriptionError, TranscriptionRequest,
-    UnconfiguredTranscriber,
+    UnconfiguredTranscriber, WhisperTranscriber,
 };
 use vogt_voice_tts::{
-    SpeechBackend, SpeechError, SpeechRequest, SubprocessSynthesizer, UnconfiguredSynthesizer,
+    PiperSynthesizer, SpeechBackend, SpeechError, SpeechRequest, SubprocessSynthesizer,
+    UnconfiguredSynthesizer,
 };
 
 use crate::{error::ApiError, Config};
@@ -35,30 +36,50 @@ impl AppState {
             ModelInfo::new(config.stt_model.clone(), "vogt-voice-stt"),
             ModelInfo::new(config.tts_model.clone(), "vogt-voice-tts"),
         ];
-        let stt: Arc<dyn TranscriptionBackend> = config
-            .stt_command
-            .as_deref()
-            .and_then(parse_command)
-            .and_then(|command| match SubprocessTranscriber::new(command, timeout) {
-                Ok(backend) => Some(Arc::new(backend) as Arc<dyn TranscriptionBackend>),
+        let stt: Arc<dyn TranscriptionBackend> = if let Some(path) = config.stt_model_path.clone() {
+            match WhisperTranscriber::new(path, config.stt_model.clone(), config.threads) {
+                Ok(backend) => Arc::new(backend),
                 Err(error) => {
-                    tracing::error!(%error, "invalid configured STT command; provider disabled");
-                    None
+                    tracing::error!(%error, "invalid in-process STT model; provider disabled");
+                    Arc::new(UnconfiguredTranscriber)
                 }
-            })
-            .unwrap_or_else(|| Arc::new(UnconfiguredTranscriber));
-        let tts: Arc<dyn SpeechBackend> = config
-            .tts_command
-            .as_deref()
-            .and_then(parse_command)
-            .and_then(|command| match SubprocessSynthesizer::new(command, timeout) {
-                Ok(backend) => Some(Arc::new(backend) as Arc<dyn SpeechBackend>),
+            }
+        } else {
+            config
+                .stt_command
+                .as_deref()
+                .and_then(parse_command)
+                .and_then(|command| match SubprocessTranscriber::new(command, timeout) {
+                    Ok(backend) => Some(Arc::new(backend) as Arc<dyn TranscriptionBackend>),
+                    Err(error) => {
+                        tracing::error!(%error, "invalid configured STT command; provider disabled");
+                        None
+                    }
+                })
+                .unwrap_or_else(|| Arc::new(UnconfiguredTranscriber))
+        };
+        let tts: Arc<dyn SpeechBackend> = if let Some(path) = config.tts_model_config_path.clone() {
+            match PiperSynthesizer::new(path, config.tts_model.clone()) {
+                Ok(backend) => Arc::new(backend),
                 Err(error) => {
-                    tracing::error!(%error, "invalid configured TTS command; provider disabled");
-                    None
+                    tracing::error!(%error, "invalid in-process TTS model; provider disabled");
+                    Arc::new(UnconfiguredSynthesizer)
                 }
-            })
-            .unwrap_or_else(|| Arc::new(UnconfiguredSynthesizer));
+            }
+        } else {
+            config
+                .tts_command
+                .as_deref()
+                .and_then(parse_command)
+                .and_then(|command| match SubprocessSynthesizer::new(command, timeout) {
+                    Ok(backend) => Some(Arc::new(backend) as Arc<dyn SpeechBackend>),
+                    Err(error) => {
+                        tracing::error!(%error, "invalid configured TTS command; provider disabled");
+                        None
+                    }
+                })
+                .unwrap_or_else(|| Arc::new(UnconfiguredSynthesizer))
+        };
         Self {
             models: Arc::new(ConfiguredModelCache::new(
                 config.model_cache_dir.clone(),
@@ -106,17 +127,37 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/models", get(models))
         .route("/v1/audio/transcriptions", post(transcriptions))
         .route("/v1/audio/speech", post(speech))
+        // Audio is transient, but it still needs a bounded request body so a
+        // caller cannot turn the optional sidecar into an unbounded memory
+        // sink while the native decoder is waiting for work.
+        .layer(DefaultBodyLimit::max(25 * 1024 * 1024))
         .with_state(Arc::new(state))
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    Json(json!({
-        "status": "ok",
-        "service": "vogt-voice",
-        "stt": { "provider": state.stt.name(), "ready": state.stt.name() != "unconfigured" },
-        "tts": { "provider": state.tts.name(), "ready": state.tts.name() != "unconfigured" },
-        "model_cache": state.models.root(),
-    }))
+async fn health(State(state): State<Arc<AppState>>) -> (StatusCode, Json<serde_json::Value>) {
+    let stt_ready = state.stt.name() != "unconfigured";
+    let tts_ready = state.tts.name() != "unconfigured";
+    // An explicitly requested native model is a deployment prerequisite. A
+    // completely unconfigured sidecar remains healthy so it can be layered
+    // into a stack without making voice mandatory, but a failed model mount
+    // must keep the first-party overlay from declaring readiness.
+    let required_models_ready = (!state.config.stt_model_path.is_some() || stt_ready)
+        && (!state.config.tts_model_config_path.is_some() || tts_ready);
+    let status = if required_models_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        status,
+        Json(json!({
+            "status": if required_models_ready { "ok" } else { "degraded" },
+            "service": "vogt-voice",
+            "stt": { "provider": state.stt.name(), "ready": stt_ready },
+            "tts": { "provider": state.tts.name(), "ready": tts_ready },
+            "model_cache": state.models.root(),
+        })),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -315,6 +356,26 @@ mod tests {
             .unwrap()
             .iter()
             .any(|model| model["id"] == "tts-1"));
+    }
+
+    #[tokio::test]
+    async fn health_is_unavailable_when_a_required_native_model_fails() {
+        let app = router(AppState::from_config(Config::parse_from([
+            "vogt-voice",
+            "--stt-model-path",
+            "/models/does-not-exist.bin",
+        ])));
+        let response = app
+            .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["status"], "degraded");
+        assert_eq!(json["stt"]["ready"], false);
     }
 
     #[tokio::test]

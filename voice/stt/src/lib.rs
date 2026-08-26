@@ -4,12 +4,31 @@
 //! whisper.cpp, Candle, or remote-provider implementation can be added
 //! without changing the wire adapter.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    io::Cursor,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use opus::{Channels as OpusChannels, Decoder as OpusDecoder};
+use symphonia::core::{
+    audio::{AudioBufferRef, SampleBuffer},
+    codecs::DecoderOptions,
+    codecs::CODEC_TYPE_OPUS,
+    errors::Error as SymphoniaError,
+    formats::FormatOptions,
+    formats::FormatReader,
+    io::{MediaSourceStream, MediaSourceStreamOptions},
+    meta::MetadataOptions,
+    probe::Hint,
+};
+use symphonia::default::{get_codecs, get_probe};
 use thiserror::Error;
 use tokio::process::Command;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 #[derive(Debug, Clone)]
 pub struct TranscriptionRequest {
@@ -34,6 +53,422 @@ pub enum TranscriptionError {
     UnsupportedModel(String),
     #[error("speech-to-text provider failed: {0}")]
     Provider(String),
+}
+
+/// A real in-process Whisper.cpp transcriber.
+///
+/// The model is loaded once when the sidecar starts. Requests accept common
+/// browser audio containers (WAV, WebM/Opus, Ogg/Opus, and Ogg/Vorbis), decode
+/// them in this process, convert them to mono 16 kHz samples, and run Whisper
+/// directly in the sidecar; no executable or shell is involved.
+pub struct WhisperTranscriber {
+    context: Arc<WhisperContext>,
+    model_id: String,
+    threads: usize,
+}
+
+impl std::fmt::Debug for WhisperTranscriber {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WhisperTranscriber")
+            .field("model_id", &self.model_id)
+            .field("threads", &self.threads)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WhisperTranscriber {
+    pub fn new(
+        model_path: impl Into<PathBuf>,
+        model_id: impl Into<String>,
+        threads: usize,
+    ) -> Result<Self, TranscriptionError> {
+        let model_path = model_path.into();
+        if !model_path.is_file() {
+            return Err(TranscriptionError::Provider(format!(
+                "Whisper model does not exist: {}",
+                model_path.display()
+            )));
+        }
+        if threads == 0 {
+            return Err(TranscriptionError::Provider(
+                "Whisper thread count must be at least one".into(),
+            ));
+        }
+        let path = model_path.to_str().ok_or_else(|| {
+            TranscriptionError::Provider("Whisper model path is not valid UTF-8".into())
+        })?;
+        let context = WhisperContext::new_with_params(path, WhisperContextParameters::default())
+            .map_err(|error| {
+                TranscriptionError::Provider(format!("load Whisper model: {error}"))
+            })?;
+        Ok(Self {
+            context: Arc::new(context),
+            model_id: model_id.into(),
+            threads,
+        })
+    }
+}
+
+#[async_trait]
+impl TranscriptionBackend for WhisperTranscriber {
+    async fn transcribe(
+        &self,
+        request: TranscriptionRequest,
+    ) -> Result<TranscriptionResponse, TranscriptionError> {
+        if request.model != self.model_id {
+            return Err(TranscriptionError::UnsupportedModel(request.model));
+        }
+        let samples = decode_audio_mono_16khz(&request.audio, &request.filename)?;
+        let context = Arc::clone(&self.context);
+        let language = request.language;
+        let prompt = request.prompt;
+        let threads = self.threads;
+        tokio::task::spawn_blocking(move || {
+            let mut state = context.create_state().map_err(|error| {
+                TranscriptionError::Provider(format!("create Whisper state: {error}"))
+            })?;
+            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params.set_n_threads(threads as i32);
+            params.set_no_context(true);
+            params.set_no_timestamps(true);
+            params.set_print_progress(false);
+            params.set_print_realtime(false);
+            if let Some(language) = language.as_deref() {
+                params.set_language(Some(language));
+            }
+            if let Some(prompt) = prompt.as_deref() {
+                params.set_initial_prompt(prompt);
+            }
+            state.full(params, &samples).map_err(|error| {
+                TranscriptionError::Provider(format!("Whisper inference: {error}"))
+            })?;
+            let count = state.full_n_segments().map_err(|error| {
+                TranscriptionError::Provider(format!("read Whisper segments: {error}"))
+            })?;
+            let mut text = String::new();
+            for index in 0..count {
+                let segment = state.full_get_segment_text(index).map_err(|error| {
+                    TranscriptionError::Provider(format!("read Whisper transcript: {error}"))
+                })?;
+                text.push_str(&segment);
+            }
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                return Err(TranscriptionError::Provider(
+                    "Whisper returned an empty transcript".into(),
+                ));
+            }
+            Ok(TranscriptionResponse { text })
+        })
+        .await
+        .map_err(|error| TranscriptionError::Provider(format!("Whisper worker failed: {error}")))?
+    }
+
+    fn name(&self) -> &'static str {
+        "whisper-rs"
+    }
+}
+
+fn decode_audio_mono_16khz(audio: &[u8], filename: &str) -> Result<Vec<f32>, TranscriptionError> {
+    if is_wav(audio, filename) {
+        return decode_wav_mono_16khz(audio);
+    }
+    decode_container_mono_16khz(audio, filename)
+}
+
+fn is_wav(audio: &[u8], filename: &str) -> bool {
+    audio.starts_with(b"RIFF") && audio.get(8..12) == Some(b"WAVE")
+        || filename
+            .rsplit_once('.')
+            .map(|(_, ext)| ext.eq_ignore_ascii_case("wav"))
+            .unwrap_or(false)
+}
+
+fn decode_wav_mono_16khz(audio: &[u8]) -> Result<Vec<f32>, TranscriptionError> {
+    let mut reader = hound::WavReader::new(Cursor::new(audio))
+        .map_err(|error| TranscriptionError::Provider(format!("decode WAV audio: {error}")))?;
+    let spec = reader.spec();
+    if spec.channels == 0 || spec.channels > 8 {
+        return Err(TranscriptionError::Provider(
+            "WAV audio must contain between one and eight channels".into(),
+        ));
+    }
+    if spec.sample_rate == 0 {
+        return Err(TranscriptionError::Provider(
+            "WAV audio has an invalid sample rate".into(),
+        ));
+    }
+    let channels = usize::from(spec.channels);
+    let mut mono = Vec::new();
+    match (spec.sample_format, spec.bits_per_sample) {
+        (hound::SampleFormat::Int, 8) => {
+            for frame in reader
+                .samples::<i16>()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    TranscriptionError::Provider(format!("read WAV samples: {error}"))
+                })?
+                .chunks(channels)
+            {
+                mono.push(
+                    frame
+                        .iter()
+                        .map(|sample| f32::from(*sample) / 128.0)
+                        .sum::<f32>()
+                        / channels as f32,
+                );
+            }
+        }
+        (hound::SampleFormat::Int, 16) => {
+            for frame in reader
+                .samples::<i16>()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    TranscriptionError::Provider(format!("read WAV samples: {error}"))
+                })?
+                .chunks(channels)
+            {
+                mono.push(
+                    frame
+                        .iter()
+                        .map(|sample| f32::from(*sample) / 32768.0)
+                        .sum::<f32>()
+                        / channels as f32,
+                );
+            }
+        }
+        (hound::SampleFormat::Int, 24) => {
+            for frame in reader
+                .samples::<i32>()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    TranscriptionError::Provider(format!("read WAV samples: {error}"))
+                })?
+                .chunks(channels)
+            {
+                mono.push(
+                    frame
+                        .iter()
+                        .map(|sample| *sample as f32 / 8_388_608.0)
+                        .sum::<f32>()
+                        / channels as f32,
+                );
+            }
+        }
+        (hound::SampleFormat::Int, 32) => {
+            for frame in reader
+                .samples::<i32>()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    TranscriptionError::Provider(format!("read WAV samples: {error}"))
+                })?
+                .chunks(channels)
+            {
+                mono.push(
+                    frame
+                        .iter()
+                        .map(|sample| *sample as f32 / 2_147_483_648.0)
+                        .sum::<f32>()
+                        / channels as f32,
+                );
+            }
+        }
+        (hound::SampleFormat::Float, 32) => {
+            for frame in reader
+                .samples::<f32>()
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| {
+                    TranscriptionError::Provider(format!("read WAV samples: {error}"))
+                })?
+                .chunks(channels)
+            {
+                mono.push(frame.iter().copied().sum::<f32>() / channels as f32);
+            }
+        }
+        _ => {
+            return Err(TranscriptionError::Provider(format!(
+                "unsupported WAV format: {:?} {}-bit",
+                spec.sample_format, spec.bits_per_sample
+            )))
+        }
+    }
+    if mono.is_empty() {
+        return Err(TranscriptionError::Provider(
+            "WAV audio contains no samples".into(),
+        ));
+    }
+    Ok(resample_linear(&mono, spec.sample_rate, 16_000))
+}
+
+fn decode_container_mono_16khz(
+    audio: &[u8],
+    filename: &str,
+) -> Result<Vec<f32>, TranscriptionError> {
+    let mut hint = Hint::new();
+    if let Some((_, extension)) = filename.rsplit_once('.') {
+        hint.with_extension(extension);
+    }
+    let source = Cursor::new(audio.to_vec());
+    let media_source =
+        MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
+    let format_options = FormatOptions {
+        enable_gapless: true,
+        ..FormatOptions::default()
+    };
+    let probed = get_probe()
+        .format(
+            &hint,
+            media_source,
+            &format_options,
+            &MetadataOptions::default(),
+        )
+        .map_err(|error| format_decode_error("probe audio container", error))?;
+    let mut format = probed.format;
+    let track = format
+        .default_track()
+        .ok_or_else(|| TranscriptionError::Provider("audio has no default track".into()))?;
+    let track_id = track.id;
+    let sample_rate = track
+        .codec_params
+        .sample_rate
+        .ok_or_else(|| TranscriptionError::Provider("audio has no sample rate".into()))?;
+    let codec = track.codec_params.codec;
+    let channels = track
+        .codec_params
+        .channels
+        .map(|channels| channels.count())
+        .ok_or_else(|| TranscriptionError::Provider("audio has no channel layout".into()))?;
+    if channels == 0 || channels > 2 {
+        return Err(TranscriptionError::Provider(
+            "audio must contain one or two channels".into(),
+        ));
+    }
+    if codec == CODEC_TYPE_OPUS {
+        return decode_opus_container(format.as_mut(), track_id, channels);
+    }
+    let mut decoder = get_codecs()
+        .make(&track.codec_params, &DecoderOptions::default())
+        .map_err(|error| format_decode_error("create audio decoder", error))?;
+    let mut mono = Vec::new();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) if packet.track_id() == track_id => packet,
+            Ok(_) => continue,
+            Err(SymphoniaError::ResetRequired) => {
+                return Err(TranscriptionError::Provider(
+                    "audio decoder requires a reset".into(),
+                ))
+            }
+            Err(SymphoniaError::IoError(error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break
+            }
+            Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(error) => return Err(format_decode_error("read audio packet", error)),
+        };
+        let decoded = decoder
+            .decode(&packet)
+            .map_err(|error| format_decode_error("decode audio packet", error))?;
+        append_mono(&mut mono, decoded);
+    }
+    if mono.is_empty() {
+        return Err(TranscriptionError::Provider(
+            "audio contains no decodable samples".into(),
+        ));
+    }
+    Ok(resample_linear(&mono, sample_rate, 16_000))
+}
+
+fn decode_opus_container(
+    format: &mut dyn FormatReader,
+    track_id: u32,
+    channels: usize,
+) -> Result<Vec<f32>, TranscriptionError> {
+    let opus_channels = match channels {
+        1 => OpusChannels::Mono,
+        2 => OpusChannels::Stereo,
+        _ => unreachable!("validated Opus channel count"),
+    };
+    // Opus is decoded at its native 48 kHz rate. The caller performs the
+    // final resample after container decoding.
+    let mut decoder = OpusDecoder::new(48_000, opus_channels)
+        .map_err(|error| TranscriptionError::Provider(format!("create Opus decoder: {error}")))?;
+    let mut mono = Vec::new();
+    loop {
+        let packet = match format.next_packet() {
+            Ok(packet) if packet.track_id() == track_id => packet,
+            Ok(_) => continue,
+            Err(SymphoniaError::ResetRequired) => {
+                return Err(TranscriptionError::Provider(
+                    "audio decoder requires a reset".into(),
+                ))
+            }
+            Err(SymphoniaError::IoError(error))
+                if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                break
+            }
+            Err(error) => return Err(format_decode_error("read Opus packet", error)),
+        };
+        let mut decoded = vec![0.0_f32; 5_760 * channels];
+        let frame_samples = decoder
+            .decode_float(&packet.data, &mut decoded, false)
+            .map_err(|error| {
+                TranscriptionError::Provider(format!("decode Opus packet: {error}"))
+            })?;
+        let start = usize::try_from(packet.trim_start).unwrap_or(usize::MAX);
+        let end_trim = usize::try_from(packet.trim_end).unwrap_or(usize::MAX);
+        if start.saturating_add(end_trim) >= frame_samples {
+            continue;
+        }
+        let end = frame_samples - end_trim;
+        for frame in decoded[start * channels..end * channels].chunks_exact(channels) {
+            mono.push(frame.iter().copied().sum::<f32>() / channels as f32);
+        }
+    }
+    if mono.is_empty() {
+        return Err(TranscriptionError::Provider(
+            "audio contains no decodable samples".into(),
+        ));
+    }
+    Ok(resample_linear(&mono, 48_000, 16_000))
+}
+
+fn append_mono(output: &mut Vec<f32>, audio: AudioBufferRef<'_>) {
+    let spec = *audio.spec();
+    let channels = spec.channels.count();
+    if channels == 0 {
+        return;
+    }
+    let mut samples = SampleBuffer::<f32>::new(audio.capacity() as u64, spec);
+    samples.copy_interleaved_ref(audio);
+    output.extend(
+        samples
+            .samples()
+            .chunks(channels)
+            .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32),
+    );
+}
+
+fn format_decode_error(context: &str, error: SymphoniaError) -> TranscriptionError {
+    TranscriptionError::Provider(format!("{context}: {error}"))
+}
+
+fn resample_linear(samples: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if from_rate == to_rate || samples.len() < 2 {
+        return samples.to_vec();
+    }
+    let output_len = ((samples.len() as u64 * u64::from(to_rate)) / u64::from(from_rate)) as usize;
+    (0..output_len.max(1))
+        .map(|index| {
+            let position = index as f64 * f64::from(from_rate) / f64::from(to_rate);
+            let left = position.floor() as usize;
+            let right = (left + 1).min(samples.len() - 1);
+            let fraction = (position - left as f64) as f32;
+            samples[left.min(samples.len() - 1)] * (1.0 - fraction) + samples[right] * fraction
+        })
+        .collect()
 }
 
 /// A speech-to-text implementation. The server owns the HTTP contract; this
@@ -233,6 +668,48 @@ mod tests {
     fn command_requires_an_executable() {
         assert!(SubprocessTranscriber::new(vec![], Duration::from_secs(1)).is_err());
         assert!(SubprocessTranscriber::new(vec!["".into()], Duration::from_secs(1)).is_err());
+    }
+
+    #[test]
+    fn native_decoder_mixes_stereo_wav_without_shelling_out() {
+        let mut cursor = Cursor::new(Vec::new());
+        let spec = hound::WavSpec {
+            channels: 2,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        {
+            let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+            writer.write_sample(i16::MAX).unwrap();
+            writer.write_sample(i16::MIN).unwrap();
+            writer.write_sample(16_384).unwrap();
+            writer.write_sample(16_384).unwrap();
+            writer.finalize().unwrap();
+        }
+
+        let samples = decode_wav_mono_16khz(&cursor.into_inner()).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert!(samples[0].abs() < 0.0001);
+        assert!((samples[1] - 0.5).abs() < 0.0001);
+    }
+
+    #[test]
+    fn native_decoder_resamples_to_whisper_rate() {
+        let samples = resample_linear(&[0.0, 1.0], 8_000, 16_000);
+        assert_eq!(samples.len(), 4);
+        assert_eq!(samples, [0.0, 0.5, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn native_decoder_rejects_invalid_audio_and_missing_model() {
+        let error = decode_wav_mono_16khz(b"not a wav").unwrap_err();
+        assert!(error.to_string().contains("decode WAV"));
+
+        let directory = tempfile::tempdir().unwrap();
+        let error = WhisperTranscriber::new(directory.path().join("missing.bin"), "whisper-1", 1)
+            .unwrap_err();
+        assert!(error.to_string().contains("does not exist"));
     }
 
     #[test]

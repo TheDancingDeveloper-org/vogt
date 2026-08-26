@@ -1346,16 +1346,18 @@ ENGINE_ASSISTANT_STT_API_KEY=sk-...   # used only by the entry that needs it
 ENGINE_ASSISTANT_TTS_API_KEY=sk-...
 ```
 
-An optional first-party alternative is the Rust `voice/` sidecar. Its default
-providers are still unconfigured; when `VOGT_VOICE_STT_COMMAND` and/or
-`VOGT_VOICE_TTS_COMMAND` is set, it runs the operator's configured inference
-executable directly (JSON argv, never a shell), forwarding STT audio through
-a temporary file and TTS text through stdin. The executable must provide the
-real transcription or audio bytes on stdout. No command, model runtime, or
-weights are included by default, so this path is opt-in and requires an
-operator-built image or mounted runtime/model files. See [`voice/README.md`](../voice/README.md)
-for the exact placeholders and contract. The existing `deploy/voice.overlay.yml`
-third-party overlay is independent and unchanged.
+An optional first-party alternative is the Rust `voice/` sidecar. Its native
+providers are `whisper-rs` (GGML Whisper) and `piper-rs` over ONNX. They load
+operator-mounted model files in-process; no executable or shell is involved,
+and audio is not retained. The first-party Compose path is
+`deploy/voice.firstparty.overlay.yml`; it requires an operator model directory
+and keeps that mount read-only. A missing or invalid required model keeps the
+sidecar unhealthy. If native model paths are absent, either half can instead
+use the explicit JSON-argv subprocess adapter, or remain unconfigured. See
+[`voice/README.md`](../voice/README.md) for model naming, supported
+WAV/WebM/Opus/Ogg input and WAV output limits, placeholders, and the contract.
+The existing
+`deploy/voice.overlay.yml` third-party overlay is independent and unchanged.
 
 #### Provider profiles (FR-T9, r16)
 
