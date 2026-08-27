@@ -123,10 +123,17 @@ jobs:
           smoke_token="$(cat "$RUNNER_TEMP/vogt-dev-smoke-token")"
           test -n "$smoke_token"
           trap 'rm -f -- "$RUNNER_TEMP/vogt-dev-smoke-token"' EXIT
-          smoke_deadline=$((SECONDS + 300))
+          # Komodo recreates the stack's containers on every deploy, so each
+          # run pays the merged image's full cold start — a fresh pull of the
+          # heavy core+engine+PWA+agent-CLI image plus its init. That was
+          # observed to exceed the previous 300s window (the stack answered
+          # /healthz only just after the loop gave up). The loop exits the
+          # instant smoke passes, so a larger ceiling only bounds a genuinely
+          # stuck deploy.
+          smoke_deadline=$((SECONDS + 900))
           until VOGT_SMOKE_TOKEN="$smoke_token" bash scripts/smoke_merged_stack.sh; do
             if (( SECONDS >= smoke_deadline )); then
-              echo "live dev stack did not become healthy within 300 seconds" >&2
+              echo "live dev stack did not become healthy within 900 seconds" >&2
               exit 1
             fi
             sleep 10
