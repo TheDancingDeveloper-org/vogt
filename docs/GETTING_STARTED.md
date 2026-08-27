@@ -43,10 +43,9 @@ container cannot infer the address clients will use. For a local installation,
 the example value `http://localhost:8080` is correct. Change `VOGT_PORT` if
 port 8080 is already in use.
 
-**Start the core (recommended).** The core image
-`ghcr.io/thedancingdeveloper-org/vogt` is not yet a public package, so build it
-from this checkout with the one-service build overlay `deploy/vogt.build.yml`
-(`VOGT_IMAGE` is ignored) — the path verified to run from a clean clone:
+**Start the core (recommended).** Build it from this checkout with the
+one-service build overlay `deploy/vogt.build.yml` (`VOGT_IMAGE` is ignored).
+This source-build path works even when a registry is unavailable:
 
 ```console
 docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d --wait
@@ -68,10 +67,10 @@ VOGT_IMAGE=vogt:local docker compose \
   up --build -d --wait
 ```
 
-**Once the `vogt` package is public**, the build overlay becomes optional: the
-base pulls the published core (and the engine overlay pulls it as `CORE_IMAGE`
-too), so the stack is just the base plus the engine overlay. Set `VOGT_IMAGE`
-in `deploy/.env` to the tag — or better, the digest — you intend to run:
+**When using a published `vogt` package**, the build overlay becomes optional:
+the base pulls the published core (and the engine overlay pulls it as
+`CORE_IMAGE` too). Set `VOGT_IMAGE` in `deploy/.env` to the tag — or better,
+the digest — you intend to run:
 
 ```console
 docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d --wait

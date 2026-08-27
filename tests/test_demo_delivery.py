@@ -112,7 +112,13 @@ def test_demo_publication_is_dev_only_scanned_signed_and_never_deploys() -> None
     job = text.split("  demo-image:", 1)[1].split("\n  # The dev-pod", 1)[0]
     assert "if: github.ref == 'refs/heads/dev'" in job
     assert job.count("target: demo-runtime") == 2
-    assert "aquasecurity/trivy-action@" in job
+    scan = job.split("      - name: scan the static demo image", 1)[1].split(
+        "\n      - uses:", 1
+    )[0]
+    assert "ghcr.io/aquasecurity/trivy@sha256:" in scan
+    assert re.search(r"trivy@sha256:[0-9a-f]{64}", scan)
+    assert "--exit-code 1" in scan
+    assert "continue-on-error" not in scan
     assert "sbom: true" in job
     assert 'cosign sign --yes "${DEMO_IMAGE}@${DIGEST}"' in job
     assert "Nothing has been deployed" in job

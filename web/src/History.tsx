@@ -23,6 +23,7 @@ import {
 } from "./historyPins";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { sessionsStore } from "./store";
+import { SafeSnippet } from "./SafeSnippet";
 import { onWake } from "./wakeCoordinator";
 import {
   historyMatchKey,
@@ -783,7 +784,9 @@ const History: Component<Props> = (props) => {
                             <strong>{result.session_name}</strong>
                             <span class="history-result-date">{formatDate(result.created_at)}</span>
                           </div>
-                          <div class="history-result-snippet" innerHTML={result.match_snippet} />
+                          <div class="history-result-snippet">
+                            <SafeSnippet text={result.match_snippet} query={outputQuery()} />
+                          </div>
                         </button>
                         );
                       }}
@@ -953,8 +956,9 @@ const History: Component<Props> = (props) => {
                               class={`history-result-snippet ${qualified() ? "qualified-match" : ""}`}
                               data-history-match={matchKey}
                               aria-current={qualified() ? "true" : undefined}
-                              innerHTML={result.match_snippet}
-                            />
+                            >
+                              <SafeSnippet text={result.match_snippet} query={outputQuery()} />
+                            </div>
                             );
                           }}
                         </For>

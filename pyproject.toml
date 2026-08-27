@@ -53,6 +53,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/vogt"]
 
+[tool.hatch.build.targets.sdist]
+# The Python distribution is the independently supported core. Keep CI,
+# deployment, engine, PWA and mobile source out of the source archive so a
+# consumer cannot mistake a development checkout for the package boundary.
+only-include = ["src/vogt", "README.md", "LICENSE", "pyproject.toml"]
+
 [tool.ruff]
 line-length = 88
 target-version = "py311"

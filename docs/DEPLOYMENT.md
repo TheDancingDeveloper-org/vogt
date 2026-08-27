@@ -105,6 +105,18 @@ digest, because a digest is the only form of "which image is this" that a
 rebuild cannot silently change — publishing an image and moving a
 deployment are separate acts, and the digest line is what moves one.
 
+For a release, verify the keyless signature before starting Compose. Replace
+`<digest>` with the exact release digest; this command performs an anonymous
+registry read and constrains both the workflow identity and the GitHub OIDC
+issuer:
+
+```console
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/release.yml@refs/tags/v[0-9].*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/thedancingdeveloper-org/vogt@sha256:<digest>
+```
+
 ```console
 docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt:0.2.2 \
   | grep -m1 Digest
@@ -362,12 +374,12 @@ exact `dev-<sha>` images and obtain the verified receipt; the promotion
 workflow refuses to open `dev → main` without that receipt. Run **Actions →
 deploy dev**, provide the current full `dev` SHA, type `DEPLOY-DEV`, and keep
 the receipt URL and artifact with the change record. The workflow verifies both
-signed images, updates the two active digest pins in the Komodo-managed
-`indexarr/ops/personal/vogt-dev` stack, calls Komodo, and runs the live smoke
-contract. It uses the existing Infisical CI identity to retrieve Komodo and
+signed images, updates the two active digest pins in the operator-managed dev
+stack, calls the deployment controller, and runs the live smoke contract. It
+uses the configured CI identity to retrieve deployment credentials and
 dev-runtime credentials. After deployment, the helper reads the active
-`MYDEVENV2_TOKEN` from the Komodo stack environment into a `0600` runner-temp
-file for live smoke only; it is never printed or committed. No GitHub App,
+runtime token from the deployment-controller stack environment into a `0600`
+runner-temp file for live smoke only; it is never printed or committed. No GitHub App,
 private key, Forgejo token, version tag, or GitHub Release is required. The
 receipt must cover readiness,
 authentication, a representative core read/write path, the engine/PWA front

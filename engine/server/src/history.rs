@@ -264,7 +264,9 @@ impl SessionHistory {
                 fts.session_id,
                 s.name as session_name,
                 s.created_at,
-                snippet(session_output_fts, 1, '<mark>', '</mark>', '...', 32) as match_snippet,
+                -- Return plain text. The PWA owns the narrowly scoped
+                -- highlighting at its text sink; terminal output is untrusted.
+                snippet(session_output_fts, 1, '', '', '...', 32) as match_snippet,
                 rank as rank
             FROM session_output_fts fts
             JOIN sessions s ON s.id = fts.session_id

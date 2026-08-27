@@ -17,9 +17,38 @@ permissions:
 
 jobs:
   retention:
-    uses: TheDancingDeveloper-org/github-policy/.github/workflows/ghcr-retention-reusable.yml@main
-    with:
-      packages: "vogt,vogt-stack,vogt-base/node,vogt-base/python,vogt-base/rust,vogt-base/ubuntu,vogt-pod-base,vogt-demo"
-      apply: ${{ inputs.apply || false }}
-    secrets:
-      GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+    runs-on: [self-hosted, publish]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # Retention rules remain organization-owned. Pin the policy checkout as
+      # executable input instead of calling the not-yet-landed reusable
+      # workflow from its moving branch.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: TheDancingDeveloper-org/github-policy
+          ref: 194ee9a0f4fad7131c4f5050d8b17af6f485d895
+          path: .github-policy
+
+      - name: generate the GHCR retention report
+        env:
+          GH_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          APPLY: ${{ inputs.apply || false }}
+        run: |
+          set -euo pipefail
+          args=(--output ghcr-retention-report.json)
+          for package in \
+            vogt vogt-stack \
+            vogt-base/node vogt-base/python vogt-base/rust vogt-base/ubuntu \
+            vogt-pod-base vogt-demo; do
+            args+=(--package "$package")
+          done
+          if [[ "$APPLY" == true ]]; then
+            args+=(--apply)
+          fi
+          python3 .github-policy/scripts/ghcr_retention.py "${args[@]}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ghcr-retention-${{ github.repository }}-${{ github.run_id }}
+          path: ghcr-retention-report.json

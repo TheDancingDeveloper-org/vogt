@@ -1962,7 +1962,7 @@ async fn exited_sessions_are_archived_searchable_and_deletable() {
             "command": [
                 "/bin/sh",
                 "-lc",
-                "printf 'history-needle path/with punctuation\\n'; exit 7",
+                "printf '<img src=x onerror=globalThis.__vogt_xss=1> <svg onload=1> <broken history-needle path/with &lt;script&gt;alert(1)&lt;/script&gt; punctuation\\n'; exit 7",
             ],
         }))
         .send()
@@ -2021,6 +2021,31 @@ async fn exited_sessions_are_archived_searchable_and_deletable() {
             .await
             .unwrap();
         if hits.iter().any(|hit| hit["session_id"] == id) {
+            let hit = hits
+                .iter()
+                .find(|hit| hit["session_id"] == id)
+                .expect("matching history result");
+            let snippet = hit["match_snippet"].as_str().unwrap_or_default();
+            assert!(
+                !snippet.contains("<mark>"),
+                "history API must return plain text snippets: {hit:?}"
+            );
+            assert!(
+                snippet.contains("<img src=x onerror=globalThis.__vogt_xss=1>"),
+                "history API must preserve hostile output as data: {hit:?}"
+            );
+            assert!(
+                snippet.contains("<svg onload=1>"),
+                "history API must preserve SVG payloads as data: {hit:?}"
+            );
+            assert!(
+                snippet.contains("<broken"),
+                "history API must preserve malformed markup as data: {hit:?}"
+            );
+            assert!(
+                snippet.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+                "history API must preserve encoded payloads as data: {hit:?}"
+            );
             break;
         }
         assert!(
