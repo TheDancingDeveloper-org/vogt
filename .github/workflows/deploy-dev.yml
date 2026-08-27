@@ -147,7 +147,14 @@ jobs:
           smoke_token="$(cat "$RUNNER_TEMP/vogt-dev-smoke-token")"
           test -n "$smoke_token"
           trap 'rm -f -- "$RUNNER_TEMP/vogt-dev-smoke-token"' EXIT
-          VOGT_SMOKE_TOKEN="$smoke_token" bash scripts/smoke_merged_stack.sh
+          smoke_deadline=$((SECONDS + 120))
+          until VOGT_SMOKE_TOKEN="$smoke_token" bash scripts/smoke_merged_stack.sh; do
+            if (( SECONDS >= smoke_deadline )); then
+              echo "live dev stack did not become healthy within 120 seconds" >&2
+              exit 1
+            fi
+            sleep 10
+          done
           VOGT_SMOKE_TOKEN="$smoke_token" python3 - "$VOGT_SMOKE_BASE" "$SOURCE_SHA" <<'PY'
           from __future__ import annotations
 
