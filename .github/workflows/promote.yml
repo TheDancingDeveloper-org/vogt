@@ -34,7 +34,7 @@ jobs:
     # required checks remain the enforcement point on GitHub's current plan.
     environment: ${{ inputs.stage == 'dev-to-main' && 'promote-main' || 'promote-prod' }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 

@@ -59,11 +59,11 @@ appointed representative at an online or offline event.
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be
-reported to the community leaders responsible for enforcement at
-**conduct@vogt.example** — this is a placeholder address; the repository
-operator should replace it with a real monitored inbox before relying on it.
-All complaints will be reviewed and investigated promptly and fairly.
+The project does not yet have a separately monitored private conduct-reporting
+channel. Do not publish sensitive incident details in an issue. For content or
+conduct on GitHub, use GitHub's own **Report abuse** flow; for incidents outside
+GitHub, contact a maintainer only through a private channel you already share.
+Establishing and exercising a dedicated project route remains release work.
 
 All community leaders are obligated to respect the privacy and security of
 the reporter of any incident.

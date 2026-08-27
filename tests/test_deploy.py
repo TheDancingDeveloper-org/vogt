@@ -222,6 +222,83 @@ def test_every_workflow_job_names_a_self_hosted_runner() -> None:
             )
 
 
+def test_every_third_party_action_is_pinned_to_a_commit() -> None:
+    """A mutable action tag is executable supply-chain input.
+
+    The runner-policy workflow repeats this check in CI; keeping the same
+    assertion in the Python suite catches a newly added workflow before it
+    reaches GitHub at all. Local reusable workflows are intentionally exempt:
+    they are resolved from this checkout and therefore move with the commit
+    being tested.
+    """
+    action = re.compile(r"^\s*(?:-\s*)?uses:\s*([^@\s]+)@([^\s#]+)")
+    for path in _workflow_files():
+        for number, line in enumerate(path.read_text("utf-8").splitlines(), start=1):
+            match = action.search(line)
+            if not match or match.group(1).startswith("./"):
+                continue
+            assert re.fullmatch(r"[0-9a-fA-F]{40}", match.group(2)), (
+                f"{path.name}:{number}: third-party action is not SHA-pinned: "
+                f"{line.strip()}"
+            )
+
+
+def test_codeql_covers_each_implementation_language() -> None:
+    """OSR-08: code scanning follows the actual language boundary."""
+    workflow = (WORKFLOWS / "codeql.yml").read_text(encoding="utf-8")
+    assert "runs-on: [self-hosted]" in workflow
+    assert "security-events: write" in workflow
+    assert "build-mode: none" in workflow
+    assert "security-extended" in workflow
+    assert "- python" in workflow
+    assert "- javascript-typescript" in workflow
+    assert "- rust" in workflow
+    assert re.search(r"github/codeql-action/init@[0-9a-f]{40}", workflow)
+    assert re.search(r"github/codeql-action/analyze@[0-9a-f]{40}", workflow)
+
+
+def test_rust_dependency_audit_is_a_fatal_ci_gate() -> None:
+    """OSR-01: RustSec findings are triaged and future drift fails CI."""
+    workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    step = workflow.split("      - name: audit Rust dependencies", 1)[1].split(
+        "\n      - uses:", 1
+    )[0]
+    assert "cargo install --locked cargo-audit --version 0.22.2" in step
+    assert "cargo audit --deny warnings" in step
+    assert "--ignore RUSTSEC-2023-0071" in step
+    assert "has no fixed rsa release" in step
+    assert "signs ES256" in step
+
+
+def test_javascript_dependency_audits_are_fatal_ci_gates() -> None:
+    """OSR-01: clean pnpm receipts stay clean after this review."""
+    workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    assert "audit the PWA's dependencies" in workflow
+    assert "audit the shell's dependencies" in workflow
+    assert workflow.count("run: pnpm audit") == 2
+
+
+def test_buildkit_cache_topology_is_operator_configuration() -> None:
+    """OSR-11: public workflows consume an opaque cache endpoint."""
+    for name in ("build.yml", "release.yml", "pod-base.yml"):
+        workflow = (WORKFLOWS / name).read_text(encoding="utf-8")
+        assert "VOGT_BUILDKIT_CACHE_REGISTRY" in workflow
+        assert "192.168.1.75:5500" not in workflow
+
+
+def test_ghcr_retention_uses_a_pinned_central_policy() -> None:
+    """OSR-01: retention executes reviewed policy, not a moving/dead workflow."""
+    workflow = (WORKFLOWS / "ghcr-retention.yml").read_text(encoding="utf-8")
+    assert "runs-on: [self-hosted, publish]" in workflow
+    assert "repository: TheDancingDeveloper-org/github-policy" in workflow
+    assert re.search(r"\n\s+ref: [0-9a-f]{40}\n", workflow)
+    assert "@main" not in workflow
+    assert "ghcr_retention.py" in workflow
+    assert 'if [[ "$APPLY" == true ]]' in workflow
+    assert "default: false" in workflow
+    assert re.search(r"actions/upload-artifact@[0-9a-f]{40}", workflow)
+
+
 def test_the_release_workflow_is_tag_only_and_signs_a_digest() -> None:
     """NFR-C3 (r5), NFR-C5, NFR-D10.
 
@@ -1161,12 +1238,16 @@ def test_a_release_apk_is_signed_or_the_job_stops() -> None:
     job = release[release.index("\n  android:") :]
 
     assert "MYDEVENV2_ANDROID_KEYSTORE_B64" in job, "the keystore is a secret"
-    assert "actions/setup-java@v4" in job, "the release runner needs a JDK"
-    assert "android-actions/setup-android@v3" in job, (
-        "the release runner needs the Android SDK"
+    assert re.search(r"actions/setup-java@[0-9a-f]{40}", job), (
+        "the release runner needs an immutable JDK setup action"
+    )
+    assert re.search(r"android-actions/setup-android@[0-9a-f]{40}", job), (
+        "the release runner needs an immutable Android SDK setup action"
     )
     assert "exit 1" in job, "a missing keystore stops the job"
-    assert "pnpm/action-setup@v4" in job, "the self-hosted runner must install pnpm"
+    assert re.search(r"pnpm/action-setup@[0-9a-f]{40}", job), (
+        "the self-hosted runner must install pnpm through an immutable action"
+    )
     assert "assembleRelease" in job, "a release build, not a debug one"
     assert "apksigner" in job and "verify" in job, (
         "the signature is verified after the build; Gradle's silence about a "
@@ -1221,13 +1302,13 @@ def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> N
     assert '[ "$CONFIRM" = DEPLOY ]' in workflow
     assert "git merge-base --is-ancestor" in workflow
     assert "docker buildx imagetools inspect" in workflow
-    assert "actions/create-github-app-token@v2" in workflow
+    assert re.search(r"actions/create-github-app-token@[0-9a-f]{40}", workflow)
     assert "VOGT_DEPLOYMENT_REPOSITORY" in workflow
     assert "actions/workflows/${DEPLOY_WORKFLOW}/dispatches" in workflow
     assert "image_digest" in workflow
     assert "vogt-deployment-receipt" in workflow
     assert "KOMODO_API" not in workflow
-    assert "sigstore/cosign-installer@v3" in workflow
+    assert re.search(r"sigstore/cosign-installer@[0-9a-f]{40}", workflow)
     assert "cosign verify" in workflow
 
 
@@ -1250,7 +1331,7 @@ def test_production_handoff_validates_and_reports_the_receipt() -> None:
     assert "scripts/validate_deployment_receipt.py" in workflow
     assert "deploy/vogt-deployment-receipt.schema.json" in workflow
     assert "GITHUB_STEP_SUMMARY" in workflow
-    assert "actions/upload-artifact@v7" in workflow
+    assert re.search(r"actions/upload-artifact@[0-9a-f]{40}", workflow)
     assert "vogt-prod-deployment-receipt-${{ inputs.tag }}" in workflow
 
 
@@ -1296,6 +1377,9 @@ def test_production_receipt_validator_accepts_schema_and_rejects_invalid_receipt
 def test_dev_deploy_is_immutable_and_receipt_gated() -> None:
     workflow = (WORKFLOWS / "deploy-dev.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
+    assert "runs-on: [self-hosted, tailnet, docker]" in workflow
+    assert "VOGT_KOMODO_URL" in workflow
+    assert "VOGT_KOMODO_STACK" in workflow
     assert "DEPLOY-DEV" in workflow
     assert "dev-${SOURCE_SHA}" in workflow
     assert "INFISICAL_CLIENT_ID" in workflow
@@ -1342,6 +1426,8 @@ def test_github_release_collects_and_publishes_the_complete_release() -> None:
     assert "vogt-dist-${{ github.ref_name }}" in job
     assert "vogt-android-release-${{ github.ref_name }}" in job
     assert "wheel and sdist are required" in job
+    assert "sdist contains non-core repository content" in job
+    assert "scripts|tests|web" in job
     assert "signed APK is required" in job
     assert "CORE_DIGEST" in job and "STACK_DIGEST" in job
     assert "vogt-release-manifest.json" in job

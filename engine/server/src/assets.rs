@@ -46,6 +46,12 @@ fn serve(path: &str) -> Response {
             };
             resp.headers_mut()
                 .insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+            resp.headers_mut().insert(
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static(
+                    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+                ),
+            );
             resp
         }
         None => not_found(),
@@ -64,6 +70,12 @@ fn not_found() -> Response {
         resp.headers_mut().insert(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        );
+        resp.headers_mut().insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' https: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            ),
         );
         return resp;
     }
@@ -84,4 +96,31 @@ pub async fn asset_wild(Path(path): Path<String>) -> Response {
         return serve("index.html");
     }
     serve(&path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::root;
+    use axum::http::header;
+
+    #[tokio::test]
+    async fn html_assets_carry_a_restrictive_content_security_policy() {
+        let response = root().await;
+        let policy = response
+            .headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(policy.contains("object-src 'none'"));
+        assert!(policy.contains("frame-ancestors 'none'"));
+        assert!(policy.contains("script-src 'self'"));
+        assert!(!policy.contains("script-src 'self' 'unsafe-inline'"));
+
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read embedded index");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("/theme-bootstrap.js"));
+        assert!(!html.contains("<script>"));
+    }
 }

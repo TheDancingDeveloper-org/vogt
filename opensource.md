@@ -28,11 +28,14 @@ earlier boundary that named the Python core alone as the artefact):
 
 The core is built from the repository-root `Dockerfile` and run from
 `deploy/vogt.compose.yml` (published image) or that file plus
-`deploy/vogt.build.yml` (build from the checkout). The engine has no published
-image; it is built from `engine/Dockerfile` and layered onto the base with
-`deploy/engine.overlay.yml`. Building the core needs Python 3.11+ and nothing
-else; building the engine needs its Rust and Node toolchain, which its
-Dockerfile provides, so an operator with Docker needs neither installed.
+`deploy/vogt.build.yml` (build from the checkout). The engine is built from
+`engine/Dockerfile`; the generic `deploy/engine.overlay.yml` builds it beside
+the core, while tagged releases also publish the signed combined
+`vogt-stack` image for the maintainer's development-pod deployment. That
+combined image is a published convenience, not the generic supported
+self-hosting path. Building the core needs Python 3.11+ and nothing else;
+building the engine needs its Rust and Node toolchain, which its Dockerfile
+provides, so an operator with Docker needs neither installed.
 
 The core is also a complete, supported product **on its own**, over the CLI,
 REST, and MCP: run without the engine it starts, passes `/health/ready`, and
@@ -96,14 +99,50 @@ new; public examples use Vogt names only.
   `ENGINE_` name is unset and the matching legacy `MYDEVENV2_*` name is set,
   the legacy value is used and a startup warning names both. Rename at your
   convenience; the fallback is scheduled for removal.
-- **PWA install identity and storage keys.** The web manifest, service-worker
-  cache name, and two browser custom-event names keep their original
-  literals so an installed PWA upgrades in place instead of appearing as a
-  second app. These are pinned in `tests/test_product_identity.py` and are
-  not user-visible.
+- **PWA compatibility state.** Browser local-storage names have migrated to
+  `vogt.*` with one-shot reads of the historical keys. The IndexedDB terminal
+  cache, Android notification-channel id, and native-insets event still keep
+  their historical internal literals because they cannot be renamed in place
+  without losing cached output, user channel settings, or compatibility with
+  an installed native shell. These are pinned in product-identity and storage
+  migration tests and are not user-visible branding.
 - **Engine state directory.** An existing engine state directory is still
   read from its old location when the operator points
   `VOGT_ENGINE_STATE_DIR` at it; nothing relocates data silently.
+
+## Retained compatibility literals
+
+Public examples use Vogt-neutral names, but a few implementation literals are
+intentionally retained because they are identities or paths inside a shipped
+artifact rather than references to an operator's host:
+
+- **`/home/sprooty` and the `sprooty` container account.** The engine's pod
+  image, volume declarations, PATH, persisted home, and ownership defaults
+  form an image ABI used by existing volumes and overlays. A rename is a
+  versioned container migration, not a documentation cleanup. Host-side paths
+  remain variables and the generic deployment never assumes an operator has
+  this home directory.
+- **`SPROOTY_UID` / `SPROOTY_GID`.** These build arguments select the numeric
+  owner of that same retained account and therefore move with the image ABI.
+- **`com.sprooty.vogt` and `com.sprooty.vogt.dev`.** These are Android
+  application identities registered with Firebase and signing/install state.
+  Renaming them would create another application and require users to
+  reinstall and re-register for push.
+- **`MYDEVENV2_*` engine, task, and Android build names.** These are deprecated
+  compatibility inputs or wire values from the pre-merge engine. New public
+  configuration uses `ENGINE_*` / `VOGT_*`; the aliases remain until a
+  documented breaking release can remove them. The mobile workspace package
+  name is not such an identity and has been renamed to `vogt-mobile`.
+- **`mydevenv2-alerts`, `mydevenv2-terminal-cache`, and
+  `mydevenv2:native-insets`.** Android notification-channel ids and IndexedDB
+  databases cannot be renamed in place, and the event remains an accepted
+  native-shell wire alias. Keeping these internal ids preserves user settings,
+  cached terminal output, and older installed shells while their visible
+  surfaces use Vogt naming.
+
+Estate hostnames, private IPs, secret-manager projects, and operator checkout
+paths are not compatibility literals. They belong in deployment variables or
+private operator material and must not be added to the generic surfaces.
 
 Removing any alias is a documented, versioned change with a migration note,
 never a silent rename.

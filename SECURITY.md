@@ -20,9 +20,10 @@ vulnerability"**. That creates a private advisory only the maintainer (and
 anyone they add) can see, and lets you attach reproduction steps or a patch
 without exposing the issue while it is unfixed.
 
-If you cannot use that flow, email **security@vogt.example** — this is a
-placeholder address; the repository operator should replace it with a real
-monitored inbox before relying on it. Include:
+If you cannot use that flow, do not publish exploit details in an issue. The
+project does not currently have an email or another private fallback channel;
+establishing and exercising one remains release work. In a private report,
+include:
 
 - what you found and why it is a security issue, not just a bug;
 - steps or a proof-of-concept to reproduce it;
@@ -45,9 +46,11 @@ expose real project data. The model, in short (the full statement is in
 - **Scoped bearer tokens.** Every request is authenticated by default
   (`--no-auth` exists only for a loopback listener). A token is bound to an
   actor and carries scopes (`read`, `work.write`, `project.write`, `admin`,
-  `writeback`), minted with `vogt token issue` and shown once. Tokens are
-  configured as `*_file` paths, never as raw values in the environment, so a
-  credential does not end up in `docker inspect` output or a process listing.
+  `writeback`), minted with `vogt token issue` and shown once. Core-side
+  tokens are configured as `*_file` paths. The optional engine's generic
+  Compose overlay currently accepts `ENGINE_TOKEN` in its ignored `.env` for
+  compatibility; operators who need to exclude it from `docker inspect` can
+  use the engine TOML `token` setting or a private secret-backed overlay.
 - **Audited writes.** Every mutating operation requires a principal and a
   reason and lands its entity change, audit row, and event row in one
   transaction (`audited_write`). There is no write path that bypasses this.

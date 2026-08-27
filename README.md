@@ -22,11 +22,10 @@ The stack is two Compose files layered together: the base
 front of it. No engine image is published, so that overlay always builds one
 from this checkout.
 
-The core image `ghcr.io/thedancingdeveloper-org/vogt` is not yet a public
-package, so the quickstart below **builds the core from this checkout** with
-the one-service build overlay `deploy/vogt.build.yml` — the path verified to
-run from a clean clone. Once the package is made public you can drop
-`-f deploy/vogt.build.yml` and the base pulls the published image instead.
+The quickstart below **builds the core from this checkout** with the
+one-service build overlay `deploy/vogt.build.yml`, a path that works without
+registry credentials. When using a published package, drop
+`-f deploy/vogt.build.yml` and set `VOGT_IMAGE` to the release tag or digest.
 
 ```console
 git clone https://github.com/TheDancingDeveloper-org/vogt.git
