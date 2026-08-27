@@ -309,12 +309,26 @@ jobs:
             cargo install --locked cargo-audit --version 0.22.2 --force
           fi
 
+          # The self-hosted runner carries a global gitconfig that injects this
+          # org's credentials for github.com. RustSec/advisory-db is a different
+          # public repository, and those credentials are rejected (HTTP 401),
+          # so cargo-audit's own git fetch cannot reach the database. Clone it
+          # anonymously with a clean git configuration, then audit against that
+          # local copy without letting cargo-audit re-fetch.
+          advisory_db="${RUNNER_TEMP:-/tmp}/rustsec-advisory-db"
+          rm -rf "$advisory_db"
+          GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_TERMINAL_PROMPT=0 \
+            git clone --quiet --depth 1 \
+              https://github.com/RustSec/advisory-db.git "$advisory_db"
+
           # RUSTSEC-2023-0071 has no fixed rsa release. rsa is compiled only
           # through web-push -> jwt-simple -> superboring. Vogt's VAPID path
           # signs ES256 (P-256 ECDSA), never RSA; see web-push's VapidKey and
           # engine/server/src/push.rs. Keep this one explicit exception while
           # denying future vulnerabilities, unsound advisories, and yanks.
-          cargo audit --deny warnings --ignore RUSTSEC-2023-0071
+          cargo audit --no-fetch --db "$advisory_db" \
+            --deny warnings --ignore RUSTSEC-2023-0071
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         with:

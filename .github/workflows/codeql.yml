@@ -43,6 +43,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
+      # The Actions runtime bundles Node for action execution, but the
+      # JavaScript/TypeScript extractor starts `node` from PATH. The
+      # self-hosted base runner deliberately has no language runtimes.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: matrix.language == 'javascript-typescript'
+        with:
+          node-version: "22"
+
       # Rust, Python, and JavaScript/TypeScript all support build-mode none in
       # the current CodeQL bundle. That keeps this security analysis separate
       # from the authoritative build/test jobs and avoids rebuilding the PWA
