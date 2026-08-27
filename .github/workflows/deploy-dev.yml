@@ -1,7 +1,9 @@
 name: deploy dev
 
-# Dev deployment is an external-estate handoff, just like production, but it
-# is a prerequisite for promotion rather than a release side effect.
+# Dev deployment is deliberately separate from release generation. This job
+# verifies the signed commit images, updates the existing Komodo GitOps stack,
+# deploys it, and records live validation. No GitHub App, release tag, or
+# GitHub Release is involved.
 
 on:
   workflow_dispatch:
@@ -14,15 +16,26 @@ on:
         description: Type DEPLOY-DEV to confirm the dev deployment
         required: true
         type: string
+      public_url:
+        description: Dev front-door URL used for live smoke checks
+        required: false
+        default: https://vogt-dev.sprooty.com
+        type: string
 
 permissions:
   contents: read
   packages: read
-  actions: write
+
+env:
+  INFISICAL_ENV: prod
+  INFISICAL_PROJECT_ID: ${{ vars.INFISICAL_PROJECT_ID }}
+  INFISICAL_API_URL: ${{ vars.INFISICAL_API_URL }}
+  KOMODO_URL: http://100.92.54.45:3011
+  KOMODO_STACK: vogt-dev
 
 jobs:
   deploy:
-    name: verify and hand off the immutable dev image
+    name: deploy and validate the signed dev image
     runs-on: [self-hosted, tailnet]
     environment: vogt-dev
     steps:
@@ -43,91 +56,210 @@ jobs:
             echo "source_sha is not the current dev commit" >&2; exit 1;
           }
 
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - uses: sigstore/cosign-installer@v3
 
-      - name: resolve and verify the signed dev image
-        id: image
+      - name: resolve and verify both signed dev images
+        id: images
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          image=ghcr.io/thedancingdeveloper-org/vogt-stack:dev-${SOURCE_SHA}
-          digest="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')"
-          case "$digest" in sha256:*) ;; *) echo "invalid image digest: $digest" >&2; exit 1;; esac
-          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          resolve() {
+            local image="$1"
+            local digest
+            digest="$(docker buildx imagetools inspect "${image}:dev-${SOURCE_SHA}" --format '{{.Manifest.Digest}}')"
+            case "$digest" in sha256:*) ;; *) echo "invalid image digest: $digest" >&2; exit 1;; esac
+            printf '%s\n' "$digest"
+          }
+          core_digest="$(resolve ghcr.io/thedancingdeveloper-org/vogt)"
+          stack_digest="$(resolve ghcr.io/thedancingdeveloper-org/vogt-stack)"
           cosign verify \
             --certificate-identity-regexp "^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/build.yml@refs/heads/dev$" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "ghcr.io/thedancingdeveloper-org/vogt-stack@${digest}"
+            "ghcr.io/thedancingdeveloper-org/vogt@${core_digest}"
+          cosign verify \
+            --certificate-identity-regexp "^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/build.yml@refs/heads/dev$" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "ghcr.io/thedancingdeveloper-org/vogt-stack@${stack_digest}"
+          {
+            echo "core_digest=$core_digest"
+            echo "stack_digest=$stack_digest"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: mint the scoped deployment-app token
-        id: deployment-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.VOGT_DEV_GITHUB_APP_ID }}
-          private-key: ${{ secrets.VOGT_DEV_GITHUB_APP_PEM }}
-          owner: ${{ vars.VOGT_DEV_DEPLOYMENT_OWNER }}
-          repositories: ${{ vars.VOGT_DEV_DEPLOYMENT_REPOSITORY_NAME }}
-          permission-actions: write
-          permission-contents: read
-
-      - name: dispatch the approved dev deployment and verify its receipt
+      - name: authenticate to Infisical without exposing values
         env:
-          GH_TOKEN: ${{ steps.deployment-token.outputs.token }}
-          DEPLOY_REPOSITORY: ${{ vars.VOGT_DEV_DEPLOYMENT_REPOSITORY }}
-          DEPLOY_WORKFLOW: ${{ vars.VOGT_DEV_DEPLOYMENT_WORKFLOW }}
-          DEPLOY_REF: ${{ vars.VOGT_DEV_DEPLOYMENT_REF }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
-          DIGEST: ${{ steps.image.outputs.digest }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          : "${DEPLOY_REPOSITORY:?Configure VOGT_DEV_DEPLOYMENT_REPOSITORY in vogt-dev}"
-          : "${DEPLOY_WORKFLOW:?Configure VOGT_DEV_DEPLOYMENT_WORKFLOW in vogt-dev}"
-          : "${DEPLOY_REF:?Configure VOGT_DEV_DEPLOYMENT_REF in vogt-dev}"
-          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          jq -n --arg ref "$DEPLOY_REF" --arg source_repository "$GITHUB_REPOSITORY" \
-            --arg source_sha "$SOURCE_SHA" --arg image_digest "$DIGEST" \
-            '{ref: $ref, inputs: {source_repository: $source_repository, source_sha: $source_sha, environment: "dev", image_digest: $image_digest, smoke_contract_version: "v1"}}' \
-            | gh api --method POST "repos/${DEPLOY_REPOSITORY}/actions/workflows/${DEPLOY_WORKFLOW}/dispatches" --input -
-          run_id=""
-          for _ in $(seq 1 60); do
-            run_id="$(gh api "repos/${DEPLOY_REPOSITORY}/actions/workflows/${DEPLOY_WORKFLOW}/runs?event=workflow_dispatch&per_page=20" --jq ".workflow_runs[] | select(.created_at >= \"$started_at\") | .id" | head -n 1 || true)"
-            [ -n "$run_id" ] && break
-            sleep 5
+          : "${INFISICAL_API_URL:?Configure INFISICAL_API_URL}"
+          : "${INFISICAL_PROJECT_ID:?Configure INFISICAL_PROJECT_ID}"
+          temp_home="$(mktemp -d "${RUNNER_TEMP}/vogt-infisical.XXXXXXXX")"
+          trap 'rm -rf -- "$temp_home"' EXIT
+          access_token="$(HOME="$temp_home" infisical login \
+            --method universal-auth \
+            --domain "$INFISICAL_API_URL" \
+            --client-id "$INFISICAL_CLIENT_ID" \
+            --client-secret "$INFISICAL_CLIENT_SECRET" \
+            --plain --silent)"
+          test -n "$access_token"
+          for name in HOMELAB_KOMODO_API_KEY HOMELAB_KOMODO_API_SECRET; do
+            value="$(infisical secrets get "$name" \
+              --domain "$INFISICAL_API_URL" \
+              --projectId "$INFISICAL_PROJECT_ID" \
+              --env "$INFISICAL_ENV" \
+              --token "$access_token" \
+              --plain --silent)"
+            test -n "$value" || { echo "Infisical secret is empty: $name" >&2; exit 1; }
+            echo "::add-mask::$value"
+            {
+              echo "$name<<VOGT_SECRET_EOF"
+              echo "$value"
+              echo "VOGT_SECRET_EOF"
+            } >> "$GITHUB_ENV"
           done
-          : "${run_id:?deployment repository did not create a workflow run}"
-          for _ in $(seq 1 180); do
-            state="$(gh api "repos/${DEPLOY_REPOSITORY}/actions/runs/${run_id}" --jq .status)"
-            [ "$state" = completed ] && break
-            sleep 10
-          done
-          [ "$(gh api "repos/${DEPLOY_REPOSITORY}/actions/runs/${run_id}" --jq .conclusion)" = success ] || exit 1
-          artifact_id="$(gh api "repos/${DEPLOY_REPOSITORY}/actions/runs/${run_id}/artifacts" --jq '.artifacts[] | select(.name == "vogt-dev-deployment-receipt") | .id' | head -n 1 || true)"
-          : "${artifact_id:?dev deployment did not upload vogt-dev-deployment-receipt}"
-          mkdir -p "$RUNNER_TEMP/vogt-dev-receipt"
-          gh api "repos/${DEPLOY_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "$RUNNER_TEMP/vogt-dev-receipt/receipt.zip"
-          python3 - "$RUNNER_TEMP/vogt-dev-receipt/receipt.zip" "$RUNNER_TEMP/vogt-dev-receipt" <<'PY'
-          import sys, zipfile
-          with zipfile.ZipFile(sys.argv[1]) as archive:
-              archive.extractall(sys.argv[2])
+
+      - name: update desired state and deploy Komodo
+        id: komodo
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CORE_DIGEST: ${{ steps.images.outputs.core_digest }}
+          STACK_DIGEST: ${{ steps.images.outputs.stack_digest }}
+        run: |
+          KOMODO_API_KEY="$HOMELAB_KOMODO_API_KEY" \
+          KOMODO_API_SECRET="$HOMELAB_KOMODO_API_SECRET" \
+          python3 scripts/deploy_dev.py
+
+      - name: run the live dev smoke contract
+        env:
+          VOGT_SMOKE_BASE: ${{ inputs.public_url }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          smoke_token="$(cat "$RUNNER_TEMP/vogt-dev-smoke-token")"
+          test -n "$smoke_token"
+          trap 'rm -f -- "$RUNNER_TEMP/vogt-dev-smoke-token"' EXIT
+          VOGT_SMOKE_TOKEN="$smoke_token" bash scripts/smoke_merged_stack.sh
+          VOGT_SMOKE_TOKEN="$smoke_token" python3 - "$VOGT_SMOKE_BASE" "$SOURCE_SHA" <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import sys
+          import uuid
+          from urllib.error import HTTPError, URLError
+          from urllib.request import Request, urlopen
+
+          base, source_sha = sys.argv[1].rstrip("/"), sys.argv[2]
+          token = os.environ["VOGT_SMOKE_TOKEN"]
+
+          def call(path: str, method: str = "GET", body: dict[str, object] | None = None) -> dict[str, object]:
+              payload = None if body is None else json.dumps(body).encode("utf-8")
+              request = Request(
+                  f"{base}{path}",
+                  data=payload,
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Content-Type": "application/json",
+                  },
+                  method=method,
+              )
+              try:
+                  with urlopen(request, timeout=20) as response:  # noqa: S310
+                      value = json.load(response)
+              except (HTTPError, URLError, TimeoutError) as exc:
+                  raise SystemExit(f"live smoke request failed: {path}: {exc}") from exc
+              if not isinstance(value, dict):
+                  raise SystemExit(f"live smoke response was not an object: {path}")
+              return value
+
+          config = call("/api/config")
+          if config.get("source_sha") != source_sha:
+              raise SystemExit("live source SHA does not match the deployed commit")
+          if not config.get("product_version"):
+              raise SystemExit("live deployment did not report product_version")
+          status = call("/api/vogt/status")
+          if not status:
+              raise SystemExit("live status response was empty")
+          marker = f"dev-deploy-smoke-{uuid.uuid4().hex[:12]}"
+          work = call(
+              "/api/vogt/work",
+              "POST",
+              {
+                  "kind": "chore",
+                  "title": f"{marker} live validation",
+                  "priority": "p2",
+                  "reason": "verified dev deployment",
+              },
+          )
+          if not isinstance(work.get("item"), dict):
+              raise SystemExit("live core write returned no work item")
+          session = call(
+              "/api/sessions",
+              "POST",
+              {"name": marker, "command": ["/bin/true"]},
+          )
+          if not session.get("id"):
+              raise SystemExit("live engine front door returned no session id")
+          print("live source SHA, product version, auth, core write, and engine front door verified")
           PY
-          python3 - "$RUNNER_TEMP/vogt-dev-receipt/receipt.json" "$SOURCE_SHA" "$DIGEST" <<'PY'
-          import json, sys
-          receipt = json.load(open(sys.argv[1], encoding="utf-8"))
-          if receipt.get("source_repository") != "TheDancingDeveloper-org/vogt": raise SystemExit("receipt repository mismatch")
-          if receipt.get("source_sha") != sys.argv[2]: raise SystemExit("receipt SHA mismatch")
-          if receipt.get("environment") != "dev": raise SystemExit("receipt environment mismatch")
-          if receipt.get("image_digest") != sys.argv[3]: raise SystemExit("receipt digest mismatch")
-          smoke = receipt.get("live_smoke", {})
-          required = ("status", "readiness", "authentication", "core_write", "engine_front_door", "product_version")
-          if any(smoke.get(key) != "passed" for key in required): raise SystemExit("dev smoke receipt is incomplete")
-          print(json.dumps(receipt, sort_keys=True))
+
+      - name: write the verified dev deployment receipt
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CORE_DIGEST: ${{ steps.images.outputs.core_digest }}
+          STACK_DIGEST: ${{ steps.images.outputs.stack_digest }}
+          DEPLOYMENT_ID: ${{ steps.komodo.outputs.deployment_id }}
+          DESIRED_STATE_COMMIT: ${{ steps.komodo.outputs.desired_state_commit }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/vogt-dev-receipt"
+          python3 - "$RUNNER_TEMP/vogt-dev-receipt/receipt.json" <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import sys
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          receipt = {
+              "source_repository": "TheDancingDeveloper-org/vogt",
+              "source_sha": os.environ["SOURCE_SHA"],
+              "environment": "dev",
+              "image_digest": os.environ["STACK_DIGEST"],
+              "deployment_id": os.environ["DEPLOYMENT_ID"],
+              "timestamp": datetime.now(timezone.utc).isoformat(),
+              "live_smoke": {
+                  "status": "passed",
+                  "readiness": "passed",
+                  "authentication": "passed",
+                  "core_write": "passed",
+                  "engine_front_door": "passed",
+                  "product_version": "passed",
+              },
+          }
+          Path(sys.argv[1]).write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
           PY
           cp "$RUNNER_TEMP/vogt-dev-receipt/receipt.json" "$RUNNER_TEMP/vogt-dev-receipt/receipt-${SOURCE_SHA}.json"
-          echo "### Verified dev deployment" >> "$GITHUB_STEP_SUMMARY"
-          echo "- source: `$SOURCE_SHA`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- image: `ghcr.io/thedancingdeveloper-org/vogt-stack@$DIGEST`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- deployment run: `https://github.com/${DEPLOY_REPOSITORY}/actions/runs/${run_id}`" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### Verified dev deployment"
+            echo
+            echo "- source: `$SOURCE_SHA`"
+            echo "- core image: `ghcr.io/thedancingdeveloper-org/vogt@$CORE_DIGEST`"
+            echo "- merged image: `ghcr.io/thedancingdeveloper-org/vogt-stack@$STACK_DIGEST`"
+            echo "- desired-state commit: `$DESIRED_STATE_COMMIT`"
+            echo "- Komodo update: `$DEPLOYMENT_ID`"
+            echo "- no release tag or GitHub Release was created"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7
         with:
