@@ -26,9 +26,6 @@ permissions:
   packages: read
 
 env:
-  INFISICAL_ENV: prod
-  INFISICAL_PROJECT_ID: ${{ vars.INFISICAL_PROJECT_ID }}
-  INFISICAL_API_URL: ${{ vars.INFISICAL_API_URL }}
   # Estate addresses and stack identities are operator configuration, not
   # public workflow defaults. Configure these repository variables before
   # dispatching the workflow.
@@ -98,48 +95,23 @@ jobs:
             echo "stack_digest=$stack_digest"
           } >> "$GITHUB_OUTPUT"
 
-      - name: authenticate to Infisical without exposing values
-        env:
-          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
-          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-        run: |
-          set -euo pipefail
-          : "${INFISICAL_API_URL:?Configure INFISICAL_API_URL}"
-          : "${INFISICAL_PROJECT_ID:?Configure INFISICAL_PROJECT_ID}"
-          temp_home="$(mktemp -d "${RUNNER_TEMP}/vogt-infisical.XXXXXXXX")"
-          trap 'rm -rf -- "$temp_home"' EXIT
-          access_token="$(HOME="$temp_home" infisical login \
-            --method universal-auth \
-            --domain "$INFISICAL_API_URL" \
-            --client-id "$INFISICAL_CLIENT_ID" \
-            --client-secret "$INFISICAL_CLIENT_SECRET" \
-            --plain --silent)"
-          test -n "$access_token"
-          for name in HOMELAB_KOMODO_API_KEY HOMELAB_KOMODO_API_SECRET; do
-            value="$(infisical secrets get "$name" \
-              --domain "$INFISICAL_API_URL" \
-              --projectId "$INFISICAL_PROJECT_ID" \
-              --env "$INFISICAL_ENV" \
-              --token "$access_token" \
-              --plain --silent)"
-            test -n "$value" || { echo "Infisical secret is empty: $name" >&2; exit 1; }
-            echo "::add-mask::$value"
-            {
-              echo "$name<<VOGT_SECRET_EOF"
-              echo "$value"
-              echo "VOGT_SECRET_EOF"
-            } >> "$GITHUB_ENV"
-          done
-
       - name: update desired state and deploy Komodo
         id: komodo
+        # The Komodo deployment-controller credential is a plain pair of GitHub
+        # Actions secrets — no secret broker, no CLI, and no GitHub App. Any
+        # operator or fork configures KOMODO_API_KEY and KOMODO_API_SECRET
+        # (repository or `vogt-dev` environment secrets); the generic pipeline
+        # then runs on any self-hosted runner without an estate-specific tool.
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           CORE_DIGEST: ${{ steps.images.outputs.core_digest }}
           STACK_DIGEST: ${{ steps.images.outputs.stack_digest }}
+          KOMODO_API_KEY: ${{ secrets.KOMODO_API_KEY }}
+          KOMODO_API_SECRET: ${{ secrets.KOMODO_API_SECRET }}
         run: |
-          KOMODO_API_KEY="$HOMELAB_KOMODO_API_KEY" \
-          KOMODO_API_SECRET="$HOMELAB_KOMODO_API_SECRET" \
+          set -euo pipefail
+          : "${KOMODO_API_KEY:?Set the KOMODO_API_KEY GitHub Actions secret}"
+          : "${KOMODO_API_SECRET:?Set the KOMODO_API_SECRET GitHub Actions secret}"
           python3 scripts/deploy_dev.py
 
       - name: run the live dev smoke contract
