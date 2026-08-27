@@ -446,6 +446,32 @@ def test_the_pwa_is_built_before_the_merged_image(workflow: str) -> None:
     )
 
 
+@pytest.mark.skipif(
+    not (REPO_ROOT / "engine" / "Dockerfile").is_file(),
+    reason="the core-alone job (NFR-Q6) deletes engine/; this reads its Dockerfile",
+)
+def test_web_frozen_install_sees_the_pnpm_overrides() -> None:
+    """The frozen install in stage 1 needs `web/pnpm-workspace.yaml`.
+
+    pnpm 11 keeps `overrides` in `pnpm-workspace.yaml`, and the lockfile is
+    resolved against them. If the selective `COPY` before the frozen install
+    omits that file, pnpm sees no overrides while the lockfile encodes them and
+    aborts with ERR_PNPM_LOCKFILE_CONFIG_MISMATCH — which broke the merged
+    image build even though the `ci` job (installing in the full checkout)
+    passed. Guard that the file is copied before the install, not only by the
+    later full `COPY web/ ./`.
+    """
+    dockerfile = (REPO_ROOT / "engine" / "Dockerfile").read_text("utf-8")
+    copy_idx = dockerfile.index("COPY web/package.json")
+    install_idx = dockerfile.index("pnpm install --frozen-lockfile")
+    workspace_idx = dockerfile.index("web/pnpm-workspace.yaml")
+    assert copy_idx < install_idx, "the selective COPY must precede the install"
+    assert workspace_idx < install_idx, (
+        "web/pnpm-workspace.yaml must be copied before `pnpm install "
+        "--frozen-lockfile`, or the overrides/lockfile mismatch aborts the build"
+    )
+
+
 @pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
 def test_both_halves_run_before_the_merged_image_is_pushed(workflow: str) -> None:
     """The failure this catches is a stack missing the half nobody looked at.
