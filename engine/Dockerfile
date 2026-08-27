@@ -125,7 +125,12 @@ ARG VOGT_SOURCE_REF
 ARG VOGT_SOURCE_SHA
 ARG VOGT_PRODUCT_VERSION
 WORKDIR /app/web
-COPY web/package.json web/pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the `overrides` the lockfile is resolved against
+# (pnpm 11 moved them out of package.json). Without it here the frozen install
+# sees no overrides while the lockfile encodes them and aborts with
+# ERR_PNPM_LOCKFILE_CONFIG_MISMATCH. The full `COPY web/ ./` below re-copies it,
+# but the install one line down needs it first.
+COPY web/package.json web/pnpm-workspace.yaml web/pnpm-lock.yaml ./
 RUN npm install -g pnpm && pnpm install --frozen-lockfile
 COPY web/ ./
 RUN set -eu; \
