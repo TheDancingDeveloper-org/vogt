@@ -253,6 +253,8 @@ def test_codeql_covers_each_implementation_language() -> None:
     assert "- python" in workflow
     assert "- javascript-typescript" in workflow
     assert "- rust" in workflow
+    assert re.search(r"actions/setup-node@[0-9a-f]{40}", workflow)
+    assert "if: matrix.language == 'javascript-typescript'" in workflow
     assert re.search(r"github/codeql-action/init@[0-9a-f]{40}", workflow)
     assert re.search(r"github/codeql-action/analyze@[0-9a-f]{40}", workflow)
 
@@ -264,10 +266,15 @@ def test_rust_dependency_audit_is_a_fatal_ci_gate() -> None:
         "\n      - uses:", 1
     )[0]
     assert "cargo install --locked cargo-audit --version 0.22.2" in step
-    assert "cargo audit --deny warnings" in step
+    assert "cargo audit --no-fetch --db" in step
+    assert "--deny warnings" in step
     assert "--ignore RUSTSEC-2023-0071" in step
     assert "has no fixed rsa release" in step
     assert "signs ES256" in step
+    # The advisory database is cloned anonymously so the runner's injected
+    # github.com credentials cannot 401 cargo-audit's own fetch.
+    assert "RustSec/advisory-db.git" in step
+    assert "GIT_CONFIG_GLOBAL=/dev/null" in step
 
 
 def test_javascript_dependency_audits_are_fatal_ci_gates() -> None:
