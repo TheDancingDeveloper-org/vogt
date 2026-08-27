@@ -1415,9 +1415,13 @@ def test_dev_deploy_is_immutable_and_receipt_gated() -> None:
     assert "VOGT_KOMODO_STACK" in workflow
     assert "DEPLOY-DEV" in workflow
     assert "dev-${SOURCE_SHA}" in workflow
-    assert "INFISICAL_CLIENT_ID" in workflow
-    assert "HOMELAB_KOMODO_API_KEY" in workflow
-    assert "HOMELAB_KOMODO_API_SECRET" in workflow
+    # The deploy authenticates to Komodo with plain GitHub Actions secrets —
+    # no estate-specific secret broker (Infisical), no CLI, no GitHub App — so
+    # the pipeline stays generic and reproducible for any operator or fork.
+    assert "INFISICAL" not in workflow
+    assert "infisical" not in workflow
+    assert "secrets.KOMODO_API_KEY" in workflow
+    assert "secrets.KOMODO_API_SECRET" in workflow
     assert "scripts/deploy_dev.py" in workflow
     assert "WriteStackFileContents" not in workflow, (
         "Komodo API details belong in the helper, not in the workflow"
