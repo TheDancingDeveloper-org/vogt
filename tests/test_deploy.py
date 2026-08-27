@@ -1298,12 +1298,41 @@ def test_dev_deploy_is_immutable_and_receipt_gated() -> None:
     assert "workflow_dispatch:" in workflow
     assert "DEPLOY-DEV" in workflow
     assert "dev-${SOURCE_SHA}" in workflow
+    assert "INFISICAL_CLIENT_ID" in workflow
+    assert "HOMELAB_KOMODO_API_KEY" in workflow
+    assert "HOMELAB_KOMODO_API_SECRET" in workflow
+    assert "scripts/deploy_dev.py" in workflow
+    assert "WriteStackFileContents" not in workflow, (
+        "Komodo API details belong in the helper, not in the workflow"
+    )
+    assert "actions/create-github-app-token" not in workflow
+    assert "actions/workflows/${DEPLOY_WORKFLOW}/dispatches" not in workflow
+    assert "VOGT_DEV_GITHUB_APP_ID" not in workflow
+    assert "VOGT_DEV_GITHUB_APP_PEM" not in workflow
+    assert "RefreshStackCache" not in workflow
+    assert "DeployStack" not in workflow
     assert "cosign verify" in workflow
     assert "vogt-dev-deployment-receipt" in workflow
     assert "product_version" in workflow
+    assert "smoke_merged_stack.sh" in workflow
+    assert "api/sessions" in workflow
+    assert '"reason": "verified dev deployment"' in workflow
     promote = (WORKFLOWS / "promote.yml").read_text(encoding="utf-8")
     assert "deploy-dev.yml" in promote
     assert "verified dev deployment receipt" in promote
+
+
+def test_dev_deploy_helper_updates_only_the_active_digest_pins() -> None:
+    helper = (REPO_ROOT / "scripts" / "deploy_dev.py").read_text(encoding="utf-8")
+    assert "read/GetStack" in helper
+    assert "write/WriteStackFileContents" in helper
+    assert '"vogt.compose.yml"' in helper
+    assert '"estate.overlay.yml"' in helper
+    assert "write/RefreshStackCache" in helper
+    assert "execute/DeployStack" in helper
+    assert "webhook_enabled" in helper
+    assert "sha256:[0-9a-f]{64}" in helper
+    assert "MYDEVENV2_TOKEN" in helper
 
 
 def test_github_release_collects_and_publishes_the_complete_release() -> None:

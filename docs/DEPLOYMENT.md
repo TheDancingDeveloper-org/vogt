@@ -358,13 +358,21 @@ not change production by itself.
 ### 7.1 Promote `dev` to production
 
 Promotion is two explicit, fast-forward-only pull requests. First deploy the
-exact `dev-<sha>` merged-stack image and obtain the verified receipt; the
-promotion workflow refuses to open `dev → main` without that receipt. Run
-**Actions → deploy dev**, provide the current full `dev` SHA, type
-`DEPLOY-DEV`, and keep the receipt URL and artifact with the change record.
-The receipt must cover readiness, authentication, a representative core
-read/write path, the engine/PWA front door, and the visible canonical product
-version/provenance. A failed or stale receipt is not a promotion approval.
+exact `dev-<sha>` images and obtain the verified receipt; the promotion
+workflow refuses to open `dev → main` without that receipt. Run **Actions →
+deploy dev**, provide the current full `dev` SHA, type `DEPLOY-DEV`, and keep
+the receipt URL and artifact with the change record. The workflow verifies both
+signed images, updates the two active digest pins in the Komodo-managed
+`indexarr/ops/personal/vogt-dev` stack, calls Komodo, and runs the live smoke
+contract. It uses the existing Infisical CI identity to retrieve Komodo and
+dev-runtime credentials. After deployment, the helper reads the active
+`MYDEVENV2_TOKEN` from the Komodo stack environment into a `0600` runner-temp
+file for live smoke only; it is never printed or committed. No GitHub App,
+private key, Forgejo token, version tag, or GitHub Release is required. The
+receipt must cover readiness,
+authentication, a representative core read/write path, the engine/PWA front
+door, and the visible canonical product version/provenance. A failed or stale
+receipt is not a promotion approval.
 
 Then promotion is two explicit, fast-forward-only pull requests. Run **Actions →
 promote**, choose `dev-to-main`, type `PROMOTE`, and confirm the generated PR
