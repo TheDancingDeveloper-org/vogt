@@ -163,7 +163,16 @@ COPY --from=demo-web /app/web/dist /app/dist
 COPY engine/deploy/demo-server.mjs /app/demo-server.mjs
 # A restrictive checkout umask may make COPY preserve mode 0600.  Normalize
 # the one executable input before dropping to the unprivileged node user.
-RUN chmod 0444 /app/demo-server.mjs
+#
+# The demo server imports only `node:` builtins (see demo-server.mjs), so the
+# npm CLI the base image bundles is dead weight — and its own bundled
+# dependencies (tar, brace-expansion, pacote, sigstore, …) are what the fatal
+# Trivy gate flags as CRITICAL/HIGH. Removing npm/npx clears every one of those
+# findings without touching anything the demo runtime uses.
+RUN chmod 0444 /app/demo-server.mjs \
+    && rm -rf /usr/local/lib/node_modules/npm \
+              /usr/local/bin/npm \
+              /usr/local/bin/npx
 USER node
 EXPOSE 8910
 ENV DEMO_BIND=0.0.0.0 \
