@@ -17,8 +17,12 @@ on:
         required: true
         type: string
       public_url:
-        description: Dev front-door URL used for live smoke checks
-        required: true
+        description: >-
+          Optional override for the live-smoke base URL. Leave blank to use the
+          VOGT_DEV_SMOKE_URL repository variable, which must name an address the
+          self-hosted runner can reach (the dev front door resolves to a
+          LAN-only IP, so a tailnet address is required here).
+        required: false
         type: string
 
 permissions:
@@ -115,11 +119,17 @@ jobs:
           python3 scripts/deploy_dev.py
 
       - name: run the live dev smoke contract
+        # The dev front door resolves to a LAN-only IP the tailnet runner cannot
+        # route to, so the smoke base must be a runner-reachable address. It
+        # comes from the VOGT_DEV_SMOKE_URL repository variable (operator
+        # configuration, like VOGT_KOMODO_URL), overridable per-dispatch via the
+        # public_url input.
         env:
-          VOGT_SMOKE_BASE: ${{ inputs.public_url }}
+          VOGT_SMOKE_BASE: ${{ inputs.public_url || vars.VOGT_DEV_SMOKE_URL }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          : "${VOGT_SMOKE_BASE:?Set the VOGT_DEV_SMOKE_URL repository variable or pass public_url}"
           smoke_token="$(cat "$RUNNER_TEMP/vogt-dev-smoke-token")"
           test -n "$smoke_token"
           trap 'rm -f -- "$RUNNER_TEMP/vogt-dev-smoke-token"' EXIT
