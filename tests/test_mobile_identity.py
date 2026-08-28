@@ -54,6 +54,7 @@ WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 RELEASE_WORKFLOW = WORKFLOWS / "release.yml"
 FIREBASE_FETCH = REPO_ROOT / "scripts" / "fetch_infisical_secret.sh"
+FIREBASE_WRITE = REPO_ROOT / "scripts" / "write_firebase_config.sh"
 
 #: The variable both build files read. Named once here so a rename shows up as
 #: one failure rather than as a silent divergence.
@@ -163,37 +164,56 @@ def test_the_dev_stream_builds_under_its_own_id() -> None:
     )
 
 
-def test_android_workflows_fetch_the_matching_infisical_firebase_config() -> None:
-    """The APK build must use the Firebase project for the id it assembles.
+def test_ci_android_writes_firebase_from_a_github_secret() -> None:
+    """CI's dev APK build reads the dev Firebase config from a plain secret.
 
-    The JSON files are intentionally not GitHub secrets or repository files:
-    Infisical is the source of truth and the runner removes the material after
-    Gradle has consumed it. Keeping these assertions here prevents a release
-    job from silently reverting to a stale local copy or the dev project.
+    #453: the dev path is deliberately broker-free — the config is a GitHub
+    Actions secret (``VOGT_FIREBASE_DEV_JSON``) written by a generic helper, so
+    the job runs on any self-hosted runner and a fork can supply its own. These
+    assertions prevent a silent regression back to the Infisical CLI for the
+    dev build, and keep the built package matched to the dev id.
     """
     ci = CI_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "secrets.VOGT_FIREBASE_DEV_JSON" in ci
+    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt.dev" in ci
+    assert "scripts/write_firebase_config.sh" in ci
+    assert ci.count("remove Firebase config") == 1
+    # No secret broker for the dev build.
+    assert "INFISICAL" not in ci
+    assert "infisical" not in ci
+    assert "scripts/fetch_infisical_secret.sh" not in ci
+
+
+def test_release_android_fetches_the_matching_infisical_firebase_config() -> None:
+    """The release APK build still fetches its prod Firebase project via Infisical.
+
+    The prod path is out of scope for #453 and unchanged: Infisical remains the
+    source of truth and the runner removes the material after Gradle consumes
+    it. Keeping these assertions prevents the release job from silently
+    reverting to a stale local copy or the dev project.
+    """
     release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_DEV_JSON" in ci
-    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt.dev" in ci
     assert "VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_PROD_JSON" in release
     assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt" in release
-    assert "scripts/fetch_infisical_secret.sh" in ci
     assert "scripts/fetch_infisical_secret.sh" in release
-    assert "vars.INFISICAL_API_URL" in ci
-    assert "vars.INFISICAL_PROJECT_ID" in ci
-    assert "secrets.INFISICAL_CLIENT_ID" in ci
-    assert "secrets.INFISICAL_CLIENT_SECRET" in ci
-    assert "install Infisical CLI" in ci
     assert "vars.INFISICAL_API_URL" in release
     assert "vars.INFISICAL_PROJECT_ID" in release
     assert "secrets.INFISICAL_CLIENT_ID" in release
     assert "secrets.INFISICAL_CLIENT_SECRET" in release
     assert "install Infisical CLI" in release
-    assert ci.count("remove Firebase config") == 1
     assert release.count("remove Firebase config") == 1
-    assert "secrets.VOGT_FIREBASE_DEV_JSON" not in ci
     assert "secrets.VOGT_FIREBASE_PROD_JSON" not in release
+
+
+def test_firebase_writer_never_prints_the_secret_and_checks_package() -> None:
+    script = FIREBASE_WRITE.read_text(encoding="utf-8")
+    # The value arrives through the environment and is written without echo.
+    assert 'printf \'%s\' "$VOGT_FIREBASE_JSON" >"$temp_output"' in script
+    assert "json.loads" in script
+    assert "VOGT_ANDROID_EXPECTED_PACKAGE" in script
+    assert 'mv -- "$temp_output" "$VOGT_FIREBASE_OUTPUT"' in script
 
 
 def test_firebase_fetcher_never_prints_the_secret_and_checks_package() -> None:
