@@ -541,8 +541,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.mobile == 'true'
     runs-on: [self-hosted]
-    # Pull requests, including fork pull requests, must not receive the
-    # Infisical machine identity. They build against the sanitized example.
+    # Pull requests, including fork pull requests, must not receive the dev
+    # Firebase secret. They build against the sanitized example.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -571,36 +571,17 @@ jobs:
         working-directory: mobile
         run: pnpm audit
 
-      - name: install Infisical CLI
+      - name: write the dev Firebase config
         if: github.event_name != 'pull_request'
-        run: |
-          set -euo pipefail
-          if command -v infisical >/dev/null 2>&1; then
-            exit 0
-          fi
-          install -m 0755 -d /usr/share/keyrings
-          curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
-            | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg
-          chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg
-          printf '%s\n' \
-            'deb [arch=amd64 signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main' \
-            > /etc/apt/sources.list.d/infisical.list
-          apt-get update
-          apt-get install -y --no-install-recommends infisical
-          rm -rf /var/lib/apt/lists/*
-
-      - name: fetch the dev Firebase config
-        if: github.event_name != 'pull_request'
+        # The dev Firebase config is a plain GitHub Actions secret — no secret
+        # broker and no CLI, so this runs on any self-hosted runner and any
+        # fork can supply its own. The helper writes it without echoing and
+        # verifies it carries the dev Android client.
         env:
-          INFISICAL_API_URL: ${{ vars.INFISICAL_API_URL }}
-          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
-          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
-          INFISICAL_PROJECT_ID: ${{ vars.INFISICAL_PROJECT_ID }}
-          INFISICAL_ENV: prod
-          VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_DEV_JSON
+          VOGT_FIREBASE_JSON: ${{ secrets.VOGT_FIREBASE_DEV_JSON }}
           VOGT_FIREBASE_OUTPUT: mobile/android/app/google-services.json
           VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt.dev
-        run: bash scripts/fetch_infisical_secret.sh
+        run: bash scripts/write_firebase_config.sh
 
       - name: verify the dev Firebase config is available
         if: github.event_name == 'pull_request'
