@@ -70,6 +70,9 @@ def test_demo_image_branches_from_the_normal_web_build() -> None:
     demo = text.split("FROM web-build AS demo-web", 1)[1].split("# ─── Stage 2:", 1)[0]
     assert "FROM ${NODE_IMAGE} AS demo-runtime" in demo
     assert "chmod 0444 /app/demo-server.mjs" in demo
+    # The demo server uses only node builtins, so the bundled npm CLI is removed
+    # — its transitive deps are what the fatal Trivy gate flags (#454).
+    assert "rm -rf /usr/local/lib/node_modules/npm" in demo
     assert "COPY --from=server-build" not in demo
     assert "COPY --from=core" not in demo
     assert "vogt-engine" not in demo
