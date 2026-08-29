@@ -189,6 +189,49 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
     )
 
 
+def test_the_release_image_build_turns_the_ai_clients_on() -> None:
+    """The tagged release *is* the prod image, and prod runs coding sessions.
+
+    v0.3.0 shipped a `vogt-stack` image built with neither `claude` nor `codex`:
+    `release.yml` passed `INSTALL_CADASTRE_MCP=true` but never
+    `INSTALL_AI_CLIENTS`, so the Dockerfile default (false) stood and production
+    came up with the two "(protected)" templates registered but unstartable.
+    This is #23 one workflow over — the dev build (the sibling test) had learned
+    it and the release build had not. Unlike `build.yml`, `release.yml` only
+    ever runs on a tag, so the value is an unconditional `true`, not the ref
+    rule; both the candidate and the pushed build must carry it, or the image
+    that is smoke-tested is not the image that is published.
+
+    Flutter stays absent on purpose: a release is the `lean` pod variant (#184).
+    """
+    text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    # Only the two args this test is about — the release build already carried
+    # INSTALL_CADASTRE_MCP (and the core image installs it too, so its count is
+    # not two). Both the stack candidate and the stack push must set these, or
+    # the image that is smoke-tested is not the image that is published.
+    for arg in ("INSTALL_AI_CLIENTS", "INSTALL_THECLAWBAY"):
+        wired = re.findall(rf"^\s+{arg}=true$", text, re.MULTILINE)
+        assert len(wired) == 2, (
+            f"{arg}=true must reach both the candidate and the pushed build of "
+            f"the release stack image; found {len(wired)}"
+        )
+    loop = re.search(r"for tool in ([^;]+); do", text)
+    assert loop, (
+        "the release image's smoke test must loop over the tools the image "
+        "carries and run each one (NFR-Q7)"
+    )
+    probed = set(loop.group(1).split())
+    owed = {"claude", "codex", "theclawbay"}
+    assert owed <= probed, (
+        "the release image's smoke test must ask the image for the clients "
+        f"(NFR-Q7); missing: {sorted(owed - probed)}"
+    )
+    assert "flutter" not in probed, (
+        "a release is the `lean` pod variant (#184); flutter is intentionally "
+        "not in the release image and must not be probed"
+    )
+
+
 def test_the_image_has_no_default_listen_address() -> None:
     """NFR-D2: the image must not silently bind anything."""
     text = _without_comments(DOCKERFILE.read_text(encoding="utf-8"))
