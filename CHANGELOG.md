@@ -14,21 +14,6 @@ git log rather than being reconstructed here.
 
 Nothing yet.
 
-## [0.3.1] - 2026-08-29
-
-### Fixed
-
-- The tagged release now builds the `vogt-stack` image with the Codex and
-  Claude Code CLIs (`INSTALL_AI_CLIENTS=true`) and `theclawbay`, matching the
-  `dev`/`prod` builds. v0.3.0 shipped without them: `release.yml` set
-  `INSTALL_CADASTRE_MCP=true` but never `INSTALL_AI_CLIENTS`, so production
-  registered the `Claude Code (protected)` and `Codex (protected)` session
-  templates yet could not start them. The release smoke test now runs each CLI
-  so the gap cannot silently reappear (#23).
-- Production deployment resolves the signed release stack image by its
-  published tag (`vogt-stack:<version>`, no `v` prefix), so the digest lookup no
-  longer fails for `v`-prefixed release tags.
-
 ## [0.3.0] - 2026-08-28
 
 The first release since the merged core+engine stack reached production. No
