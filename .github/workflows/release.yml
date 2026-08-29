@@ -384,7 +384,9 @@ jobs:
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
             VOGT_PRODUCT_VERSION=${{ github.ref_name }}
+            INSTALL_AI_CLIENTS=true
             INSTALL_CADASTRE_MCP=true
+            INSTALL_THECLAWBAY=true
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
 
@@ -396,6 +398,18 @@ jobs:
           docker run --rm --entrypoint vogt "$CANDIDATE" --version
           docker run --rm --entrypoint vogt-engine "$CANDIDATE" --help >/dev/null
           docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
+          # A release is always an estate/prod image, so it must carry the AI
+          # clients and theclawbay. v0.3.0 shipped without claude or codex
+          # because this build passed INSTALL_CADASTRE_MCP=true but never
+          # INSTALL_AI_CLIENTS, so the Dockerfile default (false) stood and prod
+          # registered the "(protected)" templates it could not start. Running
+          # each CLI here is NFR-Q7: a build arg nothing asserts is a default
+          # waiting to be forgotten (#23 / WI-17). Flutter is intentionally
+          # absent — a release is the `lean` pod variant (#184).
+          for tool in claude codex theclawbay; do
+            docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
+              || { echo "the release image is missing $tool" >&2; exit 1; }
+          done
           echo "both halves are present and start"
 
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
@@ -412,7 +426,9 @@ jobs:
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
             VOGT_PRODUCT_VERSION=${{ github.ref_name }}
+            INSTALL_AI_CLIENTS=true
             INSTALL_CADASTRE_MCP=true
+            INSTALL_THECLAWBAY=true
           provenance: true
           sbom: true
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
