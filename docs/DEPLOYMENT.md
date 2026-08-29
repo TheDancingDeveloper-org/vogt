@@ -229,6 +229,15 @@ overrides. The image records the resolved versions and refuses to start when a
 persisted home volume would shadow an image-managed CLI (set
 `VOGT_AGENT_SHADOW_POLICY=warn` only for a deliberate user-local override).
 
+This build-time flag is the only way the CLIs enter a deployment, and it
+defaults to `false`. No published image carries them: the release `vogt` core
+image runs the register alone, and the signed release digests promoted to
+production (§7) are CLI-free by design. So a deployment that runs agent
+sessions is one whose engine was built with `VOGT_INSTALL_AI_CLIENTS=true` —
+pinning a plain release image instead leaves the `Claude Code (protected)` and
+`Codex (protected)` session templates registered but unable to start, because
+the `claude` and `codex` binaries are simply not in the image.
+
 Be aware before you run it: the engine image is a **development pod**, not a
 hardened service image — it carries a writable home, `sudo`, optional agent
 CLIs, and an entrypoint that supports integrations this repository's
@@ -366,6 +375,18 @@ CI, release, and deployment are deliberately separate: CI proves a commit;
 a version tag creates signed, immutable artifacts; deployment selects the
 digest a production instance runs. A successful build or published image does
 not change production by itself.
+
+The desired state a production instance runs — which digests, which overlays,
+which host specifics — is owned by the operator's own deployment repository,
+not this one (#204); this tree ships only the estate-neutral base and overlays,
+never a turnkey production estate. Two consequences are worth stating plainly.
+The signed release digests are CLI-free (§3.2), so a production engine that
+runs agent sessions is one the operator built with
+`VOGT_INSTALL_AI_CLIENTS=true` and published to its own registry — the release
+`vogt`/`vogt-stack` digests are not that image. And the maintainer's own
+production is one such private deployment, layering a private overlay on the
+public base; it is not a supported drop-in scenario reproducible from this
+repository alone.
 
 ### 7.1 Promote `dev` to production
 
