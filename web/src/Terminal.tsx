@@ -860,8 +860,26 @@ const TerminalView: Component<Props> = (props) => {
     clearCountdown();
     setReconnectView(null);
     setStatusText("Loading terminal...");
-    ws = openAttach(props.sessionId, outputPosition);
-    ws.addEventListener("open", () => {
+    // Never leave a second socket attached to this terminal. Several paths can
+    // reach connect() while a socket is still open or connecting (pane resume,
+    // wake, watchdog recycle, a delayed close that reschedules). A leftover
+    // socket keeps delivering the same PTY output, so its bytes get written on
+    // top of the live socket's and every line doubles or triples (#466). Drop
+    // any existing socket first; the `socket`-identity guards on the handlers
+    // below turn its late events into no-ops.
+    if (ws) {
+      const stale = ws;
+      ws = null;
+      try {
+        stale.close();
+      } catch {
+        /* already closing */
+      }
+    }
+    const socket = openAttach(props.sessionId, outputPosition);
+    ws = socket;
+    socket.addEventListener("open", () => {
+      if (ws !== socket) return;
       reconnect.recover();
       watchdog.reset();
       startWatchdog();
@@ -869,7 +887,8 @@ const TerminalView: Component<Props> = (props) => {
       flushPendingInput();
       checkWatchdog(true);
     });
-    ws.addEventListener("message", (ev) => {
+    socket.addEventListener("message", (ev) => {
+      if (ws !== socket) return;
       if (typeof ev.data === "string") {
         try {
           const ctrl = JSON.parse(ev.data) as
@@ -952,7 +971,8 @@ const TerminalView: Component<Props> = (props) => {
         term?.write(buf);
       }
     });
-    ws.addEventListener("close", () => {
+    socket.addEventListener("close", () => {
+      if (ws !== socket) return;
       stopWatchdog();
       if (socketParked || isParked()) return;
       // Write the [disconnected] marker once at the start of the outage, not on
@@ -966,7 +986,8 @@ const TerminalView: Component<Props> = (props) => {
       }
       scheduleReconnect();
     });
-    ws.addEventListener("error", () => {
+    socket.addEventListener("error", () => {
+      if (ws !== socket) return;
       // Browser fires both error + close; close handler is enough.
     });
   }
