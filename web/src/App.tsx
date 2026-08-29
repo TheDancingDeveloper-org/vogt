@@ -817,10 +817,19 @@ const App: Component = () => {
     return undefined;
   };
 
-  const launchTemplateDirect = async (template: SessionTemplate) => {
+  const launchTemplateDirect = async (
+    template: SessionTemplate,
+    // Presets create immediately with their computed default name (e.g.
+    // `shell-123`), matching the "no name prompt unless Shift" convention of
+    // the + Session action; hold Shift on the preset to be asked for a name.
+    promptForName = false,
+  ) => {
     const context = await resolveTemplateContext(activeTemplatePath());
     const suggested = buildDefaultSessionName(template, context);
-    const name = await promptUser("New session from preset", suggested, "name");
+    let name: string | null = suggested;
+    if (promptForName) {
+      name = await promptUser("New session from preset", suggested, "name");
+    }
     if (!name) return;
     try {
       const launch = resolveTemplateLaunch(template, context, name);
@@ -1743,7 +1752,9 @@ const App: Component = () => {
                 void onCreate(undefined, undefined, promptForName)
               }
               sessionTemplates={allTemplates()}
-              onLaunchTemplate={(template) => void launchTemplateDirect(template)}
+              onLaunchTemplate={(template, promptForName) =>
+                void launchTemplateDirect(template, promptForName)
+              }
             >
               <div class="tab-view">
                 {/* The terminal is xterm and the editor is Monaco; both are
