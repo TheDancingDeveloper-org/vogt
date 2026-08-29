@@ -9,11 +9,14 @@ use axum::{
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
-use tokio::sync::{broadcast::error::RecvError, mpsc};
+use tokio::sync::{
+    broadcast::error::{RecvError, TryRecvError},
+    mpsc,
+};
 use uuid::Uuid;
 use vogt_engine_contract::{ClientControl, ServerControl};
 
-use crate::{app::AppState, auth};
+use crate::{app::AppState, auth, pty::OutputChunk, pty::Session};
 
 #[derive(Debug, Deserialize)]
 pub struct AttachQuery {
@@ -32,6 +35,21 @@ const SNAPSHOT_CHUNK: usize = 64 * 1024;
 /// Maximum input accepted in one frame. This prevents an accidental clipboard
 /// dump from becoming a multi-megabyte editable command line inside the PTY.
 const MAX_INPUT_BYTES: usize = 64 * 1024;
+
+/// Upper bound on the bytes coalesced into a single outbound frame. Bursty
+/// output (agent token streams, TUI redraws, a build) arrives as many small
+/// broadcast chunks; batching the ones already queued into one WebSocket frame
+/// means a chatty session wakes the client's single message-draining thread far
+/// fewer times, which is what starves the other panes' sockets under load
+/// (#466). Bounded so one burst cannot build an unbounded frame.
+const OUTBOUND_COALESCE_CAP: usize = 256 * 1024;
+
+/// How many in-band lag resyncs to attempt, with no normal live send in
+/// between, before giving up and asking the client for a clean reattach. A
+/// client that keeps falling behind every resync would otherwise drive
+/// unbounded resnapshotting; the counter resets whenever live output flows
+/// again (#466).
+const MAX_CONSECUTIVE_RESYNCS: u32 = 5;
 
 /// How long a freshly-upgraded socket has to send `{"type":"auth",...}` before
 /// we drop it. Keeps unauth clients from hanging on to a socket indefinitely.
@@ -58,6 +76,100 @@ fn live_skip(chunk_pos: u64, chunk_len: usize, snap_pos: u64) -> Option<usize> {
         Some(0)
     } else {
         Some((snap_pos - chunk_pos) as usize)
+    }
+}
+
+/// Coalesce a run of consecutive broadcast chunks into the bytes to forward.
+///
+/// `snap_pos` is the current dedup boundary: any part of a chunk at or before
+/// it was already delivered (in the initial snapshot or a resync) and is
+/// dropped via [`live_skip`]. Returns the concatenated not-yet-seen bytes and
+/// the absolute position after the last chunk that contributed output — the
+/// caller's new "sent up to here" cursor. When nothing new is forwarded the
+/// returned position is `snap_pos`, so the caller can keep its existing cursor.
+fn coalesce(snap_pos: u64, chunks: &[OutputChunk]) -> (Vec<u8>, u64) {
+    let mut out = Vec::new();
+    let mut end = snap_pos;
+    for chunk in chunks {
+        if let Some(skip) = live_skip(chunk.pos, chunk.data.len(), snap_pos) {
+            out.extend_from_slice(&chunk.data[skip..]);
+            end = chunk.pos + chunk.data.len() as u64;
+        }
+    }
+    (out, end)
+}
+
+/// Re-synchronise a lagging client in-band, on the same socket, instead of
+/// dropping it and forcing a reconnect + replay (the cascade in #466).
+///
+/// Snapshots from `from_pos` (the client's last delivered position) and streams
+/// it as the same `SnapshotStart` → payload → `SnapshotDone` sequence a fresh
+/// attach uses. When the cursor is still inside the scrollback window the server
+/// sends a `reset: false` delta (the client appends it); when it has aged out it
+/// sends a `reset: true` full snapshot (the client clears and reloads). Either
+/// way the socket stays open. Returns the new absolute position the client is
+/// synchronised to, or `Err(())` if the socket died mid-send.
+async fn send_resync<S>(sink: &mut S, session: &Session, from_pos: u64) -> Result<u64, ()>
+where
+    S: SinkExt<Message> + Unpin,
+{
+    let (payload, pos, reset) = session.snapshot_for_attach(Some(from_pos));
+    let meta = ServerControl::SnapshotStart {
+        session_id: Some(session.id),
+        scrollback_bytes: payload.len() as u64,
+        scrollback_pos: pos,
+        reset,
+    };
+    sink.send(Message::Text(serde_json::to_string(&meta).unwrap().into()))
+        .await
+        .map_err(|_| ())?;
+    for chunk in payload.chunks(SNAPSHOT_CHUNK) {
+        sink.send(Message::Binary(chunk.to_vec().into()))
+            .await
+            .map_err(|_| ())?;
+    }
+    sink.send(Message::Text(
+        serde_json::to_string(&ServerControl::SnapshotDone)
+            .unwrap()
+            .into(),
+    ))
+    .await
+    .map_err(|_| ())?;
+    Ok(pos)
+}
+
+/// Outcome of an in-band lag recovery attempt.
+enum Recovery {
+    /// Client re-synchronised to this absolute position on the same socket.
+    Resynced(u64),
+    /// Too many resyncs without progress — fall back to a clean reattach.
+    GiveUp,
+}
+
+/// Attempt an in-band resync, tripping the circuit breaker after too many in a
+/// row. Increments `resyncs`; the caller resets it whenever live output flows.
+async fn recover_from_lag<S>(
+    sink: &mut S,
+    session: &Session,
+    from_pos: u64,
+    resyncs: &mut u32,
+) -> Recovery
+where
+    S: SinkExt<Message> + Unpin,
+{
+    *resyncs += 1;
+    if *resyncs > MAX_CONSECUTIVE_RESYNCS {
+        let lag = ServerControl::Lag {
+            note: "client too slow; reattach".into(),
+        };
+        let _ = sink
+            .send(Message::Text(serde_json::to_string(&lag).unwrap().into()))
+            .await;
+        return Recovery::GiveUp;
+    }
+    match send_resync(sink, session, from_pos).await {
+        Ok(pos) => Recovery::Resynced(pos),
+        Err(()) => Recovery::GiveUp,
     }
 }
 
@@ -242,8 +354,21 @@ async fn handle_socket(
         }
     });
 
-    // Outbound: broadcast chunks → client, skipping anything already in the snapshot.
+    // Outbound: broadcast chunks → client. Bursts are coalesced into fewer
+    // frames, and a lagging client is recovered in-band rather than dropped
+    // (#466).
+    let outbound_session = Arc::clone(&session);
     let outbound = tokio::spawn(async move {
+        // `snap_pos` is the dedup boundary handed to `live_skip`; `sent_pos` is
+        // the absolute offset the client has been streamed up to. Both jump
+        // forward after an in-band resync.
+        let mut snap_pos = snap_pos;
+        let mut sent_pos = snap_pos;
+        // Consecutive resyncs with no normal live send in between. Reset on any
+        // live output; a client that trips the ceiling is handed back to a
+        // clean reattach instead of driving unbounded resnapshotting.
+        let mut resyncs: u32 = 0;
+
         loop {
             tokio::select! {
                 Some(control) = control_rx.recv() => {
@@ -255,38 +380,87 @@ async fn handle_socket(
                         break;
                     }
                 }
-                result = rx.recv() => match result {
-                Ok(chunk) => {
-                    // Skip anything already delivered in the replayed snapshot;
-                    // for a chunk straddling the snapshot boundary, send only
-                    // the not-yet-seen tail.
-                    let Some(skip) = live_skip(chunk.pos, chunk.data.len(), snap_pos) else {
-                        continue;
+                result = rx.recv() => {
+                    let first = match result {
+                        Ok(chunk) => chunk,
+                        // Lagged straight from the blocking recv: recover in-band.
+                        Err(RecvError::Lagged(_)) => {
+                            match recover_from_lag(
+                                &mut sink,
+                                &outbound_session,
+                                sent_pos,
+                                &mut resyncs,
+                            )
+                            .await
+                            {
+                                Recovery::Resynced(pos) => {
+                                    snap_pos = pos;
+                                    sent_pos = pos;
+                                    continue;
+                                }
+                                Recovery::GiveUp => break,
+                            }
+                        }
+                        Err(RecvError::Closed) => break,
                     };
-                    let send_buf = if skip == 0 {
-                        chunk.data
-                    } else {
-                        chunk.data.slice(skip..)
-                    };
-                    if sink
-                        .send(Message::Binary(send_buf.to_vec().into()))
-                        .await
-                        .is_err()
-                    {
+
+                    // Drain everything already queued so a burst becomes one
+                    // frame, not dozens — each frame is a client main-thread
+                    // wakeup. Bounded so one session can't build a huge frame.
+                    let mut drained = vec![first];
+                    let mut queued = drained[0].data.len();
+                    let mut lagged = false;
+                    let mut closed = false;
+                    while queued < OUTBOUND_COALESCE_CAP {
+                        match rx.try_recv() {
+                            Ok(next) => {
+                                queued += next.data.len();
+                                drained.push(next);
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Lagged(_)) => {
+                                lagged = true;
+                                break;
+                            }
+                            Err(TryRecvError::Closed) => {
+                                closed = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    let (frame, end) = coalesce(snap_pos, &drained);
+                    if end > sent_pos {
+                        sent_pos = end;
+                    }
+                    if !frame.is_empty() {
+                        if sink.send(Message::Binary(frame.into())).await.is_err() {
+                            break;
+                        }
+                        // Live output flowed: the client is keeping up again.
+                        resyncs = 0;
+                    }
+
+                    if closed {
                         break;
                     }
+                    if lagged {
+                        match recover_from_lag(
+                            &mut sink,
+                            &outbound_session,
+                            sent_pos,
+                            &mut resyncs,
+                        )
+                        .await
+                        {
+                            Recovery::Resynced(pos) => {
+                                snap_pos = pos;
+                                sent_pos = pos;
+                            }
+                            Recovery::GiveUp => break,
+                        }
+                    }
                 }
-                Err(RecvError::Lagged(_n)) => {
-                    let lag = ServerControl::Lag {
-                        note: "client too slow; reattach".into(),
-                    };
-                    let _ = sink
-                        .send(Message::Text(serde_json::to_string(&lag).unwrap().into()))
-                        .await;
-                    break;
-                }
-                Err(RecvError::Closed) => break,
-                },
             }
         }
     });
@@ -300,7 +474,55 @@ async fn handle_socket(
 
 #[cfg(test)]
 mod tests {
-    use super::live_skip;
+    use super::{coalesce, live_skip};
+    use crate::pty::OutputChunk;
+    use bytes::Bytes;
+
+    fn chunk(pos: u64, data: &'static [u8]) -> OutputChunk {
+        OutputChunk {
+            pos,
+            data: Bytes::from_static(data),
+        }
+    }
+
+    #[test]
+    fn coalesce_concatenates_consecutive_new_chunks() {
+        // A burst of small chunks all past the boundary becomes one buffer, and
+        // the returned cursor is the end of the last chunk.
+        let chunks = [chunk(10, b"abc"), chunk(13, b"de"), chunk(15, b"f")];
+        let (out, end) = coalesce(10, &chunks);
+        assert_eq!(&out, b"abcdef");
+        assert_eq!(end, 16);
+    }
+
+    #[test]
+    fn coalesce_drops_chunks_already_below_the_boundary() {
+        // The first chunk is fully within an earlier snapshot (pos+len <= 10);
+        // only the not-yet-seen chunks survive, and the cursor tracks them.
+        let chunks = [chunk(4, b"OLD"), chunk(10, b"new")];
+        let (out, end) = coalesce(10, &chunks);
+        assert_eq!(&out, b"new");
+        assert_eq!(end, 13);
+    }
+
+    #[test]
+    fn coalesce_trims_a_chunk_straddling_the_boundary() {
+        // Chunk [8,13) with boundary 10: only bytes [10,13) are new.
+        let chunks = [chunk(8, b"XXabc")];
+        let (out, end) = coalesce(10, &chunks);
+        assert_eq!(&out, b"abc");
+        assert_eq!(end, 13);
+    }
+
+    #[test]
+    fn coalesce_forwards_nothing_and_keeps_the_cursor_when_all_seen() {
+        // Everything is at or before the boundary: no bytes, cursor unchanged so
+        // the caller keeps its existing sent position.
+        let chunks = [chunk(0, b"seen"), chunk(4, b"more")];
+        let (out, end) = coalesce(8, &chunks);
+        assert!(out.is_empty());
+        assert_eq!(end, 8);
+    }
 
     #[test]
     fn chunk_fully_in_snapshot_is_dropped() {
