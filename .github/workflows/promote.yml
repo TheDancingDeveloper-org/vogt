@@ -23,6 +23,7 @@ on:
 permissions:
   contents: read
   checks: read
+  actions: read
   pull-requests: write
 
 jobs:
@@ -71,15 +72,25 @@ jobs:
             exit 1
           }
 
+          # The self-hosted runner has curl and jq but not the gh CLI
+          # (issue #460), so promotion queries the GitHub REST API directly.
+          api() {
+            curl -fsS \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$@"
+          }
+
           # A green source branch is a prerequisite, not a substitute for the
           # target PR checks. Select the newest completed run for each check so
           # an old green run cannot satisfy this gate. Documentation-only
           # commits intentionally have no image build; a release tag builds
           # the deployable artifact later.
           for check in ci runner-policy; do
-            conclusion="$(gh api \
-              "repos/$GITHUB_REPOSITORY/commits/$source_sha/check-runs" \
-              --jq "[.check_runs[] | select(.name == \"$check\" and .status == \"completed\")] | sort_by(.completed_at) | last | .conclusion")"
+            conclusion="$(api \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$source_sha/check-runs?per_page=100" \
+              | jq -r "[.check_runs[] | select(.name == \"$check\" and .status == \"completed\")] | sort_by(.completed_at) | last | .conclusion")"
             [ "$conclusion" = success ] || {
               echo "::error::$SOURCE@$source_sha does not have a successful $check check (got ${conclusion:-missing})."
               exit 1
@@ -88,13 +99,16 @@ jobs:
 
           if [ "$SOURCE" = dev ]; then
             receipt_name="vogt-dev-deployment-receipt-${source_sha}"
-            receipt_run="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow deploy-dev.yml --json databaseId,headSha,status,conclusion --limit 50 \
-              --jq ".[] | select(.headSha == \"$source_sha\" and .status == \"completed\" and .conclusion == \"success\") | .databaseId" | head -n 1)"
+            receipt_run="$(api \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/deploy-dev.yml/runs?per_page=50" \
+              | jq -r ".workflow_runs[] | select(.head_sha == \"$source_sha\" and .status == \"completed\" and .conclusion == \"success\") | .id" | head -n 1)"
             [ -n "$receipt_run" ] || {
               echo "::error::dev@$source_sha has no successful verified dev deployment receipt ($receipt_name)."
               exit 1
             }
-            artifact_id="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$receipt_run/artifacts" --jq ".artifacts[] | select(.name == \"$receipt_name\") | .id" | head -n 1)"
+            artifact_id="$(api \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$receipt_run/artifacts" \
+              | jq -r ".artifacts[] | select(.name == \"$receipt_name\") | .id" | head -n 1)"
             [ -n "$artifact_id" ] || {
               echo "::error::successful dev deployment has no matching receipt artifact."
               exit 1
@@ -122,9 +136,22 @@ jobs:
         run: |
           set -euo pipefail
           : "${GH_TOKEN:?Configure VOGT_PROMOTION_TOKEN with pull-request write access}"
-          existing="$(gh pr list --repo "$GITHUB_REPOSITORY" \
-            --head "$SOURCE" --base "$TARGET" --state open \
-            --json number,url --jq '.[0] // empty')"
+
+          # Talk to the REST API directly; the gh CLI is not on the runner
+          # (issue #460). This step authenticates as VOGT_PROMOTION_TOKEN so the
+          # created PR receives its normal checks.
+          api() {
+            curl -fsS \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$@"
+          }
+
+          owner="${GITHUB_REPOSITORY%%/*}"
+          existing="$(api \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls?head=$owner:$SOURCE&base=$TARGET&state=open" \
+            | jq -r '.[0].html_url // empty')"
           if [ -n "$existing" ]; then
             echo "An open promotion PR already exists: $existing"
             exit 0
@@ -148,6 +175,11 @@ jobs:
           in this repository pushes a protected branch or deploys production as
           a side effect of this PR.
           EOF
-          gh pr create --repo "$GITHUB_REPOSITORY" --head "$SOURCE" --base "$TARGET" \
-            --title "Promote $SOURCE → $TARGET (${SOURCE_SHA:0:7})" \
-            --body-file "$body"
+          jq -n \
+            --arg title "Promote $SOURCE → $TARGET (${SOURCE_SHA:0:7})" \
+            --arg head "$SOURCE" \
+            --arg base "$TARGET" \
+            --rawfile body "$body" \
+            '{title: $title, head: $head, base: $base, body: $body}' \
+            | api -X POST "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls" --data @- \
+            | jq -r '"Opened promotion PR: " + .html_url'
