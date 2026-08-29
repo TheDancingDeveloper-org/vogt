@@ -73,7 +73,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          image="ghcr.io/thedancingdeveloper-org/vogt-stack:${TAG#v}"
+          image="ghcr.io/thedancingdeveloper-org/vogt-stack:$TAG"
           digest="$(docker buildx imagetools inspect "$image" --format '{{.Manifest.Digest}}')"
           case "$digest" in sha256:*) ;; *) echo "invalid digest: $digest" >&2; exit 1;; esac
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
