@@ -1508,7 +1508,15 @@ def test_promotion_is_fast_forward_only_and_never_pushes_a_branch() -> None:
     )
     assert environment in workflow
     assert "git merge-base --is-ancestor" in workflow
-    assert "gh pr create" in workflow
+    # #460: the self-hosted runner has no gh CLI, so the promotion PR is opened
+    # through the GitHub REST API (POST .../pulls, authenticated with the
+    # promotion token), never with `gh` and never by pushing a branch.
+    assert "gh pr create" not in workflow
+    assert "gh api" not in workflow
+    assert "gh run list" not in workflow
+    assert "/repos/$GITHUB_REPOSITORY/pulls" in workflow
+    assert "-X POST" in workflow
+    assert "actions: read" in workflow
     assert "VOGT_PROMOTION_TOKEN" in workflow
     assert "GITHUB_TOKEN" in workflow
     assert "contents: write" not in workflow
