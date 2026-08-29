@@ -38,7 +38,8 @@ interface Props {
   /** Presets the overview offers when there are no sessions to list (#233). */
   sessionTemplates?: SessionTemplate[];
   /** Launch one of those presets straight into its terminal. */
-  onLaunchTemplate?: (template: SessionTemplate) => void;
+  /** Launch a preset. `promptForName` (Shift held) asks for a name first. */
+  onLaunchTemplate?: (template: SessionTemplate, promptForName?: boolean) => void;
 }
 
 export const SessionTools: Component<Props> = (props) => (
@@ -322,7 +323,8 @@ const Sessions: Component<Props> = (props) => {
                             <li>
                               <button
                                 type="button"
-                                onClick={() => props.onLaunchTemplate?.(template)}
+                                title="Launch preset (hold Shift to name it)"
+                                onClick={(event) => props.onLaunchTemplate?.(template, event.shiftKey)}
                               >
                                 <span class="sessions-template-name">{template.name}</span>
                                 <Show when={template.description}>
