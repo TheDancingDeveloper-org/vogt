@@ -463,6 +463,16 @@ pub enum ClientControl {
         /// Absolute PTY output position already rendered by the client.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resume_from: Option<u64>,
+        /// Cold-attach only: bound the initial full snapshot to at most this
+        /// many trailing bytes (#474). A fresh browser with no cache sends no
+        /// `resume_from`; without a cap the server ships the entire scrollback
+        /// ring (up to `DEFAULT_SCROLLBACK_BYTES`), which the client then
+        /// replays uncapped, making first-open slow. When present and
+        /// `resume_from` is absent the server trims the snapshot to this tail.
+        /// Ignored on a warm reattach (`resume_from` present), whose delta stays
+        /// byte-for-byte unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        snapshot_tail_bytes: Option<u64>,
     },
     Resize {
         cols: u16,
@@ -552,8 +562,36 @@ mod tests {
         let f = ClientControl::Auth {
             token: "secret".into(),
             resume_from: None,
+            snapshot_tail_bytes: None,
         };
         assert_eq!(f.to_json(), r#"{"type":"auth","token":"secret"}"#);
+    }
+
+    #[test]
+    fn auth_cold_attach_carries_a_snapshot_tail_hint() {
+        // A cold attach (no resume_from) may bound the initial snapshot (#474).
+        let cold = ClientControl::Auth {
+            token: "secret".into(),
+            resume_from: None,
+            snapshot_tail_bytes: Some(1_048_576),
+        };
+        assert_eq!(
+            cold.to_json(),
+            r#"{"type":"auth","token":"secret","snapshot_tail_bytes":1048576}"#
+        );
+
+        let parsed: ClientControl = serde_json::from_str(&cold.to_json()).unwrap();
+        match parsed {
+            ClientControl::Auth {
+                resume_from,
+                snapshot_tail_bytes,
+                ..
+            } => {
+                assert_eq!(resume_from, None);
+                assert_eq!(snapshot_tail_bytes, Some(1_048_576));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
     }
 
     #[test]
