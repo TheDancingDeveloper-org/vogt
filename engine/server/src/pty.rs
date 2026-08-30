@@ -511,6 +511,38 @@ fn try_spawn_archive(
     });
 }
 
+/// Archive a still-live session to history immediately (#475).
+///
+/// Used by the graceful-shutdown drain: a long-lived agent shell that never
+/// runs `exit` would otherwise be SIGKILLed on redeploy with nothing archived,
+/// because the ordinary archive path (`try_spawn_archive`) waits for the exit
+/// waiter to set `exit_code`. This records the row directly. `ended_at` is the
+/// child's real end time if it already exited, otherwise now; `exit_code` is
+/// whatever the child reported (`None` == terminated/unknown), which the
+/// upsert's `COALESCE` guard will not clobber for an already-finalized row.
+pub async fn archive_live_session(session: &Arc<Session>, history: &SessionHistory) {
+    let output_bytes = read_history_output(session).await;
+    let visible_output = strip_ansi(&output_bytes);
+    let output_text = String::from_utf8_lossy(&visible_output);
+    let scrollback_bytes = session.scrollback.lock().total_written();
+    let record = ArchiveRecord {
+        id: session.id,
+        name: session.name(),
+        created_at: session.created_at,
+        ended_at: (*session.ended_at.lock()).or(Some(time::OffsetDateTime::now_utc())),
+        exit_code: session.exit_code(),
+        cwd: Some(session.cwd.clone()),
+        command: session.command.clone(),
+        scrollback_bytes,
+    };
+    if let Err(e) = history
+        .archive_session_with_output(record, output_text.as_ref())
+        .await
+    {
+        tracing::warn!(session = %session.id, error = %e, "failed to archive live session during drain");
+    }
+}
+
 async fn read_history_output(session: &Arc<Session>) -> Vec<u8> {
     if let Some(path) = session.history_log_path.as_ref() {
         match tokio::fs::read(path).await {
