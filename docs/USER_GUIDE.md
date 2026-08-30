@@ -198,7 +198,7 @@ Git tab.
 | **Editor** | `#/e/<path>` | Monaco over the workspace file API. |
 | **Git** | `#/g`, `#/g/<repo>` | Choose a registered project, then inspect status, diff, log and branches or stage/unstage/discard/commit/checkout. |
 | **Tasks** | `#/tasks` | Scheduled agent runs: create, edit, pause, resume, run now, inspect. |
-| **History** | `#/history` | Archived scrollback from sessions that have ended, full-text searchable. |
+| **History** | `#/history` | Every session, live and exited, in one list — each row badged live or exited and filterable by liveness; archived scrollback is full-text searchable. |
 | **Assistant** | `#/assistant` | The conversational surface — absent entirely unless the operator configured an assistant API provider (§2.5). |
 | **GUI** | `#/gui` | Desktop streaming (Selkies/KasmVNC) — hidden unless the engine has `GUI_STREAM_URL` set, was built with the feature, and the operator recorded an end-to-end verification with `GUI_STREAM_VERIFIED=true`. An old/direct link otherwise explains that the surface is unavailable. |
 
@@ -560,8 +560,17 @@ working tree, a repository with no branches or commits, a selected path that
 is not a repository, and a missing/unavailable path are therefore separate
 states rather than different ways to draw an empty panel.
 
-History loads archived sessions in pages and says how many are loaded versus
-the server-reported total when that count is available. If no total is
+History is the one place that lists every session, live and exited. Currently
+running sessions from the live registry are unioned into the same list as the
+archived ones (keyed by id, so a session that is both running and partially
+archived appears once and reads as live), each row badged **Live** or
+**Exited**, and the **Status** filter narrows the list to running, exited, or
+archived-with-no-exit-code rows. A live row's replay pane tails its on-disk
+terminal log directly, so you can watch a running session here without waiting
+for it to exit; its output is not yet in the full-text search index, and its
+archive-only Export and Delete actions appear once it has exited and been
+archived. History loads archived sessions in pages and says how many are loaded
+versus the server-reported total when that count is available. If no total is
 available, a full page says that more may exist until **Load more** reaches a
 short page. Metadata filters apply only to the pages already loaded; archived
 output search runs across the server's full archive (up to the displayed result
