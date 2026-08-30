@@ -1975,6 +1975,10 @@ async fn exited_sessions_are_archived_searchable_and_deletable() {
         .unwrap()
         .to_string();
 
+    // Wait for the *finalized* row, not merely the provisional one written at
+    // spawn (#475). The provisional row appears first with a NULL exit code;
+    // the exit waiter later upserts the real outcome. Requiring exit_code == 7
+    // in the predicate settles that race deterministically.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let archived = loop {
         let sessions: Vec<Value> = client
@@ -1985,12 +1989,15 @@ async fn exited_sessions_are_archived_searchable_and_deletable() {
             .json()
             .await
             .unwrap();
-        if let Some(session) = sessions.iter().find(|s| s["id"] == id) {
+        if let Some(session) = sessions
+            .iter()
+            .find(|s| s["id"] == id && s["exit_code"] == json!(7))
+        {
             break session.clone();
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "session was not archived; got {sessions:?}"
+            "session was not archived with its final exit code; got {sessions:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     };
@@ -2345,6 +2352,10 @@ async fn archived_history_log_preview_and_download_work() {
         .unwrap()
         .to_string();
 
+    // Wait for the finalized row, not the provisional one written at spawn
+    // (#475): only after the exit waiter finalizes (non-NULL exit_code) is the
+    // reader thread guaranteed to have flushed the full transcript to the raw
+    // log, so the tail preview below can rely on "third line" being present.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let session = client
@@ -2353,7 +2364,10 @@ async fn archived_history_log_preview_and_download_work() {
             .await
             .unwrap();
         if session.status() == StatusCode::OK {
-            break;
+            let row: Value = session.json().await.unwrap();
+            if !row["exit_code"].is_null() {
+                break;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -2431,6 +2445,11 @@ async fn archived_history_cleanup_removes_old_sessions_and_logs() {
         .unwrap()
         .to_string();
 
+    // Wait for the finalized row, not the provisional one written at spawn
+    // (#475): if cleanup deleted the provisional row before the exit waiter
+    // finalized, the finalize's upsert would re-insert it and the 404 assert
+    // below would race. Requiring a non-NULL exit_code means no further write
+    // is pending when cleanup runs.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         let session = client
@@ -2439,7 +2458,10 @@ async fn archived_history_cleanup_removes_old_sessions_and_logs() {
             .await
             .unwrap();
         if session.status() == StatusCode::OK {
-            break;
+            let row: Value = session.json().await.unwrap();
+            if !row["exit_code"].is_null() {
+                break;
+            }
         }
         assert!(
             tokio::time::Instant::now() < deadline,
