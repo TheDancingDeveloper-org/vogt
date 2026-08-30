@@ -2928,6 +2928,196 @@ async fn ws_attach_with_token_and_cursor(
     ws
 }
 
+/// Attach sending a caller-supplied auth frame verbatim, so a test can exercise
+/// the cold-attach `snapshot_tail_bytes` hint (#474) that the typed helpers do
+/// not send.
+async fn ws_attach_with_auth(
+    base: &str,
+    id: &str,
+    auth: Value,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+    let ws_url = base.replace("http://", "ws://");
+    let url = format!("{ws_url}/api/sessions/{id}/attach");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(url).await.unwrap();
+    ws.send(Message::Text(auth.to_string().into()))
+        .await
+        .unwrap();
+    ws
+}
+
+/// Read one snapshot sequence (`snapshot-start` → binary frames →
+/// `snapshot-done`) and report whether it was a reset and how many snapshot
+/// bytes were streamed.
+async fn read_snapshot(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> (bool, usize) {
+    let mut reset = false;
+    let mut started = false;
+    let mut total = 0usize;
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(3), ws.next())
+            .await
+            .expect("snapshot frame arrives")
+            .unwrap()
+            .unwrap();
+        match m {
+            Message::Text(s) => {
+                let v: Value = serde_json::from_str(&s).unwrap();
+                match v["type"].as_str() {
+                    Some("snapshot-start") => {
+                        started = true;
+                        reset = v["reset"].as_bool().unwrap_or(true);
+                    }
+                    Some("snapshot-done") => break,
+                    _ => {}
+                }
+            }
+            Message::Binary(b) if started => total += b.len(),
+            _ => {}
+        }
+    }
+    (reset, total)
+}
+
+/// Drive more than `at_least` bytes of output into a `cat` session's ring, as
+/// many short lines, so a later attach has a scrollback bigger than any small
+/// tail cap we then request. The lines are deliberately short: real terminal
+/// output has frequent newline seams, so a tail cut lands just after a recent
+/// newline rather than dropping one enormous line down to nothing.
+async fn fill_scrollback(base: &str, id: &str, at_least: usize) {
+    let mut ws = ws_attach(base, id).await;
+    read_snapshot(&mut ws).await;
+    let mut payload = Vec::new();
+    while payload.len() < at_least {
+        payload.extend_from_slice(b"0123456789\n"); // 11 bytes per line
+    }
+    let written = payload.len();
+    ws.send(Message::Binary(payload.into())).await.unwrap();
+    // `cat` echoes each line and the tty echoes the input, so the ring grows to
+    // well beyond what we wrote; accumulate until it clears that mark.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut seen = 0usize;
+    while seen <= written && tokio::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(Message::Binary(b)))) => seen += b.len(),
+            Ok(Some(Ok(_))) => {}
+            _ => break,
+        }
+    }
+    assert!(
+        seen > written,
+        "expected the session to echo more than {written} bytes; saw {seen}"
+    );
+    ws.close(None).await.ok();
+}
+
+/// Kill a session so its child (`/bin/cat`, which never sees EOF) exits. The
+/// per-session `child.wait()` runs on a blocking task; leaving it pending
+/// stalls the test runtime's shutdown, so every test that spawns one cleans up.
+async fn kill_session(client: &reqwest::Client, base: &str, id: &str) {
+    let _ = client
+        .post(format!("{base}/api/sessions/{id}/kill"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn cold_attach_tail_hint_caps_the_snapshot() {
+    // #474: a cold attach (no resume_from) that sends a tail hint must get a
+    // full reset snapshot bounded to at most that many bytes, not the entire
+    // scrollback ring.
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "tail", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    const TAIL: usize = 512;
+    fill_scrollback(&base, &id, 4 * TAIL).await;
+
+    // Cold reattach with a small tail hint: a reset snapshot, capped.
+    let mut cold = ws_attach_with_auth(
+        &base,
+        &id,
+        json!({ "type": "auth", "token": TEST_TOKEN, "snapshot_tail_bytes": TAIL }),
+    )
+    .await;
+    let (reset, len) = read_snapshot(&mut cold).await;
+    assert!(reset, "a cold attach is always a full reset");
+    assert!(
+        len > 0 && len <= TAIL,
+        "cold snapshot should be capped at the tail hint ({TAIL}); got {len}"
+    );
+    cold.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
+#[tokio::test]
+async fn warm_attach_is_not_narrowed_by_a_tail_hint() {
+    // #474: the tail cap is a cold-attach affordance. A warm reattach carries
+    // `resume_from`; even if a tail hint is also present it must be ignored and
+    // the resume delta returned in full (`reset: false`).
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "warm", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    const TAIL: usize = 512;
+    fill_scrollback(&base, &id, 4 * TAIL).await;
+
+    // resume_from = 0 resolves to the whole retained ring as a delta. With a
+    // tail hint also set, the warm path must still return it untrimmed.
+    let mut warm = ws_attach_with_auth(
+        &base,
+        &id,
+        json!({
+            "type": "auth",
+            "token": TEST_TOKEN,
+            "resume_from": 0,
+            "snapshot_tail_bytes": TAIL,
+        }),
+    )
+    .await;
+    let (reset, len) = read_snapshot(&mut warm).await;
+    assert!(!reset, "a warm resume from 0 is a delta, not a reset");
+    assert!(
+        len > TAIL,
+        "warm reattach must ignore the tail hint; got {len} <= {TAIL}"
+    );
+    warm.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
 #[tokio::test]
 async fn ws_attach_echoes_input_and_replays_on_reattach() {
     let (base, _h) = boot().await;

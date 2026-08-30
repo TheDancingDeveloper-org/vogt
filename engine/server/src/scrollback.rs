@@ -55,6 +55,19 @@ fn newline_aligned_start(buf: &[u8], at_least: usize) -> usize {
     }
 }
 
+/// Advance `from` forward to the next UTF-8 sequence start — the first byte at
+/// or after `from` that is not a continuation byte (`0b10xx_xxxx`). Used as the
+/// fallback boundary when no newline seam exists, so a tail snapshot never
+/// begins in the middle of a multibyte character (which would render as
+/// mojibake). At most three continuation bytes are ever skipped.
+fn utf8_aligned_start(buf: &[u8], from: usize) -> usize {
+    let mut i = from;
+    while i < buf.len() && (buf[i] & 0xC0) == 0x80 {
+        i += 1;
+    }
+    i
+}
+
 impl Scrollback {
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -90,6 +103,31 @@ impl Scrollback {
     /// Snapshot the entire scrollback as a single `Bytes` (cheap-ish clone).
     pub fn snapshot(&self) -> Bytes {
         Bytes::copy_from_slice(&self.buf)
+    }
+
+    /// Snapshot at most the last `limit` bytes, trimming the front forward to a
+    /// ground-state boundary so replay never begins inside an escape sequence
+    /// or a UTF-8 character (#474). A cold-attaching client that sends a tail
+    /// hint gets this instead of the whole ring buffer.
+    ///
+    /// The cut is aligned exactly like the overflow trim in [`Self::push`]:
+    /// advance past the next newline when there is one (the only position we
+    /// can prove is the terminal's ground state), otherwise fall forward to the
+    /// next UTF-8 codepoint start. Both only ever move the cut later, so the
+    /// result is always `<= limit`.
+    pub fn snapshot_tail(&self, limit: usize) -> Bytes {
+        if self.buf.len() <= limit {
+            return Bytes::copy_from_slice(&self.buf);
+        }
+        // Drop at least this many leading bytes so the tail is within `limit`.
+        let at_least = self.buf.len() - limit;
+        let start = newline_aligned_start(&self.buf, at_least);
+        // `newline_aligned_start` may fall back to the raw `at_least` cut when
+        // the tail holds no newline; that raw cut can land on a UTF-8
+        // continuation byte, so align forward once more. When it already landed
+        // just past a newline this is a no-op (that byte is a valid start).
+        let start = utf8_aligned_start(&self.buf, start);
+        Bytes::copy_from_slice(&self.buf[start..])
     }
 
     /// Return bytes written after `position` if that absolute cursor is still
@@ -173,6 +211,42 @@ mod tests {
         assert_eq!(sb.snapshot_since(10).as_deref(), Some(&b""[..]));
         assert!(sb.snapshot_since(1).is_none());
         assert!(sb.snapshot_since(11).is_none());
+    }
+
+    // ---- cold-attach tail trimming (issue #474) ----
+
+    #[test]
+    fn snapshot_tail_returns_whole_buffer_when_within_limit() {
+        let mut sb = Scrollback::new(64);
+        sb.push(b"short output\n");
+        // Limit larger than the buffer: the tail is the whole buffer.
+        assert_eq!(&*sb.snapshot_tail(1024), b"short output\n");
+    }
+
+    #[test]
+    fn snapshot_tail_caps_bytes_at_a_newline_boundary() {
+        let mut sb = Scrollback::new(64);
+        sb.push(b"line-a\nline-b\nline-c\n"); // 21 bytes
+                                              // Keep at most 10 bytes: raw cut drops 11 (index 11 is inside "line-b"),
+                                              // so the seam advances forward to just past the next newline (index 14),
+                                              // yielding "line-c\n" — <= 10 and starting in ground state.
+        let tail = sb.snapshot_tail(10);
+        assert_eq!(&*tail, b"line-c\n");
+        assert!(tail.len() <= 10);
+    }
+
+    #[test]
+    fn snapshot_tail_never_splits_a_utf8_codepoint_without_a_newline() {
+        let mut sb = Scrollback::new(64);
+        // No newline anywhere; 'é' is 0xC3 0xA9. Bytes: a b c d é f g
+        sb.push(&[0x61, 0x62, 0x63, 0x64, 0xC3, 0xA9, 0x66, 0x67]); // 8 bytes
+                                                                    // Keep at most 4 bytes: raw cut drops 4 -> index 4 = 0xC3 (a lead byte,
+                                                                    // already a valid start here). Force a cut onto a continuation byte:
+        let tail = sb.snapshot_tail(3);
+        // Raw cut drops 5 -> index 5 = 0xA9 (continuation); align forward to 6.
+        assert_eq!(&*tail, b"fg");
+        assert!(tail.first().map_or(true, |&b| (b & 0xC0) != 0x80));
+        assert!(tail.len() <= 3);
     }
 
     // ---- boundary-safe overflow trimming (issue #366) ----
