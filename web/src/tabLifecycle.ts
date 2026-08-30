@@ -9,7 +9,12 @@ export function tabRetention(tab: Tab): TabRetention {
   return "active";
 }
 
-export function shouldMountTab(tab: Tab, activeTabId: string | null): boolean {
+export function shouldMountTab(
+  tab: Tab,
+  activeTabId: string | null,
+  narrow = false,
+): boolean {
+  if (narrow && tab.kind === "terminal") return tab.id === activeTabId;
   const retention = tabRetention(tab);
   if (retention === "always") return true;
   return tab.id === activeTabId;

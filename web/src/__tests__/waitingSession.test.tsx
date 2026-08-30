@@ -58,7 +58,9 @@ describe("a session waiting for input, on a phone", () => {
     expect(input).toHaveBeenNthCalledWith(2, "eng-1", "\u0003", false);
 
     // Neither act is an approval, and the card says which it is.
-    expect(screen.getByText(/not Vogt approvals/)).toBeVisible();
+    expect(
+      screen.getByText("Sends keystrokes to the terminal — not a Vogt approval."),
+    ).toBeVisible();
   });
 
   it("offers nothing to press when the prompt cannot be read", async () => {

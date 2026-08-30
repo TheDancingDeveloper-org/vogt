@@ -253,6 +253,12 @@ async function installFixtures(
     auth_broker: { auto_agent_auth: false, helper: "disabled" },
     storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace" },
   } }));
+  await registerRoute("**/api/auth/check", async (route) => route.fulfill({ json: {
+    ok: true,
+    version: "test",
+    product_version: "test",
+    storage: { state_dir: "/tmp/vogt", workspace_root: "/workspace" },
+  } }));
   await registerRoute("**/api/config**", async (route) => route.fulfill({ json: {
     assistant_enabled: false, gui_stream_url: null, session_templates: [],
     gui_stream_available: false,
@@ -314,7 +320,13 @@ async function installFixtures(
     }
     return route.fulfill({ status: 404, json: { error: "not found" } });
   });
-  await registerRoute("**/api/events", async (route) => route.fulfill({ status: 200, contentType: "text/event-stream", body: "" }));
+  await registerRoute("**/api/events", async (route) => route.fulfill({
+    status: 200,
+    contentType: "text/event-stream",
+    // Keep the mocked stream open and mark it answered. An immediately closed
+    // body is correctly treated as a disconnect by the production client.
+    body: `data: ${JSON.stringify({ type: "activity", id: "fixture-stream", state: "idle" })}\n\n`,
+  }));
   await registerRoute("**/api/tree**", async (route) => {
     const path = new URL(route.request().url()).searchParams.get("path") ?? "";
     if (path === "src") {
@@ -2637,7 +2649,7 @@ test("Enabled GUI capability is reachable and renders its configured stream", as
 });
 
 test("Sessions owns the tool workspace and retains only terminal continuity", async ({ page }) => {
-  await installFixtures(page, {}, [liveSession]);
+  await installFixtures(page, {}, [liveSession], undefined, {}, []);
   await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
     socket.onMessage(() => undefined);
     socket.send(JSON.stringify({
@@ -2723,16 +2735,12 @@ test("Phone Sessions shell keeps the terminal on screen and folds the header (#2
   expect(geometry.layout, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.viewport * 0.4 - 1);
   expect(geometry.host, JSON.stringify(geometry)).toBeGreaterThanOrEqual(geometry.viewport * 0.35);
 
-  // The collapsed header is one row: the title and "+ Session". The two-line
-  // honesty is folded behind the same disclosure SurfaceHeader already owns.
-  const header = page.locator(".sessions-header");
-  await expect(header.locator('[data-surface-header-slot="honesty"]')).toBeHidden();
-  await expect(header.getByRole("button", { name: "+ Session" })).toBeVisible();
-  const more = header.locator(".surface-header-more");
-  await expect(more).toBeVisible();
-  // Folded, never removed: the disclosure brings the connection line back.
-  await more.click();
-  await expect(header.locator('[data-surface-header-slot="honesty"]')).toBeVisible();
+  // The redesigned session bar owns this route. The generic Sessions header
+  // must not stack a second title/tools block above it.
+  await expect(page.locator(".sessions-header")).toBeHidden();
+  const sessionBar = page.locator(".terminal-mobile-header");
+  await expect(sessionBar.getByRole("link", { name: "Back to Sessions" })).toBeVisible();
+  await expect(sessionBar).toContainText("idle-shell");
 });
 
 test("Phone machine tools open with their work in the first screen, not below a wall of header (#232)", async ({ page }) => {
@@ -2773,7 +2781,7 @@ test("Phone machine tools open with their work in the first screen, not below a 
   expect(await topOf(".git-repository-picker"), "Git chooser").toBeLessThan(400);
 
   await openTool("#/assistant");
-  const composer = page.getByPlaceholder("Ask about sessions or work");
+  const composer = page.getByPlaceholder("Ask about your sessions…");
   await expect(composer).toBeVisible();
   // The Assistant content region begins high on the screen — the pane top is
   // where #232 had pushed everything to ~855px.
@@ -2835,12 +2843,19 @@ test("Phone Sessions overview and collapsed terminal header look right", async (
   await expect(page.locator(".sessions-place")).toHaveScreenshot("sessions-phone-overview.png", {
     // The age beside each state word and the live connection line are wall-clock
     // and stream-state relative; the composition around them is what is pinned.
-    mask: [page.locator(".session-list .state"), page.locator(".sessions-header-honesty")],
+    mask: [
+      page.locator(".session-list .state"),
+      page.locator(".sessions-header-honesty"),
+      page.locator(".session-waiting-age"),
+    ],
   });
 
   await page.goto("/#/t/sess-idle");
   await expect(page.locator(".terminal-host").first()).toBeVisible();
-  await expect(page.locator(".sessions-header")).toHaveScreenshot("sessions-phone-terminal-header.png");
+  await expect(page.locator(".terminal-mobile-header")).toHaveScreenshot(
+    "sessions-phone-terminal-header.png",
+    { mask: [page.locator(".terminal-mobile-session > span")] },
+  );
 });
 
 test("Git chooser is addressable and a failed panel recovers in place", async ({ page }) => {
@@ -4737,6 +4752,67 @@ test("an assistant Markdown reply renders a code block", async ({ page }) => {
   await expect(page.getByTestId("assistant-copy")).toBeVisible();
 });
 
+test("Phone Assistant renders structured transcript and compact approval", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The redesigned transcript is the narrow client's");
+  const sessionId = "assistant-deploy";
+  await installFixtures(page, { assistant_enabled: true }, [{
+    id: sessionId,
+    name: "deploy-agent",
+    cwd: "/workspace/vogt",
+    activity: "waiting-for-input",
+    exit_code: null,
+    scrollback_bytes: 1024,
+    created_at: "2026-08-30T10:00:00Z",
+    activity_changed_at: "2026-08-30T10:04:00Z",
+  }]);
+  await page.route("**/api/assistant/history**", async (route) =>
+    route.fulfill({ json: {
+      transcript: [
+        { role: "user", text: "What needs me?", created_at: "2026-08-30T10:05:00Z" },
+        {
+          role: "assistant",
+          text: "The deploy agent is waiting at a migration prompt.",
+          created_at: "2026-08-30T10:05:25Z",
+          tool_trace: ["listed sessions", "read deploy-agent tail"],
+          session_refs: [{ id: sessionId, name: "deploy-agent", activity: "waiting-for-input" }],
+          actions: [{ kind: "open-session", session_id: sessionId, label: "Open deploy-agent" }],
+        },
+      ],
+      pending_action: {
+        kind: "send_input",
+        id: "pending-input",
+        session_id: sessionId,
+        session_name: "deploy-agent",
+        text: "y",
+        submit: true,
+      },
+    } }),
+  );
+  await page.goto("/#/assistant");
+
+  await expect(page.locator(".sessions-header")).toBeHidden();
+  await expect(page.locator(".assistant-watch-line")).toContainText(
+    "watching 1 sessions · 1 waiting",
+  );
+  await expect(page.locator(".assistant-trace")).toContainText(
+    "▸ listed sessions · read deploy-agent tail",
+  );
+  await expect(page.locator(".assistant-session-chip")).toHaveAttribute(
+    "href",
+    `#/t/${sessionId}`,
+  );
+  await expect(page.locator(".assistant-open-session")).toContainText(
+    "Open deploy-agent ›",
+  );
+  await expect(page.getByRole("region", { name: "Pending approval" })).toContainText(
+    "Send y ⏎ to deploy-agent",
+  );
+  await expect(page.locator(".assistant")).toHaveScreenshot(
+    "assistant-phone-structured.png",
+    { mask: [page.locator(".assistant-time-separator"), page.locator(".assistant-countdown")] },
+  );
+});
+
 /**
  * #228: every primary surface now wears the one shared header — Projects and
  * the Work item joined Board, Backlog, Inbox and Sessions — with the honesty
@@ -4871,6 +4947,73 @@ const THEME_SURFACES = [
   { name: "workitem", goto: "/#/w/WI-7", ready: ".wid-facts" },
   { name: "sessions", goto: "/#/sessions", ready: ".sessions-place-body" },
 ] as const;
+
+test("mobile redesign keeps its layout across all themes and required widths", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The responsive matrix belongs to the narrow client");
+  await installFixtures(page, { assistant_enabled: true }, THREE_SESSIONS);
+  await stubTerminalAttach(page);
+  await page.goto("/#/sessions");
+
+  const setTheme = async (themeId: string) => {
+    await page.evaluate(async (id) => {
+      const { setAppTheme } = await import("/src/appThemes.ts");
+      setAppTheme(id);
+    }, themeId);
+    expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe(themeId);
+  };
+  const expectNoHorizontalOverflow = async (selector: string) => {
+    const dimensions = await page.locator(selector).first().evaluate((element) => ({
+      client: element.clientWidth,
+      scroll: element.scrollWidth,
+    }));
+    expect(dimensions.scroll, `${selector} overflows: ${JSON.stringify(dimensions)}`)
+      .toBeLessThanOrEqual(dimensions.client + 1);
+  };
+
+  // Every named token set must preserve the Sessions composition; this is a
+  // geometry smoke test rather than eight near-identical screenshot files.
+  for (const themeId of ["dark", "dim", "hc-dark", "light", "soft", "sepia", "rose", "hc-light"]) {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/#/sessions");
+    await setTheme(themeId);
+    await expect(page.locator(".sessions-place")).toBeVisible();
+    await expectNoHorizontalOverflow(".sessions-place");
+  }
+
+  // The handoff explicitly calls out these four widths and both palette
+  // bases. Exercise all three redesigned surface owners at every point.
+  for (const themeId of ["dark", "light"]) {
+    for (const width of [320, 375, 430, 768]) {
+      await page.setViewportSize({ width, height: 844 });
+
+      await page.goto("/#/sessions");
+      await setTheme(themeId);
+      await expect(page.locator(".sessions-place")).toBeVisible();
+      await expectNoHorizontalOverflow(".sessions-place");
+
+      await page.goto("/#/assistant");
+      await setTheme(themeId);
+      await expect(page.locator(".assistant-input")).toBeVisible();
+      await expect(page.locator(".sessions-header")).toBeHidden();
+      await expectNoHorizontalOverflow(".assistant");
+
+      await page.goto("/#/t/sess-idle");
+      await setTheme(themeId);
+      await expect(page.locator(".terminal-mobile-header")).toBeVisible();
+      await expect(page.locator(".terminal-host").first()).toBeVisible();
+      await expect(page.locator(".sessions-header")).toBeHidden();
+      const terminalHeight = await page.locator(".terminal-host").first()
+        .evaluate((element) => element.getBoundingClientRect().height);
+      expect(terminalHeight, `${themeId} terminal at ${width}px`).toBeGreaterThan(250);
+
+      if (themeId === "light" && width === 375) {
+        await page.getByRole("button", { name: "More terminal actions" }).click();
+        await expect(page.locator(".terminal-mobile-overflow").getByLabel("Terminal color theme"))
+          .toHaveValue("GitHub Light");
+      }
+    }
+  }
+});
 
 // Register the theme selection as an init script so index.html's pre-paint
 // script reads it — added AFTER installFixtures so it overrides the dark pin.
