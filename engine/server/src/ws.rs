@@ -113,7 +113,9 @@ async fn send_resync<S>(sink: &mut S, session: &Session, from_pos: u64) -> Resul
 where
     S: SinkExt<Message> + Unpin,
 {
-    let (payload, pos, reset) = session.snapshot_for_attach(Some(from_pos));
+    // A resync always carries the client's cursor, so this is the warm/delta
+    // path; the cold-attach tail cap never applies here.
+    let (payload, pos, reset) = session.snapshot_for_attach(Some(from_pos), None);
     let meta = ServerControl::SnapshotStart {
         session_id: Some(session.id),
         scrollback_bytes: payload.len() as u64,
@@ -199,17 +201,31 @@ fn token_ok(state: &AppState, candidate: &str) -> bool {
     auth::ws_token_allows_session_access(state, candidate)
 }
 
+/// What a successful attach handshake tells the snapshot: where to resume from
+/// (a warm reattach), and the cold-attach tail cap (#474).
+struct AttachAuth {
+    /// Absolute position the client has already rendered, if any. Present ->
+    /// warm reattach (delta or full-reset resume); absent -> cold attach.
+    resume_from: Option<u64>,
+    /// Cold-attach only: bound the full snapshot to at most this many trailing
+    /// bytes. Ignored when `resume_from` is present.
+    snapshot_tail_bytes: Option<u64>,
+}
+
 /// Read the first frame after upgrade. Must be an `auth` control frame OR the
-/// legacy `?token=` query param must have been correct. Returns Some(()) on
-/// success, None on failure (after sending a close frame).
+/// legacy `?token=` query param must have been correct. Returns `Some(_)` on
+/// success, `None` on failure (after sending a close frame).
 async fn authenticate(
     socket: &mut WebSocket,
     state: &Arc<AppState>,
     legacy_token: Option<&str>,
-) -> Option<Option<u64>> {
+) -> Option<AttachAuth> {
     if let Some(tok) = legacy_token {
         if token_ok(state, tok) {
-            return Some(None);
+            return Some(AttachAuth {
+                resume_from: None,
+                snapshot_tail_bytes: None,
+            });
         }
     }
 
@@ -238,7 +254,14 @@ async fn authenticate(
         }
     };
     match parsed {
-        ClientControl::Auth { token, resume_from } if token_ok(state, &token) => Some(resume_from),
+        ClientControl::Auth {
+            token,
+            resume_from,
+            snapshot_tail_bytes,
+        } if token_ok(state, &token) => Some(AttachAuth {
+            resume_from,
+            snapshot_tail_bytes,
+        }),
         _ => {
             close_with(socket, 4401, "unauthorized").await;
             None
@@ -252,7 +275,7 @@ async fn handle_socket(
     id: Uuid,
     legacy_token: Option<String>,
 ) {
-    let Some(resume_from) = authenticate(&mut socket, &state, legacy_token.as_deref()).await else {
+    let Some(auth) = authenticate(&mut socket, &state, legacy_token.as_deref()).await else {
         return;
     };
 
@@ -269,7 +292,10 @@ async fn handle_socket(
 
     // Subscribe BEFORE snapshotting so no broadcast chunks are missed in the gap.
     let mut rx = session.subscribe();
-    let (snapshot, snap_pos, reset) = session.snapshot_for_attach(resume_from);
+    let (snapshot, snap_pos, reset) = session.snapshot_for_attach(
+        auth.resume_from,
+        auth.snapshot_tail_bytes.map(|b| b as usize),
+    );
 
     // Send a meta JSON header so clients know the session ID and current pos.
     let meta = ServerControl::SnapshotStart {

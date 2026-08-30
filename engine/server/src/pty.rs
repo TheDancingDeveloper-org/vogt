@@ -119,15 +119,37 @@ impl Session {
 
     /// Snapshot only output newer than a client cursor. The boolean tells the
     /// client whether its existing terminal state must be reset.
-    pub fn snapshot_for_attach(&self, resume_from: Option<u64>) -> (Bytes, u64, bool) {
+    ///
+    /// `tail_bytes` caps a **cold** attach only (#474): a fresh client with no
+    /// cache sends no `resume_from`, and without a cap the full snapshot is the
+    /// entire scrollback ring. When present it bounds that full snapshot to at
+    /// most that many trailing bytes. A warm reattach (`resume_from` present)
+    /// ignores it entirely, so its `reset: false` delta stays byte-for-byte
+    /// unchanged; the returned position (`total_written`) is unaffected by
+    /// trimming the front, so the live stream still resumes with no gap.
+    pub fn snapshot_for_attach(
+        &self,
+        resume_from: Option<u64>,
+        tail_bytes: Option<usize>,
+    ) -> (Bytes, u64, bool) {
         let sb = self.scrollback.lock();
         let pos = sb.total_written();
         if let Some(cursor) = resume_from {
             if let Some(delta) = sb.snapshot_since(cursor) {
                 return (delta, pos, false);
             }
+            // Cursor aged out of the ring: a full reset snapshot, untrimmed —
+            // the tail cap is a cold-attach affordance and a warm reattach is
+            // never quietly narrowed.
+            return (sb.snapshot(), pos, true);
         }
-        (sb.snapshot(), pos, true)
+        // Cold attach: bound the snapshot to the client's tail hint so first
+        // open never ships the whole ring buffer.
+        let snapshot = match tail_bytes {
+            Some(limit) => sb.snapshot_tail(limit),
+            None => sb.snapshot(),
+        };
+        (snapshot, pos, true)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<OutputChunk> {
