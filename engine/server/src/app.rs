@@ -87,6 +87,22 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         }
     };
 
+    // One-shot backfill (#475): index raw session logs that survived a hard
+    // restart but never got an index row (the engine was SIGKILLed before it
+    // could archive). Spawned rather than awaited so a large log dir does not
+    // delay the server binding its port; it runs once and reports the count.
+    if let Some(history) = history.clone() {
+        tokio::spawn(async move {
+            match history.backfill_orphaned_logs().await {
+                Ok(0) => {}
+                Ok(recovered) => {
+                    tracing::info!(recovered, "backfilled orphaned session logs into history")
+                }
+                Err(e) => tracing::warn!("history backfill failed: {e}"),
+            }
+        });
+    }
+
     let sessions = Arc::new(SessionRegistry::new(
         Arc::clone(&cfg),
         bus.clone(),
@@ -460,10 +476,51 @@ fn build_cors(origins: &[String]) -> CorsLayer {
 
 pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     let bind = cfg.bind;
-    let (router, _state) = router(cfg).await;
+    let (router, state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(addr = %bind, "vogt-engine listening");
-    axum::serve(listener, router).await
+    // Graceful shutdown (#475): the engine had no shutdown path, so every
+    // redeploy SIGKILLed the PTYs and nothing was archived. Kubernetes/compose
+    // send SIGTERM with a grace window before the KILL; we use it to drain every
+    // live session into history first, then let axum finish in-flight requests.
+    let drain_state = Arc::clone(&state);
+    axum::serve(listener, router)
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            tracing::info!("shutdown signal received; draining live sessions to history");
+            drain_state.sessions.drain_to_history().await;
+        })
+        .await
+}
+
+/// Resolve when the process is asked to terminate: SIGTERM (the redeploy
+/// signal on Kubernetes/compose) or SIGINT/Ctrl-C. On the off chance the
+/// SIGTERM handler cannot be installed, fall back to Ctrl-C alone rather than
+/// losing the shutdown hook entirely.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = ctrl_c => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to install SIGTERM handler: {e}");
+                ctrl_c.await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await;
+    }
 }
 
 #[cfg(test)]
