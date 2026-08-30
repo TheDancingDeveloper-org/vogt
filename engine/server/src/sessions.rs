@@ -8,7 +8,7 @@ use crate::{
     config::Config,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
-    history::SessionHistory,
+    history::{ArchiveRecord, SessionHistory},
     prompt_files,
     pty::{self, Session, SessionSpec, SessionSummary, SpawnDefaults},
     workspace_path,
@@ -127,11 +127,57 @@ impl SessionRegistry {
         };
         let session = spawned.session;
         self.sessions.insert(session.id, Arc::clone(&session));
+        // Provisional history row (#475): written at spawn with `ended_at` and
+        // `exit_code` NULL, so a long-lived session that is later SIGKILLed on
+        // redeploy (never running `exit`) is still visible in the History tab.
+        // The exit waiter upserts the real outcome later; the upsert's COALESCE
+        // guard means this provisional write can never NULL a completed row,
+        // even if it lands after the finalize under load. Metadata only — no
+        // FTS write here, so it cannot wipe indexed output either.
+        if let Some(history) = self.history.clone() {
+            let record = ArchiveRecord {
+                id: session.id,
+                name: session.name(),
+                created_at: session.created_at,
+                ended_at: None,
+                exit_code: None,
+                cwd: Some(session.cwd.clone()),
+                command: session.command(),
+                scrollback_bytes: 0,
+            };
+            let sid = session.id;
+            tokio::spawn(async move {
+                if let Err(e) = history.archive_session(record).await {
+                    tracing::warn!(session = %sid, error = %e, "failed to record provisional history row");
+                }
+            });
+        }
         self.bus.publish(ServerEvent::SessionCreated {
             id: session.id,
             name: session.name(),
         });
         Ok(session)
+    }
+
+    /// Archive every live session to history before the process exits (#475).
+    ///
+    /// Called from the engine's graceful-shutdown path (SIGTERM/SIGINT). On a
+    /// redeploy the platform sends SIGTERM with a grace window; without this,
+    /// the PTYs are SIGKILLed and long-lived agent shells that never `exit`
+    /// leave no history row at all. Each session's row gets `ended_at` set and
+    /// its output indexed, whether or not the child ever exited on its own.
+    pub async fn drain_to_history(&self) {
+        let Some(history) = self.history.as_ref() else {
+            return;
+        };
+        let sessions = self.live_sessions();
+        if sessions.is_empty() {
+            return;
+        }
+        tracing::info!(count = sessions.len(), "draining live sessions to history");
+        for session in sessions {
+            pty::archive_live_session(&session, history).await;
+        }
     }
 
     pub fn get(&self, id: Uuid) -> Result<Arc<Session>> {
