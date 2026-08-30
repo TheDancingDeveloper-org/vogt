@@ -2070,6 +2070,248 @@ async fn exited_sessions_are_archived_searchable_and_deletable() {
     assert_eq!(after_delete.status(), StatusCode::NOT_FOUND);
 }
 
+/// #475: a long-lived session that never runs `exit` is still archived when the
+/// engine shuts down, via the graceful-shutdown drain — it appears in history
+/// with `ended_at` set and no one had to type `exit`.
+#[tokio::test]
+async fn shutdown_drain_archives_a_live_session_that_never_exited() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // `exec cat` never exits on its own: the child blocks forever on stdin,
+    // exactly like a long-lived agent shell on prod.
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "never-exits",
+            "command": ["/bin/sh", "-lc", "printf 'drain-me\\n'; exec cat"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Give the reader thread a moment to flush the banner into the raw log so
+    // the drain has output to archive.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // The graceful-shutdown drain, invoked directly (the drain is what the
+    // SIGTERM handler in `serve_forever` calls). The child is still running.
+    state.sessions.drain_to_history().await;
+
+    let sessions: Vec<Value> = client
+        .get(format!("{base}/api/history/sessions?limit=20"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let archived = sessions
+        .iter()
+        .find(|s| s["id"] == id)
+        .unwrap_or_else(|| panic!("live session was not archived by drain; got {sessions:?}"));
+    assert_eq!(archived["name"], "never-exits");
+    assert!(
+        archived["ended_at"].is_string(),
+        "drained session must have ended_at set: {archived:?}"
+    );
+    // The child never exited, so its outcome is unknown: exit_code stays NULL,
+    // which is what the `unfinished` history filter selects.
+    assert!(
+        archived["exit_code"].is_null(),
+        "a drained-but-unexited session has an unknown exit code: {archived:?}"
+    );
+
+    // Reap the never-exiting child so the exit waiter's blocking `child.wait()`
+    // returns; otherwise it pins the test runtime open past the end of the test.
+    let _ = client
+        .post(format!("{base}/api/sessions/{id}/kill"))
+        .send()
+        .await;
+}
+
+/// #475: a provisional row exists at spawn with a NULL exit code, and a later
+/// provisional (re)write never clobbers the real outcome once the session has
+/// finalized on exit.
+#[tokio::test]
+async fn provisional_history_row_is_written_at_spawn_and_not_clobbered() {
+    use vogt_engine_server::history::ArchiveRecord;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // Stays alive for ~2s, giving a wide window to observe the provisional row
+    // before the exit waiter finalizes it with exit code 5.
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "provisional",
+            "command": ["/bin/sh", "-lc", "printf 'ready\\n'; sleep 2; exit 5"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The provisional row is written (asynchronously) at spawn: poll for it and
+    // assert it is present with no exit code and no end time.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let provisional = loop {
+        let resp = client
+            .get(format!("{base}/api/history/{id}"))
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == StatusCode::OK {
+            let row: Value = resp.json().await.unwrap();
+            if row["exit_code"].is_null() {
+                break row;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "provisional history row never appeared before finalize"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(
+        provisional["ended_at"].is_null(),
+        "a provisional row has no end time yet: {provisional:?}"
+    );
+
+    // After the child exits, the exit waiter upserts the real outcome over the
+    // provisional NULLs.
+    let finalize_deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    loop {
+        let row: Value = client
+            .get(format!("{base}/api/history/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if row["exit_code"] == json!(5) {
+            assert!(
+                row["ended_at"].is_string(),
+                "finalized row must have ended_at: {row:?}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < finalize_deadline,
+            "session never finalized with its real exit code"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // A late provisional (re)write — the race the COALESCE guard defends
+    // against — must not NULL the finalized outcome.
+    let history = state.history.as_ref().expect("history enabled");
+    history
+        .archive_session(ArchiveRecord {
+            id: uuid::Uuid::parse_str(&id).unwrap(),
+            name: "provisional".to_string(),
+            created_at: OffsetDateTime::now_utc(),
+            ended_at: None,
+            exit_code: None,
+            cwd: None,
+            command: None,
+            scrollback_bytes: 0,
+        })
+        .await
+        .unwrap();
+
+    let after: Value = client
+        .get(format!("{base}/api/history/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        after["exit_code"],
+        json!(5),
+        "a late provisional write must not clobber a completed exit code: {after:?}"
+    );
+    assert!(
+        after["ended_at"].is_string(),
+        "a late provisional write must not clobber ended_at: {after:?}"
+    );
+}
+
+/// #475: a raw session log that predates any index row (survived a hard
+/// restart) is recovered on startup with a NULL exit code and made searchable,
+/// and an already-indexed session is never duplicated.
+#[tokio::test]
+async fn startup_backfill_indexes_orphaned_logs_without_duplicating() {
+    use vogt_engine_server::history::SessionHistory;
+
+    let dir = tempfile::tempdir().unwrap();
+    let history = SessionHistory::new(dir.path()).await.unwrap();
+
+    // An orphaned raw log with no matching row, as a prod redeploy would leave.
+    let orphan = uuid::Uuid::new_v4();
+    std::fs::write(
+        history.log_dir().join(format!("{orphan}.log")),
+        b"orphan-backfill-needle in the transcript\n",
+    )
+    .unwrap();
+
+    let recovered = history.backfill_orphaned_logs().await.unwrap();
+    assert_eq!(recovered, 1, "the single orphaned log should be recovered");
+
+    let row = history.get_session(orphan).await.unwrap();
+    assert!(
+        row.exit_code.is_none(),
+        "a recovered log has an unknown outcome (NULL exit code)"
+    );
+    assert!(
+        row.scrollback_bytes > 0,
+        "the recovered row records the log size"
+    );
+
+    // The recovered transcript is searchable.
+    let hits = history.search("orphan-backfill-needle", 10).await.unwrap();
+    assert!(
+        hits.iter().any(|h| h.session_id == orphan.to_string()),
+        "recovered output should be searchable; got {hits:?}"
+    );
+
+    // Running again is idempotent: nothing new, and no duplicate row.
+    let again = history.backfill_orphaned_logs().await.unwrap();
+    assert_eq!(again, 0, "a second backfill recovers nothing");
+    assert_eq!(history.count_sessions().await.unwrap(), 1);
+}
+
 #[tokio::test]
 async fn archived_history_log_preview_and_download_work() {
     let tmp = tempfile::tempdir().unwrap();

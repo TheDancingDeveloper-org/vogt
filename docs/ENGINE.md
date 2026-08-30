@@ -1082,10 +1082,19 @@ terminal that raised it.
 
 ### Session history APIs
 
-Archived scrollback for sessions that have ended. Every route requires history
-to be enabled — it is disabled when the store fails to open, and then these
-routes answer `500`, not `404`, which is the one place in this file where an
-absent feature does not read as absent.
+Archived scrollback for sessions. Every route requires history to be enabled —
+it is disabled when the store fails to open, and then these routes answer
+`404`, exactly as every other unprovisioned feature does (§ the error table
+above): an absent feature reads as absent, not as a broken server.
+
+A row is recorded when a session is created (provisional, with `ended_at` and
+`exit_code` NULL) and finalized when it exits. Long-lived sessions that never
+`exit` are archived on graceful shutdown (SIGTERM/SIGINT) before the process
+leaves, and raw logs that predate their index row are backfilled on startup, so
+a session need not have exited while the engine was alive to appear here. A row
+with a NULL `exit_code` is one whose outcome is unknown (still provisional,
+terminated on shutdown, or backfilled); the `unfinished` status filter selects
+exactly those.
 
 - `GET /api/history/sessions?limit=&offset=` -> `SessionMetadata[]`; `limit`
   defaults to 50.
