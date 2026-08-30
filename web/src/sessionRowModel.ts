@@ -46,8 +46,18 @@ export function sessionActivityAge(s: SessionSummary, now: number): string | nul
 /** The row's state word beside the dot: "waiting for input · 40s",
  *  "running · 6m". Colour is never the only signal, so this line exists
  *  whether or not the age is known. */
-export function sessionStateWord(s: SessionSummary, now: number): string {
+export function sessionStateWord(
+  s: SessionSummary,
+  now: number,
+  staleAt?: string | null,
+): string {
   const label = activityLabel(s.activity, s.exit_code);
+  if (staleAt) {
+    const stamp = new Date(staleAt);
+    if (!Number.isNaN(stamp.getTime())) {
+      return `${label} · as of ${stamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    }
+  }
   const age = sessionActivityAge(s, now);
   return age ? `${label} · ${age}` : label;
 }

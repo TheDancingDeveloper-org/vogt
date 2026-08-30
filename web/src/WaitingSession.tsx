@@ -21,6 +21,8 @@ import {
 } from "solid-js";
 import { api, type SessionSummary } from "./api";
 import { tailOf } from "./terminalTail";
+import { createNow } from "./viewAge";
+import { sessionActivityAge } from "./sessionRowModel";
 
 /** The byte a terminal receives when somebody presses Ctrl-C (ETX, 0x03).
  *  Written as an escape: a literal control byte in a source file is a byte
@@ -33,10 +35,13 @@ interface Props {
   onOpen: (session: SessionSummary) => void;
   /** The surface's feedback, so a refused write is not only visible here. */
   onFailure?: (message: string) => void;
+  /** Disable terminal answers while the session stream is known to be down. */
+  disabled?: boolean;
 }
 
 export const WaitingSessionCard: Component<Props> = (props) => {
   const [sending, setSending] = createSignal<string | null>(null);
+  const now = createNow();
 
   /** A session that has exited has nothing to take input; say so, and offer
    *  nothing that would fail at the person who pressed it. */
@@ -70,7 +75,7 @@ export const WaitingSessionCard: Component<Props> = (props) => {
   };
 
   const send = async (label: string, text: string, submit: boolean) => {
-    if (sending()) return;
+    if (sending() || props.disabled) return;
     setSending(label);
     try {
       await api.sessionInput(props.session.id, text, submit);
@@ -90,14 +95,18 @@ export const WaitingSessionCard: Component<Props> = (props) => {
   return (
     <article class="session-waiting" aria-label={`${props.session.name} is waiting for input`}>
       <header class="session-waiting-head">
-        <strong>{props.session.name}</strong>
-        <span class="session-waiting-state">
-          {live() ? "waiting for input" : "exited before it was answered"}
+        <span class="activity-dot waiting-for-input" aria-hidden="true" />
+        <span class="session-waiting-state">Waiting for input</span>
+        <span class="session-waiting-age">
+          {sessionActivityAge(props.session, now())}
         </span>
+      </header>
+      <div class="session-waiting-identity">
+        <strong>{props.session.name}</strong>
         <span class="session-waiting-context">
           {props.session.cwd || "default workspace"}
         </span>
-      </header>
+      </div>
 
       <Show
         when={live()}
@@ -133,25 +142,28 @@ export const WaitingSessionCard: Component<Props> = (props) => {
                   >
                     <button
                       type="button"
-                      disabled={sending() !== null}
+                      aria-label="Send y + Enter"
+                      disabled={sending() !== null || props.disabled}
                       onClick={() => void send("y", "y", true)}
                     >
-                      {sending() === "y" ? "sending…" : "Send y + Enter"}
+                      {sending() === "y" ? "sending…" : "Send y ⏎"}
                     </button>
                     <button
                       type="button"
-                      disabled={sending() !== null}
+                      aria-label="Send Ctrl-C"
+                      disabled={sending() !== null || props.disabled}
                       onClick={() => void send("interrupt", INTERRUPT, false)}
                     >
-                      {sending() === "interrupt" ? "sending…" : "Send Ctrl-C"}
+                      {sending() === "interrupt" ? "sending…" : "Ctrl-C"}
                     </button>
-                    <button type="button" onClick={() => props.onOpen(props.session)}>
-                      Open session
+                    <button class="session-waiting-open" type="button" onClick={() => props.onOpen(props.session)}>
+                      Open session ›
                     </button>
                   </div>
                   <p class="session-waiting-note">
-                    These send keystrokes to this session's terminal. They are
-                    not Vogt approvals.
+                    {props.disabled
+                      ? "Input needs the live stream — reconnect to answer."
+                      : "Sends keystrokes to the terminal — not a Vogt approval."}
                   </p>
                 </>
             )}

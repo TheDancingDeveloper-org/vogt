@@ -22,9 +22,9 @@
 // reading the real front door — a tab that opened but drew nothing would fail
 // these tests, which is the failure a person pasting the link would see.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { render, waitFor } from "@solidjs/testing-library";
+import { fireEvent, render, waitFor } from "@solidjs/testing-library";
 
 import App from "../App";
 import { APP_ROUTES } from "../routes";
@@ -53,6 +53,9 @@ interface Shell {
   vogt: FakeVogt;
   /** Paste another link, as the address bar would. */
   go(url: string): void;
+  /** Current in-memory URL and browser Back for history-contract assertions. */
+  url(): string;
+  back(): void;
 }
 
 interface ShellOptions {
@@ -107,6 +110,8 @@ function mountShell(url: string, options: ShellOptions = {}): Shell {
     container: rendered.container,
     vogt,
     go: (next: string) => history.set({ value: next }),
+    url: () => history.get(),
+    back: () => history.back(),
   };
 }
 
@@ -155,6 +160,7 @@ afterEach(() => {
   // The shell starts the engine's event stream on a successful login.
   stopLiveStream();
   setToken("");
+  vi.unstubAllGlobals();
 });
 
 describe("FR-U11 — a pasted link opens the surface it names", () => {
@@ -233,6 +239,44 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
     expect(tabLabels(container)).toEqual([]);
   });
 
+  it("replaces mobile pager selections so Back returns to Sessions", async () => {
+    vi.stubGlobal(
+      "matchMedia",
+      ((query: string) => ({
+        matches: query === "(max-width: 768px)",
+        media: query,
+        onchange: null,
+        addListener() {},
+        removeListener() {},
+        addEventListener() {},
+        removeEventListener() {},
+        dispatchEvent: () => false,
+      })) as typeof window.matchMedia,
+    );
+    const sessions = [
+      { ...SESSION, id: "eng-1", name: "alpha-build", activity: "running" },
+      { ...SESSION, id: "eng-2", name: "beta-shell", activity: "idle" },
+      { ...SESSION, id: "eng-3", name: "old-shell", activity: "idle", exit_code: 0 },
+    ];
+    const shell = mountShell("/sessions", { sessions });
+
+    // Opening from the overview is an ordinary history push.
+    shell.go("/t/eng-1");
+    const pager = await surface(shell.container, ".terminal-mobile-pager");
+    expect(pager.querySelectorAll(".terminal-mobile-dot")).toHaveLength(3);
+    expect(pager.textContent).toContain("1 / 3");
+
+    // The pager includes exited sessions, but this selection stays in the
+    // same history slot rather than adding another terminal stop to Back.
+    fireEvent.click(
+      pager.querySelector('[aria-label="Show beta-shell"]')!,
+    );
+    await waitFor(() => expect(shell.url()).toBe("/t/eng-2"));
+
+    shell.back();
+    await waitFor(() => expect(shell.url()).toBe("/sessions"));
+  });
+
   it("orders the rail's Running sessions by attention, like Sessions (#247)", async () => {
     // The rail now shares Sessions' attention spine (sortSessionsByAttention):
     // waiting-for-input leads, then running, then idle — whatever order the
@@ -246,9 +290,14 @@ describe("FR-U11 — a pasted link opens the surface it names", () => {
 
     const railRows = () =>
       container.querySelectorAll(".places-rail-session-area .session-row .name");
-    await waitFor(() => expect(railRows().length).toBe(3));
-    const names = [...railRows()].map((node) => node.textContent);
-    expect(names).toEqual(["waiting-one", "running-one", "idle-one"]);
+    const names = () => [...railRows()].map((node) => node.textContent);
+    // A previous retained shell can leave a same-sized roster in the shared
+    // store until this mount's list request lands; wait for identities, not
+    // merely for a coincidentally equal row count.
+    await waitFor(() =>
+      expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]),
+    );
+    expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]);
   });
 
   it("names a missing terminal and offers recovery without a phantom tab", async () => {
@@ -299,9 +348,10 @@ describe("shared live steering", () => {
     });
 
     await waitFor(() => {
-      // #168: the rail Sessions badge counts all sessions (2), matching the
-      // mobile nav and the Running section — not just those waiting for input.
+      // The desktop rail retains the total Sessions metric. The redesigned
+      // phone tab badge is attention, so it reports only live waiting sessions.
       expect(container.querySelector('aside nav [aria-label="2 sessions"]')).toBeTruthy();
+      expect(container.querySelector('.phone-bottom-nav [aria-label="1 sessions waiting for input"]')).toBeTruthy();
       expect(container.querySelector('[aria-label="0 active Inbox entries"]')).toBeTruthy();
       expect(container.querySelector('[aria-label="Projects unavailable"]')).toBeTruthy();
       expect(container.querySelector('.phone-bottom-nav [aria-label="12 Board work items"]')).toBeTruthy();
@@ -335,6 +385,46 @@ describe("shared live steering", () => {
       expect(container.querySelectorAll(".session-row .row-menu")).toHaveLength(1);
       expect(container.querySelectorAll(".session-row .row-btn, .session-row .close")).toHaveLength(0);
     });
+  });
+
+  it("renders only live waiting sessions as phone attention cards and counts the exact remaining rows", async () => {
+    const desktopMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) => ({
+      matches: query.includes("max-width: 768px"),
+      media: query,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+
+    try {
+      const { container } = mountShell("/sessions", {
+        sessions: [
+          { ...SESSION, activity: "running", name: "build" },
+          { ...SESSION, id: "live-wait", name: "needs-answer", activity: "waiting-for-input" },
+          { ...SESSION, id: "exited-wait", name: "old-prompt", activity: "waiting-for-input", exit_code: 0 },
+          { ...SESSION, id: "idle", name: "scratch", activity: "idle" },
+        ],
+      });
+
+      await waitFor(() => {
+        const cards = container.querySelectorAll(".session-waiting");
+        expect(cards).toHaveLength(1);
+        expect(cards[0]).toHaveTextContent("needs-answer");
+        expect(cards[0]).not.toHaveTextContent("old-prompt");
+        expect(container.querySelector(".sessions-overview-heading"))
+          .toHaveTextContent("RUNNING — 3");
+        expect(container.querySelector(".sessions-overview-breakdown"))
+          .toHaveTextContent("1 idle · 1 exited");
+        expect(container.querySelector('.phone-bottom-nav [aria-label="1 sessions waiting for input"]'))
+          .toBeTruthy();
+      });
+    } finally {
+      window.matchMedia = desktopMatchMedia;
+    }
   });
 
   it("persists a collapsed Files section and keeps the running count in its toggle", async () => {
