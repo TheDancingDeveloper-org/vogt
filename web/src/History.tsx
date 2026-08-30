@@ -37,10 +37,19 @@ interface Props {
   confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
 
-type StatusFilter = "all" | "success" | "error" | "unfinished";
+type StatusFilter = "all" | "running" | "exited" | "unfinished";
 type SortMode = "recent" | "oldest" | "largest";
 type SessionLoad = "initial" | "refresh" | "more" | null;
 type SessionRetry = "refresh" | "more";
+
+/**
+ * A row in the merged History list. History is the one place that lists every
+ * session, live and dead (#477): archived rows read from the history store are
+ * unioned with the live session registry, and `live` records which side a row
+ * came from so liveness is a filterable facet rather than a gate. A live row's
+ * `ended_at` is always null and its output is not yet in the search index.
+ */
+type HistoryRow = HistorySessionMetadata & { live: boolean };
 
 interface HistoryDraft {
   selectedId: string | null;
@@ -108,19 +117,21 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function matchesStatus(
-  session: HistorySessionMetadata,
-  filter: StatusFilter,
-): boolean {
+function matchesStatus(row: HistoryRow, filter: StatusFilter): boolean {
   switch (filter) {
     case "all":
       return true;
-    case "success":
-      return session.exit_code === 0;
-    case "error":
-      return session.exit_code !== null && session.exit_code !== 0;
+    case "running":
+      // Live in the registry and not yet reaped: an actual running shell.
+      return row.live && row.exit_code === null;
+    case "exited":
+      // Anything that carries an exit code — an archived exit, or a live row
+      // the engine has already killed but not yet archived.
+      return row.exit_code !== null;
     case "unfinished":
-      return session.exit_code === null;
+      // An archived row with no recorded exit code (crashed, killed, or an
+      // older record predating exit capture). Previously unmatchable.
+      return !row.live && row.exit_code === null;
   }
 }
 
@@ -161,18 +172,38 @@ const History: Component<Props> = (props) => {
   const [sessionsStale, setSessionsStale] = createSignal(false);
   const [sessionsRetry, setSessionsRetry] = createSignal<SessionRetry>("refresh");
 
-  /** What to say beside "No archived sessions" when the reader has live ones
-   *  open — this page shows scrollback from sessions that have *ended*
-   *  (`USER_GUIDE.md` §2, "Archived scrollback from sessions that have
-   *  ended"), and a reader with three open shells and an empty page here has
-   *  no way to tell that apart from a broken read without this line. */
-  const liveSessionNote = createMemo(() => {
-    const live = sessionsStore.order.length;
-    if (live === 0) return "";
-    return live === 1
-      ? "1 session is currently running — it appears here once it exits."
-      : `${live} sessions are currently running — they appear here once they exit.`;
+  // History is the one place that lists every session, live and dead (#477).
+  // The live registry is unioned into the archived list, keyed by id with the
+  // live entry winning on conflict, so a session that is both running and
+  // partially archived appears once and reads as live. The archived list keeps
+  // its `created_at DESC` order; sort/filter happen downstream in
+  // `filteredSessions`.
+  const mergedSessions = createMemo<HistoryRow[]>(() => {
+    const byId = new Map<string, HistoryRow>();
+    for (const session of sessions()) {
+      byId.set(session.id, { ...session, live: false });
+    }
+    for (const id of sessionsStore.order) {
+      const live = sessionsStore.sessions[id];
+      if (!live) continue;
+      byId.set(id, {
+        id: live.id,
+        name: live.name,
+        created_at: live.created_at,
+        ended_at: null,
+        exit_code: live.exit_code,
+        cwd: live.cwd ?? null,
+        command: live.command ?? null,
+        scrollback_bytes: live.scrollback_bytes,
+        live: true,
+      });
+    }
+    return [...byId.values()];
   });
+
+  const liveSessionCount = createMemo(
+    () => mergedSessions().filter((row) => row.live).length,
+  );
   const [archiveTotal, setArchiveTotal] = createSignal<number | null>(null);
   const [archiveComplete, setArchiveComplete] = createSignal(false);
   const [hasMoreSessions, setHasMoreSessions] = createSignal(false);
@@ -399,6 +430,20 @@ const History: Component<Props> = (props) => {
   };
 
   const loadDetail = async (id: string): Promise<void> => {
+    // A live row has no archive DB record yet — `GET /api/history/{id}` would
+    // 404. Serve its detail straight from the merged registry row instead; the
+    // replay pane still tails the on-disk log below, which works for a running
+    // session (#477).
+    const liveRow = mergedSessions().find((row) => row.id === id && row.live);
+    if (liveRow) {
+      detailRequest += 1;
+      setDetailKey(id);
+      setSelectedSession(liveRow);
+      setDetailError(null);
+      setDetailStale(false);
+      setDetailLoading(false);
+      return;
+    }
     const request = ++detailRequest;
     const sameSession = detailKey() === id;
     if (!sameSession) {
@@ -463,8 +508,13 @@ const History: Component<Props> = (props) => {
     searchResults().filter((result) => result.session_id === selectedId()),
   );
 
+  const selectedIsLive = createMemo(() => {
+    const id = selectedId();
+    return !!id && mergedSessions().some((row) => row.id === id && row.live);
+  });
+
   const filteredSessions = createMemo(() => {
-    const items = [...sessions()];
+    const items = [...mergedSessions()];
     const metadataNeedle = metadataQuery().trim().toLowerCase();
     const pinned = new Set(pinnedIds());
     const filtered = items.filter((session) => {
@@ -714,8 +764,8 @@ const History: Component<Props> = (props) => {
               onInput={(event) => setStatusFilter(event.currentTarget.value as StatusFilter)}
             >
               <option value="all">All</option>
-              <option value="success">Success</option>
-              <option value="error">Errored</option>
+              <option value="running">Running</option>
+              <option value="exited">Exited</option>
               <option value="unfinished">No exit code</option>
             </select>
           </label>
@@ -741,6 +791,9 @@ const History: Component<Props> = (props) => {
         </div>
         <div class="history-scope-note">
           Metadata filters apply to loaded pages. Output search runs server-wide across the full archive.
+          <Show when={liveSessionCount() > 0}>
+            {" "}Live sessions are listed here, but their output is not yet in the search index.
+          </Show>
         </div>
       </div>
 
@@ -815,11 +868,9 @@ const History: Component<Props> = (props) => {
                   when={filteredSessions().length > 0}
                   fallback={
                     <div class="history-empty">
-                      {sessions().length === 0
-                        ? liveSessionNote()
-                          ? `No archived sessions. ${liveSessionNote()}`
-                          : "No archived sessions."
-                        : "No loaded sessions match these filters."}
+                      {mergedSessions().length === 0
+                        ? "No sessions yet."
+                        : "No sessions match these filters."}
                     </div>
                   }
                 >
@@ -836,6 +887,17 @@ const History: Component<Props> = (props) => {
                           <div class="history-session-header">
                             <div class="history-session-name-row">
                               <span class="history-session-name">{session.name}</span>
+                              <span
+                                class={`history-liveness-badge ${
+                                  session.live && session.exit_code === null
+                                    ? "live"
+                                    : "exited"
+                                }`}
+                              >
+                                {session.live && session.exit_code === null
+                                  ? "Live"
+                                  : "Exited"}
+                              </span>
                               <Show when={pinned()}>
                                 <span class="history-pin-indicator">Pinned</span>
                               </Show>
@@ -882,7 +944,7 @@ const History: Component<Props> = (props) => {
         <div class="history-detail">
           <Show
             when={selectedId()}
-            fallback={<div class="history-empty">Select an archived session to inspect it.</div>}
+            fallback={<div class="history-empty">Select a session to inspect it.</div>}
           >
             <Show when={detailError()}>
               {(message) => (
@@ -918,14 +980,19 @@ const History: Component<Props> = (props) => {
                       <button type="button" onClick={() => togglePin(session().id)}>
                         {pinnedIds().includes(session().id) ? "Unpin" : "Pin"}
                       </button>
-                      <button type="button" onClick={() => void exportSession(session())}>Export</button>
-                      <button
-                        type="button"
-                        class="danger"
-                        onClick={() => void deleteSession(session())}
-                      >
-                        Delete
-                      </button>
+                      {/* Export and Delete act on the archive record, which a
+                          live session does not have yet — hide them until it
+                          exits and is archived (#477). */}
+                      <Show when={!selectedIsLive()}>
+                        <button type="button" onClick={() => void exportSession(session())}>Export</button>
+                        <button
+                          type="button"
+                          class="danger"
+                          onClick={() => void deleteSession(session())}
+                        >
+                          Delete
+                        </button>
+                      </Show>
                     </div>
                   </div>
 
@@ -969,7 +1036,11 @@ const History: Component<Props> = (props) => {
                   <div class="history-replay-toolbar">
                     <div>
                       <strong>Replay preview</strong>
-                      <div class="history-replay-note">Tail view of the archived raw terminal log.</div>
+                      <div class="history-replay-note">
+                        {selectedIsLive()
+                          ? "Tail view of the live session's raw terminal log."
+                          : "Tail view of the archived raw terminal log."}
+                      </div>
                     </div>
                     <label class="history-field">
                       <span>Tail size</span>
@@ -999,7 +1070,7 @@ const History: Component<Props> = (props) => {
                       )}
                     </Show>
                     <Show when={logLoading() && logPreview() === null}>
-                      <div class="history-loading">Loading archived output...</div>
+                      <div class="history-loading">Loading terminal output...</div>
                     </Show>
                     <Show when={logPreview()}>
                       {(preview) => (
