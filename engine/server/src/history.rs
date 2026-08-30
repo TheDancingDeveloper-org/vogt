@@ -170,7 +170,17 @@ impl SessionHistory {
         Ok(())
     }
 
-    /// Archive a completed session
+    /// Archive a session row (metadata only).
+    ///
+    /// Used for three writes with different completeness (#475): a provisional
+    /// row at spawn (`ended_at`/`exit_code` NULL), the finalized row on exit,
+    /// and the graceful-shutdown drain. The `ON CONFLICT` update is guarded so
+    /// these can arrive in any order without a later, less-complete write
+    /// erasing a completed one: `COALESCE` keeps an already-set `ended_at`,
+    /// `exit_code`, `cwd`, or `command` when the incoming write has NULL there
+    /// (a provisional or backfilled row), and `MAX` never shrinks the recorded
+    /// scrollback. A real finalize (non-NULL values) still overwrites the
+    /// provisional NULLs.
     pub async fn archive_session(&self, record: ArchiveRecord) -> Result<()> {
         let created_str = record
             .created_at
@@ -188,11 +198,11 @@ impl SessionHistory {
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
-                ended_at = excluded.ended_at,
-                exit_code = excluded.exit_code,
-                cwd = excluded.cwd,
-                command = excluded.command,
-                scrollback_bytes = excluded.scrollback_bytes
+                ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
+                exit_code = COALESCE(excluded.exit_code, sessions.exit_code),
+                cwd = COALESCE(excluded.cwd, sessions.cwd),
+                command = COALESCE(excluded.command, sessions.command),
+                scrollback_bytes = MAX(excluded.scrollback_bytes, sessions.scrollback_bytes)
             "#,
         )
         .bind(record.id.to_string())
@@ -338,6 +348,102 @@ impl SessionHistory {
         self.archive_session(record).await?;
         self.replace_index_output(session_id, output).await?;
         Ok(())
+    }
+
+    /// One-shot startup pass: index raw session logs on disk that have no
+    /// history row yet (#475).
+    ///
+    /// The raw transcript at `<state_dir>/session-logs/<uuid>.log` persists
+    /// across restarts, but before this the index row was only written when a
+    /// child exited while the engine was alive. A hard redeploy (SIGKILL of a
+    /// long-lived agent shell) therefore left the transcript on disk with no
+    /// row, invisible in the History tab. This recovers those: for every
+    /// `*.log` whose UUID is not already a row, it inserts a metadata row with
+    /// `ended_at`/`exit_code` NULL (the outcome is genuinely unknown) and
+    /// indexes the stripped output so search reaches it. Rows that already
+    /// exist are left untouched.
+    pub async fn backfill_orphaned_logs(&self) -> Result<usize> {
+        let rows = sqlx::query("SELECT id FROM sessions")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("backfill: list ids failed: {e}")))?;
+        let known: std::collections::HashSet<String> =
+            rows.into_iter().map(|r| r.get::<String, _>("id")).collect();
+
+        let entries = match std::fs::read_dir(&self.log_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => {
+                return Err(ApiError::Internal(format!(
+                    "backfill: read log dir failed: {e}"
+                )))
+            }
+        };
+
+        let mut recovered = 0usize;
+        for entry in entries {
+            let entry = entry
+                .map_err(|e| ApiError::Internal(format!("backfill: dir entry failed: {e}")))?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Ok(id) = Uuid::parse_str(stem) else {
+                continue;
+            };
+            if known.contains(&id.to_string()) {
+                continue;
+            }
+            let meta = match std::fs::metadata(&path) {
+                Ok(meta) => meta,
+                Err(_) => continue,
+            };
+            let size = meta.len();
+            let created_str = meta
+                .modified()
+                .ok()
+                .map(OffsetDateTime::from)
+                .and_then(|t| {
+                    t.format(&time::format_description::well_known::Rfc3339)
+                        .ok()
+                })
+                .unwrap_or_else(|| {
+                    OffsetDateTime::now_utc()
+                        .format(&time::format_description::well_known::Rfc3339)
+                        .unwrap_or_default()
+                });
+
+            // `DO NOTHING`: another writer that raced us to this id keeps its
+            // (more complete) row. The outcome is unknown, so exit_code/ended_at
+            // stay NULL, which the `unfinished` history filter now surfaces.
+            sqlx::query(
+                r#"
+                INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes)
+                VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?)
+                ON CONFLICT(id) DO NOTHING
+                "#,
+            )
+            .bind(id.to_string())
+            .bind(format!("recovered {}", &stem[..stem.len().min(8)]))
+            .bind(&created_str)
+            .bind(size as i64)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("backfill: insert failed: {e}")))?;
+
+            if let Ok(bytes) = std::fs::read(&path) {
+                let visible = crate::activity::strip_ansi(&bytes);
+                let text = String::from_utf8_lossy(&visible);
+                if let Err(e) = self.replace_index_output(id, text.as_ref()).await {
+                    tracing::warn!(session = %id, error = %e, "backfill: failed to index recovered log");
+                }
+            }
+            recovered += 1;
+        }
+        Ok(recovered)
     }
 
     /// Get session by ID
