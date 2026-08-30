@@ -80,7 +80,7 @@ export type ServerEvent =
   | { type: "session-created"; id: string; name: string }
   | { type: "session-renamed"; id: string; name: string }
   | { type: "session-killed"; id: string; exit_code: number | null }
-  | { type: "activity"; id: string; state: ActivityState }
+  | { type: "activity"; id: string; state: ActivityState; activity_changed_at?: string }
   /**
    * Something changed in vogt-core, republished by the front door.
    *
@@ -1079,6 +1079,9 @@ export interface AssistantTranscriptEntry {
   role: "user" | "assistant";
   text: string;
   tool_trace?: string[];
+  created_at?: string;
+  session_refs?: { id: string; name: string; activity: ActivityState }[];
+  actions?: { kind: "open-session"; session_id: string; label: string }[];
 }
 
 /** Keystrokes the assistant wants to type into a terminal. */
@@ -1120,6 +1123,9 @@ export interface AssistantReply {
   reply: string | null;
   pending_action?: AssistantPendingAction;
   tool_trace?: string[];
+  created_at?: string;
+  session_refs?: { id: string; name: string; activity: ActivityState }[];
+  actions?: { kind: "open-session"; session_id: string; label: string }[];
 }
 
 export interface AssistantHistory {

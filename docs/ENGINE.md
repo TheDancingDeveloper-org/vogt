@@ -512,7 +512,12 @@ HTTP; over the WebSocket the frame is dropped silently, because there is no
 reply channel to refuse into.
 
 `SessionSummary` carries an optional `command` field — the explicit command
-the session was created with; absent for default-shell sessions.
+the session was created with; absent for default-shell sessions. It also
+carries `activity_changed_at`, the wall-clock instant when the current
+activity state began. The same timestamp accompanies `activity` events, so a
+client can keep an attention-sorted selection tied to session identity while
+live ordering changes; an empty or absent value remains accepted from an older
+engine.
 
 `SessionSpec` (the `POST /api/sessions` body) carries an optional `prompt`
 field — the brief the session's agent should start from:
@@ -593,7 +598,8 @@ to them: session prompts are retained by liveness, not by count.
     "exit_code": null,
     "scrollback_bytes": 123,
     "cwd": "apps/vogt",
-    "created_at": "2026-07-06T00:00:00Z"
+    "created_at": "2026-07-06T00:00:00Z",
+    "activity_changed_at": "2026-07-06T00:04:12Z"
   },
   "scrollback_pos": 123,
   "scrollback_base64": "..."
@@ -674,7 +680,8 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
 
 - `GET /api/events` -> `text/event-stream` of `ServerEvent`, one JSON object
   per `data:` line. Variants are `session-created`, `session-renamed`,
-  `session-killed`, `activity`, `vogt.changed`, and the agent-task steering
+  `session-killed`, `activity` (`{id, state, activity_changed_at}`),
+  `vogt.changed`, and the agent-task steering
   trio — `task.gate.opened` (`{task_id, run_id, session_id, gate_id, question,
   options}`), `task.gate.answered` (`{…, gate_id, option?, outcome, actor,
   reason?}` where `outcome` is `approved` or `blocked`), and `task.steered`
@@ -704,7 +711,9 @@ provisioned. Mutating routes require the `assistant` token capability. See
 §6 for the threat model and behavior.
 
 - `POST /api/assistant/message` `{"text": "..."}` ->
-  `{"reply": string|null, "pending_action"?: PendingAction, "tool_trace"?: string[]}`
+  `{"reply": string|null, "pending_action"?: PendingAction, "tool_trace"?: string[],
+  "created_at"?: string, "session_refs"?: AssistantSessionRef[],
+  "actions"?: AssistantTranscriptAction[]}`
 - `POST /api/assistant/actions/:id` `{"approve": bool}` -> same reply shape
 - `PATCH /api/assistant/actions/:id` `{"reason": string}` -> the updated
   pending action only; Vogt writes accept this preview step, terminal input
@@ -751,10 +760,17 @@ approving user's paired core token, never a shared one. `GET /api/config`
 advertises `assistant_enabled` and `assistant_model` (presence only, never the
 key).
 
-A transcript entry is `{"role", "text", "tool_trace"?}`. `reply` is null when
-the turn paused on a pending action before the model produced any text, which
-is the state a client should render as "waiting for you", not as an empty
-answer.
+A transcript entry is
+`{"role", "text", "tool_trace"?, "created_at"?, "session_refs"?, "actions"?}`.
+New entries receive a server receipt timestamp. `session_refs` entries are
+`{"id", "name", "activity"}` and an action is currently
+`{"kind":"open-session", "session_id", "label"}`. The server creates these
+only from successful structured session-tool results; they are not inferred
+from assistant prose. Persisted entries and older clients remain compatible:
+all three display-metadata fields may be absent and then mean no timestamp,
+references, or actions. `reply` is null when the turn paused on a pending
+action before the model produced any text, which is the state a client should
+render as "waiting for you", not as an empty answer.
 
 ### File APIs
 
