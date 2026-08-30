@@ -3,6 +3,7 @@
 import { fetchWithRetry } from "./transport";
 import { DEADLINE_MS, type OpClass } from "./deadlines";
 import { isDemoMode, runtimeTransport, type RuntimeSocket } from "./runtimeTransport";
+import { REPLAY_TAIL_MAX_BYTES } from "./terminalReplay";
 import {
   cacheIdentity,
   cacheKey,
@@ -1315,7 +1316,13 @@ export function openAttach(id: string, resumeFrom?: number): RuntimeSocket {
       ws.send(JSON.stringify({
         type: "auth",
         token: tok,
-        ...(resumeFrom === undefined ? {} : { resume_from: resumeFrom }),
+        // Cold attach (no cached cursor): bound the server's full snapshot to
+        // the same tail budget the cache-restore path already enforces, so a
+        // first open never ships and replays the whole scrollback ring (#474).
+        // A warm reattach sends its cursor instead and its delta is untouched.
+        ...(resumeFrom === undefined
+          ? { snapshot_tail_bytes: REPLAY_TAIL_MAX_BYTES }
+          : { resume_from: resumeFrom }),
       }));
     },
     { once: true },
