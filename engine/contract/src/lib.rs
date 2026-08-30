@@ -134,15 +134,41 @@ pub struct AssistantTranscriptEntry {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_trace: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_refs: Vec<AssistantSessionRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<AssistantTranscriptAction>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantSessionRef {
+    pub id: Uuid,
+    pub name: String,
+    pub activity: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssistantTranscriptAction {
+    pub kind: String,
+    pub session_id: Uuid,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssistantReply {
     pub reply: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_action: Option<PendingAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_trace: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_refs: Vec<AssistantSessionRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<AssistantTranscriptAction>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +197,10 @@ pub enum ServerEvent {
     Activity {
         id: Uuid,
         state: ActivityState,
+        /// Wall-clock instant at which this activity state began. Optional on
+        /// the wire for compatibility with older engine clients.
+        #[serde(default)]
+        activity_changed_at: String,
     },
     /// Something changed in vogt-core.
     ///
@@ -683,8 +713,7 @@ mod tests {
 
     #[test]
     fn parses_server_event_activity() {
-        let raw =
-            r#"{"type":"activity","id":"00000000-0000-0000-0000-000000000000","state":"running"}"#;
+        let raw = r#"{"type":"activity","id":"00000000-0000-0000-0000-000000000000","state":"running","activity_changed_at":"2026-08-30T00:00:00Z"}"#;
         match serde_json::from_str::<ServerEvent>(raw).unwrap() {
             ServerEvent::Activity { state, .. } => assert_eq!(state, ActivityState::Running),
             other => panic!("wrong variant: {other:?}"),
@@ -719,5 +748,22 @@ mod tests {
         .unwrap();
         assert_eq!(spec.model.as_deref(), Some("gpt-5.6"));
         assert_eq!(spec.effort.as_deref(), Some("medium"));
+    }
+
+    #[test]
+    fn old_assistant_shapes_default_new_display_metadata() {
+        let entry: AssistantTranscriptEntry = serde_json::from_str(
+            r#"{"role":"assistant","text":"hello","tool_trace":["listed sessions"]}"#,
+        )
+        .unwrap();
+        assert!(entry.created_at.is_none());
+        assert!(entry.session_refs.is_empty());
+        assert!(entry.actions.is_empty());
+
+        let reply: AssistantReply = serde_json::from_str(r#"{"reply":"hello"}"#).unwrap();
+        assert!(reply.pending_action.is_none());
+        assert!(reply.created_at.is_none());
+        assert!(reply.session_refs.is_empty());
+        assert!(reply.actions.is_empty());
     }
 }

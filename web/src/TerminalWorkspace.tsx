@@ -16,6 +16,7 @@ import {
   deleteSession,
   killSession,
   sessionsStore,
+  isConnected,
 } from "./store";
 import {
   formatTerminalInputLimit,
@@ -65,6 +66,20 @@ import {
 } from "./terminalThemes";
 import { autoSplitName } from "./terminalNaming";
 import { terminalPaneParked } from "./tabLifecycle";
+import {
+  activityLabel,
+  sessionStateWord,
+  sortSessionsByAttention,
+} from "./sessionRowModel";
+import ModKeyRow from "./ModKeyRow";
+import { createNarrow } from "./narrow";
+import {
+  adjacentMobilePagerIndex,
+  beginMobilePagerGesture,
+  moveMobilePagerGesture,
+  settleMobilePagerIndex,
+  type MobilePagerGesture,
+} from "./mobilePager";
 
 interface Props {
   tabId: string;
@@ -83,6 +98,10 @@ interface Props {
   onTitle?: (title: string) => void;
   /** A pane rang the bell (BEL) — lights the tab's activity dot. */
   onBell?: (sessionId: string) => void;
+  /** Change the active mobile pager item and URL without inventing a second workspace. */
+  onMobileSessionChange?: (sessionId: string) => void;
+  /** The gesture's identity vanished before settlement; leave the pager safely. */
+  onMobileSessionUnavailable?: () => void;
 }
 
 const STORAGE_KEY = "vogt.terminalLayouts.v1";
@@ -306,15 +325,22 @@ const TerminalWorkspace: Component<Props> = (props) => {
   // Toolbar overflow (#236): on a phone, nine text buttons forced a hidden
   // horizontal scroll strip. Below 768px the pane-management actions
   // (Broadcast/Maximise/Split/Close) collapse into a single `···` menu.
-  const narrowQuery =
-    typeof window !== "undefined" && window.matchMedia
-      ? window.matchMedia("(max-width: 768px)")
-      : null;
-  const [isNarrow, setIsNarrow] = createSignal(narrowQuery?.matches ?? false);
+  const isNarrow = createNarrow();
   const [overflowOpen, setOverflowOpen] = createSignal(false);
+  const [mobileSwipeOffset, setMobileSwipeOffset] = createSignal(0);
+  const [mobileDestinationId, setMobileDestinationId] = createSignal<string | null>(null);
+  const [mobileDestinationDirection, setMobileDestinationDirection] = createSignal<-1 | 1>(1);
+  const [mobileDragging, setMobileDragging] = createSignal(false);
+  const [mobileSettling, setMobileSettling] = createSignal(false);
+  let mobileGesture: MobilePagerGesture | null = null;
+  let mobileForceHorizontal = false;
+  let mobileSettleTimer: ReturnType<typeof setTimeout> | undefined;
   let composerRef: HTMLTextAreaElement | undefined;
   let findInputRef: HTMLInputElement | undefined;
   let overflowRef: HTMLDivElement | undefined;
+  let mobileOverflowRef: HTMLDivElement | undefined;
+  let mobileSessionBarRef: HTMLDivElement | undefined;
+  let mobileStageRef: HTMLDivElement | undefined;
 
   onMount(() => {
     const onFont = (event: Event) => {
@@ -325,28 +351,26 @@ const TerminalWorkspace: Component<Props> = (props) => {
       const next = (event as CustomEvent<{ name?: string }>).detail?.name;
       if (typeof next === "string") setThemeNameSignal(next);
     };
-    const onNarrow = (event: MediaQueryListEvent) => {
-      setIsNarrow(event.matches);
-      if (!event.matches) setOverflowOpen(false);
-    };
     // Close the overflow menu on any tap outside it.
     const onDocPointer = (event: PointerEvent) => {
       if (!overflowOpen()) return;
       const target = event.target as Node | null;
-      if (overflowRef && target && !overflowRef.contains(target)) {
+      if (target && (!overflowRef || !overflowRef.contains(target)) && (!mobileOverflowRef || !mobileOverflowRef.contains(target))) {
         setOverflowOpen(false);
       }
     };
     window.addEventListener(TERMINAL_FONT_SIZE_EVENT, onFont);
     window.addEventListener(TERMINAL_THEME_EVENT, onTheme);
-    narrowQuery?.addEventListener("change", onNarrow);
     document.addEventListener("pointerdown", onDocPointer);
     onCleanup(() => {
       window.removeEventListener(TERMINAL_FONT_SIZE_EVENT, onFont);
       window.removeEventListener(TERMINAL_THEME_EVENT, onTheme);
-      narrowQuery?.removeEventListener("change", onNarrow);
       document.removeEventListener("pointerdown", onDocPointer);
     });
+  });
+
+  onCleanup(() => {
+    if (mobileSettleTimer !== undefined) clearTimeout(mobileSettleTimer);
   });
 
   const openFind = () => {
@@ -408,6 +432,137 @@ const TerminalWorkspace: Component<Props> = (props) => {
       .map((id) => sessionsStore.sessions[id])
       .filter((session): session is SessionSummary => Boolean(session)),
   );
+  const mobileSessions = createMemo(() => sortSessionsByAttention(allSessions()));
+  const mobileIndex = createMemo(() => {
+    const index = mobileSessions().findIndex((session) => session.id === props.sessionId);
+    return index >= 0 ? index : 0;
+  });
+  const mobileSelected = createMemo(() => mobileSessions()[mobileIndex()] ?? activeSession());
+  const mobileDestination = createMemo(() => {
+    const id = mobileDestinationId();
+    return id ? mobileSessions().find((session) => session.id === id) : undefined;
+  });
+  const focusMobileSessionBar = () => {
+    const editing = document.activeElement?.closest(".terminal-composer") !== null;
+    if (!editing) {
+      queueMicrotask(() =>
+        document.querySelector<HTMLElement>("[data-mobile-session-bar]")?.focus(),
+      );
+    }
+  };
+  const changeMobileSessionById = (sessionId: string) => {
+    const target = mobileSessions().find((session) => session.id === sessionId);
+    if (!target || target.id === props.sessionId) return;
+    props.onMobileSessionChange?.(target.id);
+    focusMobileSessionBar();
+  };
+  const changeMobileSession = (index: number) => {
+    const target = mobileSessions()[index];
+    if (target) changeMobileSessionById(target.id);
+  };
+  const mobileTransitionMs = () =>
+    window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? 0 : 280;
+  const clearMobileGesture = (delay = mobileTransitionMs()) => {
+    mobileGesture = null;
+    setMobileDragging(false);
+    setMobileSettling(delay > 0);
+    setMobileSwipeOffset(0);
+    if (mobileSettleTimer !== undefined) clearTimeout(mobileSettleTimer);
+    mobileSettleTimer = setTimeout(() => {
+      setMobileSettling(false);
+      setMobileDestinationId(null);
+    }, delay);
+  };
+  const onMobileTouchStart = (event: TouchEvent, forceHorizontal = false) => {
+    if (mobileSettling()) return;
+    const touch = event.touches[0];
+    if (!touch) return;
+    mobileGesture = beginMobilePagerGesture(touch.clientX, touch.clientY);
+    mobileForceHorizontal = forceHorizontal;
+    setMobileSwipeOffset(0);
+  };
+  const onMobileTouchMove = (event: TouchEvent) => {
+    const touch = event.touches[0];
+    if (!mobileGesture || !touch) return;
+    const move = moveMobilePagerGesture(
+      mobileGesture,
+      touch.clientX,
+      touch.clientY,
+      mobileIndex(),
+      mobileSessions().length,
+      mobileForceHorizontal,
+    );
+    mobileGesture = move.gesture;
+    if (!move.claimed) return;
+    event.preventDefault();
+    setMobileDragging(true);
+    setMobileSwipeOffset(move.offset);
+    const destinationIndex = adjacentMobilePagerIndex(
+      mobileIndex(),
+      mobileSessions().length,
+      move.offset,
+    );
+    const destination = destinationIndex === null
+      ? undefined
+      : mobileSessions()[destinationIndex];
+    setMobileDestinationId(destination?.id ?? null);
+    if (destinationIndex !== null) {
+      setMobileDestinationDirection(destinationIndex > mobileIndex() ? 1 : -1);
+    }
+  };
+  const onMobileTouchEnd = () => {
+    const offset = mobileSwipeOffset();
+    const settledIndex = settleMobilePagerIndex(
+      mobileIndex(),
+      mobileSessions().length,
+      offset,
+    );
+    // The destination identity was chosen while the finger was down. Keep it
+    // even if attention ordering changes before release; looking up the new
+    // occupant of the old numeric index would make a live reorder swipe to a
+    // different session than the one visible under the finger.
+    const destinationId = settledIndex === null
+      ? null
+      : mobileDestinationId();
+    mobileGesture = null;
+    setMobileDragging(false);
+    if (!destinationId) {
+      clearMobileGesture();
+      return;
+    }
+
+    const direction = mobileDestinationDirection();
+    const distance = mobileStageRef?.getBoundingClientRect().width
+      ?? window.innerWidth;
+    const delay = mobileTransitionMs();
+    setMobileDestinationDirection(direction);
+    setMobileDestinationId(destinationId);
+    setMobileSettling(true);
+    setMobileSwipeOffset(direction > 0 ? -distance : distance);
+    if (mobileSettleTimer !== undefined) clearTimeout(mobileSettleTimer);
+    mobileSettleTimer = setTimeout(() => {
+      // The attention order may have changed while the finger was down. The
+      // settled identity wins only if it still exists in the latest snapshot.
+      const stillExists = mobileSessions().some(
+        (session) => session.id === destinationId,
+      );
+      setMobileSettling(false);
+      setMobileDestinationId(null);
+      setMobileSwipeOffset(0);
+      if (stillExists) changeMobileSessionById(destinationId);
+      else if (props.onMobileSessionUnavailable) {
+        props.onMobileSessionUnavailable();
+      } else {
+        props.onNotify?.("That session is no longer available.", "info");
+      }
+    }, delay);
+  };
+  const onMobileTouchCancel = () => clearMobileGesture();
+  const onMobilePagerKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    changeMobileSession(mobileIndex() + (event.key === "ArrowRight" ? 1 : -1));
+  };
   // Sessions not already bound to a pane here: the ones worth composing in,
   // since a session is never shown in two panes at once.
   const eligibleSessions = createMemo(() => {
@@ -765,8 +920,58 @@ const TerminalWorkspace: Component<Props> = (props) => {
 
   // The pane-management actions. Rendered inline on a wide toolbar and inside
   // the `···` menu on a phone, so the button logic lives in exactly one place.
-  const overflowActions = () => (
+  const overflowActions = (mobile = false) => (
     <>
+      <Show when={mobile}>
+        <div class="terminal-mobile-display-controls" role="group" aria-label="Terminal display">
+          <button
+            type="button"
+            onClick={() => changeTerminalFontSize(-1)}
+            disabled={fontSize() <= MIN_TERMINAL_FONT_SIZE}
+            aria-label="Decrease terminal font size"
+          >
+            A−
+          </button>
+          <button
+            type="button"
+            onClick={() => resetTerminalFontSize()}
+            aria-label={`Terminal font size ${fontSize()}, click to reset`}
+          >
+            {fontSize()}
+          </button>
+          <button
+            type="button"
+            onClick={() => changeTerminalFontSize(1)}
+            disabled={fontSize() >= MAX_TERMINAL_FONT_SIZE}
+            aria-label="Increase terminal font size"
+          >
+            A+
+          </button>
+        </div>
+        <label class="terminal-mobile-theme-label">
+          <span>Terminal theme</span>
+          <select
+            aria-label="Terminal color theme"
+            value={themeName()}
+            onChange={(event) => setThemeName(event.currentTarget.value)}
+          >
+            <For each={Object.keys(THEMES)}>
+              {(name) => <option value={name}>{name}</option>}
+            </For>
+          </select>
+        </label>
+        <button
+          type="button"
+          onClick={() => {
+            sendDraft(false);
+            setOverflowOpen(false);
+          }}
+          disabled={!draft()}
+          title="Send the composer text without Enter"
+        >
+          Insert draft without Enter
+        </button>
+      </Show>
       <button
         class={broadcastEnabled() ? "active" : ""}
         onClick={() => {
@@ -845,8 +1050,129 @@ const TerminalWorkspace: Component<Props> = (props) => {
     </>
   );
 
+  const renderWorkspaceLayout = () => (
+    <LayoutNodeView
+      node={root()}
+      activePaneId={activePaneId()}
+      parked={Boolean(props.parked)}
+      withHeaders={panes().length > 1}
+      sessions={allSessions()}
+      onFocusPane={setActivePaneId}
+      onRetargetPane={retargetPaneTo}
+      dropTarget={dropTarget()}
+      onPaneDragOver={onPaneDragOver}
+      onPaneDragLeave={onPaneDragLeave}
+      onPaneDrop={onPaneDrop}
+      interceptPaneInput={interceptPaneInput}
+      registerPaneSend={(paneId, fn) => {
+        if (fn) paneSenders.set(paneId, fn);
+        else paneSenders.delete(paneId);
+      }}
+      registerPaneActions={(paneId, actions) => {
+        if (actions) paneActions.set(paneId, actions);
+        else paneActions.delete(paneId);
+      }}
+      onNotify={props.onNotify}
+      onRequestFind={openFind}
+      onPaneSearchResults={onPaneSearchResults}
+      onPaneTitle={(sessionId, title) => {
+        // Only the tab's own session names the tab; a split showing another
+        // session's shell must not rewrite the label out from under it.
+        if (sessionId === props.sessionId) props.onTitle?.(title);
+      }}
+      onPaneBell={(sessionId) => props.onBell?.(sessionId)}
+    />
+  );
+
   return (
     <div class="terminal-workspace">
+      <Show when={isNarrow()}>
+      <div
+        class="terminal-mobile-header"
+        ref={mobileSessionBarRef}
+        data-mobile-session-bar
+        tabIndex={0}
+        onKeyDown={onMobilePagerKeyDown}
+        onTouchStart={(event) => onMobileTouchStart(event, true)}
+        onTouchMove={onMobileTouchMove}
+        onTouchEnd={onMobileTouchEnd}
+        onTouchCancel={onMobileTouchCancel}
+      >
+        <a class="terminal-mobile-back" href="#/sessions" aria-label="Back to Sessions">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M15 5l-7 7 7 7" />
+          </svg>
+        </a>
+        <span class={`activity-dot ${activityClass(mobileSelected())}`} aria-hidden="true" />
+        <div class="terminal-mobile-session">
+          <strong>{mobileSelected()?.name ?? "terminal"}</strong>
+          <span>
+            {mobileSelected() ? sessionStateWord(mobileSelected()!, Date.now(), sessionsStore.ready && !isConnected() ? sessionsStore.lastAnswerAt : null) : "unknown"}
+            <Show when={mobileSelected()?.cwd}>
+              <small> · {mobileSelected()?.cwd}</small>
+            </Show>
+          </span>
+        </div>
+        <button type="button" class="terminal-mobile-icon" onClick={openFind} aria-label="Find in terminal" title="Find in terminal">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="10.5" cy="10.5" r="5.5" />
+            <path d="m15 15 4 4" />
+          </svg>
+        </button>
+        <button type="button" class="terminal-mobile-icon" onClick={() => setOverflowOpen((value) => !value)} aria-label="More terminal actions" title="More terminal actions">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.5" />
+            <circle cx="12" cy="12" r="1.5" />
+            <circle cx="19" cy="12" r="1.5" />
+          </svg>
+        </button>
+        <Show when={overflowOpen()}>
+          <div class="terminal-mobile-overflow" ref={mobileOverflowRef} role="menu">
+            {overflowActions(true)}
+          </div>
+        </Show>
+      </div>
+      <Show when={error()}>
+        <div class="terminal-workspace-error terminal-mobile-error" role="alert">
+          {error()}
+        </div>
+      </Show>
+      <Show when={mobileSessions().length > 1}>
+      <div
+        class="terminal-mobile-pager"
+        role="region"
+        aria-label="Session pager"
+        onTouchStart={(event) => onMobileTouchStart(event, true)}
+        onTouchMove={onMobileTouchMove}
+        onTouchEnd={onMobileTouchEnd}
+        onTouchCancel={onMobileTouchCancel}
+      >
+        <div class="terminal-mobile-pager-strip">
+          <For each={mobileSessions()}>
+            {(session, index) => (
+              <button
+                type="button"
+                class={`terminal-mobile-dot ${activityClass(session)} ${index() === mobileIndex() ? "active" : ""}`}
+                aria-label={`Show ${session.name}`}
+                aria-current={index() === mobileIndex() ? "true" : undefined}
+                onClick={() => changeMobileSession(index())}
+              >
+                <span class="terminal-mobile-dot-mark" aria-hidden="true" />
+              </button>
+            )}
+          </For>
+        </div>
+        <span class="terminal-mobile-counter" aria-hidden="true">
+          {mobileIndex() + 1} / {mobileSessions().length}
+        </span>
+      </div>
+      </Show>
+      <span class="visually-hidden" aria-live="polite" aria-atomic="true">
+        {mobileSelected()
+          ? `${mobileSelected()!.name}, ${activityLabel(mobileSelected()!.activity, mobileSelected()!.exit_code)}`
+          : "No sessions"}
+      </span>
+      </Show>
       <div class="terminal-workspace-toolbar">
         <span class={`activity-dot ${activityClass(activeSession())}`} />
         <span class="terminal-workspace-title">
@@ -855,7 +1181,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
         <Show when={activeSession()?.cwd}>
           <span class="terminal-workspace-cwd">{activeSession()?.cwd}</span>
         </Show>
-        <Show when={error()}>
+        <Show when={!isNarrow() && error()}>
           <span class="terminal-workspace-error">{error()}</span>
         </Show>
         <span class="terminal-font-readout" role="group" aria-label="Terminal font size">
@@ -1019,46 +1345,65 @@ const TerminalWorkspace: Component<Props> = (props) => {
           </For>
         </div>
       </Show>
-      <div class={`terminal-layout ${soloEnabled() ? "soloed" : ""}`}>
-        <LayoutNodeView
-          node={root()}
-          activePaneId={activePaneId()}
-          parked={Boolean(props.parked)}
-          withHeaders={panes().length > 1}
-          sessions={allSessions()}
-          onFocusPane={setActivePaneId}
-          onRetargetPane={retargetPaneTo}
-          dropTarget={dropTarget()}
-          onPaneDragOver={onPaneDragOver}
-          onPaneDragLeave={onPaneDragLeave}
-          onPaneDrop={onPaneDrop}
-          interceptPaneInput={interceptPaneInput}
-          registerPaneSend={(paneId, fn) => {
-            if (fn) paneSenders.set(paneId, fn);
-            else paneSenders.delete(paneId);
-          }}
-          registerPaneActions={(paneId, actions) => {
-            if (actions) paneActions.set(paneId, actions);
-            else paneActions.delete(paneId);
-          }}
-          onNotify={props.onNotify}
-          onRequestFind={openFind}
-          onPaneSearchResults={onPaneSearchResults}
-          onPaneTitle={(sessionId, title) => {
-            // Only the tab's own session names the tab; a split showing another
-            // session's shell must not rewrite the label out from under it.
-            if (sessionId === props.sessionId) props.onTitle?.(title);
-          }}
-          onPaneBell={(sessionId) => props.onBell?.(sessionId)}
-        />
-      </div>
-      <form
-        class="terminal-composer"
-        onSubmit={(event) => {
-          event.preventDefault();
-          sendDraft(true);
-        }}
+      <Show
+        when={isNarrow() && panes().length === 1}
+        fallback={
+          <div class={`terminal-layout ${soloEnabled() ? "soloed" : ""}`}>
+            {renderWorkspaceLayout()}
+          </div>
+        }
       >
+        <div
+          ref={mobileStageRef}
+          class={`terminal-layout terminal-mobile-stage ${mobileDragging() ? "dragging" : ""} ${mobileSettling() ? "settling" : ""}`}
+          onTouchStart={(event) => onMobileTouchStart(event)}
+          onTouchMove={onMobileTouchMove}
+          onTouchEnd={onMobileTouchEnd}
+          onTouchCancel={onMobileTouchCancel}
+        >
+          <div
+            class="terminal-mobile-slide terminal-mobile-slide-current"
+            style={{ transform: `translate3d(${mobileSwipeOffset()}px, 0, 0)` }}
+          >
+            {renderWorkspaceLayout()}
+          </div>
+          <Show when={mobileDestination()} keyed>
+            {(destination) => (
+              <div
+                class="terminal-mobile-slide terminal-mobile-slide-destination"
+                aria-hidden={!mobileDragging() && !mobileSettling()}
+                style={{
+                  transform: `translate3d(calc(${mobileDestinationDirection() * 100}% + ${mobileSwipeOffset()}px), 0, 0)`,
+                }}
+              >
+                <div class="terminal-pane active">
+                  <Terminal
+                    sessionId={destination.id}
+                    onNotify={props.onNotify}
+                    onRequestFind={openFind}
+                    onBell={() => props.onBell?.(destination.id)}
+                  />
+                </div>
+              </div>
+            )}
+          </Show>
+        </div>
+      </Show>
+      <div class="terminal-mobile-input-dock">
+        <ModKeyRow
+          send={(data) => sendToActive(data)}
+          onCopy={() => void workspaceActions.copy()}
+          onPaste={() => void workspaceActions.paste()}
+          onSelectAll={() => workspaceActions.selectAll()}
+          onFocusComposer={focusComposer}
+        />
+        <form
+          class="terminal-composer"
+          onSubmit={(event) => {
+            event.preventDefault();
+            sendDraft(true);
+          }}
+        >
         <textarea
           ref={composerRef}
           value={draft()}
@@ -1082,6 +1427,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
           rows={2}
         />
         <button
+          class="terminal-composer-line"
           type="button"
           onClick={() => {
             if (composerRef) {
@@ -1094,6 +1440,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
           Line
         </button>
         <button
+          class="terminal-composer-insert"
           type="button"
           onClick={() => sendDraft(false)}
           disabled={!draft()}
@@ -1101,10 +1448,16 @@ const TerminalWorkspace: Component<Props> = (props) => {
         >
           Insert
         </button>
-        <button type="submit" title="Send text and Enter">
-          Enter
+        <button class="terminal-composer-send" type="submit" title="Send text and Enter" aria-label="Send text and Enter">
+          <Show when={isNarrow()} fallback="Enter">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m5 12 14-7-4 14-3-5-7-2Z" />
+              <path d="m12 14 7-9" />
+            </svg>
+          </Show>
         </button>
-      </form>
+        </form>
+      </div>
       <Show when={splitPickerDir()} keyed>
         {(direction) => (
           <Dialog
