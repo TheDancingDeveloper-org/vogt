@@ -3352,14 +3352,14 @@ test("History distinguishes an archive outage from an empty archive and recovers
   await expect(error).toContainText("Failed to load history");
   await expect(error).toContainText("archive offline");
   await expect(page.getByText("0 archived sessions")).toHaveCount(0);
-  await expect(page.getByText("No archived sessions.")).toHaveCount(0);
+  await expect(page.getByText("No sessions yet.")).toHaveCount(0);
 
   const retry = page.getByRole("button", { name: "Retry history" });
   if (test.info().project.name === "phone") await retry.tap();
   else await retry.click();
 
   await expect(page.getByText("0 archived sessions")).toBeVisible();
-  await expect(page.getByText("No archived sessions.")).toBeVisible();
+  await expect(page.getByText("No sessions yet.")).toBeVisible();
   await expect(error).toHaveCount(0);
 });
 
@@ -4352,17 +4352,19 @@ test("A resized, collapsed rail does not leak its width into the narrow shell", 
 // Sessions sub-panel (#167); the places rail is where sessions are listed now.
 
 /**
- * History reads archived sessions only (`USER_GUIDE.md` §2: "Archived
- * scrollback from sessions that have ended"), and a reader with live shells
- * open has no way to tell that apart from a broken read without saying so.
+ * History is the one place that lists every session, live and dead (#477):
+ * a running shell from the live registry is unioned into the list even when
+ * the archive is empty, and badged live rather than hidden until it exits.
  */
-test("History explains an empty archive when live sessions are still running", async ({ page }) => {
+test("History lists a live session even when the archive is empty", async ({ page }) => {
   await installFixtures(page, {}, [liveSession]);
   await page.route("**/api/history/sessions*", (route) => route.fulfill({ json: [] }));
   await page.goto("/#/history");
 
-  await expect(page.getByText("No archived sessions.", { exact: false })).toBeVisible();
-  await expect(page.getByText(/session is currently running/)).toBeVisible();
+  const row = page.getByRole("button", { name: /browser-session/ });
+  await expect(row).toBeVisible();
+  await expect(row.getByText("Live")).toBeVisible();
+  await expect(page.getByText("No sessions yet.")).toHaveCount(0);
 });
 
 // -- #213 / #224: editing and moving a work item from its own page ----------

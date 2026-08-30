@@ -7,7 +7,9 @@ import {
   api,
   type HistorySessionMetadata,
   type OperationalStatus,
+  type SessionSummary,
 } from "../api";
+import { refreshSessions } from "../store";
 
 function archive(index: number): HistorySessionMetadata {
   return {
@@ -74,7 +76,33 @@ function renderHistory() {
   ));
 }
 
-afterEach(() => vi.restoreAllMocks());
+function liveSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
+  return {
+    id: "live-1",
+    name: "live-shell",
+    activity: "running",
+    exit_code: null,
+    scrollback_bytes: 2048,
+    cwd: "/workspace/vogt",
+    command: "bash",
+    created_at: "2026-08-19T00:00:00Z",
+    ...overrides,
+  };
+}
+
+/** Drive the global live-session store the History list unions in (#477). */
+async function setLiveSessions(list: SessionSummary[]): Promise<void> {
+  vi.spyOn(api, "listSessions").mockResolvedValue(list);
+  await refreshSessions();
+}
+
+afterEach(async () => {
+  vi.restoreAllMocks();
+  // The live store is a module singleton; empty it so it never leaks into the
+  // archived-only tests, then drop the reset mock too.
+  await setLiveSessions([]);
+  vi.restoreAllMocks();
+});
 
 describe("History read truth", () => {
   it("keeps a failed initial read distinct from a successful empty archive and retries", async () => {
@@ -89,12 +117,12 @@ describe("History read truth", () => {
       "Failed to load history: 503 archive unavailable",
     );
     expect(screen.queryByText("0 archived sessions")).not.toBeInTheDocument();
-    expect(screen.queryByText("No archived sessions.")).not.toBeInTheDocument();
+    expect(screen.queryByText("No sessions yet.")).not.toBeInTheDocument();
 
     await fireEvent.click(screen.getByRole("button", { name: "Retry history" }));
 
     expect(await screen.findByText("0 archived sessions")).toBeVisible();
-    expect(screen.getByText("No archived sessions.")).toBeVisible();
+    expect(screen.getByText("No sessions yet.")).toBeVisible();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
@@ -216,5 +244,63 @@ describe("History read truth", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Retry output search" }));
     expect(await screen.findByText("1 output matches (up to 100)")).toBeVisible();
     expect(screen.getAllByText("recovered", { selector: "mark" })[0]).toBeVisible();
+  });
+
+  // #477: History is the one place that lists every session. A running shell
+  // from the live registry is unioned into the archived list, badged live, and
+  // its replay tails the on-disk log with no archive DB record.
+  it("unions live sessions into the list, badges them, and filters by liveness", async () => {
+    const exited = archive(1); // exit_code 0
+    const unfinished = { ...archive(2), exit_code: null, ended_at: null };
+    vi.spyOn(api, "operationalStatus").mockResolvedValue(status(2));
+    vi.spyOn(api, "listHistorySessions").mockResolvedValue([exited, unfinished]);
+    const detail = vi.spyOn(api, "getHistorySession").mockResolvedValue(exited);
+    const log = vi.spyOn(api, "getHistorySessionLog").mockResolvedValue({
+      session_id: "live-1",
+      text: "live tail output",
+      bytes: 16,
+      total_bytes: 16,
+      truncated: false,
+    });
+    await setLiveSessions([liveSummary()]);
+
+    renderHistory();
+
+    // All three rows are listed together, newest (the live shell) first.
+    expect(await screen.findAllByText("live-shell")).not.toHaveLength(0);
+    const liveRow = screen.getAllByText("live-shell")[0]!.closest("button")!;
+    expect(within(liveRow).getByText("Live")).toBeVisible();
+    const exitedRow = screen.getByText("archive-1").closest("button")!;
+    expect(within(exitedRow).getByText("Exited")).toBeVisible();
+
+    // The live shell has no archive record: it is served from the registry
+    // (no detail fetch) and its replay tails the on-disk log by id.
+    expect(await screen.findByText("live tail output")).toBeVisible();
+    expect(log).toHaveBeenCalledWith("live-1", expect.any(Number));
+    expect(detail).not.toHaveBeenCalledWith("live-1");
+    expect(screen.getByText(/Tail view of the live session's raw terminal log/)).toBeVisible();
+    // Archive-only actions are hidden while the session is still live.
+    expect(screen.queryByRole("button", { name: "Export" })).not.toBeInTheDocument();
+    expect(screen.getByText(/their output is not yet in the search index/)).toBeVisible();
+
+    // The selection (the live shell) persists across filter changes and keeps
+    // showing in the detail heading, so assert against the list *rows*, which
+    // are buttons whose accessible name carries the session name.
+    const statusSelect = screen.getByRole("combobox", { name: "Status" });
+
+    await fireEvent.input(statusSelect, { target: { value: "running" } });
+    expect(screen.getByRole("button", { name: /live-shell/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /archive-1/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /archive-2/ })).not.toBeInTheDocument();
+
+    await fireEvent.input(statusSelect, { target: { value: "exited" } });
+    expect(screen.getByRole("button", { name: /archive-1/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /archive-2/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /live-shell/ })).not.toBeInTheDocument();
+
+    await fireEvent.input(statusSelect, { target: { value: "unfinished" } });
+    expect(screen.getByRole("button", { name: /archive-2/ })).toBeVisible();
+    expect(screen.queryByRole("button", { name: /archive-1/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /live-shell/ })).not.toBeInTheDocument();
   });
 });
