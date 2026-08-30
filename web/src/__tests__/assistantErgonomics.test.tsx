@@ -17,7 +17,7 @@ vi.mock("@capacitor/core", () => ({
   Capacitor: { isPluginAvailable: () => false },
 }));
 
-import Assistant, { nearBottom } from "../Assistant";
+import Assistant, { nearBottom, transcriptTimeLabel } from "../Assistant";
 
 /** Let microtasks and the component's `queueMicrotask`/timers settle. */
 async function settle(times = 3): Promise<void> {
@@ -227,5 +227,107 @@ describe("an assistant reply", () => {
     expect(pre?.textContent).toContain("cargo test");
     // A copy affordance rides along with the reply.
     expect(m.container.querySelector('[data-testid="assistant-copy"]')).not.toBeNull();
+  });
+
+  it("renders server-provided trace, session references, and actions", async () => {
+    const sessionId = "11111111-1111-4111-8111-111111111111";
+    const m = await mount(
+      jsonOk({
+        reply: "The deploy agent is waiting.",
+        pending_action: null,
+        tool_trace: ["listed sessions", "read deploy-agent tail"],
+        created_at: new Date().toISOString(),
+        session_refs: [
+          { id: sessionId, name: "deploy-agent", activity: "waiting-for-input" },
+        ],
+        actions: [
+          {
+            kind: "open-session",
+            session_id: sessionId,
+            label: "Open deploy-agent",
+          },
+        ],
+      }),
+    );
+    m.type("what needs me?");
+    await m.submit();
+
+    expect(m.container.querySelector(".assistant-trace")?.textContent).toContain(
+      "▸ listed sessions · read deploy-agent tail",
+    );
+    const chip = m.container.querySelector<HTMLAnchorElement>(
+      ".assistant-session-chip",
+    );
+    expect(chip?.textContent).toContain("deploy-agent");
+    expect(chip?.getAttribute("href")).toBe(`#/t/${sessionId}`);
+    const action = m.container.querySelector<HTMLAnchorElement>(
+      ".assistant-open-session",
+    );
+    expect(action?.textContent).toBe("Open deploy-agent ›");
+    expect(action?.getAttribute("href")).toBe(`#/t/${sessionId}`);
+    expect(m.container.querySelector(".assistant-time-separator")?.textContent).toContain(
+      "Today",
+    );
+  });
+
+  it("does not infer a session link from arbitrary reply text", async () => {
+    const m = await mount(
+      jsonOk({
+        reply: "Open made-up-session if you want.",
+        pending_action: null,
+        tool_trace: [],
+      }),
+    );
+    m.type("guess a session");
+    await m.submit();
+
+    expect(m.container.querySelector(".assistant-session-chip")).toBeNull();
+    expect(m.container.querySelector(".assistant-open-session")).toBeNull();
+  });
+});
+
+describe("transcript timestamp grouping", () => {
+  it("keeps old entries without timestamps compatible", () => {
+    expect(transcriptTimeLabel(undefined)).toBeNull();
+    expect(transcriptTimeLabel("not-a-date")).toBeNull();
+  });
+
+  it("labels a minute once and suppresses consecutive entries in that minute", () => {
+    const now = new Date("2026-08-30T10:30:00Z");
+    const first = "2026-08-30T10:05:10Z";
+    const second = "2026-08-30T10:05:55Z";
+
+    expect(transcriptTimeLabel(first, undefined, now)).toContain("Today");
+    expect(transcriptTimeLabel(second, first, now)).toBeNull();
+  });
+});
+
+describe("a terminal-input approval", () => {
+  it("shows the exact keystrokes in one compact approval card", async () => {
+    const m = await mount(
+      jsonOk({
+        reply: null,
+        pending_action: {
+          kind: "send_input",
+          id: "22222222-2222-4222-8222-222222222222",
+          session_id: "11111111-1111-4111-8111-111111111111",
+          session_name: "deploy-agent",
+          text: "y",
+          submit: true,
+        },
+        tool_trace: ["prepared terminal input"],
+      }),
+    );
+    m.type("answer yes");
+    await m.submit();
+
+    const card = m.container.querySelector('[aria-label="Pending approval"]');
+    expect(card?.textContent).toContain("Approval required");
+    expect(card?.textContent).toContain("Send y ⏎ to deploy-agent");
+    expect(card?.textContent).toContain("Audited to the approver.");
+    expect(card?.querySelectorAll("button")[0]?.textContent).toBe("Deny");
+    expect(card?.querySelectorAll("button")[1]?.textContent).toBe(
+      "Approve on screen",
+    );
   });
 });

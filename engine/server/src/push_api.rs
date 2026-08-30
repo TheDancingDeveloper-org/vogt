@@ -152,7 +152,7 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
     let mut rx = state.bus.subscribe();
     tokio::spawn(async move {
         while let Ok(ev) = rx.recv().await {
-            if let ServerEvent::Activity { id, state: act } = ev {
+            if let ServerEvent::Activity { id, state: act, .. } = ev {
                 let (kind, verb, data_kind) = match act {
                     ActivityState::WaitingForInput => (
                         NotificationKind::WaitingForInput,
@@ -435,6 +435,7 @@ mod tests {
         assert!(!is_notifiable_drift(&ServerEvent::Activity {
             id: uuid::Uuid::nil(),
             state: ActivityState::WaitingForInput,
+            activity_changed_at: String::new(),
         }));
     }
 }

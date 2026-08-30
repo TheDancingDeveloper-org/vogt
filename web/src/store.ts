@@ -10,12 +10,15 @@ interface SessionsStore {
   order: string[];
   /** True once we've loaded the initial list at least once. */
   ready: boolean;
+  /** Timestamp of the last successful list or stream answer. */
+  lastAnswerAt: string | null;
 }
 
 const [store, setStore] = createStore<SessionsStore>({
   sessions: {},
   order: [],
   ready: false,
+  lastAnswerAt: null,
 });
 
 const [error, setError] = createSignal<string | null>(null);
@@ -42,6 +45,7 @@ export async function refreshSessions(signal?: AbortSignal): Promise<void> {
     );
     setError(null);
     setConnected(true);
+    setStore("lastAnswerAt", new Date().toISOString());
   } catch (e) {
     if (signal?.aborted) return;
     setError((e as Error).message);
@@ -96,13 +100,20 @@ export async function renameSession(id: string, name: string): Promise<void> {
   );
 }
 
-export function updateActivity(id: string, state: ActivityState) {
+export function updateActivity(id: string, state: ActivityState, activityChangedAt?: string) {
   setStore(
     produce((s) => {
       const sess = s.sessions[id];
-      if (sess) sess.activity = state;
+      if (sess) {
+        sess.activity = state;
+        if (activityChangedAt) sess.activity_changed_at = activityChangedAt;
+      }
     }),
   );
+}
+
+function markAnswered(): void {
+  setStore("lastAnswerAt", new Date().toISOString());
 }
 
 let unsubscribeEvents: (() => void) | null = null;
@@ -184,6 +195,7 @@ export function startEventStream(): void {
   unsubscribeEvents = subscribeEvents(
     (ev: ServerEvent) => {
       setConnected(true);
+      markAnswered();
       reconnectAttempts = 0;
       switch (ev.type) {
         case "session-created":
@@ -210,7 +222,7 @@ export function startEventStream(): void {
           notifySessionKilled(ev.id, ev.exit_code);
           break;
         case "activity":
-          updateActivity(ev.id, ev.state);
+          updateActivity(ev.id, ev.state, ev.activity_changed_at);
           break;
         case "vogt-changed":
           // The Vogt surfaces subscribe to this themselves; the session store
