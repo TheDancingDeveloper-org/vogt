@@ -1294,6 +1294,12 @@ textarea {
   white-space: normal;
 }
 
+/* Base sizing for the New-session button icon. Without this the inline SVG has
+   only a viewBox and falls back to the 300x150 replaced-element default on
+   desktop, ballooning the button (issue #489). The phone media block below
+   restates this; keep the two in sync. */
+.sessions-new-icon { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
+
 /* `.board-field select` is shared with the denser filter-panel form below,
    whose 8px padding is the right call there; in the header it is what pushed
    Board's own Refresh cadence to 36px next to every 32px button beside it.
