@@ -111,6 +111,7 @@ import {
 } from "./placeMetrics";
 import { createNow, onVogtLive } from "./viewAge";
 import { noteForeground } from "./wakeCoordinator";
+import { startPrewarm } from "./terminalPrewarm";
 import {
   activityClass,
   activityLabel,
@@ -626,6 +627,9 @@ const App: Component = () => {
         await refreshSessions();
         startEventStream();
         noteForeground("boot");
+        // Warm the most-recently-active panes in the background so a later
+        // click restores from cache and reattaches with a cheap delta (#476).
+        startPrewarm();
         void placeMetrics.refresh();
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
@@ -646,6 +650,7 @@ const App: Component = () => {
     await refreshSessions();
     startEventStream();
     noteForeground("boot");
+    startPrewarm();
     setAuthError(null);
     setAuthState("authenticated");
     void placeMetrics.refresh();
