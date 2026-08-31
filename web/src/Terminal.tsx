@@ -27,6 +27,7 @@ import {
   scheduleReplay,
   type ReplayHandle,
 } from "./terminalReplay";
+import { beginForegroundReplay } from "./terminalPrewarm";
 import {
   clampTerminalFontSize,
   DEFAULT_TERMINAL_FONT_SIZE,
@@ -177,6 +178,20 @@ const TerminalView: Component<Props> = (props) => {
 
   const isParked = () => Boolean(props.parked) || hiddenParked();
 
+  // Foreground-replay gate for background pre-warm (#476). While a live
+  // (non-parked) pane is loading its cache / running its first cold attach up
+  // to snapshot-done, background warm-up pauses so the pane the reader is
+  // actually looking at is never delayed behind it. The token is idempotent, so
+  // extra enter/exit calls (reconnects, resumes) cannot leak or double-count.
+  let foregroundReplayEnd: (() => void) | null = null;
+  const enterForegroundReplay = () => {
+    if (foregroundReplayEnd || isParked()) return;
+    foregroundReplayEnd = beginForegroundReplay();
+  };
+  const exitForegroundReplay = () => {
+    foregroundReplayEnd?.();
+    foregroundReplayEnd = null;
+  };
 
   const syncQueuedBytes = () => setQueuedBytes(pendingInputBytes);
 
@@ -765,6 +780,8 @@ const TerminalView: Component<Props> = (props) => {
 
     void loadTerminalCache(props.sessionId).then((cached) => {
       if (destroyed) return;
+      // A live pane's initial load holds the pre-warm gate until snapshot-done.
+      enterForegroundReplay();
       if (!cached || cached.data.byteLength === 0) {
         setReadyToConnect(true);
         if (!isParked()) connect();
@@ -809,6 +826,8 @@ const TerminalView: Component<Props> = (props) => {
   function markSessionGone() {
     if (!sessionGone) {
       sessionGone = true;
+      // This pane will never reach snapshot-done; do not hold pre-warm paused.
+      exitForegroundReplay();
       dropPendingInput();
       clearCountdown();
       setReconnectView(null);
@@ -937,6 +956,8 @@ const TerminalView: Component<Props> = (props) => {
             void (snapshotReplay?.done ?? Promise.resolve()).then(() => {
               if (destroyed || replay !== snapshotReplay) return;
               inSnapshot = false;
+              // The active pane has finished its own replay; let pre-warm run.
+              exitForegroundReplay();
               setStatusText(null);
               term?.scrollToBottom();
               persistCache();
@@ -1006,6 +1027,8 @@ const TerminalView: Component<Props> = (props) => {
   function parkSocket() {
     if (socketParked) return;
     socketParked = true;
+    // A parked pane is no longer foreground; release the pre-warm gate.
+    exitForegroundReplay();
     persistCache();
     replay?.cancel();
     if (reconnectTimer !== null) {
@@ -1024,6 +1047,8 @@ const TerminalView: Component<Props> = (props) => {
     if (!socketParked) return;
     socketParked = false;
     if (destroyed || !readyToConnect() || isParked()) return;
+    // Resuming to the foreground: hold the pre-warm gate through this attach.
+    enterForegroundReplay();
     setStatusText("Loading terminal...");
     connect();
   }
@@ -1036,6 +1061,7 @@ const TerminalView: Component<Props> = (props) => {
 
   onCleanup(() => {
     destroyed = true;
+    exitForegroundReplay();
     replay?.cancel();
     pendingInput = [];
     pendingInputBytes = 0;
