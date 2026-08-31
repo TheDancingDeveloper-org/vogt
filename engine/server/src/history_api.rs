@@ -33,16 +33,31 @@ pub struct SearchQuery {
     q: String,
     #[serde(default = "default_search_limit")]
     limit: usize,
+    /// Supplement the archived FTS index with a bounded scan of each live
+    /// session's scrollback, so output that has not been archived yet is still
+    /// found (#491). On by default; pass `false` for archive-only results.
+    #[serde(default = "default_include_live")]
+    include_live: bool,
 }
 
 fn default_search_limit() -> usize {
     20
 }
 
+fn default_include_live() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LogQuery {
     #[serde(default = "default_tail_bytes")]
     tail_bytes: u64,
+    /// Strip the escape sequences a terminal consumes without printing, so the
+    /// `text` is readable plain text rather than raw control bytes. Off by
+    /// default to preserve the raw stream for callers that render it
+    /// themselves (the PWA replay resolves it client-side).
+    #[serde(default)]
+    strip_ansi: bool,
 }
 
 fn default_tail_bytes() -> u64 {
@@ -75,14 +90,46 @@ pub async fn list_sessions(
     Ok(Json(sessions))
 }
 
-/// Search session output via full-text search
+/// Search session output via full-text search over the archive, optionally
+/// supplemented by a bounded scan of live sessions' scrollback (#491).
+///
+/// The live scan costs zero DB writes: for each live session it reads the last
+/// `history_live_scan_bytes` of scrollback, strips ANSI, and applies the same
+/// AND-of-terms match as the FTS query. Live hits are appended after the
+/// archived ones and the combined list is held to `limit`, so a search never
+/// returns more than asked regardless of how many sessions are running.
 pub async fn search_sessions(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<SearchResult>>> {
     let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
-    let results = history.search(&q.q, q.limit).await?;
+    let limit = q.limit.min(100);
+    let mut results = history.search(&q.q, limit).await?;
+
+    if q.include_live && results.len() < limit {
+        let tokens = crate::history::query_tokens(&q.q);
+        if !tokens.is_empty() {
+            let scan_bytes = state.config.history_live_scan_bytes as usize;
+            for session in state.sessions.live_sessions() {
+                if results.len() >= limit {
+                    break;
+                }
+                let summary = session.summary();
+                let tail = session.tail(scan_bytes);
+                if let Some(hit) = crate::history::live_match(
+                    &summary.id.to_string(),
+                    &summary.name,
+                    &summary.created_at,
+                    tail.as_ref(),
+                    &tokens,
+                ) {
+                    results.push(hit);
+                }
+            }
+        }
+    }
+
     Ok(Json(results))
 }
 
@@ -105,7 +152,9 @@ pub async fn get_session_log(
 ) -> Result<Json<SessionLogPreview>> {
     let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
-    let preview = history.read_log_preview(id, q.tail_bytes).await?;
+    let preview = history
+        .read_log_preview(id, q.tail_bytes, q.strip_ansi)
+        .await?;
     Ok(Json(preview))
 }
 

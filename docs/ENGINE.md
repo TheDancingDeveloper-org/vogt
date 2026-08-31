@@ -1109,13 +1109,21 @@ exactly those.
 
 - `GET /api/history/sessions?limit=&offset=` -> `SessionMetadata[]`; `limit`
   defaults to 50.
-- `GET /api/history/search?q=&limit=` -> `SearchResult[]` — full-text over
-  archived output, ranked; `limit` defaults to 20.
+- `GET /api/history/search?q=&limit=&include_live=` -> `SearchResult[]` —
+  full-text over archived output, ranked; `limit` defaults to 20. Each result
+  carries `live` (default false). `include_live` defaults to **true**: on top
+  of the archived FTS hits, each running session's scrollback is scanned
+  on-demand (the last `history_live_scan_bytes`, ANSI-stripped, same
+  AND-of-terms match) and matches are appended with `live: true`, so output
+  that has not been archived yet is still found (#491). The combined list is
+  held to `limit`. Pass `include_live=false` for archive-only results.
 - `GET /api/history/:id` -> `SessionMetadata`
-- `GET /api/history/:id/log?tail_bytes=` -> `SessionLogPreview`
+- `GET /api/history/:id/log?tail_bytes=&strip_ansi=` -> `SessionLogPreview`
   `{session_id, text, bytes, total_bytes, truncated}` — the *tail*, 64 KiB by
   default. `truncated` is how a client knows it is not looking at the whole
-  run.
+  run. `strip_ansi` (default false) removes the escape sequences a terminal
+  consumes without printing, so `text` is readable plain text; the byte
+  counters still describe the raw tail window that was read.
 - `GET /api/history/:id/download` -> the whole log, streamed, as an attachment
   named for the session.
 - `DELETE /api/history/:id` -> `{"ok": true}`, `404` if it was already gone
@@ -1326,6 +1334,8 @@ Every setting, with the TOML key for a `--config` file and its default
 | `assistant_profiles` | `ENGINE_ASSISTANT_PROFILES_JSON` | `[]` | additional named providers, a JSON array of profile objects (below) |
 | `assistant_default_profile` | `ENGINE_ASSISTANT_DEFAULT_PROFILE` | the implicit `default` | which profile a request that names none runs on |
 | `assistant_log_retention_days` | `ENGINE_ASSISTANT_LOG_RETENTION_DAYS` | `30` | horizon of the durable interaction log, enforced by a daily sweep |
+| `history_retention_days` | `ENGINE_HISTORY_RETENTION_DAYS` | `30` | horizon for archived session history (FTS index + raw logs), enforced by a daily sweep; `0` keeps forever |
+| `history_live_scan_bytes` | `ENGINE_HISTORY_LIVE_SCAN_BYTES` | `262144` | trailing scrollback bytes scanned per live session when a history search sets `include_live` |
 | `assistant_stt_base_urls` | `ENGINE_ASSISTANT_STT_BASE_URLS` (comma-separated) | empty (server STT off) | ordered list of OpenAI-compatible `/audio/transcriptions` bases |
 | `assistant_stt_model` | `ENGINE_ASSISTANT_STT_MODEL` | `whisper-1` | transcription model |
 | `assistant_stt_api_key` | `ENGINE_ASSISTANT_STT_API_KEY` | unset | key for whichever STT entry needs one; a local server needs none |
