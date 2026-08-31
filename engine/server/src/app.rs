@@ -228,6 +228,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // whatever the last caller passed — the failure mode r18 named in the
     // session log.
     spawn_assistant_log_retention_sweeper(Arc::clone(&state));
+    // Background task: enforce the session-history retention horizon on the same
+    // daily schedule (#491), so `history.db` and the raw `session-logs/` cannot
+    // grow without bound. A no-op when history is disabled or the horizon is 0.
+    spawn_history_retention_sweeper(Arc::clone(&state));
 
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
     let public = Router::new()
@@ -436,6 +440,33 @@ fn spawn_assistant_log_retention_sweeper(state: Arc<AppState>) {
                 ),
                 Ok(_) => {}
                 Err(e) => tracing::warn!("assistant log retention sweep failed: {e}"),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
+        }
+    });
+}
+
+/// Enforce the session-history retention horizon on a daily schedule (#491),
+/// mirroring the assistant-log sweeper: one sweep at startup and then every 24
+/// hours. A no-op when history is disabled, and when the horizon is `0` — the
+/// documented "keep forever" — so the sweep never deletes everything by
+/// treating 0 days as "older than now".
+fn spawn_history_retention_sweeper(state: Arc<AppState>) {
+    let Some(history) = state.history.clone() else {
+        return;
+    };
+    let retention_days = state.config.history_retention_days;
+    if retention_days == 0 {
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            match history.cleanup_old_sessions(retention_days).await {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, retention_days, "session history retention sweep")
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("session history retention sweep failed: {e}"),
             }
             tokio::time::sleep(std::time::Duration::from_secs(24 * 60 * 60)).await;
         }

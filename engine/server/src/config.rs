@@ -272,6 +272,16 @@ pub struct Config {
     /// days. Enforced on a schedule so the horizon is a configured maximum
     /// rather than whatever the last caller passed. Defaults to 30.
     pub assistant_log_retention_days: u32,
+    /// Retention horizon for archived session history (the FTS index and the
+    /// raw scrollback logs), in days. Enforced by a daily sweep, mirroring the
+    /// assistant-log horizon, so `history.db` and `session-logs/` cannot grow
+    /// without bound. Defaults to 30; `0` disables the sweep (keep forever).
+    pub history_retention_days: u32,
+    /// How many trailing bytes of each *live* session's scrollback a history
+    /// search scans when `include_live` is set. Bounds the per-search cost of
+    /// live coverage (no DB writes; the scan is read-only). Defaults to 256
+    /// KiB.
+    pub history_live_scan_bytes: u64,
     /// Server-side speech (FR-T12), configured **independently of the chat
     /// profile**: the whole point of the requirement is that a deployment
     /// whose chat runs through OpenRouter (which does not front audio
@@ -387,6 +397,8 @@ struct FileConfig {
     assistant_profiles: Option<Vec<AssistantProfile>>,
     assistant_default_profile: Option<String>,
     assistant_log_retention_days: Option<u32>,
+    history_retention_days: Option<u32>,
+    history_live_scan_bytes: Option<u64>,
     assistant_stt_base_urls: Option<Vec<String>>,
     assistant_stt_api_key: Option<String>,
     assistant_stt_model: Option<String>,
@@ -685,6 +697,12 @@ pub fn load(
         assistant_log_retention_days: parse_u32_env("ENGINE_ASSISTANT_LOG_RETENTION_DAYS")?
             .or(from_file.assistant_log_retention_days)
             .unwrap_or(30),
+        history_retention_days: parse_u32_env("ENGINE_HISTORY_RETENTION_DAYS")?
+            .or(from_file.history_retention_days)
+            .unwrap_or(30),
+        history_live_scan_bytes: parse_u64_env("ENGINE_HISTORY_LIVE_SCAN_BYTES")?
+            .or(from_file.history_live_scan_bytes)
+            .unwrap_or(256 * 1024),
         assistant_stt_base_urls,
         assistant_stt_api_key,
         assistant_stt_model: from_file
