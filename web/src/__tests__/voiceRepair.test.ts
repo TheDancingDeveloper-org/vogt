@@ -1,6 +1,6 @@
 // FR-T13: the repair pass between a recognizer and the composer.
 //
-// These are the utterances from `docs/VOICE_POC.md` §2, in the forms a
+// These are the utterances from the voice POC script, in the forms a
 // recognizer actually returns them. They are the half of FR-T5's promised
 // validation pass that does not need a microphone — and the half that will
 // still be true next week, since a person speaking into a device once proves

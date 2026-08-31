@@ -155,8 +155,7 @@ points: configuration, Compose overlays, image extension, running behind your
 own front door, and the optional integrations above. The Rust engine and
 Capacitor mobile shell (`engine/`, `web/`, `mobile/`) are the largest worked
 example of those extension points; the engine is the stack's front half, and
-the mobile shell wraps its PWA. See [`opensource.md`](opensource.md) for the
-public/private boundary and compatibility policy.
+the mobile shell wraps its PWA.
 
 ## Development
 
@@ -198,8 +197,8 @@ workflow and [`docs/CONFIG.md`](docs/CONFIG.md) for every setting.
   what it owns, how to build and run it, its wire contract, the assistant.
 - [Design outline](docs/DESIGN.md) — architecture and domain decisions.
 - [Contributing](docs/CONTRIBUTING.md) — workflow and checks.
-- [Public boundary and compatibility](opensource.md) — what is supported,
-  what is optional, which legacy names remain as aliases.
+- [AI policy](AI_POLICY.md) — how this stack is built: by AI agents, for
+  AI-forward developers, and what that means for contributions.
 
 ## Licence
 

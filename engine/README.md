@@ -25,7 +25,6 @@ drifts in exactly the places nobody looks.
 | Rules for agents working in this subtree | [`AGENTS.md`](AGENTS.md), and [`../AGENTS.md`](../AGENTS.md) above it |
 | Deploying the images, including the optional engine | [`docs/DEPLOYMENT.md`](../docs/DEPLOYMENT.md) |
 | Why there are two languages at all | [`docs/DESIGN.md`](../docs/DESIGN.md) |
-| The voice assistant's delivery status | [`docs/VOICE_DELIVERY.md`](../docs/VOICE_DELIVERY.md) |
 
 Two things that bite immediately, repeated here because this is where somebody
 lands before reading anything else:

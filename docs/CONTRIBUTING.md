@@ -74,11 +74,10 @@ The supported public product is the Python core, Rust session engine, and
 Solid PWA together; the core remains independently supported over CLI, REST,
 and MCP. The engine and PWA have their own toolchains (`engine/AGENTS.md`,
 [`ENGINE.md`](ENGINE.md)) and image, and a core-only change need not require
-those optional toolchains unless it changes their contracts. Read
-[`opensource.md`](../opensource.md) before changing packaging or deployment
-files — `tests/test_public_delivery.py` pins that the public example stays
-self-contained, and a change that introduces a private path, registry, secret
-broker, or external service into it will fail there.
+those optional toolchains unless it changes their contracts. Before changing
+packaging or deployment files, know that `tests/test_public_delivery.py` pins
+the public example as self-contained: a change that introduces a private
+path, registry, secret broker, or external service into it will fail there.
 
 Vogt is currently a single-maintainer project. Protected branches therefore
 require the test and policy checks, resolved review conversations, linear
@@ -94,7 +93,7 @@ transport-parity rule, logging — are in [`AGENTS.md`](../AGENTS.md).
 ## Pull requests
 
 Describe the behavior change, the surfaces it affects, and the verification
-commands run. If a change keeps a compatibility alias for a
-historical identifier, explain its migration/removal plan and record it in
-[`opensource.md`](../opensource.md) rather than hiding the alias in a generic
-example.
+commands run. Do not add compatibility aliases for historical identifiers:
+no released installation depends on the legacy names still in the tree, and
+removing them outright is preferred over extending them (see
+[`ROADMAP.md`](ROADMAP.md) "Pending cleanup").

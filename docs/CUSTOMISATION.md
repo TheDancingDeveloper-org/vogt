@@ -260,9 +260,10 @@ model and request details.
 
 A fronted deployment needs a token the front door presents to the core, so
 audit rows name the actor who acted rather than "the proxy". The core is what
-validates it — which used to mean it could only be *minted* by a running
-core, and a first deploy went: start up, watch `/api/vogt` answer 401, exec
-into the core, mint a token, paste it into your configuration, deploy again.
+validates it — which, without a bootstrap path, would mean it could only be
+*minted* by a running core, making a first deploy: start up, watch
+`/api/vogt` answer 401, exec into the core, mint a token, paste it into your
+configuration, deploy again.
 The second deploy is not free either: it restarts the pod and takes every
 open terminal session with it.
 
@@ -430,7 +431,7 @@ tailnet and no maintainer integrations, so it runs on any host unchanged.
 
 The maintainer's own estate layers its host mounts, tailnet, and secret
 integrations on top of this same base. That overlay is not tracked in this
-repository (#204) — a deployment tied to one operator's paths and addresses
+repository — a deployment tied to one operator's paths and addresses
 does not belong in a public tree — and lives in the operator's private ops
 repository instead. Treat `engine.overlay.yml` as the pattern: every
 estate-specific value it would add is an environment value or a mount an
