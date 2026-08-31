@@ -1645,6 +1645,7 @@ const App: Component = () => {
                   <a href="#/t/demo-build">Build + tests</a>
                   <a href="#/t/demo-agent">Agent review</a>
                   <a href="#/t/demo-logs">Incident view</a>
+                  <a href="/mobile-demo.html" target="_blank" rel="noreferrer">Mobile app</a>
                   <a href="/demo-gui.html" target="_blank" rel="noreferrer">GUI stream</a>
                   <a
                     href={`https://github.com/TheDancingDeveloper-org/vogt/commit/${manifest().source_sha}`}
