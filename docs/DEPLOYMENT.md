@@ -91,7 +91,7 @@ What the base does, and why it does it that way:
 | `VOGT_PUBLIC_URL` | yes | — | The URL clients use to reach this instance. |
 | `VOGT_PORT` | no | `8080` | Host port the container's 8000 is published on. |
 | `VOGT_BIND_IP` | no | `127.0.0.1` | Host interface the port is published on. |
-| `VOGT_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt:0.3.0` | The image to run. |
+| `VOGT_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt:0.3.1` | The image to run. |
 | `VOGT_UID` | no | `1000` | The uid the container runs as (gid is always 0). |
 | `VOGT_LOG_LEVEL` | no | `info` | Verbosity of Vogt's own logger. |
 
@@ -118,7 +118,7 @@ cosign verify \
 ```
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt:0.3.0 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt:0.3.1 \
   | grep -m1 Digest
 # then, in deploy/.env:
 VOGT_IMAGE=ghcr.io/thedancingdeveloper-org/vogt@sha256:<digest>

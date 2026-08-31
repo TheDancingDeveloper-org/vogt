@@ -14,6 +14,43 @@ git log rather than being reconstructed here.
 
 Nothing yet.
 
+## [0.3.1] - 2026-08-31
+
+A feature and reliability release focused on the terminal, session history, and
+the mobile experience. No operation was renamed or removed and no schema
+migration is required.
+
+### Added
+
+- **History lists every session, live and exited.** The History tab now unions
+  running sessions with the archive, badged and filterable by status, with an
+  in-progress replay preview for live sessions.
+- **Background pane pre-warm.** After boot, recently-active session panes are
+  warmed in the background so a fresh browser opens any of them instantly
+  instead of paying a cold full-snapshot load on first click.
+- **Mobile app demo site.** A second public demo,
+  `vogt-mobile-demo.thedancingdeveloper.com`, showcases the mobile app
+  alongside the existing desktop demo.
+- **Mobile Sessions and Assistant redesign** — a swipeable terminal pager and
+  reworked mobile workflows.
+
+### Changed
+
+- **Session history is actually recorded now.** A graceful-shutdown drain
+  archives every live session on redeploy, a provisional row is written at
+  spawn and finalized on exit, and a startup backfill indexes orphaned
+  transcript logs — so history is populated without a session having to exit
+  in-process.
+- **Faster cold terminal attach.** A cold attach transfers and replays only a
+  bounded tail of scrollback rather than the full ring buffer, cutting the
+  first-open latency of long-lived sessions.
+- **Assistant improvements** in the engine.
+
+### Fixed
+
+- Launching a session preset no longer pops an unwanted name prompt; presets
+  create immediately with the computed name (hold Shift to name one).
+
 ## [0.3.0] - 2026-08-28
 
 The first release since the merged core+engine stack reached production. No
@@ -81,6 +118,7 @@ minor bump per the compatibility policy in [`opensource.md`](opensource.md).
 Baseline entry for this changelog. See the git log and release notes for the
 full history up to this tag.
 
-[Unreleased]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TheDancingDeveloper-org/vogt/releases/tag/v0.2.0
