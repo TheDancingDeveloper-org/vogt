@@ -54,6 +54,8 @@ fn test_config() -> Config {
         assistant_profiles: vec![],
         assistant_default_profile: None,
         assistant_log_retention_days: 30,
+        history_retention_days: 30,
+        history_live_scan_bytes: 256 * 1024,
         assistant_stt_base_urls: vec![],
         assistant_stt_api_key: None,
         assistant_stt_model: "whisper-1".into(),
@@ -2488,6 +2490,182 @@ async fn archived_history_cleanup_removes_old_sessions_and_logs() {
         .await
         .unwrap();
     assert_eq!(after.status(), StatusCode::NOT_FOUND);
+}
+
+/// #491: a *live* session's output is searchable before it exits, via the
+/// on-demand bounded scan (`include_live`, on by default), and the hit is
+/// marked `live: true`. `include_live=false` restores archive-only behaviour,
+/// so the same still-running session is not found there.
+#[tokio::test]
+async fn live_session_output_is_searchable_before_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // Prints a unique needle then stays alive — never archived during the test.
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "live-search-me",
+            "command": ["/bin/sh", "-lc", "printf 'live-needle-zzz here\\n'; sleep 30"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // The needle reaches scrollback shortly after spawn; the live scan then
+    // finds it. Same deadline discipline as the archive-search test.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let hits: Vec<Value> = client
+            .get(format!("{base}/api/history/search?q=live-needle-zzz"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(hit) = hits.iter().find(|hit| hit["session_id"] == id) {
+            assert_eq!(
+                hit["live"], true,
+                "a live-session hit must be flagged: {hit:?}"
+            );
+            assert!(
+                hit["match_snippet"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("live-needle-zzz"),
+                "live snippet must preserve the matched output as data: {hit:?}"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "live search should find a running session's output; got {hits:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Archive-only search excludes the still-running session.
+    let archive_only: Vec<Value> = client
+        .get(format!(
+            "{base}/api/history/search?q=live-needle-zzz&include_live=false"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !archive_only.iter().any(|hit| hit["session_id"] == id),
+        "include_live=false must not return a live (unarchived) session: {archive_only:?}"
+    );
+}
+
+/// #491: the log-preview endpoint strips ANSI on request, so an agent reading
+/// over MCP gets plain text; the default preserves the raw escape stream for
+/// callers that render it themselves.
+#[tokio::test]
+async fn history_log_preview_strips_ansi_when_requested() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "ansi-me",
+            "command": [
+                "/bin/sh",
+                "-lc",
+                "printf '\\033[31mred-needle\\033[0m plain-tail\\n'; exit 0",
+            ],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Wait for the finalized row so the raw log is fully flushed.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let session = client
+            .get(format!("{base}/api/history/{id}"))
+            .send()
+            .await
+            .unwrap();
+        if session.status() == StatusCode::OK {
+            let row: Value = session.json().await.unwrap();
+            if !row["exit_code"].is_null() {
+                break;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session was not archived in time"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Default: raw stream, escapes preserved.
+    let raw: Value = client
+        .get(format!("{base}/api/history/{id}/log"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let raw_text = raw["text"].as_str().unwrap_or_default();
+    assert!(
+        raw_text.contains('\u{1b}'),
+        "default preview must keep the raw escape stream: {raw:?}"
+    );
+
+    // strip_ansi=true: readable plain text, no escape bytes.
+    let stripped: Value = client
+        .get(format!("{base}/api/history/{id}/log?strip_ansi=true"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let text = stripped["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("red-needle") && text.contains("plain-tail"),
+        "stripped preview must keep the visible text: {stripped:?}"
+    );
+    assert!(
+        !text.contains('\u{1b}'),
+        "stripped preview must contain no escape bytes: {stripped:?}"
+    );
 }
 
 #[tokio::test]
