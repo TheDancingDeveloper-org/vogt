@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Pin and deploy Vogt's dev stack through its existing Komodo resource.
+"""Pin and deploy Vogt's dev stack through its configured Komodo resource.
 
-Komodo owns the credentials for the private ``indexarr/ops`` repository, so
+Komodo owns the credentials for the operator's private deployment repository, so
 the GitHub workflow does not need a Forgejo token or a GitHub App.  This script
 uses Komodo's file-write API to keep the desired state in Git, then deploys
 the exact digests that CI verified.
@@ -18,8 +18,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-KOMODO_URL = os.environ.get("KOMODO_URL", "http://100.92.54.45:3011").rstrip("/")
-STACK = os.environ.get("KOMODO_STACK", "vogt-dev")
+STACK = ""
 CORE_IMAGE = "ghcr.io/thedancingdeveloper-org/vogt"
 STACK_IMAGE = "ghcr.io/thedancingdeveloper-org/vogt-stack"
 SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
@@ -39,7 +38,7 @@ def required(name: str) -> str:
 def api(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
     body = json.dumps(payload).encode("utf-8")
     request = Request(
-        f"{KOMODO_URL}/{endpoint}",
+        f"{required('KOMODO_URL').rstrip('/')}/{endpoint}",
         data=body,
         headers={
             "X-Api-Key": required("KOMODO_API_KEY"),
@@ -157,6 +156,8 @@ def deploy() -> str:
 
 
 def main() -> int:
+    global STACK
+    STACK = required("KOMODO_STACK")
     source_sha = required("SOURCE_SHA")
     core_digest = required("CORE_DIGEST")
     stack_digest = required("STACK_DIGEST")

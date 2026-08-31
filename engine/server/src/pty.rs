@@ -585,9 +585,11 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
         drop(a);
         *session.activity_since.lock() = Instant::now();
         *session.activity_changed_at.lock() = time::OffsetDateTime::now_utc();
+        let activity_changed_at = format_rfc3339(*session.activity_changed_at.lock());
         bus.publish(ServerEvent::Activity {
             id: session.id,
             state: new,
+            activity_changed_at,
         });
     }
 }

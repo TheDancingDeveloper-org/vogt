@@ -280,7 +280,36 @@ export class DemoStore {
     if (taskMatch) return this.taskRequest(taskMatch[1] ?? "", taskMatch[2], taskMatch[3], method, body);
     if (path === "/api/agent-tasks/artifacts/cleanup") return json({ removed_task_dir_count: 1, removed_prompt_file_count: 2, removed_context_file_count: 2, removed_bytes: 8192 });
     if (path === "/api/assistant/history") return json(this.state.assistant);
-    if (path === "/api/assistant/message") { const text = String(body.text ?? ""); const reply = `I can demonstrate **${text || "that"}** without reaching a server. Try Board, Inbox, or the nested Agent review terminal layout.`; this.state.assistant.transcript.push({ role: "user", text }, { role: "assistant", text: reply, tool_trace: ["read deterministic demo state"] }); this.write(); return json({ reply, pending_action: this.state.assistant.pending_action, tool_trace: ["read deterministic demo state"] }); }
+    if (path === "/api/assistant/message") {
+      const text = String(body.text ?? "");
+      const reply = `I can demonstrate **${text || "that"}** without reaching a server. Try Sessions, Inbox, or the Agent review terminal.`;
+      const userCreatedAt = this.now();
+      this.state.next_id += 1;
+      const createdAt = this.now();
+      this.state.next_id += 1;
+      const sessionRefs = [{ id: "demo-agent", name: "Agent review", activity: "waiting-for-input" }];
+      const actions = [{ kind: "open-session" as const, session_id: "demo-agent", label: "Open Agent review" }];
+      this.state.assistant.transcript.push(
+        { role: "user", text, created_at: userCreatedAt },
+        {
+          role: "assistant",
+          text: reply,
+          tool_trace: ["read deterministic demo state", "listed sessions"],
+          created_at: createdAt,
+          session_refs: sessionRefs,
+          actions,
+        },
+      );
+      this.write();
+      return json({
+        reply,
+        pending_action: this.state.assistant.pending_action,
+        tool_trace: ["read deterministic demo state", "listed sessions"],
+        created_at: createdAt,
+        session_refs: sessionRefs,
+        actions,
+      });
+    }
     if (path === "/api/assistant/reset") { this.state.assistant.transcript = []; this.state.assistant.pending_action = null; this.write(); return json({ ok: true }); }
     const actionMatch = /^\/api\/assistant\/actions\/([^/]+)$/.exec(path);
     if (actionMatch) { if (method === "PATCH") { const action = this.state.assistant.pending_action; if (action) action.reason = String(body.reason ?? action.reason); this.write(); return json(action); } this.state.assistant.pending_action = null; this.write(); return json({ reply: body.approve ? "Approved in demo state; no external effect occurred." : "Denied. Nothing changed.", pending_action: null, tool_trace: ["update browser-only approval"] }); }
@@ -296,6 +325,7 @@ export class DemoStore {
   private async vogt(path: string, method: string, query: URLSearchParams, body: Record<string, unknown>): Promise<Response> {
     const params = method === "GET" ? Object.fromEntries(query.entries()) : body;
     if (path === "/status") return json({ ok: true });
+    if (path === "/place/metrics") return json({ inbox_active: 2, projects_total: 3, work_total: 12, backlog_total_considered: 8, drift_present: true, revision: 1, generated_at: this.now() });
     if (path === "/workflows") return json({ workflows: [workflowFor("feature"), workflowFor("bug"), workflowFor("chore"), workflowFor("question")] });
     if (path === "/work" && method === "GET") return json({ items: this.filterWork(params), total: this.filterWork(params).length, link_state: "linked" });
     if (path === "/work" && method === "POST") { const ref = `WI-${this.state.next_id++}`; const row = { ...this.state.work[0]!, ...body, id: `work-${this.state.next_id}`, ref, state: "open", created_at: this.now(), updated_at: this.now() }; this.state.work.unshift(row); this.audit("work.create", "work_item", row.id, String(body.reason)); this.changed("work.created", "work_item", row.id); return json({ item: row, comments: [], sessions: [] }); }

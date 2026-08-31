@@ -153,9 +153,9 @@ jobs:
     outputs:
       digest: ${{ steps.push.outputs.digest }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
         with:
           # The layer cache lives on the estate's own local-registry at
           # 192.168.1.75:5500 — plaintext HTTP on the LAN. The default
@@ -197,13 +197,13 @@ jobs:
       # anything and would put the estate's shared bucket back on this
       # repository's critical path.
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         id: meta
         with:
           images: ${{ env.IMAGE }}
@@ -226,7 +226,7 @@ jobs:
       # Built and run before it is pushed. v0.1.0 shipped an image whose
       # entrypoint did not exist and v0.1.1 one that imported no application;
       # both builds were green and both artefacts had never been started.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: candidate
         with:
           context: .
@@ -260,7 +260,7 @@ jobs:
           fi
           echo "image runs, has git, and still refuses to guess an address"
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: push
         with:
           context: .
@@ -277,7 +277,7 @@ jobs:
           build-args: |
             PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
       - name: sign the image
         env:
@@ -325,22 +325,22 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
         with:
           driver-opts: network=host
           buildkitd-config-inline: |
             [registry."192.168.1.75:5500"]
               http = true
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         id: demo-meta
         with:
           images: ${{ env.DEMO_IMAGE }}
@@ -350,7 +350,7 @@ jobs:
           flavor: |
             latest=false
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: demo-candidate
         with:
           context: .
@@ -407,6 +407,9 @@ jobs:
           grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$manifest"
           grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$build"
           get '' | grep -F 'id="root"'
+          mobile="$(get mobile-demo.html)"
+          grep -F 'id="mobile-demo-title"' <<<"$mobile"
+          grep -F 'src="/index.html#/sessions"' <<<"$mobile"
 
           # The origin has no server-side API: a write is refused with 404 and an
           # explanatory body, checked from inside the container as well.
@@ -420,25 +423,50 @@ jobs:
               .catch((e) => { console.error(e.message); process.exit(1); });
           '
 
-      - name: scan the static demo image
-        # TEMPORARY: non-fatal. The self-hosted runner cannot install Trivy —
-        # `trivy-action`'s `install.sh` downloads the binary from GitHub
-        # releases, which this runner has no egress for (it fails in <1s, before
-        # any scan), the same reason base images are mirrored into GHCR. Tolerate
-        # that here so the demo image publishes; the findings threshold below is
-        # kept so the scan still runs and reports wherever Trivy *can* install.
-        # Restore the gate (drop continue-on-error) once the runner can run
-        # Trivy — e.g. run it from a mirrored image, or pre-install the binary.
-        continue-on-error: true
-        uses: aquasecurity/trivy-action@v0.33.1
-        with:
-          image-ref: ${{ env.DEMO_IMAGE }}:smoke-test
-          format: table
-          exit-code: "1"
-          ignore-unfixed: true
-          severity: CRITICAL,HIGH
+          # A dedicated mobile hostname runs the same signed image with only
+          # its root document changed. Prove that mode independently: `/`
+          # must be the showcase while `/index.html` stays the PWA embedded by
+          # its frame (rather than recursively loading the showcase).
+          docker rm -f "$cid" >/dev/null
+          cid="$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --env DEMO_ROOT_DOCUMENT=mobile-demo.html \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m "$CANDIDATE")"
+          for _ in $(seq 1 30); do
+            get healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          get '' | grep -F 'id="mobile-demo-title"'
+          get index.html | grep -F 'id="root"'
 
-      - uses: docker/build-push-action@v6
+      - name: scan the static demo image
+        # The self-hosted runner cannot use trivy-action's GitHub Releases
+        # installer, but it can pull from GHCR. Run the scanner from an exact
+        # image digest instead, against the candidate in the runner's Docker
+        # daemon. The database's :2 tag is intentionally moving: unlike the
+        # scanner executable, a vulnerability database has to stay current.
+        env:
+          CANDIDATE: ${{ env.DEMO_IMAGE }}:smoke-test
+          TRIVY_IMAGE: ghcr.io/aquasecurity/trivy@sha256:bcc376de8d77cfe086a917230e818dc9f8528e3c852f7b1aff648949b6258d1c # 0.69.3
+        run: |
+          set -euo pipefail
+          cache_volume="vogt-trivy-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker volume create "$cache_volume" >/dev/null
+          trap 'docker volume rm "$cache_volume" >/dev/null 2>&1 || true' EXIT
+
+          docker run --rm \
+            --volume /var/run/docker.sock:/var/run/docker.sock \
+            --volume "${cache_volume}:/root/.cache/trivy" \
+            "$TRIVY_IMAGE" image \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2 \
+            --scanners vuln \
+            --skip-version-check \
+            --format table \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --severity CRITICAL,HIGH \
+            "$CANDIDATE"
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: demo-push
         with:
           context: .
@@ -458,7 +486,7 @@ jobs:
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-dev
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:demo-dev,mode=max
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
       - name: sign the static demo image
         env:
@@ -478,6 +506,11 @@ jobs:
             echo '```yaml'
             echo "image: ${DEMO_IMAGE}@${DIGEST}"
             echo '```'
+            echo
+            echo "That one digest serves both the standard demo at \`/\` and"
+            echo "the mobile showcase at \`/mobile-demo.html\`. For a separate"
+            echo "mobile-first hostname, apply \`deploy/mobile-demo.overlay.yml\`"
+            echo "to the same digest-pinned service."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The dev-pod toolchain, built (or found already published) before anything
@@ -515,9 +548,9 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
         with:
           # The layer cache lives on the estate's own local-registry at
           # 192.168.1.75:5500 — plaintext HTTP on the LAN. The default
@@ -569,13 +602,13 @@ jobs:
       # anything and would put the estate's shared bucket back on this
       # repository's critical path.
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         id: meta
         with:
           images: ${{ env.STACK_IMAGE }}
@@ -587,7 +620,7 @@ jobs:
           flavor: |
             latest=false
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: candidate
         with:
           # The repository root, not `engine/`: the Dockerfile reaches for
@@ -660,7 +693,7 @@ jobs:
             echo "estate image carries the AI clients and the mobile SDK"
           fi
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: push
         with:
           context: .
@@ -692,7 +725,7 @@ jobs:
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }},mode=max
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
       - name: sign the image
         env:

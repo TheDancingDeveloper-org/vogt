@@ -154,9 +154,9 @@ jobs:
       # last-writer-wins and nothing reads it.
       image: ${{ steps.resolve.outputs.image }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -183,7 +183,7 @@ jobs:
       # copies manifests around on these runners — sets buildx up before
       # reaching for it as well. Thirty seconds against a job whose entire
       # purpose is to save twenty-two minutes.
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
         with:
           # The layer cache lives on the estate's own local-registry at
           # 192.168.1.75:5500 — plaintext HTTP on the LAN. The default
@@ -211,7 +211,7 @@ jobs:
             echo "not published yet; building"
           fi
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         if: steps.probe.outputs.exists != 'true'
         with:
           # `engine/Dockerfile.pod.dockerignore` empties the context: this

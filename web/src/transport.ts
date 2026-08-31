@@ -56,6 +56,8 @@ export interface RetryOptions {
   retries?: number;
   /** Base backoff before the first retry, growing linearly. Default 150ms. */
   backoffMs?: number;
+  /** Abort an attempt after this many milliseconds. */
+  deadlineMs?: number;
 }
 
 /**
@@ -78,8 +80,21 @@ export async function fetchWithRetry(
 
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const controller = opts.deadlineMs === undefined ? null : new AbortController();
+    const deadline = controller === null ? null : setTimeout(() => controller.abort(), opts.deadlineMs);
+    const requestController = controller;
+    const cancel = requestController !== null && signal !== undefined
+      ? () => requestController.abort()
+      : null;
+    if (requestController !== null && signal !== undefined && cancel !== null) {
+      if (signal.aborted) requestController.abort();
+      else signal.addEventListener("abort", cancel, { once: true });
+    }
+    const requestInit = controller === null
+      ? init
+      : { ...init, signal: controller.signal };
     try {
-      return await runtimeTransport().request(url, init);
+      return await runtimeTransport().request(url, requestInit);
     } catch (err) {
       if (isAbort(err, signal)) throw err;
       lastError = err;
@@ -89,6 +104,11 @@ export async function fetchWithRetry(
       // The caller may have given up during the backoff; honour it rather than
       // firing another request into a signal that is now aborted.
       if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    } finally {
+      if (deadline !== null) clearTimeout(deadline);
+      if (requestController !== null && signal !== undefined && cancel !== null) {
+        signal.removeEventListener("abort", cancel);
+      }
     }
   }
   throw new TransportError(lastError);

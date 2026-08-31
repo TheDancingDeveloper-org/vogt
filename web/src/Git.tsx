@@ -27,7 +27,7 @@ import {
 } from "./monaco";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { shouldRenderSideBySide } from "./diffLayout";
-import { listProjects } from "./vogtApi";
+import { taxonomy } from "./taxonomyCache";
 import { repositoryChoices } from "./gitRepositories";
 import { createRetainedRead } from "./retainedRead";
 import { openEditorTab } from "./tabs";
@@ -275,7 +275,7 @@ const GitTab: Component<Props> = (props) => {
       let offset = 0;
       let total = 0;
       do {
-        const page = await listProjects({ limit: 500, offset });
+        const page = await taxonomy.projects({ limit: 500, offset });
         projects.push(...page.projects);
         total = page.total;
         offset += page.projects.length;

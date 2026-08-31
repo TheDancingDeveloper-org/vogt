@@ -22,7 +22,17 @@ export interface DemoState {
   files: Record<string, { content: string | null; binary?: boolean; mtime: number; hash: string }>;
   git_entries: Record<string, unknown>[];
   tasks: Record<string, unknown>[];
-  assistant: { transcript: { role: string; text: string; tool_trace?: string[] }[]; pending_action: Record<string, unknown> | null };
+  assistant: {
+    transcript: {
+      role: string;
+      text: string;
+      tool_trace?: string[];
+      created_at?: string;
+      session_refs?: { id: string; name: string; activity: string }[];
+      actions?: { kind: "open-session"; session_id: string; label: string }[];
+    }[];
+    pending_action: Record<string, unknown> | null;
+  };
 }
 
 export function createDemoState(): DemoState {
@@ -79,7 +89,7 @@ export function createDemoState(): DemoState {
       "src/main.ts": { content: "import { start } from './runtime';\n\nstart({ mode: 'demo', safe: true });\n", mtime: 1787581220000, hash: "demo-main-v1" },
       "src/runtime.ts": { content: "export function start(options: { mode: string; safe: boolean }) {\n  return options.safe;\n}\n", mtime: 1787581230000, hash: "demo-runtime-v1" },
       "src/styles.css": { content: ":root { color-scheme: dark light; }\n.demo { display: grid; gap: 1rem; }\n", mtime: 1787581240000, hash: "demo-css-v1" },
-      "docs/architecture.md": { content: "# Architecture\n\nThe browser owns a deterministic store and a simulated terminal protocol. The deployed engine remains locked behind an undisclosed random token.\n\n" + "Representative long-form content demonstrates editor wrapping and scrolling.\n\n".repeat(24), mtime: 1787581250000, hash: "demo-doc-v1" },
+      "docs/architecture.md": { content: "# Architecture\n\nThe browser owns a deterministic store and a simulated terminal protocol. The static demo origin carries neither the session engine nor the Vogt core.\n\n" + "Representative long-form content demonstrates editor wrapping and scrolling.\n\n".repeat(24), mtime: 1787581250000, hash: "demo-doc-v1" },
       "assets/preview.png": { content: null, binary: true, mtime: 1787581260000, hash: "demo-binary-v1" },
     },
     git_entries: [
@@ -90,10 +100,23 @@ export function createDemoState(): DemoState {
     tasks: demoTasks(),
     assistant: {
       transcript: [
-        { role: "user", text: "What should I look at first?" },
-        { role: "assistant", text: "Start with **Board**, then open the `Build + tests` terminal showcase. Every change is private to this tab.", tool_trace: ["read demo scenario", "inspect session catalogue"] },
-        { role: "user", text: "Is the terminal real?" },
-        { role: "assistant", text: "No. It follows the real snapshot protocol, but input selects canned responses and never reaches a process." },
+        {
+          role: "user",
+          text: "What needs me?",
+          created_at: "2026-08-24T14:49:00Z",
+        },
+        {
+          role: "assistant",
+          text: "The **Agent review** session is waiting at the mobile composition approval. The terminal follows the real snapshot protocol, but its input is canned and never reaches a process.",
+          tool_trace: ["listed sessions", "read Agent review tail"],
+          created_at: "2026-08-24T14:49:25Z",
+          session_refs: [
+            { id: "demo-agent", name: "Agent review", activity: "waiting-for-input" },
+          ],
+          actions: [
+            { kind: "open-session", session_id: "demo-agent", label: "Open Agent review" },
+          ],
+        },
       ],
       pending_action: { kind: "send_input", id: "action-demo-input", session_id: "demo-agent", session_name: "Agent review", text: "approve demo snapshot", submit: true },
     },

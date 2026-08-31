@@ -81,7 +81,7 @@ jobs:
     steps:
       # A clean clone, every run: the whole point is that nothing on the runner
       # is carried between runs except the layer/toolchain caches.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: mint the stack's secrets
         env:

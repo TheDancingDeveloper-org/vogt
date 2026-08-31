@@ -10,6 +10,7 @@
 import { For, Show, createMemo, type Component } from "solid-js";
 import type { SessionSummary } from "./api";
 import { createNow } from "./viewAge";
+import { isConnected, sessionsStore } from "./store";
 import {
   activityClass,
   activityLabel,
@@ -42,7 +43,7 @@ export const SessionList: Component<Props> = (props) => {
           {(session) => (
             <li>
               <a
-                class={`session-row${session.activity === "waiting-for-input" ? " waiting" : ""}`}
+                class={`session-row ${activityClass(session)}${session.exit_code === null && session.activity === "waiting-for-input" ? " waiting" : ""}${sessionsStore.ready && !isConnected() ? " session-row--stale" : ""}`}
                 href={`#/t/${session.id}`}
                 aria-label={`${session.name}, ${activityLabel(session.activity, session.exit_code)}`}
                 title={`${session.name}\ncwd: ${session.cwd}`}
@@ -53,15 +54,18 @@ export const SessionList: Component<Props> = (props) => {
                 />
                 <div class="session-row-body">
                   <span class="name">{session.name}</span>
-                  <span
-                    class={`state${session.activity === "waiting-for-input" ? " state--waiting" : ""}`}
-                  >
-                    {sessionStateWord(session, now())}
+                  <span class="session-row-meta">
+                    <span
+                      class={`state state--${activityClass(session)}`}
+                    >
+                      {sessionStateWord(session, now(), sessionsStore.ready && !isConnected() ? sessionsStore.lastAnswerAt : null)}
+                    </span>
+                    <Show when={session.cwd}>
+                      <span class="cwd"> · {session.cwd}</span>
+                    </Show>
                   </span>
-                  <Show when={session.cwd}>
-                    <span class="cwd">{session.cwd}</span>
-                  </Show>
                 </div>
+                <span class="session-row-chevron" aria-hidden="true">›</span>
               </a>
             </li>
           )}

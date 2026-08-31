@@ -22,12 +22,13 @@ import {
   type AssistantSendInputAction,
   type AssistantVogtWriteAction,
 } from "./api";
-import { listProjects } from "./vogtApi";
+import { taxonomy } from "./taxonomyCache";
 import { renderMarkdown } from "./markdown";
 import { writeClipboardText } from "./clipboard";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { pendingAction, setPendingAction } from "./pendingAction";
+import { isConnected, sessionsError, sessionsStore } from "./store";
 import {
   onVoiceServiceEnded,
   registerPushSpeaker,
@@ -52,6 +53,44 @@ export interface AssistantUiEntry {
   tool_trace?: string[];
   /** A send that errored or was refused: shown as failed, with a Retry. */
   failed?: boolean;
+  created_at?: string;
+  session_refs?: { id: string; name: string; activity: string }[];
+  actions?: { kind: "open-session"; session_id: string; label: string }[];
+}
+
+export function transcriptTimeLabel(
+  createdAt: string | undefined,
+  previousCreatedAt?: string,
+  now = new Date(),
+): string | null {
+  if (!createdAt) return null;
+  const created = new Date(createdAt);
+  if (Number.isNaN(created.getTime())) return null;
+  if (previousCreatedAt) {
+    const previous = new Date(previousCreatedAt);
+    if (
+      !Number.isNaN(previous.getTime()) &&
+      previous.getFullYear() === created.getFullYear() &&
+      previous.getMonth() === created.getMonth() &&
+      previous.getDate() === created.getDate() &&
+      previous.getHours() === created.getHours() &&
+      previous.getMinutes() === created.getMinutes()
+    ) {
+      return null;
+    }
+  }
+  const sameDay =
+    now.getFullYear() === created.getFullYear() &&
+    now.getMonth() === created.getMonth() &&
+    now.getDate() === created.getDate();
+  const day = sameDay
+    ? "Today"
+    : created.toLocaleDateString([], { month: "short", day: "numeric" });
+  const time = created.toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+  return `${day} · ${time}`;
 }
 
 /**
@@ -187,18 +226,6 @@ function asVogtWrite(
  * approve button off screen — an approval you have to hunt for is worse than
  * one you can read.
  */
-const payloadStyle = {
-  display: "block",
-  "font-family": "monospace",
-  "white-space": "pre-wrap",
-  "word-break": "break-all",
-  padding: "6px 8px",
-  background: "rgba(0,0,0,0.25)",
-  "border-radius": "6px",
-  "max-height": "220px",
-  "overflow-y": "auto",
-} as const;
-
 /**
  * What the assistant is asking permission for, spoken.
  *
@@ -251,6 +278,26 @@ export default function Assistant(props: AssistantProps) {
     { name: string; model: string; default: boolean }[]
   >([]);
   const [profile, setProfile] = createSignal(restored.profile);
+  const disconnected = () => sessionsStore.ready && !isConnected();
+  const waitingCount = () =>
+    sessionsStore.order.filter((id) => {
+      const session = sessionsStore.sessions[id];
+      return session?.exit_code === null && session.activity === "waiting-for-input";
+    }).length;
+  const watchState = () => {
+    if (!sessionsStore.ready) {
+      return sessionsError()
+        ? "sessions unavailable"
+        : "sessions loading — no answer yet";
+    }
+    const answer = `watching ${sessionsStore.order.length} sessions · ${waitingCount()} waiting`;
+    return isConnected() ? answer : `${answer} · from last answer`;
+  };
+  const pendingReasonReady = () => {
+    const action = pendingAction();
+    return action?.kind !== "vogt_write" ||
+      (Boolean(reasonDraft().trim()) && reasonDraft().trim() === action.reason);
+  };
 
   let scroller: HTMLDivElement | undefined;
   let inputEl: HTMLTextAreaElement | undefined;
@@ -428,7 +475,7 @@ export default function Assistant(props: AssistantProps) {
       // stays off, which is the safe absent state.
     }
     try {
-      const listed = await listProjects();
+      const listed = await taxonomy.projects();
       setSlugs(listed.projects.map((project) => project.slug));
     } catch {
       // A core that cannot be asked costs slug repair and nothing else: the
@@ -483,7 +530,14 @@ export default function Assistant(props: AssistantProps) {
     if (reply.reply !== null && reply.reply !== undefined) {
       setTranscript((cur) => [
         ...cur,
-        { role: "assistant", text: reply.reply ?? "", tool_trace: reply.tool_trace },
+        {
+          role: "assistant",
+          text: reply.reply ?? "",
+          tool_trace: reply.tool_trace,
+          created_at: reply.created_at,
+          session_refs: reply.session_refs,
+          actions: reply.actions,
+        },
       ]);
       if (ttsOn()) speak(reply.reply);
     }
@@ -852,7 +906,23 @@ export default function Assistant(props: AssistantProps) {
   return (
     <div class="assistant">
       <div class="assistant-head">
-        <strong class="assistant-head__title">Assistant</strong>
+        <div class="assistant-head__title">
+          <h1>Assistant</h1>
+          <span
+            class={`assistant-watch-line${disconnected() ? " stale" : ""}`}
+            data-state={
+              sessionsStore.ready
+                ? isConnected()
+                  ? "ready"
+                  : "stale"
+                : sessionsError()
+                  ? "unavailable"
+                  : "loading"
+            }
+          >
+            {watchState()}
+          </span>
+        </div>
         {/*
           Offered only when there is a choice to make (FR-T9). One configured
           profile is not a decision, and a select with one option is a control
@@ -883,10 +953,20 @@ export default function Assistant(props: AssistantProps) {
           title={ttsOn() ? "Disable spoken replies" : "Speak replies aloud"}
           onClick={toggleTts}
         >
-          {ttsOn() ? "🔊" : "🔇"}
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M11 5 6.5 8.5H3v7h3.5L11 19V5Z" />
+            <Show
+              when={ttsOn()}
+              fallback={<path d="m16 9 5 6m0-6-5 6" />}
+            >
+              <path d="M15 9.5a4 4 0 0 1 0 5M18 7a7 7 0 0 1 0 10" />
+            </Show>
+          </svg>
         </button>
-        <button type="button" title="Clear the conversation" onClick={() => void reset()}>
-          Clear
+        <button type="button" aria-label="Clear the conversation" title="Clear the conversation" onClick={() => void reset()}>
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l1 12A1.5 1.5 0 0 0 9 20.4h6a1.5 1.5 0 0 0 1.5-1.4l1-12" />
+          </svg>
         </button>
       </div>
 
@@ -900,17 +980,15 @@ export default function Assistant(props: AssistantProps) {
           </div>
         </Show>
         <For each={transcript()}>
-          {(entry) => (
-            <div
-              class={`assistant-row assistant-row--${entry.role}${
-                entry.failed ? " assistant-row--failed" : ""
-              }`}
-            >
+          {(entry, index) => (
+            <>
+            <Show when={transcriptTimeLabel(entry.created_at, transcript()[index() - 1]?.created_at)}>
+              {(label) => <div class="assistant-time-separator"><time datetime={entry.created_at}>{label()}</time></div>}
+            </Show>
+            <div class={`assistant-row assistant-row--${entry.role}${entry.failed ? " assistant-row--failed" : ""}`}>
               <Show when={entry.role === "assistant" && entry.tool_trace?.length}>
                 <div class="assistant-trace">
-                  <For each={entry.tool_trace}>
-                    {(step) => <div>· {step}</div>}
-                  </For>
+                  ▸ {entry.tool_trace?.join(" · ")}
                 </div>
               </Show>
               <div class={`assistant-bubble assistant-bubble--${entry.role}`}>
@@ -938,7 +1016,7 @@ export default function Assistant(props: AssistantProps) {
                     );
                   }}
                 >
-                  ⧉ Copy
+                  Copy
                 </button>
               </Show>
               <Show when={entry.failed}>
@@ -955,37 +1033,46 @@ export default function Assistant(props: AssistantProps) {
                   </button>
                 </div>
               </Show>
+              <Show when={entry.session_refs?.length}>
+                <div class="assistant-session-refs" aria-label="Referenced sessions">
+                  <For each={entry.session_refs}>
+                    {(ref) => <a href={`#/t/${ref.id}`} class={`assistant-session-chip ${ref.activity}`}><span class={`activity-dot ${ref.activity}`} aria-hidden="true" />{ref.name}<small>{ref.activity}</small></a>}
+                  </For>
+                </div>
+              </Show>
+              <Show when={entry.actions?.length}>
+                <div class="assistant-entry-actions">
+                  <For each={entry.actions}>
+                    {(action) => <a href={`#/t/${action.session_id}`} class="assistant-open-session">{action.label} ›</a>}
+                  </For>
+                </div>
+              </Show>
             </div>
+            </>
           )}
         </For>
         <Show when={!props.pendingHosted && pendingAction()}>
           {(action) => (
-            <div
-              style={{
-                border: "1px solid var(--activity-warning)",
-                "border-radius": "10px",
-                padding: "10px 12px",
-                display: "flex",
-                "flex-direction": "column",
-                gap: "8px",
-                background: "rgba(210, 153, 34, 0.08)",
-              }}
-            >
+            <div class="assistant-pending-card" role="region" aria-label="Pending approval">
+              <div class="assistant-pending-head">
+                <span class="activity-dot running" aria-hidden="true" />
+                <span>Approval required</span>
+              </div>
               <Show when={asSendInput(action())}>
                 {(send) => (
                   <>
-                    <div style={{ "font-size": "13px" }}>
-                      Type into <strong>{send().session_name}</strong>
-                      {send().submit ? " and press Enter" : ""}:
+                    <div class="assistant-pending-copy">
+                      Send <code class="assistant-keystroke">
+                        {visibleText(send().text)}{send().submit ? " ⏎" : ""}
+                      </code>{" "}to <strong>{send().session_name}</strong>
                     </div>
-                    <code style={payloadStyle}>{visibleText(send().text)}</code>
                   </>
                 )}
               </Show>
               <Show when={asVogtWrite(action())}>
                 {(write) => (
                   <>
-                    <div style={{ "font-size": "13px" }}>
+                    <div class="assistant-pending-copy">
                       Write to Vogt: <strong>{write().operation}</strong> on{" "}
                       <strong>{write().target}</strong>
                     </div>
@@ -994,14 +1081,14 @@ export default function Assistant(props: AssistantProps) {
                       Vogt stores it and someone reads it back later — it is
                       the part of this card that outlives the approval.
                     */}
-                    <div style={{ "font-size": "13px" }}>
+                    <div class="assistant-pending-copy">
                       Recorded reason (editable before approval):
                     </div>
                     <textarea
                       aria-label="Assistant Vogt write reason"
                       value={reasonDraft()}
                       rows={2}
-                      disabled={reasonBusy() || busy()}
+                      disabled={reasonBusy() || busy() || disconnected()}
                       onInput={(event) => setReasonDraft(event.currentTarget.value)}
                     />
                     <button
@@ -1011,16 +1098,26 @@ export default function Assistant(props: AssistantProps) {
                     >
                       {reasonBusy() ? "Updating reason…" : "Update reason for review"}
                     </button>
-                    <code style={payloadStyle}>{write().payload}</code>
+                    <code class="assistant-pending-payload">{write().payload}</code>
                   </>
                 )}
               </Show>
-              <div style={{ display: "flex", gap: "8px", "align-items": "center" }}>
-                <button type="button" disabled={busy()} onClick={() => void resolve(true)}>
-                  ✓ Approve
+              <div class="assistant-pending-actions">
+                <button type="button" disabled={busy() || disconnected()} onClick={() => void resolve(false)}>
+                  Deny
                 </button>
-                <button type="button" disabled={busy()} onClick={() => void resolve(false)}>
-                  ✗ Deny
+                <button
+                  type="button"
+                  class="assistant-approve"
+                  disabled={
+                    busy() ||
+                    reasonBusy() ||
+                    disconnected() ||
+                    !pendingReasonReady()
+                  }
+                  onClick={() => void resolve(true)}
+                >
+                  Approve on screen
                 </button>
                 {/*
                   The 120s expiry, counting down (FR-T2). The server drops the
@@ -1040,6 +1137,11 @@ export default function Assistant(props: AssistantProps) {
                   </span>
                 </Show>
               </div>
+              <p class="assistant-pending-audit">
+                {disconnected()
+                  ? "Approval needs the live stream — reconnect to answer."
+                  : "Audited to the approver."}
+              </p>
             </div>
           )}
         </Show>
@@ -1077,7 +1179,7 @@ export default function Assistant(props: AssistantProps) {
           rows={1}
           value={draft()}
           disabled={busy()}
-          placeholder={listening() ? "listening…" : "Ask about sessions or work"}
+          placeholder={listening() ? "listening…" : "Ask about your sessions…"}
           onInput={(e) => setDraft(e.currentTarget.value)}
           onKeyDown={(e) => {
             // Enter sends; Shift+Enter (and IME composition) inserts a newline,
@@ -1105,7 +1207,10 @@ export default function Assistant(props: AssistantProps) {
               title="Voice input isn't available in this browser."
               aria-label="Voice input unavailable in this browser"
             >
-              🎙
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="9" y="3" width="6" height="11" rx="3" />
+                <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+              </svg>
             </button>
           }
         >
@@ -1150,7 +1255,10 @@ export default function Assistant(props: AssistantProps) {
               }
             }}
           >
-            🎙
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+            </svg>
           </button>
         </Show>
         {/*
@@ -1160,8 +1268,11 @@ export default function Assistant(props: AssistantProps) {
         <Show
           when={busy()}
           fallback={
-            <button type="submit" disabled={!draft().trim()}>
-              Send
+            <button type="submit" disabled={!draft().trim()} aria-label="Send message">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 19V5M6 11l6-6 6 6" />
+              </svg>
+              <span class="visually-hidden">Send</span>
             </button>
           }
         >

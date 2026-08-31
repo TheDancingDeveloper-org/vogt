@@ -31,7 +31,8 @@ interface Props {
   /** Presets the overview offers when there are no sessions to list (#233). */
   sessionTemplates?: SessionTemplate[];
   /** Launch one of those presets straight into its terminal. */
-  onLaunchTemplate?: (template: SessionTemplate) => void;
+  /** Launch a preset. `promptForName` (Shift held) asks for a name first. */
+  onLaunchTemplate?: (template: SessionTemplate, promptForName?: boolean) => void;
 }
 
 export const SessionTools: Component<Props> = (props) => (
@@ -137,21 +138,39 @@ const Sessions: Component<Props> = (props) => {
   // these; the cards are what puts the prompt and its two answers where a
   // thumb is, above the list rather than inside it.
   const narrow = createNarrow();
-  // On a narrow shell, once a terminal or a machine tool owns the screen the
-  // Sessions surface header is chrome over it: the two-line honesty folds and
-  // the whole header shrinks to a title and "+ Session" so the terminal is not
-  // pushed off-screen (#232). On the overview, and on any desk, the header is
-  // itself and stays open.
+  // On a narrow shell, machine tools without their own mobile composition use
+  // the compact Sessions header. Terminal and Assistant hide it below and own
+  // their purpose-built headers instead. On the overview, and on any desk,
+  // the Sessions header stays open.
   const collapsed = () => narrow() && Boolean(props.hasActiveWorkspace);
-  // Including the ones that exited while waiting: somebody came to this
-  // screen to answer that prompt, and a card that says the session is gone is
-  // the answer to why they cannot (Stage 9's "refuse safely and explain").
+  const liveCount = () => sessions().filter((session) => session.exit_code === null).length;
   const waiting = createMemo(() =>
-    sessions().filter((session) => session.activity === "waiting-for-input"),
+    sessions().filter(
+      (session) =>
+        session.exit_code === null && session.activity === "waiting-for-input",
+    ),
   );
+  const displayedRows = createMemo(() => {
+    if (!narrow()) return sessions();
+    const waitingIds = new Set(waiting().map((session) => session.id));
+    return sessions().filter((session) => !waitingIds.has(session.id));
+  });
+  const idleRowCount = () =>
+    displayedRows().filter(
+      (session) => session.exit_code === null && session.activity === "idle",
+    ).length;
+  const exitedRowCount = () =>
+    displayedRows().filter((session) => session.exit_code !== null).length;
+  // Terminal and Assistant have their own narrow headers in the redesign.
+  // The Sessions surface header remains the desktop owner and still wraps the
+  // other machine tools, but must not stack a second title/tools bar above
+  // either of these phone compositions.
+  const mobileWorkspaceOwnsHeader = () =>
+    Boolean(props.hasActiveWorkspace) &&
+    (props.currentTool === "terminal" || props.currentTool === "assistant");
   return (
     <section
-      class={`sessions-place ${props.hasActiveWorkspace ? "has-workspace" : ""}`}
+      class={`sessions-place ${props.hasActiveWorkspace ? "has-workspace" : ""}${mobileWorkspaceOwnsHeader() ? " mobile-workspace-owns-header" : ""}`}
       aria-label="Sessions"
     >
       <SurfaceHeader
@@ -181,8 +200,8 @@ const Sessions: Component<Props> = (props) => {
                 : sessionsError()
                   ? `Sessions unavailable — ${sessionsError()}`
                   : isConnected()
-                    ? <><strong>{sessions().length} live</strong> · sorted by attention</>
-                    : <><strong>{sessions().length} from the last answer</strong> · stream disconnected; may be stale</>}
+                    ? <><strong>{liveCount()} live</strong> · sorted by attention</>
+                    : <><strong>{sessions().length} from the last answer</strong> · may be stale</>}
             </p>
             <span class={`connection-state ${isConnected() ? "connected" : "disconnected"}`}>
               {isConnected() ? "Connected" : "Disconnected"}
@@ -199,10 +218,14 @@ const Sessions: Component<Props> = (props) => {
         action={props.onCreateSession ? (
           <button
             type="button"
+            disabled={sessionsStore.ready && !isConnected()}
             onClick={(event) => props.onCreateSession?.(event.shiftKey)}
             title="New session (hold Shift to name it)"
           >
-            + Session
+            <svg class="sessions-new-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+            New
           </button>
         ) : undefined}
       />
@@ -214,6 +237,7 @@ const Sessions: Component<Props> = (props) => {
                 session={session}
                 onOpen={(chosen) => navigate(`/t/${chosen.id}`)}
                 onFailure={(message) => setPendingError(message)}
+                disabled={sessionsStore.ready && !isConnected()}
               />
             )}
           </For>
@@ -226,7 +250,14 @@ const Sessions: Component<Props> = (props) => {
           active workspace. */}
       <div class="sessions-place-body">
         <div class="sessions-active-workspace">
-          <Show when={pendingAction()} keyed>
+          <Show
+            when={
+              narrow() && props.currentTool === "assistant"
+                ? null
+                : pendingAction()
+            }
+            keyed
+          >
             {(current) => {
               const isDeepLink = () => !approvalId() || approvalId() === current.id;
               return (
@@ -241,7 +272,7 @@ const Sessions: Component<Props> = (props) => {
                           aria-label="Pending Vogt write reason"
                           rows={2}
                           value={reasonDraft()}
-                          disabled={reasonBusy() || pendingBusy()}
+                          disabled={reasonBusy() || pendingBusy() || (sessionsStore.ready && !isConnected())}
                           onInput={(event) => setReasonDraft(event.currentTarget.value)}
                         />
                         <button
@@ -260,15 +291,18 @@ const Sessions: Component<Props> = (props) => {
                   </div>
                   <Show when={isDeepLink()} fallback={<p>This approval link is stale or points at another current action.</p>}>
                     <div class="sessions-pending-actions">
-                      <button type="button" disabled={pendingBusy()} onClick={() => void resolvePending(false)}>Deny</button>
+                      <button type="button" disabled={pendingBusy() || (sessionsStore.ready && !isConnected())} onClick={() => void resolvePending(false)}>Deny</button>
                       <button
                         type="button"
-                        disabled={pendingBusy() || reasonBusy() || (current.kind === "vogt_write" && reasonDraft().trim() !== current.reason)}
+                        disabled={pendingBusy() || reasonBusy() || (sessionsStore.ready && !isConnected()) || (current.kind === "vogt_write" && reasonDraft().trim() !== current.reason)}
                         onClick={() => void resolvePending(true)}
                       >
                         Approve on screen
                       </button>
                     </div>
+                    <Show when={sessionsStore.ready && !isConnected()}>
+                      <p class="sessions-pending-disconnected">Input needs the live stream — reconnect to answer.</p>
+                    </Show>
                   </Show>
                 </section>
               );
@@ -304,7 +338,8 @@ const Sessions: Component<Props> = (props) => {
                             <li>
                               <button
                                 type="button"
-                                onClick={() => props.onLaunchTemplate?.(template)}
+                                title="Launch preset (hold Shift to name it)"
+                                onClick={(event) => props.onLaunchTemplate?.(template, event.shiftKey)}
                               >
                                 <span class="sessions-template-name">{template.name}</span>
                                 <Show when={template.description}>
@@ -320,14 +355,21 @@ const Sessions: Component<Props> = (props) => {
                 )}
               >
                 <div class="sessions-overview-list">
-                  <h2 class="sessions-overview-heading">Running sessions</h2>
+                  <div class="sessions-overview-section-head">
+                    <h2 class="sessions-overview-heading">
+                      RUNNING — {displayedRows().length}
+                    </h2>
+                    <span class="sessions-overview-breakdown">
+                      {idleRowCount()} idle · {exitedRowCount()} exited
+                    </span>
+                  </div>
                   {/* On a narrow shell the waiting sessions are already the
                       attention cards above, so the list carries the rest;
                       on a desk there are no cards and it carries them all. */}
                   <SessionList
                     sessions={sessions()}
                     omit={narrow() ? waiting().map((session) => session.id) : []}
-                    label="Running sessions"
+                    label={narrow() ? "Non-waiting sessions" : "All sessions"}
                   />
                 </div>
               </Show>

@@ -44,11 +44,6 @@ import {
   backlog,
   bugs,
   createWork,
-  listActors,
-  listInitiatives,
-  listLabels,
-  listProjects,
-  listWorkflows,
   startSession,
   suppressSubject,
   transitionWork,
@@ -57,6 +52,7 @@ import {
   type RankedEntry,
   type RankedView,
 } from "./vogtApi";
+import { taxonomy } from "./taxonomyCache";
 import { openWorkItemTab } from "./tabs";
 import {
   ViewAgeBadge,
@@ -861,12 +857,12 @@ const Backlog: Component<Props> = (props) => {
   // for, and it has its own outage state.
 
   const [projects] = createResource(() =>
-    attempt(() => listProjects({ limit: 200 })),
+    attempt(() => taxonomy.projects()),
   );
-  const [labels] = createResource(() => attempt(() => listLabels()));
-  const [initiatives] = createResource(() => attempt(() => listInitiatives()));
-  const [actors] = createResource(() => attempt(() => listActors()));
-  const [workflows] = createResource(() => attempt(() => listWorkflows()));
+  const [labels] = createResource(() => attempt(() => taxonomy.labels()));
+  const [initiatives] = createResource(() => attempt(() => taxonomy.initiatives()));
+  const [actors] = createResource(() => attempt(() => taxonomy.actors()));
+  const [workflows] = createResource(() => attempt(() => taxonomy.workflows()));
 
   const projectOptions = createMemo(() => {
     const result = projects();

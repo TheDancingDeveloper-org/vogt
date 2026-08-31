@@ -374,8 +374,17 @@ const App: Component = () => {
     sessionsStore.ready
       ? sessionsStore.order
           .map((id) => sessionsStore.sessions[id])
-          .filter((s): s is SessionSummary => Boolean(s) && s!.activity === "waiting-for-input")
+          .filter(
+            (s): s is SessionSummary =>
+              Boolean(s) &&
+              s!.exit_code === null &&
+              s!.activity === "waiting-for-input",
+          )
       : [];
+  const waitingSessionMetric = (): PlaceMetric => ({
+    value: sessionsStore.ready ? waitingSessionList().length : null,
+    state: sessionMetric().state,
+  });
 
   /** rail-spec.md B1: at most one card, outage wins ties, "running" never
    *  earns one. It is a pointer to WaitingSessionCard on Sessions, never a
@@ -505,6 +514,8 @@ const App: Component = () => {
   const editorWorkspaceActive = () =>
     isIDEMode && activeKind() === "editor" && location.pathname.startsWith("/e/");
   const sessionWorkspaceActive = () => routeOutcome()?.kind === "tool";
+  const terminalScreenActive = () =>
+    activeKind() === "terminal" && location.pathname.startsWith("/t/");
   const guiEnabled = () => Boolean(publicCfg()?.gui_stream_available);
   const routeOutcome = () => describeRoute(
     location.pathname,
@@ -807,10 +818,19 @@ const App: Component = () => {
     return undefined;
   };
 
-  const launchTemplateDirect = async (template: SessionTemplate) => {
+  const launchTemplateDirect = async (
+    template: SessionTemplate,
+    // Presets create immediately with their computed default name (e.g.
+    // `shell-123`), matching the "no name prompt unless Shift" convention of
+    // the + Session action; hold Shift on the preset to be asked for a name.
+    promptForName = false,
+  ) => {
     const context = await resolveTemplateContext(activeTemplatePath());
     const suggested = buildDefaultSessionName(template, context);
-    const name = await promptUser("New session from preset", suggested, "name");
+    let name: string | null = suggested;
+    if (promptForName) {
+      name = await promptUser("New session from preset", suggested, "name");
+    }
     if (!name) return;
     try {
       const launch = resolveTemplateLaunch(template, context, name);
@@ -1147,6 +1167,7 @@ const App: Component = () => {
         senders.delete(tab.id);
         actions.delete(tab.id);
         closeTab(tab.id);
+        if (shellNarrow()) navigate("/sessions", { replace: true });
       } else {
         closeTabAndNavigate(tab.id);
       }
@@ -1434,7 +1455,7 @@ const App: Component = () => {
                   <div class="session-row-body">
                     <span class="name">{s.name}</span>
                     <span class={`state${s.activity === "waiting-for-input" ? " state--waiting" : ""}`}>
-                      {sessionStateWord(s, railNow())}
+                      {sessionStateWord(s, railNow(), sessionsStore.ready && !isConnected() ? sessionsStore.lastAnswerAt : null)}
                     </span>
                     <Show when={s.cwd}><span class="cwd">{s.cwd}</span></Show>
                   </div>
@@ -1619,6 +1640,7 @@ const App: Component = () => {
                   <a href="#/t/demo-build">Build + tests</a>
                   <a href="#/t/demo-agent">Agent review</a>
                   <a href="#/t/demo-logs">Incident view</a>
+                  <a href="/mobile-demo.html" target="_blank" rel="noreferrer">Mobile app</a>
                   <a href="/demo-gui.html" target="_blank" rel="noreferrer">GUI stream</a>
                   <a
                     href={`https://github.com/TheDancingDeveloper-org/vogt/commit/${manifest().source_sha}`}
@@ -1743,7 +1765,9 @@ const App: Component = () => {
                 void onCreate(undefined, undefined, promptForName)
               }
               sessionTemplates={allTemplates()}
-              onLaunchTemplate={(template) => void launchTemplateDirect(template)}
+              onLaunchTemplate={(template, promptForName) =>
+                void launchTemplateDirect(template, promptForName)
+              }
             >
               <div class="tab-view">
                 {/* The terminal is xterm and the editor is Monaco; both are
@@ -1773,6 +1797,7 @@ const App: Component = () => {
                     && shouldMountTab(
                       tab,
                       sessionWorkspaceActive() ? tabsStore.active : null,
+                      shellNarrow(),
                     )
                 )}>
                   {(t) => (
@@ -1821,6 +1846,16 @@ const App: Component = () => {
                         }
                         onTitle={(title) => renameTab(tab().id, title)}
                         onBell={(sessionId) => ringBell(sessionId)}
+                        onMobileSessionChange={(sessionId) => {
+                          openTerminalTab(sessionId, sessionsStore.sessions[sessionId]?.name ?? "terminal");
+                          navigate(`/t/${sessionId}`, { replace: true });
+                        }}
+                        onMobileSessionUnavailable={() => {
+                          showToast("That session is no longer available.", {
+                            kind: "info",
+                          });
+                          navigate("/sessions", { replace: true });
+                        }}
                       />
                     )}
                   </Show>
@@ -1854,7 +1889,7 @@ const App: Component = () => {
                   </Show>
                   <Show when={t.kind === "assistant"}>
                     <Assistant
-                      pendingHosted
+                      pendingHosted={!shellNarrow()}
                       onError={(msg) => showToast(msg, { kind: "error" })}
                       confirmAction={confirmUser}
                     />
@@ -1880,22 +1915,24 @@ const App: Component = () => {
           </div>
           </ErrorBoundary>
           <Show when={activeKind() === "terminal" && location.pathname.startsWith("/t/")}>
-            <ModKeyRow
-              send={(d) => activeSend(d)}
-              onCopy={() => void activeCopy()}
-              onPaste={() => void activePaste()}
-              onSelectAll={() => activeSelectAll()}
-              onFocusComposer={() => activeFocusComposer()}
-            />
+            <div class="app-modkey-row">
+              <ModKeyRow
+                send={(d) => activeSend(d)}
+                onCopy={() => void activeCopy()}
+                onPaste={() => void activePaste()}
+                onSelectAll={() => activeSelectAll()}
+                onFocusComposer={() => activeFocusComposer()}
+              />
+            </div>
           </Show>
         </main>
       </div>
 
-      <nav class="phone-bottom-nav" aria-label="Primary navigation">
-        <a href="#/sessions" class={currentPlace("sessions") ? "active" : ""} aria-current={currentPlace("sessions") ? "page" : undefined}><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
-        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined}><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></a>
-        <a href={`#${surfaceHref(recentPlacesStore.places, "/board")}`} class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined}><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
-        <a href={`#${surfaceHref(recentPlacesStore.places, "/backlog")}`} class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
+      <nav class={`phone-bottom-nav${terminalScreenActive() ? " phone-bottom-nav--terminal" : ""}`} aria-label="Primary navigation">
+        <a href="#/sessions" class={currentPlace("sessions") ? "active" : ""} aria-current={currentPlace("sessions") ? "page" : undefined} aria-label="Sessions"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5" /><path d="M7.5 9.5l3 2.7-3 2.7M13.5 15h3.5" /></svg><PlaceCount metric={waitingSessionMetric()} label="sessions waiting for input" /></span><span class="phone-nav-label">Sessions</span></a>
+        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} aria-label="Inbox"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13.5V7a2 2 0 012-2h14a2 2 0 012 2v6.5M3 13.5h5.2l1.6 2.5h4.4l1.6-2.5H21M3 13.5V17a2 2 0 002 2h14a2 2 0 002-2v-3.5" /></svg><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></span><span class="phone-nav-label">Inbox</span></a>
+        <a href={`#${surfaceHref(recentPlacesStore.places, "/board")}`} class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} aria-label="Board"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="4.6" height="11" rx="1.2" /><rect x="9.7" y="4" width="4.6" height="16" rx="1.2" /><rect x="15.9" y="4" width="4.6" height="7.5" rx="1.2" /></svg><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></span><span class="phone-nav-label">Board</span></a>
+        <a href={`#${surfaceHref(recentPlacesStore.places, "/backlog")}`} class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} aria-label="Backlog"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 6h12M8.5 12h12M8.5 18h12" /><circle cx="4.2" cy="6" r="1.1" /><circle cx="4.2" cy="12" r="1.1" /><circle cx="4.2" cy="18" r="1.1" /></svg><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></span><span class="phone-nav-label">Backlog</span></a>
         {/* The bar reaches four of eleven places; this fifth slot opens a sheet
             with the rest plus Settings and Sign out, so every place and both
             account actions are within two taps from any surface (#231). */}
@@ -1905,7 +1942,7 @@ const App: Component = () => {
           aria-haspopup="dialog"
           aria-expanded={moreSheetOpen()}
           onClick={() => setMoreSheetOpen(true)}
-        ><span>More</span></button>
+        ><span class="phone-nav-icon-slot"><svg class="phone-nav-icon phone-nav-icon--filled" viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="19" cy="12" r="1.8" /></svg></span><span class="phone-nav-label">More</span></button>
       </nav>
 
       <Show when={moreSheetOpen()}>

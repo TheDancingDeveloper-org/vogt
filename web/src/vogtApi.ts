@@ -21,6 +21,8 @@
 
 import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
 import { fetchWithRetry } from "./transport";
+import { DEADLINE_MS } from "./deadlines";
+import { invalidateTaxonomy } from "./taxonomyInvalidation";
 
 /** Where the front door mounts vogt-core. */
 export const VOGT_PREFIX = "/api/vogt";
@@ -121,7 +123,11 @@ async function call<T>(
     body = JSON.stringify(params);
   }
 
-  const res = await fetchWithRetry(url, { method, headers, body, signal });
+  const res = await fetchWithRetry(
+    url,
+    { method, headers, body, signal },
+    { deadlineMs: DEADLINE_MS[method === "GET" ? "list" : "detail"] },
+  );
   const text = await res.text();
   if (!res.ok) {
     let message = text;
@@ -141,7 +147,14 @@ async function call<T>(
     reportAuthResponse(res.status, message);
     throw new ApiError(res.status, message);
   }
-  return text ? (JSON.parse(text) as T) : (undefined as T);
+  const result = text ? (JSON.parse(text) as T) : (undefined as T);
+  switch (operation) {
+    case "project.register":
+    case "project.import":
+      invalidateTaxonomy("projects");
+      break;
+  }
+  return result;
 }
 
 // -- the shapes the surfaces read ------------------------------------------
@@ -822,10 +835,15 @@ export const listEvents = (
   params: { after?: number; limit?: number; entity_id?: string } = {},
 ) => call<EventListResult>("events.list", params);
 
-export const listSessions = (params: Record<string, unknown> = {}) =>
+export const listSessions = (
+  params: Record<string, unknown> = {},
+  signal?: AbortSignal,
+) =>
   call<{ sessions: SessionSummary[]; engine?: string | null }>(
     "session.list",
     params,
+    "GET",
+    signal,
   );
 
 // -- writes, each carrying the reason its view collected --------------------

@@ -13,6 +13,7 @@ import { clearToolDrafts } from "../toolDrafts";
 import { clearPendingAction } from "../pendingAction";
 import { resetRailSections } from "../railSections";
 import { resetFileTreeState } from "../fileTreeState";
+import { clearTaxonomyCache } from "../taxonomyCache";
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
@@ -65,6 +66,7 @@ afterEach(() => {
   clearPendingAction();
   resetRailSections();
   resetFileTreeState();
+  clearTaxonomyCache();
 });
 
 // Unmount what the last test mounted.

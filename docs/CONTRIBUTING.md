@@ -70,15 +70,23 @@ as its own piece of work (#207); it is not solved by this file.
 
 ## Scope boundaries
 
-The public supported path is the Python core and its generic Docker/Compose
-delivery (`Dockerfile`, `deploy/vogt.compose.yml`, `deploy/vogt.build.yml`,
-`deploy/.env.example`). The Rust session engine, PWA, and mobile shell have
-their own toolchains (`engine/AGENTS.md`, [`ENGINE.md`](ENGINE.md)) and their
-own image; do not make them a prerequisite for a core change. Read
+The supported public product is the Python core, Rust session engine, and
+Solid PWA together; the core remains independently supported over CLI, REST,
+and MCP. The engine and PWA have their own toolchains (`engine/AGENTS.md`,
+[`ENGINE.md`](ENGINE.md)) and image, and a core-only change need not require
+those optional toolchains unless it changes their contracts. Read
 [`opensource.md`](../opensource.md) before changing packaging or deployment
 files — `tests/test_public_delivery.py` pins that the public example stays
 self-contained, and a change that introduces a private path, registry, secret
 broker, or external service into it will fail there.
+
+Vogt is currently a single-maintainer project. Protected branches therefore
+require the test and policy checks, resolved review conversations, linear
+history, and administrator enforcement, but not a second approving review:
+requiring one would make the only maintainer unable to land changes and GitHub
+does not let an author self-approve. Outside contributions still receive
+maintainer review through the normal pull-request path. Revisit this explicit
+tradeoff when a second regular maintainer can share approval duty.
 
 Repository-wide conventions for agents and people — layer order, the
 transport-parity rule, logging — are in [`AGENTS.md`](../AGENTS.md).

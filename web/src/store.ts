@@ -9,12 +9,15 @@ interface SessionsStore {
   order: string[];
   /** True once we've loaded the initial list at least once. */
   ready: boolean;
+  /** Timestamp of the last successful list or stream answer. */
+  lastAnswerAt: string | null;
 }
 
 const [store, setStore] = createStore<SessionsStore>({
   sessions: {},
   order: [],
   ready: false,
+  lastAnswerAt: null,
 });
 
 const [error, setError] = createSignal<string | null>(null);
@@ -40,6 +43,7 @@ export async function refreshSessions(): Promise<void> {
     );
     setError(null);
     setConnected(true);
+    setStore("lastAnswerAt", new Date().toISOString());
   } catch (e) {
     setError((e as Error).message);
     setConnected(false);
@@ -93,13 +97,20 @@ export async function renameSession(id: string, name: string): Promise<void> {
   );
 }
 
-export function updateActivity(id: string, state: ActivityState) {
+export function updateActivity(id: string, state: ActivityState, activityChangedAt?: string) {
   setStore(
     produce((s) => {
       const sess = s.sessions[id];
-      if (sess) sess.activity = state;
+      if (sess) {
+        sess.activity = state;
+        if (activityChangedAt) sess.activity_changed_at = activityChangedAt;
+      }
     }),
   );
+}
+
+function markAnswered(): void {
+  setStore("lastAnswerAt", new Date().toISOString());
 }
 
 let unsubscribeEvents: (() => void) | null = null;
@@ -119,6 +130,8 @@ function nextReconnectDelay(): number {
 
 /** Callers waiting to hear that vogt-core changed (FR-U10). */
 const vogtListeners = new Set<(seq: number) => void>();
+export type VogtChangedEvent = Extract<ServerEvent, { type: "vogt-changed" }>;
+const vogtEventListeners = new Set<(event: VogtChangedEvent) => void>();
 
 /**
  * Subscribe to vogt-core's changes, as republished on the engine's stream.
@@ -133,8 +146,16 @@ export function onVogtChanged(listener: (seq: number) => void): () => void {
   return () => vogtListeners.delete(listener);
 }
 
-function notifyVogtChanged(seq: number): void {
-  for (const listener of vogtListeners) listener(seq);
+export function onVogtChangedEvent(
+  listener: (event: VogtChangedEvent) => void,
+): () => void {
+  vogtEventListeners.add(listener);
+  return () => vogtEventListeners.delete(listener);
+}
+
+function notifyVogtChanged(event: VogtChangedEvent): void {
+  for (const listener of vogtListeners) listener(event.seq);
+  for (const listener of vogtEventListeners) listener(event);
 }
 
 /** Callers waiting to hear that a session exited (a PTY the engine killed). */
@@ -171,6 +192,7 @@ export function startEventStream(): void {
   unsubscribeEvents = subscribeEvents(
     (ev: ServerEvent) => {
       setConnected(true);
+      markAnswered();
       reconnectAttempts = 0;
       switch (ev.type) {
         case "session-created":
@@ -197,14 +219,14 @@ export function startEventStream(): void {
           notifySessionKilled(ev.id, ev.exit_code);
           break;
         case "activity":
-          updateActivity(ev.id, ev.state);
+          updateActivity(ev.id, ev.state, ev.activity_changed_at);
           break;
         case "vogt-changed":
           // The Vogt surfaces subscribe to this themselves; the session store
           // has no opinion about a work item. Recorded here so the switch is
           // exhaustive and a future reader is not left wondering whether the
           // event was forgotten or ignored.
-          notifyVogtChanged(ev.seq);
+          notifyVogtChanged(ev);
           break;
       }
     },

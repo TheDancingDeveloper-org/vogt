@@ -20,9 +20,9 @@ vulnerability"**. That creates a private advisory only the maintainer (and
 anyone they add) can see, and lets you attach reproduction steps or a patch
 without exposing the issue while it is unfixed.
 
-If you cannot use that flow, email **security@vogt.example** — this is a
-placeholder address; the repository operator should replace it with a real
-monitored inbox before relying on it. Include:
+If you cannot use that flow, contact the repository maintainers privately
+through GitHub and do not publish exploit details in an issue. The project does
+not currently promise an email fallback. Include:
 
 - what you found and why it is a security issue, not just a bug;
 - steps or a proof-of-concept to reproduce it;
@@ -45,9 +45,11 @@ expose real project data. The model, in short (the full statement is in
 - **Scoped bearer tokens.** Every request is authenticated by default
   (`--no-auth` exists only for a loopback listener). A token is bound to an
   actor and carries scopes (`read`, `work.write`, `project.write`, `admin`,
-  `writeback`), minted with `vogt token issue` and shown once. Tokens are
-  configured as `*_file` paths, never as raw values in the environment, so a
-  credential does not end up in `docker inspect` output or a process listing.
+  `writeback`), minted with `vogt token issue` and shown once. Core-side
+  tokens are configured as `*_file` paths. The optional engine's generic
+  Compose overlay currently accepts `ENGINE_TOKEN` in its ignored `.env` for
+  compatibility; operators who need to exclude it from `docker inspect` can
+  use the engine TOML `token` setting or a private secret-backed overlay.
 - **Audited writes.** Every mutating operation requires a principal and a
   reason and lands its entity change, audit row, and event row in one
   transaction (`audited_write`). There is no write path that bypasses this.
@@ -65,3 +67,35 @@ leak a token (file-based or linked) to an unintended party, or a way to
 escalate scopes. Missing rate limiting on a self-hosted single-operator
 service, or the debug-signed dev/CI build artifacts being unsigned, are known
 and out of scope unless you can show real impact.
+
+## Mobile Firebase configuration
+
+`mobile/android/app/google-services.json` is operator-supplied and must never
+be committed. It is ignored by Git. The tracked
+`mobile/android/app/google-services.json.example` is a sanitized fixture for
+forks and pull requests; it does not provide working Firebase or FCM access.
+
+Trusted Android builds fetch their real configuration from Infisical and remove
+the working file after Gradle finishes. Pull-request builds use the sanitized
+fixture and do not receive the Infisical credentials.
+
+The CI `tracked secret hygiene` job checks every reviewed tree for the live
+configuration filename and Firebase-looking API keys. It intentionally checks
+the current tree only: removing a credential from history requires an
+operator-coordinated rewrite and cannot be performed by an ordinary pull
+request.
+
+## If a credential is exposed
+
+1. Revoke or rotate it in Google Cloud/Firebase immediately. Restrict any
+   replacement to the intended Android package names and signing certificates.
+2. Decide whether the repository history must be rewritten. Rotation makes the
+   old value unusable; it does not remove old commits from clones, tags, or
+   hosting caches.
+3. Provision the replacement configuration outside Git and store it in the
+   configured secret manager.
+4. Run a full-history secret scan after the operator action and confirm that
+   current-tree CI remains green.
+
+Do not paste credentials into issues or pull requests. Report a suspected new
+exposure privately to the repository maintainers.

@@ -41,7 +41,7 @@ jobs:
     name: the tag is promotable from prod
     runs-on: [self-hosted]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           # The release tag and prod can be far apart.  A shallow checkout
           # cannot prove ancestry and would turn this guard into a guess.
@@ -77,11 +77,11 @@ jobs:
     needs: validate-release
     runs-on: [self-hosted]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       # Exact pin: setup-uv stopped publishing major tags at v8, so
       # `@v9` does not resolve. Renovate bumps this line.
-      - uses: astral-sh/setup-uv@v9.0.0
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
 
       - run: uv sync --locked
 
@@ -99,7 +99,7 @@ jobs:
 
       - run: uv build
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: vogt-dist-${{ github.ref_name }}
           path: dist/
@@ -124,9 +124,9 @@ jobs:
       # repository and this workflow (NFR-C5).
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
         with:
           # The layer cache lives on the estate's own local-registry at
           # 192.168.1.75:5500 — plaintext HTTP on the LAN. The default
@@ -166,13 +166,13 @@ jobs:
       # anything and would put the estate's shared bucket back on this
       # repository's critical path.
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         id: meta
         with:
           images: ${{ env.IMAGE }}
@@ -195,7 +195,7 @@ jobs:
       # build was green, the signature was valid, and the artefact had never
       # been executed. A publish gate that only proves an image assembles
       # proves the wrong thing.
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: candidate
         with:
           context: .
@@ -232,7 +232,7 @@ jobs:
           fi
           echo "image runs, and still refuses to guess an address"
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: push
         with:
           context: .
@@ -246,7 +246,7 @@ jobs:
           build-args: |
             PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
       - name: sign the image and attest its SBOM
         env:
@@ -298,9 +298,9 @@ jobs:
       packages: write
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
         with:
           # The layer cache lives on the estate's own local-registry at
           # 192.168.1.75:5500 — plaintext HTTP on the LAN. The default
@@ -345,13 +345,13 @@ jobs:
       # anything and would put the estate's shared bucket back on this
       # repository's critical path.
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@v5
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
         id: meta
         with:
           images: ${{ env.STACK_IMAGE }}
@@ -368,7 +368,7 @@ jobs:
           flavor: |
             latest=auto
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: candidate
         with:
           # The repository root: the Dockerfile reaches for `web/dist`,
@@ -398,7 +398,7 @@ jobs:
           docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
           echo "both halves are present and start"
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: push
         with:
           context: .
@@ -418,7 +418,7 @@ jobs:
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
       - name: sign the image
         env:
@@ -465,9 +465,9 @@ jobs:
     needs: distribution
     runs-on: [self-hosted]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
 
@@ -559,7 +559,7 @@ jobs:
           verifier="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner | sort | tail -1)"
           "$verifier" verify --print-certs "$apk"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: vogt-android-release-${{ github.ref_name }}
           path: mobile/android/app/build/outputs/apk/release/*.apk
@@ -577,16 +577,16 @@ jobs:
       contents: write
       actions: read
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: vogt-dist-${{ github.ref_name }}
           path: release-assets/dist
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
           name: vogt-android-release-${{ github.ref_name }}
           path: release-assets/android
@@ -605,6 +605,12 @@ jobs:
           apk_count="$(find release-assets/android -type f -name '*.apk' | wc -l)"
           [ "$wheel_count" -ge 2 ] || { echo "wheel and sdist are required" >&2; exit 1; }
           [ "$apk_count" -ge 1 ] || { echo "signed APK is required" >&2; exit 1; }
+          sdist="$(find release-assets/dist -type f -name '*.tar.gz' -print -quit)"
+          test -n "$sdist"
+          if tar -tzf "$sdist" | grep -Eq '/(\.github|deploy|docs|engine|mobile|tests|web)(/|$)'; then
+            echo "sdist contains non-core repository content" >&2
+            exit 1
+          fi
           case "$CORE_DIGEST:$STACK_DIGEST" in
             sha256:*:sha256:*) ;;
             *) echo "release image digests are missing" >&2; exit 1;;

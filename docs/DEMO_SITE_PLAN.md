@@ -1,10 +1,9 @@
 # Demo site implementation plan
 
-**Status:** implemented on `feat/demo-site`; acceptance evidence is in the
-tests and delivery gates named below
+**Status:** implemented; the current GUI and mobile-app showcase share the
+same built Solid PWA and deterministic browser transport
 **Target base:** `dev`
-**Implementation base SHA:** `a2369cf6e286fbef1ce562a7d8be0b75bab57ffa`
-**Reviewed:** 2026-08-24
+**Reviewed:** 2026-08-31
 **Visual reference:** the PWA served by
 [`vogt-dev.sprooty.com`](https://vogt-dev.sprooty.com/), from the matching
 `dev` commit
@@ -38,6 +37,15 @@ The primary acceptance statement is:
 > For one `dev` commit, build `web/dist/` once. The live-capable image and the
 > demo image consume those exact hashed assets. Only the runtime transport and
 > data differ; the rendered application components and CSS do not.
+
+The demo artifact also serves `mobile-demo.html`. It is a presentation shell,
+not another application: its phone frame loads the same origin's PWA at the
+responsive Sessions, terminal and Assistant routes. This matches the actual
+Capacitor architecture, where the Android WebView loads the deployed PWA
+directly; native-only push and microphone plumbing are stated as exclusions.
+For a dedicated mobile hostname, the same static image may select the showcase
+as its root document. Its frame names `/index.html` explicitly, so this mode
+does not recurse and does not require a second build or image stream.
 
 ## 2. Review findings
 
@@ -183,21 +191,20 @@ upload, GUI process launch and any attempt to execute an arbitrary command.
 ### 3.4 Serve the demo without an engine or core
 
 Build `web/dist/` once from the chosen `dev` SHA. A demo-image stage copies the
-same output, verifies the recorded hashes, adds `demo-manifest.json` plus a
-static simulated GUI page, and serves it from a minimal static Node origin.
-The demo target contains neither the Rust engine nor the Python core, making
-the absence of a PTY or shared write path structural rather than configuration.
-Run that server with:
+same output, verifies the recorded hashes, adds `demo-manifest.json`, the
+static simulated GUI page and the mobile-app showcase, then serves them from a
+minimal static Node origin. The demo target contains neither the Rust engine
+nor the Python core, making the absence of a PTY or shared write path
+structural rather than configuration. Run that server with:
 
 - no token, core URL, workspace or state mount;
 - a read-only root filesystem and no Linux capabilities;
-- Assistant, voice, FCM, GUI process launch and agent-auth integrations
-  absent rather than merely unconfigured.
+- Assistant, voice, FCM, GUI process launch and agent-auth integrations absent.
 
 The browser never calls those real APIs in demo mode. A direct caller receives
-a static 404 from every `/api/**` or `/mcp` path. Add an integration smoke that
-attempts session creation and proves there is no backend route capable of
-creating a PTY.
+a static 404 from every `/api/**` or `/mcp` path. An integration smoke attempts
+session creation and proves there is no backend route capable of creating a
+PTY.
 
 The image may be published by CI, but it must not deploy itself. If the demo is
 hosted on the estate, use a separate digest-pinned Komodo stack and an ops
@@ -393,6 +400,7 @@ web/src/demo/store.ts                  per-browser state and reducers
 web/src/demo/transport.ts              engine + Vogt request responder
 web/src/demo/socket.ts                 scripted terminal attach implementation
 web/src/demo/gui-stream.html           same-origin simulated GUI content
+web/src/demo/mobile-showcase.html      phone frame around the same responsive PWA
 web/tests/browser/demo.spec.ts         complete route/menu/split matrix
 deploy/demo.overlay.yml                isolated demo runtime
 deploy/demo.env.example                non-secret operator choices
@@ -446,6 +454,8 @@ not know.
 - [x] Demo desktop/phone route and screenshot matrices are green.
 - [x] The demo image is scanned/signed and deployable only by digest through the
       approved deployment path.
+- [x] Standard and mobile-first hostnames can pin one digest; the mobile
+      overlay changes only the allowlisted root document.
 - [x] A reset and a complete canonical tour work in a fresh browser.
 
 ## 8. Cut lines

@@ -1,0 +1,58 @@
+name: codeql
+
+# Repository-owned code scanning for all three implementation languages.
+# This starts as an independent check: once the self-hosted runner has
+# produced a receipt for every matrix entry it can be added to branch
+# protection without turning runner/tool-download uncertainty into a merge
+# outage.
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+  pull_request:
+    branches:
+      - main
+      - dev
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: [self-hosted]
+    timeout-minutes: 45
+    concurrency:
+      group: codeql-${{ github.ref }}-${{ matrix.language }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - python
+          - javascript-typescript
+          - rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # Rust, Python, and JavaScript/TypeScript all support build-mode none in
+      # the current CodeQL bundle. That keeps this security analysis separate
+      # from the authoritative build/test jobs and avoids rebuilding the PWA
+      # or engine only to extract source a second time.
+      - uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d
+        with:
+          category: /language:${{ matrix.language }}

@@ -26,7 +26,7 @@ discard local preferences, break push delivery, create a second Android app or
 invalidate existing task definitions, so they stay; every user-facing label
 says Vogt.
 
-Status: **current as of 2026-08-18**, and describing one product.
+Status: **current as of 2026-08-30**, and describing one product.
 
 **One honest caveat, stated once and not repeated.** Everything below is
 implemented and covered by tests. The Solid surfaces have jsdom coverage
@@ -451,6 +451,15 @@ One pending action at a time, carrying the exact payload, the target, and the
 reason that will be written to the audit log; it expires after 120 seconds —
 the card counts the seconds down — and a new message abandons it.
 
+The transcript separates newly received turns by time, keeps a tool trace on
+one quiet line, and turns sessions returned by successful assistant tools into
+state-labelled chips and **Open session** actions. Those links come from the
+structured tool result, not from names guessed out of prose; older transcript
+entries with no receipt timestamp simply render without a made-up time.
+Terminal-input approval stays inline in the conversation and shows the exact
+text, whether Enter will be appended, and the target session before **Deny**
+and **Approve on screen** can be pressed.
+
 **Voice never approves.** Speech reaches the assistant only as a user message,
 and an approval is a tap. Push-to-talk is *held*, not toggled — press to open
 the microphone, release to send — because a take auto-sends, and a toggle left
@@ -699,13 +708,20 @@ from source, not published.
   the session has exited, the card says that instead and offers nothing to
   press. Below the cards, the running sessions that are *not* waiting still
   list as rows, so an idle or busy session is one tap from its terminal.
-- **Opening a terminal or tool collapses the Sessions header.** On the
-  overview the header is the surface's own — kicker, title, the connection
-  line and the tool strip. Once a terminal, History, Git, Assistant or Tasks
-  owns the screen, that header folds to a single row (the title and **+
-  Session**), the tool strip becomes one scrolling row, and the connection
-  line moves behind **View controls** — so the terminal keeps at least 40% of
-  the screen instead of being pushed off the bottom.
+- **A terminal and the Assistant own their phone headers.** On the overview,
+  Sessions shows its kicker, title, live/stale connection truth and scrolling
+  tool strip. Opening a terminal replaces that chrome with a compact session
+  bar: Back, activity/name/path, Find and the overflow that retains terminal
+  theme, font, broadcast, split and close actions. Assistant uses its own
+  compact watch status and actions. Other machine tools retain the folded
+  Sessions header, so no route stacks two headers over its work.
+- **Open terminals form an identity-stable pager.** Swipe horizontally on the
+  session bar, dots or terminal (a vertical gesture still scrolls), tap a
+  state-coloured dot, or focus the bar and press Left/Right. The pager follows
+  the full attention order, including exited sessions; if live activity
+  reorders that list, the terminal you selected stays selected. Back always
+  returns to the Sessions overview, and the bottom place bar stays out of the
+  terminal screen.
 - **The editor gives the code the width.** The Files sidebar is an overlay
   drawer that starts collapsed, so the editor gets the whole screen rather than
   a sliver beside a fixed column; **>** slides the drawer in over the editor and
@@ -719,11 +735,13 @@ from source, not published.
   **Settings** and **Sign out**. Every place and both account actions are two
   taps from any surface. The bar lifts above the soft keyboard rather than
   hiding under it.
-- **Modifier row** above the soft keyboard: `Esc`, `Tab`, sticky `Ctrl` and
-  `Alt`, arrows, `Home`/`End`/`PgUp`/`PgDn`, `/ | ~`, `Enter`. Tap `Ctrl` then a
-  letter **on the soft keyboard** to send `Ctrl+letter` (tap `Ctrl` then `r` for
-  `^R`); tap `Alt` then a letter for the `Esc`-prefixed sequence. An armed
-  `Ctrl`/`Alt` clears itself after about five seconds, or the moment you use it.
+- **Modifier row** above the soft keyboard: the first tier is `Esc`, `Tab`,
+  sticky `Ctrl` and `Alt`, `^C`, Up, Down and `⋯`. The final key reveals the
+  remaining arrows, `Home`/`End`/`PgUp`/`PgDn`, `/ | ~`, Enter, typing,
+  selection, copy and paste controls. Tap `Ctrl` then a letter **on the soft
+  keyboard** to send `Ctrl+letter` (tap `Ctrl` then `r` for `^R`); tap `Alt`
+  then a letter for the `Esc`-prefixed sequence. An armed `Ctrl`/`Alt` clears
+  itself after about five seconds, or the moment you use it.
 - Use the terminal's labelled **A− / A+** controls for terminal-only font size;
   the size is remembered per device. Browser pinch/Ctrl+wheel zoom remains the
   normal whole-app zoom gesture.
@@ -882,6 +900,12 @@ ordering, but the output is scripted. Input matches a small canned command
 list and is never executed. The GUI stream is likewise a same-origin static
 illustration, not a remote desktop. The source link in the strip names the
 exact commit whose PWA asset hashes the demo advertises.
+
+**Mobile app** opens a separate showcase page with the real responsive PWA in
+a phone-sized frame. Its Sessions attention cards, terminal pager and
+structured Assistant approval are the same components loaded by the Android
+Capacitor WebView; only native push delivery and microphone plumbing cannot be
+demonstrated by the browser frame.
 
 **Can I use it offline?** No. Installed PWAs show an explicit offline fallback
 page rather than pretending to support disconnected use — a queued offline

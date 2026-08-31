@@ -29,6 +29,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
 import Board, { CARD_ESTIMATE, cellKey, projectBoard, type Lane } from "../Board";
+import { clearTaxonomy } from "../taxonomyCache";
 import type { WorkItem } from "../vogtApi";
 import { fakeVogt, mountAt, refusal, settle, workItem } from "./harness";
 
@@ -504,6 +505,10 @@ describe("NFR-S5 — the filter and drag paths do not degrade with backlog size"
     narrow.unmount();
 
     vogt.route("GET /workflows", { body: { workflows: [chain("feature", twelve)] } });
+    // The fake backend changed without emitting the vogt-changed event a real
+    // workflow mutation emits. Model that invalidation before mounting the
+    // second consumer of the process-wide taxonomy cache.
+    clearTaxonomy("workflows");
     const before = reads();
     const wide = board();
     await settled(wide.container, twelve.length);

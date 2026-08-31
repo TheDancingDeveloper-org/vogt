@@ -220,6 +220,59 @@ def test_every_workflow_job_names_a_self_hosted_runner() -> None:
             )
 
 
+def test_every_third_party_action_is_pinned_to_a_commit() -> None:
+    """A mutable action tag is executable supply-chain input.
+
+    The runner-policy workflow repeats this check in CI; keeping the same
+    assertion in the Python suite catches a newly added workflow before it
+    reaches GitHub at all. Local reusable workflows are intentionally exempt:
+    they are resolved from this checkout and therefore move with the commit
+    being tested.
+    """
+    action = re.compile(r"^\s*(?:-\s*)?uses:\s*([^@\s]+)@([^\s#]+)")
+    for path in _workflow_files():
+        for number, line in enumerate(path.read_text("utf-8").splitlines(), start=1):
+            match = action.search(line)
+            if not match or match.group(1).startswith("./"):
+                continue
+            assert re.fullmatch(r"[0-9a-fA-F]{40}", match.group(2)), (
+                f"{path.name}:{number}: third-party action is not SHA-pinned: "
+                f"{line.strip()}"
+            )
+
+
+def test_codeql_covers_each_implementation_language() -> None:
+    """OSR-08: code scanning follows the actual language boundary.
+
+    Keep it independent from the required CI aggregate until every matrix
+    entry has run on the self-hosted fleet; the workflow itself still has to
+    be immutable, least-privileged, and cover Python, TypeScript, and Rust.
+    """
+    workflow = (WORKFLOWS / "codeql.yml").read_text(encoding="utf-8")
+    assert "runs-on: [self-hosted]" in workflow
+    assert "security-events: write" in workflow
+    assert "build-mode: none" in workflow
+    assert "security-extended" in workflow
+    assert "- python" in workflow
+    assert "- javascript-typescript" in workflow
+    assert "- rust" in workflow
+    assert re.search(r"github/codeql-action/init@[0-9a-f]{40}", workflow)
+    assert re.search(r"github/codeql-action/analyze@[0-9a-f]{40}", workflow)
+
+
+def test_rust_dependency_audit_is_a_fatal_ci_gate() -> None:
+    """OSR-01: RustSec findings are triaged and future drift fails CI."""
+    workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
+    step = workflow.split("      - name: audit Rust dependencies", 1)[1].split(
+        "\n      - uses:", 1
+    )[0]
+    assert "cargo install --locked cargo-audit --version 0.22.2" in step
+    assert "cargo audit --deny warnings" in step
+    assert "--ignore RUSTSEC-2023-0071" in step
+    assert "has no fixed rsa release" in step
+    assert "signs ES256" in step
+
+
 def test_the_release_workflow_is_tag_only_and_signs_a_digest() -> None:
     """NFR-C3 (r5), NFR-C5, NFR-D10.
 
@@ -1214,7 +1267,7 @@ def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> N
     assert '[ "$CONFIRM" = DEPLOY ]' in workflow
     assert "git merge-base --is-ancestor" in workflow
     assert "docker buildx imagetools inspect" in workflow
-    assert "actions/create-github-app-token@v2" in workflow
+    assert re.search(r"actions/create-github-app-token@[0-9a-f]{40}", workflow)
     assert "VOGT_DEPLOYMENT_REPOSITORY" in workflow
     assert "actions/workflows/${DEPLOY_WORKFLOW}/dispatches" in workflow
     assert "image_digest" in workflow
@@ -1222,13 +1275,16 @@ def test_production_deploy_is_approval_gated_and_pins_an_immutable_digest() -> N
     assert "desired_state_commit" in workflow
     assert "migration_limits" in workflow
     assert "KOMODO_API" not in workflow
-    assert "sigstore/cosign-installer@v3" in workflow
+    assert re.search(r"sigstore/cosign-installer@[0-9a-f]{40}", workflow)
     assert "cosign verify" in workflow
 
 
 def test_dev_deploy_is_immutable_and_receipt_gated() -> None:
     workflow = (WORKFLOWS / "deploy-dev.yml").read_text(encoding="utf-8")
     assert "workflow_dispatch:" in workflow
+    assert "runs-on: [self-hosted, tailnet, docker]" in workflow
+    assert "VOGT_KOMODO_URL" in workflow
+    assert "VOGT_KOMODO_STACK" in workflow
     assert "DEPLOY-DEV" in workflow
     assert "dev-${SOURCE_SHA}" in workflow
     assert "INFISICAL_CLIENT_ID" in workflow
@@ -1275,6 +1331,7 @@ def test_github_release_collects_and_publishes_the_complete_release() -> None:
     assert "vogt-dist-${{ github.ref_name }}" in job
     assert "vogt-android-release-${{ github.ref_name }}" in job
     assert "wheel and sdist are required" in job
+    assert "sdist contains non-core repository content" in job
     assert "signed APK is required" in job
     assert "CORE_DIGEST" in job and "STACK_DIGEST" in job
     assert "vogt-release-manifest.json" in job

@@ -91,7 +91,7 @@ What the base does, and why it does it that way:
 | `VOGT_PUBLIC_URL` | yes | — | The URL clients use to reach this instance. |
 | `VOGT_PORT` | no | `8080` | Host port the container's 8000 is published on. |
 | `VOGT_BIND_IP` | no | `127.0.0.1` | Host interface the port is published on. |
-| `VOGT_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt:v0.2.0` | The image to run. |
+| `VOGT_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt:v0.2.0` | The image to run. The published package must be readable by anonymous pulls for this path. |
 | `VOGT_UID` | no | `1000` | The uid the container runs as (gid is always 0). |
 | `VOGT_LOG_LEVEL` | no | `info` | Verbosity of Vogt's own logger. |
 
@@ -104,6 +104,18 @@ The base names a tag so the example reads. A deployment should name a
 digest, because a digest is the only form of "which image is this" that a
 rebuild cannot silently change — publishing an image and moving a
 deployment are separate acts, and the digest line is what moves one.
+
+For a release, verify the keyless signature before starting Compose. Replace
+`<tag>` and `<digest>` with the exact release values; this command performs an
+anonymous registry read and constrains both the workflow identity and the
+GitHub OIDC issuer:
+
+```console
+cosign verify \
+  --certificate-identity-regexp '^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/release.yml@refs/tags/v[0-9].*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/thedancingdeveloper-org/vogt@sha256:<digest>
+```
 
 ```console
 docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt:v0.2.0 \
@@ -362,12 +374,13 @@ exact `dev-<sha>` images and obtain the verified receipt; the promotion
 workflow refuses to open `dev → main` without that receipt. Run **Actions →
 deploy dev**, provide the current full `dev` SHA, type `DEPLOY-DEV`, and keep
 the receipt URL and artifact with the change record. The workflow verifies both
-signed images, updates the two active digest pins in the Komodo-managed
-`indexarr/ops/personal/vogt-dev` stack, calls Komodo, and runs the live smoke
-contract. It uses the existing Infisical CI identity to retrieve Komodo and
+signed images, updates the two active digest pins in the operator-managed dev
+stack, calls the deployment controller, and runs the live smoke contract. It
+uses the configured CI identity to retrieve deployment credentials and
 dev-runtime credentials. After deployment, the helper reads the active
-`MYDEVENV2_TOKEN` from the Komodo stack environment into a `0600` runner-temp
-file for live smoke only; it is never printed or committed. No GitHub App,
+the active runtime token from the deployment-controller stack environment into
+a `0600` runner-temp file for live smoke only; it is never printed or
+committed. No GitHub App,
 private key, Forgejo token, version tag, or GitHub Release is required. The
 receipt must cover readiness,
 authentication, a representative core read/write path, the engine/PWA front
@@ -438,7 +451,8 @@ sanitized checked-in example.
    and migration limits, and must upload `vogt-deployment-receipt/receipt.json`,
    validated against [`deploy/vogt-deployment-receipt.schema.json`](../deploy/vogt-deployment-receipt.schema.json).
    The source workflow rejects a green handoff without that receipt. This
-   replaces a long-lived broad Komodo credential in the Vogt repository.
+   replaces a long-lived broad deployment-controller credential in the Vogt
+   repository.
 5. Check the production front door's `/health/ready`, the engine's `/readyz`
    when deployed, authentication, and one representative read/write workflow.
    Keep the former digest and the pre-release backup until those checks pass.
@@ -550,6 +564,9 @@ SHA in `demo-build.json`, verifies them, and only then adds
 `demo-manifest.json` plus the simulated GUI document. The runtime is a small
 read-only Node static server. It has no Python core, Rust engine, PTY,
 subprocess route, workspace mount, upstream proxy or deploy credential.
+Demo augmentation also adds `mobile-demo.html`; that page frames the same PWA
+at phone width to demonstrate the implemented Capacitor WebView UI without
+shipping a second frontend.
 
 The `demo-image` job in `build.yml` runs only for `dev`, smoke-tests that APIs
 are refused, emits an SBOM and signs the digest. It **does not deploy**.
@@ -558,6 +575,27 @@ reported `ghcr.io/thedancingdeveloper-org/vogt-demo@sha256:…` reference in the
 operator's deployment stack and let its approved workflow apply it. The repository-local
 [`deploy/demo.overlay.yml`](../deploy/demo.overlay.yml) documents the hardened
 runtime and safe allocation defaults; it is not an alternate deployment path.
+
+The same deployed origin serves the mobile showcase at `/mobile-demo.html`.
+To give it a separate mobile-first hostname, run a second Compose project from
+the **same signed digest** and layer
+[`deploy/mobile-demo.overlay.yml`](../deploy/mobile-demo.overlay.yml) over the
+demo service. That overlay changes only the root document; `/index.html`
+remains the real PWA loaded inside the phone frame, so the showcase cannot
+recurse into itself:
+
+```console
+docker compose --project-name vogt-mobile-demo \
+  --env-file deploy/mobile-demo.env \
+  -f deploy/demo.overlay.yml \
+  -f deploy/mobile-demo.overlay.yml up -d
+```
+
+Start `deploy/mobile-demo.env` from `deploy/demo.env.example`, retain the same
+`VOGT_DEMO_IMAGE=...@sha256:...`, and choose a different
+`VOGT_DEMO_PORT` (for example `8913`). Point the mobile hostname's TLS reverse
+proxy at that loopback port. Publishing either entry point still deploys
+nothing; the operator-owned digest update remains the only movement step.
 
 To build and prove the artifact locally:
 

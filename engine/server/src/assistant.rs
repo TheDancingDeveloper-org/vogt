@@ -40,7 +40,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::{
-    activity::strip_ansi,
+    activity::{strip_ansi, ActivityState},
     agent_tasks::AgentTaskRegistry,
     assistant_log::{AssistantLog, ListQuery, LogEvent, LoggedEntry},
     config::Config,
@@ -103,6 +103,60 @@ pub struct TranscriptEntry {
     pub text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_trace: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub session_refs: Vec<SessionRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub actions: Vec<TranscriptAction>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionRef {
+    pub id: Uuid,
+    pub name: String,
+    pub activity: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptAction {
+    pub kind: String,
+    pub session_id: Uuid,
+    pub label: String,
+}
+
+fn transcript_now() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_else(|_| time::OffsetDateTime::now_utc().to_string())
+}
+
+fn activity_name(activity: ActivityState) -> String {
+    serde_json::to_value(activity)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "idle".to_string())
+}
+
+fn remember_session(refs: &mut Vec<SessionRef>, id: Uuid, name: String, activity: ActivityState) {
+    if refs.iter().any(|known| known.id == id) {
+        return;
+    }
+    refs.push(SessionRef {
+        id,
+        name,
+        activity: activity_name(activity),
+    });
+}
+
+fn open_session_actions(refs: &[SessionRef]) -> Vec<TranscriptAction> {
+    refs.iter()
+        .map(|session| TranscriptAction {
+            kind: "open-session".to_string(),
+            session_id: session.id,
+            label: format!("Open {}", session.name),
+        })
+        .collect()
 }
 
 /// What one approval buys, as the client renders it.
@@ -165,6 +219,12 @@ pub struct AssistantReply {
     pub pending_action: Option<PendingActionView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_trace: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub session_refs: Vec<SessionRef>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<TranscriptAction>,
 }
 
 struct PendingAction {
@@ -178,6 +238,11 @@ struct PendingAction {
     /// Results of sibling tool calls from the same assistant message that
     /// already executed before the loop paused.
     completed_results: Vec<Value>,
+    /// Display metadata already accumulated in this turn. Approval resumes
+    /// the same turn, so neither the trace nor structured session identity may
+    /// disappear merely because the loop crossed the on-screen gate.
+    tool_trace: Vec<String>,
+    session_refs: Vec<SessionRef>,
     created: Instant,
     /// What to send the core if this is approved. `None` for a `send_input`.
     /// Held beside the view rather than inside it because the view is
@@ -677,8 +742,19 @@ impl AssistantRuntime {
             role: "user".into(),
             text,
             tool_trace: vec![],
+            created_at: Some(transcript_now()),
+            session_refs: vec![],
+            actions: vec![],
         });
-        self.run_loop(&mut convo, Vec::new(), &turn, profile).await
+        self.run_loop(
+            &mut convo,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &turn,
+            profile,
+        )
+        .await
     }
 
     /// Approve or deny the pending action, then resume the loop.
@@ -761,7 +837,15 @@ impl AssistantRuntime {
             "tool_call_id": pending.tool_call_id,
             "content": outcome,
         }));
-        self.run_loop(&mut convo, results, &turn, profile).await
+        self.run_loop(
+            &mut convo,
+            results,
+            pending.tool_trace,
+            pending.session_refs,
+            &turn,
+            profile,
+        )
+        .await
     }
 
     /// Send an approved write to the core as the approving user.
@@ -876,12 +960,15 @@ impl AssistantRuntime {
         &self,
         convo: &mut Conversation,
         carried_results: Vec<Value>,
+        carried_trace: Vec<String>,
+        carried_session_refs: Vec<SessionRef>,
         turn: &Turn,
         profile: &Profile,
     ) -> Result<AssistantReply> {
         convo.messages.extend(carried_results);
         let actor = turn.caller.token_name.clone();
-        let mut tool_trace: Vec<String> = Vec::new();
+        let mut tool_trace = carried_trace;
+        let mut session_refs = carried_session_refs;
         let mut rounds = 0u32;
         let mut forced_rounds = 0u32;
         loop {
@@ -900,12 +987,21 @@ impl AssistantRuntime {
                     role: "assistant".into(),
                     text: text.clone(),
                     tool_trace: tool_trace.clone(),
+                    created_at: Some(transcript_now()),
+                    session_refs: session_refs.clone(),
+                    actions: open_session_actions(&session_refs),
                 });
                 trim_history(convo);
                 return Ok(AssistantReply {
                     reply: Some(text),
                     pending_action: None,
                     tool_trace,
+                    created_at: convo
+                        .transcript
+                        .last()
+                        .and_then(|entry| entry.created_at.clone()),
+                    actions: open_session_actions(&session_refs),
+                    session_refs,
                 });
             }
             let response = self
@@ -948,12 +1044,21 @@ impl AssistantRuntime {
                         role: "assistant".into(),
                         text: text.clone(),
                         tool_trace: tool_trace.clone(),
+                        created_at: Some(transcript_now()),
+                        session_refs: session_refs.clone(),
+                        actions: open_session_actions(&session_refs),
                     });
                     trim_history(convo);
                     return Ok(AssistantReply {
                         reply: Some(text),
                         pending_action: None,
                         tool_trace,
+                        created_at: convo
+                            .transcript
+                            .last()
+                            .and_then(|entry| entry.created_at.clone()),
+                        actions: open_session_actions(&session_refs),
+                        session_refs,
                     });
                 }
             };
@@ -978,16 +1083,24 @@ impl AssistantRuntime {
                     .to_string();
                 self.log_event(&actor, LogEvent::Reply { text: text.clone() })
                     .await;
+                let created_at = transcript_now();
+                let actions = open_session_actions(&session_refs);
                 convo.transcript.push(TranscriptEntry {
                     role: "assistant".into(),
                     text: text.clone(),
                     tool_trace: tool_trace.clone(),
+                    created_at: Some(created_at.clone()),
+                    session_refs: session_refs.clone(),
+                    actions: actions.clone(),
                 });
                 trim_history(convo);
                 return Ok(AssistantReply {
                     reply: Some(text),
                     pending_action: None,
                     tool_trace,
+                    created_at: Some(created_at),
+                    session_refs,
+                    actions,
                 });
             }
 
@@ -1084,6 +1197,16 @@ impl AssistantRuntime {
                 match gated {
                     Some(Ok((trace, view, vogt))) => {
                         tool_trace.push(trace);
+                        if let PendingActionView::SendInput(input) = &view {
+                            if let Ok(session) = self.sessions.get(input.session_id) {
+                                remember_session(
+                                    &mut session_refs,
+                                    input.session_id,
+                                    input.session_name.clone(),
+                                    session.activity(),
+                                );
+                            }
+                        }
                         // Sibling calls after this one in the same message
                         // get a deferred notice so the protocol stays valid.
                         for later in tool_calls.iter().skip(idx + 1) {
@@ -1114,6 +1237,8 @@ impl AssistantRuntime {
                             actor: actor.clone(),
                             tool_call_id: call_id,
                             completed_results: results,
+                            tool_trace: tool_trace.clone(),
+                            session_refs: session_refs.clone(),
                             created: Instant::now(),
                             vogt,
                         });
@@ -1134,6 +1259,9 @@ impl AssistantRuntime {
                             reply: None,
                             pending_action: Some(view),
                             tool_trace,
+                            created_at: None,
+                            actions: open_session_actions(&session_refs),
+                            session_refs,
                         });
                     }
                     Some(Err(e)) => {
@@ -1157,7 +1285,7 @@ impl AssistantRuntime {
                 }
 
                 let outcome = self
-                    .dispatch_tool(&name, &args, &mut tool_trace, turn)
+                    .dispatch_tool(&name, &args, &mut tool_trace, &mut session_refs, turn)
                     .await;
                 let content = match outcome {
                     Ok(content) => content,
@@ -1239,6 +1367,7 @@ impl AssistantRuntime {
         name: &str,
         args: &Value,
         tool_trace: &mut Vec<String>,
+        session_refs: &mut Vec<SessionRef>,
         turn: &Turn,
     ) -> Result<String> {
         if let Some(def) = turn.find(name) {
@@ -1257,9 +1386,16 @@ impl AssistantRuntime {
         match name {
             "list_sessions" => {
                 tool_trace.push("listed sessions".into());
-                let list: Vec<Value> = self
-                    .sessions
-                    .list()
+                let summaries = self.sessions.list();
+                for session in &summaries {
+                    remember_session(
+                        session_refs,
+                        session.id,
+                        session.name.clone(),
+                        session.activity,
+                    );
+                }
+                let list: Vec<Value> = summaries
                     .into_iter()
                     .map(|s| {
                         json!({
@@ -1287,6 +1423,7 @@ impl AssistantRuntime {
             "read_session_tail" => {
                 let session_id = parse_session_id(args)?;
                 let session = self.sessions.get(session_id)?;
+                remember_session(session_refs, session.id, session.name(), session.activity());
                 let bytes = args
                     .get("bytes")
                     .and_then(Value::as_u64)
@@ -1988,6 +2125,17 @@ mod tests {
             Some("your cat session shows marker-xyz")
         );
         assert_eq!(out.tool_trace.len(), 2);
+        assert!(out.created_at.is_some());
+        assert_eq!(out.session_refs.len(), 1);
+        assert_eq!(out.session_refs[0].id, session.id);
+        assert_eq!(out.session_refs[0].name, "cat");
+        assert_eq!(out.actions.len(), 1);
+        assert_eq!(out.actions[0].kind, "open-session");
+        assert_eq!(out.actions[0].session_id, session.id);
+        let history = rt.history().await;
+        let assistant_entry = history.last().expect("assistant transcript entry");
+        assert_eq!(assistant_entry.session_refs.len(), 1);
+        assert_eq!(assistant_entry.actions.len(), 1);
         // The tool result fed to the model must carry the delimited output.
         let convo = rt.conversation.lock().await;
         let tail_result = convo
@@ -2023,6 +2171,8 @@ mod tests {
             .unwrap();
         assert!(out.reply.is_none());
         let action = out.pending_action.expect("pending action");
+        assert_eq!(out.session_refs.len(), 1);
+        assert_eq!(out.session_refs[0].id, session.id);
         assert_eq!(as_send_input(&action).session_id, session.id);
         assert_eq!(as_send_input(&action).text, "echo approved-input");
 
@@ -2039,6 +2189,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.reply.as_deref(), Some("done, I typed it"));
+        assert_eq!(out.session_refs.len(), 1);
+        assert_eq!(out.actions.len(), 1);
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         let tail = String::from_utf8_lossy(&session.tail(4096)).into_owned();
         assert!(

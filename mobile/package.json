@@ -1,5 +1,5 @@
 {
-  "name": "mydevenv2-mobile",
+  "name": "vogt-mobile",
   "version": "0.2.2",
   "private": true,
   "type": "module",
@@ -12,13 +12,13 @@
   },
   "dependencies": {
     "@capacitor-community/speech-recognition": "^7.0.1",
-    "@capacitor/android": "^8.3.4",
-    "@capacitor/app": "^8.0.5",
-    "@capacitor/core": "^8.3.4",
-    "@capacitor/push-notifications": "^8.1.1"
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/app": "^8.1.1",
+    "@capacitor/core": "^8.5.0",
+    "@capacitor/push-notifications": "^8.1.2"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.3.4",
+    "@capacitor/cli": "^8.5.0",
     "typescript": "^6.0.3"
   }
 }
