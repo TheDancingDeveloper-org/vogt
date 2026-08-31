@@ -793,7 +793,7 @@ const History: Component<Props> = (props) => {
         <div class="history-scope-note">
           Metadata filters apply to loaded pages. Output search runs server-wide across the full archive.
           <Show when={liveSessionCount() > 0}>
-            {" "}Live sessions are listed here, but their output is not yet in the search index.
+            {" "}Running sessions are searched too — a match still in progress is badged Live.
           </Show>
         </div>
       </div>
@@ -836,6 +836,9 @@ const History: Component<Props> = (props) => {
                         >
                           <div class="history-result-header">
                             <strong>{result.session_name}</strong>
+                            <Show when={result.live}>
+                              <span class="history-liveness-badge live">Live</span>
+                            </Show>
                             <span class="history-result-date">{formatDate(result.created_at)}</span>
                           </div>
                           <div class="history-result-snippet">
