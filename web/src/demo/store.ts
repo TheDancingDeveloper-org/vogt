@@ -286,7 +286,36 @@ export class DemoStore {
     if (taskMatch) return this.taskRequest(taskMatch[1] ?? "", taskMatch[2], taskMatch[3], method, body);
     if (path === "/api/agent-tasks/artifacts/cleanup") return json({ removed_task_dir_count: 1, removed_prompt_file_count: 2, removed_context_file_count: 2, removed_bytes: 8192 });
     if (path === "/api/assistant/history") return json(this.state.assistant);
-    if (path === "/api/assistant/message") { const text = String(body.text ?? ""); const reply = `I can demonstrate **${text || "that"}** without reaching a server. Try Board, Inbox, or the nested Agent review terminal layout.`; this.state.assistant.transcript.push({ role: "user", text }, { role: "assistant", text: reply, tool_trace: ["read deterministic demo state"] }); this.write(); return json({ reply, pending_action: this.state.assistant.pending_action, tool_trace: ["read deterministic demo state"] }); }
+    if (path === "/api/assistant/message") {
+      const text = String(body.text ?? "");
+      const reply = `I can demonstrate **${text || "that"}** without reaching a server. Try Sessions, Inbox, or the Agent review terminal.`;
+      const userCreatedAt = this.now();
+      this.state.next_id += 1;
+      const createdAt = this.now();
+      this.state.next_id += 1;
+      const sessionRefs = [{ id: "demo-agent", name: "Agent review", activity: "waiting-for-input" }];
+      const actions = [{ kind: "open-session" as const, session_id: "demo-agent", label: "Open Agent review" }];
+      this.state.assistant.transcript.push(
+        { role: "user", text, created_at: userCreatedAt },
+        {
+          role: "assistant",
+          text: reply,
+          tool_trace: ["read deterministic demo state", "listed sessions"],
+          created_at: createdAt,
+          session_refs: sessionRefs,
+          actions,
+        },
+      );
+      this.write();
+      return json({
+        reply,
+        pending_action: this.state.assistant.pending_action,
+        tool_trace: ["read deterministic demo state", "listed sessions"],
+        created_at: createdAt,
+        session_refs: sessionRefs,
+        actions,
+      });
+    }
     if (path === "/api/assistant/reset") { this.state.assistant.transcript = []; this.state.assistant.pending_action = null; this.write(); return json({ ok: true }); }
     const actionMatch = /^\/api\/assistant\/actions\/([^/]+)$/.exec(path);
     if (actionMatch) { if (method === "PATCH") { const action = this.state.assistant.pending_action; if (action) action.reason = String(body.reason ?? action.reason); this.write(); return json(action); } this.state.assistant.pending_action = null; this.write(); return json({ reply: body.approve ? "Approved in demo state; no external effect occurred." : "Denied. Nothing changed.", pending_action: null, tool_trace: ["update browser-only approval"] }); }
