@@ -115,6 +115,98 @@ class EngineArchivedSession:
 
 
 @dataclass(frozen=True)
+class EngineHistorySession:
+    """One row of the engine's session-history listing (`SessionMetadata`).
+
+    The fuller shape the history list returns — name and scrollback size on
+    top of the `EngineArchivedSession` facts — so a caller browsing history
+    can label a session without a second round trip. A live session that the
+    history list includes has a NULL `ended_at`/`exit_code`, same as the GUI.
+    """
+
+    id: str
+    name: str
+    created_at: str
+    ended_at: str | None = None
+    exit_code: int | None = None
+    cwd: str | None = None
+    command: str | None = None
+    scrollback_bytes: int = 0
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineHistorySession:
+        raw_bytes = payload.get("scrollback_bytes")
+        return cls(
+            id=str(payload.get("id", "")),
+            name=str(payload.get("name", "")),
+            created_at=str(payload.get("created_at", "")),
+            ended_at=_optional_str(payload.get("ended_at")),
+            exit_code=_optional_int(payload.get("exit_code")),
+            cwd=_optional_str(payload.get("cwd")),
+            command=_optional_str(payload.get("command")),
+            scrollback_bytes=raw_bytes if isinstance(raw_bytes, int) else 0,
+        )
+
+
+@dataclass(frozen=True)
+class EngineHistoryMatch:
+    """One hit from a session-output search (`SearchResult`).
+
+    `live` distinguishes a match in a *running* session's scrollback (found by
+    the engine's on-demand scan) from one in the archived FTS index. The
+    snippet is plain text — terminal output is untrusted, so the engine never
+    marks it up and neither does anything downstream.
+    """
+
+    session_id: str
+    session_name: str
+    created_at: str
+    match_snippet: str
+    rank: float = 0.0
+    live: bool = False
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineHistoryMatch:
+        raw_rank = payload.get("rank")
+        return cls(
+            session_id=str(payload.get("session_id", "")),
+            session_name=str(payload.get("session_name", "")),
+            created_at=str(payload.get("created_at", "")),
+            match_snippet=str(payload.get("match_snippet", "")),
+            rank=float(raw_rank) if isinstance(raw_rank, (int, float)) else 0.0,
+            live=bool(payload.get("live", False)),
+        )
+
+
+@dataclass(frozen=True)
+class EngineSessionLog:
+    """The tail of a session's raw output log (`SessionLogPreview`).
+
+    `text` is the rendered tail (ANSI-stripped when the caller asked for it);
+    `bytes`/`total_bytes`/`truncated` describe the raw window that was read, so
+    a caller knows whether it is looking at the whole run.
+    """
+
+    session_id: str
+    text: str
+    bytes: int = 0
+    total_bytes: int = 0
+    truncated: bool = False
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineSessionLog:
+        raw_bytes = payload.get("bytes")
+        raw_total = payload.get("total_bytes")
+        return cls(
+            session_id=str(payload.get("session_id", "")),
+            text=str(payload.get("text", "")),
+            bytes=raw_bytes if isinstance(raw_bytes, int) else 0,
+            total_bytes=raw_total if isinstance(raw_total, int) else 0,
+            truncated=bool(payload.get("truncated", False)),
+        )
+
+
+@dataclass(frozen=True)
 class EngineTaskFinding:
     """Something a bound agent-task run reported about itself (FR-E7).
 
@@ -253,7 +345,7 @@ class EngineClient:
                 token = resolved.read_text(encoding="utf-8").strip() or None
         return cls(base_url=url.strip().rstrip("/"), token=token, transport=transport)
 
-    # -- the six things Vogt asks of the engine ----------------------------
+    # -- the nine things Vogt asks of the engine ---------------------------
 
     def create_session(
         self,
@@ -359,6 +451,77 @@ class EngineClient:
             EngineAgentTask.from_payload(row) for row in rows if isinstance(row, dict)
         ]
 
+    def history_sessions(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> list[EngineHistorySession]:
+        """The engine's archived-session listing, newest-first, paginated.
+
+        Reads whole rows (name, size, outcome) so a caller can browse history
+        without a detail fetch per row. The engine may include live sessions
+        in this list; those carry a NULL `ended_at`.
+        """
+        query = urllib.parse.urlencode({"limit": limit, "offset": offset})
+        payload = self._call(f"/api/history/sessions?{query}")
+        rows = payload if isinstance(payload, list) else []
+        return [
+            EngineHistorySession.from_payload(row)
+            for row in rows
+            if isinstance(row, dict)
+        ]
+
+    def search_history(
+        self, query: str, *, limit: int = 20, include_live: bool = True
+    ) -> list[EngineHistoryMatch]:
+        """Full-text search over session output, live sessions included.
+
+        `include_live` (default true) supplements the archived FTS index with
+        a bounded scan of each running session's scrollback, so output that
+        has not been archived yet is still found; those hits carry `live:
+        true`. Snippets are plain text.
+        """
+        params = urllib.parse.urlencode(
+            {
+                "q": query,
+                "limit": limit,
+                "include_live": "true" if include_live else "false",
+            }
+        )
+        payload = self._call(f"/api/history/search?{params}")
+        rows = payload if isinstance(payload, list) else []
+        return [
+            EngineHistoryMatch.from_payload(row)
+            for row in rows
+            if isinstance(row, dict)
+        ]
+
+    def history_log(
+        self,
+        session_id: str,
+        *,
+        tail_bytes: int = 64 * 1024,
+        strip_ansi: bool = True,
+    ) -> EngineSessionLog | None:
+        """The tail of a session's raw output log, or `None` when there is none.
+
+        Works for a live session too — the engine reads the on-disk log by id
+        with no archive row required (this is how a running session can be
+        replayed). `strip_ansi` defaults true so a caller gets readable text;
+        pass false for the raw escape stream.
+        """
+        params = urllib.parse.urlencode(
+            {
+                "tail_bytes": tail_bytes,
+                "strip_ansi": "true" if strip_ansi else "false",
+            }
+        )
+        payload = self._call(
+            f"/api/history/{urllib.parse.quote(session_id)}/log?{params}",
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineSessionLog.from_payload(payload)
+
     # -- transport ---------------------------------------------------------
 
     def _call(
@@ -421,7 +584,10 @@ __all__ = [
     "EngineAgentTask",
     "EngineArchivedSession",
     "EngineClient",
+    "EngineHistoryMatch",
+    "EngineHistorySession",
     "EngineSession",
+    "EngineSessionLog",
     "EngineTaskFinding",
     "EngineTaskRun",
     "EngineUnavailable",

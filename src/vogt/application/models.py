@@ -2643,3 +2643,119 @@ class SessionListResult(Result):
             "on the engine being up (FR-E9)."
         ),
     )
+
+
+# -- session history (#491) ------------------------------------------------
+#
+# Three read ops that surface the engine's session history — list, search,
+# read one log's tail — to MCP/CLI/REST. All history lives engine-side; these
+# are pass-throughs that degrade the FR-E9 way: an unreachable engine sets the
+# `engine` field and returns an empty view, never an error that reads as "no
+# history". History is a machine surface, so the params carry no `reason`.
+
+_HISTORY_ENGINE_FIELD_DESC = (
+    "What the engine said, when it could not be asked. Empty history is "
+    "returned rather than an error, so an outage never reads as 'no history' "
+    "(FR-E9)."
+)
+
+
+class HistoryListParams(Params):
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+class HistorySessionRow(Result):
+    """One row of the engine's archived-session listing.
+
+    A live session the engine chooses to include carries a null `ended_at`
+    and `exit_code`, exactly as it appears in the GUI history list.
+    """
+
+    id: str
+    name: str
+    created_at: str
+    ended_at: str | None = None
+    exit_code: int | None = None
+    cwd: str | None = None
+    command: str | None = None
+    scrollback_bytes: int = 0
+
+
+class HistoryListResult(Result):
+    sessions: list[HistorySessionRow] = []
+    engine: str | None = Field(default=None, description=_HISTORY_ENGINE_FIELD_DESC)
+
+
+class SearchOutputParams(Params):
+    q: str = Field(
+        description=(
+            "Search terms. Plain words, ANDed together — not FTS query syntax."
+        )
+    )
+    limit: int = Field(default=20, ge=1, le=100)
+    include_live: bool = Field(
+        default=True,
+        description=(
+            "Scan running sessions' output too, not just the archive, so "
+            "output that has not been archived yet is still found. Live hits "
+            "are flagged `live: true` (#491)."
+        ),
+    )
+
+
+class HistoryOutputMatch(Result):
+    """One hit from a session-output search.
+
+    `live` distinguishes a match in a running session's scrollback from one in
+    the archived index. The snippet is plain text — terminal output is
+    untrusted and is never marked up.
+    """
+
+    session_id: str
+    session_name: str
+    created_at: str
+    match_snippet: str
+    rank: float = 0.0
+    live: bool = Field(
+        default=False,
+        description="True when the match is in a running session's live output.",
+    )
+
+
+class SearchOutputResult(Result):
+    matches: list[HistoryOutputMatch] = []
+    engine: str | None = Field(default=None, description=_HISTORY_ENGINE_FIELD_DESC)
+
+
+class LogTailParams(Params):
+    id: str = Field(description="Session id whose output log to read.")
+    tail_bytes: int = Field(
+        default=64 * 1024,
+        ge=1,
+        le=256 * 1024,
+        description="Trailing bytes of the log to read; capped at 256 KiB.",
+    )
+    strip_ansi: bool = Field(
+        default=True,
+        description=(
+            "Remove terminal escape codes so the text is readable. Pass false "
+            "for the raw escape stream."
+        ),
+    )
+
+
+class LogTailResult(Result):
+    """The tail of one session's output log.
+
+    Works for a live session too — the engine reads the on-disk log by id, no
+    archive row required. `session_id` is null when the engine has no log for
+    that id (or could not be asked, with `engine` then set).
+    """
+
+    session_id: str | None = None
+    text: str = ""
+    bytes: int = 0
+    total_bytes: int = 0
+    truncated: bool = False
+    engine: str | None = Field(default=None, description=_HISTORY_ENGINE_FIELD_DESC)

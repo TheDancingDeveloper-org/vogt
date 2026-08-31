@@ -399,6 +399,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
         {"project": "parity-project", "reason": WHY},
     ),
     ("session.list", {}),
+    # History reads (#491), driven against the same stand-in engine: parity
+    # proves the three surfaces agree on the engine's canned answers.
+    ("session.history_list", {}),
+    ("session.search_output", {"q": "needle"}),
+    (
+        "session.log_tail",
+        {"id": "01000000-0000-0000-0000-000000000001"},
+    ),
     (
         "session.stop",
         lambda seen: {
@@ -746,6 +754,7 @@ def _stand_in_engine() -> EngineClient:
         method: str = "GET",
     ) -> tuple[int, bytes]:
         spec = json.loads(body.decode("utf-8")) if body else {}
+        path = url.split("?", 1)[0]
         if method == "POST" and url.endswith("/api/sessions"):
             return 200, json.dumps(
                 {
@@ -760,6 +769,46 @@ def _stand_in_engine() -> EngineClient:
             return 200, b'{"ok":true}'
         if method == "GET" and url.endswith("/api/sessions"):
             return 200, b"[]"
+        # Session history (#491). Canned, deterministic rows so the three
+        # surfaces have the same engine answer to agree on.
+        if method == "GET" and path.endswith("/api/history/sessions"):
+            return 200, json.dumps(
+                [
+                    {
+                        "id": "01000000-0000-0000-0000-000000000001",
+                        "name": "archived-parity",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "ended_at": "2026-01-01T00:01:00Z",
+                        "exit_code": 0,
+                        "cwd": "/tmp",
+                        "command": "echo hi",
+                        "scrollback_bytes": 42,
+                    }
+                ]
+            ).encode()
+        if method == "GET" and path.endswith("/api/history/search"):
+            return 200, json.dumps(
+                [
+                    {
+                        "session_id": "01000000-0000-0000-0000-000000000001",
+                        "session_name": "archived-parity",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "match_snippet": "a needle in the output",
+                        "rank": -1.5,
+                        "live": False,
+                    }
+                ]
+            ).encode()
+        if method == "GET" and path.endswith("/log"):
+            return 200, json.dumps(
+                {
+                    "session_id": "01000000-0000-0000-0000-000000000001",
+                    "text": "readable tail",
+                    "bytes": 13,
+                    "total_bytes": 13,
+                    "truncated": False,
+                }
+            ).encode()
         return 404, b""
 
     return EngineClient(base_url="http://127.0.0.1:8910", transport=transport)
