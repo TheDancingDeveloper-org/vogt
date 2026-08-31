@@ -281,7 +281,7 @@ describe("History read truth", () => {
     expect(screen.getByText(/Tail of the live session, rendered readable/)).toBeVisible();
     // Archive-only actions are hidden while the session is still live.
     expect(screen.queryByRole("button", { name: "Export" })).not.toBeInTheDocument();
-    expect(screen.getByText(/their output is not yet in the search index/)).toBeVisible();
+    expect(screen.getByText(/Running sessions are searched too/)).toBeVisible();
 
     // The selection (the live shell) persists across filter changes and keeps
     // showing in the detail heading, so assert against the list *rows*, which
