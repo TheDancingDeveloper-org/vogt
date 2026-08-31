@@ -84,7 +84,10 @@ from vogt.application.services.projects import (
 )
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
+    history_list,
     list_sessions,
+    log_tail,
+    search_output,
     start_session,
     stop_session,
 )
@@ -143,6 +146,7 @@ __all__ = [
     "export_instance",
     "get_project",
     "get_work",
+    "history_list",
     "import_forge_repo",
     "import_instance",
     "import_project",
@@ -170,6 +174,7 @@ __all__ = [
     "list_work",
     "list_workflows",
     "list_write_backs",
+    "log_tail",
     "migrate_instance",
     "observations",
     "onboard",
@@ -186,6 +191,7 @@ __all__ = [
     "revoke_suppression",
     "revoke_token",
     "scaffold_project",
+    "search_output",
     "serve",
     "serve_mcp_stdio",
     "set_write_back",
