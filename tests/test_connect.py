@@ -203,7 +203,7 @@ def test_connection_info_omits_a_url_it_does_not_have(
 
 # -- behind a front door (r10: FR-A8, FR-A9, MERGE §5.3) -------------------
 
-DOOR = "https://vogt-dev.sprooty.com"
+DOOR = "https://vogt.example.com"
 
 
 def _fronted(data_dir: Path, url: str | None = URL) -> AppContext:
@@ -235,10 +235,10 @@ def test_a_fronted_instance_reports_the_door_a_client_arrived_at(
 ) -> None:
     """#24: the core answered with its own address, which nothing can reach.
 
-    On the merged stack `/connection-info` reported
-    `http://vogt-dev.tailc7d3c.ts.net:8910` and `api_path: /api`, while
-    clients arrive at `https://vogt-dev.sprooty.com` and `/api/vogt`. Both
-    were true of the core and neither was usable, which is the distinction
+    On the merged stack `/connection-info` reported the core's own
+    unreachable in-container address and `api_path: /api`, while clients
+    arrive at the deployment's public door and `/api/vogt`. Both were
+    true of the core and neither was usable, which is the distinction
     r10 turns into a rule: the address belongs to the process that publishes
     it.
     """

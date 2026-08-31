@@ -1,21 +1,13 @@
 # Vogt — Design Outline
 
-Status: **v0.3 (revision r5), built**; **§1.2 reversed at r9** (2026-08-14 —
-Vogt runs the work it governs) · design 2026-08-12, reconciled against the
-delivered v1 on 2026-08-12, and against the merged product on 2026-08-15.
-Scope: standalone product. Cadastre — the maintainer's earlier, private
-infrastructure register — is prior art and a lessons source, not a
-dependency; see §11.
-
-**This document describes what Vogt *is*.** That rule was tightened on
-2026-08-15 and it changes how to read the sections below. Where the build
-decided something differently from an earlier draft, the decision is described
-in place and the withdrawn alternative is named so the absence reads as a
+**This document describes what Vogt *is*.** Where the build decided
+something differently from an earlier draft, the decision is described in
+place and the withdrawn alternative is named so the absence reads as a
 choice. Where something was designed and **never delivered**, it is *not*
-described here as though it existed: it is a numbered gap in the
-requirements baseline's gap register, with what is missing and what its
-absence costs. A design document that describes unbuilt things is the most
-expensive kind of wrong, because it reads exactly like one that does not.
+described here as though it existed: it belongs in
+[`ROADMAP.md`](ROADMAP.md), not here. A design document that describes
+unbuilt things is the most expensive kind of wrong, because it reads exactly
+like one that does not.
 
 The numbered requirements baseline (`FR-*`/`NFR-*` identifiers, revision
 history, delivery verification and the gap register) is maintained outside
@@ -48,8 +40,8 @@ work items, backlog, ranking, contracts, compliance, dependency references,
 drift, and audit all work against the filesystem and local git alone.
 
 Forge-optional is a statement about *dependency*, not about *sequencing*.
-Read-only GitHub collectors ship at M2 alongside the local ones (r2
-decision, FR-O5a), because the estate this tool governs keeps most of its
+Read-only GitHub collectors ship alongside the local ones (FR-O5a),
+because the estate this tool governs keeps most of its
 real work — issues, PRs, CI results — on GitHub, and an MVP populated only
 by source markers would be a demo rather than a daily driver. What stays
 optional is the *dependency*: nothing in the core requires the adapter, the
@@ -66,23 +58,22 @@ Consequences:
   forge adapter is configured.
 - CI status is modeled as generic `RevisionCheck`-style observations; the
   GitHub Actions collector is one producer.
-- Write-back, historical backfill, and forge-derived drift remain at M5.
+- Fuller write-back, historical backfill, and forge-derived drift are
+  designed but not built ([`ROADMAP.md`](ROADMAP.md)).
 
-### 1.2 Non-goals (v1) *(one reversed at r9)*
+### 1.2 Non-goals *(one reversed)*
 
 - Multi-forge support (GitHub + GitHub Actions are the only *optional*
   forge integration in v1).
 - Multi-node / hosted SaaS (single-node self-hosted only).
 - Time tracking, sprint ceremonies, burndown charts.
 - ~~Being an agent runner. Vogt tells agents *what* and *why*; it does
-  not execute them.~~ **Reversed at r9** — see below. The line stays because
-  it was true for v1, and because a reader of the delivered v1 will find
-  nothing in it that runs anything.
+  not execute them.~~ **Reversed** — see below. The line stays struck
+  rather than deleted so the reversal reads as a decision, not a drift.
 - Enforcing anything. Vogt reports; the human or agent acts (§5).
 
-**The agent-runner reversal (r9).** Vogt now runs the work it governs.
-A previously separate session-engine codebase is merged in as Vogt's
-session engine (`engine/`, `web/`, `mobile/`), and with it come PTY
+**The agent-runner reversal.** Vogt runs the work it governs. The
+session engine (`engine/`, `web/`, `mobile/`) brings PTY
 sessions, agent tasks and an assistant, so a work item can *open a coding session* in its project's
 tree instead of only describing one. The design change is recorded here
 rather than in a deleted bullet because the original line was not a mistake:
@@ -102,9 +93,7 @@ unchanged: an execution surface is not an enforcement surface, and nothing
 in the merged product consumes compliance, trust or drift status as a
 precondition for running anything.
 
-The numbered form of all this is requirements revision **r9** (families
-FR-E, FR-T, FR-M, and the appended FR-U/FR-S/NFR rows); the engine's own
-reference is [`ENGINE.md`](ENGINE.md).
+The engine's own reference is [`ENGINE.md`](ENGINE.md).
 
 ### 1.3 Alternatives considered
 
@@ -116,7 +105,7 @@ this proposal must answer.
 | **GitHub Issues/Projects + an MCP shim** | Covers the write plane well and would delete a third of this design. It cannot express the parts that motivate the product: coverage-modelled observation ("has anything even looked at this repo lately?"), declared-vs-observed separation with typed drift, cross-project dependency references, contract compliance, or a ranked global view over repos that are *not* on GitHub. It also makes every answer network-bound and rate-limited, and puts the index of your own estate inside a service you do not run. |
 | **Jira / Linear / self-hosted alternatives (Plane, Taiga)** | Same write plane, none of the observation layer, and all of them assume work is *entered*. The problem Vogt exists for is the opposite: work already exists in the filesystem and on the forge and nobody has an index of it. Bending one of these into an observation platform is more work than the observation platform. |
 | **A pile of scripts + a Markdown index** | The honest baseline, and what exists today. It fails on freshness (no answer to "when was this last true"), on provenance, and on being usable by agents without bespoke parsing per script. |
-| **Extend cadastre** | Rejected for domain reasons, see §11. |
+| **Extend an existing infrastructure register** | Rejected for domain reasons, see §11. |
 
 What survives the comparison is the observation, coverage, trust, drift and
 cross-project layer — the write plane is table stakes that has to exist for
@@ -127,7 +116,7 @@ outsourcing it to a forge.
 
 ## 2. Design principles (learnings applied)
 
-Carried from cadastre (proven there):
+Carried from a prior internal infrastructure register (proven there):
 
 | Principle | What it means here |
 |---|---|
@@ -139,12 +128,12 @@ Carried from cadastre (proven there):
 | Checks return evidence | A contract check returns its result **with the failing rules named**, never a bare boolean. |
 | Zero-dep self-hosting | SQLite + forward-only migrations + migration lock. Backup/export/import are v1 commands, not v2. |
 
-Inverted from cadastre (its anti-learnings for this domain):
+Inverted from that register (its anti-learnings for this domain):
 
-| Cadastre posture | Vogt posture | Why |
+| Register posture | Vogt posture | Why |
 |---|---|---|
-| Declaration-first: undeclared work is invisible | **Observed-first**: collected work is visible immediately; adoption upgrades trust | Cadastre's import blocked with 97% of items lacking declared repos; a tracker must never show an empty view of a busy estate |
-| Absence in observations can read as drift | **Coverage is modeled explicitly**: "collector X last swept scope Y at T". Absence is only meaningful inside swept scope | Most cadastre "missing" drift was collector-coverage artifact |
+| Declaration-first: undeclared work is invisible | **Observed-first**: collected work is visible immediately; adoption upgrades trust | Its import blocked with 97% of items lacking declared repos; a tracker must never show an empty view of a busy estate |
+| Absence in observations can read as drift | **Coverage is modeled explicitly**: "collector X last swept scope Y at T". Absence is only meaningful inside swept scope | Most of its "missing" drift was collector-coverage artifact |
 | Read-only map, no write-back | **Owns the write plane**, incl. opt-in GitHub write-back | It's a tracker; creating/closing/moving work is the product |
 | No people model | Actors (humans *and* agents) are core entities from day one | Retrofitting assignment/attribution is miserable |
 | Hand-rolled ASGI | FastAPI | Free OpenAPI, validation, auth middleware; big API surface planned |
@@ -348,12 +337,8 @@ Model:
   a project no sweep has walked (FR-O4).
 - Update-automation posture (version-updates config / vulnerability alerts
   / automated security fixes — three independent toggles, never one
-  boolean) is **forge posture**, not dependency data. It moves to the forge
-  module at M5.
-- Roadmap fit: reference extraction and the cross-project graph land with
-  M2; `unresolved_dependency` reporting with M3; `mirrored_source` and the
-  scan record at r15, after an estate onboarding produced eighteen mirrored
-  crates by hand.
+  boolean) is **forge posture**, not dependency data, and is owned by the
+  forge module.
 
 ### 3.6 Observed-first without drowning (r2/r3)
 
@@ -401,7 +386,7 @@ provider-matched `repo_url` plus a usable credential and refuses with the
 missing precondition named. On a **linked** project:
 
 - **The work items are the mirrored forge issues.** The observed mirror
-  (issues synced all-state by the M5 collectors) is the truth for title,
+  (issues synced all-state by the forge collectors) is the truth for title,
   body, labels and open/closed; the `work_overlay` table — keyed by the
   subject, not by a `wrk_*` id — carries the vogt-local half: a workflow
   state richer than open/closed, priority, effort, assignee, initiative,
@@ -477,29 +462,26 @@ adapters/
   cli/         thin argparse/typer over application
   http/        FastAPI: REST + generated OpenAPI; serves GUI API
   mcp/         MCP server (stdio + streamable HTTP); tool set mirrors REST
-  github/      OPTIONAL forge adapter plugin: collectors (read, from M2) +
-               write-back (opt-in write, M5); absent = fully functional
+  github/      OPTIONAL forge adapter plugin: collectors (read) +
+               write-back (opt-in write); absent = fully functional
 collectors/    plugin registry — core (no network): git-local,
                source-markers, contract-checker, dep-refs; optional
                (network): gh-issues, gh-prs, gh-actions, gh-releases,
                session-outcomes (registered only when an engine is
                configured; FR-E6, FR-E7)
-gui/           static ES modules consuming the HTTP adapter only (M6 chose
-               buildless over React — see `ROADMAP.md` M6; a wheel that
-               needs npm to build is the cost that decided it)
 storage/       SQLite x2 (declared.sqlite3, observed.sqlite3), migrations
 ```
 
-**The merged tree, from r9.** The repository also carries the session engine
+**The merged tree.** The repository also carries the session engine
 and the front ends it brought, and the layer rules above still describe the
 Python core rather than the whole product:
 
 ```
 engine/        the Rust session engine (server + contract crates): PTYs,
                scrollback, activity, agent tasks, push, the assistant —
-               and, from M9, the front door: the only listening process,
+               and the front door: the only listening process,
                proxying /api/vogt and /mcp to vogt-core on loopback
-web/           the Solid PWA, the product's front end from M11; consumes
+web/           the Solid PWA, the product's front end; consumes
                the engine's API and, through /api/vogt, the same public
                operations the CLI and MCP see. One route model supplies the
                desktop rail, phone bar and Sessions tools with their current
@@ -518,16 +500,15 @@ src/vogt/      unchanged, and still the only definition of an operation
 
 The engine's own reference — what it owns, how to run it, its full wire
 contract, the assistant and the agent-task scheduler — is
-[`ENGINE.md`](ENGINE.md). It is one document because it used to be eight, each
-describing the engine as a separate product.
+[`ENGINE.md`](ENGINE.md).
 
 Two properties hold the shape together, and both are asserted rather than
 described. **The registry is still the single definition**: the PWA's route
 table resolves against it, and so do the assistant's Vogt tools, which are
 fetched from the core's own MCP `tools/list` rather than written out again.
-**The core is still complete alone**: it serves its own port, its own GUI
-and its own MCP when no engine is present, and CI runs the suite with
-`engine/`, `web/` and `mobile/` deleted to keep that true (NFR-Q6).
+**The core is still complete alone**: it serves its own port and its own
+MCP when no engine is present, and CI runs the suite with `engine/`, `web/`
+and `mobile/` deleted to keep that true (NFR-Q6).
 
 The direction of dependency is the thing to preserve. The engine calls the
 core, and the core calls the engine only for sessions — four operations
@@ -541,7 +522,7 @@ instead of one language argument.
   `import`, `mcp.stdio` — each acting on the local process or data directory
   with no meaningful remote semantics, and each carrying its reason as the
   dictionary's value rather than in a comment. `HTTP_ONLY` is **empty**, and
-  has been since M4: no operation has yet earned an exception in that
+  always has been: no operation has yet earned an exception in that
   direction. It stays declared because a list that only exists once something
   needs it is a list nobody adds to correctly.
 - **Write-back** lives only in `adapters/github/` behind a per-project
@@ -572,11 +553,11 @@ REST/CLI/GUI are peers over the same operations.
 - **One transport-neutral operation registry.** Every operation is defined
   once — name, scope, `mutating` flag, argument schema, HTTP route — and
   the MCP tool list, FastAPI routes, CLI commands, *and the stdio bridge*
-  are all generated from that registry. Cadastre's biggest MCP duplication
-  was the same 20 tool signatures hand-mirrored across its server, its
-  remote bridge, and its registry; here the bridge is generated, never
-  hand-written. Parity exclusions are named lists that fail when stale,
-  never glob matches.
+  are all generated from that registry. The prior register's biggest MCP
+  duplication was the same 20 tool signatures hand-mirrored across its
+  server, its remote bridge, and its registry; here the bridge is
+  generated, never hand-written. Parity exclusions are named lists that
+  fail when stale, never glob matches.
 - **Identity is never a tool argument.** The principal is derived from
   authentication (token, mTLS, trusted proxy, or `local:<os-user>`) —
   a caller-supplied principal would let any token forge provenance.
@@ -910,10 +891,10 @@ Deployment: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 - Transport-parity test matrix with named exclusion lists (§4).
 - Coverage gate in CI (start ≥80%).
 - Forward-only migrations, tested against fixture databases.
-- A seeded benchmark fixture at the NFR-S1 envelope from M2, with the
+- A seeded benchmark fixture at the NFR-S1 envelope, with the
   interactive-query target asserted in CI — the two-store split means every
   aggregate query is an application-layer join, and that cost needs a
-  tripwire rather than a discovery at M6.
+  tripwire rather than a late discovery.
 - Every feature lands with CLI + REST + MCP + audit coverage or it doesn't
   land.
 - **Own dependencies practice what we preach**: `uv.lock` committed,
@@ -953,111 +934,44 @@ Deployment: [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ---
 
-## 9. Open questions
+## 9. Standing decisions
 
-Resolved 2026-08-12 (r1):
+Positions that shape the product but do not belong to any one section above.
+Everything else that was once an open question is decided and described in
+place in the section that owns it.
 
-- **Licence: MIT**. Developed in a private repository under
-  `TheDancingDeveloper-org` first; public at a milestone of the owner's
-  choosing (NFR-O1).
-- **Name: Vogt** (final) — the German reeve/bailiff who oversaw an estate
-  (Vogtei), enforced its rules, and answered for its work; the
-  counterpart of a cadastre (a land register). Package/CLI `vogt`, env
-  prefix `VOGT_*`.
-- Drift autonomy → low-risk auto-accept defaults (§3.2).
-- Notifications → audit-backed `/events` feed, no push in v1 (§4.2).
-- M4 auth → **token-only**: scoped bearer tokens bound to actors,
-  issued/rotated via CLI, one mechanism for GUI/REST/MCP; OIDC may layer
-  on later.
-- Attachments → **deferred past MVP**; schema leaves room, bug evidence
-  meanwhile lives as paths/URLs in body text.
-- **M5 (GitHub write-back) before M6 (GUI)** — build the GUI once against
-  complete data. This ordering is fixed, not swappable.
-
-Resolved 2026-08-12 (r2, after whole-proposal review):
-
-- Gates → **status, not enforcement** (§2.1, §5); `~/WorkingStack` and
-  `project migrate` withdrawn (§5.1).
-- Dependency tracking → **references, not resolved versions** (§3.5).
-- MVP line → **M0–M2**, with read-only GitHub collectors pulled into M2
-  (§1.1).
-- Observed-first → **promotion by convention + suppression + root
-  exclusions** (§3.6).
-- `/events` cursor → **single events table in the declared store** (§4.2).
-- Drift evidence → **snapshot at raise time + pinned against retention**
-  (§3.2).
-- Project granularity → **one repo/folder; workspace members are not
-  projects** (§3.1).
-
-Resolved 2026-08-12 (r3):
-
-- **No discovery, no continuous checking** (§2.1, §5, §5.1). Collection
-  scope is the registered project list; the contract is evaluated on
-  demand and reported with its age. FR-G5–G8 deferred.
-- AI-assisted drift detection and recommendation is recorded as a
-  **non-committed stretch goal** — the reason the scheduler stays small,
-  and something no v1 requirement may lean on.
-
-Resolved 2026-08-12 (the last of the open questions):
-
+- **Licence: MIT.**
+- **Name: Vogt** — the German reeve/bailiff who oversaw an estate (Vogtei),
+  enforced its rules, and answered for its work; the counterpart of a
+  cadastre (a land register). Package/CLI `vogt`, env prefix `VOGT_*`.
 - **Comment write-back is outbound only** (FR-B5). Comments authored in
   Vogt post upstream under `comment_only`/`full`; inbound forge comments
   stay observations against the linked item. Mirroring both ways would
   need forge-author identity mapping and loop suppression for our own
   writes, and buys little the observation view doesn't already give.
-- **No manual ranking override.** `rank_order` is dropped from
-  `work_items`; ordering is computed from documented weights and stays
-  fully explainable, with `priority` and initiative weight as the
-  hand-set inputs that already feed the score (§3.4).
-- **Trust is `disputed`, drift resolution is `contested`** (§6). The
-  computed vocabulary and the chosen vocabulary no longer collide.
-- **Cadastre: accept the duplication for v1** (§11).
-
-Resolved 2026-08-12 (r4):
-
-- **Deployment target: a Compose stack running the GHCR image, digest-pinned,
-  bound to a private-network address** ([`DEPLOYMENT.md`](DEPLOYMENT.md)).
-  The desired state (compose file plus pinned digest) lives in version
-  control, not on the host.
-- **TLS may terminate in-process** (NFR-D6 revised). A listener that is
-  only reachable on a private network and already holds a certificate
-  gains nothing from a reverse proxy in front of it; a proxy remains the
-  right answer where it is already the host's ingress.
-- **"No default port anywhere" was too broad** (NFR-D2 revised). Defaults
-  that encode exposure or identity (a public hostname, a bind to all
-  interfaces, an endpoint URL) stay forbidden; defaults that are pure host
-  allocation (the listen port) are now *required*, because a `${X:?}` gate
+- **TLS may terminate in-process** (NFR-D6). A listener that is only
+  reachable on a private network and already holds a certificate gains
+  nothing from a reverse proxy in front of it; a proxy remains the right
+  answer where it is already the host's ingress.
+- **Exposure values carry no defaults; allocation values do** (NFR-D2).
+  Defaults that encode exposure or identity (a public hostname, a bind to
+  all interfaces, an endpoint URL) are forbidden; defaults that are pure
+  host allocation (the listen port) are required, because a `${X:?}` gate
   on an allocation value turns every deploy into a hunt for a number nobody
   cares about. The distinction is what the value decides, not whether it is
   a number.
 - **Publish and deploy are separate acts** (NFR-D10). A tag publishes a
   signed image; production moves only when a human or agent bumps the
-  pinned digest and redeploys the stack. Automating that bump is not v1
-  scope.
-
-Nothing is open. New questions get appended here as they arise.
+  pinned digest and redeploys the stack.
 
 ---
 
 ## 10. Roadmap
 
-Defined in [`ROADMAP.md`](ROADMAP.md): seven stages (M0 Foundation → M6
-GUI) with per-stage requirement IDs and demo acceptance criteria.
-**MVP = M0–M2** (r2): a daily-usable tracker with observed-first views over
-the local estate *and* read-only GitHub. M3 adds compliance reporting and
-the drift lifecycle, M4 service mode, M5 forge consolidation and
-write-back, M6 the GUI. **v1 = M0–M6.**
-
-Post-v1: M7 (import and the notification inbox) and M8 (`connect` — reaching
-an instance from an agent environment). The merge stages **M9–M14** carry the
-§1.2 reversal into delivery — foundations, coding sessions, GUI uplift, the
-AI layer, mobile, consolidation. **v2 = M9–M14**, M14 being the consolidation
-stage rather than a feature one.
-
-Two of those stages end in a demo that has not been run, because neither can be
-run without a browser and a phone: M11's and M13's. `ROADMAP.md` says so at
-each stage and the gap register carries them, so that "built" nowhere
-quietly means "watched working".
+The product described here is built and shipping. What remains designed but
+unbuilt, and what is deliberately deferred, is listed in
+[`ROADMAP.md`](ROADMAP.md); the live work queue is the GitHub issue
+tracker.
 
 ### 10.1 Public demo artifact
 
@@ -1082,36 +996,16 @@ browser showcase. The static origin can select that document as `/` through
 an allowlisted `DEMO_ROOT_DOCUMENT`; the mobile deployment overlay uses this
 for a separate hostname while retaining `/index.html` as the framed PWA. Both
 entry points therefore pin one signed image digest and cannot drift apart.
-[`DEMO_SITE_PLAN.md`](DEMO_SITE_PLAN.md) records the complete implementation
-and acceptance rationale.
 
 ---
 
-## 11. Relationship to cadastre
+## 11. Relationship to infrastructure registers
 
-Cadastre (the maintainer's private land register — infrastructure, hosts,
-services) and Vogt (the reeve — product work, backlog, project health) are
-separate products with separate domains and separate stores. **Vogt does not
-import from cadastre and does not couple to its API in v1**; nothing in
-this repository needs it to exist.
-
-The cost of that decision is real and should be stated rather than
-discovered: the declared/observed split, coverage modelling, trust
-computation, the audit spine, the operation registry, the transport-parity
-harness and the MCP stdio bridge are all being written a second time, and
-will drift apart under two maintenance loads.
-
-**Decision (2026-08-12):** accept the duplication for v1 and re-converge
-afterwards. Building Vogt against a shared kernel now would
-couple two designs while one of them is still being learned, and the r2
-review of this proposal is itself evidence that Vogt's requirements are
-still moving. Instead: keep the shared concepts *named* identically across
-both codebases (`declared`/`observed`, `sweep`, `coverage`, `trust_state`,
-`drift_proposal`, operation registry), so that extracting a common package
-after v1 is a mechanical refactor rather than a redesign. Revisit at v1
-with two working implementations to compare.
-
-The related open question — whether an infrastructure register eventually
-feeds *in* as a collector, adding infrastructure context to a project's
-brief — stays open, and would be an optional, read-only external
-integration if it happens. It is not a dependency in either direction.
+An infrastructure register (hosts, services, credentials — Cadastre is one
+such product) and Vogt (product work, backlog, project health) are separate
+domains with separate stores. **Vogt does not import from or couple to any
+infrastructure register**; nothing in this repository needs one to exist.
+Whether such a register eventually feeds *in* as a collector — adding
+infrastructure context to a project's brief — stays an open question, and
+would be an optional, read-only external integration if it happens. It is
+not a dependency in either direction.

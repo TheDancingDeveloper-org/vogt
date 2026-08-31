@@ -362,5 +362,5 @@ This removes the example's named data volume and cannot be undone by Docker.
   reverse proxy and TLS, digest pinning, backups, upgrades, and running the
   optional engine next to the core.
 - [`docs/ENGINE.md`](ENGINE.md) is the optional session engine's reference.
-- [`opensource.md`](../opensource.md) states the public boundary: what is
-  supported, what is optional, and which legacy names remain as aliases.
+- [`docs/DESIGN.md`](DESIGN.md) states the architecture and the product
+  boundary: what the stack is, and which pieces are optional.

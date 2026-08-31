@@ -378,7 +378,7 @@ not change production by itself.
 
 The desired state a production instance runs — which digests, which overlays,
 which host specifics — is owned by the operator's own deployment repository,
-not this one (#204); this tree ships only the estate-neutral base and overlays,
+not this one; this tree ships only the estate-neutral base and overlays,
 never a turnkey production estate. Two consequences are worth stating plainly.
 The signed release digests are CLI-free (§3.2), so a production engine that
 runs agent sessions is one the operator built with

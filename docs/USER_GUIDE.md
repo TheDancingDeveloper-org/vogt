@@ -17,14 +17,11 @@ are covered in
 [`GETTING_STARTED.md`](GETTING_STARTED.md) and [`DEPLOYMENT.md`](DEPLOYMENT.md);
 every environment variable is listed in [`CONFIG.md`](CONFIG.md).
 
-The engine was once a separate product, and a few deliberately invisible
-compatibility identifiers keep the historical name: browser storage keys, some
-Rust crate and config names, the Android package and notification-channel IDs,
-and the agent-task notify phrase (§2.7). Legacy `MYDEVENV2_*` environment
-names are still accepted as aliases for `ENGINE_*`. Renaming those would
-discard local preferences, break push delivery, create a second Android app or
-invalidate existing task definitions, so they stay; every user-facing label
-says Vogt.
+A few internal identifiers — some browser storage keys, Rust crate and
+config names, the Android notification-channel ID, the agent-task notify
+phrase (§2.7), and the `MYDEVENV2_*` environment aliases for `ENGINE_*` —
+still carry a legacy internal name. Their removal is pending housekeeping
+([`ROADMAP.md`](ROADMAP.md)); every user-facing label says Vogt.
 
 Status: **current as of 2026-08-30**, and describing one product.
 
@@ -32,8 +29,9 @@ Status: **current as of 2026-08-30**, and describing one product.
 implemented and covered by tests. The Solid surfaces have jsdom coverage
 against a fake front door and automated Chromium coverage for representative
 desktop and phone routes, including Sessions composition, terminal splitting,
-zoom-event ownership and dirty-editor lifecycle. A human/device M13 demo is
-still outstanding and `ROADMAP.md` says so.
+zoom-event ownership and dirty-editor lifecycle. The device-dependent voice
+and push passes run per release on real hardware rather than in CI
+([`ROADMAP.md`](ROADMAP.md)).
 
 ---
 
