@@ -7,7 +7,7 @@
 # `ok` can be true while the half of the product somebody just deployed is
 # absent. Six checks, each naming what its failure means.
 #
-#     scripts/smoke_merged_stack.sh https://vogt.sprooty.com "$FRONT_DOOR_TOKEN"
+#     scripts/smoke_merged_stack.sh https://vogt.example.com "$FRONT_DOOR_TOKEN"
 #
 # The token is a *front-door* token — the one a browser holds. It is read from
 # argv only for a one-off check; prefer `VOGT_SMOKE_TOKEN` in the environment,

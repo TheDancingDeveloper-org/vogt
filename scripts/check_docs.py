@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Check that relative links in the documentation resolve.
 
-Small on purpose. The design documents cross-reference each other heavily
-(`DESIGN.md` §5 → `REQUIREMENTS.md` FR-G14 → `ROADMAP.md` M3), and a broken
+Small on purpose. The design documents cross-reference each other heavily,
+and a broken
 link between them is the kind of rot that makes a documentation set stop
 being trusted. External URLs are not fetched: a link checker that depends on
 the network fails for reasons that have nothing to do with the change.
@@ -55,10 +55,8 @@ def broken_links(path: Path) -> list[str]:
         target = match.group(1)
         if target.startswith("/"):
             # An absolute filesystem path is not a relative link, and checking
-            # whether it exists asks about *this* machine. One such link —
-            # `/home/sprooty/Working/AGENTS.md` — passed here for a day and
-            # failed on the first CI run, because the estate guide is outside
-            # this repository and the runner has no such directory.
+            # whether it exists asks about *this* machine, not the repository:
+            # such a link can pass locally and fail on any other checkout.
             problems.append(f"{target} (an absolute path is not a link)")
             continue
         if target.startswith(EXTERNAL) or target.startswith("#"):

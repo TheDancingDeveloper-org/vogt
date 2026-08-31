@@ -1,19 +1,19 @@
-"""Where this instance is, as a client sees it (FR-A8, FR-A9, MERGE §5.3).
+"""Where this instance is, as a client sees it (FR-A8, FR-A9).
 
 Vogt answers two questions about its own address — `/connection-info` and
 `connect` — and both were right for exactly as long as Vogt was the only
-process serving them. r9's merge put a Rust front door in front of the core,
-and the core kept answering with its own address and its own mount points:
-`http://vogt-dev.tailc7d3c.ts.net:8910` and `/api`, while clients arrive at
-`https://vogt-dev.sprooty.com` and `/api/vogt`. The `connect` operation, whose
+process serving them. Put the Rust front door in front of the core and the
+core keeps answering with its own address and its own mount points — its
+unreachable in-container address and `/api` — while clients arrive at the
+deployment's public door and `/api/vogt`. The `connect` operation, whose
 entire reason for existing is that a client should not have to work out how to
 reach the product, rendered a pasteable MCP configuration pointing at an
 address nothing can reach (#26).
 
-r10's rule is that a client-facing fact about an address belongs to the
+The rule is that a client-facing fact about an address belongs to the
 process that publishes the address. The core does not publish it and cannot
-learn it — the same argument r7 made for the core against its own container
-port, one hop further out. So the door supplies it and the core renders with
+learn it — the same argument that keeps the core ignorant of its own
+container port, one hop further out. So the door supplies it and the core renders with
 it, which keeps the *rendering* in one place: `connect` is a hundred lines of
 prose and JSON shapes that are Vogt's content, not addressing, and mirroring
 them into the front door would be a second copy to drift.
