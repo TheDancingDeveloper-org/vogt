@@ -278,7 +278,7 @@ describe("History read truth", () => {
     expect(await screen.findByText("live tail output")).toBeVisible();
     expect(log).toHaveBeenCalledWith("live-1", expect.any(Number));
     expect(detail).not.toHaveBeenCalledWith("live-1");
-    expect(screen.getByText(/Tail view of the live session's raw terminal log/)).toBeVisible();
+    expect(screen.getByText(/Tail of the live session, rendered readable/)).toBeVisible();
     // Archive-only actions are hidden while the session is still live.
     expect(screen.queryByRole("button", { name: "Export" })).not.toBeInTheDocument();
     expect(screen.getByText(/their output is not yet in the search index/)).toBeVisible();
