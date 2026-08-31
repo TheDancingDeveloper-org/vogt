@@ -49,6 +49,11 @@ pub struct SearchResult {
     pub created_at: String,
     pub match_snippet: String,
     pub rank: f64,
+    /// True when the hit came from a *live* session's scrollback (an on-demand
+    /// bounded scan), rather than the archived FTS index. Archived rows default
+    /// this to false, including when an older engine omits the field.
+    #[serde(default)]
+    pub live: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +304,7 @@ impl SessionHistory {
                 created_at: row.get("created_at"),
                 match_snippet: row.get("match_snippet"),
                 rank: row.get("rank"),
+                live: false,
             })
             .collect();
 
@@ -467,7 +473,18 @@ impl SessionHistory {
     }
 
     /// Read the tail of an archived raw session log for replay-oriented views.
-    pub async fn read_log_preview(&self, id: Uuid, tail_bytes: u64) -> Result<SessionLogPreview> {
+    ///
+    /// With `strip_ansi`, the escape sequences a terminal consumes without
+    /// printing are removed from `text` (the same stripper the archive path
+    /// uses), so an agent reading over MCP gets plain text rather than a wall
+    /// of `\x1b[` noise. The byte counters still describe the raw tail window
+    /// that was read from disk — `text` is the rendered view of it.
+    pub async fn read_log_preview(
+        &self,
+        id: Uuid,
+        tail_bytes: u64,
+        strip_ansi: bool,
+    ) -> Result<SessionLogPreview> {
         let path = self.log_path(id);
         let mut file = tokio::fs::File::open(&path)
             .await
@@ -496,9 +513,15 @@ impl SessionHistory {
                 .map_err(|e| ApiError::Internal(format!("failed to read session log: {e}")))?;
         }
 
+        let text = if strip_ansi {
+            String::from_utf8_lossy(&crate::activity::strip_ansi(&buf)).into_owned()
+        } else {
+            String::from_utf8_lossy(&buf).into_owned()
+        };
+
         Ok(SessionLogPreview {
             session_id: id.to_string(),
-            text: String::from_utf8_lossy(&buf).into_owned(),
+            text,
             bytes,
             total_bytes,
             truncated: total_bytes > bytes,
@@ -584,6 +607,88 @@ fn user_query_to_fts(query: &str) -> Option<String> {
     }
 }
 
+/// Lowercased alphanumeric/underscore tokens (max 16), the same tokenisation
+/// the FTS query builder uses, for substring-matching live-session scrollback.
+/// Empty when the query carries no usable term.
+pub fn query_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter_map(|part| {
+            let trimmed = part.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_lowercase())
+            }
+        })
+        .take(16)
+        .collect()
+}
+
+/// Build a live-search hit from a live session's raw scrollback tail, when
+/// every query token appears (case-insensitively) in the ANSI-stripped text.
+/// Mirrors the archived path's AND-of-terms semantics and its plain-text
+/// snippet contract — terminal output is untrusted, so the snippet is never
+/// marked up; the PWA owns highlighting at its text sink.
+pub fn live_match(
+    session_id: &str,
+    session_name: &str,
+    created_at: &str,
+    raw_tail: &[u8],
+    tokens: &[String],
+) -> Option<SearchResult> {
+    if tokens.is_empty() {
+        return None;
+    }
+    let stripped = crate::activity::strip_ansi(raw_tail);
+    let text = String::from_utf8_lossy(&stripped);
+    let haystack = text.to_lowercase();
+    if !tokens.iter().all(|t| haystack.contains(t.as_str())) {
+        return None;
+    }
+    Some(SearchResult {
+        session_id: session_id.to_string(),
+        session_name: session_name.to_string(),
+        created_at: created_at.to_string(),
+        match_snippet: live_snippet(&text, &tokens[0]),
+        // Archived hits carry FTS `rank` (ascending = best); live hits have no
+        // FTS score. 0.0 keeps them ahead of nothing in particular; the `live`
+        // flag, not the rank, is what a consumer keys on.
+        rank: 0.0,
+        live: true,
+    })
+}
+
+/// A readable one-line snippet for a live hit: the first scrollback line that
+/// contains the leading token (case-insensitively), trimmed and length-capped;
+/// failing that, the first non-empty line. Line-oriented rather than a byte
+/// window, so it stays on character boundaries and reads cleanly.
+fn live_snippet(text: &str, first_token: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() && trimmed.to_lowercase().contains(first_token) {
+            return truncate_chars(trimmed, MAX_CHARS);
+        }
+    }
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| truncate_chars(line, MAX_CHARS))
+        .unwrap_or_default()
+}
+
+/// Truncate to at most `max` characters (not bytes), appending an ellipsis when
+/// anything was dropped.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max).collect();
+    out.push_str("...");
+    out
+}
+
 fn remove_log_file(path: PathBuf) -> Result<()> {
     match std::fs::remove_file(&path) {
         Ok(()) => Ok(()),
@@ -615,5 +720,68 @@ fn summarize_regular_files(path: &Path) -> Result<(usize, u64)> {
             "failed to read history log dir {}: {e}",
             path.display()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn query_tokens_lowercases_splits_and_keeps_underscores() {
+        assert_eq!(
+            query_tokens("Hello, World_1!"),
+            vec!["hello".to_string(), "world_1".to_string()]
+        );
+    }
+
+    #[test]
+    fn query_tokens_are_empty_for_a_query_with_no_usable_term() {
+        assert!(query_tokens("   ").is_empty());
+        assert!(query_tokens("!!! ---").is_empty());
+    }
+
+    #[test]
+    fn query_tokens_cap_at_sixteen() {
+        let many = (0..30)
+            .map(|i| format!("w{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(query_tokens(&many).len(), 16);
+    }
+
+    #[test]
+    fn live_match_requires_every_token_and_strips_ansi() {
+        // Two tokens, both present across the ANSI-coloured tail.
+        let tail = b"\x1b[2K\x1b[1Ghello there\n\x1b[31mworld needle\x1b[0m\n";
+        let tokens = query_tokens("needle world");
+        let hit = live_match("sid", "sname", "2026-01-01T00:00:00Z", tail, &tokens)
+            .expect("all tokens present -> a hit");
+        assert!(hit.live);
+        assert_eq!(hit.session_id, "sid");
+        assert_eq!(hit.session_name, "sname");
+        assert_eq!(hit.rank, 0.0);
+        // Snippet is the matching line, ANSI removed, plain text (untrusted
+        // output preserved as data — never marked up).
+        assert_eq!(hit.match_snippet, "world needle");
+        assert!(!hit.match_snippet.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn live_match_returns_none_when_a_token_is_absent() {
+        let tail = b"only has the word alpha\n";
+        let tokens = query_tokens("alpha beta");
+        assert!(live_match("s", "n", "t", tail, &tokens).is_none());
+    }
+
+    #[test]
+    fn live_match_returns_none_for_empty_tokens() {
+        assert!(live_match("s", "n", "t", b"anything", &[]).is_none());
+    }
+
+    #[test]
+    fn truncate_chars_appends_ellipsis_only_when_dropping() {
+        assert_eq!(truncate_chars("short", 10), "short");
+        assert_eq!(truncate_chars("abcdef", 3), "abc...");
     }
 }
