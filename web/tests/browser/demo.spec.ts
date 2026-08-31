@@ -40,7 +40,7 @@ for (const [route, expected] of routes) {
   });
 }
 
-test("canonical terminal links restore two-pane and nested three-pane layouts", async ({ page }) => {
+test("canonical terminal links restore two-pane and nested three-pane layouts", async ({ page }, testInfo) => {
   await installDemo(page);
   await page.goto("/#/t/demo-build");
   const build = page.locator('[data-tab-id="term:demo-build"]');
@@ -55,7 +55,12 @@ test("canonical terminal links restore two-pane and nested three-pane layouts", 
   await page.goto("/#/t/demo-logs");
   const incident = page.locator('[data-tab-id="term:demo-logs"]');
   await expect(incident.locator(".terminal-pane")).toHaveCount(3, { timeout: 15_000 });
-  await expect(incident.getByText("Input fan-out", { exact: true })).toBeVisible();
+  // The broadcast-state roster ("Input fan-out") lives in `.terminal-workspace-roster`,
+  // which the mobile redesign hides on phone in favour of the swipeable pager — so the
+  // badge is only surfaced (and only assertable as visible) on the desktop composition.
+  if (testInfo.project.name === "desktop") {
+    await expect(incident.getByText("Input fan-out", { exact: true })).toBeVisible();
+  }
 });
 
 test("demo reset restores canonical tab-local state", async ({ page }) => {
