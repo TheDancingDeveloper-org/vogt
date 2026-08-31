@@ -510,6 +510,8 @@ mod tests {
             assistant_profiles: vec![],
             assistant_default_profile: None,
             assistant_log_retention_days: 30,
+            history_retention_days: 30,
+            history_live_scan_bytes: 256 * 1024,
             assistant_stt_base_urls: vec![],
             assistant_stt_api_key: None,
             assistant_stt_model: "whisper-1".into(),
