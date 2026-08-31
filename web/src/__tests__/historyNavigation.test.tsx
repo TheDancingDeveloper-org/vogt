@@ -39,6 +39,15 @@ const betaResult = {
   rank: -1,
 };
 
+const liveResult = {
+  ...alphaResult,
+  session_id: "session-live",
+  session_name: "live shell",
+  match_snippet: "live says <mark>needle</mark>",
+  rank: 0,
+  live: true,
+};
+
 function historyFixture() {
   return fakeVogt({}, {
     "GET /api/history/sessions": { body: [alpha, beta] },
@@ -73,6 +82,36 @@ describe("History result navigation", () => {
     expect(qualified?.innerHTML).toContain("<mark>needle</mark>");
     expect(vogt.engineCalls.find((call) => call.path === "/api/history/search")?.query.get("q"))
       .toBe("needle");
+  });
+
+  it("badges a live-session hit and asks the engine to include live output (#491)", async () => {
+    const vogt = fakeVogt({}, {
+      "GET /api/history/sessions": { body: [alpha] },
+      "GET /api/history/search": { body: [alphaResult, liveResult] },
+      "GET /api/history/session-alpha": { body: alpha },
+      "GET /api/history/session-alpha/log": {
+        body: { session_id: alpha.id, text: "alpha says needle", bytes: 17, total_bytes: 17, truncated: false },
+      },
+    });
+    const view = mountAt("/history", historyResultUrl("needle", alphaResult), () => <History />);
+
+    await waitFor(() =>
+      expect(view.container.querySelectorAll(".history-search-result").length).toBe(2),
+    );
+
+    const liveButton = [...view.container.querySelectorAll<HTMLButtonElement>(".history-search-result")]
+      .find((button) => button.textContent?.includes("live shell"));
+    expect(liveButton?.querySelector(".history-liveness-badge.live")?.textContent).toBe("Live");
+
+    // The archived hit carries no Live badge.
+    const alphaButton = [...view.container.querySelectorAll<HTMLButtonElement>(".history-search-result")]
+      .find((button) => button.textContent?.includes("alpha archive"));
+    expect(alphaButton?.querySelector(".history-liveness-badge")).toBeNull();
+
+    // The search asked the engine to include live output.
+    expect(
+      vogt.engineCalls.find((call) => call.path === "/api/history/search")?.query.get("include_live"),
+    ).toBe("true");
   });
 
   it("gives each distinct result its own URL and updates the detail", async () => {
