@@ -8,7 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 
-DEMO_ONLY = {"demo-manifest.json", "demo-gui.html"}
+DEMO_ONLY = {"demo-manifest.json", "demo-gui.html", "mobile-demo.html"}
 
 
 def digest(path: Path) -> str:
