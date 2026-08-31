@@ -21,22 +21,28 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     CreateWorkParams,
     GetWorkParams,
+    HistoryListParams,
     ListAuditParams,
     ListEventsParams,
     ListSessionsParams,
+    LogTailParams,
     RegisterProjectParams,
     RelateWorkParams,
+    SearchOutputParams,
     StartSessionParams,
     StopSessionParams,
 )
 from vogt.application.services import (
     create_work,
     get_work,
+    history_list,
     list_audit,
     list_events,
     list_sessions,
+    log_tail,
     register_project,
     relate_work,
+    search_output,
     start_session,
     stop_session,
 )
@@ -57,6 +63,9 @@ class StandInEngine:
         self.killed: list[str] = []
         self.alive: dict[str, str] = {}
         self.counter = 0
+        #: When set, the history log endpoint 404s — the engine has no log for
+        #: that id (history off, or the id is unknown).
+        self.log_missing = False
 
     def __call__(
         self,
@@ -92,6 +101,57 @@ class StandInEngine:
                     {"id": key, "name": key, "activity": state, "cwd": ROOT}
                     for key, state in self.alive.items()
                 ]
+            ).encode()
+        # Session history (#491). Canned rows; tests assert both the mapping
+        # and, via `self.sent`, that the query params were forwarded.
+        path = url.split("?", 1)[0]
+        if method == "GET" and path.endswith("/api/history/sessions"):
+            return 200, json.dumps(
+                [
+                    {
+                        "id": "hist-1",
+                        "name": "old-session",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "ended_at": "2026-01-01T00:05:00Z",
+                        "exit_code": 0,
+                        "cwd": ROOT,
+                        "command": "make test",
+                        "scrollback_bytes": 128,
+                    }
+                ]
+            ).encode()
+        if method == "GET" and path.endswith("/api/history/search"):
+            return 200, json.dumps(
+                [
+                    {
+                        "session_id": "hist-1",
+                        "session_name": "old-session",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "match_snippet": "found the needle here",
+                        "rank": -2.0,
+                        "live": False,
+                    },
+                    {
+                        "session_id": "live-9",
+                        "session_name": "running-now",
+                        "created_at": "2026-01-02T00:00:00Z",
+                        "match_snippet": "a needle in a live run",
+                        "rank": 0.0,
+                        "live": True,
+                    },
+                ]
+            ).encode()
+        if method == "GET" and path.endswith("/log"):
+            if self.log_missing:
+                return 404, b""
+            return 200, json.dumps(
+                {
+                    "session_id": "hist-1",
+                    "text": "plain readable tail",
+                    "bytes": 19,
+                    "total_bytes": 40,
+                    "truncated": True,
+                }
             ).encode()
         return 404, b""
 
@@ -685,3 +745,103 @@ def test_naming_both_a_work_item_and_a_project_is_still_refused(
         start_session(
             wired, StartSessionParams(work_item="WI-1", project="vogt", reason=WHY)
         )
+
+
+# -- session history reads (#491) ------------------------------------------
+#
+# Thin pass-throughs to the engine, degrading the FR-E9 way `list_sessions`
+# does. The stand-in returns canned rows; `engine.sent` lets a test assert the
+# query params were forwarded, since that forwarding is the whole behaviour.
+
+
+def _history_urls(engine: StandInEngine) -> list[str]:
+    return [row["url"] for row in engine.sent if "/api/history" in row["url"]]
+
+
+def test_history_list_forwards_pagination_and_maps_rows(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = history_list(wired, HistoryListParams(limit=10, offset=5))
+    assert result.engine is None
+    assert [row.id for row in result.sessions] == ["hist-1"]
+    row = result.sessions[0]
+    assert row.name == "old-session"
+    assert row.exit_code == 0
+    assert row.scrollback_bytes == 128
+    url = _history_urls(engine)[-1]
+    assert "limit=10" in url and "offset=5" in url
+
+
+def test_search_output_maps_hits_and_flags_live(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = search_output(wired, SearchOutputParams(q="needle", limit=25))
+    assert result.engine is None
+    assert [m.live for m in result.matches] == [False, True]
+    assert result.matches[0].match_snippet == "found the needle here"
+    assert result.matches[1].session_id == "live-9"
+    url = _history_urls(engine)[-1]
+    assert "q=needle" in url
+    assert "include_live=true" in url
+    assert "limit=25" in url
+
+
+def test_search_output_can_ask_for_archive_only(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    search_output(wired, SearchOutputParams(q="needle", include_live=False))
+    assert "include_live=false" in _history_urls(engine)[-1]
+
+
+def test_log_tail_maps_the_preview_and_forwards_flags(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = log_tail(
+        wired, LogTailParams(id="hist-1", tail_bytes=4096, strip_ansi=True)
+    )
+    assert result.engine is None
+    assert result.session_id == "hist-1"
+    assert result.text == "plain readable tail"
+    assert result.bytes == 19
+    assert result.total_bytes == 40
+    assert result.truncated is True
+    url = _history_urls(engine)[-1]
+    assert "tail_bytes=4096" in url
+    assert "strip_ansi=true" in url
+
+
+def test_log_tail_missing_log_is_empty_not_an_error(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    engine.log_missing = True
+    result = log_tail(wired, LogTailParams(id="gone"))
+    assert result.engine is None
+    assert result.session_id is None
+    assert result.text == ""
+
+
+def test_history_reads_report_no_engine_configured(instance: AppContext) -> None:
+    ctx = dataclasses.replace(instance, engine=None)
+    assert "VOGT_ENGINE_URL" in (history_list(ctx, HistoryListParams()).engine or "")
+    assert "VOGT_ENGINE_URL" in (
+        search_output(ctx, SearchOutputParams(q="x")).engine or ""
+    )
+    assert "VOGT_ENGINE_URL" in (log_tail(ctx, LogTailParams(id="x")).engine or "")
+
+
+def test_history_reads_report_a_dead_engine_not_an_error(
+    instance: AppContext,
+) -> None:
+    dead = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=DeadEngine()),
+    )
+    hist = history_list(dead, HistoryListParams())
+    assert hist.sessions == []
+    assert hist.engine is not None and "not answering" in hist.engine
+    search = search_output(dead, SearchOutputParams(q="x"))
+    assert search.matches == []
+    assert search.engine is not None and "not answering" in search.engine
+    tail = log_tail(dead, LogTailParams(id="x"))
+    assert tail.session_id is None
+    assert tail.engine is not None and "not answering" in tail.engine
