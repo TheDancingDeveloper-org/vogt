@@ -446,6 +446,9 @@ export interface HistorySearchResult {
   created_at: string;
   match_snippet: string;
   rank: number;
+  // True when the hit came from a running session's live output rather than
+  // the archived index (#491). Older engines omit it; treated as false.
+  live?: boolean;
 }
 
 export interface HistoryLogPreview {
@@ -855,10 +858,15 @@ export const api = {
       signal,
       "list",
     ),
-  searchHistory: (query: string, limit = 20, signal?: AbortSignal) =>
+  searchHistory: (
+    query: string,
+    limit = 20,
+    includeLive = true,
+    signal?: AbortSignal,
+  ) =>
     req<HistorySearchResult[]>(
       "GET",
-      `/api/history/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+      `/api/history/search?q=${encodeURIComponent(query)}&limit=${limit}&include_live=${includeLive}`,
       undefined,
       signal,
       "long",

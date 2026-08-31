@@ -5047,6 +5047,10 @@ textarea {
 .history-result-date {
   font-size: 11px;
   color: var(--fg-muted);
+  /* Keep the date hard right so the optional Live badge groups with the name
+     on the left rather than floating to the middle under space-between. */
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .history-result-snippet {
