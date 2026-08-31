@@ -1073,8 +1073,17 @@ contains no Vogt core, session engine, credentials, PTY or proxy.
 Normal and demo packaging share one PWA compilation. `demo-build.json` records
 the source ref/SHA and SHA-256 of each built asset; demo augmentation verifies
 those hashes before adding the runtime manifest and the static GUI-stream
-illustration. [`DEMO_SITE_PLAN.md`](DEMO_SITE_PLAN.md) records the complete
-implementation and acceptance rationale.
+illustration. It also adds `mobile-demo.html`, a phone-frame showcase whose
+frame loads that same PWA at the responsive Sessions, terminal and Assistant
+routes. The Android shell loads the deployed PWA in a Capacitor WebView, so the
+showcase deliberately frames the implementation instead of maintaining a
+second mobile mock. Native-only push and microphone behavior remain outside the
+browser showcase. The static origin can select that document as `/` through
+an allowlisted `DEMO_ROOT_DOCUMENT`; the mobile deployment overlay uses this
+for a separate hostname while retaining `/index.html` as the framed PWA. Both
+entry points therefore pin one signed image digest and cannot drift apart.
+[`DEMO_SITE_PLAN.md`](DEMO_SITE_PLAN.md) records the complete implementation
+and acceptance rationale.
 
 ---
 

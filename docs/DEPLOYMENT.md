@@ -583,6 +583,9 @@ SHA in `demo-build.json`, verifies them, and only then adds
 `demo-manifest.json` plus the simulated GUI document. The runtime is a small
 read-only Node static server. It has no Python core, Rust engine, PTY,
 subprocess route, workspace mount, upstream proxy or deploy credential.
+Demo augmentation also adds `mobile-demo.html`; that page frames the same PWA
+at phone width to demonstrate the implemented Capacitor WebView UI without
+shipping a second frontend.
 
 The `demo-image` job in `build.yml` runs only for `dev`, smoke-tests that APIs
 are refused, emits an SBOM and signs the digest. It **does not deploy**.
@@ -591,6 +594,15 @@ reported `ghcr.io/thedancingdeveloper-org/vogt-demo@sha256:…` reference in the
 operator's deployment stack and let its approved workflow apply it. The repository-local
 [`deploy/demo.overlay.yml`](../deploy/demo.overlay.yml) documents the hardened
 runtime and safe allocation defaults; it is not an alternate deployment path.
+
+The same deployed origin serves the mobile showcase at `/mobile-demo.html`.
+To give it a separate mobile-first hostname, run a second Compose project from
+the **same signed digest** and layer
+[`deploy/mobile-demo.overlay.yml`](../deploy/mobile-demo.overlay.yml) over the
+demo service. That overlay changes only the root document; `/index.html`
+remains the real PWA loaded inside the phone frame, so the showcase cannot
+recurse into itself. Publishing either entry point still deploys nothing; the
+operator-owned digest update remains the only movement step.
 
 To build and prove the artifact locally:
 
