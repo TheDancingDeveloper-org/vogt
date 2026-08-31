@@ -1,34 +1,9 @@
-# Vogt — Data Schema & Topology (v0.3, revision r5)
+# Vogt — Data Schema & Topology
 
-Status: **built** (reconciled against the delivered v1 on 2026-08-12; the
-as-built shape of §3.2 is the note at the end of that section, and the
-requirement-by-requirement verification lives with the requirements
-baseline, outside this repository; `FR-*`/`NFR-*` IDs are quoted as plain
-text).
-Types are indicative; DDL is written
-at M0. Companion to `DESIGN.md` §3 (domain model) and §7 (storage).
-
-r2 changes: `contracts` and `packages` tables removed; `events` and
-`suppressions` tables added; dependency tables reduced to references;
-drift proposals carry an evidence snapshot; retention rules tightened.
-
-r3 changes: no sweep roots and no discovery — collector scope is always a
-set of registered project ids; `projects.exclusions` replaces per-root
-exclusion patterns; contract results are written by on-demand checks only.
-
-r4 changes: `coding_sessions` added (§2.6) for the merge with the session
-engine — the declared link between a work item or project and a terminal the
-engine runs for it. No other table changed; the engine keeps its own state in
-its own `state_dir` and nothing about it is mirrored here.
-
-r5 changes: **no schema change at all.** Session outcomes and bound
-agent-task runs (FR-E6, FR-E7) arrive as observations of two new kinds,
-`session.outcome` and `agent_task.run`, against two new subject-key shapes
-(§3.1) — which is what r4's §2.6 said would happen and what nothing had
-built. This revision is recorded because the previous one described that
-mechanism as existing: a document that reasons from an unbuilt thing to a
-schema decision is the failure the v1 delivery verification found in this
-file, and r5 is the correction as well as the build.
+Companion to `DESIGN.md` §3 (domain model) and §7 (storage). Types are
+indicative; the migrations under `src/vogt/storage/` are authoritative.
+`FR-*`/`NFR-*` IDs refer to the numbered requirements baseline, which is
+maintained outside this repository and quoted here as plain text.
 
 ## 1. Storage topology
 
@@ -193,7 +168,7 @@ not yet an input to the phase.
 
 `writeback_actions` records the *attempt*, not only the success — including
 `skipped`, which is what a policy refusal looks like. Write-back is never a
-separate operation (`ROADMAP.md` M5): a comment authored here posts upstream
+separate operation: a comment authored here posts upstream
 as part of commenting, so this table is the only place the upstream half of
 a declared write is visible before the next sweep re-observes it.
 

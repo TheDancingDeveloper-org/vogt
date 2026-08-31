@@ -600,7 +600,7 @@ jobs:
       # repo/environment variable `VOGT_ANDROID_SERVER_URL` and only falls back
       # to loopback when that is unset. Unset, the artifact stays a build-proof
       # that points at nothing (installing it shows the offline page). Set the
-      # variable to a real front door — e.g. `https://vogt-dev.sprooty.com` —
+      # variable to a real front door — e.g. `https://vogt.example.com` —
       # and the same job publishes an APK that is actually installable and
       # loads that Vogt. It stays debug-signed (below), so it is a sideload
       # channel, not a store/release artifact; a signed release APK is still a

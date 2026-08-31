@@ -5,7 +5,7 @@ All notable changes to Vogt are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once released — pre-1.0, a minor version bump may still carry a breaking
-change, per the compatibility policy in [`opensource.md`](opensource.md).
+change.
 
 This file starts from the public 0.2.0 baseline; earlier history lives in the
 git log rather than being reconstructed here.
@@ -56,7 +56,7 @@ migration is required.
 The first release since the merged core+engine stack reached production. No
 operation was renamed or removed; no schema migration is required (the declared
 schema stays at 0015, the observed schema at 0004). Pre-1.0, this remains a
-minor bump per the compatibility policy in [`opensource.md`](opensource.md).
+minor bump.
 
 ### Added
 

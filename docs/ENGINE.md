@@ -1,13 +1,12 @@
 # Vogt — The Session Engine
 
-Status: **built and current as of 2026-08-15** · this document describes what
-the engine *is*, not what it was planned to be. Where a capability was designed
-and never delivered, it is not described here; outstanding engine work is
-tracked in the GitHub issue tracker and [`ROADMAP.md`](ROADMAP.md).
+This document describes what the engine *is*, not what it was planned to be.
+Where a capability was designed and never delivered, it is not described
+here; outstanding engine work is tracked in the GitHub issue tracker and
+[`ROADMAP.md`](ROADMAP.md).
 
-The session engine is the Rust half of Vogt. It began life as a standalone
-product and was merged into this repository to become Vogt's execution
-surface. It runs PTYs, streams them over WebSocket, serves the PWA, and is the
+The session engine is the Rust half of Vogt — its execution surface. It runs
+PTYs, streams them over WebSocket, serves the PWA, and is the
 merged product's **front door**: the only listening process, proxying
 `/api/vogt` and `/mcp` to the Python core on loopback.
 
@@ -26,8 +25,7 @@ of the repository; each rule they label is stated in words beside them.
 Companion documents: [`DESIGN.md`](DESIGN.md) (the product's architecture),
 [`DEPLOYMENT.md`](DEPLOYMENT.md) (production deployment: images, compose,
 env, reverse proxy, backups, upgrades), [`USER_GUIDE.md`](USER_GUIDE.md) (how
-a person drives it), [`VOICE_DELIVERY.md`](VOICE_DELIVERY.md) (the voice
-assistant's delivery status).
+a person drives it).
 
 ---
 
@@ -83,13 +81,12 @@ The engine's checks run in `.github/workflows/ci.yml` and its image is built
 by `.github/workflows/build.yml`.
 
 Crate names, binary and helper names (`mydevenv2-*`), and the legacy
-`MYDEVENV2_*` environment prefix still carry the engine's pre-merge name.
-That is deliberate and is not drift: the names divide by *process*, not by
-product, and renaming them is a migration on every live deployment. The same
-compatibility rule keeps the Android application and notification channel
-IDs, browser storage/event keys, and the `MYDEVENV2_NOTIFY:` task hook; none
-is presentation copy. Browser/route titles, install labels, login/errors,
-notification channel labels and notification content all use **Vogt**.
+`MYDEVENV2_*` environment prefix still carry a legacy internal name, as do
+the Android notification channel ID, browser storage/event keys, and the
+`MYDEVENV2_NOTIFY:` task hook. None is presentation copy, and their removal
+is pending housekeeping ([`ROADMAP.md`](ROADMAP.md)). Browser/route titles,
+install labels, login/errors, notification channel labels and notification
+content all use **Vogt**.
 Engine settings are read under `ENGINE_*` (see §3); the legacy `MYDEVENV2_*`
 names are still accepted as aliases and log a warning at startup.
 
@@ -375,9 +372,8 @@ is wrong.
 
 ### Contract crate
 
-Rust DTOs live in `engine/contract/` (`vogt-engine-contract`). They were shared
-with the archived native client, which the merge left behind, so the server is
-now the only consumer in this tree. Those types cover:
+Rust DTOs live in `engine/contract/` (`vogt-engine-contract`); the server is
+their only consumer in this tree. Those types cover:
 
 - session lifecycle payloads
 - SSE event payloads
@@ -387,8 +383,7 @@ now the only consumer in this tree. Those types cover:
 
 The browser client still carries TypeScript mirrors in `web/src/api.ts`, but
 those shapes should follow the shared Rust contract instead of ad hoc
-server-local structs. The browser/PWA is the supported client surface; the old
-native desktop client remains deprecated legacy code.
+server-local structs. The browser/PWA is the supported client surface.
 
 Routes whose response shape is named below without a crate to look it up in are
 server-local: the handler's own struct in `engine/server/src/`, named in the
@@ -1606,9 +1601,9 @@ become instructions.
 
 One clause of the assistant's requirements is short, and it is not described
 above as though it existed: FR-T5's spoken validation pass of the recogniser
-against domain vocabulary (project slugs, `WI-n` ids) has not been run by a
-person — [`VOICE_DELIVERY.md`](VOICE_DELIVERY.md) tracks it. FR-T7's native
-Anthropic backend was the other, and was deferred at r12 rather than left
+against domain vocabulary (project slugs, `WI-n` ids) is a device-dependent
+pass run per release rather than in CI ([`ROADMAP.md`](ROADMAP.md)). FR-T7's
+native Anthropic backend was the other, and was deferred rather than left
 owed — the provider section above.
 
 ### Voice
@@ -1838,8 +1833,7 @@ Named here so the absences read as decisions rather than omissions.
   is: read scrollback, read a curated slice of Vogt, and — after an on-screen
   approval — type into a PTY or make one of four Vogt writes as the approving
   user.
-- **There is no native desktop client.** The engine's pre-merge repository
-  had one; it was deprecated and not carried across. A reference to `client/`
+- **There is no native desktop client.** A reference to `client/`
   anywhere in this tree names something that is not here.
 - **Nothing here is a second backlog.** The engine's outstanding work lives in
   the GitHub issue tracker and `ROADMAP.md`, because an item without a

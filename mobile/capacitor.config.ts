@@ -10,8 +10,8 @@ import type { CapacitorConfig } from "@capacitor/cli";
 //
 // ── Why the URL has no default ─────────────────────────────────────────────
 //
-// It used to default to `https://mydevenv2.sprooty.com`, and that default is
-// what FR-M1 is against. That host is MyDevEnv2's own standalone stack: it
+// It used to default to the legacy MyDevEnv2 host, and that default is
+// what FR-M1 is against. That host was MyDevEnv2's own standalone stack: it
 // serves the session engine without vogt-core, so `/api/vogt` answers 503,
 // `vogt.configured` is false, and the four Vogt surfaces the drawer offers —
 // board, backlog, projects, audit — render their outage state. An APK built
@@ -34,8 +34,8 @@ import type { CapacitorConfig } from "@capacitor/cli";
 //
 // ── Names: one changed, one deliberately not ───────────────────────────────
 //
-// M14 settled §11.1: the merged product is **Vogt**, served at
-// `vogt.sprooty.com`. `appName` is the label under the icon, so it says Vogt
+// M14 settled §11.1: the merged product is **Vogt**. `appName` is the label
+// under the icon, so it says Vogt
 // — a phone showing "MyDevEnv2" beside a product that calls itself something
 // else is the naming decision failing at the only place a user reads it.
 //
