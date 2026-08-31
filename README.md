@@ -14,6 +14,17 @@ integrations honestly rather than failing startup; plain folders and local Git
 repositories are first-class, and GitHub and agent integrations add capability
 when you opt in.
 
+## Live demo
+
+Two public demo sites run the current build against seeded, read-only data —
+the write API is isolated, so nothing there persists and no sign-in is needed:
+
+- [**vogt-demo.thedancingdeveloper.com**](https://vogt-demo.thedancingdeveloper.com/)
+  — the desktop Solid PWA.
+- [**vogt-mobile-demo.thedancingdeveloper.com**](https://vogt-mobile-demo.thedancingdeveloper.com/)
+  — the mobile app demo: a phone frame around the same responsive PWA that the
+  Capacitor mobile shell wraps.
+
 ## Run it
 
 The stack is two Compose files layered together: the base
