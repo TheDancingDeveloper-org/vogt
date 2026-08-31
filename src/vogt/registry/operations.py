@@ -74,6 +74,8 @@ from vogt.application.models import (
     ForgeReposResult,
     GetProjectParams,
     GetWorkParams,
+    HistoryListParams,
+    HistoryListResult,
     ImportParams,
     ImportProjectParams,
     ImportProjectResult,
@@ -102,6 +104,8 @@ from vogt.application.models import (
     ListSuppressionsParams,
     ListTokensParams,
     ListWorkParams,
+    LogTailParams,
+    LogTailResult,
     McpStdioParams,
     McpStdioResult,
     MigrateParams,
@@ -130,6 +134,8 @@ from vogt.application.models import (
     RevokeTokenParams,
     ScaffoldProjectParams,
     ScaffoldProjectResult,
+    SearchOutputParams,
+    SearchOutputResult,
     ServeParams,
     ServeResult,
     SessionListResult,
@@ -846,6 +852,46 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.stop_session,
             route=HttpRoute("POST", "/sessions/stop"),
             cli=CliBinding(("session", "stop")),
+        ),
+        # -- session history (#491) ---------------------------------------
+        #
+        # Three reads that surface the engine's session history to agents
+        # (MCP), scripts (REST) and operators (CLI) at once — the GUI already
+        # reaches the engine directly. Static GET paths with the id as a query
+        # field, the house convention (there are no `{param}` routes); the id
+        # in `session.log_tail` rides on `LogTailParams.id`.
+        Operation(
+            name="session.history_list",
+            summary="List archived sessions (history), newest first.",
+            scope="read",
+            mutating=False,
+            params_model=HistoryListParams,
+            result_model=HistoryListResult,
+            handler=services.history_list,
+            route=HttpRoute("GET", "/sessions/history"),
+            cli=CliBinding(("session", "history")),
+        ),
+        Operation(
+            name="session.search_output",
+            summary="Search session output (live sessions included).",
+            scope="read",
+            mutating=False,
+            params_model=SearchOutputParams,
+            result_model=SearchOutputResult,
+            handler=services.search_output,
+            route=HttpRoute("GET", "/sessions/history/search"),
+            cli=CliBinding(("session", "search")),
+        ),
+        Operation(
+            name="session.log_tail",
+            summary="Read the tail of a session's output log, readable.",
+            scope="read",
+            mutating=False,
+            params_model=LogTailParams,
+            result_model=LogTailResult,
+            handler=services.log_tail,
+            route=HttpRoute("GET", "/sessions/log"),
+            cli=CliBinding(("session", "log")),
         ),
         Operation(
             name="token.issue",

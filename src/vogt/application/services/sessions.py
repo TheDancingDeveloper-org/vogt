@@ -32,7 +32,15 @@ from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    HistoryListParams,
+    HistoryListResult,
+    HistoryOutputMatch,
+    HistorySessionRow,
     ListSessionsParams,
+    LogTailParams,
+    LogTailResult,
+    SearchOutputParams,
+    SearchOutputResult,
     SessionListResult,
     SessionResult,
     SessionSummary,
@@ -270,6 +278,93 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
             ],
             engine=detail,
         )
+
+
+# -- session history (#491) ------------------------------------------------
+#
+# Thin read pass-throughs to the engine's history surface. All three degrade
+# the FR-E9 way `list_sessions` does: no engine, or an unreachable one, sets
+# the `engine` field and returns an empty view — never an error that reads as
+# "no history". History lives entirely engine-side, so there is no declared
+# store to consult.
+
+_NO_ENGINE = "no session engine is configured (VOGT_ENGINE_URL is unset)"
+
+
+def history_list(ctx: AppContext, params: HistoryListParams) -> HistoryListResult:
+    """The engine's archived-session listing, newest-first, paginated."""
+    if ctx.engine is None:
+        return HistoryListResult(engine=_NO_ENGINE)
+    try:
+        rows = ctx.engine.history_sessions(limit=params.limit, offset=params.offset)
+    except EngineUnavailable as exc:
+        return HistoryListResult(engine=str(exc))
+    return HistoryListResult(
+        sessions=[
+            HistorySessionRow(
+                id=row.id,
+                name=row.name,
+                created_at=row.created_at,
+                ended_at=row.ended_at,
+                exit_code=row.exit_code,
+                cwd=row.cwd,
+                command=row.command,
+                scrollback_bytes=row.scrollback_bytes,
+            )
+            for row in rows
+        ]
+    )
+
+
+def search_output(ctx: AppContext, params: SearchOutputParams) -> SearchOutputResult:
+    """Full-text search over session output, live sessions included (#491)."""
+    if ctx.engine is None:
+        return SearchOutputResult(engine=_NO_ENGINE)
+    try:
+        hits = ctx.engine.search_history(
+            params.q, limit=params.limit, include_live=params.include_live
+        )
+    except EngineUnavailable as exc:
+        return SearchOutputResult(engine=str(exc))
+    return SearchOutputResult(
+        matches=[
+            HistoryOutputMatch(
+                session_id=hit.session_id,
+                session_name=hit.session_name,
+                created_at=hit.created_at,
+                match_snippet=hit.match_snippet,
+                rank=hit.rank,
+                live=hit.live,
+            )
+            for hit in hits
+        ]
+    )
+
+
+def log_tail(ctx: AppContext, params: LogTailParams) -> LogTailResult:
+    """The tail of one session's output log, readable (ANSI-stripped) by default.
+
+    A missing log — the id is unknown, or history is off — is an empty result
+    (`session_id` null, `engine` null), not an error: "there is no output to
+    show" is an ordinary answer.
+    """
+    if ctx.engine is None:
+        return LogTailResult(engine=_NO_ENGINE)
+    try:
+        log = ctx.engine.history_log(
+            params.id, tail_bytes=params.tail_bytes, strip_ansi=params.strip_ansi
+        )
+    except EngineUnavailable as exc:
+        return LogTailResult(engine=str(exc))
+    if log is None:
+        return LogTailResult()
+    return LogTailResult(
+        session_id=log.session_id,
+        text=log.text,
+        bytes=log.bytes,
+        total_bytes=log.total_bytes,
+        truncated=log.truncated,
+    )
 
 
 # -- resolution ------------------------------------------------------------
@@ -547,4 +642,11 @@ def _summarize(
     )
 
 
-__all__ = ["list_sessions", "start_session", "stop_session"]
+__all__ = [
+    "history_list",
+    "list_sessions",
+    "log_tail",
+    "search_output",
+    "start_session",
+    "stop_session",
+]

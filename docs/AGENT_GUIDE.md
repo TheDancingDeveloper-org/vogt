@@ -164,6 +164,29 @@ to its subject with `vogt_work_item` (a ref like `WI-42`) or `vogt_project` (a
 slug) so the run's findings file as observations against that subject with the
 same freshness and trust every other kind of evidence carries.
 
+### Search session history — live and archived
+
+Vogt exposes the engine's session history as three reads, so you can find what
+any session has printed without leaving the tool surface (they need only a
+running engine; no capability beyond the ordinary session token):
+
+- `session_search_output` — full-text search over session output. It covers
+  **running** sessions too, not just the archive: each hit carries `live`, so a
+  match in a session that is still going is distinguishable from one in a
+  finished run. Pass `include_live=false` for archive-only.
+- `session_log_tail` — the tail of one session's output log, readable
+  (`strip_ansi` defaults on). Works for a live session as well as an archived
+  one.
+- `session_history_list` — the archived-session listing, newest first.
+
+```console
+$ uv run vogt session search --q "connection refused"
+$ uv run vogt session log --id <session-id>
+```
+
+Each returns an `engine` field that is set (with the reason) when the engine
+could not be asked; an outage reads as an empty result, never as "no history".
+
 ### Name the branch so Vogt can see it
 
 Vogt recognises which work item a git branch belongs to by its **name**, using
