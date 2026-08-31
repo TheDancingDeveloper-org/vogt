@@ -407,6 +407,9 @@ jobs:
           grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$manifest"
           grep -F "\"source_sha\": \"${GITHUB_SHA}\"" <<<"$build"
           get '' | grep -F 'id="root"'
+          mobile="$(get mobile-demo.html)"
+          grep -F 'id="mobile-demo-title"' <<<"$mobile"
+          grep -F 'src="/index.html#/sessions"' <<<"$mobile"
 
           # The origin has no server-side API: a write is refused with 404 and an
           # explanatory body, checked from inside the container as well.
@@ -419,6 +422,21 @@ jobs:
               })
               .catch((e) => { console.error(e.message); process.exit(1); });
           '
+
+          # A dedicated mobile hostname runs the same signed image with only
+          # its root document changed. Prove that mode independently: `/`
+          # must be the showcase while `/index.html` stays the PWA embedded by
+          # its frame (rather than recursively loading the showcase).
+          docker rm -f "$cid" >/dev/null
+          cid="$(docker run -d --read-only --cap-drop ALL --security-opt no-new-privileges \
+            --env DEMO_ROOT_DOCUMENT=mobile-demo.html \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m "$CANDIDATE")"
+          for _ in $(seq 1 30); do
+            get healthz >/dev/null 2>&1 && break
+            sleep 1
+          done
+          get '' | grep -F 'id="mobile-demo-title"'
+          get index.html | grep -F 'id="root"'
 
       - name: scan the static demo image
         # The self-hosted runner cannot use trivy-action's GitHub Releases
@@ -488,6 +506,11 @@ jobs:
             echo '```yaml'
             echo "image: ${DEMO_IMAGE}@${DIGEST}"
             echo '```'
+            echo
+            echo "That one digest serves both the standard demo at \`/\` and"
+            echo "the mobile showcase at \`/mobile-demo.html\`. For a separate"
+            echo "mobile-first hostname, apply \`deploy/mobile-demo.overlay.yml\`"
+            echo "to the same digest-pinned service."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The dev-pod toolchain, built (or found already published) before anything

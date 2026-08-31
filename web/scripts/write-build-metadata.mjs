@@ -40,6 +40,7 @@ if (!demo) {
     ".vite/manifest.json",
     "demo-build.json",
     "demo-gui.html",
+    "mobile-demo.html",
     "demo-manifest.json",
   ]);
   const assets = {};
@@ -74,6 +75,7 @@ for (const [name, expected] of Object.entries(built.assets)) {
 
 await mkdir(dirname(join(dist, "demo-gui.html")), { recursive: true });
 await cp(join(root, "src/demo/gui-stream.html"), join(dist, "demo-gui.html"));
+await cp(join(root, "src/demo/mobile-showcase.html"), join(dist, "mobile-demo.html"));
 await writeFile(join(dist, "demo-manifest.json"), `${JSON.stringify({
   schema: 1,
   enabled: true,

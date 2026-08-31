@@ -18,7 +18,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WEB_SRC = REPO_ROOT / "web" / "src"
 DEMO_SERVER = REPO_ROOT / "engine" / "deploy" / "demo-server.mjs"
+MOBILE_DEMO = REPO_ROOT / "web" / "src" / "demo" / "mobile-showcase.html"
 DEMO_OVERLAY = REPO_ROOT / "deploy" / "demo.overlay.yml"
+MOBILE_DEMO_OVERLAY = REPO_ROOT / "deploy" / "mobile-demo.overlay.yml"
 ENGINE_DOCKERFILE = REPO_ROOT / "engine" / "Dockerfile"
 BUILD_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "build.yml"
 
@@ -96,6 +98,20 @@ def test_demo_origin_has_no_process_proxy_or_write_implementation() -> None:
     assert 'pathname.startsWith("/api/")' in text
     assert 'req.method !== "GET" && req.method !== "HEAD"' in text
     assert "read-only static origin" in text
+    assert '"mobile-demo.html"' in text
+    assert 'process.env.DEMO_ROOT_DOCUMENT ?? "index.html"' in text
+    assert 'new Set(["index.html", "mobile-demo.html"])' in text
+
+
+@requires_web
+def test_mobile_demo_embeds_the_real_demo_pwa() -> None:
+    text = MOBILE_DEMO.read_text(encoding="utf-8")
+    assert 'src="/index.html#/sessions"' in text
+    assert 'href="/index.html#/assistant"' in text
+    assert 'target="vogt-mobile"' in text
+    assert "screenshot recreation" in text
+    assert "Capacitor" in text
+    assert "<script" not in text
 
 
 def test_demo_compose_requires_a_digest_and_drops_runtime_privilege() -> None:
@@ -108,6 +124,21 @@ def test_demo_compose_requires_a_digest_and_drops_runtime_privilege() -> None:
         assert required in text
     assert not re.search(r"^\s+volumes:\s*$", text, re.MULTILINE)
     assert not re.search(r"^\s+(environment|env_file|secrets):\s*$", text, re.MULTILINE)
+
+
+def test_mobile_demo_overlay_changes_only_the_root_document() -> None:
+    text = MOBILE_DEMO_OVERLAY.read_text(encoding="utf-8")
+    executable = "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert executable.strip() == (
+        "services:\n"
+        "  vogt-demo:\n"
+        "    environment:\n"
+        "      DEMO_ROOT_DOCUMENT: mobile-demo.html"
+    )
+    for forbidden in ("image:", "ports:", "volumes:", "secrets:", "command:"):
+        assert forbidden not in executable
 
 
 def test_demo_publication_is_dev_only_scanned_signed_and_never_deploys() -> None:
@@ -125,6 +156,9 @@ def test_demo_publication_is_dev_only_scanned_signed_and_never_deploys() -> None
     assert "sbom: true" in job
     assert 'cosign sign --yes "${DEMO_IMAGE}@${DIGEST}"' in job
     assert "Nothing has been deployed" in job
+    assert "mobile-demo.html" in job
+    assert "--env DEMO_ROOT_DOCUMENT=mobile-demo.html" in job
+    assert "get index.html" in job
     lowered = job.lower()
     assert "ssh " not in lowered
     assert "docker compose up" not in lowered
@@ -150,4 +184,34 @@ def test_demo_compose_renders_as_a_static_read_only_service() -> None:
     assert "host_ip: 127.0.0.1" in result.stdout
     assert 'published: "8912"' in result.stdout
     assert "target: 8910" in result.stdout
+    assert "cap_drop:" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("docker") is None, reason="docker not present")
+def test_mobile_demo_overlay_preserves_the_hardened_digest_pinned_service() -> None:
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "-f",
+            str(DEMO_OVERLAY),
+            "-f",
+            str(MOBILE_DEMO_OVERLAY),
+            "config",
+        ],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "VOGT_DEMO_IMAGE": (
+                "ghcr.io/thedancingdeveloper-org/vogt-demo@sha256:" + "b" * 64
+            ),
+            "VOGT_DEMO_PORT": "8913",
+        },
+    )
+    if result.returncode != 0:
+        pytest.skip(f"docker compose unavailable: {result.stderr.strip()[:200]}")
+    assert "DEMO_ROOT_DOCUMENT: mobile-demo.html" in result.stdout
+    assert "read_only: true" in result.stdout
+    assert 'published: "8913"' in result.stdout
     assert "cap_drop:" in result.stdout
