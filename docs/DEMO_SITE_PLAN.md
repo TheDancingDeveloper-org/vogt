@@ -39,6 +39,15 @@ The primary acceptance statement is:
 > demo image consume those exact hashed assets. Only the runtime transport and
 > data differ; the rendered application components and CSS do not.
 
+The demo artifact also serves `mobile-demo.html`. It is a presentation shell,
+not another application: its phone frame loads the same origin's PWA at the
+responsive Sessions, terminal and Assistant routes. This matches the actual
+Capacitor architecture, where the Android WebView loads the deployed PWA
+directly; native-only push and microphone plumbing are stated as exclusions.
+For a dedicated mobile hostname, the same static image may select the showcase
+as its root document. Its frame names `/index.html` explicitly, so this mode
+does not recurse and does not require a second build or image stream.
+
 ## 2. Review findings
 
 ### 2.1 The UI already has most of the necessary presentation
@@ -393,6 +402,7 @@ web/src/demo/store.ts                  per-browser state and reducers
 web/src/demo/transport.ts              engine + Vogt request responder
 web/src/demo/socket.ts                 scripted terminal attach implementation
 web/src/demo/gui-stream.html           same-origin simulated GUI content
+web/src/demo/mobile-showcase.html      phone frame around the same responsive PWA
 web/tests/browser/demo.spec.ts         complete route/menu/split matrix
 deploy/demo.overlay.yml                isolated demo runtime
 deploy/demo.env.example                non-secret operator choices

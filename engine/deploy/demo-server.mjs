@@ -9,6 +9,10 @@ import { extname, resolve, sep } from "node:path";
 const root = resolve("/app/dist");
 const host = process.env.DEMO_BIND ?? "0.0.0.0";
 const port = Number(process.env.DEMO_PORT ?? "8910");
+const rootDocument = process.env.DEMO_ROOT_DOCUMENT ?? "index.html";
+if (!new Set(["index.html", "mobile-demo.html"]).has(rootDocument)) {
+  throw new Error("DEMO_ROOT_DOCUMENT must be index.html or mobile-demo.html");
+}
 const types = new Map([
   [".css", "text/css; charset=utf-8"], [".html", "text/html; charset=utf-8"],
   [".ico", "image/x-icon"], [".js", "text/javascript; charset=utf-8"],
@@ -34,7 +38,9 @@ function json(res, status, body) {
 
 createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://demo.invalid");
-  if (url.pathname === "/healthz") return json(res, 200, { ok: true, mode: "static-demo" });
+  if (url.pathname === "/healthz") {
+    return json(res, 200, { ok: true, mode: "static-demo", root_document: rootDocument });
+  }
   if (url.pathname.startsWith("/api/") || url.pathname === "/mcp" || url.pathname.startsWith("/mcp/")) {
     return json(res, 404, { error: "The public demo has no server-side API." });
   }
@@ -42,7 +48,7 @@ createServer(async (req, res) => {
 
   let pathname;
   try { pathname = decodeURIComponent(url.pathname); } catch { return json(res, 400, { error: "bad path" }); }
-  const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  const relative = pathname === "/" ? rootDocument : pathname.replace(/^\/+/, "");
   const file = resolve(root, relative);
   if (file !== root && !file.startsWith(`${root}${sep}`)) return json(res, 404, { error: "not found" });
   let info;
@@ -52,7 +58,10 @@ createServer(async (req, res) => {
   headers(res);
   res.setHeader("Content-Type", types.get(extname(file)) ?? "application/octet-stream");
   res.setHeader("Content-Length", String(info.size));
-  const unversioned = new Set(["index.html", "sw.js", "demo-manifest.json", "demo-build.json"]);
+  const unversioned = new Set([
+    "index.html", "sw.js", "demo-manifest.json", "demo-build.json",
+    "demo-gui.html", "mobile-demo.html",
+  ]);
   res.setHeader("Cache-Control", unversioned.has(relative) ? "no-store, must-revalidate" : "public, max-age=31536000, immutable");
   if (req.method === "HEAD") return res.end();
   createReadStream(file).pipe(res);

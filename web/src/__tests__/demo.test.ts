@@ -84,6 +84,22 @@ describe("public demo contracts", () => {
     socket.close();
   });
 
+  it("mirrors the mobile Assistant transcript display metadata", async () => {
+    const store = new DemoStore();
+    const history = await (
+      await store.request("/api/assistant/history", "GET", new URLSearchParams())
+    ).json();
+    expect(history.transcript[1]).toMatchObject({
+      created_at: "2026-08-24T14:49:25Z",
+      session_refs: [
+        { id: "demo-agent", name: "Agent review", activity: "waiting-for-input" },
+      ],
+      actions: [
+        { kind: "open-session", session_id: "demo-agent", label: "Open Agent review" },
+      ],
+    });
+  });
+
   it("reset restores the canonical split presets and deterministic state", async () => {
     const store = new DemoStore();
     await store.request("/api/vogt/work/transition", "POST", new URLSearchParams(), { body: JSON.stringify(body()) });

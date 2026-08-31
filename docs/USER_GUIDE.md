@@ -910,6 +910,12 @@ list and is never executed. The GUI stream is likewise a same-origin static
 illustration, not a remote desktop. The source link in the strip names the
 exact commit whose PWA asset hashes the demo advertises.
 
+**Mobile app** opens a separate showcase page with the real responsive PWA in
+a phone-sized frame. Its Sessions attention cards, terminal pager and
+structured Assistant approval are the same components loaded by the Android
+Capacitor WebView; only native push delivery and microphone plumbing cannot be
+demonstrated by the browser frame.
+
 **Can I use it offline?** No. Installed PWAs show an explicit offline fallback
 page rather than pretending to support disconnected use — a queued offline
 write could not carry an honest freshness answer, so none is offered.
