@@ -28,8 +28,11 @@ jobs:
     runs-on: [self-hosted]
     timeout-minutes: 45
     concurrency:
+      # Newest-wins: an analysis of a superseded commit is fully covered by
+      # the analysis that replaces it — CodeQL scans the whole tree, so
+      # cancelling loses nothing on any event.
       group: codeql-${{ github.ref }}-${{ matrix.language }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+      cancel-in-progress: true
     permissions:
       contents: read
       security-events: write
