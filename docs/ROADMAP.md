@@ -19,6 +19,20 @@ until it ships.
   deferred. Tracked in the issue tracker as it is picked up.
 - **Native Anthropic assistant backend.** The assistant speaks to any
   OpenAI-compatible chat endpoint; a native Anthropic backend is deferred.
+- **Foreign-domain integration (first investigated case: bee hive
+  management).** [`DESIGN.md`](DESIGN.md) §11 keeps foreign domains out of
+  the core entity set and leaves "feeds in as a collector, read-only" as the
+  open integration shape. Investigating the first concrete case — apiary,
+  hive, inspection, treatment, harvest, sensor telemetry — confirmed that
+  allocation: the domain lives in its own product outside this repository
+  (co-deployable via a Layer-2 Compose overlay,
+  [`CUSTOMISATION.md`](CUSTOMISATION.md), when wanted), actionable tasks
+  enter Vogt as ordinary work items over MCP/REST, and evidence would enter
+  as read-only observations under a domain vocabulary (e.g. `hive.*` kinds —
+  observation `kind`/`payload` already accept this without schema change).
+  No new core entities; continuous telemetry stays in the foreign product's
+  own store, with Vogt observing summaries. The evidence half depends on
+  collector discovery below.
 
 ## Pending cleanup
 
@@ -38,3 +52,9 @@ until it ships.
 - **Device-dependent conformance.** The voice and mobile-push passes that
   need a physical phone and speaker are run per release by the maintainer
   rather than in CI.
+- **Operator-supplied collector discovery.** [`CUSTOMISATION.md`](CUSTOMISATION.md)
+  names extra collectors as a Layer-3 image extension, but the collector
+  registry is assembled from a hard-coded list plus configuration-gated
+  branches in `application/services/collect.py`; an image extension cannot
+  register one today. An entry-point (or equivalent) discovery mechanism is
+  deferred until a concrete external-evidence integration needs it.
