@@ -1040,37 +1040,40 @@ def test_the_opencode_registration_does_not_freeze_an_endpoint() -> None:
     )
 
 
-def test_no_two_pushed_commits_share_a_concurrency_group() -> None:
-    """NFR-C1's path gating makes a lost run lose coverage permanently.
+def test_newest_wins_ci_is_paired_with_full_classification_on_push() -> None:
+    """Cancelling a run is safe only when its replacement covers its ground.
 
-    A push is classified by `before..sha`, so each commit is checked by
-    exactly one run and no later run looks at it again. Lose that run and
-    those files are not checked later — they are checked never.
-
-    **`cancel-in-progress: false` is not enough, and believing it was cost a
-    second escape.** That setting governs runs which are *in progress*; a run
-    still **pending** is cancelled whenever a newer run joins its group,
-    unconditionally. On a single self-hosted runner nearly every run is
-    pending for a while, so a `ruff format` failure slipped through exactly
-    as the previous failure had, while the workflow carried a comment saying
-    the hole was shut.
-
-    Keying a push by its commit is what closes it: no two pushed commits
-    share a group, so none can supersede another. A pull request still
-    cancels its own superseded runs, which loses nothing — those classify
-    against the merge base.
+    CI is newest-wins per ref: a superseded run — pending or in progress —
+    is cancelled when a newer one joins its group, so a merge burst costs
+    one run instead of a bank of queued ones. That is only sound because a
+    push run classifies as a change to *everything*: under the earlier
+    incremental `before..sha` classification, each commit was examined by
+    exactly one run, and a cancelled run's files were checked by nothing,
+    ever — two failures escaped to `dev` through that gap. These two
+    properties must move together, so they are asserted together.
     """
     raw = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     group = re.search(r"^  group: (.+)$", raw, re.MULTILINE)
     assert group, "ci.yml declares a concurrency group"
-    assert "github.sha" in group.group(1), (
-        f"pushes must be keyed by commit, not by ref: {group.group(1)!r}. Two "
-        "commits in one group means the older run can be cancelled while "
-        "pending, and its files are then checked by nothing, ever"
+    assert "github.ref" in group.group(1), (
+        "the ref keeps `dev` and `main` — the same commit after a "
+        "fast-forward release — from evicting each other's runs"
     )
-    assert "pull_request.number" in group.group(1), (
-        "a pull request still groups by PR, so its superseded runs can be "
-        "cancelled — they classify against the merge base and lose nothing"
+    assert "cancel-in-progress: true" in raw, (
+        "newest-wins is the policy: superseded runs are cancelled, not banked"
+    )
+    assert "github.sha" not in group.group(1), (
+        "per-commit keying banks a run per push; if that is being restored, "
+        "push classification may become incremental again in the same change"
+    )
+    classify = _without_comments(raw)
+    assert '"$BEFORE' not in classify, (
+        "a push must not classify by `before..sha`: newest-wins cancellation "
+        "would leave a superseded run's files checked by nothing, ever"
+    )
+    assert "everything" in classify, (
+        "the classify step's push arm must declare a change to everything, "
+        "which is what makes cancelling a superseded push run lose nothing"
     )
 
 
@@ -1229,17 +1232,15 @@ def test_the_gate_fails_on_anything_that_is_not_success_or_skipped() -> None:
 
 
 def test_a_workflow_may_cancel_only_when_a_later_run_covers_the_same_ground() -> None:
-    """The rule that tells `docs.yml` apart from `ci.yml`.
+    """A workflow that cancels superseded runs must re-cover their ground.
 
-    Both cancel superseded runs on a branch and only one of them can afford
-    to. `docs.yml` checks the whole tree every time, so a later run covers
-    everything a superseded one would have. `ci.yml` classifies a push by
-    `before..sha` — each commit is examined by exactly one run, and a lost
-    run is coverage lost permanently.
-
-    Asserted because the two files look the same at the point where they
-    differ, and the difference cost two escaped failures before it was
-    understood (§6.3 finding 19).
+    `docs.yml` checks the whole tree every time, so a later run covers
+    everything a superseded one would have — which is what makes its
+    cancellation safe, and the property the comment in the file exists to
+    protect. `ci.yml` now holds the same property by classifying every push
+    as a change to everything (asserted in the newest-wins test above);
+    historically it classified by `before..sha`, and cancelling under that
+    regime cost two escaped failures (§6.3 finding 19).
     """
     docs = (WORKFLOWS / "docs.yml").read_text(encoding="utf-8")
     assert "whole tree" in docs, (
