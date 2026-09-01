@@ -209,7 +209,7 @@ jobs:
       - run: uv sync --locked
 
       - name: canonical product version is aligned
-        run: uv run --no-sync python scripts/check_product_version.py 0.3.1
+        run: uv run --no-sync python scripts/check_product_version.py 0.4.0
 
       - name: ruff (lint)
         run: uv run --no-sync ruff check .
