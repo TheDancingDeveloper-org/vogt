@@ -34,37 +34,26 @@ on:
   workflow_dispatch:
 
 concurrency:
-  # Keyed by *commit* for a push, and by pull request for a PR.
+  # Newest-wins, by ref: a superseded run — pending or in progress — is
+  # cancelled when a newer one joins its group, so a merge burst costs one
+  # full run instead of a bank of queued ones.
   #
-  # The first version of this keyed pushes by ref and set `cancel-in-progress`
-  # to false for them, on the reasoning below — and that is not sufficient,
-  # which was found by watching it fail rather than by reading the docs
-  # again. `cancel-in-progress` governs runs that are *in progress*. A run
-  # that is still **pending** is cancelled whenever a newer run joins its
-  # group, always, whatever that setting says. On a single self-hosted runner
-  # almost every run is pending for a while, so the hole stayed open and the
-  # workflow claimed it was shut.
+  # Cancelling is only safe because a run's coverage is fully contained in
+  # the run that replaces it. A pull request classifies against the merge
+  # base, so that was always true of PRs. A push is now classified as a
+  # change to *everything* (the classify step below), which restores the
+  # same property: the previous design classified a push by `before..sha`,
+  # and a cancelled incremental run meant its files were checked by nothing,
+  # ever — a lint error reached `dev` through exactly that gap twice. If
+  # push classification ever becomes incremental again, this key must go
+  # back to per-commit in the same change.
   #
-  # Keying by SHA means no two pushed commits ever share a group, so none can
-  # supersede another. It costs runner time on a burst — every commit is
-  # checked, which is the point.
-  # The ref is in the key too, for the reason `build.yml` records at length:
-  # `dev` and `main` carry the same commit once a release fast-forwards, so a
-  # SHA-only group let one branch's push evict the other's pending run — and a
-  # push run that never happens is a commit NFR-C1's path gating never checks.
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ github.event.pull_request.number || github.sha }}
-  # Why any of this matters: NFR-C1's path gating classifies a push by
-  # `before..sha`, so each commit is checked by exactly one run and no later
-  # run ever looks at it again. Lose that run and those files are not
-  # "checked later" — they are checked never. It has happened twice:
-  # `tests/test_deploy.py` changed in one push whose run was superseded, and
-  # a lint error reached `dev` through the gap; then a `ruff format` failure
-  # went the same way while the supposed fix was in place.
-  #
-  # A pull request is different — its runs classify against the merge base,
-  # so a later run covers everything an earlier one would have, and
-  # cancelling the superseded one loses nothing.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # The ref stays in the key: `dev` and `main` carry the same commit once a
+  # release fast-forwards, and a SHA-free, ref-free group would let one
+  # branch's push evict the other's run. A PR groups by its own
+  # `refs/pull/N/merge` ref, so PRs never evict each other or a branch.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -110,8 +99,6 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-          BEFORE: ${{ github.event.before }}
-          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -125,19 +112,22 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           }
 
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch --no-tags origin "$BASE_REF"
-            base="$(git merge-base "origin/$BASE_REF" HEAD)"
-            range="$base..HEAD"
-          elif [ -z "$BEFORE" ] \
-            || [ "$BEFORE" = "0000000000000000000000000000000000000000" ] \
-            || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
-            echo "no usable base commit; treating as a change to everything"
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            # A push checks everything, always. The concurrency group is
+            # newest-wins per ref, so a superseded push run is cancelled —
+            # which is only safe because the replacing run re-checks the
+            # whole tree. Classifying a push by `before..sha` under that
+            # policy would mean a cancelled run's files are checked by
+            # nothing, ever; the two escapes that found that hole are
+            # recorded in the concurrency comment at the top of this file.
+            echo "push: newest-wins concurrency, so every push checks everything"
             everything
             exit 0
-          else
-            range="$BEFORE..$SHA"
           fi
+
+          git fetch --no-tags origin "$BASE_REF"
+          base="$(git merge-base "origin/$BASE_REF" HEAD)"
+          range="$base..HEAD"
 
           files="$(git diff --name-only "$range")"
           echo "changed files:"
