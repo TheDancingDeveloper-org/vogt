@@ -14,6 +14,53 @@ git log rather than being reconstructed here.
 
 Nothing yet.
 
+## [0.4.0] - 2026-09-01
+
+A feature release that opens session history to agents and tightens the
+terminal. Additive: three new read operations join the surface; no operation
+was renamed or removed and no schema migration is required.
+
+### Added
+
+- **Session history is searchable by agents, live and archived (#491).** The
+  engine's history search gains `include_live` (on by default) — a bounded,
+  write-free scan of each running session's scrollback supplements the archived
+  full-text index, and hits from a live session are flagged. The log endpoint
+  gains `strip_ansi` for readable plain text. vogt-core exposes three new read
+  operations on MCP, CLI and REST — `session.search_output`,
+  `session.log_tail`, `session.history_list` — so agents and scripts can reach
+  history that was previously GUI-only. The History tab now includes running
+  sessions in output search and badges live matches.
+- **History retention.** A configurable daily sweeper
+  (`history_retention_days`, default 30, `0` keeps forever) bounds both the
+  history database and the raw session logs.
+
+### Changed
+
+- **Public tree prepared for open source.** Retired historical docs, estate
+  references and backward-compatibility framing so the published tree documents
+  only its current state.
+- **Deployment docs** clarify that release images are CLI-free and the estate
+  is operator-private.
+
+### Fixed
+
+- **History replay is readable (#490).** Replays now resolve terminal escape
+  sequences and in-place redraws instead of dumping the raw byte stream.
+- **The "New session" button no longer renders oversized (#489).**
+- **Terminal lag and replay flood under many sessions (#466).** Lagging
+  clients are recovered in-band with burst coalescing, and leaked sockets no
+  longer duplicate a session's output.
+- **Promotion CI (#460).** `promote.yml` uses the GitHub REST API instead of
+  the `gh` CLI, so the green-gate validation and PR creation run on the
+  self-hosted runner. Superseded CI runs are now cancelled rather than banked.
+
+### Security
+
+- **Voice sidecar dependencies (#459).** Bumped ureq/url to clear the
+  rustls-webpki (high) and idna advisories. The affected crates live only in
+  the opt-in voice sidecar, not the default release images.
+
 ## [0.3.1] - 2026-08-31
 
 A feature and reliability release focused on the terminal, session history, and
@@ -118,7 +165,8 @@ minor bump.
 Baseline entry for this changelog. See the git log and release notes for the
 full history up to this tag.
 
-[Unreleased]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/TheDancingDeveloper-org/vogt/releases/tag/v0.2.0
