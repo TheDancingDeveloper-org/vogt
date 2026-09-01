@@ -388,6 +388,25 @@ production is one such private deployment, layering a private overlay on the
 public base; it is not a supported drop-in scenario reproducible from this
 repository alone.
 
+**Read the `vogt-stack` tags carefully — two different builds share the
+repository.** The registry interleaves both families under one name, and
+pinning by the natural-looking tag is exactly the mistake this table exists
+to prevent:
+
+| Tag family | Built by | Pod base | Agent CLIs | Meant for |
+|---|---|---|---|---|
+| `X.Y.Z`, `X.Y`, `sha-<short>`, `latest` | `release.yml` (version tag) | lean | **none** — CLI-free by policy | the signed public release artifact |
+| `dev`, `dev-<longsha>`, `prod-<longsha>` | `build.yml` (branch push) | full | present | the maintainer's own dev/prod pods, which run coding sessions |
+
+A deployment that runs agent sessions and pins a semver or `latest`
+`vogt-stack` digest comes up with **no agent CLIs**: the engine registers its
+session templates but none of them can start. Nothing warns at pull time —
+the image runs and passes a liveness probe. If your deployment runs agents,
+pin a `full`-variant digest (a branch build, or your own image built with
+`VOGT_INSTALL_AI_CLIENTS=true`), never the release stack tag. See issue
+[#502](https://github.com/TheDancingDeveloper-org/vogt/issues/502) for making
+the variants distinguishable in the registry itself.
+
 ### 7.1 Promote `dev` to production
 
 Promotion is two explicit, fast-forward-only pull requests. First deploy the
