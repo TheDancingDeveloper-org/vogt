@@ -1180,7 +1180,12 @@ const Board: Component<Props> = (props) => {
     return fresh.map((item) => {
       const old = previous.get(item.ref);
       if (!old) return item;
-      return Date.parse(old.updated_at) > Date.parse(item.updated_at)
+      // `>=` on purpose (#534): an unchanged item has an *equal* updated_at,
+      // and returning the fresh server object there churns object identity —
+      // defeating `<For>` keying so every card DOM subtree is disposed and
+      // re-created on every poll/SSE/keystroke. Keep `old`'s identity unless
+      // the server's copy is strictly newer.
+      return Date.parse(old.updated_at) >= Date.parse(item.updated_at)
         ? old
         : item;
     });
