@@ -348,6 +348,27 @@ async fn record_auth_failure(method: &Method, path: &str, request_id: &str, reas
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 }
 
+/// Route a WebSocket attach auth failure through the same failure counter,
+/// escalating delay and audit line the HTTP bearer gate uses (#518).
+///
+/// WS auth ran before this with no online-guessing penalty: it validates the
+/// token before any session lookup, so an attacker could open sockets and
+/// guess tokens at network speed. Sharing `AUTH_FAILURES` means a brute-force
+/// run over either surface slows the other too.
+pub async fn record_ws_auth_failure(reason: &'static str) {
+    let count = AUTH_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::warn!(
+        target: "mydevenv2::audit",
+        method = "WS",
+        path = "/api/sessions/{id}/attach",
+        reason = reason,
+        total_failures = count,
+        "auth failure"
+    );
+    let delay_ms = (count.min(50) * 50).min(2000);
+    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+}
+
 pub fn ws_token_allows_session_access(state: &AppState, candidate: &str) -> bool {
     authorize_token(&state.config, candidate)
         .map(|access| access.allows(TokenCapability::Sessions))
@@ -518,6 +539,7 @@ mod tests {
             workspace_root: std::env::temp_dir(),
             gui_stream_url: None,
             gui_stream_verified: false,
+            ws_query_token_allowed: false,
             state_dir: tempfile::tempdir().unwrap().keep(),
             fcm_service_account_json: None,
             vapid_subject: "mailto:test@example.invalid".into(),

@@ -218,6 +218,14 @@ pub struct Config {
     /// end-to-end launch-and-render check. False keeps every GUI affordance
     /// withdrawn even when a URL and streamer package are present.
     pub gui_stream_verified: bool,
+    /// Whether the deprecated `?token=` query parameter on the WebSocket
+    /// attach is still accepted (#518). Off by default: a token in the query
+    /// string lands in every front proxy's access log, browser history and
+    /// Referer-adjacent surface, and the PWA has spoken first-frame auth for
+    /// releases. Set `ENGINE_WS_QUERY_TOKEN=true` only to keep a not-yet-
+    /// redeployed client working; every use is logged and the path is slated
+    /// for removal.
+    pub ws_query_token_allowed: bool,
     /// Where persistent state lives (push subscriptions, VAPID keys).
     /// Defaults to $HOME/.local/share/mydevenv2.
     pub state_dir: std::path::PathBuf,
@@ -381,6 +389,7 @@ struct FileConfig {
     workspace_root: Option<String>,
     gui_stream_url: Option<String>,
     gui_stream_verified: Option<bool>,
+    ws_query_token_allowed: Option<bool>,
     state_dir: Option<String>,
     fcm_service_account_json: Option<String>,
     vapid_subject: Option<String>,
@@ -572,6 +581,18 @@ pub fn load(
     .or(from_file.gui_stream_verified)
     .unwrap_or(false);
 
+    let ws_query_token_allowed = match std::env::var("ENGINE_WS_QUERY_TOKEN") {
+        Ok(value) => Some(parse_bool_env("ENGINE_WS_QUERY_TOKEN", &value)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_WS_QUERY_TOKEN: {error}"
+            )));
+        }
+    }
+    .or(from_file.ws_query_token_allowed)
+    .unwrap_or(false);
+
     let agent_auth_helper = engine_env("ENGINE_AGENT_AUTH_HELPER")
         .ok()
         .or(from_file.agent_auth_helper)
@@ -626,6 +647,7 @@ pub fn load(
             .or_else(|| std::env::var("GUI_STREAM_URL").ok())
             .filter(|s| !s.is_empty()),
         gui_stream_verified,
+        ws_query_token_allowed,
         state_dir: from_file
             .state_dir
             .map(std::path::PathBuf::from)
