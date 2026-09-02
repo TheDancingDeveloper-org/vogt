@@ -183,10 +183,28 @@ pub async fn download_file(
     let file = tokio::fs::File::open(&p).await?;
     let stream = ReaderStream::with_capacity(file, 64 * 1024);
     let body = Body::from_stream(stream);
-    let filename = p
+    let raw_name = p
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "download".into());
+    // Sanitize the quoted filename (#524.9): a `"` (or backslash/control byte)
+    // in a workspace filename would break the quoted-string and let the saved
+    // artifact's name be spoofed. Collapse anything unsafe to '_'.
+    let filename: String = raw_name
+        .chars()
+        .map(|c| {
+            if c == '"' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let filename = if filename.trim().is_empty() {
+        "download".to_string()
+    } else {
+        filename
+    };
     let disposition = format!("attachment; filename=\"{}\"", filename);
     let response = Response::builder()
         .header(

@@ -364,6 +364,18 @@ pub async fn api(State(state): State<Arc<AppState>>, request: Request) -> Respon
         return not_configured();
     };
 
+    // Refuse dot-segment traversal (#524.8). axum's `/api/vogt/{*path}`
+    // matches raw `..`/`%2e%2e` segments, and map_prefix string-substitutes,
+    // so `GET /api/vogt/../health/ready` would reach core paths outside `/api`
+    // with the injected core token attached. The core token is exactly what
+    // this handler adds, so this is where the guard belongs.
+    if has_dot_segment(request.uri().path()) {
+        return refusal(
+            StatusCode::BAD_REQUEST,
+            "forwarded path must not contain '.' or '..' segments",
+        );
+    }
+
     let identity = request.extensions().get::<AuthorizedIdentity>().cloned();
     // The caller's own pairing first, the deployment-wide token second. The
     // fallback is what keeps an M9 deployment — one configured
@@ -457,6 +469,17 @@ fn map_prefix(uri: &Uri, from: &str, to: &str) -> String {
         Some(rest) => format!("{to}{rest}"),
         None => path.to_string(),
     }
+}
+
+/// Whether any `/`-separated segment of a raw request path is a dot segment
+/// (`.`/`..`), including percent-encoded forms (`%2e`, `%2E`). Used to refuse
+/// proxy-prefix escapes (#524.8) before the path is string-substituted and
+/// reqwest normalises it.
+fn has_dot_segment(raw_path: &str) -> bool {
+    raw_path.split('/').any(|seg| {
+        let decoded = seg.to_ascii_lowercase().replace("%2e", ".");
+        decoded == "." || decoded == ".."
+    })
 }
 
 // -- refusals, each with a reason (FR-U21) ----------------------------------
@@ -583,4 +606,33 @@ pub fn spawn_event_follower(state: Arc<AppState>) {
             cursor = next;
         }
     });
+}
+
+#[cfg(test)]
+mod dot_segment_tests {
+    use super::has_dot_segment;
+
+    #[test]
+    fn rejects_dot_segments_including_encoded() {
+        for p in [
+            "/api/vogt/../health/ready",
+            "/api/vogt/%2e%2e/health/ready",
+            "/api/vogt/foo/../bar",
+            "/api/vogt/%2E%2E/x",
+            "/api/vogt/.",
+        ] {
+            assert!(has_dot_segment(p), "{p} should be rejected");
+        }
+    }
+
+    #[test]
+    fn allows_ordinary_paths() {
+        for p in [
+            "/api/vogt/work/list",
+            "/api/vogt/projects/my.project/brief",
+            "/api/vogt/a..b/c",
+        ] {
+            assert!(!has_dot_segment(p), "{p} should be allowed");
+        }
+    }
 }

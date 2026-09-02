@@ -24,6 +24,8 @@ import sys
 from dataclasses import dataclass
 from typing import Any, TextIO
 
+from pydantic import ValidationError
+
 from vogt import __version__
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.errors import VogtError
@@ -184,8 +186,22 @@ class StdioServer:
             # A failed tool call is a *result* with isError, not a protocol
             # error: the model is meant to see it and try something else.
             return _result(message_id, _tool_error(exc.code, str(exc)))
-        except Exception as exc:  # a tool must not kill the session
-            return _result(message_id, _tool_error("error", str(exc)))
+        except ValidationError as exc:
+            # A bad-argument error names fields, not internals, and the model
+            # is meant to see it and correct the call.
+            return _result(message_id, _tool_error("invalid_params", str(exc)))
+        except Exception:  # a tool must not kill the session
+            # Keep raw exception text (paths, SQLite internals) out of the
+            # response; log it with a correlation ref instead (#524.3).
+            from uuid import uuid4
+
+            from vogt.observability import logger
+
+            ref = uuid4().hex[:12]
+            logger("mcp").exception("mcp tool %r failed (ref=%s)", name, ref)
+            return _result(
+                message_id, _tool_error("error", f"internal error (ref {ref})")
+            )
         return _result(
             message_id,
             {

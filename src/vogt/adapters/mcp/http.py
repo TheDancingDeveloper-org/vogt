@@ -18,6 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
 from vogt.adapters.mcp.stdio import (
     INVALID_PARAMS,
@@ -33,6 +34,7 @@ from vogt.application.services.auth import (
     authorize,
 )
 from vogt.errors import VogtError
+from vogt.observability import logger
 from vogt.registry import OperationRegistry
 
 MCP_PATH = "/mcp"
@@ -170,8 +172,21 @@ def _call(
         payload = operation.run_raw(ctx, arguments)
     except VogtError as exc:
         return _result(message_id, _tool_error(exc.code, str(exc)))
-    except Exception as exc:  # a tool must not kill the session
-        return _result(message_id, _tool_error("error", str(exc)))
+    except ValidationError as exc:
+        # A bad-argument error names fields, not internals, and the model is
+        # meant to see it and correct the call — surface it, don't mask it.
+        return _result(message_id, _tool_error("invalid_params", str(exc)))
+    except Exception:  # a tool must not kill the session
+        # Don't return the raw exception text to a remote caller (#524.3): it
+        # can carry absolute paths and SQLite internals. Log it server-side
+        # with a correlation ref and hand back only that ref.
+        from uuid import uuid4
+
+        ref = uuid4().hex[:12]
+        logger("mcp").exception("mcp tool %r failed (ref=%s)", name, ref)
+        return _result(
+            message_id, _tool_error("error", f"internal error (ref {ref})")
+        )
 
     body: dict[str, Any] = payload.model_dump(mode="json")
     import json as _json
