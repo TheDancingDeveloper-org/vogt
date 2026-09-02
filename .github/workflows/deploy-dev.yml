@@ -258,11 +258,11 @@ jobs:
           {
             echo "### Verified dev deployment"
             echo
-            echo "- source: `$SOURCE_SHA`"
-            echo "- core image: `ghcr.io/thedancingdeveloper-org/vogt@$CORE_DIGEST`"
-            echo "- merged image: `ghcr.io/thedancingdeveloper-org/vogt-stack-estate@$STACK_DIGEST`"
-            echo "- desired-state commit: `$DESIRED_STATE_COMMIT`"
-            echo "- Komodo update: `$DEPLOYMENT_ID`"
+            echo "- source: \`$SOURCE_SHA\`"
+            echo "- core image: \`ghcr.io/thedancingdeveloper-org/vogt@$CORE_DIGEST\`"
+            echo "- merged image: \`ghcr.io/thedancingdeveloper-org/vogt-stack-estate@$STACK_DIGEST\`"
+            echo "- desired-state commit: \`$DESIRED_STATE_COMMIT\`"
+            echo "- Komodo update: \`$DEPLOYMENT_ID\`"
             echo "- no release tag or GitHub Release was created"
           } >> "$GITHUB_STEP_SUMMARY"
 
