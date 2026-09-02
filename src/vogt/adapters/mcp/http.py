@@ -12,6 +12,7 @@ rather than present-and-refusing.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from typing import Any
 
@@ -63,8 +64,14 @@ def add_mcp_route(
                 status_code=200,
             )
 
-        ctx, caller = resolve(request)
-        response = _handle(message, ctx=ctx, caller=caller, registry=registry)
+        # resolve() authorizes (a DB write) and _handle() runs the operation —
+        # both synchronous. Offload to a thread so an MCP tool call does not
+        # serialize on the event loop the way an async handler would (#525).
+        def _resolve_and_handle() -> dict[str, Any] | None:
+            ctx, caller = resolve(request)
+            return _handle(message, ctx=ctx, caller=caller, registry=registry)
+
+        response = await asyncio.to_thread(_resolve_and_handle)
         if response is None:
             # A notification. 202 with no body is the streamable-HTTP shape.
             return JSONResponse(content=None, status_code=202)
