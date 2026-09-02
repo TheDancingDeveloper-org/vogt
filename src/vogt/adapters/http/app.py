@@ -185,7 +185,15 @@ def _endpoint_for(
     is_read = operation.route.method == "GET"
     annotation: Any = Annotated[params_model, Query()] if is_read else params_model
 
-    async def endpoint(
+    # A plain `def`, not `async def` (#525). The whole body is synchronous —
+    # authorize, the store reads, and `operation.run` (which can run a git
+    # clone, a full sweep, or a blocking engine HTTP call). FastAPI runs an
+    # `async def` path operation directly on the event loop with no threadpool
+    # offload, so every request serialized behind whichever was running and
+    # server concurrency was effectively 1. A sync `def` is dispatched to
+    # FastAPI's threadpool, so one slow operation no longer freezes every
+    # interactive endpoint.
+    def endpoint(
         params: BaseModel, request: Request, response: Response
     ) -> BaseModel | Response:
         if authorize_request is None:
