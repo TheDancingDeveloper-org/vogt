@@ -69,6 +69,42 @@ escalate scopes. Missing rate limiting on a self-hosted single-operator
 service, or the debug-signed dev/CI build artifacts being unsigned, are known
 and out of scope unless you can show real impact.
 
+## CI and self-hosted runners
+
+This is a public repository, and `pull_request`-triggered jobs run on the
+estate's self-hosted runner pool (`ci.yml`, `codeql.yml`, `runner-policy.yml`,
+`promotion-policy.yml`, `docs.yml`, `mirror-base-images.yml`). Those jobs run
+`uv`/`pytest`, `pnpm install`, `cargo`, Playwright and `gradlew` over
+PR-controlled source — arbitrary code execution by design — on a fleet that
+also carries `docker`, `publish` and `tailnet` labels and later runs
+secret-bearing jobs.
+
+**The single load-bearing control is the repository/organisation setting
+"Require approval for _all_ outside collaborators" (Settings → Actions → Fork
+pull request workflows).** GitHub's default requires approval only for
+first-time contributors, which is not sufficient here: one merged typo fix
+would otherwise let a fork author run code on the pool automatically. This
+setting must stay enabled; it is not enforceable from the tree, so it is
+stated here to be audited.
+
+Relocating fork validation to GitHub-hosted or ephemeral runners was
+considered and deliberately not adopted (see the header comment in
+`.github/workflows/runner-policy.yml`): the exposure is closed at the approval
+gate rather than by moving the pipeline. What the tree _does_ enforce:
+
+- `runner-policy` asserts every job names a self-hosted runner and none is
+  selected dynamically, and third-party actions are SHA-pinned.
+- Secret-bearing steps (Infisical, the Android keystore, Komodo API keys) are
+  gated on `github.event_name != 'pull_request'`, and no workflow uses
+  `pull_request_target`.
+- Signed release images build cold, without importing the shared LAN BuildKit
+  cache, so unauthenticated LAN writes cannot reach a signed artifact
+  (`release.yml`).
+
+If the approval setting is ever found disabled, treat every self-hosted runner
+as potentially compromised by fork-submitted code and rotate the credentials
+those runners can reach.
+
 ## Mobile Firebase configuration
 
 `mobile/android/app/google-services.json` is operator-supplied and must never
