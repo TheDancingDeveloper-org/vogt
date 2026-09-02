@@ -183,7 +183,11 @@ def _call(
         from uuid import uuid4
 
         ref = uuid4().hex[:12]
-        logger("mcp").exception("mcp tool %r failed (ref=%s)", name, ref)
+        # Log the registry-canonical name, not the caller's raw `name`: at this
+        # point `by_mcp_tool` has matched it to a known operation, so this is a
+        # constant from the registry, never user input in the log (avoids log
+        # injection — a newline in `name` could otherwise forge log lines).
+        logger("mcp").exception("mcp tool %r failed (ref=%s)", operation.name, ref)
         return _result(message_id, _tool_error("error", f"internal error (ref {ref})"))
 
     body: dict[str, Any] = payload.model_dump(mode="json")
