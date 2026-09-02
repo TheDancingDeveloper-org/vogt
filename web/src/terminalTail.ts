@@ -9,6 +9,11 @@
  *  it up, not so much that the answer scrolls off a phone. */
 const TAIL_LINES = 12;
 
+/** How many trailing scrollback bytes to fetch for a tail (#532). Far more
+ *  than TAIL_LINES needs even with escape sequences, but a tiny fraction of a
+ *  full ring — so the card no longer pulls and base64-decodes up to 4 MiB. */
+export const TAIL_FETCH_BYTES = 16 * 1024;
+
 /** The tail of a session's scrollback, decoded and stripped of the escape
  *  sequences a terminal would have consumed. */
 export function tailOf(scrollbackBase64: string): string {

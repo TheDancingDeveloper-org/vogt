@@ -722,8 +722,18 @@ export const api = {
     req<SessionSummary[]>("GET", "/api/sessions", undefined, signal),
   createSession: (s: CreateSessionRequest) =>
     req<SessionSummary>("POST", "/api/sessions", s),
-  getSession: (id: string, signal?: AbortSignal) =>
-    req<SessionDetail>("GET", `/api/sessions/${id}`, undefined, signal, "detail"),
+  getSession: (id: string, signal?: AbortSignal, tailBytes?: number) =>
+    req<SessionDetail>(
+      "GET",
+      // The waiting-session cards render a 12-line tail; asking for a bounded
+      // tail_bytes avoids fetching and base64-decoding up to 4 MiB (#532).
+      tailBytes
+        ? `/api/sessions/${id}?tail_bytes=${tailBytes}`
+        : `/api/sessions/${id}`,
+      undefined,
+      signal,
+      "detail",
+    ),
   renameSession: (id: string, name: string) =>
     req<OkResponse>("PATCH", `/api/sessions/${id}`, { name }),
   killSession: (id: string) =>

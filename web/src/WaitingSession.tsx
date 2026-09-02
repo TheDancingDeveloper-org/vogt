@@ -20,7 +20,7 @@ import {
   type Component,
 } from "solid-js";
 import { api, type SessionSummary } from "./api";
-import { tailOf } from "./terminalTail";
+import { tailOf, TAIL_FETCH_BYTES } from "./terminalTail";
 import { createNow } from "./viewAge";
 import { sessionActivityAge } from "./sessionRowModel";
 
@@ -51,7 +51,7 @@ export const WaitingSessionCard: Component<Props> = (props) => {
     () => (live() ? props.session.id : null),
     async (id) => {
       try {
-        const detail = await api.getSession(id);
+        const detail = await api.getSession(id, undefined, TAIL_FETCH_BYTES);
         return { ok: true as const, text: tailOf(detail.scrollback_base64) };
       } catch (error) {
         return {
