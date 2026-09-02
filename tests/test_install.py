@@ -92,9 +92,7 @@ def test_disabling_the_bootstrap_refuses_it_and_reports_closed(
 
     disabled = replace(
         instance,
-        config=instance.config.model_copy(
-            update={"install_bootstrap_enabled": False}
-        ),
+        config=instance.config.model_copy(update={"install_bootstrap_enabled": False}),
     )
     assert install_status(disabled).install_mode is False
     with pytest.raises(InstallClosed, match="disabled"):

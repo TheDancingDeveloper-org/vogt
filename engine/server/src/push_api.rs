@@ -53,8 +53,9 @@ pub async fn subscribe(
 /// *literal* in a private/loopback/link-local range is rejected here, which is
 /// the direct SSRF vector.
 fn validate_webpush_endpoint(endpoint: &str) -> Result<()> {
-    let url = reqwest::Url::parse(endpoint)
-        .map_err(|_| crate::error::ApiError::BadRequest("push endpoint is not a valid URL".into()))?;
+    let url = reqwest::Url::parse(endpoint).map_err(|_| {
+        crate::error::ApiError::BadRequest("push endpoint is not a valid URL".into())
+    })?;
     if url.scheme() != "https" {
         return Err(crate::error::ApiError::BadRequest(
             "push endpoint must be https".into(),
@@ -438,8 +439,7 @@ mod tests {
     fn webpush_endpoint_validation_blocks_ssrf_targets() {
         assert!(validate_webpush_endpoint("https://fcm.googleapis.com/fcm/x").is_ok());
         assert!(
-            validate_webpush_endpoint("https://updates.push.services.mozilla.com/wp/x")
-                .is_ok()
+            validate_webpush_endpoint("https://updates.push.services.mozilla.com/wp/x").is_ok()
         );
         // Non-https and non-routable IP literals are refused.
         assert!(validate_webpush_endpoint("http://fcm.googleapis.com/x").is_err());
