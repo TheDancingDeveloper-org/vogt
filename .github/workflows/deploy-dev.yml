@@ -85,7 +85,12 @@ jobs:
             printf '%s\n' "$digest"
           }
           core_digest="$(resolve ghcr.io/thedancingdeveloper-org/vogt)"
-          stack_digest="$(resolve ghcr.io/thedancingdeveloper-org/vogt-stack)"
+          # `-estate`: the dev stack publishes to the private estate package,
+          # not the public `vogt-stack`. The public one carries the generic AIO
+          # and has no `dev-<sha>` tags at all, so resolving it here would fail
+          # — or, worse, succeed against some unrelated tag and deploy the
+          # wrong image to vogt-dev.
+          stack_digest="$(resolve ghcr.io/thedancingdeveloper-org/vogt-stack-estate)"
           cosign verify \
             --certificate-identity-regexp "^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/build.yml@refs/heads/dev$" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
@@ -93,7 +98,7 @@ jobs:
           cosign verify \
             --certificate-identity-regexp "^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/build.yml@refs/heads/dev$" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "ghcr.io/thedancingdeveloper-org/vogt-stack@${stack_digest}"
+            "ghcr.io/thedancingdeveloper-org/vogt-stack-estate@${stack_digest}"
           {
             echo "core_digest=$core_digest"
             echo "stack_digest=$stack_digest"
@@ -255,7 +260,7 @@ jobs:
             echo
             echo "- source: `$SOURCE_SHA`"
             echo "- core image: `ghcr.io/thedancingdeveloper-org/vogt@$CORE_DIGEST`"
-            echo "- merged image: `ghcr.io/thedancingdeveloper-org/vogt-stack@$STACK_DIGEST`"
+            echo "- merged image: `ghcr.io/thedancingdeveloper-org/vogt-stack-estate@$STACK_DIGEST`"
             echo "- desired-state commit: `$DESIRED_STATE_COMMIT`"
             echo "- Komodo update: `$DEPLOYMENT_ID`"
             echo "- no release tag or GitHub Release was created"
