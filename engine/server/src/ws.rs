@@ -125,10 +125,15 @@ where
     sink.send(Message::Text(serde_json::to_string(&meta).unwrap().into()))
         .await
         .map_err(|_| ())?;
-    for chunk in payload.chunks(SNAPSHOT_CHUNK) {
-        sink.send(Message::Binary(chunk.to_vec().into()))
+    // Zero-copy frames: `payload` is `Bytes`, so `slice` shares the buffer
+    // rather than allocating and copying each 64 KiB frame (#533.3).
+    let mut offset = 0;
+    while offset < payload.len() {
+        let end = (offset + SNAPSHOT_CHUNK).min(payload.len());
+        sink.send(Message::Binary(payload.slice(offset..end)))
             .await
             .map_err(|_| ())?;
+        offset = end;
     }
     sink.send(Message::Text(
         serde_json::to_string(&ServerControl::SnapshotDone)
@@ -312,15 +317,19 @@ async fn handle_socket(
         return;
     }
 
-    // Stream the scrollback in chunks.
-    for chunk in snapshot.chunks(SNAPSHOT_CHUNK) {
+    // Stream the scrollback in zero-copy `Bytes` slices (#533.3): `snapshot`
+    // is `Bytes`, so each frame shares the buffer instead of copying 64 KiB.
+    let mut offset = 0;
+    while offset < snapshot.len() {
+        let end = (offset + SNAPSHOT_CHUNK).min(snapshot.len());
         if sink
-            .send(Message::Binary(chunk.to_vec().into()))
+            .send(Message::Binary(snapshot.slice(offset..end)))
             .await
             .is_err()
         {
             return;
         }
+        offset = end;
     }
     if sink
         .send(Message::Text(
