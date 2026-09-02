@@ -145,6 +145,14 @@ def _call(
     except Exception:
         return _error(message_id, METHOD_NOT_FOUND, f"unknown tool {name!r}")
 
+    # tools/call honors the transport exclusion just as tools/list does
+    # (FR-A5/FR-S4). LOCAL_ONLY operations (restore/backup/serve/import/init/
+    # migrate/mcp.stdio) are invisible to the remote MCP transport and must
+    # not be dispatchable through it — the same invisible-tool rule, applied
+    # to the call path rather than only the listing.
+    if "mcp" not in registry.transports_for(operation.name):
+        return _error(message_id, METHOD_NOT_FOUND, f"unknown tool {name!r}")
+
     try:
         # The second gate, and it is recorded either way (FR-S4, FR-S5).
         authorize(

@@ -45,6 +45,15 @@ def secrets(instance: AppContext) -> dict[str, str]:
             reason=WHY,
         ),
     )
+    create_actor(
+        instance,
+        CreateActorParams(
+            identity_ref="agent:admin",
+            kind="agent",
+            display_name="Admin",
+            reason=WHY,
+        ),
+    )
     return {
         "read": issue_token(
             instance,
@@ -57,6 +66,12 @@ def secrets(instance: AppContext) -> dict[str, str]:
                 name="w",
                 scopes="work.write,project.write",
                 reason=WHY,
+            ),
+        ).secret,
+        "admin": issue_token(
+            instance,
+            IssueTokenParams(
+                actor="agent:admin", name="a", scopes="admin", reason=WHY
             ),
         ).secret,
     }
@@ -256,6 +271,29 @@ def test_calling_an_ungranted_tool_is_refused_and_recorded(
     with instance.declared.read() as view:
         denials = view.list_auth_decisions(decision="deny", limit=10)
     assert any(d.transport == "mcp-http" for d in denials)
+
+
+def test_local_only_tools_are_not_callable_over_http(
+    instance: AppContext, authed: TestClient, secrets: dict[str, str]
+) -> None:
+    """LOCAL_ONLY operations are excluded from tools/list AND tools/call.
+
+    `restore`/`backup`/`serve`/… turn an admin API token into arbitrary-path
+    filesystem read/write on the host; the remote MCP transport must refuse
+    them the same way REST and tools/list already do — as unknown tools,
+    before authorization or dispatch.
+    """
+    for tool in ("restore", "backup", "serve", "import", "init", "migrate"):
+        response = _rpc(
+            authed,
+            "tools/call",
+            secrets["admin"],
+            name=tool,
+            arguments={},
+        )
+        assert "error" in response, f"{tool} must not dispatch over HTTP"
+        assert response["error"]["code"] == -32601, tool  # METHOD_NOT_FOUND
+        assert "result" not in response, tool
 
 
 def test_a_granted_tool_call_works_over_http(
