@@ -96,7 +96,23 @@ pub fn resolve_for_write(root: &Path, requested: &str) -> Result<PathBuf> {
             "path escapes workspace_root via symlink".into(),
         ));
     }
-    Ok(canon_parent.join(file_name))
+    let target = canon_parent.join(file_name);
+    // The final component is re-joined without canonicalisation so a
+    // not-yet-existing file still resolves — but if it already exists as a
+    // symlink, an O_CREAT|O_TRUNC write follows it and lands wherever it
+    // points, outside the workspace (#512). A hostile repo or an agent can
+    // plant `workspace_root/foo -> ~/.ssh/authorized_keys`. Refuse to write
+    // through it; the caller may remove the link explicitly if that is the
+    // real intent.
+    match std::fs::symlink_metadata(&target) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(ApiError::BadRequest(
+                "refusing to write through a symlink at the target path".into(),
+            ));
+        }
+        _ => {}
+    }
+    Ok(target)
 }
 
 /// Variant of [`resolve_existing`] that tolerates the path not yet existing.
@@ -170,6 +186,27 @@ mod tests {
         symlink(&outside_path, root.join("link")).unwrap();
 
         let res = resolve_for_write(&root, "link/new.txt");
+        assert!(
+            matches!(&res, Err(ApiError::BadRequest(msg)) if msg.contains("symlink")),
+            "expected symlink rejection, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn write_rejects_final_component_symlink_escape() {
+        // The parent is the workspace root (canonical, under root), but the
+        // final component is itself a symlink pointing outside. The old code
+        // canonicalised only the parent and returned parent.join(name), so a
+        // following O_CREAT|O_TRUNC write landed on the link's target (#512).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_path = outside.path().canonicalize().unwrap();
+        let victim = outside_path.join("victim.txt");
+        std::fs::write(&victim, b"original").unwrap();
+        symlink(&victim, root.join("foo")).unwrap();
+
+        let res = resolve_for_write(&root, "foo");
         assert!(
             matches!(&res, Err(ApiError::BadRequest(msg)) if msg.contains("symlink")),
             "expected symlink rejection, got {res:?}"
