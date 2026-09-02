@@ -135,6 +135,9 @@ const TerminalView: Component<Props> = (props) => {
   let cacheChunks: Uint8Array[] = [];
   let cacheBytes = 0;
   let cacheTimer: ReturnType<typeof setTimeout> | null = null;
+  // The outputPosition at the last successful persist, so an unchanged ring is
+  // not re-copied and re-written to IndexedDB (#537).
+  let lastPersistedPosition: number | undefined;
   let replay: ReplayHandle | null = null;
   const [readyToConnect, setReadyToConnect] = createSignal(false);
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -307,15 +310,22 @@ const TerminalView: Component<Props> = (props) => {
 
   const persistCache = () => {
     if (outputPosition === undefined) return;
+    // Skip the write when nothing new has arrived since the last persist
+    // (#537): outputPosition is the monotonic byte cursor, so an unchanged
+    // value means the ring is identical and copying+writing it is wasted work.
+    if (outputPosition === lastPersistedPosition) return;
+    lastPersistedPosition = outputPosition;
     void saveTerminalCache(props.sessionId, outputPosition, cachedBytes());
   };
 
   const scheduleCachePersist = () => {
     if (cacheTimer !== null) return;
+    // 5s, not 1s (#537): a reconnect cache does not need per-second freshness,
+    // and each persist copies up to 4 MiB and does a 4 MiB IndexedDB put.
     cacheTimer = setTimeout(() => {
       cacheTimer = null;
       persistCache();
-    }, 1_000);
+    }, 5_000);
   };
 
   const dispatchInput = (data: string | ArrayBuffer) => {
