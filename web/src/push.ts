@@ -324,12 +324,17 @@ export function isNativePlatform(): boolean {
 }
 
 function navigateFromPushUrl(url: string) {
+  // Only same-origin/relative navigation from a push payload (#522). The URL
+  // is server-supplied; feeding a scheme (`javascript:`, or an off-origin
+  // `http(s):`) or a protocol-relative `//host` into the raw `location.href`
+  // sink would be an open-redirect / script sink the moment any notification
+  // URL is derived from work-item content. Relative paths only.
   if (url.startsWith("/#")) {
     location.hash = url.slice(1);
-  } else if (url.startsWith("/")) {
+  } else if (url.startsWith("/") && !url.startsWith("//")) {
     location.hash = `#${url}`;
   } else {
-    location.href = url;
+    console.warn("ignoring push navigation to a non-relative URL");
   }
 }
 
