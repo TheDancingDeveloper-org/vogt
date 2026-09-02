@@ -14,6 +14,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_COMPOSE = REPO_ROOT / "deploy" / "vogt.compose.yml"
 BUILD_OVERLAY = REPO_ROOT / "deploy" / "vogt.build.yml"
 ENGINE_OVERLAY = REPO_ROOT / "deploy" / "engine.overlay.yml"
+STACK_COMPOSE = REPO_ROOT / "deploy" / "stack.compose.yml"
+# The two public files that stand a pod in front of a core. They differ in how
+# the engine arrives — the overlay builds one, the AIO pulls one that already
+# contains the core — and agree on everything a stranger is entitled to assume:
+# loopback by default, named volumes, and not one estate name between them.
+PUBLIC_DEPLOY_FILES = (ENGINE_OVERLAY, STACK_COMPOSE)
 PUBLIC_ENV = REPO_ROOT / "deploy" / ".env.example"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
 
@@ -243,25 +249,96 @@ def test_the_engine_overlay_builds_the_engine_and_fronts_the_core() -> None:
     assert re.search(r"ENGINE_TOKEN:\s*\"\$\{ENGINE_TOKEN:\?", overlay)
 
 
-def test_the_engine_overlay_publishes_to_loopback_unless_told_otherwise() -> None:
-    """The host interface is an exposure decision, so the overlay refuses one.
+@pytest.mark.parametrize("path", PUBLIC_DEPLOY_FILES, ids=lambda p: p.name)
+def test_the_public_deploy_files_publish_to_loopback_unless_told_otherwise(
+    path: Path,
+) -> None:
+    """The host interface is an exposure decision, so these files refuse one.
 
     Like the base, the engine's published port defaults to `127.0.0.1`; the
     engine's own in-container socket is 0.0.0.0 so the published port reaches
     it, which is the one place the two must differ.
+
+    It matters more for the AIO than for the overlay, not less: that image is a
+    development pod carrying `sudo`, `sshd` and the agent CLIs, so a default
+    that put it on a network interface would be handing out a shell.
     """
-    overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8"))
+    overlay = _without_comments(path.read_text(encoding="utf-8"))
     assert "${ENGINE_BIND:-127.0.0.1}:" in overlay
     assert 'ENGINE_BIND: "0.0.0.0:8910"' in overlay
 
 
-def test_the_engine_overlay_carries_no_estate_addresses_or_paths() -> None:
-    overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8")).lower()
+def test_the_stack_compose_runs_the_published_aio_and_its_own_core() -> None:
+    """The AIO is the other half of the parity model: one image, no build.
+
+    Where the overlay builds an engine and proxies to a *sibling* core, this
+    runs a published image that already contains both and points the engine at
+    its own loopback. That single `VOGT_CORE_URL` is what starts the core —
+    the entrypoint derives the core's listen address from the proxy target, so
+    the pair cannot drift into a front door aimed at a port nothing serves.
+
+    Loopback is also the containment: NFR-D11 says the engine is the only way
+    in, and a non-loopback value here would mean the core is somewhere else
+    entirely, not that it is exposed.
+    """
+    stack = _without_comments(STACK_COMPOSE.read_text(encoding="utf-8"))
+    assert "build:" not in stack, (
+        "the AIO is the published image; a build directive here would quietly "
+        "make it something other than the digest a consumer pinned"
+    )
+    assert "${VOGT_STACK_IMAGE:-" in stack
+    assert 'VOGT_CORE_URL: "http://127.0.0.1:8000"' in stack, (
+        "the AIO runs its own core on loopback; any other value stops the "
+        "entrypoint starting one (NFR-D11)"
+    )
+    assert 'VOGT_FRONTED: "true"' in stack
+    assert "VOGT_CORE_TOKEN_FILE:" in stack
+    assert "VOGT_BOOTSTRAP_CORE_TOKEN_FILE:" in stack
+    # The engine's own token is the one required operator value (>=16 chars).
+    assert re.search(r"ENGINE_TOKEN:\s*\"\$\{ENGINE_TOKEN:\?", stack)
+    # One published port, and it is the engine's. Publishing 8000 would put the
+    # core on the network beside the door that exists to be the only way in.
+    published = re.findall(r"^      - \"\$\{ENGINE_BIND.*$", stack, re.MULTILINE)
+    assert len(published) == 1, f"expected exactly one published port: {published}"
+    assert ":8000" not in "".join(published)
+
+
+def test_the_stack_compose_is_a_base_not_an_overlay() -> None:
+    """Layering it onto `vogt.compose.yml` would run two cores.
+
+    The AIO image contains a core and the base compose runs one, so the two
+    files are alternatives. This is worth asserting because every other
+    deployment file in `deploy/` *is* an overlay, which makes combining them
+    the natural guess and a wrong one.
+    """
+    stack = _without_comments(STACK_COMPOSE.read_text(encoding="utf-8"))
+    # A base declares what it runs: image, volumes and secrets of its own.
+    assert re.search(r"^volumes:\n", stack, re.MULTILINE)
+    assert re.search(r"^secrets:\n", stack, re.MULTILINE)
+    assert re.search(r"^services:\n", stack, re.MULTILINE)
+    # Scoped to the `services:` block: the top-level `volumes:` keys sit at the
+    # same indent, so an unscoped search finds the named volumes too.
+    block = re.search(r"^services:\n(.*?)(?=^\S)", stack, re.MULTILINE | re.DOTALL)
+    assert block, "no services block"
+    services = re.findall(r"^  ([a-z][a-z0-9-]*):$", block.group(1), re.MULTILINE)
+    assert services == ["vogt"], (
+        f"the AIO is one container by definition; found services {services}"
+    )
+
+
+@pytest.mark.parametrize("path", PUBLIC_DEPLOY_FILES, ids=lambda p: p.name)
+def test_the_public_deploy_files_carry_no_estate_addresses_or_paths(
+    path: Path,
+) -> None:
+    overlay = _without_comments(path.read_text(encoding="utf-8")).lower()
     for marker in ESTATE_MARKERS:
         assert marker.lower() not in overlay, f"estate marker leaked: {marker}"
 
 
-def test_the_engine_overlay_uses_named_volumes_not_host_binds() -> None:
+@pytest.mark.parametrize("path", PUBLIC_DEPLOY_FILES, ids=lambda p: p.name)
+def test_the_public_deploy_files_use_named_volumes_not_host_binds(
+    path: Path,
+) -> None:
     """A fresh named volume keeps the image's ownership; a host bind would
     arrive root-owned and break the pod, and would tie the file to one host.
 
@@ -269,7 +346,7 @@ def test_the_engine_overlay_uses_named_volumes_not_host_binds() -> None:
     never an absolute path, a relative path, a `~` home, or a `${VAR:-/path}`
     whose default is a path.
     """
-    overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8"))
+    overlay = _without_comments(path.read_text(encoding="utf-8"))
     # Isolate each service's `volumes:` list; ports and secrets live under
     # their own keys and are not volume mounts.
     volume_blocks = re.findall(

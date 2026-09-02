@@ -1,0 +1,168 @@
+# The all-in-one Vogt stack: core, engine and PWA in one container.
+#
+#   cp deploy/stack.env.example deploy/.env      # then fill in ENGINE_TOKEN
+#   openssl rand -hex 32 > deploy/vogt-core-token
+#   docker compose -f deploy/stack.compose.yml up -d --wait
+#
+# There is no `--build`: the published image already carries all three.
+#
+# This is a *base*, not an overlay. It stands alone and does not layer onto
+# `vogt.compose.yml` — that file runs a core, and so does this image, so
+# combining them would run two.
+#
+# ── Which shape is this, and do you want it? ────────────────────────────────
+#
+# Three supported shapes, and this is the least contained of them:
+#
+#   core only (`vogt.compose.yml`)          hardened; no UI, no sessions
+#   core + engine (`engine.overlay.yml`)    core stays hardened; engine builds
+#                                           from the checkout
+#   the AIO (this file)                     one container, no build, full pod
+#
+# The AIO is a **development pod**, and that is a deliberate posture rather
+# than an oversight. It carries a writable home, passwordless `sudo`, an SSH
+# server, a Docker CLI that talks to a socket you may mount, and the `claude`
+# and `codex` agent CLIs. It cannot run `read_only`, and it does not drop
+# capabilities. The core-only image is hardened by construction — slim base,
+# `nologin`, `read_only`, `cap_drop: [ALL]`, one writable volume — and none of
+# that survives being lifted into a pod that exists to run arbitrary agent
+# sessions. `engine/Dockerfile`'s header says why the two images are kept
+# separate: collapsing them would quietly delete Vogt's containment story
+# under an unchanged image name.
+#
+# So: run this where you would run a dev box, not where you would run a
+# hardened service. If you want the containment, run the core alone and put
+# the engine somewhere you trust it.
+#
+# Nothing here names a host, a path, or a tailnet. Every value an operator must
+# choose is a `${VAR}`; where one is genuinely required the reference fails the
+# deploy with a message rather than guessing.
+
+services:
+  vogt:
+    # Digest-pin this for a real deployment (NFR-D10) — a tag can move, and
+    # the whole point of a signed release is that the bytes cannot. The default
+    # is a tag so the file is runnable as-is.
+    #
+    # Pin the *release* family (`X.Y.Z`, `latest`). The `dev-<sha>` and
+    # `prod-<sha>` tags in the same repository are the maintainer's own pods:
+    # same CLIs, plus estate integrations that address one estate's
+    # infrastructure and mean nothing outside it. See DEPLOYMENT.md §7.
+    image: ${VOGT_STACK_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-stack:0.4.0}
+    restart: unless-stopped
+
+    # tini as PID 1 reaps the processes agent sessions leave behind. The
+    # entrypoint deliberately does *not* adopt a supervision framework, and
+    # this is the half of that decision the compose owns.
+    init: true
+
+    # The engine is the only way in (NFR-D11). The core listens on loopback
+    # *inside* the container and is never published — the entrypoint enforces
+    # that rather than trusting this comment, refusing to start if
+    # `VOGT_CORE_URL` names anything but a loopback address.
+    #
+    # Loopback on the host too, unless told otherwise: this file will not put a
+    # pod carrying sudo and agent CLIs on a network interface because nobody
+    # said to. Set `ENGINE_BIND` to a real address to expose it, and put
+    # something that terminates TLS in front.
+    ports:
+      - "${ENGINE_BIND:-127.0.0.1}:${ENGINE_PORT:-8910}:8910"
+
+    environment:
+      # The engine's own listen socket, inside the container's namespace — all
+      # interfaces so the published port above can reach it. Fixed, not an
+      # exposure decision: `ENGINE_BIND` in `.env` decides exposure, on the
+      # host side of the port mapping.
+      ENGINE_BIND: "0.0.0.0:8910"
+      # The engine's bearer token (at least 16 characters), required for every
+      # API and WebSocket call. Keep it in `deploy/.env` (git-ignored) rather
+      # than your shell.
+      ENGINE_TOKEN: "${ENGINE_TOKEN:?Set ENGINE_TOKEN in deploy/.env — the engine bearer token, at least 16 characters}"
+      # The address clients reach the front door at. The engine cannot
+      # advertise an address it is not told, so set it once the stack is
+      # reachable at a stable URL.
+      ENGINE_PUBLIC_URL: "${ENGINE_PUBLIC_URL:-}"
+
+      # One value both starts the core and tells the engine where to proxy.
+      # Loopback means "the core is ours to run", so the entrypoint supervises
+      # `vogt init && vogt serve` here; the engine proxies `/api/vogt`, `/mcp`
+      # and `/ui-legacy` to the same address. Deriving one from the other is
+      # what stops a front door confidently pointed at a port nothing serves.
+      VOGT_CORE_URL: "http://127.0.0.1:8000"
+      # The token the engine presents on `/api/vogt`; the core adopts the same
+      # file at `init` if it does not already hold one. Both halves reading one
+      # file is the whole bootstrap mechanism — no second deploy. Brokered as a
+      # file, never a bare value, so it stays out of every `docker inspect`.
+      VOGT_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+      VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+      # Who that adopted token acts as, and how much it may do. Everything that
+      # can read the file runs as this identity, so this scope is the blast
+      # radius; narrow it if you do not need project writes.
+      VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR: "${VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR:-agent:engine}"
+      VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES: "${VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES:-read,work.write,project.write}"
+      # The engine is the front door, so `connect` and `/connection-info`
+      # render against the identity the engine states per request (its
+      # `X-Vogt-*` headers) rather than the core's own loopback address.
+      # `VOGT_PUBLIC_URL` is deliberately absent: when fronted, the door is the
+      # only thing that knows where clients arrive, and it says so per request.
+      VOGT_FRONTED: "true"
+
+      # Both halves must agree about where the estate is: the core's import
+      # root and the engine's workspace root are the same tree, or a session
+      # opened "for" a project opens somewhere the registry never recorded.
+      # The entrypoint warns at boot if these drift apart.
+      VOGT_DATA_DIR: /var/lib/vogt
+      VOGT_IMPORT_ROOT: /home/sprooty/Working
+
+      VOGT_LIFECYCLE_STATE_DIR: /home/sprooty/.vogt-lifecycle
+      VOGT_LIFECYCLE_WORKDIR: /home/sprooty/Working
+      VOGT_LIFECYCLE_HEALTHCHECK_URL: http://127.0.0.1:8910/readyz
+      VOGT_HOOK_DIR: /run/vogt/hooks
+      VOGT_HOOKS_REQUIRED: "${VOGT_HOOKS_REQUIRED:-false}"
+
+    # Named volumes, not host binds. Docker seeds a fresh named volume from the
+    # image, so the `sprooty` ownership the image built is preserved — a host
+    # directory would arrive root-owned and break the pod. No host paths appear
+    # in this file by design.
+    volumes:
+      # The pod's writable home: agent state, caches, session scratch, and the
+      # `Working` tree sessions run in.
+      - engine-home:/home/sprooty
+      # The core's SQLite databases and backups. Separate from the home volume
+      # so the data outlives a pod you decide to reset.
+      - vogt-data:/var/lib/vogt
+
+    # `/readyz` is the aggregate. It reports the core's state but deliberately
+    # stays ready when the core is absent — restarting the container would not
+    # revive a core and would kill every live terminal (FR-E9).
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/vogt-lifecycle", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    secrets:
+      - vogt_core_token
+
+volumes:
+  engine-home:
+  vogt-data:
+
+secrets:
+  # The core token, shared by both halves inside the container. Create it
+  # beside this file before the first deploy:
+  #
+  #   openssl rand -hex 32 > deploy/vogt-core-token
+  #
+  # A relative path, so nothing here is tied to one host. Legitimately empty
+  # until you mint one — an empty file just leaves `/api/vogt` answering 401,
+  # which is the pre-bootstrap behaviour rather than a broken one.
+  vogt_core_token:
+    file: ./vogt-core-token

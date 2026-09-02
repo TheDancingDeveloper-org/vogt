@@ -378,13 +378,26 @@ jobs:
           load: true
           tags: ${{ env.STACK_IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
+          # `#` inside a `|` block scalar is literal content, not a YAML
+          # comment, and build-push-action parses the input without a comment
+          # option — so a note in there reaches buildx as a build arg. It goes
+          # here instead, as it does in `build.yml`.
+          #
+          # The generic shape: the agent CLIs the product exists to run, and
+          # none of the maintainer's estate integrations. A release is the
+          # public artifact, so it carries what a consumer needs to run a
+          # session and nothing that only means something inside one estate.
+          # This is a third shape deliberately chosen, not a drift toward
+          # `build.yml`'s: those dev/prod branch builds keep the estate rule
+          # and add cadastre + theclawbay on top of this same base.
           build-args: |
             POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
             VOGT_PRODUCT_VERSION=${{ github.ref_name }}
-            INSTALL_CADASTRE_MCP=true
+            INSTALL_AI_CLIENTS=true
+            INSTALL_CADASTRE_MCP=false
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
 
@@ -398,6 +411,30 @@ jobs:
           docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
           echo "both halves are present and start"
 
+          # `vogt-verify-agent-clis` above does NOT prove the CLIs are here. It
+          # is a *shadow* detector: `check_tool` returns 0 when the system path
+          # does not exist, `check_package` returns 0 unless the binary is
+          # executable, and `agent-versions.resolved` is written unconditionally
+          # — so it is green on a CLI-free image. It answers "is a persisted
+          # $HOME copy shadowing the image's?", not "is there an image copy?".
+          #
+          # The release now carries the clients by decision, and a build arg
+          # that nothing executes is a default waiting to be forgotten — which
+          # is #23 exactly: INSTALL_AI_CLIENTS defaulted to false, no build
+          # turned it on, `vogt-dev` ran without claude or codex and nothing was
+          # red. Running them is the only thing that distinguishes a generic
+          # release from a silent reversion to the CLI-free one.
+          #
+          # Ungated, unlike `build.yml`'s equivalent: every release is the
+          # generic shape, so there is no ref to condition on. `flutter` and
+          # `theclawbay` are absent from the list on purpose — a release is the
+          # `lean` pod base and carries no estate integrations.
+          for tool in claude codex; do
+            docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
+              || { echo "the release image is missing $tool" >&2; exit 1; }
+          done
+          echo "the release image carries the agent CLIs"
+
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
         id: push
         with:
@@ -406,13 +443,18 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Identical to the candidate's, so the pushed image is the layers the
+          # smoke test just ran rather than a rebuild that resembles them. The
+          # two lists drifting apart is how an image gets smoke-tested in one
+          # shape and published in another.
           build-args: |
             POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
             VOGT_PRODUCT_VERSION=${{ github.ref_name }}
-            INSTALL_CADASTRE_MCP=true
+            INSTALL_AI_CLIENTS=true
+            INSTALL_CADASTRE_MCP=false
           provenance: true
           sbom: true
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
