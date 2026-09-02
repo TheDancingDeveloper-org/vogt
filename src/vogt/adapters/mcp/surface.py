@@ -18,6 +18,7 @@ Two rules are already visible in the shape here:
 
 from __future__ import annotations
 
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -27,6 +28,15 @@ from vogt.registry import OperationRegistry, default_registry
 from vogt.registry.operation import Scope
 
 ContextFactory = Callable[[], AppContext]
+
+#: The wire tool list is a pure function of the registry, which is static per
+#: process — but `tools/list` regenerated ~60 pydantic JSON schemas on every
+#: call, and MCP clients send it on connect and sometimes repeatedly (#529.5).
+#: Memoize it per registry object; a WeakKeyDictionary so a test's throwaway
+#: registry is not pinned for the life of the process.
+_TOOL_CACHE: "weakref.WeakKeyDictionary[OperationRegistry, list[McpTool]]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 @dataclass(frozen=True)
@@ -69,8 +79,14 @@ class McpSurface:
         (FR-S4) — arrives with tokens at M4. Until then there is no
         authentication to filter by, and pretending otherwise would be a gate
         that gates nothing.
+
+        Memoized per registry (#529.5): the registry is static per process, so
+        the ~60 JSON schemas are generated once, not per `tools/list`.
         """
-        return [
+        cached = _TOOL_CACHE.get(self._registry)
+        if cached is not None:
+            return cached
+        tools = [
             McpTool(
                 name=operation.mcp_tool_name,
                 description=operation.summary,
@@ -80,6 +96,8 @@ class McpSurface:
             )
             for operation in self._registry.for_transport("mcp")
         ]
+        _TOOL_CACHE[self._registry] = tools
+        return tools
 
     def call_tool(
         self, name: str, arguments: dict[str, Any] | None = None

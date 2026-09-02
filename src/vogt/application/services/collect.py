@@ -204,10 +204,22 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
     )
     reports = sweeper.run(collectors, projects)
 
+    total_new = sum(report.new for report in reports)
     try:
-        subjects = ctx.observed.rebuild_latest()
-        dep_rows = _resolve_dep_refs(ctx)
-        ctx.observed.replace_dep_refs(dep_rows)
+        if total_new == 0:
+            # Every collector appended nothing (digest dedup), so both
+            # projections are already correct — skip the DELETE + correlated-
+            # subquery reinsert of every subject and dep ref, which was run
+            # unconditionally on every sweep and, on a quiet 15-minute
+            # schedule, was ~2M redundant row writes/day at scale (#529.3).
+            current = ctx.observed.counts()
+            subjects = current["subjects"]
+            dep_ref_count = current["dep_refs"]
+        else:
+            subjects = ctx.observed.rebuild_latest()
+            dep_rows = _resolve_dep_refs(ctx)
+            ctx.observed.replace_dep_refs(dep_rows)
+            dep_ref_count = len(dep_rows)
     except Exception as exc:
         # Every collector above already committed its own sweep row — each
         # one genuinely ran and is, in isolation, `ok`. But nothing after
@@ -240,7 +252,7 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
         scope=params.project or "all registered projects",
         projects=len(projects),
         subjects=subjects,
-        dep_refs=len(dep_rows),
+        dep_refs=dep_ref_count,
         reports=[
             SweepReportView(
                 collector=report.collector,
