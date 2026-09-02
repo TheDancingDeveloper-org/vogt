@@ -34,7 +34,7 @@ ContextFactory = Callable[[], AppContext]
 #: call, and MCP clients send it on connect and sometimes repeatedly (#529.5).
 #: Memoize it per registry object; a WeakKeyDictionary so a test's throwaway
 #: registry is not pinned for the life of the process.
-_TOOL_CACHE: "weakref.WeakKeyDictionary[OperationRegistry, list[McpTool]]" = (
+_TOOL_CACHE: weakref.WeakKeyDictionary[OperationRegistry, list[McpTool]] = (
     weakref.WeakKeyDictionary()
 )
 

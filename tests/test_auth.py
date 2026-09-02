@@ -266,9 +266,9 @@ def test_prune_auth_decisions_caps_allows_and_keeps_denies_longer(
     assert removed == 1  # only the old allow
     after = list_auth_decisions(agent, AuthDecisionListParams()).decisions
     assert len(after) == before - 1
-    assert all(
-        not (d.decision == "allow" and d.at == old) for d in after
-    ), "the old allow is gone"
+    assert all(not (d.decision == "allow" and d.at == old) for d in after), (
+        "the old allow is gone"
+    )
     assert any(d.decision == "deny" for d in after), "denies are kept longer"
 
 
