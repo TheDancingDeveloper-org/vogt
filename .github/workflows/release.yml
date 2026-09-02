@@ -27,14 +27,10 @@ env:
   # Published, versioned and signed; not recommended to anybody who wants
   # Vogt rather than this estate's pod.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
-  # The BuildKit layer cache, on the estate's own local-registry on Node B
-  # (#184) — the same backend and repository `build.yml` uses, and the one #129
-  # established on `main`. Not GHCR: the runners are on Node B, so this cache
-  # never leaves the host while GHCR is a WAN round-trip. `dind-daemon.json` on
-  # the workers trusts it over HTTP. Releases share a `release` cache stream
-  # (rather than a per-tag key that would be cold every time) so one release
-  # warms the next; it cannot evict main's or dev's streams.
-  CACHE_IMAGE: ${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}/vogt-buildcache
+  # NOTE: signed releases build cold and no longer import the plaintext LAN
+  # BuildKit layer cache (#514) — an unauthenticated LAN write to that cache
+  # must not become a signed, verified artifact. The ordinary per-commit cache
+  # stays in build.yml; releases are rare enough to pay the cold build.
 
 jobs:
   validate-release:
@@ -127,18 +123,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-        with:
-          # The layer cache lives on the operator's configured plaintext LAN
-          # registry. The default
-          # docker-container builder speaks HTTPS to every registry and sits
-          # on a bridge network, so the first #184 landing failed its cache
-          # import with `http: server gave HTTP response to HTTPS client`
-          # before any layer was reused. Host networking reaches the LAN
-          # address; the inline buildkitd entry says HTTP is intentional.
-          driver-opts: network=host
-          buildkitd-config-inline: |
-            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
-              http = true
+        # A signed release no longer imports the plaintext LAN layer cache
+        # (#514), so the release builder needs neither host networking nor a
+        # trust-HTTP buildkitd entry for that registry: the default
+        # docker-container builder (HTTPS, bridge network) pulls the
+        # digest-pinned base from GHCR and pushes the signed image over HTTPS,
+        # and never reaches the LAN registry at all.
 
       # No Docker Hub login, deliberately — and this is a trap worth naming,
       # because the obvious "improvement" is to add one back.
@@ -202,16 +192,14 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}:smoke-test
           labels: ${{ steps.meta.outputs.labels }}
-          # Layer cache on the estate's local-registry (#184); the push below
-          # shares the ref so it re-tags rather than recompiles.
-          #
-          # `-release` is its own cache ref, not the `core-<ref>` one
-          # `build.yml` writes. A release may reuse work a commit build did,
-          # but it must not change what later commit builds start from: the
-          # ordinary path stays the only writer of the ordinary cache, and a
-          # release stays reproducible from its own inputs alone.
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release,mode=max
+          # No shared build cache for a release (#514). Every published image
+          # here is cosign-signed and verified downstream, but the LAN cache
+          # registry is plaintext HTTP with no auth: anyone on the LAN — fork
+          # PR code on the same runner fleet included — can push poisoned cache
+          # manifests that BuildKit would import verbatim into a signed
+          # artifact, laundering an unauthenticated LAN write into signed
+          # provenance. Releases are rare enough to build cold from the
+          # digest-pinned base; the ordinary commit cache stays in build.yml.
           build-args: |
             PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 
@@ -241,8 +229,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: true
           sbom: true
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:core-release,mode=max
+          # No shared build cache for a signed release (#514).
           build-args: |
             PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 
@@ -301,18 +288,12 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
-        with:
-          # The layer cache lives on the operator's configured plaintext LAN
-          # registry. The default
-          # docker-container builder speaks HTTPS to every registry and sits
-          # on a bridge network, so the first #184 landing failed its cache
-          # import with `http: server gave HTTP response to HTTPS client`
-          # before any layer was reused. Host networking reaches the LAN
-          # address; the inline buildkitd entry says HTTP is intentional.
-          driver-opts: network=host
-          buildkitd-config-inline: |
-            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
-              http = true
+        # A signed release no longer imports the plaintext LAN layer cache
+        # (#514), so the release builder needs neither host networking nor a
+        # trust-HTTP buildkitd entry for that registry: the default
+        # docker-container builder (HTTPS, bridge network) pulls the
+        # digest-pinned base from GHCR and pushes the signed image over HTTPS,
+        # and never reaches the LAN registry at all.
 
       # No runner-side `pnpm build` (#184): it never reached the image
       # (`engine/Dockerfile.dockerignore` excludes `web/dist`, and stage 1 of
@@ -398,8 +379,7 @@ jobs:
             VOGT_PRODUCT_VERSION=${{ github.ref_name }}
             INSTALL_AI_CLIENTS=true
             INSTALL_CADASTRE_MCP=false
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
+          # No shared build cache for a signed release (#514).
 
       - name: both halves run
         env:
@@ -457,8 +437,7 @@ jobs:
             INSTALL_CADASTRE_MCP=false
           provenance: true
           sbom: true
-          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release
-          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-release,mode=max
+          # No shared build cache for a signed release (#514).
 
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
