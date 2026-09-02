@@ -61,6 +61,7 @@ import {
 } from "./vogtApi";
 import { openWorkItemTab } from "./tabs";
 import SurfaceHeader from "./SurfaceHeader";
+import { safeHref } from "./markdown";
 import {
   ViewAgeBadge,
   createLoadStamp,
@@ -1602,7 +1603,7 @@ const Projects: Component<Props> = (props) => {
                     <span class="vogt-projects-mono vogt-projects-muted">
                       {readString(project(), "root_path") ?? "no path recorded"}
                     </span>
-                    <Show when={readString(project(), "repo_url")}>
+                    <Show when={safeHref(readString(project(), "repo_url"))}>
                       {(url) => (
                         <a href={url()} target="_blank" rel="noreferrer">
                           {url()}

@@ -69,7 +69,7 @@ import {
   honestyToneClass,
   onVogtLive,
 } from "./viewAge";
-import { renderMarkdown } from "./markdown";
+import { renderMarkdown, safeHref } from "./markdown";
 import { actorName as resolveActorName, projectName as resolveProjectName } from "./refNames";
 import { looksLikeYesNo, tailOf, TAIL_FETCH_BYTES } from "./terminalTail";
 
@@ -2156,7 +2156,7 @@ const WorkItemDetail: Component<Props> = (props) => {
                           >
                             <div class="wid-pr-head">
                               <Show
-                                when={pr().url}
+                                when={safeHref(pr().url)}
                                 fallback={
                                   <span class="wid-pr-number">
                                     #{pr().number}

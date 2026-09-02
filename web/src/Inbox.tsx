@@ -22,6 +22,7 @@ import {
 } from "./viewAge";
 import Dialog from "./Dialog";
 import SurfaceHeader from "./SurfaceHeader";
+import { safeHref } from "./markdown";
 
 /** A datetime-local value (no timezone) for `now + days`. */
 function localDatetimeIn(days: number): string {
@@ -250,7 +251,7 @@ const Entry: Component<EntryProps> = (props) => {
           >
             Open entry
           </button>
-          <Show when={props.entry.source_url}>
+          <Show when={safeHref(props.entry.source_url)}>
             {(href) => (
               <a
                 class="inbox-open-source"
