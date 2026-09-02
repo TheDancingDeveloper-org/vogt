@@ -520,7 +520,11 @@ fn try_spawn_archive(
     let session = Arc::clone(session);
     runtime.spawn(async move {
         let output_bytes = read_history_output(&session).await;
-        let visible_output = strip_ansi(&output_bytes);
+        // strip_ansi is CPU-bound over up to 16 MiB; run it off the async
+        // worker so it cannot stall other sessions' tasks (#531.1).
+        let visible_output = tokio::task::spawn_blocking(move || strip_ansi(&output_bytes))
+            .await
+            .unwrap_or_default();
         let output_text = String::from_utf8_lossy(&visible_output);
         let scrollback_bytes = session.scrollback.lock().total_written();
         let record = ArchiveRecord {
@@ -575,9 +579,16 @@ pub async fn archive_live_session(session: &Arc<Session>, history: &SessionHisto
     }
 }
 
+/// Cap on how much of a session's raw log is read into memory to build its
+/// searchable archive (#531.1). A long-running agent session can write
+/// gigabytes; reading the whole file (then stripping it, a second copy) risked
+/// multi-GB transient RAM and a single gigabyte-scale FTS INSERT. The last
+/// 16 MiB of stripped output is what search snippets realistically need.
+const HISTORY_INDEX_MAX_BYTES: u64 = 16 * 1024 * 1024;
+
 async fn read_history_output(session: &Arc<Session>) -> Vec<u8> {
     if let Some(path) = session.history_log_path.as_ref() {
-        match tokio::fs::read(path).await {
+        match read_tail(path, HISTORY_INDEX_MAX_BYTES).await {
             Ok(bytes) => return bytes,
             Err(e) => {
                 tracing::warn!(
@@ -590,6 +601,20 @@ async fn read_history_output(session: &Arc<Session>) -> Vec<u8> {
         }
     }
     session.snapshot().0.to_vec()
+}
+
+/// Read at most the last `max` bytes of a file, without pulling the whole thing
+/// into memory when it is larger.
+async fn read_tail(path: &Path, max: u64) -> std::io::Result<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut file = tokio::fs::File::open(path).await?;
+    let len = file.metadata().await?.len();
+    if len > max {
+        file.seek(std::io::SeekFrom::Start(len - max)).await?;
+    }
+    let mut buf = Vec::with_capacity(len.min(max) as usize);
+    file.read_to_end(&mut buf).await?;
+    Ok(buf)
 }
 
 fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
