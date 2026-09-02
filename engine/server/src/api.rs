@@ -1,7 +1,7 @@
 use std::{convert::Infallible, path::Path as FsPath, sync::Arc, time::Duration};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{sse::Event, Sse},
     Json,
@@ -27,12 +27,25 @@ pub async fn create_session(
     Ok(Json(s.summary()))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SessionDetailQuery {
+    /// Return only the last N bytes of scrollback instead of the whole ring
+    /// (#532). The PWA's waiting-session cards render a 12-line tail, so they
+    /// ask for ~16 KB rather than fetching and base64-decoding up to 4 MiB.
+    /// Aligned forward to a ground-state boundary, so replay is still safe.
+    pub tail_bytes: Option<usize>,
+}
+
 pub async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    Query(q): Query<SessionDetailQuery>,
 ) -> Result<Json<SessionDetail>> {
     let s = state.sessions.get(id)?;
-    let (snap, pos) = s.snapshot();
+    let (snap, pos) = match q.tail_bytes {
+        Some(limit) => s.snapshot_tail(limit),
+        None => s.snapshot(),
+    };
     Ok(Json(SessionDetail {
         summary: s.summary(),
         scrollback_pos: pos,

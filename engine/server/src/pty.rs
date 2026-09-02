@@ -117,6 +117,16 @@ impl Session {
         (sb.snapshot(), sb.total_written())
     }
 
+    /// Snapshot at most the last `limit` bytes of scrollback, aligned forward
+    /// to a ground-state boundary (#532). The position returned is still the
+    /// absolute `total_written`, so a client that later attaches by cursor
+    /// resumes without a gap. Copies only the tail while holding the lock,
+    /// rather than up to the full ring.
+    pub fn snapshot_tail(&self, limit: usize) -> (Bytes, u64) {
+        let sb = self.scrollback.lock();
+        (sb.snapshot_tail(limit), sb.total_written())
+    }
+
     /// Snapshot only output newer than a client cursor. The boolean tells the
     /// client whether its existing terminal state must be reset.
     ///

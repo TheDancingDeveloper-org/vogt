@@ -71,7 +71,7 @@ import {
 } from "./viewAge";
 import { renderMarkdown } from "./markdown";
 import { actorName as resolveActorName, projectName as resolveProjectName } from "./refNames";
-import { looksLikeYesNo, tailOf } from "./terminalTail";
+import { looksLikeYesNo, tailOf, TAIL_FETCH_BYTES } from "./terminalTail";
 
 interface Props {
   itemRef: string;
@@ -657,7 +657,11 @@ const AnswerWaitingSession: Component<{
   const [tail, { refetch }] = createResource(open, async (isOpen) => {
     if (!isOpen) return null;
     return attempt(async () => {
-      const detail = await api.getSession(props.engineSessionId);
+      const detail = await api.getSession(
+        props.engineSessionId,
+        undefined,
+        TAIL_FETCH_BYTES,
+      );
       return tailOf(detail.scrollback_base64);
     });
   });
