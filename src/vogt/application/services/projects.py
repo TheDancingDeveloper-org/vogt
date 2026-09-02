@@ -36,9 +36,44 @@ from vogt.core.contract import (
 )
 from vogt.core.entities import Actor, Project
 from vogt.core.ids import slugify
+from vogt.core.principal import LOCAL_SCHEME
 from vogt.core.workflow import check_lifecycle_transition
 from vogt.errors import Conflict, InvalidRequest, NotFound
 from vogt.storage.interface import ProjectUpdate, WorkFilter, WriteTxn
+
+
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.expanduser().resolve().relative_to(root.expanduser().resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def guard_remote_root_path(ctx: AppContext, root_path: str) -> None:
+    """Constrain a caller-supplied `root_path` on the remote transports (#516).
+
+    On the loopback/CLI surface the caller already owns the filesystem, so a
+    path is theirs to name. A token-authenticated remote caller does not own
+    it: `project.register`/`create`/`import` would otherwise give a
+    `project.write` token read/write reach anywhere the server process can —
+    `/etc`, another user's checkout, the data directory itself. Remote roots
+    must stay within the configured import root (`<data_dir>/repos` by default;
+    an operator observing an estate points `import_root` at that estate —
+    FR-W11), which is the operator-owned allowlist.
+
+    The principal is authentication-derived and never caller-suppliable
+    (FR-S2), so the `local:` scheme reliably marks the loopback/CLI surface.
+    """
+    if ctx.principal.identity_ref.startswith(f"{LOCAL_SCHEME}:"):
+        return
+    root = ctx.config.resolved_import_root
+    if not _within(Path(root_path), root):
+        msg = (
+            f"root_path must be within the configured import root ({root}); "
+            "a remote caller may not name an arbitrary server filesystem path"
+        )
+        raise InvalidRequest(msg)
 
 PROJECT_REGISTER = "project.register"
 PROJECT_CREATE = "project.create"
@@ -108,6 +143,7 @@ def register_project(ctx: AppContext, params: RegisterProjectParams) -> ProjectR
     duplicate slug, which is a naming collision rather than a judgement about
     the project.
     """
+    guard_remote_root_path(ctx, params.root_path)
     return record_registration(ctx, params)
 
 
@@ -255,6 +291,7 @@ def create_project(ctx: AppContext, params: CreateProjectParams) -> CreateProjec
     means a failed registration leaves a harmless skeleton on disk rather
     than a registered project pointing at a half-written directory.
     """
+    guard_remote_root_path(ctx, params.root_path)
     slug = _slug_for(params.name)
     owner = params.owner or ctx.principal.display_name
     root = Path(params.root_path).expanduser()

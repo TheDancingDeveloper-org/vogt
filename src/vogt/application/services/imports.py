@@ -31,7 +31,10 @@ from vogt.application.models import (
     OnboardParams,
     RegisterProjectParams,
 )
-from vogt.application.services.projects import record_registration
+from vogt.application.services.projects import (
+    guard_remote_root_path,
+    record_registration,
+)
 from vogt.application.services.writeback import onboard
 from vogt.core.entities import LifecycleState
 from vogt.core.ids import slugify
@@ -116,6 +119,11 @@ def import_from_ref(
     registered rather than a project pointing at nothing. `project create`
     scaffolds in the same order, for the same reason.
     """
+    # A remote caller may not clone into an arbitrary server path (#516);
+    # the default (import_root/slug) is always allowed because it is derived,
+    # not caller-named.
+    if root_path is not None:
+        guard_remote_root_path(ctx, root_path)
     # The identity provider owns canonical URLs. A configured credential is
     # optional for public cloning, but required for consolidation; this keeps
     # the core usable without an upstream token while never claiming that a
