@@ -1175,19 +1175,25 @@ const Board: Component<Props> = (props) => {
 
   /** Both sides are the server's; the later `updated_at` wins, so a poll that
    *  started before a transition landed cannot undo it on screen. */
+  // Value equality for a work item, used to preserve object identity for
+  // unchanged items across a refetch (#534). JSON is adequate here: both sides
+  // are same-shape server objects, so key order matches; a false negative only
+  // costs one avoidable re-key, never a masked change.
+  const itemsEqual = (a: WorkItem, b: WorkItem): boolean =>
+    JSON.stringify(a) === JSON.stringify(b);
+
   const mergeItems = (fresh: WorkItem[]): WorkItem[] => {
     const previous = new Map(items().map((item) => [item.ref, item]));
     return fresh.map((item) => {
       const old = previous.get(item.ref);
       if (!old) return item;
-      // `>=` on purpose (#534): an unchanged item has an *equal* updated_at,
-      // and returning the fresh server object there churns object identity —
-      // defeating `<For>` keying so every card DOM subtree is disposed and
-      // re-created on every poll/SSE/keystroke. Keep `old`'s identity unless
-      // the server's copy is strictly newer.
-      return Date.parse(old.updated_at) >= Date.parse(item.updated_at)
-        ? old
-        : item;
+      // Keep the previous object's identity when the item is unchanged, so
+      // <For> keying is preserved and the card DOM is not disposed and rebuilt
+      // (#534). Compared by value, not by updated_at: two writes in the same
+      // timestamp-resolution window would otherwise be masked. mergeItems runs
+      // per refetch (not per keystroke), so the compare is off the hot path.
+      if (Date.parse(old.updated_at) > Date.parse(item.updated_at)) return old;
+      return itemsEqual(old, item) ? old : item;
     });
   };
 
