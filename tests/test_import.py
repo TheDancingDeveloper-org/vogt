@@ -100,6 +100,78 @@ def importing(
 # -- the operation ---------------------------------------------------------
 
 
+def test_remote_callers_cannot_name_paths_outside_the_import_root(
+    data_dir: Path, tmp_path: Path, cloner: FakeCloner
+) -> None:
+    """#516: project register/create/import contain remote root_path.
+
+    A token-authenticated caller (any non-`local:` principal) may only name
+    paths within the configured import root; a loopback/CLI caller keeps the
+    unrestricted form, because it already owns the filesystem.
+    """
+    from vogt.application.models import (
+        CreateProjectParams,
+        RegisterProjectParams,
+    )
+    from vogt.application.services import create_project, register_project
+    from vogt.core.principal import Principal
+
+    del data_dir
+    root = tmp_path / "estate"
+    outside = str(tmp_path / "etc" / "loot")
+
+    def ctx_for(principal: Principal, ddir: str) -> AppContext:
+        context = build_context(
+            config=VogtConfig(
+                data_dir=tmp_path / ddir, import_root=root, sqlite_synchronous="off"
+            ),
+            principal=principal,
+            clock=StepClock(),
+            id_factory=SequentialIds(),
+            cloner=cloner,
+        )
+        init_instance(context, InitParams())
+        return context
+
+    remote = Principal(
+        identity_ref="agent:remote", kind="agent", display_name="remote"
+    )
+    remote_ctx = ctx_for(remote, "d-remote")
+    with pytest.raises(InvalidRequest, match="import root"):
+        register_project(
+            remote_ctx,
+            RegisterProjectParams(name="loot", root_path=outside, reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="import root"):
+        create_project(
+            remote_ctx,
+            CreateProjectParams(name="loot", root_path=outside, reason=WHY),
+        )
+    with pytest.raises(InvalidRequest, match="import root"):
+        import_project(
+            remote_ctx,
+            ImportProjectParams(
+                repo=REPO, root_path=outside, consolidate=False, reason=WHY
+            ),
+        )
+
+    # A remote caller may still name a path within the import root.
+    within = str(root / "sub" / "here")
+    contained = register_project(
+        remote_ctx,
+        RegisterProjectParams(name="contained", root_path=within, reason=WHY),
+    )
+    assert contained.project.root_path == within
+
+    # The loopback/CLI surface is unrestricted.
+    local_ctx = ctx_for(TEST_PRINCIPAL, "d-local")
+    registered = register_project(
+        local_ctx,
+        RegisterProjectParams(name="anywhere", root_path=outside, reason=WHY),
+    )
+    assert registered.project.root_path == outside
+
+
 def test_import_clones_registers_and_lands_at_the_default_root(
     importing: tuple[AppContext, Path], cloner: FakeCloner
 ) -> None:
