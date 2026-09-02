@@ -197,6 +197,53 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
     )
 
 
+def test_the_estate_stack_publishes_to_its_own_package() -> None:
+    """`vogt-stack` is public, and GHCR visibility is per package, not version.
+
+    Making the generic AIO public published *every* version in the repository,
+    including 173 `dev-`/`prod-` images that are the maintainer's own pods —
+    tailscale, infisical, the step CLI, the Cadastre MCP bridge, theclawbay.
+    No credential was exposed (the build passes none as a build arg and mounts
+    none), but a stranger being able to pull and run the estate's pod image is
+    not a property anybody chose.
+
+    `build.yml`'s own comment had already named the failure mode for a related
+    reason — "one repository with two kinds of tag in it is how somebody
+    eventually pins the wrong one" — and visibility turned that from a pinning
+    hazard into a disclosure one. So the estate stream publishes to
+    `vogt-stack-estate` and the public stream to `vogt-stack`, which makes the
+    boundary a package rather than a convention.
+
+    `release.yml` is deliberately not parametrised: a release is always the
+    public generic artefact, so its `STACK_IMAGE` must stay unconditional.
+    """
+    build = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
+    assert "vogt-stack${{" in build, (
+        "build.yml's STACK_IMAGE must select the estate package for dev/prod; a "
+        "literal `vogt-stack` there publishes estate pods to the public package"
+    )
+    assert "'-estate' || ''" in build, (
+        "the estate suffix must be chosen by ref, not hardcoded either way"
+    )
+    # The same estate rule the build args follow, so one ref cannot drift from
+    # the other and publish a `prod` pod to the public package.
+    stack_line = next(
+        line for line in build.splitlines() if line.strip().startswith("STACK_IMAGE:")
+    )
+    for ref in ("refs/heads/dev", "refs/heads/prod"):
+        assert ref in stack_line, f"the estate package rule must name {ref}"
+
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    release_line = next(
+        line for line in release.splitlines() if line.strip().startswith("STACK_IMAGE:")
+    )
+    assert "${{" not in release_line, (
+        "a release is always the public generic artefact; a conditional "
+        "STACK_IMAGE in release.yml could publish one to the estate package"
+    )
+    assert "-estate" not in release_line
+
+
 def test_the_release_stack_is_the_generic_shape() -> None:
     """The release stack is the public AIO: agent CLIs, no estate integrations.
 

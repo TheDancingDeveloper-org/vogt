@@ -432,19 +432,27 @@ never a turnkey production estate. And the maintainer's own production is one
 such private deployment, layering a private overlay on the public base; it is
 not a supported drop-in scenario reproducible from this repository alone.
 
-**Two builds share the `vogt-stack` name, and pinning the wrong one is the
-mistake this table exists to prevent.** Both carry the agent CLIs; what
-separates them is whether they also carry the maintainer's estate:
+**Two different images exist, and they are now two different packages.** Both
+carry the agent CLIs; what separates them is whether they also carry the
+maintainer's estate:
 
-| Tag family | Built by | Pod base | Carries | Meant for |
-|---|---|---|---|---|
-| `X.Y.Z`, `X.Y`, `sha-<short>`, `latest` | `release.yml` (version tag) | `lean` | `claude`, `codex` | the signed public artifact — anyone |
-| `dev`, `dev-<longsha>`, `prod-<longsha>` | `build.yml` (branch push) | `full` | the above, plus Flutter/Android SDK, Cadastre MCP, theclawbay | the maintainer's own dev/prod pods |
+| Package | Built by | Visibility | Pod base | Carries | Meant for |
+|---|---|---|---|---|---|
+| `vogt-stack` | `release.yml` (version tag), `main` | public | `lean` | `claude`, `codex` | the signed public artifact — anyone |
+| `vogt-stack-estate` | `build.yml` on `dev` / `prod` | private | `full` | the above, plus Flutter/Android SDK, Cadastre MCP, theclawbay | the maintainer's own dev/prod pods |
 
-The release family is the one to pin. The branch family is not a "fuller"
-release — it is a private deployment's image, carrying integrations that
-address one estate's infrastructure and mean nothing outside it. Pin a
-`dev-<sha>` digest only if you are that estate.
+`vogt-stack` is the one to pin. The estate package is not a "fuller" release —
+it is a private deployment's image, carrying integrations that address one
+estate's infrastructure and mean nothing outside it.
+
+They were one package until the public AIO shipped, distinguished only by tag
+family. That was already a pinning hazard, and publishing the package turned it
+into a disclosure one: **GHCR visibility is per package, not per version**, so
+making the generic AIO public also published every `dev-`/`prod-` image in it.
+No credential was exposed — the build passes none as a build arg and mounts
+none — but a stranger being able to pull the estate's pod image is not a
+property anybody chose. Splitting the packages makes the boundary something the
+registry enforces rather than something a tag convention implies.
 
 What the release digests do *not* carry is Flutter and the Android SDK: those
 belong to the `full` pod base, and the signed APK is built by `release.yml`'s
