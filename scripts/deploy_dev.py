@@ -20,7 +20,12 @@ from urllib.request import Request, urlopen
 
 STACK = ""
 CORE_IMAGE = "ghcr.io/thedancingdeveloper-org/vogt"
-STACK_IMAGE = "ghcr.io/thedancingdeveloper-org/vogt-stack"
+# The private estate package, not the public `vogt-stack`. `dev` and `prod`
+# branch builds publish there; the public one carries the generic AIO and has no
+# `dev-<sha>` tags to pin. This constant is what rewrites the image line in the
+# deployed `estate.overlay.yml`, so a stale value here repins vogt-dev onto a
+# digest from the wrong package.
+STACK_IMAGE = "ghcr.io/thedancingdeveloper-org/vogt-stack-estate"
 SHA256 = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 

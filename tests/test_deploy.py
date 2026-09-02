@@ -244,6 +244,55 @@ def test_the_estate_stack_publishes_to_its_own_package() -> None:
     assert "-estate" not in release_line
 
 
+def test_the_deploy_path_resolves_the_package_the_build_published_to() -> None:
+    """Splitting the packages splits the deploy path too, or dev deploys wrong.
+
+    `deploy-dev.yml` resolves `<image>:dev-<sha>` and `scripts/deploy_dev.py`
+    rewrites the image line in the deployed `estate.overlay.yml`. Both named
+    `vogt-stack` while `build.yml` published there. Now that `dev` and `prod`
+    publish to `vogt-stack-estate`, a stale name here does not fail loudly — the
+    public package has no `dev-<sha>` tag, so it errors at best, and at worst
+    resolves something unrelated and repins vogt-dev onto a digest from the
+    wrong package.
+
+    `deploy-production.yml` is deliberately excluded: it takes a *release tag*
+    and its cosign identity requires `release.yml@refs/tags/v[0-9]`, so it
+    deploys the signed public release artefact. That one stays on `vogt-stack`,
+    and pointing it at the estate package would be the same bug mirrored.
+    """
+    dev_wf = (WORKFLOWS / "deploy-dev.yml").read_text(encoding="utf-8")
+    assert "vogt-stack-estate" in dev_wf, (
+        "deploy-dev.yml must resolve the estate package that build.yml's dev "
+        "branch publishes to"
+    )
+    # Executable lines only: the comment above the change explains what the
+    # public package is *not* used for here, and naming it is the point.
+    for line in dev_wf.splitlines():
+        if line.lstrip().startswith("#"):
+            continue
+        if "vogt-stack" in line and "vogt-stack-estate" not in line:
+            raise AssertionError(
+                f"deploy-dev.yml still names the public package: {line.strip()}"
+            )
+
+    helper = (REPO_ROOT / "scripts" / "deploy_dev.py").read_text(encoding="utf-8")
+    assert 'STACK_IMAGE = "ghcr.io/thedancingdeveloper-org/vogt-stack-estate"' in (
+        helper
+    ), "scripts/deploy_dev.py must rewrite estate.overlay.yml with the estate package"
+
+    prod_wf = (WORKFLOWS / "deploy-production.yml").read_text(encoding="utf-8")
+    assert "vogt-stack-estate" not in prod_wf, (
+        "production deploys the signed public release, not an estate build"
+    )
+
+    # A new package that no retention policy names accumulates every dev build
+    # for ever; the public one is already listed.
+    retention = (WORKFLOWS / "ghcr-retention.yml").read_text(encoding="utf-8")
+    assert "vogt-stack-estate" in retention, (
+        "the estate package must be covered by the GHCR retention policy"
+    )
+
+
 def test_the_release_stack_is_the_generic_shape() -> None:
     """The release stack is the public AIO: agent CLIs, no estate integrations.
 
