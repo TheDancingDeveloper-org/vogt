@@ -40,7 +40,9 @@ pub async fn subscribe(
     // network (#524.5). Require https and refuse a non-routable host at the
     // subscribe boundary.
     if let Subscription::WebPush { endpoint, .. } = &req.sub {
-        validate_webpush_endpoint(endpoint)?;
+        if !state.config.push_allow_insecure_endpoints {
+            validate_webpush_endpoint(endpoint)?;
+        }
     }
     let stored = state.push.add(req.sub, req.label)?;
     Ok(Json(
