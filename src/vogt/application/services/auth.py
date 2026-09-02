@@ -77,6 +77,12 @@ class Authenticated:
         return None if self.token is None else self.token.id
 
 
+#: How stale a token's `last_used_at` may get before a request refreshes it
+#: (#526). Long enough that a busy token is not writing on every request,
+#: short enough that "last used" stays operationally useful.
+_TOUCH_DEBOUNCE = timedelta(minutes=5)
+
+
 def authenticate(
     ctx: AppContext, *, bearer: str | None, writes_enabled: bool = True
 ) -> Authenticated:
@@ -116,7 +122,16 @@ def authenticate(
             )
             raise Unauthenticated("the presented token is not valid")
 
-    ctx.declared.touch_token(token.id, at=ctx.clock())
+    # Debounce the last-used write (#526). touch_token opens its own
+    # BEGIN IMMEDIATE write transaction, and closing the last WAL connection
+    # checkpoints (~25ms) — paid on *every* authenticated request, reads
+    # included. The exact last-used instant is telemetry, not a correctness
+    # input, so update it at most once per token per debounce window, compared
+    # against the value already loaded above (no extra read, no process state
+    # that could collide across instances or tests).
+    now = ctx.clock()
+    if token.last_used_at is None or now - token.last_used_at >= _TOUCH_DEBOUNCE:
+        ctx.declared.touch_token(token.id, at=now)
     return Authenticated(
         principal=Principal(
             identity_ref=actor.identity_ref,
