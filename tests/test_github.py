@@ -267,6 +267,13 @@ def test_a_404_is_absence_not_an_exception(ctx: CollectorContext) -> None:
         ("https://gitlab.com/o/r", None),
         (None, None),
         ("https://github.com/o", None),
+        # #517: owner/repo carrying path/query-injection metacharacters are
+        # rejected as unparseable rather than interpolated raw into API URLs.
+        ("https://github.com/a?x=1/b", None),
+        ("https://github.com/../../user/repos", None),
+        ("https://github.com/o/..", None),
+        ("https://github.com/o/r%2f..%2f", None),
+        ("https://github.com/o/r#frag", None),
     ],
 )
 def test_repo_urls_are_recognised_in_the_forms_people_write_them(

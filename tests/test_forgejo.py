@@ -694,3 +694,26 @@ def test_a_closure_upstream_leaves_the_backlog(
     latest = ctx.observed.latest_by_subject(f"forge:{HOST}/indexarr/Indexarr#42")
     assert latest is not None, "and the key scheme is the provider's own (#171)"
     assert lifecycle_of(latest) == LIFECYCLE_CLOSED
+
+
+def test_parse_repo_url_rejects_injection_metacharacters() -> None:
+    """#517: owner/repo carrying `..`, `?`, `#`, `%` are unparseable.
+
+    They are interpolated raw into forge API URL builds, so a crafted
+    `repo_url` (settable by any project.write token) would otherwise steer
+    the stored credential's request to an arbitrary path/query. The strict
+    name pattern rejects them as "not mine" (None), never a ref.
+    """
+    from vogt.adapters.forge.forgejo import parse_repo_url
+
+    hosts = (HOST,)
+    ok = parse_repo_url(f"https://{HOST}/indexarr/Indexarr", hosts)
+    assert ok is not None and ok.owner == "indexarr" and ok.repo == "Indexarr"
+    for bad in (
+        f"https://{HOST}/a?x=1/b",
+        f"https://{HOST}/../../user/repos",
+        f"https://{HOST}/o/..",
+        f"https://{HOST}/o/r%2f..",
+        f"{HOST}/o/r%23frag",
+    ):
+        assert parse_repo_url(bad, hosts) is None, bad

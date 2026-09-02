@@ -11,6 +11,7 @@ also means it never appears in a process listing or a shell history.
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -257,6 +258,15 @@ class GitHubClient:
 #: fact `repo_of` parses against, named rather than buried in the string.
 SUPPORTED_HOST = "github.com"
 
+#: What a forge permits in an owner or repository name — the same strict
+#: pattern `imports.py` validates against (#517). Owner/repo are interpolated
+#: raw into f-string URL builds (`f"{api_root}/repos/{owner}/{repo}/..."`), so
+#: a value carrying `..`, `?`, `#`, `%` — settable by any `project.write`
+#: token via `repo_url` — would steer the stored credential's request to an
+#: arbitrary path/query on the forge host. Reject it at the parser: an
+#: unparseable value is "not a GitHub repo", the ordinary None answer.
+_VALID_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
 
 def repo_of(repo_url: str | None) -> tuple[str, str] | None:
     """Extract `(owner, repo)` from a project's repository URL.
@@ -275,5 +285,7 @@ def repo_of(repo_url: str | None) -> tuple[str, str] | None:
         return None
     parts = candidate[len("github.com/") :].split("/")
     if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None
+    if not _VALID_NAME.fullmatch(parts[0]) or not _VALID_NAME.fullmatch(parts[1]):
         return None
     return parts[0], parts[1]

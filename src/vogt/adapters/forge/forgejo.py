@@ -30,6 +30,7 @@ anywhere in this module (FR-B4).
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -184,6 +185,11 @@ class ForgejoClient:
             raise ForgejoUnavailable(msg) from exc
 
 
+#: What a forge permits in an owner or repository name (#517); matches the
+#: strict `_NAME` pattern `imports.py` already validates references against.
+_VALID_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+
+
 def parse_repo_url(repo_url: str | None, hosts: tuple[str, ...]) -> RepoRef | None:
     """Extract a `RepoRef` from a URL naming one of `hosts`, else `None`.
 
@@ -215,6 +221,11 @@ def parse_repo_url(repo_url: str | None, hosts: tuple[str, ...]) -> RepoRef | No
         return None
     parts = path.removesuffix(".git").strip("/").split("/")
     if len(parts) < 2 or not parts[0] or not parts[1]:
+        return None
+    # Owner/repo are interpolated raw into forge API URLs; a value carrying
+    # `..`, `?`, `#`, `%` would steer the stored credential's request to an
+    # arbitrary path/query (#517). Reject it — "not mine", the ordinary None.
+    if not _VALID_NAME.fullmatch(parts[0]) or not _VALID_NAME.fullmatch(parts[1]):
         return None
     return RepoRef(host=canonical_host, owner=parts[0], repo=parts[1])
 
