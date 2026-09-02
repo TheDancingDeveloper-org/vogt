@@ -66,6 +66,12 @@ class SqliteObservedStore:
         self._synchronous = synchronous
         self._clock = clock
         self._id_factory = id_factory
+        #: Once the evidence tables exist they never un-exist, so a `True`
+        #: probe is cached for the life of this store (#528.8). A single
+        #: backlog render calls has_evidence_tables from freshness, _gather,
+        #: git signals, upstream, inbox and notifications; without this each
+        #: was a fresh connection + catalog probe.
+        self._has_evidence_cached = False
         self._migrator = Migrator(
             store="observed",
             directory=MIGRATIONS_DIR,
@@ -613,13 +619,20 @@ class SqliteObservedStore:
 
     def has_evidence_tables(self) -> bool:
         """Whether this store has been migrated to hold evidence yet."""
+        if self._has_evidence_cached:
+            return True
         if not self._path.exists():
             return False
         conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
-            return table_exists(conn, "observations")
+            exists = table_exists(conn, "observations")
         finally:
             conn.close()
+        # Only cache the True answer: the table can still come into existence
+        # (first sweep/migration), but once it exists it never un-exists.
+        if exists:
+            self._has_evidence_cached = True
+        return exists
 
     # -- connections -------------------------------------------------------
 

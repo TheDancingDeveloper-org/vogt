@@ -459,6 +459,12 @@ class SqliteReadView:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        #: workflow_for is called once per observation while assembling a
+        #: board/backlog, but at most ~4 distinct workflows exist — a global
+        #: board over 10 linked projects x 1000 issues was up to 10,000
+        #: identical workflow_defs queries + JSON parses per render (#528.3).
+        #: The definitions are constant for this view's lifetime.
+        self._workflow_cache: dict[str, Workflow] = {}
 
     def instance_id(self) -> str:
         value = _meta_get(self._conn, META_INSTANCE_ID)
@@ -706,13 +712,19 @@ class SqliteReadView:
         backfill them in SQL, so the code that owns the defaults supplies
         them instead of the migration guessing.
         """
+        cached = self._workflow_cache.get(kind)
+        if cached is not None:
+            return cached
         row = self._conn.execute(
             "SELECT definition FROM workflow_defs WHERE kind = ?", (kind,)
         ).fetchone()
         if row is None:
-            return default_workflow(kind)  # type: ignore[arg-type]
-        definition: dict[str, object] = json.loads(str(row["definition"]))
-        return Workflow.from_definition(kind, definition)  # type: ignore[arg-type]
+            workflow = default_workflow(kind)  # type: ignore[arg-type]
+        else:
+            definition: dict[str, object] = json.loads(str(row["definition"]))
+            workflow = Workflow.from_definition(kind, definition)  # type: ignore[arg-type]
+        self._workflow_cache[kind] = workflow
+        return workflow
 
     # -- observed-first ----------------------------------------------------
 
@@ -1378,6 +1390,9 @@ class SqliteWriteTxn(SqliteReadView):
 
     def upsert_workflow(self, workflow: Workflow, *, at: datetime) -> None:
         _upsert_workflow(self._conn, workflow, at=at)
+        # Keep the per-view workflow cache (#528.3) honest if this same txn
+        # reads the kind back after writing it.
+        self._workflow_cache.pop(workflow.kind, None)
 
     def _attach_label_by_name(self, work_item_id: str, name: str) -> None:
         row = self._conn.execute(
