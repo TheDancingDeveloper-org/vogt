@@ -14,6 +14,82 @@ git log rather than being reconstructed here.
 
 Nothing yet.
 
+## [0.5.0] - 2026-09-02
+
+The first generic release: the published all-in-one image now works out of
+the box for any consumer, and a broad performance pass and the fixes from a
+whole-repo security review land across all three halves. No schema
+migration is required.
+
+### Added
+
+- **A generic all-in-one stack image.** The published `vogt-stack` release
+  family now carries the agent CLIs (`claude`, `codex`) that its shipped
+  session templates launch, and carries no estate-specific tooling. The
+  estate overlay moved to its own private package with its own build and
+  deploy path, so `deploy/stack.compose.yml` as shipped produces a working
+  pod for any consumer.
+
+### Changed
+
+- **Promotion is a verified fast-forward push.** GitHub's rebase merge
+  rewrites the promoted commits' SHAs, so the previous PR-based promotion
+  broke its own fast-forward gate on every release and needed manual repair.
+  The promote workflow now keeps all of its gates (confirmation, green
+  source checks, verified dev deployment receipt, ancestry) and ends in a
+  plain fast-forward push under a ruleset that admits no other update to a
+  release branch.
+- The public demo image serves its static assets from a slim runtime base
+  instead of the build stage.
+
+### Performance
+
+- **Core:** list surfaces for events, audit, and observations gain covering
+  indexes; generated endpoints run off the event loop; last-used writes are
+  debounced and `auth_decisions` gains a retention cap; empty sweeps skip
+  the projection rebuild and `tools/list` is memoized; `has_evidence_tables`
+  and per-view workflow lookups are cached.
+- **Engine:** scrollback overflow trimming is amortized (~512× fewer
+  memmoves); WebSocket snapshot frames stream zero-copy; session detail
+  reads support `tail_bytes` so clients stop fetching whole logs; history
+  archive reads are bounded and ANSI stripping runs off the hot path.
+- **Web:** board items keep identity across refetches and compare by value,
+  so unchanged rows stop re-rendering; live-event nudge fan-out is
+  coalesced; terminal cache persistence is lengthened and skips unchanged
+  frames.
+
+### Fixed
+
+- Browserslist overrides step past the prototype-write advisories in the
+  web toolchain.
+
+### Security
+
+Fixes from a whole-repo security review (#510–#524, #539):
+
+- **Core:** MCP `tools/call` refuses `LOCAL_ONLY` operations (#510); a
+  remote `root_path` is contained to the import root (#516); forge
+  owner/repo values are validated and path/query injection rejected (#517);
+  operators can refuse the first-run install bootstrap (#515); the caller's
+  raw MCP tool name is no longer logged.
+- **Engine:** symlink escapes closed in write, duplicate, and git diff
+  (#512); engine secrets are stripped from spawned child processes (#511);
+  untrusted-content delimiters are neutralized and steer text capped
+  (#520); WebSocket auth is rate-limited and the legacy `?token=` path is
+  config-gated (#518); `gui/kill` is contained and session-detail and
+  history reads are gated (#519); the push endpoint gains a config-gated
+  SSRF check (#524).
+- **Web:** server-supplied URLs route through `safeHref` and push
+  navigation is same-origin (#522); the stored API base is validated
+  against a scheme allow-list (#521).
+- **Mobile:** the Android clipboard/voice bridges are gated on the
+  top-level origin (#523); a vulnerable transitive `@xmldom/xmldom` is
+  overridden (GHSA-6gmq-8vp8-gcm6).
+- **CI / supply chain:** signed releases build cold, off the shared (and
+  therefore poisonable) build cache (#514); the load-bearing fork-PR
+  approval control is documented (#513); grouped low-severity fixes across
+  core, engine, CI, and mobile (#524).
+
 ## [0.4.0] - 2026-09-01
 
 A feature release that opens session history to agents and tightens the
