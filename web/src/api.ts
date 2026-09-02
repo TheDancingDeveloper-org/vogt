@@ -203,12 +203,39 @@ export function setToken(token: string) {
  * Override via the settings modal when the PWA is served from a different
  * origin to the API (e.g. running the built bundle against a remote box).
  */
+/**
+ * Reduce a candidate base to a bare http(s) origin, or `null` if it is not one
+ * (#521). The base is prefixed onto every request URL with the bearer token
+ * attached, so a localStorage value that carries a non-http scheme, embedded
+ * credentials, or a path/query/fragment must never be honoured — only an
+ * origin an operator would legitimately point the PWA at.
+ */
+export function sanitizeBase(raw: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  if (u.username || u.password) return null;
+  if (u.search || u.hash) return null;
+  if (u.pathname !== "/" && u.pathname !== "") return null;
+  return u.origin;
+}
+
 export function getBase(): string {
-  return localStorage.getItem(BASE_KEY) ?? "";
+  const raw = localStorage.getItem(BASE_KEY);
+  if (!raw) return "";
+  // A stored base that is not a plain http(s) origin is treated as absent
+  // (same-origin), so a poisoned localStorage value cannot silently repoint
+  // API calls — and the bearer token they carry — at an attacker origin.
+  return sanitizeBase(raw) ?? "";
 }
 
 export function setBase(base: string) {
-  if (base) localStorage.setItem(BASE_KEY, base.replace(/\/+$/, ""));
+  const clean = base ? sanitizeBase(base) : null;
+  if (clean) localStorage.setItem(BASE_KEY, clean);
   else localStorage.removeItem(BASE_KEY);
   invalidate();
   broadcastAuthState();
