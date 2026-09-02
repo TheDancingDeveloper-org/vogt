@@ -184,9 +184,7 @@ def _call(
 
         ref = uuid4().hex[:12]
         logger("mcp").exception("mcp tool %r failed (ref=%s)", name, ref)
-        return _result(
-            message_id, _tool_error("error", f"internal error (ref {ref})")
-        )
+        return _result(message_id, _tool_error("error", f"internal error (ref {ref})"))
 
     body: dict[str, Any] = payload.model_dump(mode="json")
     import json as _json

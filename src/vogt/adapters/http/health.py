@@ -142,9 +142,7 @@ def add_health_routes(
             ref = uuid4().hex[:12]
             logger("health").exception("readiness probe failed (ref=%s)", ref)
             response.status_code = 503
-            return Readiness(
-                status="not_ready", detail=f"internal error (ref {ref})"
-            )
+            return Readiness(status="not_ready", detail=f"internal error (ref {ref})")
 
         # NFR-I3. Named per store and with both numbers, because "not ready"
         # with nothing else costs whoever is holding the pager the first

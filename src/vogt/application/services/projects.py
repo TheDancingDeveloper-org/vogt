@@ -75,6 +75,7 @@ def guard_remote_root_path(ctx: AppContext, root_path: str) -> None:
         )
         raise InvalidRequest(msg)
 
+
 PROJECT_REGISTER = "project.register"
 PROJECT_CREATE = "project.create"
 PROJECT_TRANSITION = "project.transition"

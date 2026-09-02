@@ -70,9 +70,7 @@ def secrets(instance: AppContext) -> dict[str, str]:
         ).secret,
         "admin": issue_token(
             instance,
-            IssueTokenParams(
-                actor="agent:admin", name="a", scopes="admin", reason=WHY
-            ),
+            IssueTokenParams(actor="agent:admin", name="a", scopes="admin", reason=WHY),
         ).secret,
     }
 

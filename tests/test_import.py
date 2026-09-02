@@ -133,9 +133,7 @@ def test_remote_callers_cannot_name_paths_outside_the_import_root(
         init_instance(context, InitParams())
         return context
 
-    remote = Principal(
-        identity_ref="agent:remote", kind="agent", display_name="remote"
-    )
+    remote = Principal(identity_ref="agent:remote", kind="agent", display_name="remote")
     remote_ctx = ctx_for(remote, "d-remote")
     with pytest.raises(InvalidRequest, match="import root"):
         register_project(
