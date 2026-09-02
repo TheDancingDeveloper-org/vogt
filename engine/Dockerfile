@@ -298,6 +298,16 @@ COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
 # One `npm install -g` for whichever packages are wanted, not one per package:
 # a second global install into the same prefix reconciles the whole tree for no
 # benefit. No `sudo`: the pod base hands this stage over as root.
+#
+# The install is then asked to prove itself, because `npm install -g` exiting 0
+# is not evidence that `claude` runs (#505). The published tarball ships
+# `bin/claude.exe` as a ~500-byte shell stub; the real binary arrives from the
+# `postinstall` script or a platform-native optional dependency, so
+# `--ignore-scripts`, some pnpm configs, or a missing optional dep all yield a
+# green build and a pod whose `claude` only prints an error. That is the
+# packaging that broke 2.1.237 (#147/#148) and held the pin at 2.1.236 for
+# months; it has not changed. One `--version` makes every future Renovate bump
+# of the pin self-verifying instead of hopeful.
 RUN set -eu; \
     . /usr/local/share/vogt/agent-versions.env; \
     codex_version="${CODEX_VERSION:-${VOGT_CODEX_VERSION}}"; \
@@ -318,7 +328,9 @@ RUN set -eu; \
         npm install -g --prefix=/usr/local $pkgs; \
     fi \
     && if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        install -d /usr/local/libexec \
+        /usr/local/bin/claude --version | grep -qF "$claude_code_version" \
+        || { echo "claude is not $claude_code_version — a stub install (#147/#148, #505)" >&2; exit 1; } \
+        && install -d /usr/local/libexec \
         && codex_target="$(readlink -f /usr/local/bin/codex)" \
         && ln -s "$codex_target" /usr/local/libexec/codex-real \
         && ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \

@@ -37,15 +37,51 @@ A core with nothing else configured is a complete, supported product.
 **The session engine and PWA** (optional) — a Rust server under `engine/`
 that embeds the web UI from `web/`, owns the terminals a work item's session
 runs in, hosts the voice assistant, and can act as the front door in front
-of the core. It is built from `engine/Dockerfile`; there is no published
-image for it, but a generic Compose overlay builds and runs one beside the
-core (§3.2). Without it the core's `session.*` operations report that no
-engine is configured, and nothing else changes.
+of the core. It is built from `engine/Dockerfile`. No image of the engine
+*alone* is published, but it does not have to be built: the all-in-one
+`vogt-stack` image carries the engine, the PWA and the core together (§1.1).
+A generic Compose overlay builds one beside the core instead, if you would
+rather (§3.2). Without the engine, the core's `session.*` operations report
+that no engine is configured, and nothing else changes.
 
 **The mobile shell** (optional) — a Capacitor wrapper under `mobile/` around
 the same PWA. Nothing server-side depends on it. It loads the deployed front
 door, so ordinary server and PWA releases reach installed phones without an
 APK rebuild; the production APK procedure is in §7.1.
+
+### 1.1 Which shape do you want?
+
+Three supported ways to run this, and the difference between them is
+containment, not features. State it before you pick, because moving between
+them later means moving data.
+
+| | Core only | Core + engine | All-in-one (`vogt-stack`) |
+|---|---|---|---|
+| Files | [`vogt.compose.yml`](../deploy/vogt.compose.yml) | the above + [`engine.overlay.yml`](../deploy/engine.overlay.yml) | [`stack.compose.yml`](../deploy/stack.compose.yml) |
+| Containers | 1 | 2 | 1 |
+| Web UI, terminals, sessions | no | yes | yes |
+| Build required | no | yes (the engine) | no |
+| Core posture | hardened | hardened | inside the pod |
+| Engine posture | — | development pod | development pod |
+| Agent CLIs | no | if you build them in | `claude`, `codex` included |
+
+**Hardened** means what it says: a slim base with `git` and nothing else, any
+uid with gid 0, `nologin`, `read_only`, `cap_drop: [ALL]`,
+`no-new-privileges`, a `noexec` tmpfs and one writable volume.
+
+**Development pod** means the opposite, deliberately. The engine image exists
+to run coding agents, so it carries a writable home, a fixed `sprooty` uid,
+passwordless `sudo`, an SSH server, and a Docker CLI for talking to a socket
+you may choose to mount. It cannot run `read_only`. That is not an oversight
+to be hardened away later — an agent session needs a machine, and this is the
+machine. `engine/Dockerfile`'s header records why the two images are never
+collapsed into one: doing so would quietly delete Vogt's containment story
+under an unchanged image name.
+
+So the choice is straightforward. Run the **core only** where you want an API
+and the containment. Run the **AIO** where you would otherwise run a dev box.
+Run **core + engine** when you want the core's containment kept intact and are
+willing to build the engine to get it.
 
 ## 2. Run from published images
 
@@ -192,9 +228,12 @@ run it as a system service, wrap exactly that `init && serve` pair.
 
 ### 3.2 The session engine and PWA
 
-There is no published engine image, so the engine is always built from the
-checkout. The generic overlay `deploy/engine.overlay.yml` does that and wires
-the engine in front of the core in one command:
+No image of the engine *by itself* is published, so this path always builds
+one from the checkout. (If you would rather not build, the all-in-one
+`vogt-stack` image carries the engine with a core already inside it — §1.1
+compares the two, and `deploy/stack.compose.yml` runs it.) The generic
+overlay `deploy/engine.overlay.yml` builds the engine and wires it in front of
+the core in one command:
 
 ```console
 cp deploy/.env.example deploy/.env          # fill in the "session engine" block
@@ -229,14 +268,24 @@ overrides. The image records the resolved versions and refuses to start when a
 persisted home volume would shadow an image-managed CLI (set
 `VOGT_AGENT_SHADOW_POLICY=warn` only for a deliberate user-local override).
 
-This build-time flag is the only way the CLIs enter a deployment, and it
-defaults to `false`. No published image carries them: the release `vogt` core
-image runs the register alone, and the signed release digests promoted to
-production (§7) are CLI-free by design. So a deployment that runs agent
-sessions is one whose engine was built with `VOGT_INSTALL_AI_CLIENTS=true` —
-pinning a plain release image instead leaves the `Claude Code (protected)` and
-`Codex (protected)` session templates registered but unable to start, because
-the `claude` and `codex` binaries are simply not in the image.
+The flag defaults to `false`, so an engine you build yourself is CLI-free
+unless you say otherwise. Two published images differ here, and the difference
+is the point:
+
+- The release **core** image (`vogt`) runs the register alone and carries no
+  CLIs. It is not a pod and has nowhere to run a session.
+- The release **stack** image (`vogt-stack`) *does* carry them. It is the
+  all-in-one dev pod, and a pod that cannot run `claude` or `codex` is not the
+  thing it is published to be. The versions are the `engine/agent-versions.env`
+  pins baked at build time, and the release build runs both binaries before it
+  publishes the digest — a build arg nothing executes is a default waiting to
+  be forgotten.
+
+So a deployment that runs agent sessions either pins a `vogt-stack` release
+digest or builds its own engine with `VOGT_INSTALL_AI_CLIENTS=true`. Pinning
+the plain `vogt` core image and expecting sessions leaves the `Claude Code
+(protected)` and `Codex (protected)` templates registered but unable to start,
+because the binaries are simply not in that image.
 
 Be aware before you run it: the engine image is a **development pod**, not a
 hardened service image — it carries a writable home, `sudo`, optional agent
@@ -379,14 +428,27 @@ not change production by itself.
 The desired state a production instance runs — which digests, which overlays,
 which host specifics — is owned by the operator's own deployment repository,
 not this one; this tree ships only the estate-neutral base and overlays,
-never a turnkey production estate. Two consequences are worth stating plainly.
-The signed release digests are CLI-free (§3.2), so a production engine that
-runs agent sessions is one the operator built with
-`VOGT_INSTALL_AI_CLIENTS=true` and published to its own registry — the release
-`vogt`/`vogt-stack` digests are not that image. And the maintainer's own
-production is one such private deployment, layering a private overlay on the
-public base; it is not a supported drop-in scenario reproducible from this
-repository alone.
+never a turnkey production estate. And the maintainer's own production is one
+such private deployment, layering a private overlay on the public base; it is
+not a supported drop-in scenario reproducible from this repository alone.
+
+**Two builds share the `vogt-stack` name, and pinning the wrong one is the
+mistake this table exists to prevent.** Both carry the agent CLIs; what
+separates them is whether they also carry the maintainer's estate:
+
+| Tag family | Built by | Pod base | Carries | Meant for |
+|---|---|---|---|---|
+| `X.Y.Z`, `X.Y`, `sha-<short>`, `latest` | `release.yml` (version tag) | `lean` | `claude`, `codex` | the signed public artifact — anyone |
+| `dev`, `dev-<longsha>`, `prod-<longsha>` | `build.yml` (branch push) | `full` | the above, plus Flutter/Android SDK, Cadastre MCP, theclawbay | the maintainer's own dev/prod pods |
+
+The release family is the one to pin. The branch family is not a "fuller"
+release — it is a private deployment's image, carrying integrations that
+address one estate's infrastructure and mean nothing outside it. Pin a
+`dev-<sha>` digest only if you are that estate.
+
+What the release digests do *not* carry is Flutter and the Android SDK: those
+belong to the `full` pod base, and the signed APK is built by `release.yml`'s
+own Android job rather than from inside a pod.
 
 ### 7.1 Promote `dev` to production
 

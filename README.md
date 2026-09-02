@@ -27,11 +27,23 @@ the write API is isolated, so nothing there persists and no sign-in is needed:
 
 ## Run it
 
-The stack is two Compose files layered together: the base
-(`deploy/vogt.compose.yml`) defines the core service, and the engine overlay
-(`deploy/engine.overlay.yml`) adds the Rust engine — the PWA front end — in
-front of it. No engine image is published, so that overlay always builds one
-from this checkout.
+There are three shapes, and they trade containment against convenience:
+
+| | What it is | Web UI | Build |
+|---|---|---|---|
+| **Core only** | `deploy/vogt.compose.yml` — the API, hardened | no | no |
+| **Core + engine** | the above + `deploy/engine.overlay.yml` | yes | the engine |
+| **All-in-one** | `deploy/stack.compose.yml` — one published image | yes | no |
+
+The first two keep the core in a hardened container: slim base, `read_only`,
+all capabilities dropped. The all-in-one is a **development pod** — writable
+home, `sudo`, sshd, and the `claude` and `codex` CLIs — because it exists to
+run coding agents, and an agent session needs a machine. Pick it where you
+would run a dev box, not where you would run a hardened service.
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §1.1 lays the three out in full.
+
+No image of the engine alone is published, so the overlay path always builds
+one from this checkout; the all-in-one image carries it with a core inside.
 
 The quickstart below **builds the core from this checkout** with the
 one-service build overlay `deploy/vogt.build.yml`, a path that works without

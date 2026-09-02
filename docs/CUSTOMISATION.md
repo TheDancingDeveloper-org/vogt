@@ -425,9 +425,10 @@ It adds one service and some configuration. It does not rebuild, repin, or
 restate the core — that is the published image, unmodified, which is what
 makes "a customised deployment is the public image plus configuration" a
 claim you can check rather than one you have to believe
-(`tests/test_public_delivery.py` checks it). No engine image is published, so
-the overlay always builds one from this checkout; it carries no host paths, no
-tailnet and no maintainer integrations, so it runs on any host unchanged.
+(`tests/test_public_delivery.py` checks it). No image of the engine alone is
+published, so the overlay always builds one from this checkout; it carries no
+host paths, no tailnet and no maintainer integrations, so it runs on any host
+unchanged.
 
 The maintainer's own estate layers its host mounts, tailnet, and secret
 integrations on top of this same base. That overlay is not tracked in this
@@ -436,6 +437,43 @@ does not belong in a public tree — and lives in the operator's private ops
 repository instead. Treat `engine.overlay.yml` as the pattern: every
 estate-specific value it would add is an environment value or a mount an
 operator supplies, never a default baked into a file a stranger clones.
+
+## Extending the stack image
+
+The same claim holds one level up. `engine/Dockerfile`'s final stage says of
+the core it lifts in that "the private path is the public path plus
+configuration — now it is a digest", and the all-in-one `vogt-stack` image is
+where that stops being a statement about one image and becomes the deployment
+model. A deployment that needs tools the public image does not carry adds them
+in a layer of its own:
+
+```dockerfile
+FROM ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:...
+
+# The image ends as `USER sprooty`, so an extending build must take root back
+# for anything that installs, and hand it over again at the end. Forgetting the
+# second half yields a pod running as root, which is a different container from
+# the one whose digest you pinned.
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends your-tool \
+    && rm -rf /var/lib/apt/lists/*
+USER sprooty
+```
+
+That is not a hypothetical: it is exactly how the maintainer's own `vogt-dev`
+and `vogt-prod` images are built — the public digest, plus the estate's
+integrations, plus nothing else. Whatever a private deployment adds is
+therefore visible as a Dockerfile a few lines long, and what it *started* from
+is a digest anyone can pull and verify. A private image built any other way
+would be an assertion about the public one rather than a layer on it.
+
+Two things about the base are worth knowing before you extend it. It is a
+development pod, not a hardened service image (see
+[`DEPLOYMENT.md`](DEPLOYMENT.md) §1.1), so it will not accept `read_only` and
+its uid is fixed. And it contains a core, so a layer that adds a *second* one
+— or a compose file that layers `stack.compose.yml` onto
+`vogt.compose.yml` — runs two.
 
 If your deployment needs something none of these layers reach, that is worth
 an issue. The generic base is only generic if the customisations people

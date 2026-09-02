@@ -153,10 +153,18 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
         "INSTALL_AI_CLIENTS must be passed to both the candidate and the "
         f"pushed build of engine/Dockerfile, for dev and prod; found {len(wired)}"
     )
+    # "A pod with the clients but not the integrations is a third shape nobody
+    # chose" was true of `build.yml`, whose refs are the estate's own pods, and
+    # it stays the rule here. It is no longer true of the *release*: that shape
+    # has since been chosen deliberately and is what the public generic AIO is
+    # — clients, no estate integrations, `lean` pod base. See
+    # `test_the_release_stack_is_the_generic_shape` below, which pins it.
+    # The two files therefore disagree on purpose; this assertion is about
+    # `build.yml` alone and must not be generalised to both.
     for arg in ("INSTALL_CADASTRE_MCP", "INSTALL_THECLAWBAY"):
         assert len(re.findall(arg + estate, text)) == 2, (
-            f"{arg} must follow the same estate rule as INSTALL_AI_CLIENTS; a "
-            "pod with the clients but not the integrations is a third shape "
+            f"{arg} must follow the same estate rule as INSTALL_AI_CLIENTS; an "
+            "estate pod with the clients but not the integrations is a shape "
             "nobody chose"
         )
     # Flutter is no longer a build arg of the merged image (#184): it is the
@@ -187,6 +195,91 @@ def test_the_dev_image_build_turns_the_ai_clients_on() -> None:
         "(NFR-Q7); a build arg nothing asserts is how #23 went unnoticed, and "
         f"a tool nothing runs is how WI-17 did. Missing: {sorted(owed - probed)}"
     )
+
+
+def test_the_release_stack_is_the_generic_shape() -> None:
+    """The release stack is the public AIO: agent CLIs, no estate integrations.
+
+    The release used to be the inverse of what it is published for — no
+    `INSTALL_AI_CLIENTS` line at all (so `engine/Dockerfile`'s `false` default
+    won) and `INSTALL_CADASTRE_MCP=true`. It shipped the maintainer's estate
+    MCP to strangers while withholding the two CLIs the product exists to run.
+    Nothing was red, because nothing asserted either half.
+
+    So this pins the shape rather than trusting the args to stay written: a
+    release carries `claude` and `codex`, and carries neither cadastre nor
+    theclawbay. `build.yml` keeps the estate rule and is asserted separately in
+    `test_the_dev_image_build_turns_the_ai_clients_on` — the two files differ on
+    purpose, which is why neither test is written over both.
+    """
+    text = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    # Both build steps, as ever: the candidate is what the smoke test runs and
+    # the push is what consumers pull, and an arg on one but not the other means
+    # the tested image is not the published one.
+    for arg in ("INSTALL_AI_CLIENTS=true", "INSTALL_CADASTRE_MCP=false"):
+        assert text.count(arg) == 2, (
+            f"release.yml must pass {arg} to both the candidate and the pushed "
+            f"stack build; found {text.count(arg)}"
+        )
+    assert "INSTALL_CADASTRE_MCP=true" not in text, (
+        "a release must not carry the maintainer's estate MCP: it is the "
+        "public artifact, and cadastre means nothing outside one estate"
+    )
+    assert "INSTALL_THECLAWBAY" not in text, (
+        "theclawbay is an estate integration; a release leaves it at the "
+        "Dockerfile's false default rather than naming it"
+    )
+    # `vogt-verify-agent-clis` is not this proof and never was: it returns 0
+    # when the binaries are absent (it detects a persisted-$HOME copy shadowing
+    # the image's, which is a different question). Only running them proves
+    # they are there — the #23 lesson, applied to the release stream.
+    smoke = text[text.index("- name: both halves run") :]
+    smoke = smoke[: smoke.index("- uses:")]
+    loop = re.search(r"for tool in ([^;]+); do", smoke)
+    assert loop, (
+        "the release stack's smoke test must run the CLIs it now ships, not "
+        "merely check them for shadowing (NFR-Q7)"
+    )
+    probed = set(loop.group(1).split())
+    owed = {"claude", "codex"}
+    assert owed <= probed, (
+        "the release image must be asked for the clients it carries; missing: "
+        f"{sorted(owed - probed)}"
+    )
+    # `flutter` and `theclawbay` belong to the `full` pod base and the estate
+    # build. Probing for them here would fail a correct release.
+    assert not probed & {"flutter", "theclawbay"}, (
+        "a release is the `lean` pod base with no estate integrations; probing "
+        f"for {sorted(probed & {'flutter', 'theclawbay'})} asks it for what it "
+        "deliberately does not carry"
+    )
+
+
+@pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
+def test_no_build_args_block_contains_a_comment(workflow: str) -> None:
+    """`#` in a `|` block scalar is content, not a comment.
+
+    `build-args: |` is a literal block, and build-push-action parses it without
+    a comment option, so an explanatory note written inside the block reaches
+    buildx as a build arg named `#`. `build.yml` carries a comment saying so,
+    directly above the block it applies to — and the note was written there
+    because the mistake had already been made once. It was then made again
+    while adding the release's generic build args, which is the point at which
+    a comment stops being the right tool.
+
+    Notes belong above the `build-args:` key, where YAML comments are comments.
+    """
+    text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
+    for block in re.finditer(
+        r"^(\s+)build-args: \|\n((?:\1  .*\n|\n)*)", text, re.MULTILINE
+    ):
+        offending = [
+            line for line in block.group(2).splitlines() if line.strip().startswith("#")
+        ]
+        assert not offending, (
+            f"{workflow}: comment inside a build-args block scalar reaches "
+            f"buildx as a build arg; move it above the key: {offending}"
+        )
 
 
 def test_the_image_has_no_default_listen_address() -> None:
@@ -1640,6 +1733,31 @@ def test_the_pinned_agent_cli_cannot_update_past_its_pin() -> None:
     assert re.search(r"^ENV\s+DISABLE_UPDATES=1\s*$", text, re.MULTILINE), (
         "engine/Dockerfile must set DISABLE_UPDATES=1, or the pinned agent CLI "
         "re-installs itself into the persisted $HOME on every boot (#196)"
+    )
+
+
+@pytest.mark.skipif(
+    not ENGINE_DOCKERFILE.exists(),
+    reason="the core-alone job (NFR-Q6) deletes engine/; this reads its Dockerfile",
+)
+def test_the_pinned_claude_proves_it_is_not_a_stub() -> None:
+    """`npm install -g` exiting 0 is not evidence that `claude` runs (#505).
+
+    The published tarball ships `bin/claude.exe` as a ~500-byte shell stub; the
+    real binary arrives from the `postinstall` script or a platform-native
+    optional dependency. When that does not happen the install still succeeds
+    and the image still builds — the pod simply has a `claude` that prints an
+    error. That is the packaging that broke 2.1.237 (#147/#148) and held the pin
+    at 2.1.236 for months, and it has not changed since, so a pin is only worth
+    what a check that the binary answers is worth.
+
+    Paired with the sibling test above: `DISABLE_UPDATES` stops the pin being
+    walked past at runtime, this stops it being hollow at build time.
+    """
+    text = ENGINE_DOCKERFILE.read_text(encoding="utf-8")
+    assert re.search(r"claude --version \| grep -qF", text), (
+        "engine/Dockerfile must run the claude it just installed and match it "
+        "against the pin, or a stub install is a green build (#505)"
     )
 
 
