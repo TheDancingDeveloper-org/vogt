@@ -70,10 +70,28 @@ def test_demo_image_branches_from_the_normal_web_build() -> None:
     assert "FROM web-build AS demo-web" in text
     assert "pnpm demo:augment" in text
     demo = text.split("FROM web-build AS demo-web", 1)[1].split("# ─── Stage 2:", 1)[0]
-    assert "FROM ${NODE_IMAGE} AS demo-runtime" in demo
+    # Not `NODE_IMAGE`, which is the *builder*. Building the PWA needs a
+    # toolchain; serving the built bytes does not, and `node:22-bookworm`
+    # derives from `buildpack-deps` — 413 packages of compilers and `-dev`
+    # headers the demo never executes, each one a fatal-gated Trivy finding
+    # waiting to be published against it. That is not hypothetical twice over:
+    # npm's transitive deps forced the removal below (#454), and then
+    # `libexpat1`/`libexpat1-dev` (CVE-2026-56408) failed `dev`'s build on four
+    # consecutive pushes while nothing in the tree had changed. The slim base
+    # carries 88 packages and neither.
+    assert "FROM ${DEMO_RUNTIME_IMAGE} AS demo-runtime" in demo
+    assert "FROM ${NODE_IMAGE} AS demo-runtime" not in demo, (
+        "the demo runtime must not reuse the builder base; that is what put "
+        "compilers and -dev headers in a static file server"
+    )
+    assert re.search(r"^ARG DEMO_RUNTIME_IMAGE=\S+-slim$", text, re.MULTILINE), (
+        "the demo runtime base must be a slim variant: the property is a small "
+        "surface, not merely a separate build arg pointing at the same image"
+    )
     assert "chmod 0444 /app/demo-server.mjs" in demo
     # The demo server uses only node builtins, so the bundled npm CLI is removed
-    # — its transitive deps are what the fatal Trivy gate flags (#454).
+    # — its transitive deps are what the fatal Trivy gate flags (#454). The slim
+    # base still ships npm, so this stays load-bearing.
     assert "rm -rf /usr/local/lib/node_modules/npm" in demo
     assert "COPY --from=server-build" not in demo
     assert "COPY --from=core" not in demo

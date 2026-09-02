@@ -69,6 +69,17 @@
 # these build args back to their Docker Hub names still works and is the
 # escape hatch for a builder that cannot reach GHCR.
 ARG NODE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm
+# The static demo's *runtime* base, deliberately not `NODE_IMAGE`. Building the
+# PWA needs a toolchain; serving the built bytes does not — `demo-server.mjs`
+# imports only `node:` builtins. `node:22-bookworm` derives from
+# `buildpack-deps` and carries 413 packages including compilers and `-dev`
+# headers, every one of which is attack surface the demo never uses and a
+# fatal-gated Trivy finding waiting to be published against it. The `rm -rf npm`
+# in the demo stage is the scar from the last round of that (#454);
+# `libexpat1`/`libexpat1-dev` (CVE-2026-56408) was the next, and it failed
+# `dev`'s build on four consecutive pushes while nothing in the tree had
+# changed. The slim base carries 88 packages and neither of those.
+ARG DEMO_RUNTIME_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/node:22-bookworm-slim
 ARG RUST_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm
 # uv builds the core's virtualenv from the committed lockfile, so the image
 # contains exactly what CI tested (NFR-Q5). Same pin as the root Dockerfile;
@@ -157,7 +168,7 @@ RUN set -eu; \
         VOGT_PRODUCT_VERSION="$product_version"; \
     pnpm demo:augment
 
-FROM ${NODE_IMAGE} AS demo-runtime
+FROM ${DEMO_RUNTIME_IMAGE} AS demo-runtime
 WORKDIR /app
 COPY --from=demo-web /app/web/dist /app/dist
 COPY engine/deploy/demo-server.mjs /app/demo-server.mjs
@@ -168,7 +179,8 @@ COPY engine/deploy/demo-server.mjs /app/demo-server.mjs
 # npm CLI the base image bundles is dead weight — and its own bundled
 # dependencies (tar, brace-expansion, pacote, sigstore, …) are what the fatal
 # Trivy gate flags as CRITICAL/HIGH. Removing npm/npx clears every one of those
-# findings without touching anything the demo runtime uses.
+# findings without touching anything the demo runtime uses. The slim base still
+# ships npm, so this stays load-bearing.
 RUN chmod 0444 /app/demo-server.mjs \
     && rm -rf /usr/local/lib/node_modules/npm \
               /usr/local/bin/npm \
