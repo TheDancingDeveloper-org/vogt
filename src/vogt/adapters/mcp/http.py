@@ -64,14 +64,15 @@ def add_mcp_route(
                 status_code=200,
             )
 
-        # resolve() authorizes (a DB write) and _handle() runs the operation —
-        # both synchronous. Offload to a thread so an MCP tool call does not
-        # serialize on the event loop the way an async handler would (#525).
-        def _resolve_and_handle() -> dict[str, Any] | None:
-            ctx, caller = resolve(request)
-            return _handle(message, ctx=ctx, caller=caller, registry=registry)
-
-        response = await asyncio.to_thread(_resolve_and_handle)
+        # resolve() sets the request-actor contextvar the access log reads
+        # after this handler returns, so it must run on the event loop, not a
+        # worker thread (a contextvar mutated in a thread would not propagate
+        # back). _handle() — the authorize write and the operation dispatch —
+        # is the slow part, so only it is offloaded (#525).
+        ctx, caller = resolve(request)
+        response = await asyncio.to_thread(
+            _handle, message, ctx=ctx, caller=caller, registry=registry
+        )
         if response is None:
             # A notification. 202 with no body is the streamable-HTTP shape.
             return JSONResponse(content=None, status_code=202)
