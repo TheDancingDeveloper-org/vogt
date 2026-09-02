@@ -1,38 +1,49 @@
 name: promote
 
-# Promotion is a pull-request operation, not a branch push. The workflow
-# opens the only two promotion PRs the branch model permits; branch protection
-# then runs the target branch's checks and records the human merge. Keeping the
-# write here to PR creation means a bad dispatch cannot rewrite main or prod.
+# Promotion is a verified fast-forward push, not a pull request. GitHub has
+# no fast-forward merge method: every PR merge — rebase merge included —
+# rewrites the promoted commits' SHAs, so a PR-based promotion makes the
+# source branch a non-ancestor of the target the moment it lands, and the
+# next stage's ancestry gate fails. That deadlock recurred on every release
+# and was repaired by hand three times before promotion pushed directly.
+#
+# main and prod are governed by the `release-branch-promotion` ruleset:
+# deletions and force pushes are blocked outright, and any update must
+# carry green `ci` and `runner-policy` checks on the pushed commit. A
+# fast-forward promotion pushes the exact SHA the source branch already
+# validated, so this workflow's token passes on the commit's own merits —
+# no bypass, no extra credential. A push of anything unvalidated is
+# rejected (a fresh commit has no checks), and the push below carries no
+# force flag, so even if every gate above regressed the server still
+# rejects anything that is not a fast-forward.
 
 on:
   workflow_dispatch:
     inputs:
       stage:
-        description: Promotion stage to open
+        description: Promotion stage to run
         required: true
         type: choice
         options:
           - dev-to-main
           - main-to-prod
       confirm:
-        description: Type PROMOTE to open the promotion pull request
+        description: Type PROMOTE to fast-forward the target branch
         required: true
         type: string
 
 permissions:
-  contents: read
+  contents: write
   checks: read
-  actions: read
-  pull-requests: write
+  actions: write
 
 jobs:
   promote:
-    name: open the ${{ inputs.stage }} promotion PR
+    name: fast-forward the ${{ inputs.stage }} promotion
     runs-on: [self-hosted]
     # These named environments are hooks for installations that can configure
-    # environment reviewers. The repository's branch-protection review and
-    # required checks remain the enforcement point on GitHub's current plan.
+    # environment reviewers. The repository's ruleset and this workflow's
+    # gates remain the enforcement point on GitHub's current plan.
     environment: ${{ inputs.stage == 'dev-to-main' && 'promote-main' || 'promote-prod' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -48,7 +59,7 @@ jobs:
         run: |
           set -euo pipefail
           [ "$CONFIRM" = PROMOTE ] || {
-            echo "::error::Type PROMOTE to open a promotion pull request."
+            echo "::error::Type PROMOTE to run a promotion."
             exit 1
           }
 
@@ -82,11 +93,13 @@ jobs:
               "$@"
           }
 
-          # A green source branch is a prerequisite, not a substitute for the
-          # target PR checks. Select the newest completed run for each check so
-          # an old green run cannot satisfy this gate. Documentation-only
-          # commits intentionally have no image build; a release tag builds
-          # the deployable artifact later.
+          # A green source branch is the promotion gate: a fast-forward
+          # promotes the exact commit the source branch validated, so the
+          # checks below are the checks the target inherits. Select the
+          # newest completed run for each check so an old green run cannot
+          # satisfy this gate. Documentation-only commits intentionally have
+          # no image build; a release tag builds the deployable artifact
+          # later.
           for check in ci runner-policy; do
             conclusion="$(api \
               "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/commits/$source_sha/check-runs?per_page=100" \
@@ -123,23 +136,38 @@ jobs:
             echo "target_sha=$target_sha"
           } >> "$GITHUB_OUTPUT"
 
-      - name: create or report the promotion pull request
+      - name: fast-forward the target branch
         env:
-          # A PR created with GITHUB_TOKEN does not trigger a second workflow
-          # run. Use a narrowly scoped fine-grained token owned by the release
-          # operator so the generated PR receives its normal checks.
-          GH_TOKEN: ${{ secrets.VOGT_PROMOTION_TOKEN }}
           SOURCE: ${{ steps.refs.outputs.source }}
           TARGET: ${{ steps.refs.outputs.target }}
           SOURCE_SHA: ${{ steps.refs.outputs.source_sha }}
           TARGET_SHA: ${{ steps.refs.outputs.target_sha }}
         run: |
           set -euo pipefail
-          : "${GH_TOKEN:?Configure VOGT_PROMOTION_TOKEN with pull-request write access}"
+          git push origin "$SOURCE_SHA:refs/heads/$TARGET"
+          {
+            echo "## Promotion: $SOURCE → $TARGET"
+            echo
+            echo "- promoted: \`$SOURCE_SHA\`"
+            echo "- target before promotion: \`$TARGET_SHA\`"
+            echo "- verified dev deployment receipt run: \`${{ steps.refs.outputs.verified_dev_receipt_run || 'not applicable' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          # Talk to the REST API directly; the gh CLI is not on the runner
-          # (issue #460). This step authenticates as VOGT_PROMOTION_TOKEN so the
-          # created PR receives its normal checks.
+      - name: run the target ref's pipelines
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.refs.outputs.target }}
+        run: |
+          set -euo pipefail
+          # A push made with the workflow token does not fire push-triggered
+          # workflows. The promoted commit's `ci` and `runner-policy` checks
+          # already exist — the fast-forward moved the ref to the exact SHA
+          # the source branch validated — but two pipelines are ref-bound
+          # rather than commit-bound and are dispatched explicitly:
+          # `build.yml` publishes the branch-scoped sha image tags for both
+          # release branches, and `ci.yml` on prod builds the production
+          # Android APK, which may only come from a prod-ref run. REST, not
+          # gh — the runner has no gh CLI (issue #460).
           api() {
             curl -fsS \
               -H "Authorization: Bearer $GH_TOKEN" \
@@ -147,39 +175,11 @@ jobs:
               -H "X-GitHub-Api-Version: 2022-11-28" \
               "$@"
           }
-
-          owner="${GITHUB_REPOSITORY%%/*}"
-          existing="$(api \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls?head=$owner:$SOURCE&base=$TARGET&state=open" \
-            | jq -r '.[0].html_url // empty')"
-          if [ -n "$existing" ]; then
-            echo "An open promotion PR already exists: $existing"
-            exit 0
+          printf '{"ref":"%s"}' "$TARGET" | api -X POST \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/build.yml/dispatches" \
+            --data @-
+          if [ "$TARGET" = prod ]; then
+            printf '{"ref":"%s"}' "$TARGET" | api -X POST \
+              "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/dispatches" \
+              --data @-
           fi
-
-          body="$(mktemp)"
-          trap 'rm -f "$body"' EXIT
-          cat > "$body" <<EOF
-          ## Promotion: $SOURCE → $TARGET
-
-          This PR was opened by the **promote** workflow after its approval gate.
-
-          - source: \`$SOURCE@$SOURCE_SHA\`
-          - target before promotion: \`$TARGET@$TARGET_SHA\`
-          - ancestry: fast-forward only
-          - required source checks: \`ci\`, \`runner-policy\`
-          - verified dev deployment receipt: \`${{ steps.refs.outputs.verified_dev_receipt_run || 'not applicable' }}\`
-
-          Merge only after the target branch checks and normal review policy
-          pass. The subsequent stage must be dispatched separately; no workflow
-          in this repository pushes a protected branch or deploys production as
-          a side effect of this PR.
-          EOF
-          jq -n \
-            --arg title "Promote $SOURCE → $TARGET (${SOURCE_SHA:0:7})" \
-            --arg head "$SOURCE" \
-            --arg base "$TARGET" \
-            --rawfile body "$body" \
-            '{title: $title, head: $head, base: $base, body: $body}' \
-            | api -X POST "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls" --data @- \
-            | jq -r '"Opened promotion PR: " + .html_url'

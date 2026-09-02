@@ -1,7 +1,10 @@
 name: promotion policy
 
-# main and prod are release branches. Feature work targets dev; the only
-# allowed PR edges into the release branches are dev → main and main → prod.
+# main and prod are release branches. Feature work targets dev. Promotion is
+# a fast-forward push performed by promote.yml under the
+# `release-branch-promotion` ruleset — no pull request can update a release
+# branch at all. This check remains so a stray PR opened against main or prod
+# fails early with a clear reason instead of sitting unmergeable.
 
 on:
   pull_request:

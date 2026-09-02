@@ -1694,7 +1694,7 @@ def test_deployment_receipt_schema_carries_the_full_handoff_evidence() -> None:
     )
 
 
-def test_promotion_is_fast_forward_only_and_never_pushes_a_branch() -> None:
+def test_promotion_is_a_verified_fast_forward_push() -> None:
     workflow = (WORKFLOWS / "promote.yml").read_text(encoding="utf-8")
     assert "type: choice" in workflow
     assert "dev-to-main" in workflow
@@ -1705,20 +1705,32 @@ def test_promotion_is_fast_forward_only_and_never_pushes_a_branch() -> None:
     )
     assert environment in workflow
     assert "git merge-base --is-ancestor" in workflow
-    # #460: the self-hosted runner has no gh CLI, so the promotion PR is opened
-    # through the GitHub REST API (POST .../pulls, authenticated with the
-    # promotion token), never with `gh` and never by pushing a branch.
+    # GitHub has no fast-forward merge method, so the old PR-based promotion
+    # rewrote the promoted SHAs on every merge and broke its own ancestry gate
+    # for the next stage. Promotion is now a plain fast-forward push with the
+    # workflow token, under the release-branch-promotion ruleset: deletions
+    # and force pushes blocked, and every update must carry green ci and
+    # runner-policy checks on the pushed commit — which a fast-forward of the
+    # validated source SHA has by construction. No force flag anywhere: the
+    # server rejects a non-fast-forward even if every gate above regressed.
+    assert 'git push origin "$SOURCE_SHA:refs/heads/$TARGET"' in workflow
+    assert "--force" not in workflow
+    assert "force-with-lease" not in workflow
+    assert "contents: write" in workflow
+    # The PR path and its operator-owned token are gone.
+    assert "VOGT_PROMOTION_TOKEN" not in workflow
+    assert "/pulls" not in workflow
+    # #460: the self-hosted runner has curl and jq but not the gh CLI.
     assert "gh pr create" not in workflow
     assert "gh api" not in workflow
     assert "gh run list" not in workflow
-    assert "/repos/$GITHUB_REPOSITORY/pulls" in workflow
-    assert "-X POST" in workflow
-    assert "actions: read" in workflow
-    assert "VOGT_PROMOTION_TOKEN" in workflow
-    assert "GITHUB_TOKEN" in workflow
-    assert "contents: write" not in workflow
-    assert "git push" not in workflow
-    assert "required source checks" in workflow
+    assert "gh workflow run" not in workflow
+    # A token push fires no push-triggered workflows; the promoted commit
+    # keeps the checks it earned on the source branch (same SHA), and the
+    # ref-bound pipelines are dispatched explicitly — build.yml for the
+    # branch-scoped image tags, ci.yml on prod for the production APK.
+    assert "/actions/workflows/build.yml/dispatches" in workflow
+    assert "/actions/workflows/ci.yml/dispatches" in workflow
     assert "for check in ci runner-policy; do" in workflow
 
 
