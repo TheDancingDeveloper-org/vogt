@@ -251,8 +251,18 @@ pub async fn diff(
             .await
             .unwrap_or_default()
     } else {
+        // Resolve through symlinks and refuse anything escaping the repo
+        // (#512): a committed `evil-link -> /etc/passwd` would otherwise be
+        // read straight into the diff's `current` for any valid token (this
+        // read, unlike every files.rs read, had no root check). A path that
+        // does not resolve — untracked or deleted — reads as empty, unchanged.
         let full = repo.join(&path);
-        tokio::fs::read_to_string(&full).await.unwrap_or_default()
+        match (full.canonicalize(), repo.canonicalize()) {
+            (Ok(canon), Ok(repo_canon)) if canon.starts_with(&repo_canon) => {
+                tokio::fs::read_to_string(&canon).await.unwrap_or_default()
+            }
+            _ => String::new(),
+        }
     };
 
     Ok(Json(DiffResp {

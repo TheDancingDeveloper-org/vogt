@@ -431,6 +431,15 @@ async fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
             let src_path = ent.path();
             let dst_path = current_dst.join(ent.file_name());
             let ft = ent.file_type().await?;
+            if ft.is_symlink() {
+                // Skip symlink entries exactly as `tree`/`search_files` do: a
+                // file-symlink here is not a dir, so the `else` branch would
+                // `fs::copy` and follow the *source* link — duplicating a dir
+                // that contains `link -> ~/.ssh/id_rsa` would copy the secret's
+                // content into the workspace where GET /api/files reads it
+                // (#512).
+                continue;
+            }
             if ft.is_dir() {
                 stack.push((src_path, dst_path));
             } else {
