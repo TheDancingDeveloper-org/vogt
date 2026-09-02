@@ -58,12 +58,34 @@ permissions:
 env:
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
   # The merged product — the Python core *and* the session engine in one
-  # container, which is what `deploy/vogt-stack.compose.yml` runs. A separate
-  # repository rather than a tag on the one above, because they are different
-  # artefacts for different deployments: `vogt` is the supported install of
-  # Vogt alone (NFR-PO4), and this is the estate's own stack. One repository
-  # with two kinds of tag in it is how somebody eventually pins the wrong one.
-  STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # container, which is what the stack compose runs. A separate repository
+  # rather than a tag on the one above, because they are different artefacts
+  # for different deployments: `vogt` is the supported install of Vogt alone
+  # (NFR-PO4), and this is the merged stack. One repository with two kinds of
+  # tag in it is how somebody eventually pins the wrong one.
+  #
+  # That last sentence was written about *pinning*, and it turned out to
+  # understate the problem. `vogt-stack` is now a public package — it is the
+  # generic public AIO — and package visibility on GHCR is per *package*, not
+  # per version. Publishing it therefore published every version in it,
+  # including 173 `dev-`/`prod-` images that are the maintainer's own pods:
+  # tailscale, infisical, the step CLI, the Cadastre MCP bridge and theclawbay,
+  # none of which a stranger can use and none of which belongs in a public
+  # artefact. No secret was exposed — the build passes no credential as a build
+  # arg and mounts none — but "anyone can run the estate's pod image" is not a
+  # property anybody chose either.
+  #
+  # So the estate stream gets its own repository, and the split is now a
+  # visibility boundary rather than only a naming convention: `dev` and `prod`
+  # publish to `vogt-stack-estate`, and `main` and every release publish to the
+  # public `vogt-stack`. `release.yml` is unconditional — a release is always
+  # the public generic one.
+  #
+  # NOTE on first run: GHCR can create a new package with the visibility of the
+  # repository that pushed it, and this repository is public. Check
+  # `vogt-stack-estate` is private after the first `dev` build and fix it in the
+  # package settings if not; there is no API for that.
+  STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack${{ (github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod') && '-estate' || '' }}
   # Static public-demo image. It contains neither the engine nor the core and
   # is published only from dev; deployment remains a separate approved digest
   # handoff.
