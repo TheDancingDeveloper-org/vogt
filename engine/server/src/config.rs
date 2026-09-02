@@ -226,6 +226,13 @@ pub struct Config {
     /// redeployed client working; every use is logged and the path is slated
     /// for removal.
     pub ws_query_token_allowed: bool,
+    /// Whether a WebPush subscription may name a non-https or non-routable
+    /// (loopback/RFC-1918/link-local) endpoint (#524.5). Off by default: the
+    /// dispatcher POSTs to the stored endpoint from inside the pod netns, so
+    /// an attacker-chosen one is a blind SSRF into the loopback core, the
+    /// tailnet, or the host network. An operator running an internal push
+    /// relay (or a test with a loopback stand-in service) sets it on.
+    pub push_allow_insecure_endpoints: bool,
     /// Where persistent state lives (push subscriptions, VAPID keys).
     /// Defaults to $HOME/.local/share/mydevenv2.
     pub state_dir: std::path::PathBuf,
@@ -390,6 +397,7 @@ struct FileConfig {
     gui_stream_url: Option<String>,
     gui_stream_verified: Option<bool>,
     ws_query_token_allowed: Option<bool>,
+    push_allow_insecure_endpoints: Option<bool>,
     state_dir: Option<String>,
     fcm_service_account_json: Option<String>,
     vapid_subject: Option<String>,
@@ -593,6 +601,18 @@ pub fn load(
     .or(from_file.ws_query_token_allowed)
     .unwrap_or(false);
 
+    let push_allow_insecure_endpoints = match std::env::var("ENGINE_PUSH_ALLOW_INSECURE") {
+        Ok(value) => Some(parse_bool_env("ENGINE_PUSH_ALLOW_INSECURE", &value)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_PUSH_ALLOW_INSECURE: {error}"
+            )));
+        }
+    }
+    .or(from_file.push_allow_insecure_endpoints)
+    .unwrap_or(false);
+
     let agent_auth_helper = engine_env("ENGINE_AGENT_AUTH_HELPER")
         .ok()
         .or(from_file.agent_auth_helper)
@@ -648,6 +668,7 @@ pub fn load(
             .filter(|s| !s.is_empty()),
         gui_stream_verified,
         ws_query_token_allowed,
+        push_allow_insecure_endpoints,
         state_dir: from_file
             .state_dir
             .map(std::path::PathBuf::from)

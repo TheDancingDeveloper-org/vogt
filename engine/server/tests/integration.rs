@@ -34,6 +34,8 @@ fn test_config() -> Config {
         gui_stream_url: None,
         gui_stream_verified: false,
         ws_query_token_allowed: false,
+        // The push tests subscribe a loopback http stand-in service (#524.5).
+        push_allow_insecure_endpoints: true,
         state_dir: tempfile::tempdir().unwrap().keep(),
         fcm_service_account_json: None,
         vapid_subject: "mailto:test@example.invalid".to_string(),
