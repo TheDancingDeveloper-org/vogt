@@ -225,12 +225,31 @@ async fn authenticate(
     state: &Arc<AppState>,
     legacy_token: Option<&str>,
 ) -> Option<AttachAuth> {
+    // The deprecated ?token= query path is off unless an operator opted back
+    // in (#518): a token there lands in proxy/access logs and browser history.
     if let Some(tok) = legacy_token {
-        if token_ok(state, tok) {
-            return Some(AttachAuth {
-                resume_from: None,
-                snapshot_tail_bytes: None,
-            });
+        if state.config.ws_query_token_allowed {
+            if token_ok(state, tok) {
+                tracing::warn!(
+                    target: "mydevenv2::audit",
+                    "WS attach authenticated via the deprecated ?token= query \
+                     parameter; migrate the client to first-frame auth"
+                );
+                return Some(AttachAuth {
+                    resume_from: None,
+                    snapshot_tail_bytes: None,
+                });
+            }
+            // A wrong legacy token is a guess; count it, then fall through to
+            // give the client its first-frame chance.
+            auth::record_ws_auth_failure("wrong-token").await;
+        } else {
+            tracing::warn!(
+                target: "mydevenv2::audit",
+                "WS attach supplied a ?token= query parameter but it is \
+                 disabled (set ENGINE_WS_QUERY_TOKEN=true to re-enable); \
+                 expecting first-frame auth"
+            );
         }
     }
 
@@ -247,6 +266,7 @@ async fn authenticate(
     let text = match first {
         Message::Text(s) => s,
         _ => {
+            auth::record_ws_auth_failure("malformed").await;
             close_with(socket, 4401, "auth frame required").await;
             return None;
         }
@@ -254,6 +274,7 @@ async fn authenticate(
     let parsed: ClientControl = match serde_json::from_str(&text) {
         Ok(c) => c,
         Err(_) => {
+            auth::record_ws_auth_failure("malformed").await;
             close_with(socket, 4401, "auth frame required").await;
             return None;
         }
@@ -268,6 +289,7 @@ async fn authenticate(
             snapshot_tail_bytes,
         }),
         _ => {
+            auth::record_ws_auth_failure("wrong-token").await;
             close_with(socket, 4401, "unauthorized").await;
             None
         }

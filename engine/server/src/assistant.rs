@@ -1924,6 +1924,7 @@ mod tests {
             workspace_root: std::env::temp_dir(),
             gui_stream_url: None,
             gui_stream_verified: false,
+            ws_query_token_allowed: false,
             state_dir: tempfile::tempdir().unwrap().keep(),
             fcm_service_account_json: None,
             vapid_subject: "mailto:test@example.invalid".into(),
