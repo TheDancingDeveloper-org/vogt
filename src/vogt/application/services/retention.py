@@ -44,9 +44,17 @@ def prune(ctx: AppContext, params: PruneParams) -> PruneResult:
         msg = "nothing has been swept yet; there is no history to prune"
         raise InvalidRequest(msg)
 
-    horizon = ctx.clock() - timedelta(days=ctx.config.retention_days)
+    now = ctx.clock()
+    horizon = now - timedelta(days=ctx.config.retention_days)
     report = ctx.observed.prune(
         before=horizon, protected_observation_ids=_protected_observation_ids(ctx)
+    )
+    # Retention also caps the auth-decision telemetry (#526), which otherwise
+    # grows one row per authenticated request forever. Allows get the ordinary
+    # horizon; denies (the security-interesting rows) are kept 4x longer.
+    ctx.declared.prune_auth_decisions(
+        allow_before=horizon,
+        deny_before=now - timedelta(days=ctx.config.retention_days * 4),
     )
     # Deletion is the one effect that cannot be re-derived by running the
     # operation again, so it is the least defensible of the four to have left

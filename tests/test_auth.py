@@ -210,6 +210,68 @@ def test_using_a_token_records_when(agent: AppContext) -> None:
     assert list_tokens(agent, ListTokensParams()).tokens[0].last_used_at is not None
 
 
+def test_last_used_write_is_debounced(agent: AppContext) -> None:
+    """#526: the last-used write is skipped within the debounce window.
+
+    The first use records it; a second use moments later must not open another
+    write transaction — the stored instant stays put, but no write is paid.
+    """
+    from vogt.application.services.auth import _TOUCH_DEBOUNCE
+
+    secret = _token(agent)
+    authenticate(agent, bearer=secret)
+    first = list_tokens(agent, ListTokensParams()).tokens[0].last_used_at
+    assert first is not None
+    # Same context/clock (advances by a step, well under the 5-minute window).
+    authenticate(agent, bearer=secret)
+    second = list_tokens(agent, ListTokensParams()).tokens[0].last_used_at
+    assert second == first, "a repeat use within the window does not re-touch"
+    assert _TOUCH_DEBOUNCE.total_seconds() > 0
+
+
+def test_prune_auth_decisions_caps_allows_and_keeps_denies_longer(
+    agent: AppContext,
+) -> None:
+    """#526: allows are pruned at the horizon, denies kept longer."""
+    from datetime import UTC, datetime
+
+    from vogt.core.entities import AuthDecision
+
+    def row(decision: str, at: datetime) -> None:
+        agent.declared.record_auth_decision(
+            AuthDecision(
+                id=agent.id_factory("aut"),
+                at=at,
+                decision=decision,  # type: ignore[arg-type]
+                reason_code="ok",
+                operation="work.list",
+                scope="read",
+                actor_id=None,
+                token_id=None,
+                identity_ref="agent:x",
+                transport="http",
+            )
+        )
+
+    old = datetime(2020, 1, 1, tzinfo=UTC)
+    recent = datetime(2020, 6, 1, tzinfo=UTC)
+    row("allow", old)
+    row("deny", old)
+    row("allow", recent)
+    before = len(list_auth_decisions(agent, AuthDecisionListParams()).decisions)
+    removed = agent.declared.prune_auth_decisions(
+        allow_before=datetime(2020, 3, 1, tzinfo=UTC),
+        deny_before=datetime(2019, 1, 1, tzinfo=UTC),
+    )
+    assert removed == 1  # only the old allow
+    after = list_auth_decisions(agent, AuthDecisionListParams()).decisions
+    assert len(after) == before - 1
+    assert all(
+        not (d.decision == "allow" and d.at == old) for d in after
+    ), "the old allow is gone"
+    assert any(d.decision == "deny" for d in after), "denies are kept longer"
+
+
 # -- the two gates ---------------------------------------------------------
 
 

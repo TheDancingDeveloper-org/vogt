@@ -632,6 +632,12 @@ class DeclaredStore(Protocol):
 
     def touch_token(self, token_id: str, *, at: datetime) -> None: ...
 
+    def prune_auth_decisions(
+        self, *, allow_before: datetime, deny_before: datetime
+    ) -> int:
+        """Delete auth-decision rows older than the given horizons (#526)."""
+        ...
+
     def publish_event(
         self,
         *,

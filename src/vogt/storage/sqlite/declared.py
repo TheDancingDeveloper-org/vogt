@@ -350,6 +350,34 @@ class SqliteDeclaredStore:
         finally:
             conn.close()
 
+    def prune_auth_decisions(
+        self, *, allow_before: datetime, deny_before: datetime
+    ) -> int:
+        """Delete auth-decision rows older than the given horizons (#526).
+
+        `auth_decisions` gains one row per authenticated request, allows
+        included, and nothing pruned it — unbounded growth in the authoritative
+        DB. Allows are pure telemetry and get the shorter horizon; denies are
+        the security-interesting rows and are kept longer. The `at` column is
+        indexed, so this is a single indexed range delete.
+        """
+        conn = self._open_initialized()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute(
+                "DELETE FROM auth_decisions WHERE "
+                "(decision = 'allow' AND at < ?) OR (decision = 'deny' AND at < ?)",
+                (to_iso(allow_before), to_iso(deny_before)),
+            )
+            removed = cur.rowcount
+            conn.execute("COMMIT")
+            return removed
+        except BaseException:
+            _rollback_quietly(conn)
+            raise
+        finally:
+            conn.close()
+
     def touch_token(self, token_id: str, *, at: datetime) -> None:
         """Record that a token was used, for the operator's benefit."""
         conn = self._open_initialized()
