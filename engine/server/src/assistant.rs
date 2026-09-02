@@ -1513,6 +1513,20 @@ impl AssistantRuntime {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        // Bound the injected text (#520). Steering is typed straight into an
+        // agent CLI's interactive prompt with no approval gate; a cap keeps a
+        // prompt-injected model from delivering a large attacker-authored
+        // instruction block in one shot. (The stronger fix the finding asks
+        // for — routing steer through the same PendingAction approval flow as
+        // send_input — is a larger change to the approval plumbing and is left
+        // as follow-up; this cap and the delimiter neutralisation in
+        // `untrusted`/`delimit` shrink the injection surface in the meantime.)
+        const MAX_STEER_BYTES: usize = 4096;
+        if text.len() > MAX_STEER_BYTES {
+            return Err(ApiError::BadRequest(format!(
+                "steer text exceeds the {MAX_STEER_BYTES}-byte cap"
+            )));
+        }
         let interrupt = args
             .get("interrupt")
             .and_then(Value::as_bool)
@@ -1544,8 +1558,25 @@ impl AssistantRuntime {
 /// an error message quoting a repository, a session named by an agent, and a
 /// work item's body all arrive from outside this loop, and all three have
 /// been able to carry an instruction at some point in some product.
+///
+/// The payload is neutralised first (#520): `delimit`/`untrusted` used to do
+/// no escaping, so untrusted content could close its own wrapper — a work
+/// item body containing `</vogt-data>` ends the data block and everything
+/// after it reads as model-authored instruction. `defang_delimiter` breaks any
+/// literal copy of the open/close tag so the wrapper's own tags stay the only
+/// boundaries the model sees.
 fn untrusted(kind: &str, text: &str) -> String {
-    format!("<{kind}>\n{text}\n</{kind}>")
+    let defanged = defang_delimiter(kind, text);
+    format!("<{kind}>\n{defanged}\n</{kind}>")
+}
+
+/// Break any literal `<kind>`/`</kind>` inside untrusted `text` so it cannot
+/// close or re-open the delimiter (#520). Case-insensitive — `</VOGT-DATA>`
+/// must not slip past — and it inserts a zero-width space after the `<`, which
+/// keeps the text readable to a human while the tag no longer matches.
+fn defang_delimiter(kind: &str, text: &str) -> String {
+    let out = vogt_tools::defang_tag(text, &format!("</{kind}>"));
+    vogt_tools::defang_tag(&out, &format!("<{kind}>"))
 }
 
 /// Refuse a reason that says nothing, and name what is wrong with it.
