@@ -89,8 +89,18 @@ impl Scrollback {
             self.buf.extend_from_slice(&chunk[start..]);
             return;
         }
-        let overflow = (self.buf.len() + chunk.len()).saturating_sub(self.capacity);
-        if overflow > 0 {
+        // Amortize the overflow trim (#530). A byte-exact cut on every chunk
+        // means `drain(..)` memmoves the whole retained ~capacity buffer per
+        // ≤8 KiB push once full — ~512x write amplification, the dominant
+        // steady-state CPU cost per busy session. Instead let the buffer grow
+        // by up to `slack` past capacity and drop a whole slack-worth at once,
+        // cutting amplification to ~capacity/slack (~16x at 4 MiB). The slack
+        // is a fraction of capacity so tiny test buffers still trim exactly at
+        // capacity; `total_written`/`snapshot_since` already tolerate
+        // variable-size trims.
+        let slack = self.capacity / 16;
+        if self.buf.len() + chunk.len() > self.capacity + slack {
+            let overflow = (self.buf.len() + chunk.len()) - self.capacity;
             // Drop at least the oldest `overflow` bytes, extending the cut
             // forward to just past the next newline so the retained buffer
             // begins in the terminal's ground state (see the type comment).
@@ -161,6 +171,38 @@ impl Scrollback {
     pub fn tail(&self, n: usize) -> &[u8] {
         let start = self.buf.len().saturating_sub(n);
         &self.buf[start..]
+    }
+}
+
+#[cfg(test)]
+mod amortize_tests {
+    use super::Scrollback;
+
+    #[test]
+    fn overflow_is_amortized_within_capacity_plus_slack() {
+        // capacity 160 -> slack 10. Push many small newline-terminated chunks;
+        // the buffer must stay bounded by capacity+slack, keep the newest
+        // bytes, and account total_written exactly (#530).
+        let cap = 160usize;
+        let mut sb = Scrollback::new(cap);
+        let mut written = 0u64;
+        for i in 0..500u32 {
+            let line = format!("line{i}\n");
+            sb.push(line.as_bytes());
+            written += line.len() as u64;
+            assert!(
+                sb.len() <= cap + cap / 16,
+                "buffer {} exceeded capacity+slack {}",
+                sb.len(),
+                cap + cap / 16
+            );
+        }
+        assert_eq!(sb.total_written(), written);
+        // The most recent line is retained and the retained region begins at a
+        // ground-state (post-newline) boundary.
+        let snap = sb.snapshot();
+        assert!(snap.ends_with(b"line499\n"));
+        assert!(sb.total_written() >= sb.len() as u64);
     }
 }
 
