@@ -41,6 +41,14 @@ pub enum TokenCapability {
     AgentTasksWrite,
     PushWrite,
     HistoryWrite,
+    /// Reading the archived session history (`GET /api/history/*`) — every
+    /// past session's complete output, which routinely contains pasted
+    /// secrets (#519). Gated even though it is a GET, for the same reason
+    /// `assistant` gates the durable interaction log: it is a cross-session
+    /// record, not the caller's own live transcript, so "any valid token"
+    /// is too broad a grant. The primary token holds every capability, so
+    /// the PWA and the deployment default are unaffected.
+    History,
     Assistant,
     /// Writing to vogt-core through the front door (`/api/vogt`). Reads need
     /// only a valid token; a write needs to have been granted this, because
@@ -48,7 +56,7 @@ pub enum TokenCapability {
     VogtWrite,
 }
 
-const ALL_CAPABILITIES: [TokenCapability; 9] = [
+const ALL_CAPABILITIES: [TokenCapability; 10] = [
     TokenCapability::Sessions,
     TokenCapability::FilesystemWrite,
     TokenCapability::GitWrite,
@@ -56,6 +64,7 @@ const ALL_CAPABILITIES: [TokenCapability; 9] = [
     TokenCapability::AgentTasksWrite,
     TokenCapability::PushWrite,
     TokenCapability::HistoryWrite,
+    TokenCapability::History,
     TokenCapability::Assistant,
     TokenCapability::VogtWrite,
 ];
@@ -383,6 +392,14 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
         if *method == Method::POST && (path.ends_with("/kill") || path.ends_with("/input")) {
             return Some(TokenCapability::Sessions);
         }
+        // Reading a session's detail ships its full scrollback (routinely
+        // pasted secrets), so it needs the sessions capability too (#519): a
+        // zero-capability "readonly" token must not read every live session's
+        // transcript. The WS attach (also a read of live output) is
+        // registered outside this gate and is unaffected here.
+        if *method == Method::GET {
+            return Some(TokenCapability::Sessions);
+        }
     }
     // Reading the durable interaction log is scope-gated even though it is a
     // GET (FR-T14, FR-S3): it is a cross-conversation record attributable to
@@ -425,6 +442,13 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     }
     if path.starts_with("/api/history/") && (*method == Method::DELETE || *method == Method::POST) {
         return Some(TokenCapability::HistoryWrite);
+    }
+    // Reading the archived history — every past session's complete output — is
+    // gated behind its own read capability (#519), for the same reason the
+    // assistant log read is: it is a cross-session record, not this caller's
+    // own live transcript.
+    if path.starts_with("/api/history") && *method == Method::GET {
+        return Some(TokenCapability::History);
     }
     // Everything under the Vogt front door that is not a read. The core
     // enforces its own rules on top of this — a reason on every write, the
@@ -595,6 +619,20 @@ mod tests {
             Some(TokenCapability::AgentTasksWrite)
         );
         assert_eq!(required_capability(&Method::GET, "/api/sessions"), None);
+        // #519: a session's detail read ships its scrollback, so it is gated.
+        assert_eq!(
+            required_capability(&Method::GET, "/api/sessions/abc123"),
+            Some(TokenCapability::Sessions)
+        );
+        // #519: reading archived history needs its own read capability.
+        assert_eq!(
+            required_capability(&Method::GET, "/api/history"),
+            Some(TokenCapability::History)
+        );
+        assert_eq!(
+            required_capability(&Method::GET, "/api/history/session/abc123"),
+            Some(TokenCapability::History)
+        );
         assert_eq!(
             required_capability(&Method::POST, "/api/sessions/abc123/input"),
             Some(TokenCapability::Sessions)
