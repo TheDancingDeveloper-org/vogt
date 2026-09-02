@@ -34,10 +34,59 @@ pub async fn subscribe(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SubscribeReq>,
 ) -> Result<Json<serde_json::Value>> {
+    // The dispatcher POSTs to a stored WebPush endpoint from inside the pod
+    // netns, so an attacker-chosen endpoint is a blind SSRF into loopback (the
+    // core), the tailnet, or — under the docker-socket overlay — the host
+    // network (#524.5). Require https and refuse a non-routable host at the
+    // subscribe boundary.
+    if let Subscription::WebPush { endpoint, .. } = &req.sub {
+        validate_webpush_endpoint(endpoint)?;
+    }
     let stored = state.push.add(req.sub, req.label)?;
     Ok(Json(
         json!({ "ok": true, "id": stored.id, "prefs": stored.prefs }),
     ))
+}
+
+/// Refuse a WebPush endpoint that is not an https URL to a routable host
+/// (#524.5). Hostnames are allowed (real push services use them); only an IP
+/// *literal* in a private/loopback/link-local range is rejected here, which is
+/// the direct SSRF vector.
+fn validate_webpush_endpoint(endpoint: &str) -> Result<()> {
+    let url = reqwest::Url::parse(endpoint)
+        .map_err(|_| crate::error::ApiError::BadRequest("push endpoint is not a valid URL".into()))?;
+    if url.scheme() != "https" {
+        return Err(crate::error::ApiError::BadRequest(
+            "push endpoint must be https".into(),
+        ));
+    }
+    let Some(host) = url.host_str() else {
+        return Err(crate::error::ApiError::BadRequest(
+            "push endpoint has no host".into(),
+        ));
+    };
+    // IPv6 literals arrive bracketed in a URL host.
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let blocked = match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
+            }
+            std::net::IpAddr::V6(v6) => {
+                let seg0 = v6.segments()[0];
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (seg0 & 0xfe00) == 0xfc00 // fc00::/7 unique-local
+                    || (seg0 & 0xffc0) == 0xfe80 // fe80::/10 link-local
+            }
+        };
+        if blocked {
+            return Err(crate::error::ApiError::BadRequest(
+                "push endpoint host is not routable".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +433,24 @@ pub fn spawn_digest_flusher(state: Arc<AppState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webpush_endpoint_validation_blocks_ssrf_targets() {
+        assert!(validate_webpush_endpoint("https://fcm.googleapis.com/fcm/x").is_ok());
+        assert!(
+            validate_webpush_endpoint("https://updates.push.services.mozilla.com/wp/x")
+                .is_ok()
+        );
+        // Non-https and non-routable IP literals are refused.
+        assert!(validate_webpush_endpoint("http://fcm.googleapis.com/x").is_err());
+        assert!(validate_webpush_endpoint("https://127.0.0.1/x").is_err());
+        assert!(validate_webpush_endpoint("https://10.0.0.5/x").is_err());
+        assert!(validate_webpush_endpoint("https://192.168.1.75:5500/x").is_err());
+        assert!(validate_webpush_endpoint("https://169.254.169.254/x").is_err());
+        assert!(validate_webpush_endpoint("https://[::1]/x").is_err());
+        assert!(validate_webpush_endpoint("https://[fd00::1]/x").is_err());
+        assert!(validate_webpush_endpoint("not a url").is_err());
+    }
 
     fn vogt_event(kind: &str) -> ServerEvent {
         ServerEvent::VogtChanged {

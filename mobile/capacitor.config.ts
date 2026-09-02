@@ -94,6 +94,13 @@ const config: CapacitorConfig = {
     // `http://` URL fail at runtime with a network error rather than at build
     // time with a reason; deriving it means the flag always matches the URL
     // it was set for.
+    //
+    // SECURITY (#524.13): an APK built against an `http://` URL submits the
+    // bearer token in cleartext over ANY network the device is on, not only
+    // over WireGuard. `http://` is acceptable ONLY for a tailnet front door
+    // reachable exclusively over the tailnet (the traffic is encrypted by
+    // WireGuard, not TLS). Never build an `http://` APK pointed at a host
+    // reachable off-tailnet — use `https://` there.
     cleartext: SERVER_URL.startsWith("http://"),
     androidScheme: "https",
   },

@@ -480,6 +480,15 @@ pub async fn operate(
             if branch.is_empty() {
                 return Err(ApiError::BadRequest("branch must not be empty".into()));
             }
+            // A leading-dash "branch" is parsed by git as a flag, not a ref
+            // (#524.6): `checkout -f` force-discards local modifications,
+            // `--detach`/`--merge`/`--ours` are likewise reachable. Stage/
+            // Unstage/Discard already pass `--`; Checkout did not. Reject it.
+            if branch.starts_with('-') {
+                return Err(ApiError::BadRequest(
+                    "branch name must not begin with '-'".into(),
+                ));
+            }
             if create {
                 run_git(&repo, &["checkout", "-b", branch]).await?;
             } else {

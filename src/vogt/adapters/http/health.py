@@ -131,9 +131,20 @@ def add_health_routes(
         except VogtError as exc:
             response.status_code = 503
             return Readiness(status="not_ready", detail=str(exc))
-        except Exception as exc:  # a probe must answer, not raise
+        except Exception:  # a probe must answer, not raise
+            # /health/ready is unauthenticated, so it must not hand an internal
+            # exception (absolute paths, SQLite internals) to any caller
+            # (#524.3). Log it with a correlation ref; return only the ref.
+            from uuid import uuid4
+
+            from vogt.observability import logger
+
+            ref = uuid4().hex[:12]
+            logger("health").exception("readiness probe failed (ref=%s)", ref)
             response.status_code = 503
-            return Readiness(status="not_ready", detail=f"{type(exc).__name__}: {exc}")
+            return Readiness(
+                status="not_ready", detail=f"internal error (ref {ref})"
+            )
 
         # NFR-I3. Named per store and with both numbers, because "not ready"
         # with nothing else costs whoever is holding the pager the first

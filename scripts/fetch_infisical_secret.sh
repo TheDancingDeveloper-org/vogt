@@ -47,11 +47,14 @@ test -n "$access_token" || {
   exit 1
 }
 
+# Pass the access token by env, not `--token` on argv (#524.4): argv is
+# visible in `ps`/`/proc/*/cmdline` to any other process on the runner. The
+# CLI reads INFISICAL_TOKEN as the fallback for `--token`.
+INFISICAL_TOKEN="$access_token" \
 infisical secrets get "$VOGT_FIREBASE_SECRET_NAME" \
   --domain "$INFISICAL_API_URL" \
   --projectId "$INFISICAL_PROJECT_ID" \
   --env "$INFISICAL_ENV" \
-  --token "$access_token" \
   --plain --silent >"$temp_output"
 
 python3 - "$temp_output" "$VOGT_ANDROID_EXPECTED_PACKAGE" <<'PY'
