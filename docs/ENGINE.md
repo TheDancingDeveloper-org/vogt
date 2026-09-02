@@ -177,7 +177,10 @@ export ENGINE_TOKEN="$(openssl rand -hex 24)"
 
 # Optional: scoped tokens and a write-rate cap for the primary token.
 # Capability names: sessions, filesystem-write, git-write, gui-control,
-# agent-tasks-write, push-write, history-write, assistant, vogt-write
+# agent-tasks-write, push-write, history-write, history, assistant, vogt-write
+# (`sessions` also gates reading a session's detail/scrollback; `history` gates
+# reading archived session history — both reads, gated because they expose
+# other callers' output.)
 export ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE=600
 export ENGINE_EXTRA_TOKENS_JSON='[
   {"name": "readonly", "token": "replace-with-another-16+-char-secret",
@@ -399,8 +402,8 @@ section that documents it.
 - **A valid token is enough for most routes.** Some also require a named
   capability, and those say so; where nothing is said, any valid token will
   do. The capabilities are `sessions`, `filesystem-write`, `git-write`,
-  `gui-control`, `agent-tasks-write`, `push-write`, `history-write`,
-  `assistant` and `vogt-write`; the primary token holds all nine, and a scoped
+  `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, `history`,
+  `assistant` and `vogt-write`; the primary token holds all ten, and a scoped
   token holds what its `extra_tokens` entry lists. The mapping lives in
   `required_capability` in `engine/server/src/auth.rs` and is keyed on method
   *and* path, so `GET /api/sessions` needs no capability while
@@ -408,6 +411,11 @@ section that documents it.
 - A token that authenticates but lacks the capability gets `403`, not `401`.
   The distinction is worth acting on: `401` means try a different credential,
   `403` means this credential will never work for this route.
+- **`gui-control` and `agent-tasks-write` are arbitrary code execution**, equal
+  in power to `sessions`: `gui/launch` runs any argv and an agent task runs a
+  caller-supplied `command` in a PTY, both as the pod user (which holds
+  `NOPASSWD:ALL` sudo). Grant them only where you would grant a shell; do not
+  read them as narrower than they are (#519).
 - Every mutating request (POST/PUT/PATCH/DELETE) is rate limited per token —
   600 per minute by default, `mutating_requests_per_minute` per scoped token.
   Over the limit is `429` with `Retry-After` in whole seconds.

@@ -49,6 +49,15 @@ impl GuiRegistry {
     pub fn count_alive(&self) -> usize {
         self.list_alive().len()
     }
+
+    /// Whether `pid` names a GUI process this engine launched and that is
+    /// still alive. The kill endpoint consults it so it can only signal
+    /// processes it owns (#519), never an arbitrary pid on the box.
+    pub fn is_tracked(&self, pid: u32) -> bool {
+        let mut g = self.procs.lock();
+        g.retain(|p| pid_alive(p.pid));
+        g.iter().any(|p| p.pid == pid)
+    }
 }
 
 impl Default for GuiRegistry {
@@ -146,9 +155,16 @@ pub struct KillQuery {
 }
 
 pub async fn kill_proc(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Query(q): Query<KillQuery>,
 ) -> Result<Json<serde_json::Value>> {
+    // Only signal a process this engine actually launched (#519). The handler
+    // used to SIGTERM any pid the caller named, so a `gui-control`-scoped
+    // token could kill vogt-core, tailscaled, or another session's shell —
+    // DoS well outside the "GUI launcher" contract. Consult the registry.
+    if !state.gui.is_tracked(q.pid) {
+        return Err(ApiError::NotFound);
+    }
     #[cfg(unix)]
     unsafe {
         let rc = libc::kill(q.pid as libc::pid_t, libc::SIGTERM);
@@ -286,7 +302,23 @@ fn load_features() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::gui_stream_available;
+    use super::{gui_stream_available, GuiProc, GuiRegistry};
+
+    #[test]
+    fn kill_only_targets_launched_processes() {
+        let reg = GuiRegistry::new();
+        // Our own pid stands in for a live process the engine did not launch.
+        let unlaunched = std::process::id();
+        assert!(!reg.is_tracked(unlaunched), "nothing launched yet");
+        assert!(!reg.is_tracked(4_000_000_000), "a pid we never saw");
+
+        reg.add(GuiProc {
+            pid: unlaunched,
+            command: vec!["x".to_string()],
+            launched_at: time::OffsetDateTime::now_utc(),
+        });
+        assert!(reg.is_tracked(unlaunched), "now it is one of ours");
+    }
 
     #[test]
     fn gui_visibility_requires_url_streamer_and_operator_verification() {
