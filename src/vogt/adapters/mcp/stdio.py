@@ -198,7 +198,10 @@ class StdioServer:
             from vogt.observability import logger
 
             ref = uuid4().hex[:12]
-            logger("mcp").exception("mcp tool %r failed (ref=%s)", name, ref)
+            # Don't put the caller's raw tool name in the log line — a newline
+            # in it could forge log entries (log injection). The exception
+            # traceback already carries the failing call; the ref correlates.
+            logger("mcp").exception("mcp tool call failed (ref=%s)", ref)
             return _result(
                 message_id, _tool_error("error", f"internal error (ref {ref})")
             )
