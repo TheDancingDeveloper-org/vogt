@@ -619,10 +619,13 @@ class SqliteObservedStore:
 
     def has_evidence_tables(self) -> bool:
         """Whether this store has been migrated to hold evidence yet."""
-        if self._has_evidence_cached:
-            return True
+        # The cheap file-exists stat runs every time so a store whose db is
+        # removed (retention's harsher cousin) still reports honestly; the
+        # cache only skips the expensive connection + catalog probe (#528.8).
         if not self._path.exists():
             return False
+        if self._has_evidence_cached:
+            return True
         conn = connect(self._path, create=False, synchronous=self._synchronous)
         try:
             exists = table_exists(conn, "observations")

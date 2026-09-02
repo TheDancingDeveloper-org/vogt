@@ -18,6 +18,7 @@ serves from `web/`, so "nothing is client-only" stays structurally true.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Callable
 from dataclasses import replace
@@ -185,15 +186,18 @@ def _endpoint_for(
     is_read = operation.route.method == "GET"
     annotation: Any = Annotated[params_model, Query()] if is_read else params_model
 
-    # A plain `def`, not `async def` (#525). The whole body is synchronous —
-    # authorize, the store reads, and `operation.run` (which can run a git
-    # clone, a full sweep, or a blocking engine HTTP call). FastAPI runs an
-    # `async def` path operation directly on the event loop with no threadpool
-    # offload, so every request serialized behind whichever was running and
-    # server concurrency was effectively 1. A sync `def` is dispatched to
-    # FastAPI's threadpool, so one slow operation no longer freezes every
-    # interactive endpoint.
-    def endpoint(
+    # Offload the synchronous handler off the event loop (#525). FastAPI runs
+    # an `async def` path operation directly on the loop with no threadpool
+    # hop, so `operation.run` — which can run a git clone, a full sweep, or a
+    # blocking engine HTTP call — froze every other request for its duration
+    # (server concurrency ≈ 1). We keep the handler `async` and offload only
+    # `operation.run` via `asyncio.to_thread`, so the slow work runs on a
+    # worker thread while the loop stays free. Authentication/authorization
+    # stay on the loop deliberately: `authorize_request` sets the request-actor
+    # contextvar that the access-log middleware reads *after* the handler
+    # returns, and a contextvar mutated inside a worker thread would not
+    # propagate back to it.
+    async def endpoint(
         params: BaseModel, request: Request, response: Response
     ) -> BaseModel | Response:
         if authorize_request is None:
@@ -221,7 +225,9 @@ def _endpoint_for(
         # front door stated, and only the adapter should read a request
         # (`identity.py`). A no-op unless this instance is configured as
         # fronted and a door actually said something.
-        result: BaseModel = operation.run(_with_public_identity(ctx, request), params)
+        result: BaseModel = await asyncio.to_thread(
+            operation.run, _with_public_identity(ctx, request), params
+        )
         return result
 
     endpoint.__name__ = operation.name.replace(".", "_")
