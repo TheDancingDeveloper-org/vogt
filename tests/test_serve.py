@@ -163,10 +163,15 @@ def test_a_read_token_cannot_write(authed: TestClient, secrets: dict[str, str]) 
     assert response.json()["error"]["code"] == "forbidden"
 
 
-def test_a_write_token_writes(authed: TestClient, secrets: dict[str, str]) -> None:
+def test_a_write_token_writes(
+    instance: AppContext, authed: TestClient, secrets: dict[str, str]
+) -> None:
+    # A remote root_path must be within the import root (#516); the write still
+    # succeeds when it is.
+    root_path = str(instance.config.resolved_import_root / "allowed")
     response = authed.post(
         "/api/projects",
-        json={"name": "Allowed", "root_path": "/srv/allowed", "reason": WHY},
+        json={"name": "Allowed", "root_path": root_path, "reason": WHY},
         headers={"Authorization": f"Bearer {secrets['write']}"},
     )
     assert response.status_code == 200
@@ -176,9 +181,10 @@ def test_the_write_is_attributed_to_the_token_holder(
     instance: AppContext, authed: TestClient, secrets: dict[str, str]
 ) -> None:
     """FR-S2: provenance comes from the credential, not from the request."""
+    root_path = str(instance.config.resolved_import_root / "a")
     authed.post(
         "/api/projects",
-        json={"name": "Attributed", "root_path": "/srv/a", "reason": WHY},
+        json={"name": "Attributed", "root_path": root_path, "reason": WHY},
         headers={"Authorization": f"Bearer {secrets['write']}"},
     )
     with instance.declared.read() as view:

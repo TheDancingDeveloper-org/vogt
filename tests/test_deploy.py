@@ -475,11 +475,18 @@ def test_javascript_dependency_audits_are_fatal_ci_gates() -> None:
 
 
 def test_buildkit_cache_topology_is_operator_configuration() -> None:
-    """OSR-11: public workflows consume an opaque cache endpoint."""
-    for name in ("build.yml", "release.yml", "pod-base.yml"):
+    """OSR-11: public workflows consume an opaque cache endpoint.
+
+    release.yml is the exception (#514): a signed release builds cold and no
+    longer imports the shared cache at all, so it references neither the cache
+    var nor the registry — but it must still never carry the hardcoded IP.
+    """
+    for name in ("build.yml", "pod-base.yml"):
         workflow = (WORKFLOWS / name).read_text(encoding="utf-8")
         assert "VOGT_BUILDKIT_CACHE_REGISTRY" in workflow
         assert "192.168.1.75:5500" not in workflow
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    assert "192.168.1.75:5500" not in release
 
 
 def test_ghcr_retention_uses_a_pinned_central_policy() -> None:
