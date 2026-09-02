@@ -99,6 +99,11 @@ pub async fn launch(
 
     let child = Command::new(&exe)
         .args(&args)
+        // Do not leak the engine's credentials into a launched GUI process
+        // (#511): start from the engine env with secrets stripped, exactly as
+        // PTY sessions now do.
+        .env_clear()
+        .envs(crate::pty::sanitized_child_env())
         // Detach from the parent's stdio so a backgrounded GUI app doesn't
         // wedge the parent terminal if it writes to stderr.
         .stdin(std::process::Stdio::null())

@@ -264,6 +264,46 @@ fn shell_escape(arg: &str) -> String {
     }
 }
 
+/// Whether an environment variable the engine holds is a secret a child
+/// process must never inherit (#511).
+///
+/// A PTY session, GUI process or agent-task run inherits the engine's full
+/// process environment by default (`CommandBuilder::new` copies the parent
+/// env; `tokio::process::Command` likewise). That environment carries
+/// `ENGINE_TOKEN`, `ENGINE_EXTRA_TOKENS_JSON` (every scoped token, plus any
+/// paired core tokens), `ENGINE_ASSISTANT_API_KEY`, the STT/TTS keys, the
+/// Infisical machine identity and `TAILSCALE_AUTH_KEY`. A caller holding only
+/// the `sessions` capability could `echo $ENGINE_EXTRA_TOKENS_JSON` and take
+/// every other token; prompt-injected agent content reads them for free. The
+/// capability model collapses.
+///
+/// A denylist rather than an allowlist, so the pod's toolchain, locale and
+/// agent configuration survive untouched — only credentials are dropped.
+/// Caller-supplied `spec.env` is applied *after* this base and is intentional,
+/// so it is never filtered here.
+pub(crate) fn is_secret_env(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    k.starts_with("ENGINE_")
+        || k.starts_with("INFISICAL_")
+        || k == "TAILSCALE_AUTH_KEY"
+        || k.contains("TOKEN")
+        || k.contains("SECRET")
+        || k.contains("PASSWORD")
+        || k.contains("API_KEY")
+}
+
+/// The engine's own environment with the secrets stripped — the base a child
+/// process should start from before its session/task variables are added.
+pub(crate) fn sanitized_child_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    std::env::vars_os()
+        .filter(|(k, _)| match k.to_str() {
+            Some(s) => !is_secret_env(s),
+            // A non-UTF-8 key cannot be one of our (ASCII-named) secrets.
+            None => true,
+        })
+        .collect()
+}
+
 /// Spawn a PTY-backed session running `spec.command` (or the default shell if
 /// `None`). Starts the reader thread, the exit waiter, and the activity watcher.
 ///
@@ -310,6 +350,15 @@ pub fn spawn(
         .unwrap_or_else(|| defaults.default_cwd.to_path_buf());
     let cwd_display = cwd.to_string_lossy().into_owned();
     cmd.cwd(cwd);
+    // Start from the engine's environment with the credentials stripped
+    // (#511): a child session/agent must not inherit ENGINE_TOKEN, the scoped
+    // token set, the assistant API key, the Infisical identity or the
+    // tailscale key. env_clear() drops the default parent-env copy; we then
+    // repopulate the non-secret variables the pod's shells and agents need.
+    cmd.env_clear();
+    for (k, v) in sanitized_child_env() {
+        cmd.env(k, v);
+    }
     cmd.env("TERM", "xterm-256color");
     cmd.env("MYDEVENV2_SESSION", &spec.name);
     // The session id is allocated before the spawn so the child can be told
@@ -695,5 +744,48 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
             state: new,
             activity_changed_at,
         });
+    }
+}
+
+#[cfg(test)]
+mod secret_env_tests {
+    use super::is_secret_env;
+
+    #[test]
+    fn engine_credentials_are_denied() {
+        for key in [
+            "ENGINE_TOKEN",
+            "ENGINE_EXTRA_TOKENS_JSON",
+            "ENGINE_ASSISTANT_API_KEY",
+            "MYDEVENV2_TOKEN",
+            "INFISICAL_CLIENT_ID",
+            "INFISICAL_CLIENT_SECRET",
+            "TAILSCALE_AUTH_KEY",
+            "VOGT_CORE_TOKEN",
+            "GITHUB_TOKEN",
+            "vogt_core_token",
+        ] {
+            assert!(is_secret_env(key), "{key} should be treated as a secret");
+        }
+    }
+
+    #[test]
+    fn ordinary_variables_survive() {
+        for key in [
+            "PATH",
+            "HOME",
+            "TERM",
+            "LANG",
+            "LC_ALL",
+            "SHELL",
+            "USER",
+            "MYDEVENV2_SESSION",
+            "MYDEVENV2_SESSION_ID",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
+            "XDG_RUNTIME_DIR",
+        ] {
+            assert!(!is_secret_env(key), "{key} should not be filtered");
+        }
     }
 }
