@@ -44,8 +44,12 @@ public class MainActivity extends BridgeActivity {
             return;
         }
 
-        webView.addJavascriptInterface(new ClipboardBridge(this), JS_CLIPBOARD_BRIDGE);
-        webView.addJavascriptInterface(new VoiceBridge(this), JS_VOICE_BRIDGE);
+        // The bridges are visible to every frame and origin the WebView loads,
+        // not just the PWA (#523), so each gates its sensitive methods on the
+        // WebView's current top-level origin being the trusted app origin.
+        final String allowedHost = getBridge() != null ? hostOf(getBridge().getServerUrl()) : null;
+        webView.addJavascriptInterface(new ClipboardBridge(this, webView, allowedHost), JS_CLIPBOARD_BRIDGE);
+        webView.addJavascriptInterface(new VoiceBridge(this, webView, allowedHost), JS_VOICE_BRIDGE);
         // When the notification's "End conversation" action stops the service,
         // tell the PWA so it closes the conversation on its side too.
         VoiceConversationService.setEndFromUiListener(() ->
@@ -141,13 +145,22 @@ public class MainActivity extends BridgeActivity {
      */
     static class VoiceBridge {
         private final Context context;
+        private final WebView webView;
+        private final String allowedHost;
 
-        VoiceBridge(Context context) {
+        VoiceBridge(Context context, WebView webView, String allowedHost) {
             this.context = context.getApplicationContext();
+            this.webView = webView;
+            this.allowedHost = allowedHost;
         }
 
         @JavascriptInterface
         public void startConversation() {
+            // A framed third party must not be able to spin up the mic
+            // foreground service (#523).
+            if (!topLevelHostTrusted(webView, allowedHost)) {
+                return;
+            }
             Intent intent = new Intent(context, VoiceConversationService.class)
                 .setAction(VoiceConversationService.ACTION_START);
             ContextCompat.startForegroundService(context, intent);
@@ -160,15 +173,72 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    /** The host of a URL, or null. */
+    private static String hostOf(String url) {
+        if (url == null) {
+            return null;
+        }
+        return android.net.Uri.parse(url).getHost();
+    }
+
+    /**
+     * Whether the WebView's current <em>top-level</em> document is the trusted
+     * app origin (#523). A {@code @JavascriptInterface} bridge added with
+     * {@code addJavascriptInterface} is visible to every frame and origin the
+     * WebView loads, so a bridge must refuse to act unless the top page is ours.
+     *
+     * <p>Residual limitation: this checks the top-level document, not the
+     * calling frame, so it does not stop a trusted top-level page's own
+     * embedded iframe (e.g. {@code gui_stream_url}) from calling in. Restricting
+     * per calling frame means migrating the bridge to
+     * {@code WebViewCompat.addWebMessageListener} with allowedOriginRules
+     * (which Capacitor already builds from the server URL) or a Capacitor
+     * plugin; that turns the JS contract async and is the recommended complete
+     * fix. This gate is the low-risk first layer.
+     *
+     * <p>Runs off the WebView's private JavaBridge thread, so it reads the URL
+     * via a short post to the UI thread — never a deadlock, because the UI
+     * thread is not blocked waiting on the bridge.
+     */
+    static boolean topLevelHostTrusted(final WebView webView, final String allowedHost) {
+        if (allowedHost == null || webView == null) {
+            return false;
+        }
+        final String[] holder = new String[1];
+        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+        webView.post(() -> {
+            holder[0] = webView.getUrl();
+            latch.countDown();
+        });
+        try {
+            if (!latch.await(1, java.util.concurrent.TimeUnit.SECONDS)) {
+                return false;
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        return allowedHost.equalsIgnoreCase(hostOf(holder[0]));
+    }
+
     static class ClipboardBridge {
         private final Context context;
+        private final WebView webView;
+        private final String allowedHost;
 
-        ClipboardBridge(Context context) {
+        ClipboardBridge(Context context, WebView webView, String allowedHost) {
             this.context = context.getApplicationContext();
+            this.webView = webView;
+            this.allowedHost = allowedHost;
         }
 
         @JavascriptInterface
         public String readText() {
+            // Refuse to hand the clipboard (plausibly holding tokens) to a
+            // page that is not the trusted app origin (#523).
+            if (!topLevelHostTrusted(webView, allowedHost)) {
+                return "";
+            }
             ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
             if (clipboard == null || !clipboard.hasPrimaryClip()) {
                 return "";
@@ -183,6 +253,9 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void writeText(String value) {
+            if (!topLevelHostTrusted(webView, allowedHost)) {
+                return;
+            }
             ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
             if (clipboard == null) {
                 return;
