@@ -79,6 +79,31 @@ def test_bootstrap_names_the_operator_and_mints_an_admin_token(
     assert result.token.expires_at is None
 
 
+def test_disabling_the_bootstrap_refuses_it_and_reports_closed(
+    instance: AppContext,
+) -> None:
+    """#515: an operator can refuse the unauthenticated first-run bootstrap.
+
+    A fronted/public deployment that provisions its first credential another
+    way sets install_bootstrap_enabled=false; the door is then closed even on
+    a fresh, zero-token store — no window for an internet caller to race.
+    """
+    from dataclasses import replace
+
+    disabled = replace(
+        instance,
+        config=instance.config.model_copy(
+            update={"install_bootstrap_enabled": False}
+        ),
+    )
+    assert install_status(disabled).install_mode is False
+    with pytest.raises(InstallClosed, match="disabled"):
+        install_bootstrap(disabled, InstallBootstrapParams(display_name="Ada"))
+    # And no token was minted, so the loopback path can still provision one.
+    with disabled.declared.read() as view:
+        assert not view.list_tokens(include_revoked=True, limit=1)
+
+
 def test_bootstrap_closes_install_mode(instance: AppContext) -> None:
     install_bootstrap(instance, InstallBootstrapParams(display_name="Ada"))
     assert install_status(instance).install_mode is False
