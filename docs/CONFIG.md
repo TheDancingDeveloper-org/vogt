@@ -39,6 +39,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `bootstrap_core_token_file` | `VOGT_BOOTSTRAP_CORE_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `bootstrap_core_token_actor` | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | string | `agent:vogt-engine` | behaviour |
 | `bootstrap_core_token_scopes` | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | string | `read,work.write,project.write` | behaviour |
+| `install_bootstrap_enabled` | `VOGT_INSTALL_BOOTSTRAP_ENABLED` | boolean | `True` | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
@@ -156,6 +157,10 @@ Identity the adopted core token is bound to, created if absent. Audit rows name 
 ### `bootstrap_core_token_scopes`
 
 Scopes for the adopted core token. Everything in the pod runs as one uid and can read the token file, so this scope *is* that pod's blast radius — narrow it to what the front door actually needs. `admin` is deliberately not the default.
+
+### `install_bootstrap_enabled`
+
+Whether the unauthenticated first-run install bootstrap (`POST /api/install/bootstrap`) may mint the first admin token while the token store is empty. It is safe on the loopback topology `serve` defaults to — only parties who could already mint a token over loopback reach it — but a fronted deployment proxies it through the public front door, so on every fresh deploy or store reset there is a window where any internet caller can take the instance (#515). A deployment that provisions its first credential another way (`bootstrap_core_token_file`, or an operator-adopted token) never needs the HTTP bootstrap: set this `false` to refuse it outright and close that window. When disabled the status route reports the mode closed.
 
 ### `sqlite_synchronous`
 

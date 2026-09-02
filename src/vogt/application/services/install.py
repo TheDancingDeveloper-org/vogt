@@ -62,7 +62,14 @@ def install_mode_active(view: ReadView) -> bool:
 
 def install_status(ctx: AppContext) -> InstallStatusResult:
     """Whether the first-run bootstrap is still open. Unauthenticated and
-    truthful either way: the closed answer tells a wizard to go log in."""
+    truthful either way: the closed answer tells a wizard to go log in.
+
+    An operator who has refused the bootstrap by config (#515) is closed
+    regardless of how many tokens exist — the wizard is told to go log in,
+    because a deployment that turned the door off provisions its first
+    credential another way."""
+    if not ctx.config.install_bootstrap_enabled:
+        return InstallStatusResult(install_mode=False)
     with ctx.declared.read() as view:
         return InstallStatusResult(install_mode=install_mode_active(view))
 
@@ -80,6 +87,16 @@ def install_bootstrap(
     principal in existence to attribute it to, and `ensure_actor`'s
     auto-register row says where that actor came from.
     """
+    if not ctx.config.install_bootstrap_enabled:
+        # #515: an operator who provisions the first credential another way
+        # (bootstrap_core_token_file, adoption) closes the unauthenticated
+        # door outright — no window on the public front for a caller to race.
+        msg = (
+            "install mode is disabled on this instance "
+            "(install_bootstrap_enabled=false): the first credential is "
+            "provisioned by configuration, not over this endpoint."
+        )
+        raise InstallClosed(msg)
     identity_ref = (
         params.identity_ref
         if params.identity_ref is not None
