@@ -243,6 +243,10 @@ export interface LiveOptions {
  * Nothing about the event is rendered: the handler re-reads, and the view's
  * own age badge stays the answer to "is this current".
  */
+/** The nudge coalescing window (#535): long enough to fold a write burst into
+ *  one refetch, short enough that a single change still feels live. */
+const LIVE_COALESCE_MS = 400;
+
 export function onVogtLive(handler: () => void, options: LiveOptions = {}): void {
   const allowed = () => {
     if (typeof document !== "undefined" && document.hidden) return false;
@@ -250,11 +254,33 @@ export function onVogtLive(handler: () => void, options: LiveOptions = {}): void
   };
   onMount(() => {
     if (options.onNudge !== false) {
-      const stop = onVogtChanged(() => {
+      // Coalesce the nudge fan-out (#535). Every audited write emits an event,
+      // so a bulk op or a busy agent turned N events into N full refetches on
+      // every surface (WorkItemDetail issues 6 parallel reads each). A
+      // leading+trailing throttle fires once immediately, then folds any burst
+      // within the window into a single trailing refetch.
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let coalesced = false;
+      const nudge = () => {
         if (!allowed()) return;
-        handler();
+        if (timer === null) {
+          handler();
+          timer = setTimeout(function done() {
+            timer = null;
+            if (coalesced) {
+              coalesced = false;
+              nudge();
+            }
+          }, LIVE_COALESCE_MS);
+        } else {
+          coalesced = true;
+        }
+      };
+      const stop = onVogtChanged(nudge);
+      onCleanup(() => {
+        if (timer !== null) clearTimeout(timer);
+        stop();
       });
-      onCleanup(stop);
     }
 
     if (options.onVisible === false || typeof document === "undefined") return;
