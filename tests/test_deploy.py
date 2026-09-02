@@ -715,6 +715,56 @@ def test_the_dev_pod_toolchain_is_split_into_its_own_base() -> None:
         assert tool in pod, f"the pod base must install {tool!r}"
 
 
+@pytest.mark.skipif(
+    not (REPO_ROOT / "engine" / "Dockerfile.pod").is_file(),
+    reason="the core-alone job (NFR-Q6) deletes engine/; this reads Dockerfile.pod",
+)
+def test_the_pod_base_installs_no_estate_infrastructure() -> None:
+    """The pod base is a dev-pod toolchain, not one estate's infrastructure.
+
+    Tailscale, the Infisical CLI and the Smallstep `step` CLI were installed
+    here until the published stack image became a public artifact. None of the
+    three is a development tool: Tailscale joins one tailnet, Infisical brokers
+    against one secrets manager, and `step` self-issues SSH certificates against
+    the step-ca on one host. A stranger running the published image gets the
+    surface and none of the capability.
+
+    They moved into the operator's private overlay, which is `FROM` the
+    published digest and adds them back — the same relationship
+    `engine/Dockerfile` stage 3 states about the core ("the private path is the
+    public path plus configuration ... now it is a digest"), applied to the
+    whole stack.
+
+    Asserted here because the pod base is the easiest place to put a tool back:
+    it is the layer that already installs forty other things, and one more
+    `apt-get install` reads as ordinary. `rclone` is deliberately not in this
+    list — it is general-purpose and carries no estate.
+
+    The helper *scripts* are a different question and stay: they are tested from
+    the repo and are simply not activated in a generic image. This is about what
+    the base installs, so it reads install directives rather than any mention.
+    """
+    pod = (REPO_ROOT / "engine" / "Dockerfile.pod").read_text("utf-8")
+    install_lines = "\n".join(
+        line
+        for line in pod.splitlines()
+        if not line.lstrip().startswith("#") and line.strip()
+    )
+    for tool in ("tailscale", "infisical", "step-cli"):
+        assert tool not in install_lines.lower(), (
+            f"{tool!r} is estate infrastructure and belongs in the operator's "
+            "private overlay (FROM the published digest), not in the pod base "
+            "every public consumer pulls"
+        )
+    # The overlay's own proof is that it can still be added back on top, which
+    # is what the public extension mechanism documents.
+    customisation = (REPO_ROOT / "docs" / "CUSTOMISATION.md").read_text("utf-8")
+    assert "Extending the stack image" in customisation, (
+        "removing these only works because the public docs state how a "
+        "deployment layers its own tools onto the published digest"
+    )
+
+
 @pytest.mark.parametrize("workflow", ["build.yml", "release.yml"])
 def test_both_image_workflows_supply_the_pod_base_by_digest(workflow: str) -> None:
     """#184: pod-base is a prerequisite and its digest is what the build uses.

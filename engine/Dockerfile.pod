@@ -155,51 +155,37 @@ RUN api="https://api.github.com/repos/github/github-mcp-server/releases/latest" 
     && install -m 755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
     && rm -f /tmp/github-mcp-server-release.json /tmp/github-mcp-server.tar.gz /tmp/github-mcp-server
 
-# Tailscale — OPTIONAL. The client is installed here, but nothing joins a
-# tailnet by default: `entrypoint.sh` runs `tailscale up` only when
-# `TAILSCALE_AUTH_KEY` is set (and the pod is given the TUN device +
-# NET_ADMIN). A generic image left with that variable unset never touches
-# Tailscale, so this line bakes in a capability, not a network. Estate pods opt
-# in via `deploy/estate.overlay.yml`.
-RUN . /etc/os-release \
-    && curl -fsSL "https://pkgs.tailscale.com/stable/ubuntu/${VERSION_CODENAME}.noarmor.gpg" \
-       > /usr/share/keyrings/tailscale-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/tailscale-archive-keyring.gpg] \
-            https://pkgs.tailscale.com/stable/ubuntu ${VERSION_CODENAME} main" \
-       > /etc/apt/sources.list.d/tailscale.list \
-    && apt-get update && apt-get install -y --no-install-recommends tailscale \
-    && rm -rf /var/lib/apt/lists/*
+# Tailscale, the Infisical CLI and the Smallstep `step` CLI used to be
+# installed here and are not any more.
+#
+# None of the three is a dev-pod tool. Tailscale joins one tailnet, Infisical
+# brokers against one secrets manager, and `step` self-issues SSH certificates
+# against the step-ca on one host — they are this estate's infrastructure, and
+# a stranger running the published image gets three daemons' worth of surface
+# for capabilities they cannot use. That was tolerable while the pod base was
+# private. It is not the shape of a public artifact, and the published stack
+# image is now exactly that: the generic release carries the agent CLIs and no
+# estate integrations at all.
+#
+# So they moved one layer up, into the operator's private overlay, which is
+# `FROM` the published digest and adds them back. That is the same relationship
+# `engine/Dockerfile` stage 3 already states about the core — "the private path
+# is the public path plus configuration ... now it is a digest" — applied to the
+# whole stack. `docs/CUSTOMISATION.md` documents the mechanism publicly.
+#
+# Removing them is inert for a generic pod rather than a behaviour change:
+# `entrypoint.sh`'s tailscale block is fully gated on `TAILSCALE_AUTH_KEY` or a
+# persisted `/var/lib/tailscale/tailscaled.state`, so with neither it never
+# touches the binary; the Infisical agent-auth helper is env-gated and
+# auto-selects only when a secrets-manager identity is present; nothing invokes
+# `step` unprompted. The estate helper scripts stay in the repo and stay tested
+# — they are simply not activated in a generic image.
+#
+# `rclone` deliberately stays: it is a general-purpose tool with no estate in
+# it, and the pod uses it for ordinary transfers.
 
 # rclone — official installer resolves + verifies latest itself.
 RUN curl -fsSL https://rclone.org/install.sh | bash
-
-# Infisical CLI
-RUN install -m 0755 -d /usr/share/keyrings \
-    && curl -1sLf https://artifacts-cli.infisical.com/infisical.gpg \
-       | gpg --dearmor -o /usr/share/keyrings/infisical-archive-keyring.gpg \
-    && chmod 0644 /usr/share/keyrings/infisical-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/infisical-archive-keyring.gpg] https://artifacts-cli.infisical.com/deb stable main" \
-       > /etc/apt/sources.list.d/infisical.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends infisical \
-    && rm -rf /var/lib/apt/lists/*
-
-# Smallstep `step` CLI — used to self-issue short-lived SSH certificates against
-# the step-ca on Node B (`step ssh certificate ...`), the only path to host-shell
-# SSH for in-pod agents. Installed from the official .deb (lands at /usr/bin/step).
-# No apt repo for this one, and GitHub doesn't offer a stable "latest" download
-# URL — resolve the latest release tag via the API, then verify the asset
-# against the sha256 digest that same API response publishes.
-RUN api="https://api.github.com/repos/smallstep/cli/releases/latest" \
-    && curl -fsSL "$api" -o /tmp/step-release.json \
-    && step_version=$(jq -r '.tag_name | ltrimstr("v")' /tmp/step-release.json) \
-    && asset_url=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .browser_download_url' /tmp/step-release.json) \
-    && asset_digest=$(jq -r --arg v "$step_version" '.assets[] | select(.name == "step-cli_" + $v + "-1_amd64.deb") | .digest | ltrimstr("sha256:")' /tmp/step-release.json) \
-    && curl -fsSL "$asset_url" -o /tmp/step-cli.deb \
-    && echo "${asset_digest}  /tmp/step-cli.deb" | sha256sum -c - \
-    && apt-get install -y --no-install-recommends /tmp/step-cli.deb \
-    && rm -f /tmp/step-cli.deb /tmp/step-release.json \
-    && rm -rf /var/lib/apt/lists/*
 
 # Sway (headless Wayland compositor) + minimal apps for in-pod GUI testing
 RUN apt-get update && apt-get install -y --no-install-recommends \
