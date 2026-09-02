@@ -27,11 +27,13 @@ from vogt.storage.interface import WriteTxn
 from tests.conftest import StepClock
 
 
-def _register(context: AppContext, name: str = "Example") -> str:
+def _register(
+    context: AppContext, name: str = "Example", root_path: str = "/srv/example"
+) -> str:
     result = register_project(
         context,
         RegisterProjectParams(
-            name=name, root_path="/srv/example", reason="registering for a test"
+            name=name, root_path=root_path, reason="registering for a test"
         ),
     )
     return result.project.id
@@ -115,7 +117,12 @@ def test_an_unseen_principal_is_auto_registered_and_explained(
         # sequential ids would collide.
         id_factory=new_id,
     )
-    _register(agent_context, name="Agent Project")
+    # A non-local (token) principal must register within the import root (#516).
+    _register(
+        agent_context,
+        name="Agent Project",
+        root_path=str(agent_context.config.resolved_import_root / "agent-project"),
+    )
 
     with instance.declared.read() as view:
         actor = view.actor_by_identity("agent:claude-code")

@@ -49,10 +49,13 @@ FORGE_PUBLISH = "forge.publish"
 FORGE_PUBLISHED_EVENT = "forge.published"
 
 #: Publish resolves its provider before a repository exists to name, so the
-#: host is probed with a placeholder URL. GitHub-only is the same v1 ceiling
-#: the whole write path holds (`_writer_provider` says so too); a second
-#: forge makes the target host a parameter, not a constant.
-_HOST_PROBE_URL = "https://github.com/-/-"
+#: host is probed with a placeholder URL. Only the host is read; the owner and
+#: repo are placeholders, but they must still parse as valid names (#517
+#: tightened `repo_of` to reject non-name owner/repo), so `probe/probe` rather
+#: than the old `-/-` sentinel. GitHub-only is the same v1 ceiling the whole
+#: write path holds (`_writer_provider` says so too); a second forge makes the
+#: target host a parameter, not a constant.
+_HOST_PROBE_URL = "https://github.com/probe/probe"
 
 
 def publish_project(ctx: AppContext, params: ForgePublishParams) -> ForgePublishResult:
