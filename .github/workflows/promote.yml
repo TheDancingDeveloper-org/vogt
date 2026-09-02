@@ -164,11 +164,11 @@ jobs:
 
           This PR was opened by the **promote** workflow after its approval gate.
 
-          - source: `$SOURCE@$SOURCE_SHA`
-          - target before promotion: `$TARGET@$TARGET_SHA`
+          - source: \`$SOURCE@$SOURCE_SHA\`
+          - target before promotion: \`$TARGET@$TARGET_SHA\`
           - ancestry: fast-forward only
-          - required source checks: `ci`, `runner-policy`
-          - verified dev deployment receipt: `${{ steps.refs.outputs.verified_dev_receipt_run || 'not applicable' }}`
+          - required source checks: \`ci\`, \`runner-policy\`
+          - verified dev deployment receipt: \`${{ steps.refs.outputs.verified_dev_receipt_run || 'not applicable' }}\`
 
           Merge only after the target branch checks and normal review policy
           pass. The subsequent stage must be dispatched separately; no workflow
