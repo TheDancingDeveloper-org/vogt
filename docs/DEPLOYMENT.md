@@ -460,9 +460,9 @@ own Android job rather than from inside a pod.
 
 ### 7.1 Promote `dev` to production
 
-Promotion is two explicit, fast-forward-only pull requests. First deploy the
+Promotion is two explicit, fast-forward-only pushes. First deploy the
 exact `dev-<sha>` images and obtain the verified receipt; the promotion
-workflow refuses to open `dev → main` without that receipt. Run **Actions →
+workflow refuses to promote `dev → main` without that receipt. Run **Actions →
 deploy dev**, provide the current full `dev` SHA, type `DEPLOY-DEV`, and keep
 the receipt URL and artifact with the change record. The workflow verifies both
 signed images, updates the two active digest pins in the operator-managed dev
@@ -477,23 +477,30 @@ authentication, a representative core read/write path, the engine/PWA front
 door, and the visible canonical product version/provenance. A failed or stale
 receipt is not a promotion approval.
 
-Then promotion is two explicit, fast-forward-only pull requests. Run **Actions →
-promote**, choose `dev-to-main`, type `PROMOTE`, and confirm the generated PR
-gets its required review and checks. The workflow checks that the source branch
-is green (`ci` and `runner-policy`) and opens `dev → main`; it never pushes a
-branch. Merge that PR only after its target checks pass. Dispatch the same
-workflow again with `main-to-prod`, merge that PR after the production branch
-checks pass, and only then continue below. The promotion-policy check rejects
-every other PR edge into `main` or `prod`. On GitHub plans that support it, the
-workflow's `promote-main` and `promote-prod` environments can add a separate
-reviewer gate before a PR is opened.
+Then promotion is two explicit, fast-forward-only pushes. Run **Actions →
+promote**, choose `dev-to-main`, and type `PROMOTE`. The workflow verifies
+that the target is an ancestor of the source, that the source branch is green
+(`ci` and `runner-policy`), and that the verified dev deployment receipt
+covers the exact source SHA; only then does it fast-forward `main` to that
+SHA. Dispatch the same workflow again with `main-to-prod`, and only then
+continue below.
 
-Before the first run, add the `VOGT_PROMOTION_TOKEN` repository secret. It
-should be a fine-grained token owned by the release operator with **Pull
-requests: read and write** and **Contents: read** on this repository. A
-dedicated token is required because a pull request created with the default
-Actions token does not start another workflow run; without it, the required
-promotion checks would remain pending.
+GitHub has no fast-forward merge method — every PR merge, rebase merge
+included, rewrites the promoted commits' SHAs, which makes the source branch
+a non-ancestor of the target and deadlocks the next stage's ancestry gate.
+Promotion therefore never goes through a pull request: the
+`release-branch-promotion` ruleset blocks deletions and force pushes on
+`main` and `prod` outright and requires green `ci` and `runner-policy`
+checks on any pushed commit — which a fast-forward of the validated source
+SHA carries by construction, and an unvalidated commit never can. The
+promotion-policy check fails any stray PR into a release branch early with
+the reason. The promoted commit keeps the checks it earned on the
+source branch — a fast-forward moves the ref to the identical SHA — and the
+workflow dispatches the ref-bound pipelines itself: `build.yml` for the
+branch-scoped image tags, plus `ci.yml` on `prod` for the production Android
+APK. No token or secret is required beyond the workflow's own. On GitHub
+plans that support it, the `promote-main` and `promote-prod` environments
+can add a separate reviewer gate before the push.
 
 The Android jobs read their Firebase client configuration from Infisical at
 build time. Configure these repository-level GitHub values before a push to

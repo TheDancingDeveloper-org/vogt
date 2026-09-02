@@ -66,8 +66,8 @@ can race the idempotent `vogt init` bootstrap and the healthcheck's
 **Add the engine (the PWA).** The engine overlay builds the Rust engine from
 this checkout and fronts the core with it, serving the Solid PWA at `/`; see
 [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for the tour. The engine image lifts
-the core image in (`CORE_IMAGE`), so until the `vogt` package is public, point
-it at the core you build here by layering all three files and naming the local
+the core image in (`CORE_IMAGE`); to run against the core you build here
+instead of the published image, layer all three files and name the local
 core:
 
 ```console
