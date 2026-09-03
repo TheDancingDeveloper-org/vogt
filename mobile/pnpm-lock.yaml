@@ -10,13 +10,16 @@ overrides:
   uuid: 11.1.1
   '@xmldom/xmldom': '>=0.9.12'
 
+patchedDependencies:
+  '@capacitor-community/speech-recognition@7.0.1': 845252f29b96eb5c4aabb205464b5584fc4ecd5fc6a49796b25cbe605a1a062c
+
 importers:
 
   .:
     dependencies:
       '@capacitor-community/speech-recognition':
         specifier: ^7.0.1
-        version: 7.0.1(@capacitor/core@8.5.0)
+        version: 7.0.1(patch_hash=845252f29b96eb5c4aabb205464b5584fc4ecd5fc6a49796b25cbe605a1a062c)(@capacitor/core@8.5.0)
       '@capacitor/android':
         specifier: ^8.5.0
         version: 8.5.0(@capacitor/core@8.5.0)
@@ -441,7 +444,7 @@ packages:
 
 snapshots:
 
-  '@capacitor-community/speech-recognition@7.0.1(@capacitor/core@8.5.0)':
+  '@capacitor-community/speech-recognition@7.0.1(patch_hash=845252f29b96eb5c4aabb205464b5584fc4ecd5fc6a49796b25cbe605a1a062c)(@capacitor/core@8.5.0)':
     dependencies:
       '@capacitor/core': 8.5.0
 

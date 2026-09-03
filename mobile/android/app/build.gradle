@@ -110,7 +110,13 @@ android {
             // mode is the default, and res/raw/keep.xml pins the visible
             // branding (launcher icon + splash) as a documented safety net.
             shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // proguard-android-optimize.txt, not proguard-android.txt: AGP 9.0
+            // removed the latter because it bundles -dontoptimize, which holds
+            // R8 back from the optimizations this whole change is meant to
+            // enable (#558). Our keep rules pin the Capacitor bridge/plugin/JS
+            // surface, so the extra optimization has nothing to safely strip
+            // from it.
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
 }
