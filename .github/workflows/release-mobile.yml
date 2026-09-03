@@ -51,6 +51,10 @@ jobs:
         with:
           node-version: "22"
 
+      # `pnpm install` below needs pnpm on PATH: the runner ships node but not
+      # pnpm, so set it up per-job exactly as ci.yml and release.yml do.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+
       # The upload key is the recoverable one we hold — the same estate keystore
       # the APK job signs with. Absent, stop rather than ship a debug-signed
       # bundle under a release tag (a new key is a different app identity that
