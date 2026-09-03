@@ -55,7 +55,7 @@ def main() -> int:
         base += "/api"
     slug = _require("INFISICAL_PROJECT_SLUG")
     env = _require("INFISICAL_ENV")
-    secret_name = _require("SECRET_NAME")
+    key_name = _require("SECRET_NAME")
     output_path = Path(_require("OUTPUT_PATH"))
 
     login = _api(
@@ -86,26 +86,26 @@ def main() -> int:
     )
     result = _api(
         base,
-        f"/v3/secrets/raw/{urllib.parse.quote(secret_name, safe='')}?{query}",
+        f"/v3/secrets/raw/{urllib.parse.quote(key_name, safe='')}?{query}",
         token,
         None,
     )
     secret = result.get("secret") if isinstance(result, dict) else None
     value = secret.get("secretValue") if isinstance(secret, dict) else None
     if not isinstance(value, str) or not value:
-        raise SystemExit(f"Infisical returned no value for {slug}/{env}/{secret_name}")
+        raise SystemExit(f"Infisical returned no value for {slug}/{env}/{key_name}")
 
     try:
         json.loads(value)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"{secret_name} is not valid JSON: {exc}") from exc
+        raise SystemExit(f"{key_name} is not valid JSON: {exc}") from exc
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     # Owner-only, and created without a world-readable window.
     fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(value)
-    print(f"Fetched {secret_name} from {slug}/{env}")
+    print(f"Fetched {key_name} from {slug}/{env}")
     return 0
 
 
