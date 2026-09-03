@@ -304,6 +304,44 @@ pub(crate) fn sanitized_child_env() -> Vec<(std::ffi::OsString, std::ffi::OsStri
         .collect()
 }
 
+/// Whether an environment variable is one the agent-auth helper (and only the
+/// helper) is re-granted on top of [`sanitized_child_env`].
+///
+/// #511 strips the Infisical machine identity and the `ENGINE_AGENT_AUTH_*`
+/// manifest from every child. The trusted helper needs exactly these to broker
+/// the agent's tokens, and drops them again before it launches the user's
+/// shell (`engine/deploy/agent-auth.sh`). This is a tight allowlist, not an
+/// exemption from stripping: the broad engine secrets (`ENGINE_TOKEN`, the
+/// scoped token set, the assistant/STT/TTS keys, `TAILSCALE_AUTH_KEY`) are
+/// still withheld from the helper.
+fn is_agent_auth_helper_env(key: &str) -> bool {
+    let k = key.to_ascii_uppercase();
+    matches!(
+        k.as_str(),
+        "INFISICAL_API_URL"
+            | "INFISICAL_CLIENT_ID"
+            | "INFISICAL_CLIENT_SECRET"
+            | "ENGINE_INFISICAL_ENV"
+            // Secret *names* (which secret to fetch), not secret values —
+            // stripped by is_secret_env only for containing "SECRET". The
+            // helper needs them to name the Cadastre/Vogt tokens it brokers.
+            | "MYDEVENV2_CADASTRE_SECRET_NAME"
+            | "MYDEVENV2_VOGT_SECRET_NAME"
+    ) || k.starts_with("ENGINE_AGENT_AUTH_")
+}
+
+/// The subset of the engine's environment the agent-auth helper is re-granted:
+/// the brokering identity and manifest [`is_agent_auth_helper_env`] names, which
+/// [`sanitized_child_env`] would otherwise have stripped.
+fn agent_auth_helper_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    std::env::vars_os()
+        .filter(|(k, _)| match k.to_str() {
+            Some(s) => is_agent_auth_helper_env(s),
+            None => false,
+        })
+        .collect()
+}
+
 /// Spawn a PTY-backed session running `spec.command` (or the default shell if
 /// `None`). Starts the reader thread, the exit waiter, and the activity watcher.
 ///
@@ -328,6 +366,11 @@ pub fn spawn(
         .openpty(size)
         .map_err(|e| ApiError::Pty(format!("openpty: {e}")))?;
 
+    // Whether this spawn is the trusted agent-auth helper itself (rather than a
+    // caller command or a bare shell). The helper brokers agent tokens out of
+    // Infisical and needs the machine identity #511 otherwise strips; it is
+    // re-granted below and drops it again before it execs the user's shell.
+    let mut spawning_agent_auth_helper = false;
     let mut cmd = match spec.command.as_ref() {
         Some(argv) if !argv.is_empty() => {
             let mut c = CommandBuilder::new(&argv[0]);
@@ -337,6 +380,7 @@ pub fn spawn(
             c
         }
         _ if defaults.auto_agent_auth => {
+            spawning_agent_auth_helper = true;
             let mut c = CommandBuilder::new(defaults.agent_auth_helper);
             c.arg("shell");
             c
@@ -358,6 +402,17 @@ pub fn spawn(
     cmd.env_clear();
     for (k, v) in sanitized_child_env() {
         cmd.env(k, v);
+    }
+    // The agent-auth helper is the one child that legitimately needs the
+    // brokering identity #511 strips: it reads the Infisical machine identity
+    // and the ENGINE_AGENT_AUTH_* manifest to mint the agent's git/gh/MCP
+    // tokens, then unsets them before it launches the user's shell. Re-grant
+    // exactly those variables — and only to the helper command, never to a
+    // caller command or a bare shell.
+    if spawning_agent_auth_helper {
+        for (k, v) in agent_auth_helper_env() {
+            cmd.env(k, v);
+        }
     }
     cmd.env("TERM", "xterm-256color");
     cmd.env("MYDEVENV2_SESSION", &spec.name);
@@ -749,7 +804,54 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
 
 #[cfg(test)]
 mod secret_env_tests {
-    use super::is_secret_env;
+    use super::{is_agent_auth_helper_env, is_secret_env};
+
+    #[test]
+    fn agent_auth_helper_regains_only_the_brokering_inputs() {
+        // Every variable the helper is re-granted must be one is_secret_env
+        // would otherwise strip — the re-grant is meaningless (or a bug) for a
+        // variable that already survives sanitisation.
+        for key in [
+            "INFISICAL_API_URL",
+            "INFISICAL_CLIENT_ID",
+            "INFISICAL_CLIENT_SECRET",
+            "ENGINE_INFISICAL_ENV",
+            "ENGINE_AGENT_AUTH_SECRETS",
+            "ENGINE_AGENT_AUTH_GH_TOKEN_FROM",
+            "ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID",
+            "MYDEVENV2_CADASTRE_SECRET_NAME",
+            "MYDEVENV2_VOGT_SECRET_NAME",
+        ] {
+            assert!(
+                is_agent_auth_helper_env(key),
+                "{key} should reach the helper"
+            );
+            assert!(
+                is_secret_env(key),
+                "{key} is re-granted, so it must be one #511 strips"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_auth_helper_never_regains_the_broad_engine_secrets() {
+        // The helper needs the Infisical identity, not the engine's own token
+        // set, assistant/STT keys or the tailscale key.
+        for key in [
+            "ENGINE_TOKEN",
+            "ENGINE_EXTRA_TOKENS_JSON",
+            "ENGINE_ASSISTANT_API_KEY",
+            "TAILSCALE_AUTH_KEY",
+            "VOGT_CORE_TOKEN",
+            "GITHUB_TOKEN",
+            "MYDEVENV2_TOKEN",
+        ] {
+            assert!(
+                !is_agent_auth_helper_env(key),
+                "{key} must not be re-granted to the helper"
+            );
+        }
+    }
 
     #[test]
     fn engine_credentials_are_denied() {
