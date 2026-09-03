@@ -253,6 +253,19 @@ load_agent_environment() {
 
     export GIT_ASKPASS=/usr/local/bin/mydevenv2-git-askpass
     export GIT_TERMINAL_PROMPT=0
+
+    # Drop the brokering identity before the shell/command this helper launches.
+    # The engine re-grants exactly these to the helper (they are otherwise
+    # stripped from every child, #511); every Infisical secret is now fetched,
+    # so the launched shell must not keep the machine identity that could read
+    # the rest of the vault, nor the manifest that names what to read. The
+    # brokered agent tokens exported above are kept — that is the whole point.
+    unset INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET INFISICAL_API_URL \
+        ENGINE_INFISICAL_ENV ENGINE_AGENT_AUTH_SECRETS \
+        ENGINE_AGENT_AUTH_GH_TOKEN_FROM ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID \
+        ENGINE_AGENT_AUTH_PROBES \
+        MYDEVENV2_CADASTRE_SECRET_NAME MYDEVENV2_VOGT_SECRET_NAME \
+        2>/dev/null || true
 }
 
 # The service-probe list is configuration, not a baked-in estate service map.
