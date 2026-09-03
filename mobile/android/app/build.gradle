@@ -105,9 +105,11 @@ android {
             // surface Capacitor resolves reflectively (which R8 cannot see) —
             // not leaving R8 off. See that file for each rule and its reason.
             minifyEnabled true
-            // Resource shrinking is a follow-up (#557), enabled in its own
-            // commit so a regression can be bisected apart from code shrinking.
-            shrinkResources false
+            // Resource shrinking (#557): drops unused resources from the
+            // release bundle. Valid only alongside minifyEnabled true. Safe
+            // mode is the default, and res/raw/keep.xml pins the visible
+            // branding (launcher icon + splash) as a documented safety net.
+            shrinkResources true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }

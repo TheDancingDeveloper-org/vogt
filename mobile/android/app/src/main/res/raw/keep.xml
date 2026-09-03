@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Resource-shrinker keep list (#557).
+
+  With `shrinkResources true`, R8's resource shrinker removes resources it
+  cannot see a reference to. This app has no `Resources.getIdentifier(...)` or
+  other by-name resource lookups (the WebView loads a remote front door, so the
+  UI is web, not Android resources), so nothing here is strictly required — the
+  shrinker keeps everything below via the static references in AndroidManifest
+  and styles.xml already.
+
+  These are pinned anyway as a documented safety net for the visible branding
+  the acceptance criteria call out (launcher icon + splash must render): they
+  are the resources whose accidental removal would be user-visible and silent,
+  so it is worth stating that they must survive rather than trusting inference.
+
+  `shrinkMode="safe"` (the default) is left in force: a resource that later
+  gains a dynamic reference is kept rather than stripped.
+-->
+<resources xmlns:tools="http://schemas.android.com/tools"
+    tools:keep="@mipmap/ic_launcher,@mipmap/ic_launcher_round,@drawable/splash,@color/ic_launcher_background" />
