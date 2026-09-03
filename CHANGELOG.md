@@ -14,6 +14,35 @@ git log rather than being reconstructed here.
 
 Nothing yet.
 
+## [0.5.1] - 2026-09-03
+
+A patch on 0.5.0: a terminal-startup regression fix, and the Android app moves
+to its published identity. No schema migration is required.
+
+### Changed
+
+- **Android applicationId is now `com.thedancingdeveloper.vogt`** (dev builds
+  `com.thedancingdeveloper.vogt.dev`), reverse-DNS of the app's own domain and
+  the identity the Google Play record binds to. A new applicationId is a new
+  app: there is no in-place upgrade from an earlier build — it installs
+  alongside, and push re-registers against the new id.
+
+### Added
+
+- **A Google Play release lane.** A `v*` tag builds a signed Android App
+  Bundle and, when publishing is armed, delivers it to the Play internal
+  testing track — a laptop-free pipeline that signs with an upload key and
+  lets Google hold the app-signing key.
+
+### Fixed
+
+- **Terminal sessions start again when automatic agent authentication is on.**
+  A session's shell is launched through a credential-brokering helper; the
+  0.5.0 security pass had stripped the very credentials that helper needs, so
+  every terminal exited immediately. The helper now receives exactly what it
+  needs and drops it again before it hands control to the shell, so the shell
+  still never inherits the broker identity.
+
 ## [0.5.0] - 2026-09-02
 
 The first generic release: the published all-in-one image now works out of

@@ -48,7 +48,7 @@ services:
     # `prod-<sha>` tags in the same repository are the maintainer's own pods:
     # same CLIs, plus estate integrations that address one estate's
     # infrastructure and mean nothing outside it. See DEPLOYMENT.md §7.
-    image: ${VOGT_STACK_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.0}
+    image: ${VOGT_STACK_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.1}
     restart: unless-stopped
 
     # tini as PID 1 reaps the processes agent sessions leave behind. The
