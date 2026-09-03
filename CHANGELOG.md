@@ -14,6 +14,19 @@ git log rather than being reconstructed here.
 
 Nothing yet.
 
+## [0.5.2] - 2026-09-03
+
+A patch that makes the Google Play release lane work end to end. No user-facing
+runtime change and no schema migration.
+
+### Fixed
+
+- **The Play release lane builds and uploads.** `release-mobile.yml` now sets
+  pnpm up with a pinned version, fetches the production Firebase config and the
+  Play service account without the `infisical` CLI (which is not present on
+  every self-hosted runner), and the Android build targets API 36 to satisfy
+  Google Play's current target-SDK requirement.
+
 ## [0.5.1] - 2026-09-03
 
 A patch on 0.5.0: a terminal-startup regression fix, and the Android app moves
