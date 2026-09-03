@@ -97,12 +97,16 @@ android {
             if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             }
-            // Capacitor discovers and invokes parts of its bridge and plugin surface
-            // dynamically. R8's optimizing pass merged BridgeActivity into our
-            // MainActivity in the published APK, which made the release build exit
-            // during startup on a real device. Keep release builds unoptimized until
-            // the complete native launch path is covered on-device.
-            minifyEnabled false
+            // R8 code shrinking + obfuscation (#556). This was previously off:
+            // with an empty proguard-rules.pro, R8's optimizing pass merged
+            // BridgeActivity into MainActivity and the release build crashed at
+            // startup on a real device. The fix is the keep-rules now in
+            // proguard-rules.pro — they pin the bridge/plugin/JS-interface
+            // surface Capacitor resolves reflectively (which R8 cannot see) —
+            // not leaving R8 off. See that file for each rule and its reason.
+            minifyEnabled true
+            // Resource shrinking is a follow-up (#557), enabled in its own
+            // commit so a regression can be bisected apart from code shrinking.
             shrinkResources false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
