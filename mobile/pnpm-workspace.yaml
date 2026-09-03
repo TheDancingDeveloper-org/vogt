@@ -5,3 +5,5 @@ overrides:
   # @capacitor/cli tooling pulls a vulnerable @xmldom/xmldom (build-time only,
   # not shipped in the APK); force past the moderate advisory GHSA-6gmq-8vp8-gcm6.
   "@xmldom/xmldom": ">=0.9.12"
+patchedDependencies:
+  '@capacitor-community/speech-recognition@7.0.1': patches/@capacitor-community__speech-recognition@7.0.1.patch
