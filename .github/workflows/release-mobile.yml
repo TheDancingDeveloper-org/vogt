@@ -1,0 +1,180 @@
+# Signed Android App Bundle for the Google Play **internal** track, following
+# the estate google-play-release pattern (workspace skill; proven on
+# PaddockMuster). See docs/DEPLOYMENT.md and the skill for the signing model.
+#
+# Vogt-specific shape: one [self-hosted] job (the estate runner-policy requires
+# self-hosted for every job, and the build needs the estate Android SDK plus the
+# production Firebase config from Infisical — neither reachable from a
+# GitHub-hosted runner). Vogt is Capacitor, so the bundle comes from
+# `./gradlew bundleRelease`, not `flutter build appbundle`; the version name and
+# code come from the product version baked into build.gradle.
+#
+# Signing model (skill §1): Google holds the app-signing key (Play App Signing);
+# we hold the recoverable *upload* key — the existing estate keystore
+# (MYDEVENV2_ANDROID_KEYSTORE_*). applicationId `com.thedancingdeveloper.vogt`
+# is reverse-DNS of the owned domain and is immutable after first upload.
+#
+# Dry-run / first-upload safety: the Play upload is gated on
+# PLAY_SERVICE_ACCOUNT_JSON. Until that secret exists the job still produces the
+# signed AAB and keeps it as a run artifact (proving the path end to end) and
+# skips the upload. Vogt's keystore is always the *real* upload key, so there is
+# no throwaway-key first-upload hazard (skill §1 warning); the gate is purely
+# "is there a service account to upload with yet". Enabling the upload also
+# needs ruby on the runner (fastlane) — a runner-provisioning step, not done
+# here.
+name: release-mobile
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version_name:
+        description: Informational only — the AAB version comes from the product version in build.gradle
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  PACKAGE_NAME: com.thedancingdeveloper.vogt
+
+jobs:
+  android:
+    name: build the signed Play AAB and upload to internal testing
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+
+      # The upload key is the recoverable one we hold — the same estate keystore
+      # the APK job signs with. Absent, stop rather than ship a debug-signed
+      # bundle under a release tag (a new key is a different app identity that
+      # Play rejects against an existing record).
+      - id: keystore
+        name: is there a keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.MYDEVENV2_ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.MYDEVENV2_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.MYDEVENV2_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.MYDEVENV2_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${KEYSTORE_B64:-}" ]      || missing="$missing MYDEVENV2_ANDROID_KEYSTORE_B64"
+          [ -n "${KEYSTORE_PASSWORD:-}" ] || missing="$missing MYDEVENV2_ANDROID_KEYSTORE_PASSWORD"
+          [ -n "${KEY_ALIAS:-}" ]         || missing="$missing MYDEVENV2_ANDROID_KEY_ALIAS"
+          [ -n "${KEY_PASSWORD:-}" ]      || missing="$missing MYDEVENV2_ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::No upload keystore configured; missing:$missing. The keystore is the recoverable upload key Play App Signing binds to — a new one is a different app identity."
+            exit 1
+          fi
+
+      - name: the release URL is named
+        env:
+          SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          # FR-M1: the shell wraps a remote front door and has no default. A
+          # store build must name the production front door it points at.
+          if [ -z "${SERVER_URL:-}" ]; then
+            echo "::error::VOGT_ANDROID_SERVER_URL is not set. A store build must name the front door it wraps; there is deliberately no default (FR-M1)."
+            exit 1
+          fi
+
+      - name: install the shell's dependencies
+        working-directory: mobile
+        run: pnpm install --frozen-lockfile
+
+      - name: fetch the production Firebase config
+        env:
+          INFISICAL_API_URL: ${{ vars.INFISICAL_API_URL }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_PROJECT_ID: ${{ vars.INFISICAL_PROJECT_ID }}
+          INFISICAL_ENV: prod
+          VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_PROD_JSON
+          VOGT_FIREBASE_OUTPUT: mobile/android/app/google-services.json
+          VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt
+        run: bash scripts/fetch_infisical_secret.sh
+
+      - name: capacitor sync
+        working-directory: mobile
+        env:
+          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+        run: npx cap sync android
+
+      - name: bundle and sign the AAB
+        working-directory: mobile/android
+        env:
+          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+          MYDEVENV2_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.MYDEVENV2_ANDROID_KEYSTORE_PASSWORD }}
+          MYDEVENV2_ANDROID_KEY_ALIAS: ${{ secrets.MYDEVENV2_ANDROID_KEY_ALIAS }}
+          MYDEVENV2_ANDROID_KEY_PASSWORD: ${{ secrets.MYDEVENV2_ANDROID_KEY_PASSWORD }}
+          KEYSTORE_B64: ${{ secrets.MYDEVENV2_ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          # Written under RUNNER_TEMP and removed on the way out, signed or not:
+          # a keystore left on a shared self-hosted runner is a signing key
+          # anybody with a job on that runner could take.
+          umask 077
+          keystore="$RUNNER_TEMP/upload.keystore"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$keystore"
+          trap 'rm -f "$keystore"' EXIT
+          export MYDEVENV2_ANDROID_KEYSTORE_PATH="$keystore"
+          ./gradlew bundleRelease --no-daemon
+
+      - name: the bundle is actually signed
+        working-directory: mobile/android
+        run: |
+          set -euo pipefail
+          aab="$(find app/build/outputs/bundle/release -name '*.aab' | head -1)"
+          test -n "$aab"
+          # Gradle silently produces an *unsigned* release bundle when the
+          # signing config is absent — the exact artefact this job exists to
+          # stop reaching Play. An AAB is a JAR, so jarsigner verifies its
+          # signature block.
+          jarsigner -verify "$aab" | grep -q 'jar verified'
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vogt-play-aab-${{ github.ref_name }}
+          path: mobile/android/app/build/outputs/bundle/release/*.aab
+          if-no-files-found: error
+          retention-days: 7
+
+      # Gated: only a configured service account uploads. Absent → dry run: the
+      # signed AAB above is the whole product of the job, kept as an artifact.
+      - name: upload to Play internal testing
+        working-directory: mobile/android
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PLAY_SERVICE_ACCOUNT_JSON:-}" ]; then
+            echo "::notice::PLAY_SERVICE_ACCOUNT_JSON is not set — dry run. The signed AAB is kept as a run artifact; no Play upload. Configure the secret (and ruby on the runner) to enable the internal-track upload."
+            exit 0
+          fi
+          json_key="${RUNNER_TEMP}/play-service-account.json"
+          printf '%s' "${PLAY_SERVICE_ACCOUNT_JSON}" > "$json_key"
+          trap 'rm -f "$json_key"' EXIT
+          # fastlane into a writable gem home: the runner's system gem dir needs
+          # sudo, so a bare `gem install` fails with Gem::FilePermissionError.
+          export GEM_HOME="${RUNNER_TEMP}/gems"
+          export PATH="${GEM_HOME}/bin:${PATH}"
+          gem install fastlane -v 2.228.0 --no-document
+          aab="$(find app/build/outputs/bundle/release -name '*.aab' | head -1)"
+          test -n "$aab"
+          fastlane supply \
+            --package_name "${PACKAGE_NAME}" \
+            --track internal \
+            --aab "$aab" \
+            --json_key "$json_key" \
+            --skip_upload_metadata --skip_upload_images --skip_upload_screenshots
+
+      - name: remove Firebase config
+        if: always()
+        run: rm -f mobile/android/app/google-services.json

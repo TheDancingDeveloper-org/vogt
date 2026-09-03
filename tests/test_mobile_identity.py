@@ -53,6 +53,7 @@ SERVICES = _SERVICES_REAL if _SERVICES_REAL.is_file() else _SERVICES_EXAMPLE
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
 CI_WORKFLOW = WORKFLOWS / "ci.yml"
 RELEASE_WORKFLOW = WORKFLOWS / "release.yml"
+RELEASE_MOBILE_WORKFLOW = WORKFLOWS / "release-mobile.yml"
 FIREBASE_FETCH = REPO_ROOT / "scripts" / "fetch_infisical_secret.sh"
 FIREBASE_WRITE = REPO_ROOT / "scripts" / "write_firebase_config.sh"
 
@@ -205,6 +206,39 @@ def test_release_android_fetches_the_matching_infisical_firebase_config() -> Non
     assert "install Infisical CLI" in release
     assert release.count("remove Firebase config") == 1
     assert "secrets.VOGT_FIREBASE_PROD_JSON" not in release
+
+
+def test_release_mobile_builds_a_gated_play_aab() -> None:
+    """The Play pipeline builds a signed AAB and only uploads when armed.
+
+    A release is a `v*` tag. The AAB is signed with the estate upload key (the
+    same keystore secrets the APK job uses) and the Play upload is gated on
+    PLAY_SERVICE_ACCOUNT_JSON — absent, the job is a dry run that keeps the
+    signed AAB as an artifact and never touches Play. This is what stops a
+    half-configured pipeline making a bad first upload (Play App Signing binds
+    to whatever signs the first upload). It builds the prod applicationId (the
+    build.gradle default), so it must NOT pin a dev/non-prod id here.
+    """
+    wf = RELEASE_MOBILE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "tags: ['v*']" in wf
+    # Estate runner-policy: every job self-hosted (also: SDK + Infisical are not
+    # reachable from a GitHub-hosted runner).
+    assert "runs-on: [self-hosted]" in wf
+    assert "runs-on: ubuntu-latest" not in wf
+    assert "./gradlew bundleRelease" in wf
+    assert "--track internal" in wf
+    assert "PACKAGE_NAME: com.thedancingdeveloper.vogt" in wf
+    # The upload is gated: no service account → dry run, no Play call.
+    assert "secrets.PLAY_SERVICE_ACCOUNT_JSON" in wf
+    assert 'if [ -z "${PLAY_SERVICE_ACCOUNT_JSON:-}" ]; then' in wf
+    # A store build wraps the prod front door and carries the real prod Firebase.
+    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt" in wf
+    assert "VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_PROD_JSON" in wf
+    # It builds under the prod default id — no non-prod override pinned here.
+    assert f"{APP_ID_VAR}:" not in wf
+    assert "VOGT_ANDROID_APP_ID:" not in wf
+    assert wf.count("remove Firebase config") == 1
 
 
 def test_firebase_writer_never_prints_the_secret_and_checks_package() -> None:
