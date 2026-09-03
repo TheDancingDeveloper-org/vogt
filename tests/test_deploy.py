@@ -1612,13 +1612,20 @@ def test_dev_deploy_is_immutable_and_receipt_gated() -> None:
     assert "VOGT_KOMODO_STACK" in workflow
     assert "DEPLOY-DEV" in workflow
     assert "dev-${SOURCE_SHA}" in workflow
-    # The deploy authenticates to Komodo with plain GitHub Actions secrets —
-    # no estate-specific secret broker (Infisical), no CLI, no GitHub App — so
-    # the pipeline stays generic and reproducible for any operator or fork.
-    assert "INFISICAL" not in workflow
-    assert "infisical" not in workflow
+    # Komodo's control credentials stay plain GitHub Actions secrets — no
+    # secret broker, no CLI, no GitHub App on the deploy path. The one estate
+    # dependency is the dev front-door token: the vogt-stack-estate stack stores
+    # it as an `[[infisical://…]]` reference that Komodo resolves out of band, so
+    # the helper resolves that same reference against Infisical purely to hand
+    # the live smoke a real bearer token (scripts/deploy_dev.py:resolve_secret_ref).
+    # That is the sole Infisical use, and it never touches the Komodo control path.
     assert "secrets.KOMODO_API_KEY" in workflow
     assert "secrets.KOMODO_API_SECRET" in workflow
+    assert "INFISICAL_CLIENT_ID" in workflow
+    assert "INFISICAL_CLIENT_SECRET" in workflow
+    # Resolution lives in the helper, not a CLI or an estate-specific action.
+    assert "infisical login" not in workflow
+    assert "Infisical/secrets-action" not in workflow
     assert "scripts/deploy_dev.py" in workflow
     assert "WriteStackFileContents" not in workflow, (
         "Komodo API details belong in the helper, not in the workflow"
@@ -1651,6 +1658,11 @@ def test_dev_deploy_helper_updates_only_the_active_digest_pins() -> None:
     assert "webhook_enabled" in helper
     assert "sha256:[0-9a-f]{64}" in helper
     assert "MYDEVENV2_TOKEN" in helper
+    # The front-door token is an `[[infisical://…]]` reference in the Komodo
+    # env; the helper resolves it against Infisical so the smoke gets a real
+    # bearer token rather than the literal placeholder.
+    assert "resolve_secret_ref" in helper
+    assert "universal-auth" in helper
 
 
 def test_github_release_collects_and_publishes_the_complete_release() -> None:

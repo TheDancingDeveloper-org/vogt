@@ -117,6 +117,15 @@ jobs:
           STACK_DIGEST: ${{ steps.images.outputs.stack_digest }}
           KOMODO_API_KEY: ${{ secrets.KOMODO_API_KEY }}
           KOMODO_API_SECRET: ${{ secrets.KOMODO_API_SECRET }}
+          # The dev stack stores its front-door token as an
+          # `[[infisical://…]]` reference that Komodo resolves out of band;
+          # GetStack returns the raw template, so deploy_dev.py resolves it
+          # against Infisical to hand the smoke a real bearer token. The URL
+          # must be reachable from the runner (like VOGT_KOMODO_URL); the
+          # machine identity is a pair of repository secrets.
+          INFISICAL_API_URL: ${{ vars.INFISICAL_API_URL }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
         run: |
           set -euo pipefail
           : "${KOMODO_API_KEY:?Set the KOMODO_API_KEY GitHub Actions secret}"
