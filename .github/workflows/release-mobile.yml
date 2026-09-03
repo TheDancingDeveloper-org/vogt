@@ -14,14 +14,15 @@
 # (MYDEVENV2_ANDROID_KEYSTORE_*). applicationId `com.thedancingdeveloper.vogt`
 # is reverse-DNS of the owned domain and is immutable after first upload.
 #
-# Dry-run / first-upload safety: the Play upload is gated on
-# PLAY_SERVICE_ACCOUNT_JSON. Until that secret exists the job still produces the
-# signed AAB and keeps it as a run artifact (proving the path end to end) and
-# skips the upload. Vogt's keystore is always the *real* upload key, so there is
-# no throwaway-key first-upload hazard (skill §1 warning); the gate is purely
-# "is there a service account to upload with yet". Enabling the upload also
-# needs ruby on the runner (fastlane) — a runner-provisioning step, not done
-# here.
+# Dry-run / first-upload safety: the Play upload is gated on the repo variable
+# VOGT_PLAY_PUBLISH. Until it is 'true' the job still produces the signed AAB and
+# keeps it as a run artifact (proving the path end to end) and skips the upload.
+# Arming it is one deliberate operator act, made only once both prerequisites are
+# in place: PLAY_SERVICE_ACCOUNT_JSON in Infisical `cicd/prod` (fetched at
+# runtime, never a GitHub secret) and ruby on the runner (fastlane). Vogt's
+# keystore is always the *real* upload key, so there is no throwaway-key
+# first-upload hazard (skill §1 warning); the explicit variable is what keeps the
+# first, binding upload from happening before the operator intends it.
 name: release-mobile
 
 on:
@@ -146,20 +147,37 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # Gated: only a configured service account uploads. Absent → dry run: the
-      # signed AAB above is the whole product of the job, kept as an artifact.
-      - name: upload to Play internal testing
-        working-directory: mobile/android
+      # Dry run — the default. The signed AAB above is the whole product of the
+      # job, kept as an artifact; no Play call. Arming publishing is a single,
+      # deliberate operator act (below), because the first upload binds Play App
+      # Signing to our upload key.
+      - name: dry run (publishing not armed)
+        if: vars.VOGT_PLAY_PUBLISH != 'true'
+        run: echo "::notice::VOGT_PLAY_PUBLISH is not 'true' — dry run. Signed AAB kept as a run artifact; no Play upload. Set the repo variable VOGT_PLAY_PUBLISH=true (once PLAY_SERVICE_ACCOUNT_JSON is in Infisical cicd and ruby is on the runner) to enable the internal-track upload."
+
+      # Armed: fetch the Play service account from Infisical (cicd) and upload to
+      # the internal track. Gated on the VOGT_PLAY_PUBLISH variable so the first,
+      # binding upload happens only when the operator has confirmed the service
+      # account and runner ruby are both in place.
+      - name: fetch the Play service account
+        if: vars.VOGT_PLAY_PUBLISH == 'true'
         env:
-          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          INFISICAL_API_URL: ${{ vars.INFISICAL_API_URL }}
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+          INFISICAL_PROJECT_SLUG: cicd
+          INFISICAL_ENV: prod
+          SECRET_NAME: PLAY_SERVICE_ACCOUNT_JSON
+          OUTPUT_PATH: ${{ runner.temp }}/play-service-account.json
+        run: python3 scripts/fetch_infisical_json.py
+
+      - name: upload to Play internal testing
+        if: vars.VOGT_PLAY_PUBLISH == 'true'
+        working-directory: mobile/android
         run: |
           set -euo pipefail
-          if [ -z "${PLAY_SERVICE_ACCOUNT_JSON:-}" ]; then
-            echo "::notice::PLAY_SERVICE_ACCOUNT_JSON is not set — dry run. The signed AAB is kept as a run artifact; no Play upload. Configure the secret (and ruby on the runner) to enable the internal-track upload."
-            exit 0
-          fi
           json_key="${RUNNER_TEMP}/play-service-account.json"
-          printf '%s' "${PLAY_SERVICE_ACCOUNT_JSON}" > "$json_key"
+          test -s "$json_key"
           trap 'rm -f "$json_key"' EXIT
           # fastlane into a writable gem home: the runner's system gem dir needs
           # sudo, so a bare `gem install` fails with Gem::FilePermissionError.

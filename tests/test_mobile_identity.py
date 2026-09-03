@@ -212,12 +212,14 @@ def test_release_mobile_builds_a_gated_play_aab() -> None:
     """The Play pipeline builds a signed AAB and only uploads when armed.
 
     A release is a `v*` tag. The AAB is signed with the estate upload key (the
-    same keystore secrets the APK job uses) and the Play upload is gated on
-    PLAY_SERVICE_ACCOUNT_JSON — absent, the job is a dry run that keeps the
-    signed AAB as an artifact and never touches Play. This is what stops a
-    half-configured pipeline making a bad first upload (Play App Signing binds
-    to whatever signs the first upload). It builds the prod applicationId (the
-    build.gradle default), so it must NOT pin a dev/non-prod id here.
+    same keystore secrets the APK job uses) and the Play upload is gated on the
+    repo variable VOGT_PLAY_PUBLISH — until it is 'true' the job is a dry run
+    that keeps the signed AAB as an artifact and never touches Play. That
+    explicit gate is what stops a half-configured pipeline making a bad first
+    upload (Play App Signing binds to whatever signs the first upload). The
+    service account is fetched from Infisical at runtime, never a GitHub secret.
+    It builds the prod applicationId (the build.gradle default), so it must NOT
+    pin a dev/non-prod id here.
     """
     wf = RELEASE_MOBILE_WORKFLOW.read_text(encoding="utf-8")
 
@@ -229,9 +231,15 @@ def test_release_mobile_builds_a_gated_play_aab() -> None:
     assert "./gradlew bundleRelease" in wf
     assert "--track internal" in wf
     assert "PACKAGE_NAME: com.thedancingdeveloper.vogt" in wf
-    # The upload is gated: no service account → dry run, no Play call.
-    assert "secrets.PLAY_SERVICE_ACCOUNT_JSON" in wf
-    assert 'if [ -z "${PLAY_SERVICE_ACCOUNT_JSON:-}" ]; then' in wf
+    # The upload is gated on an explicit repo variable — unset/not 'true' is a
+    # dry run with no Play call, both halves asserted.
+    assert "vars.VOGT_PLAY_PUBLISH == 'true'" in wf
+    assert "vars.VOGT_PLAY_PUBLISH != 'true'" in wf
+    # The Play service account comes from Infisical at runtime, not a GH secret.
+    assert "scripts/fetch_infisical_json.py" in wf
+    assert "SECRET_NAME: PLAY_SERVICE_ACCOUNT_JSON" in wf
+    assert "INFISICAL_PROJECT_SLUG: cicd" in wf
+    assert "secrets.PLAY_SERVICE_ACCOUNT_JSON" not in wf
     # A store build wraps the prod front door and carries the real prod Firebase.
     assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt" in wf
     assert "VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_PROD_JSON" in wf
