@@ -1039,6 +1039,76 @@ def test_nothing_but_protocol_reaches_a_wrappers_stdout(
 
 
 @needs_engine
+@pytest.mark.parametrize(
+    ("wrapper", "bridge", "token_env"),
+    [
+        (VOGT_MCP_WRAPPER, "vogt-mcp-remote", "VOGT_HTTP_TOKEN"),
+        (CADASTRE_MCP_WRAPPER, "cadastre-mcp-remote", "CADASTRE_HTTP_TOKEN"),
+    ],
+    ids=["vogt", "cadastre"],
+)
+def test_a_token_already_in_the_env_skips_the_broker(
+    tmp_path: Path, wrapper: Path, bridge: str, token_env: str
+) -> None:
+    """#559/#560: a usable credential must not be routed through the broker.
+
+    The reported failure: a coding session holds a working token
+    (`VOGT_HTTP_TOKEN` split from its `VOGT_SESSION_ID` in v0.5.1 for Vogt;
+    `CADASTRE_HTTP_TOKEN` for Cadastre, which had no skip-path at all) but no
+    Infisical creds, so the wrapper's mandatory `mydevenv2-agent-auth` detour
+    `die`s (exit 1) and every client sees CONNECTION_CLOSED — despite the token
+    connecting fine when the bridge is run directly.
+
+    Modelled by making the broker stub fail the way the real one does without
+    Infisical creds: the wrapper must reach the bridge without ever invoking it.
+    """
+    script, bin_dir = _wrapper_sandbox(tmp_path, wrapper, bridge)
+    # Replace the cooperative broker stub with one that fails the way the real
+    # `mydevenv2-agent-auth` does when it has no Infisical creds, and records
+    # that it was reached at all.
+    broker_touched = tmp_path / "broker-was-invoked"
+    (bin_dir / "mydevenv2-agent-auth").write_text(
+        "#!/usr/bin/env bash\n"
+        f'touch "{broker_touched}"\n'
+        "printf 'mydevenv2-agent-auth: INFISICAL_API_URL is not set\\n' >&2\n"
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "mydevenv2-agent-auth").chmod(0o755)
+
+    home = tmp_path / "home"
+    home.mkdir()
+    environment = {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "HOME": str(home),
+        "TMPDIR": str(tmp_path),
+        "MYDEVENV2_CADASTRE_SRC": str(tmp_path / "absent"),
+        "MYDEVENV2_VOGT_SRC": str(tmp_path / "absent"),
+        "CADASTRE_MCP_URL": "https://cadastre.invalid/mcp",
+        # The one thing this session has and the broker path cannot use: a
+        # working token, with no VOGT_SESSION_ID pairing it (the v0.5.1 split).
+        token_env: "a-token-that-connects",
+    }
+    completed = subprocess.run(
+        [str(script)],
+        input='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=60,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert not broker_touched.exists(), (
+        "a usable token was in the env, so the wrapper must run the bridge "
+        "directly and never enter the broker that hard-fails without Infisical"
+    )
+    frames = [line for line in completed.stdout.splitlines() if line.strip()]
+    assert frames, "the bridge's own answer should be there — it connected"
+    assert json.loads(frames[0])["jsonrpc"] == "2.0"
+
+
+@needs_engine
 def test_the_access_check_probes_vogt_and_not_only_cadastre() -> None:
     """#30: a check that skips one service converts unknown into assurance.
 
