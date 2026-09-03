@@ -1,4 +1,4 @@
-package com.sprooty.vogt;
+package com.thedancingdeveloper.vogt;
 
 import android.Manifest;
 import android.app.Notification;
@@ -46,9 +46,9 @@ public class VoiceConversationService extends Service {
     private static final int NOTIFICATION_ID = 4711;
 
     /** Start (or refresh) the held foreground service. */
-    static final String ACTION_START = "com.sprooty.vogt.voice.START";
+    static final String ACTION_START = "com.thedancingdeveloper.vogt.voice.START";
     /** Stop requested from the notification's "End conversation" action. */
-    static final String ACTION_STOP_FROM_UI = "com.sprooty.vogt.voice.STOP_FROM_UI";
+    static final String ACTION_STOP_FROM_UI = "com.thedancingdeveloper.vogt.voice.STOP_FROM_UI";
 
     /**
      * How the service tells the web that the conversation was ended from the

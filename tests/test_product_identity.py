@@ -104,9 +104,10 @@ def test_compatibility_names_remain_explicitly_stable() -> None:
     `vogt.*` with a one-shot migration (`web/src/storageMigration.ts`), so state
     is carried across the rename rather than pinned to the historic name. The
     Android *applicationId* is no longer in this set either: #271's mobile half
-    renamed it to `com.sprooty.vogt`, accepting the migration cost a rename
-    carries (a new app — users reinstall, no in-place upgrade — and FCM
-    re-registration against the new id). The names that remain are the ones a
+    renamed it (to `com.sprooty.vogt`), and it later moved to
+    `com.thedancingdeveloper.vogt` for the owned domain — each rename accepting
+    the cost it carries (a new app — users reinstall, no in-place upgrade — and
+    FCM re-registration against the new id). The names that remain are the ones a
     rename could not migrate at all — an OS-level Android notification channel,
     an IndexedDB database, and a wire prefix a client may still emit.
     """
@@ -120,11 +121,11 @@ def test_compatibility_names_remain_explicitly_stable() -> None:
     # session, so nobody is signed out (#271).
     assert 'const TOKEN_KEY = "vogt.token"' in api
     assert 'id: "mydevenv2-alerts"' in push
-    # The Android applicationId was renamed to `com.sprooty.vogt` (#271, mobile
-    # half). Unlike the channel id above, this one accepts the migration cost
-    # rather than staying stable: the operator adds the new id to Firebase and
-    # users reinstall.
-    assert '"com.sprooty.vogt"' in capacitor
+    # The Android applicationId moved to `com.thedancingdeveloper.vogt` (owned
+    # domain; #271 first took it to com.sprooty.vogt). Unlike the channel id
+    # above, this one accepts the migration cost rather than staying stable: the
+    # operator adds the new id to Firebase and users reinstall.
+    assert '"com.thedancingdeveloper.vogt"' in capacitor
     # The default notify prefix was renamed to `VOGT_NOTIFY:` (#203), but the
     # legacy `MYDEVENV2_NOTIFY:` must remain an accepted prefix so existing task
     # definitions and any client still emitting it keep working.

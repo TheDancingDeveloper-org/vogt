@@ -59,7 +59,7 @@ FIREBASE_WRITE = REPO_ROOT / "scripts" / "write_firebase_config.sh"
 #: The variable both build files read. Named once here so a rename shows up as
 #: one failure rather than as a silent divergence.
 APP_ID_VAR = "MYDEVENV2_ANDROID_APP_ID"
-DEFAULT_APP_ID = "com.sprooty.vogt"
+DEFAULT_APP_ID = "com.thedancingdeveloper.vogt"
 
 pytestmark = pytest.mark.skipif(
     not SERVICES.is_file(),
@@ -176,7 +176,7 @@ def test_ci_android_writes_firebase_from_a_github_secret() -> None:
     ci = CI_WORKFLOW.read_text(encoding="utf-8")
 
     assert "secrets.VOGT_FIREBASE_DEV_JSON" in ci
-    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt.dev" in ci
+    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt.dev" in ci
     assert "scripts/write_firebase_config.sh" in ci
     assert ci.count("remove Firebase config") == 1
     # No secret broker for the dev build.
@@ -196,7 +196,7 @@ def test_release_android_fetches_the_matching_infisical_firebase_config() -> Non
     release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_PROD_JSON" in release
-    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt" in release
+    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt" in release
     assert "scripts/fetch_infisical_secret.sh" in release
     assert "vars.INFISICAL_API_URL" in release
     assert "vars.INFISICAL_PROJECT_ID" in release
@@ -241,9 +241,11 @@ def test_namespace_matches_the_source_package() -> None:
 
     The manifest names its components relatively (`.MainActivity`,
     `.VogtApplication`, ...), so `namespace` must equal the package the source
-    actually declares. #271 renamed both together — the source tree moved from
-    `com/sprooty/mydevenv2/` to `com/sprooty/vogt/` and the applicationId
-    default moved with it — so `namespace` and `DEFAULT_APP_ID` share a value.
-    A divergence here means the manifest resolves to a class that is not there.
+    actually declares. The id family moved twice — #271 from
+    `com/sprooty/mydevenv2/` to `com/sprooty/vogt/`, then to
+    `com/thedancingdeveloper/vogt/` for the owned domain — and the source tree,
+    `namespace` and the applicationId default moved together each time, so
+    `namespace` and `DEFAULT_APP_ID` share a value. A divergence here means the
+    manifest resolves to a class that is not there.
     """
     assert f'namespace "{DEFAULT_APP_ID}"' in GRADLE.read_text(encoding="utf-8")

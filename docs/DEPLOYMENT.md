@@ -513,8 +513,8 @@ build time. Configure these repository-level GitHub values before a push to
   identity with read access to the `prod` environment.
 
 The CI Android job fetches `VOGT_FIREBASE_DEV_JSON` and builds
-`com.sprooty.vogt.dev`; the tagged release job fetches
-`VOGT_FIREBASE_PROD_JSON` and builds `com.sprooty.vogt`. The fetcher validates
+`com.thedancingdeveloper.vogt.dev`; the tagged release job fetches
+`VOGT_FIREBASE_PROD_JSON` and builds `com.thedancingdeveloper.vogt`. The fetcher validates
 the package entry before Gradle runs and removes the generated
 `mobile/android/app/google-services.json` even when the job fails. Pull
 requests do not receive the Infisical credentials and continue to use the

@@ -1,4 +1,4 @@
-package com.sprooty.vogt;
+package com.thedancingdeveloper.vogt;
 
 import android.app.Application;
 import android.content.pm.PackageInfo;

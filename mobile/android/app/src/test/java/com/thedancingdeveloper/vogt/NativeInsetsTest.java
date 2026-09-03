@@ -1,4 +1,4 @@
-package com.sprooty.vogt;
+package com.thedancingdeveloper.vogt;
 
 import static org.junit.Assert.assertEquals;
 

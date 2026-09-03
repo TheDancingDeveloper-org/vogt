@@ -1,4 +1,4 @@
-package com.sprooty.vogt;
+package com.thedancingdeveloper.vogt;
 
 final class NativeInsets {
     private NativeInsets() {}

@@ -1,4 +1,4 @@
-package com.sprooty.vogt;
+package com.thedancingdeveloper.vogt;
 
 import android.os.Bundle;
 import android.content.ClipData;
