@@ -16,10 +16,19 @@ import sys
 import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 STACK = ""
 CORE_IMAGE = "ghcr.io/thedancingdeveloper-org/vogt"
+# The dev stack's `.env` stores secrets as `[[infisical://<project>/<env>/<KEY>]]`
+# references that Komodo resolves out of band when it injects the container
+# environment. `read/GetStack` returns the *unresolved* template, so any secret
+# the smoke needs (the front-door token) must be resolved here against Infisical
+# before use. See resolve_secret_ref().
+INFISICAL_REF = re.compile(
+    r"\A\[\[infisical://(?P<project>[^/]+)/(?P<env>[^/]+)/(?P<key>[^\]]+)\]\]\Z"
+)
 # The private estate package, not the public `vogt-stack`. `dev` and `prod`
 # branch builds publish there; the public one carries the generic AIO and has no
 # `dev-<sha>` tags to pin. This constant is what rewrites the image line in the
@@ -71,6 +80,79 @@ def output(name: str, value: str) -> None:
             handle.write(f"{name}={value}\n")
 
 
+def _infisical(
+    base: str, method: str, path: str, token: str, payload: object
+) -> object:
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    data = None
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode("utf-8")
+    request = Request(base + path, data=data, headers=headers, method=method)
+    try:
+        with urlopen(request, timeout=20) as response:
+            loaded: object = json.load(response)
+    except (HTTPError, URLError, TimeoutError) as exc:
+        raise KomodoError(f"Infisical {path} failed: {exc}") from exc
+    return loaded
+
+
+def resolve_secret_ref(value: str) -> str:
+    """Resolve a `[[infisical://project/env/KEY]]` reference to its live value.
+
+    Komodo dereferences these when it deploys, but `read/GetStack` hands back the
+    raw template, so the smoke would otherwise present the literal placeholder as
+    a bearer token. Plain values pass through untouched. Requires the deploy job
+    to expose INFISICAL_API_URL and a machine identity (INFISICAL_CLIENT_ID /
+    INFISICAL_CLIENT_SECRET), which the workflow wires from repository secrets.
+    """
+    ref = INFISICAL_REF.match(value)
+    if not ref:
+        return value
+    base = os.environ.get("INFISICAL_API_URL", "").rstrip("/")
+    client_id = os.environ.get("INFISICAL_CLIENT_ID", "")
+    client_secret = os.environ.get("INFISICAL_CLIENT_SECRET", "")
+    if not (base and client_id and client_secret):
+        raise KomodoError(
+            "front-door token is an infisical reference but INFISICAL_API_URL / "
+            "INFISICAL_CLIENT_ID / INFISICAL_CLIENT_SECRET are not set"
+        )
+    if not base.endswith("/api"):
+        base += "/api"
+    project, env, key = ref.group("project"), ref.group("env"), ref.group("key")
+    login = _infisical(
+        base,
+        "POST",
+        "/v1/auth/universal-auth/login",
+        "",
+        {"clientId": client_id, "clientSecret": client_secret},
+    )
+    if not isinstance(login, dict) or not isinstance(login.get("accessToken"), str):
+        raise KomodoError("Infisical login did not return an access token")
+    token = login["accessToken"]
+    workspaces = _infisical(base, "GET", "/v1/workspace", token, None)
+    entries = workspaces.get("workspaces") if isinstance(workspaces, dict) else None
+    workspace_id = None
+    if isinstance(entries, list):
+        for entry in entries:
+            if isinstance(entry, dict) and entry.get("name") == project:
+                workspace_id = entry.get("id")
+                break
+    if not isinstance(workspace_id, str):
+        raise KomodoError(f"Infisical has no project named {project!r}")
+    query = urlencode(
+        {"workspaceId": workspace_id, "environment": env, "secretPath": "/"}
+    )
+    result = _infisical(base, "GET", f"/v3/secrets/raw/{key}?{query}", token, None)
+    secret = result.get("secret") if isinstance(result, dict) else None
+    resolved = secret.get("secretValue") if isinstance(secret, dict) else None
+    if not isinstance(resolved, str) or not resolved:
+        raise KomodoError(f"Infisical returned no value for {project}/{env}/{key}")
+    return resolved
+
+
 def write_smoke_token(stack: dict[str, object]) -> None:
     """Pass the active front-door token through a private runner-temp file."""
     runner_temp = os.environ.get("RUNNER_TEMP")
@@ -87,8 +169,9 @@ def write_smoke_token(stack: dict[str, object]) -> None:
     match = re.search(r"(?m)^MYDEVENV2_TOKEN=(.*)$", environment)
     if not match or not match.group(1):
         raise KomodoError("Komodo dev stack has no MYDEVENV2_TOKEN")
+    token = resolve_secret_ref(match.group(1))
     token_path = Path(runner_temp) / "vogt-dev-smoke-token"
-    token_path.write_text(match.group(1), encoding="utf-8")
+    token_path.write_text(token, encoding="utf-8")
     token_path.chmod(0o600)
 
 
