@@ -14,6 +14,27 @@ git log rather than being reconstructed here.
 
 Nothing yet.
 
+## [0.5.2] - 2026-09-03
+
+A patch on 0.5.1 that hardens the Google Play release lane and fixes an MCP
+bridge regression. No schema migration is required.
+
+### Changed
+
+- **The Android release build targets API 36 and shrinks.** The release bundle
+  compiles against Android API 36 (a Play requirement) and runs R8 code
+  shrinking, obfuscation, and resource shrinking, on top of an Android Gradle
+  Plugin 9.0 upgrade — a smaller, Play-ready artifact.
+
+### Fixed
+
+- **The MCP bridge runs directly when a usable token is already present**,
+  instead of re-brokering a credential it does not need.
+- **The Play release lane builds without the Infisical CLI.** The signed
+  bundle's Firebase configuration is fetched over the API at build time, and
+  pnpm is set up and pinned in the release-mobile job so it resolves the same
+  toolchain as the rest of CI.
+
 ## [0.5.1] - 2026-09-03
 
 A patch on 0.5.0: a terminal-startup regression fix, and the Android app moves
