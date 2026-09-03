@@ -31,6 +31,22 @@ if [[ -n "${VOGT_SESSION_ID:-}" && -n "${VOGT_HTTP_TOKEN:-}" ]]; then
         vogt-mcp-remote "$@"
 fi
 
+# Defensive fast-path (#559). The pair above is the invariant `_session_env()`
+# promises — token and session id set together — but a deployment can split it:
+# v0.5.1 provisioned coding sessions with `VOGT_HTTP_TOKEN` (and the brokered
+# token *file*) yet no `VOGT_SESSION_ID`, so the guard above missed and the
+# broker below ran. In a coding session there are no Infisical creds — brokering
+# there is designed not to work — so the wrapper exited 1 and every client saw
+# CONNECTION_CLOSED, despite holding a token that connects. When a usable
+# credential is already in the environment, run the bridge directly and let its
+# `resolve_token()` decide which source wins; only broker when there is nothing
+# to use.
+if [[ -n "${VOGT_HTTP_TOKEN:-}" || -s "${VOGT_TOKEN_FILE:-}" ]]; then
+    exec env \
+        VOGT_URL="${VOGT_URL:-$VOGT_URL_DEFAULT}" \
+        vogt-mcp-remote "$@"
+fi
+
 exec /usr/local/bin/mydevenv2-agent-auth run -- env \
     VOGT_URL="${VOGT_URL:-$VOGT_URL_DEFAULT}" \
     vogt-mcp-remote "$@"
