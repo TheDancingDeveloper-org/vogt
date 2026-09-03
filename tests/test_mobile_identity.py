@@ -240,9 +240,12 @@ def test_release_mobile_builds_a_gated_play_aab() -> None:
     assert "SECRET_NAME: PLAY_SERVICE_ACCOUNT_JSON" in wf
     assert "INFISICAL_PROJECT_SLUG: cicd" in wf
     assert "secrets.PLAY_SERVICE_ACCOUNT_JSON" not in wf
-    # A store build wraps the prod front door and carries the real prod Firebase.
-    assert "VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt" in wf
-    assert "VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_PROD_JSON" in wf
+    # A store build carries the real prod Firebase, fetched CLI-free (the
+    # infisical CLI is not on every runner) from the apps project and validated
+    # to carry the prod Android client.
+    assert "SECRET_NAME: VOGT_FIREBASE_PROD_JSON" in wf
+    assert "INFISICAL_PROJECT_SLUG: apps" in wf
+    assert "scripts/fetch_infisical_secret.sh" not in wf
     # It builds under the prod default id — no non-prod override pinned here.
     assert f"{APP_ID_VAR}:" not in wf
     assert "VOGT_ANDROID_APP_ID:" not in wf
