@@ -39,19 +39,20 @@ import type { CapacitorConfig } from "@capacitor/cli";
 // — a phone showing "MyDevEnv2" beside a product that calls itself something
 // else is the naming decision failing at the only place a user reads it.
 //
-// **`appId` is now `com.sprooty.vogt` (#271).** It used to stay
-// `com.sprooty.mydevenv2` precisely because a package name is an identity, not
-// a label, and moving it has a real device-side cost — which is exactly the
-// migration #271 accepts now that the FCM project decision is being taken with
-// it. Two consequences are operator follow-ups, not oversights: (a) the new id
-// is a *new* app, so there is no in-place upgrade — users of the old
-// `com.sprooty.mydevenv2` build reinstall — and (b) FCM will not deliver on the
-// new id until the operator adds `com.sprooty.vogt` (and `.dev`) to the
-// Firebase project and supplies a real `android/app/google-services.json`; the
-// committed placeholder there is sanitized and non-live (#265). `build.gradle`
-// moves `applicationId` and `namespace` in the same change, and this file and
-// that one must keep the same fallback id — tests/test_mobile_identity.py
-// asserts it.
+// **`appId` is now `com.thedancingdeveloper.vogt`.** A package name is an
+// identity, not a label, so moving it has a real device-side cost: #271 first
+// renamed `com.sprooty.mydevenv2` -> `com.sprooty.vogt`, and the id then moved
+// again to `com.thedancingdeveloper.vogt` so the app publishes under the owned
+// `thedancingdeveloper.com` domain — the reverse-DNS the Play Store record and
+// Play App Signing bind to on first upload. Two consequences are operator
+// follow-ups, not oversights: (a) each new id is a *new* app, so there is no
+// in-place upgrade — a prior build reinstalls — and (b) FCM will not deliver on
+// the new id until the operator adds `com.thedancingdeveloper.vogt` (and
+// `.dev`) to the Firebase project and supplies a real
+// `android/app/google-services.json`; the committed placeholder there is
+// sanitized and non-live (#265). `build.gradle` moves `applicationId` and
+// `namespace` in the same change, and this file and that one must keep the same
+// fallback id — tests/test_mobile_identity.py asserts it.
 
 const SERVER_URL =
   process.env.VOGT_ANDROID_SERVER_URL ||
@@ -74,7 +75,7 @@ const config: CapacitorConfig = {
     process.env.VOGT_ANDROID_APP_ID ||
     // The transition alias, as with the server URL and app name above.
     process.env.MYDEVENV2_ANDROID_APP_ID ||
-    "com.sprooty.vogt",
+    "com.thedancingdeveloper.vogt",
   appName:
     process.env.VOGT_ANDROID_APP_NAME ||
     // The transition alias, as with the server URL above.

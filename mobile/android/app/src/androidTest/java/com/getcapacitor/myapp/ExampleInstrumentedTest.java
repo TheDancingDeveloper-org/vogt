@@ -6,7 +6,7 @@ import android.content.Context;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
-import com.sprooty.vogt.MainActivity;
+import com.thedancingdeveloper.vogt.MainActivity;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 
@@ -30,8 +30,8 @@ public class ExampleInstrumentedTest {
         // instrumentation source set in every Android Gradle configuration).
         assertTrue(
                 "unexpected Vogt application id: " + appContext.getPackageName(),
-                "com.sprooty.vogt".equals(appContext.getPackageName())
-                        || "com.sprooty.vogt.dev".equals(appContext.getPackageName()));
+                "com.thedancingdeveloper.vogt".equals(appContext.getPackageName())
+                        || "com.thedancingdeveloper.vogt.dev".equals(appContext.getPackageName()));
     }
 
     @Test

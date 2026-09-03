@@ -566,7 +566,7 @@ jobs:
           INFISICAL_ENV: prod
           VOGT_FIREBASE_SECRET_NAME: VOGT_FIREBASE_PROD_JSON
           VOGT_FIREBASE_OUTPUT: mobile/android/app/google-services.json
-          VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt
+          VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt
         run: bash scripts/fetch_infisical_secret.sh
 
       - name: capacitor sync

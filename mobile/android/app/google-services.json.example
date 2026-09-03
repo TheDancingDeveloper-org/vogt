@@ -29,7 +29,7 @@
       "client_info": {
         "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
         "android_client_info": {
-          "package_name": "com.sprooty.vogt"
+          "package_name": "com.thedancingdeveloper.vogt"
         }
       },
       "oauth_client": [],
@@ -48,7 +48,7 @@
       "client_info": {
         "mobilesdk_app_id": "1:000000000000:android:1111111111111111111111",
         "android_client_info": {
-          "package_name": "com.sprooty.vogt.dev"
+          "package_name": "com.thedancingdeveloper.vogt.dev"
         }
       },
       "oauth_client": [],

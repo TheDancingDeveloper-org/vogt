@@ -570,7 +570,7 @@ jobs:
         env:
           VOGT_FIREBASE_JSON: ${{ secrets.VOGT_FIREBASE_DEV_JSON }}
           VOGT_FIREBASE_OUTPUT: mobile/android/app/google-services.json
-          VOGT_ANDROID_EXPECTED_PACKAGE: com.sprooty.vogt.dev
+          VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt.dev
         run: bash scripts/write_firebase_config.sh
 
       - name: verify the dev Firebase config is available
@@ -608,7 +608,7 @@ jobs:
       # and setting it on one is the exact divergence `tests/
       # test_mobile_identity.py` exists to catch.
       #
-      # `com.sprooty.vogt.dev` has its own client entry in the sanitized
+      # `com.thedancingdeveloper.vogt.dev` has its own client entry in the sanitized
       # placeholder `mobile/android/app/google-services.json.example` (copied to
       # `google-services.json` by build.gradle when no real, operator-supplied
       # file is present — #265), so this build can register for push; that
@@ -618,7 +618,7 @@ jobs:
         working-directory: mobile
         env:
           VOGT_ANDROID_SERVER_URL: ${{ vars.VOGT_ANDROID_SERVER_URL || 'http://127.0.0.1:8910' }}
-          MYDEVENV2_ANDROID_APP_ID: "com.sprooty.vogt.dev"
+          MYDEVENV2_ANDROID_APP_ID: "com.thedancingdeveloper.vogt.dev"
         run: npx cap sync android
 
       # A *debug* APK: it is signed with Gradle's generated debug key, so it
@@ -628,7 +628,7 @@ jobs:
       - name: assemble
         working-directory: mobile/android
         env:
-          MYDEVENV2_ANDROID_APP_ID: "com.sprooty.vogt.dev"
+          MYDEVENV2_ANDROID_APP_ID: "com.thedancingdeveloper.vogt.dev"
         run: ./gradlew assembleDebug --no-daemon
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
