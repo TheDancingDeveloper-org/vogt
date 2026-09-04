@@ -1,23 +1,27 @@
-# Generic Vogt — the public base.
+# The core alone — the base of the *contributor* stack.
 #
-# This file is the supported self-hosting path *and* the base other
-# deployments layer onto. It knows nothing about any particular estate: no
-# session engine, no Komodo, Tailscale, Infisical, Cadastre or MCP client.
+# Not the way to deploy Vogt. That is `stack.compose.yml` beside this file,
+# which runs the published all-in-one image (DEPLOYMENT.md §1.1). This file
+# runs the Python core by itself, and exists so that a core or an engine you
+# are changing can be run from a checkout: `vogt.build.yml` swaps the image
+# for a build of this tree, and `engine.overlay.yml` builds the engine and
+# puts it in front. CI's end-to-end suite drives the same three files.
 #
-# Run it alone:
+# It knows nothing about any particular estate: no Komodo, Tailscale,
+# Infisical, Cadastre or MCP client, and `tests/test_public_delivery.py` keeps
+# it that way.
+#
+# Run the core alone:
 #
 #   cp deploy/.env.example deploy/.env
 #   docker compose -f deploy/vogt.compose.yml up -d
 #
-# Build from a checkout instead of pulling a published image by adding the
-# build overlay:
+# Build it from the checkout instead of pulling the published core image:
 #
 #   docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d
 #
-# Add your own services, mounts and settings with an overlay of your own —
-# `docs/CUSTOMISATION.md` describes the supported extension points. Nothing
-# below needs editing to customise a deployment; that is the point of it
-# being a base.
+# Nothing below needs editing to layer onto; that is the point of it being a
+# base.
 
 services:
   vogt:

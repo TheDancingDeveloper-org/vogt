@@ -10,29 +10,24 @@
 # `vogt.compose.yml` — that file runs a core, and so does this image, so
 # combining them would run two.
 #
-# ── Which shape is this, and do you want it? ────────────────────────────────
+# ── What you are running ────────────────────────────────────────────────────
 #
-# Three supported shapes, and this is the least contained of them:
+# This is the supported way to run Vogt, and the only one (DEPLOYMENT.md
+# §1.1). The image is a **development pod**, and that is a deliberate posture
+# rather than an oversight. It carries a writable home, passwordless `sudo`,
+# an SSH server, a Docker CLI that talks to a socket you may mount, and the
+# `claude` and `codex` agent CLIs. It cannot run `read_only`, and it does not
+# drop capabilities — a pod that exists to run arbitrary agent sessions
+# cannot be hardened against the sessions it runs. Run it where you would run
+# a dev box: on loopback or a private network, behind something that
+# terminates TLS, with only the mounts and credentials its sessions need.
 #
-#   core only (`vogt.compose.yml`)          hardened; no UI, no sessions
-#   core + engine (`engine.overlay.yml`)    core stays hardened; engine builds
-#                                           from the checkout
-#   the AIO (this file)                     one container, no build, full pod
-#
-# The AIO is a **development pod**, and that is a deliberate posture rather
-# than an oversight. It carries a writable home, passwordless `sudo`, an SSH
-# server, a Docker CLI that talks to a socket you may mount, and the `claude`
-# and `codex` agent CLIs. It cannot run `read_only`, and it does not drop
-# capabilities. The core-only image is hardened by construction — slim base,
-# `nologin`, `read_only`, `cap_drop: [ALL]`, one writable volume — and none of
-# that survives being lifted into a pod that exists to run arbitrary agent
-# sessions. `engine/Dockerfile`'s header says why the two images are kept
-# separate: collapsing them would quietly delete Vogt's containment story
-# under an unchanged image name.
-#
-# So: run this where you would run a dev box, not where you would run a
-# hardened service. If you want the containment, run the core alone and put
-# the engine somewhere you trust it.
+# Customising it means layering on top, never editing this file: settings in
+# `.env`, extra services and mounts in an overlay of your own, extra tools in
+# an image of your own that starts `FROM` this one's digest. CUSTOMISATION.md
+# is the guide. `vogt.compose.yml` + `engine.overlay.yml` beside this file are
+# the *contributor* stack — a core and an engine built from a checkout — and
+# are not a deployment.
 #
 # Nothing here names a host, a path, or a tailnet. Every value an operator must
 # choose is a `${VAR}`; where one is genuinely required the reference fails the

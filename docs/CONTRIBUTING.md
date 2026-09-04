@@ -70,14 +70,18 @@ as its own piece of work (#207); it is not solved by this file.
 
 ## Scope boundaries
 
-The supported public product is the Python core, Rust session engine, and
-Solid PWA together; the core remains independently supported over CLI, REST,
-and MCP. The engine and PWA have their own toolchains (`engine/AGENTS.md`,
-[`ENGINE.md`](ENGINE.md)) and image, and a core-only change need not require
-those optional toolchains unless it changes their contracts. Before changing
-packaging or deployment files, know that `tests/test_public_delivery.py` pins
-the public example as self-contained: a change that introduces a private
-path, registry, secret broker, or external service into it will fail there.
+The supported public product is one image: the Python core, Rust session
+engine, and Solid PWA together (`DEPLOYMENT.md` §1.1). The core stays
+independently *runnable* — over CLI, REST and MCP from a plain `uv sync`, and
+CI keeps it free of engine dependencies — so a core-only change need not
+touch the engine's toolchain (`engine/AGENTS.md`, [`ENGINE.md`](ENGINE.md))
+unless it changes a contract. To run what you are changing, use the
+two-container contributor stack: `deploy/vogt.compose.yml` with
+`deploy/vogt.build.yml` for a core built here, plus `deploy/engine.overlay.yml`
+for an engine built here (`DEPLOYMENT.md` §3). Before changing packaging or
+deployment files, know that `tests/test_public_delivery.py` pins the public
+files as self-contained: a change that introduces a private path, registry,
+secret broker, or external service into them will fail there.
 
 Vogt is currently a single-maintainer project. Protected branches therefore
 require the test and policy checks, resolved review conversations, linear

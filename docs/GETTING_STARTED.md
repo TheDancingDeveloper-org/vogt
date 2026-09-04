@@ -1,33 +1,31 @@
 # Getting started with Vogt
 
-This guide gets a new operator from nothing to a working Vogt stack — the
-Python core and the Rust engine that serves the PWA — with Docker as the only
-prerequisite (it builds the engine for you). A forge token, an AI provider,
-and an MCP client are all optional and documented separately. Production
-concerns — a reverse proxy, TLS, digest pinning, backups on a schedule — are
-in [`docs/DEPLOYMENT.md`](DEPLOYMENT.md); this guide stops at a working
+This guide gets a new operator from nothing to a working Vogt — the browser
+front end, the API, terminals, and the agent CLIs — with Docker as the only
+prerequisite. A forge token, an AI provider, and an MCP client are all
+optional and documented separately. Production concerns — a reverse proxy,
+TLS, digest pinning, backups on a schedule — are in
+[`docs/DEPLOYMENT.md`](DEPLOYMENT.md); this guide stops at a working
 instance.
 
 ## Choose an installation path
 
-There are three supported ways to run Vogt:
+There are two:
 
-- **The stack (recommended)** — the core plus the engine, two containers on
-  one published port. Docker builds the engine from the checkout, so you need
-  Docker and nothing else; the browser experience — the PWA at `/` — is the
-  reason to run it.
-- **Core only** — the base Compose file on its own, no engine and no browser
-  front end. A supported deployment for CLI, REST, and MCP use.
-- **Local Python** — the core as a plain package, useful for development or a
-  single-user workstation. It writes to the normal Vogt data directory unless
-  you set `VOGT_DATA_DIR`.
+- **The published image (recommended)** — one container, pulled from the
+  registry, nothing to build. It carries the core, the engine that serves the
+  PWA at `/`, and the `claude` and `codex` CLIs. This is Vogt as it is meant
+  to be run.
+- **Local Python** — the core alone as a plain package, for development or a
+  single-user workstation over the CLI, REST and MCP. No browser front end.
+  It writes to the normal Vogt data directory unless you set `VOGT_DATA_DIR`.
 
 ## Docker Compose (recommended)
 
 Prerequisites:
 
 - Docker Engine 24 or newer with the Compose plugin;
-- Git, if building from a checkout; and
+- Git, to fetch the two deploy files (or copy them by hand); and
 - a host port that is available for the web UI/API.
 
 From the repository root:
@@ -35,91 +33,68 @@ From the repository root:
 ```console
 git clone https://github.com/TheDancingDeveloper-org/vogt.git
 cd vogt
-cp deploy/.env.example deploy/.env
+cp deploy/stack.env.example deploy/.env
+openssl rand -hex 32 > deploy/vogt-core-token
 ```
 
-Edit `deploy/.env` before starting. `VOGT_PUBLIC_URL` is required because a
-container cannot infer the address clients will use. For a local installation,
-the example value `http://localhost:8080` is correct. Change `VOGT_PORT` if
-port 8080 is already in use.
+Edit `deploy/.env` before starting. `ENGINE_TOKEN` is required — it is the
+bearer token you will paste into the browser and hand to agents, at least 16
+characters, and the stack refuses to invent one for you. Change `ENGINE_PORT`
+if 8910 is already in use. The token file you just created is read by both
+halves inside the container, which is what lets the engine talk to the core
+on the first boot without a second deploy.
 
-**Start the core (recommended).** Build it from this checkout with the
-one-service build overlay `deploy/vogt.build.yml` (`VOGT_IMAGE` is ignored).
-This source-build path works even when a registry is unavailable:
+**Start it.** There is no `--build`: the image already carries everything.
 
 ```console
-docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d --wait
+docker compose -f deploy/stack.compose.yml up -d --wait
 ```
 
-This runs the core without the engine — no browser front end, but the full
-API, CLI, and MCP.
+`--wait` blocks until the healthcheck reports healthy. Without it, a curl
+right after `up -d` can race the container: the core's `vogt init` runs
+first, then the engine comes up, and the healthcheck's `start_period` is
+60s, so an immediate probe can see connection-refused rather than a real
+answer.
 
-**Add the engine (the browser front end).** The engine overlay builds the Rust
-engine from this checkout, since no engine image is published, and fronts the
-core with it. Fill in the engine block of `deploy/.env` first — the overlay's
-own header and [`docs/ENGINE.md`](ENGINE.md) list the keys. The engine image
-lifts the core image in (`CORE_IMAGE`), so until the `vogt` package is public,
-name the core you build here by layering all three files:
+The port publishes to `127.0.0.1` unless you set `ENGINE_BIND`. The example
+will not put a pod carrying `sudo` and agent CLIs on a network interface
+because nobody said to.
+
+Check it is up:
 
 ```console
-VOGT_IMAGE=vogt:local docker compose \
-  -f deploy/vogt.compose.yml -f deploy/vogt.build.yml -f deploy/engine.overlay.yml \
-  up --build -d --wait
+curl http://localhost:8910/healthz     # the engine answers
+curl http://localhost:8910/readyz      # ...and reports the core behind it
 ```
 
-**When using a published `vogt` package**, the build overlay becomes optional:
-the base pulls the published core (and the engine overlay pulls it as
-`CORE_IMAGE` too). Set `VOGT_IMAGE` in `deploy/.env` to the tag — or better,
-the digest — you intend to run:
+`/readyz` names each check — `vogt_core`, `workspace_agreement`,
+`backup_agreement` — with a pass or fail and a reason. It deliberately stays
+ready when the core is absent, because restarting the container would not
+revive a core and would kill every live terminal; read the body, not just
+the status.
 
-```console
-docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d --wait
-```
-
-`--wait` blocks until the healthcheck reports healthy. Without it, the curls
-below can race the container: `vogt init` runs first, the healthcheck's
-`start_period` is 20s, and the engine build takes a moment, so a curl right
-after a bare `up -d` can see connection-refused rather than a real answer.
-
-The base is never edited; every deployment states only its difference from it
-as an overlay or an environment value. That is the whole customisation model,
-and [`docs/CUSTOMISATION.md`](CUSTOMISATION.md) is the long form.
-
-The Compose command runs the idempotent `vogt init` bootstrap before serving,
-so a new named volume is ready without a manual container shell step. It is
-required rather than convenient: `serve` on an empty data directory answers
-`/health/ready` with 503 and tells you to run `vogt init` first.
-
-The port publishes to `127.0.0.1` unless you set `VOGT_BIND_IP`. The example
-will not put an instance on a network interface because nobody said to.
-
-Check both health endpoints:
-
-```console
-curl http://localhost:8080/health/live
-curl http://localhost:8080/health/ready
-```
-
-Readiness reports whether both stores are migrated to this build's schema — it
-does not migrate them, which is why the Compose command runs `vogt init`
-first. A healthy response includes the declared and observed schema versions.
-
-If you ran the stack, open `http://localhost:8080/` in a browser: the engine
-serves the PWA — the board, backlog, terminals, agent tasks, and the voice
-assistant — at the root. [`docs/USER_GUIDE.md`](USER_GUIDE.md) is the tour.
-The core-only path publishes no browser front end; it answers the CLI, REST,
-and MCP surfaces, and a browser at `/` gets nothing to render.
+Open `http://localhost:8910/` in a browser. The engine serves the PWA — the
+board, backlog, terminals, agent tasks, and the voice assistant — at the
+root. Open **Settings (⚙)**, paste the `ENGINE_TOKEN` you set, and save.
+[`docs/USER_GUIDE.md`](USER_GUIDE.md) is the tour.
 
 Stop or inspect the instance with:
 
 ```console
-docker compose -f deploy/vogt.compose.yml ps
-docker compose -f deploy/vogt.compose.yml logs -f vogt
-docker compose -f deploy/vogt.compose.yml down
+docker compose -f deploy/stack.compose.yml ps
+docker compose -f deploy/stack.compose.yml logs -f vogt
+docker compose -f deploy/stack.compose.yml down
 ```
 
-The named volume `vogt-data` survives `down`. Do not add `--volumes` unless
-you intentionally want to remove the instance and everything it holds.
+Two named volumes survive `down`: `vogt-data` (the core's databases and
+backups) and `engine-home` (the pod's home — agent state, session scratch,
+the `Working` tree sessions run in). Do not add `--volumes` unless you
+intentionally want to remove the instance and everything it holds.
+
+The base file is never edited; every deployment states only its difference
+from it as an overlay or an environment value. That is the whole
+customisation model, and [`docs/CUSTOMISATION.md`](CUSTOMISATION.md) is the
+long form.
 
 ## Local Python
 
@@ -205,22 +180,26 @@ uv run vogt token issue \
   --reason "create a browser credential"
 ```
 
-**Docker Compose.** The container always runs as a fixed identity, not
+**Docker Compose.** The container runs as a fixed identity, `sprooty`, not
 yours, so `local:$(id -un)` names an actor that was never created and the
 command fails with `no actor with identity '...' — create it with 'actor
-create' first`. `vogt init` bootstraps the actor `local:vogt` inside the
-container (the image's default uid, 1000, maps to that username in
-`/etc/passwd` — see the root `Dockerfile`), so issue the token as that actor,
-from the container that owns the data directory:
+create' first`. `vogt init` bootstraps the actor `local:sprooty` inside the
+container, so issue the token as that actor, from the container that owns
+the data directory:
 
 ```console
-docker compose -f deploy/vogt.compose.yml exec vogt \
+docker compose -f deploy/stack.compose.yml exec vogt \
   vogt token issue \
-  --actor local:vogt \
-  --name browser \
+  --actor local:sprooty \
+  --name claude-code \
   --scopes read,work.write,project.write \
-  --reason "create a browser credential"
+  --reason "create an agent credential"
 ```
+
+This is the token for a CLI, an MCP client, or a script talking to the core
+directly. The browser uses the engine's own `ENGINE_TOKEN` instead — the
+engine is the front door, and it presents its own core credential behind the
+scenes.
 
 The secret is shown once. Store it in a file with restrictive permissions and
 send it as `Authorization: Bearer ...`; never put it in a URL or command-line
@@ -244,31 +223,32 @@ The default collectors read local Git state, configured source markers, and
 dependency references. They return findings; the sweep records observations
 and coverage. A collector cannot silently change declared work.
 
-**Docker Compose.** `deploy/vogt.compose.yml` mounts nothing from the host by
-default, so `--root-path` above has nothing to observe until you bind-mount a
-real checkout into the container. Add a small overlay that mounts the
-repository and sets the uid that owns it (`VOGT_UID` in `deploy/.env`, or
-`user:` directly in the overlay) — see [`docs/CUSTOMISATION.md`, "Observing an
-estate on a host path"](CUSTOMISATION.md#observing-an-estate-on-a-host-path)
-for the full pattern. A minimal example:
+**Docker Compose.** `deploy/stack.compose.yml` mounts nothing from the host
+by default, so `--root-path` above has nothing to observe until you bind-mount
+a real checkout into the container. Mount it under the pod's `Working` tree —
+that is both the core's import root and the root sessions open in, so a
+project registered there is one a terminal can also be opened for. The pod
+runs as uid 1000, so the host directory must be readable (and, for sessions,
+writable) by that uid. See [`docs/CUSTOMISATION.md`, "Observing an estate on
+a host path"](CUSTOMISATION.md#observing-an-estate-on-a-host-path) for the
+full pattern. A minimal example:
 
 ```yaml
 # my-overlay.yml
 services:
   vogt:
-    user: "1000:0"                     # the uid that owns /srv/my-project
     volumes:
-      - /srv/my-project:/workspace/my-project:rw
+      - /srv/my-project:/home/sprooty/Working/my-project:rw
 ```
 
 ```console
-docker compose -f deploy/vogt.compose.yml -f my-overlay.yml up -d --wait
-docker compose -f deploy/vogt.compose.yml exec vogt \
+docker compose -f deploy/stack.compose.yml -f my-overlay.yml up -d --wait
+docker compose -f deploy/stack.compose.yml exec vogt \
   vogt project register \
   --name my-project \
-  --root-path /workspace/my-project \
+  --root-path /home/sprooty/Working/my-project \
   --reason "start tracking this repository"
-docker compose -f deploy/vogt.compose.yml exec vogt \
+docker compose -f deploy/stack.compose.yml exec vogt \
   vogt sweep --reason "collect repository state"
 ```
 
@@ -312,16 +292,16 @@ client — an infrastructure register such as Cadastre, a language server — ar
 your agent's configuration, not Vogt's; the public image installs, contacts,
 and requires none of them.
 
-## Optional session engine
+## The session engine
 
-The Rust session engine and its PWA (`engine/`, `web/`) add terminal
-sessions, file and git APIs, agent tasks, push notifications, and a
-voice/chat assistant. They are a separate image, built from source with
-`engine/Dockerfile`, and the core reaches them only when `VOGT_ENGINE_URL`
-and `VOGT_ENGINE_TOKEN_FILE` are set. Nothing in this guide needs them.
-[`docs/ENGINE.md`](ENGINE.md) covers building and running the engine; the
-assistant provider is any OpenAI-compatible chat endpoint, configured with
-`ENGINE_ASSISTANT_BASE_URL`, `ENGINE_ASSISTANT_API_KEY`, and
+The Rust session engine and its PWA (`engine/`, `web/`) are what give you
+terminal sessions, file and git APIs, agent tasks, push notifications, and a
+voice/chat assistant. The published image carries them already wired to the
+core; nothing here needs configuring. Only the **Local Python** path runs
+without them, and there the core simply reports that no engine is
+configured. [`docs/ENGINE.md`](ENGINE.md) covers the engine's own settings;
+the assistant provider is any OpenAI-compatible chat endpoint, configured
+with `ENGINE_ASSISTANT_BASE_URL`, `ENGINE_ASSISTANT_API_KEY`, and
 `ENGINE_ASSISTANT_MODEL`.
 
 ## Backup, upgrade, and removal
@@ -333,16 +313,22 @@ uv run vogt backup --reason "backup before upgrade"
 uv run vogt migrate
 ```
 
-For Compose, take a backup from inside the running service or stop it before
-copying the `vogt-data` volume. Upgrade by rebuilding/pulling the new image,
-then start the same Compose file; startup applies forward-only migrations.
-Keep the old image and backup until the new readiness check and a restore
-test succeed.
+For Compose, take the backup from inside the running container:
+
+```console
+docker compose -f deploy/stack.compose.yml exec vogt \
+  vogt backup --reason "backup before upgrade"
+```
+
+Upgrade by changing `VOGT_STACK_IMAGE` in `deploy/.env` to the new digest
+(or tag), then `up -d --wait` with the same Compose file; startup applies
+forward-only migrations. Keep the old image and backup until the new
+readiness check and a restore test succeed.
 
 To remove the example completely, first make a backup, then run:
 
 ```console
-docker compose -f deploy/vogt.compose.yml down --volumes
+docker compose -f deploy/stack.compose.yml down --volumes
 ```
 
 This removes the example's named data volume and cannot be undone by Docker.

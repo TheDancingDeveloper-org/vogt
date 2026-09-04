@@ -14,18 +14,17 @@ permissions:
   contents: read
 
 env:
+  # The core alone. Published and signed at every release because the stack
+  # image below copies `/opt/vogt` out of it by digest (#143) and the release
+  # manifest records the pair — it is the verifiable build input of the
+  # product, not the product. Nothing tells an operator to deploy it
+  # (DEPLOYMENT.md §1.1, decision of 2026-09-04).
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
-  # The merged product — core plus session engine in one container. Released
-  # alongside the core image because NFR-C6 says the build-vs-release
-  # discipline governs *the merged image*, and a tag that produced only half
-  # the product would leave the estate's own deployment with no versioned
-  # artefact to roll back to.
-  #
-  # It is not the supported install of Vogt (NFR-PO4 — that is the image
-  # above, and it is the one the wheel and the docs point at). This one
-  # carries a development environment: agent CLIs, an Android SDK, Sway.
-  # Published, versioned and signed; not recommended to anybody who wants
-  # Vogt rather than this estate's pod.
+  # The product: core plus session engine, PWA and agent CLIs in one
+  # container. This is the one supported install of Vogt — the image
+  # `deploy/stack.compose.yml` runs and the docs point at. A development pod
+  # by design (writable home, sudo, sshd, the CLIs), published, versioned and
+  # signed.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
   # NOTE: signed releases build cold and no longer import the plaintext LAN
   # BuildKit layer cache (#514) — an unauthenticated LAN write to that cache
@@ -68,8 +67,14 @@ jobs:
       contents: read
       packages: write
 
+  # Still called `distribution` — the image jobs and the release job `needs:`
+  # it by that id — but it no longer builds one. It used to package a wheel
+  # and sdist and attach them to the GitHub Release; nothing consumed them
+  # (no PyPI publish, no image built from them, no doc pointing at them), so
+  # from 2026-09-04 the job is only the version gate: the tag, the package,
+  # the PWA and mobile manifests, and the workflows all name one version.
   distribution:
-    name: build distribution
+    name: the version matches the tag
     needs: validate-release
     runs-on: [self-hosted]
     steps:
@@ -92,14 +97,6 @@ jobs:
             exit 1
           fi
           uv run --no-sync python scripts/check_product_version.py "${TAG#v}"
-
-      - run: uv build
-
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: vogt-dist-${{ github.ref_name }}
-          path: dist/
-          if-no-files-found: error
 
   image:
     name: build, sign and publish the image
@@ -244,20 +241,20 @@ jobs:
           # signature over a movable reference proves nothing.
           cosign sign --yes "${IMAGE}@${DIGEST}"
 
-      - name: report what to pin
+      - name: report the build input
         env:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           {
-            echo "## Published"
+            echo "## Published (core — a build input, not the product)"
             echo
             echo '```'
             echo "${IMAGE}@${DIGEST}"
             echo '```'
             echo
-            echo "Nothing has been deployed. Production moves when this digest"
-            echo "is handed to the approved estate deployment workflow, which"
-            echo "owns the desired-state pin and \`DeployStack\` (NFR-D10)."
+            echo "The merged \`vogt-stack\` image below lifts its core from this"
+            echo "digest. Deployments pin the merged image, never this one"
+            echo "(DEPLOYMENT.md §1.1). Nothing has been deployed."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # The dev-pod toolchain base, built (or reused) before the merged image that
@@ -451,12 +448,12 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: |
           {
-            echo "## Published (merged stack)"
+            echo "## Published (the product)"
             echo
-            echo "\`deploy/vogt-stack.compose.yml\` pins:"
+            echo "In \`deploy/.env\` beside \`deploy/stack.compose.yml\`:"
             echo
-            echo '```yaml'
-            echo "    image: ${STACK_IMAGE}@${DIGEST}"
+            echo '```'
+            echo "VOGT_STACK_IMAGE=${STACK_IMAGE}@${DIGEST}"
             echo '```'
             echo
             echo "Publishing is not deploying (NFR-D10). See"
@@ -632,11 +629,6 @@ jobs:
 
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
         with:
-          name: vogt-dist-${{ github.ref_name }}
-          path: release-assets/dist
-
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
-        with:
           name: vogt-android-release-${{ github.ref_name }}
           path: release-assets/android
 
@@ -650,22 +642,13 @@ jobs:
           STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
         run: |
           set -euo pipefail
-          wheel_count="$(find release-assets/dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) | wc -l)"
           apk_count="$(find release-assets/android -type f -name '*.apk' | wc -l)"
-          [ "$wheel_count" -ge 2 ] || { echo "wheel and sdist are required" >&2; exit 1; }
           [ "$apk_count" -ge 1 ] || { echo "signed APK is required" >&2; exit 1; }
-          sdist="$(find release-assets/dist -type f -name '*.tar.gz' -print -quit)"
-          test -n "$sdist"
-          if tar -tzf "$sdist" | grep -Eq '/(\.github|deploy|docs|engine|mobile|scripts|tests|web)(/|$)'; then
-            echo "sdist contains non-core repository content" >&2
-            exit 1
-          fi
           case "$CORE_DIGEST:$STACK_DIGEST" in
             sha256:*:sha256:*) ;;
             *) echo "release image digests are missing" >&2; exit 1;;
           esac
           mkdir -p release-assets/final
-          find release-assets/dist -type f \( -name '*.whl' -o -name '*.tar.gz' \) -exec cp {} release-assets/final/ \;
           find release-assets/android -type f -name '*.apk' -exec cp {} release-assets/final/ \;
           jq -n \
             --arg schema "vogt-release-manifest.v1" \
@@ -674,7 +657,7 @@ jobs:
             --arg core "${CORE_IMAGE}@${CORE_DIGEST}" \
             --arg stack "${STACK_IMAGE}@${STACK_DIGEST}" \
             --arg handoff "https://github.com/TheDancingDeveloper-org/vogt/issues/377" \
-            '{schema: $schema, product: "Vogt", product_version: ($tag | ltrimstr("v")), source_tag: $tag, source_sha: $source_sha, images: {core: $core, merged_stack: $stack}, provenance: {cosign: "keyless signature from .github/workflows/release.yml", sbom: "GitHub Actions SBOM attestation for the published image digests"}, production_deployment_handoff: $handoff, assets: {python: "wheel and sdist", android: "signed APK"}}' \
+            '{schema: $schema, product: "Vogt", product_version: ($tag | ltrimstr("v")), source_tag: $tag, source_sha: $source_sha, images: {core: $core, merged_stack: $stack}, provenance: {cosign: "keyless signature from .github/workflows/release.yml", sbom: "GitHub Actions SBOM attestation for the published image digests"}, production_deployment_handoff: $handoff, assets: {android: "signed APK"}}' \
             > release-assets/final/vogt-release-manifest.json
           jq empty release-assets/final/vogt-release-manifest.json
           jq -r . release-assets/final/vogt-release-manifest.json > release-assets/release-notes.json

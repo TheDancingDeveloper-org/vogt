@@ -1739,12 +1739,15 @@ def test_github_release_collects_and_publishes_the_complete_release() -> None:
     workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
     job = workflow[workflow.index("\n  github-release:") :]
     assert "needs: [validate-release, distribution, image, stack-image, android]" in job
-    assert "vogt-dist-${{ github.ref_name }}" in job
     assert "vogt-android-release-${{ github.ref_name }}" in job
-    assert "wheel and sdist are required" in job
-    assert "sdist contains non-core repository content" in job
-    assert "scripts|tests|web" in job
     assert "signed APK is required" in job
+    # No wheel, no sdist (2026-09-04): nothing consumed them — no PyPI
+    # publish, no image built from them, no doc pointing at them — and the
+    # one supported artefact is the merged image. A release that attaches
+    # files nobody can use is a release that lies about what it ships.
+    assert "vogt-dist-" not in job
+    assert "wheel" not in job and "sdist" not in job
+    assert "uv build" not in workflow
     assert "CORE_DIGEST" in job and "STACK_DIGEST" in job
     assert "vogt-release-manifest.json" in job
     assert "production_deployment_handoff" in job

@@ -25,10 +25,24 @@ DOCKERFILE = REPO_ROOT / "Dockerfile"
 
 
 def test_public_delivery_defaults_to_the_current_product_release() -> None:
-    """The first pull after publication must name an existing current release."""
+    """The first pull after publication must name an existing current release.
+
+    Two images carry the version. The stack image is the product — the one
+    `stack.compose.yml` and the operator docs name (DEPLOYMENT.md §1.1). The
+    core image is the contributor stack's base and the stack image's build
+    input, so the contributor files and the image-extension doc name it.
+    """
     with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
         version = tomllib.load(handle)["project"]["version"]
-    image = f"ghcr.io/thedancingdeveloper-org/vogt:{version}"
+    stack = f"ghcr.io/thedancingdeveloper-org/vogt-stack:{version}"
+    for path in (
+        STACK_COMPOSE,
+        REPO_ROOT / "docs" / "DEPLOYMENT.md",
+    ):
+        assert stack in path.read_text(encoding="utf-8"), (
+            f"{path.relative_to(REPO_ROOT)} must name the current release {stack}"
+        )
+    core = f"ghcr.io/thedancingdeveloper-org/vogt:{version}"
     for path in (
         PUBLIC_COMPOSE,
         PUBLIC_ENV,
@@ -36,8 +50,8 @@ def test_public_delivery_defaults_to_the_current_product_release() -> None:
         REPO_ROOT / "docs" / "CUSTOMISATION.md",
         REPO_ROOT / "docs" / "DEPLOYMENT.md",
     ):
-        assert image in path.read_text(encoding="utf-8"), (
-            f"{path.relative_to(REPO_ROOT)} must name the current release {image}"
+        assert core in path.read_text(encoding="utf-8"), (
+            f"{path.relative_to(REPO_ROOT)} must name the current release {core}"
         )
 
 

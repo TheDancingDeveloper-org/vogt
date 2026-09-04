@@ -15,7 +15,7 @@
 # engine remains the only front door.
 
 services:
-  engine:
+  vogt:
     environment:
       ENGINE_ASSISTANT_STT_BASE_URLS: "${ENGINE_ASSISTANT_STT_BASE_URLS:-http://voice:8000/v1}"
       ENGINE_ASSISTANT_STT_MODEL: "${ENGINE_ASSISTANT_STT_MODEL:-whisper-1}"

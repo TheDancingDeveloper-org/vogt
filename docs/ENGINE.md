@@ -125,8 +125,9 @@ image carrying the toolchains an agent working *inside* a session is likely to
 want — Node, Rust, Java/Gradle, the Android SDK, and in the `full` variant
 Flutter. It is a development pod rather than a hardened service image — it
 runs as a named user with `sudo`, with a writable home — which is why the
-core-only image at the repository root still exists and is the one to use
-when you do not want sessions at all.
+core image at the repository root is still a separate build rather than a
+stage of this one: it is the hardened input this image lifts its core from,
+not something to deploy on its own (`DEPLOYMENT.md` §1.1).
 
 Build arguments worth knowing, all off by default: `INSTALL_AI_CLIENTS=true`
 bakes in the `codex` and `claude` CLIs at the Renovate-pinned versions in
