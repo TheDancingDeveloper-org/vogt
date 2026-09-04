@@ -52,6 +52,7 @@ import {
   type SavedWorkspaceLayout,
 } from "./workspaceLayouts";
 import Dialog from "./Dialog";
+import { createNarrow } from "./narrow";
 import { historyResultUrl } from "./historyRoute";
 import { terminalWorkspaceHandle } from "./paneComposeBus";
 
@@ -285,6 +286,7 @@ function fuzzyMatch(pattern: string, text: string): boolean {
 
 const CommandPalette: Component<Props> = (props) => {
   const navigate = useNavigate();
+  const narrow = createNarrow();
   const [query, setQuery] = createSignal("");
   const [selectedIndex, setSelectedIndex] = createSignal(0);
   const [historyResults, setHistoryResults] = createSignal<HistorySearchResult[]>([]);
@@ -1048,6 +1050,17 @@ const CommandPalette: Component<Props> = (props) => {
         category: "Git",
       },
       {
+        id: "open-files-place",
+        label: "Open Files",
+        description: "The workspace file tree — browse, and upload into any folder",
+        icon: "/",
+        action: () => {
+          navigate("/files");
+          props.onClose();
+        },
+        category: "Files",
+      },
+      {
         id: "open-tasks-place",
         label: "Open Tasks",
         description: "Recurring agent tasks",
@@ -1658,7 +1671,9 @@ const CommandPalette: Component<Props> = (props) => {
             id={inputId}
             type="text"
             class="command-palette-input"
-            placeholder="Type a command, # for workspace actions, @ symbols, / files, or > history..."
+            placeholder={narrow()
+              ? "Search, or # @ / > for modes…"
+              : "Type a command, # for workspace actions, @ symbols, / files, or > history..."}
             value={query()}
             onInput={handleInput}
             onKeyDown={handleKeyDown}
@@ -1672,6 +1687,17 @@ const CommandPalette: Component<Props> = (props) => {
             aria-describedby={`${instructionsId} ${statusId}`}
             data-dialog-initial-focus
           />
+          {/* A phone has no Escape key and the palette covers the backdrop it
+              would otherwise tap, so leaving needs a control of its own. */}
+          <button
+            type="button"
+            class="command-palette-close"
+            aria-label="Close command palette"
+            tabindex="-1"
+            onClick={() => props.onClose()}
+          >
+            <span aria-hidden="true">×</span>
+          </button>
         </div>
         <Show when={showModeHelp()}>
           <div class="command-palette-modehelp" aria-label="Prefix modes">
@@ -1741,9 +1767,17 @@ const CommandPalette: Component<Props> = (props) => {
             : `${filteredCommands().length} command${filteredCommands().length === 1 ? "" : "s"} found. ${selectedCommand()?.label ?? ""} selected.`}
         </div>
         <div class="command-palette-footer">
-          <span id={instructionsId}>↑↓ Navigate</span>
-          <span>↵ Select</span>
-          <span>Esc Close</span>
+          <span id={instructionsId} class="command-palette-hint">↑↓ Navigate</span>
+          <span class="command-palette-hint">↵ Select</span>
+          <span class="command-palette-hint">Esc Close</span>
+          <button
+            type="button"
+            class="command-palette-footer-close"
+            tabindex="-1"
+            onClick={() => props.onClose()}
+          >
+            Close
+          </button>
         </div>
       </Dialog>
     </Show>

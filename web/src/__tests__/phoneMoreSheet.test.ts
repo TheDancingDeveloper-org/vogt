@@ -14,6 +14,7 @@ describe("the phone More sheet inventory", () => {
     });
     expect(items.map((item) => item.label)).toEqual([
       "Git",
+      "Files",
       "History",
       "Tasks",
       "Settings",
@@ -62,6 +63,7 @@ describe("the phone More sheet inventory", () => {
     expect(byId.get("projects")).toBe("#/projects");
     expect(byId.get("audit")).toBe("#/audit");
     expect(byId.get("git")).toBe("#/g");
+    expect(byId.get("files")).toBe("#/files");
     expect(byId.get("history")).toBe("#/history");
     expect(byId.get("tasks")).toBe("#/tasks");
     expect(byId.get("gui")).toBe("#/gui");
@@ -73,6 +75,7 @@ describe("the phone More sheet inventory", () => {
       "Projects",
       "Audit",
       "Git",
+      "Files",
       "History",
       "Tasks",
       "GUI stream",

@@ -6,7 +6,10 @@ export type PrimaryPlace =
   | "board"
   | "backlog"
   | "projects"
-  | "audit";
+  | "audit"
+  /** The workspace file tree as a place of its own — the phone has no rail
+   *  to hold it, and uploading to a chosen folder needs the tree. */
+  | "files";
 
 export type SessionTool =
   | "terminal"
@@ -47,6 +50,7 @@ const PLACE_PATHS: Record<string, PrimaryPlace> = {
   "/backlog": "backlog",
   "/projects": "projects",
   "/audit": "audit",
+  "/files": "files",
 };
 
 export function describeRoute(
@@ -164,6 +168,7 @@ const PLACE_TITLES: Record<PrimaryPlace, string> = {
   backlog: "Backlog",
   projects: "Projects",
   audit: "Audit",
+  files: "Files",
 };
 
 const TOOL_TITLES: Record<SessionTool, string> = {

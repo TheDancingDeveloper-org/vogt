@@ -4,6 +4,8 @@ import { APP_ROUTES } from "./routes";
 import { migrateStorageKeys } from "./storageMigration";
 import "./styles.css";
 import { initializeRuntimeTransport } from "./runtimeTransport";
+import { dialogIsOpen } from "./Dialog";
+import { installNativeBackButton } from "./nativeBack";
 
 await initializeRuntimeTransport();
 
@@ -92,6 +94,7 @@ applyAppTheme();
 initAppThemeSystemWatch();
 installVisualViewportSizing();
 installNativeInsetsFallback();
+installNativeBackButton(dialogIsOpen);
 
 // HashRouter avoids needing an SPA fallback configured on the embedding
 // Rust server: every navigation stays under index.html.

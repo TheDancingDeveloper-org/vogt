@@ -73,6 +73,7 @@ import {
 } from "./sessionRowModel";
 import ModKeyRow from "./ModKeyRow";
 import { createNarrow } from "./narrow";
+import GoToButton from "./GoToButton";
 import {
   adjacentMobilePagerIndex,
   beginMobilePagerGesture,
@@ -1113,6 +1114,7 @@ const TerminalWorkspace: Component<Props> = (props) => {
             </Show>
           </span>
         </div>
+        <GoToButton class="terminal-mobile-icon" />
         <button type="button" class="terminal-mobile-icon" onClick={openFind} aria-label="Find in terminal" title="Find in terminal">
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <circle cx="10.5" cy="10.5" r="5.5" />

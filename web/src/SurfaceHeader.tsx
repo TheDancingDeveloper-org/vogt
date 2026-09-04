@@ -1,5 +1,7 @@
 import { Show, createSignal, createUniqueId, type Component, type JSX } from "solid-js";
+import GoToButton from "./GoToButton";
 import { createNarrow } from "./narrow";
+import { useShellActions } from "./shellActions";
 
 /**
  * The one DOM grammar for a primary product surface's working header.
@@ -51,6 +53,7 @@ export interface SurfaceHeaderProps {
 
 export const SurfaceHeader: Component<SurfaceHeaderProps> = (props) => {
   const narrow = createNarrow();
+  const shell = useShellActions();
   const [open, setOpen] = createSignal(false);
   const controlsId = createUniqueId();
 
@@ -76,6 +79,15 @@ export const SurfaceHeader: Component<SurfaceHeaderProps> = (props) => {
       <div class="surface-header-title" data-surface-header-slot="title">
         {props.title}
       </div>
+      {/* A phone's "Go to…" rides in the title row beside the surface's own
+          action, so it costs no row of its own above every screen. The slot
+          exists only on a narrow client inside the shell; a desk has the
+          rail's button and this renders nothing. */}
+      <Show when={narrow() && shell !== undefined}>
+        <div class="surface-header-goto" data-surface-header-slot="goto">
+          <GoToButton />
+        </div>
+      </Show>
       <Show when={props.honesty !== undefined}>
         <div
           class={`surface-header-honesty${props.honestyClass ? ` ${props.honestyClass}` : ""}`}
