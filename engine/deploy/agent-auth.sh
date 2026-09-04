@@ -34,6 +34,21 @@
 #   ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID  the project holding those two secrets
 #   CADASTRE_MCP_ENABLED           "1" turns the Cadastre integration on
 #   CADASTRE_MCP_URL               the Cadastre MCP endpoint (no default)
+#
+# The contract this helper gives a session (#511, #566): a session gets exactly
+# the manifest — every secret above, resolved once at launch and exported as a
+# brokered token — and nothing more. The machine identity that could read the
+# rest of the vault is dropped before the shell/command starts, so an agent's
+# own "log in to the secrets manager and fetch a secret" step finds
+# INFISICAL_CLIENT_ID empty *by design*, not because the credential is missing.
+# Two names-only breadcrumbs mark the boundary for tooling that needs to tell
+# those apart: `AGENT_AUTH_MODE=brokered` and `AGENT_AUTH_GRANTED`, the
+# space-separated names (never values) of the credential variables granted. To
+# make a new secret reachable from sessions, add a line to
+# ENGINE_AGENT_AUTH_SECRETS — do not reach for the identity. (The strip is a
+# propagation boundary between processes, not a kernel one: a same-uid process
+# can still read PID 1's environment via /proc/1/environ; the identity is out
+# of the manifest's reach, not out of the machine's.)
 
 set -euo pipefail
 
@@ -50,6 +65,25 @@ readonly TOKEN_PROJECT_ID="${ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID:-}"
 # session's own `VOGT_URL` still wins where one is set.
 readonly DEFAULT_VOGT_URL="http://127.0.0.1:8910"
 AUTH_TMP_DIR=""
+
+# Names of the credential variables this helper grants the launched session,
+# accumulated as each is exported. Published as the `AGENT_AUTH_GRANTED`
+# breadcrumb (names only, never values) just before the brokering identity is
+# dropped, so a session that follows the near-universal "log in to the secrets
+# manager, fetch what you need" pattern sees the brokered model instead of an
+# empty INFISICAL_CLIENT_ID and the wrong conclusion that the credential does
+# not exist (#566).
+AGENT_AUTH_GRANTED_VARS=""
+# Set when a manifest entry matched ENGINE_AGENT_AUTH_GH_TOKEN_FROM and GH_TOKEN
+# was aliased from it. Checked after the manifest load: a GH_TOKEN_FROM that
+# names no manifest entry aliased nothing and, before #566, did so in silence.
+GH_TOKEN_ALIASED=0
+
+# Record a granted credential variable name for the breadcrumb. Names only:
+# no value ever leaves this helper through it.
+grant_var() {
+    AGENT_AUTH_GRANTED_VARS+="${AGENT_AUTH_GRANTED_VARS:+ }$1"
+}
 
 cleanup_auth_artifacts() {
     if [[ -n "$AUTH_TMP_DIR" && -d "$AUTH_TMP_DIR" ]]; then
@@ -173,8 +207,16 @@ load_manifest_secrets() {
         fi
         printf -v "$var" '%s' "$value"
         export "${var?}"
+        [[ -n "$value" ]] && grant_var "$var"
         if [[ "$var" == "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]]; then
-            export GH_TOKEN="$value"
+            # The name matched a manifest entry, which is what the post-load
+            # check below verifies; the alias is still worth only a non-empty
+            # value.
+            GH_TOKEN_ALIASED=1
+            if [[ -n "$value" ]]; then
+                export GH_TOKEN="$value"
+                grant_var GH_TOKEN
+            fi
         fi
     done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
 }
@@ -192,6 +234,17 @@ load_agent_environment() {
     unset GITHUB_PAT GH_RELEASE_TOKEN
     load_manifest_secrets "$access_token"
 
+    # A GH_TOKEN alias that names nothing is the one manifest error that stayed
+    # silent: the alias above only fires while iterating manifest entries, so a
+    # GH_TOKEN_FROM that is not among them left GH_TOKEN unset with no warning,
+    # and every `gh` call then failed as if unauthenticated — a long way from
+    # the typo that caused it. Fail here, naming the mismatch; under
+    # ENGINE_AGENT_AUTH_REQUIRED the entrypoint runs this at boot, so it
+    # surfaces before a session ever starts.
+    if [[ -n "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" && "$GH_TOKEN_ALIASED" != "1" ]]; then
+        die "ENGINE_AGENT_AUTH_GH_TOKEN_FROM names '${ENGINE_AGENT_AUTH_GH_TOKEN_FROM}', which is not a variable in ENGINE_AGENT_AUTH_SECRETS; no GH_TOKEN was aliased"
+    fi
+
     # Cadastre is an explicit private-stack integration. Only fetch its
     # credential when that stack has opted in.
     if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
@@ -203,6 +256,7 @@ load_agent_environment() {
         [[ -n "$CADASTRE_HTTP_TOKEN" ]] || die \
             "Infisical secret $CADASTRE_SECRET_NAME is missing or empty"
         export CADASTRE_HTTP_TOKEN
+        grant_var CADASTRE_HTTP_TOKEN
     else
         unset CADASTRE_HTTP_TOKEN CADASTRE_HTTP_TOKEN_FILE 2>/dev/null || true
     fi
@@ -230,16 +284,19 @@ load_agent_environment() {
     else
         unset VOGT_HTTP_TOKEN 2>/dev/null || true
     fi
+    [[ -n "${VOGT_HTTP_TOKEN:-}" ]] && grant_var VOGT_HTTP_TOKEN
 
     umask 077
     AUTH_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mydevenv2-agent-auth.XXXXXXXX")"
     if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
         printf '%s' "$CADASTRE_HTTP_TOKEN" >"$AUTH_TMP_DIR/cadastre-http-token"
         export CADASTRE_HTTP_TOKEN_FILE="$AUTH_TMP_DIR/cadastre-http-token"
+        grant_var CADASTRE_HTTP_TOKEN_FILE
     fi
     if [[ -n "${VOGT_HTTP_TOKEN:-}" ]]; then
         printf '%s' "$VOGT_HTTP_TOKEN" >"$AUTH_TMP_DIR/vogt-http-token"
         export VOGT_TOKEN_FILE="$AUTH_TMP_DIR/vogt-http-token"
+        grant_var VOGT_TOKEN_FILE
     fi
 
     # Not gated on Cadastre. The bootstrap registers Vogt unconditionally and
@@ -253,6 +310,16 @@ load_agent_environment() {
 
     export GIT_ASKPASS=/usr/local/bin/mydevenv2-git-askpass
     export GIT_TERMINAL_PROMPT=0
+
+    # Signpost the strip (#566). The identity and the manifest are about to be
+    # dropped; without a breadcrumb the launched session sees only empty
+    # INFISICAL_* vars, its `infisical login` fails, and the natural wrong
+    # conclusion is "no such credential exists." These two names-only vars —
+    # never a value, and deliberately not the API URL — let session tooling
+    # detect the brokered model and either read a credential it was granted or
+    # fail with an actionable message. See docs/ENGINE.md §9.
+    export AGENT_AUTH_MODE=brokered
+    export AGENT_AUTH_GRANTED="$AGENT_AUTH_GRANTED_VARS"
 
     # Drop the brokering identity before the shell/command this helper launches.
     # The engine re-grants exactly these to the helper (they are otherwise
