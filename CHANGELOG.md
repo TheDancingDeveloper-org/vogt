@@ -12,7 +12,21 @@ git log rather than being reconstructed here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **The phone terminal renders agent-CLI symbols instead of tofu.** Claude
+  Code's "⏵⏵ bypass permissions" footer drew two empty boxes on Android
+  because the system monospace font has no U+23F5. xterm now falls back, last
+  in its font list, to three bundled glyph subsets of Noto Sans Symbols,
+  Symbols 2 and Math (OFL 1.1, `web/public/fonts/`), fetched only when a
+  symbol from their ranges is actually drawn.
+- **Phone uplift.** The terminal screen fills the viewport (the hidden bottom
+  bar no longer reserves its padding); "Go to…" rides inline in each
+  surface header instead of taking a row; bottom-bar count badges are no
+  longer clipped; the command palette and the new-session preset picker can
+  be closed on touch (× / Close / Cancel, backdrop, and the Android back
+  button); and a new Files place lets a phone browse the workspace tree and
+  upload into a chosen folder (WI-75).
 
 ## [0.5.2] - 2026-09-03
 

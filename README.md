@@ -179,4 +179,7 @@ setting.
 
 ## Licence
 
-[MIT](LICENSE).
+[MIT](LICENSE). The terminal's bundled symbol-glyph fallback fonts under
+`web/public/fonts/` are subsets of Noto Sans Symbols, Noto Sans Symbols 2 and
+Noto Sans Math, licensed under the SIL Open Font License 1.1
+(`web/public/fonts/OFL-NotoSans.txt`).
