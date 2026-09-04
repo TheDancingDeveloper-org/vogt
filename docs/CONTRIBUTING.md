@@ -94,6 +94,21 @@ tradeoff when a second regular maintainer can share approval duty.
 Repository-wide conventions for agents and people — layer order, the
 transport-parity rule, logging — are in [`AGENTS.md`](../AGENTS.md).
 
+## Branches
+
+`dev` is the integration branch and the target for all development work:
+base a new branch on `origin/dev`, keep it rebased onto `origin/dev` (the
+branch is linear-history, so a stale base is the usual reason a PR cannot
+land), and open the pull request against `dev`. The dev pod deploys from
+`dev`, and CI's `e2e` and `build` pipelines run there.
+
+`main` and `prod` are release branches, not places to work. `main` is a
+transient promotion waypoint: it only ever receives a fast-forward of a
+validated `dev` SHA and is then fast-forwarded on to `prod`; nothing is
+branched from it and nothing is cut from it. A version tag must be reachable
+from `prod` before `release.yml` will publish. Promotion is a workflow-driven
+push, never a pull request — see [`DEPLOYMENT.md`](DEPLOYMENT.md) §7.1.
+
 ## Pull requests
 
 Describe the behavior change, the surfaces it affects, and the verification

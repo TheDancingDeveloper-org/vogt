@@ -20,9 +20,16 @@ depends on the engine.
 - This file applies repository-wide. Before changing `engine/`, `web/`, or
   `mobile/`, also read `engine/AGENTS.md`; its more specific rules supplement
   this file. `CLAUDE.md` files are pointers, not a second source of rules.
-- Feature and fix pull requests target `dev`. `main` and `prod` are promotion
-  branches; `.github/workflows/promotion-policy.yml` restricts what may merge
-  into them.
+- **`dev` is the target for all development work.** Base every branch on
+  `origin/dev` and open every feature, fix, and docs pull request against
+  `dev`; `dev` is what the dev pod runs and what CI validates. `main` is not a
+  development branch and never a base: it is a transient promotion waypoint
+  that only ever receives a fast-forward of a validated `dev` SHA on its way
+  to `prod`, and nothing is cut from it — release tags must be reachable from
+  `prod` (`docs/DEPLOYMENT.md` §7.1). `.github/workflows/promotion-policy.yml`
+  fails any other pull request into `main` or `prod` early. A branch that
+  has drifted behind `dev` is rebased onto `origin/dev` before its PR, not
+  onto `main`.
 - Run `git status --short --branch` before editing. Preserve unrelated staged,
   unstaged, and untracked work; do not fold it into the task or rewrite it to
   make checks pass.
