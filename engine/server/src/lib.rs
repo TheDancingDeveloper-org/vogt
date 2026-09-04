@@ -26,6 +26,7 @@ pub mod push;
 pub mod push_api;
 pub mod push_fcm;
 pub mod scrollback;
+pub mod secret_broker;
 pub mod sessions;
 pub mod vogt_core;
 pub mod vogt_tools;

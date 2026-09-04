@@ -17,9 +17,13 @@
 #   INFISICAL_CLIENT_ID/_SECRET    required — the machine identity
 #   ENGINE_INFISICAL_ENV           Infisical environment slug (default: prod)
 #   ENGINE_AGENT_AUTH_SECRETS      the secrets to load, one per line:
-#                                    VAR PROJECT_ID SECRET_NAME [optional]
+#                                    VAR PROJECT_ID SECRET_NAME [optional|ondemand]
 #                                  each fetched and exported as VAR; a missing
 #                                  required secret fails, naming the secret.
+#                                  `ondemand` declares VAR for sessions but
+#                                  does NOT fetch it at launch: it is reachable
+#                                  only through the engine's broker, on request
+#                                  (`fetch`, below), and every fetch is audited.
 #   ENGINE_AGENT_AUTH_GH_TOKEN_FROM  a VAR from the manifest to also export as
 #                                    GH_TOKEN (the git/gh default identity).
 #   ENGINE_AGENT_AUTH_PROBES       optional `check` probes, one per line:
@@ -49,6 +53,23 @@
 # propagation boundary between processes, not a kernel one: a same-uid process
 # can still read PID 1's environment via /proc/1/environ; the identity is out
 # of the manifest's reach, not out of the machine's.)
+#
+# The on-demand broker (#568) is the one sanctioned way to get a manifest
+# secret *after* launch, and it has two halves in this file:
+#
+#   get VAR      engine-side. Run by the engine, which holds the identity,
+#                with the same re-granted environment a session launch gets.
+#                Resolves exactly one manifest entry and prints its value —
+#                nothing else — to stdout. Refuses a VAR not in the manifest.
+#   fetch VAR    session-side. Runs inside a session, which holds no identity,
+#                only MYDEVENV2_BROKER_URL and MYDEVENV2_BROKER_TOKEN (minted
+#                by the engine for that session). Asks the engine's
+#                `POST /api/agent-auth/fetch/VAR` and prints the value. The
+#                engine enforces the manifest, rate-limits, and audits the
+#                fetch by session and name, never value.
+#
+# A session's environment therefore says which names it may ask for, in
+# `AGENT_AUTH_ONDEMAND`, beside what it already holds in `AGENT_AUTH_GRANTED`.
 
 set -euo pipefail
 
@@ -74,6 +95,9 @@ AUTH_TMP_DIR=""
 # empty INFISICAL_CLIENT_ID and the wrong conclusion that the credential does
 # not exist (#566).
 AGENT_AUTH_GRANTED_VARS=""
+# Names declared `ondemand`: reachable through the broker, never exported at
+# launch. Published as the `AGENT_AUTH_ONDEMAND` breadcrumb.
+AGENT_AUTH_ONDEMAND_VARS=""
 # Set when a manifest entry matched ENGINE_AGENT_AUTH_GH_TOKEN_FROM and GH_TOKEN
 # was aliased from it. Checked after the manifest load: a GH_TOKEN_FROM that
 # names no manifest entry aliased nothing and, before #566, did so in silence.
@@ -97,12 +121,19 @@ Usage:
   mydevenv2-agent-auth check
   mydevenv2-agent-auth run -- <command> [args...]
   mydevenv2-agent-auth shell
+  mydevenv2-agent-auth get <VAR>
+  mydevenv2-agent-auth fetch <VAR>
 
 Commands:
   check  Fetch credentials and validate secrets-manager access, any configured
          service probes, and the Cadastre and Vogt MCP endpoints.
   run    Execute one command with service credentials on demand in memory.
   shell  Start a login shell with service credentials on demand in memory.
+  get    (engine-side) Resolve one ENGINE_AGENT_AUTH_SECRETS entry with the
+         machine identity and print its value to stdout. Used by the engine's
+         on-demand broker; needs the identity, so it cannot run in a session.
+  fetch  (session-side) Ask the engine's broker for one manifest secret and
+         print its value to stdout. Needs only the session's broker token.
 EOF
 }
 
@@ -182,6 +213,73 @@ get_secret() {
         --plain --silent
 }
 
+# Print `PROJECT_ID SECRET_NAME FLAG` for one manifest variable, or return 1
+# when the manifest does not declare it. The one place the manifest is read
+# for a *single* name; the launch-time loop below reads it for all of them.
+manifest_entry() {
+    local want="$1" line var project name flag
+    [[ -n "${ENGINE_AGENT_AUTH_SECRETS:-}" ]] || return 1
+    while IFS= read -r line; do
+        line="${line%%#*}"
+        read -r var project name flag <<<"$line"
+        [[ "${var:-}" == "$want" ]] || continue
+        [[ -n "${project:-}" && -n "${name:-}" ]] || die \
+            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [optional|ondemand]'): $line"
+        printf '%s %s %s' "$project" "$name" "${flag:-required}"
+        return 0
+    done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
+    return 1
+}
+
+# `get VAR`: the engine's half of the on-demand broker (#568). The engine
+# holds the identity and runs this with the same re-granted environment a
+# session launch gets, after enforcing the manifest itself; this enforces it
+# again because the helper is the part that is pluggable and must stand
+# alone. stdout *is* the value, so nothing else is ever printed there.
+get_one() {
+    local var="$1" entry project name flag access_token value
+    entry="$(manifest_entry "$var")" || die \
+        "$var is not a variable in ENGINE_AGENT_AUTH_SECRETS; nothing is fetched that the deployment did not declare"
+    read -r project name flag <<<"$entry"
+    require_identity
+    require_command infisical
+    access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
+    value="$(get_secret "$access_token" "$project" "$name" || true)"
+    [[ -n "$value" ]] || die "Infisical secret $name is missing or empty"
+    printf '%s' "$value"
+}
+
+# `fetch VAR`: the session's half of the broker (#568). Runs *inside* a
+# session, which holds no identity — only the broker address and the token
+# the engine minted for this session — and asks the engine for one manifest
+# secret. Prints the value verbatim to stdout. Every refusal repeats the
+# engine's own reason, which for an undeclared name is the manifest line to
+# add; the identity is never involved on this side.
+fetch_one() {
+    local var="$1" response status body
+    [[ -n "${MYDEVENV2_BROKER_URL:-}" && -n "${MYDEVENV2_BROKER_TOKEN:-}" ]] || die \
+        "no secret broker in this environment (MYDEVENV2_BROKER_URL/_TOKEN are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    require_command curl
+    umask 077
+    response="$(mktemp)"
+    status="$(curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -X POST -H "Authorization: Bearer $MYDEVENV2_BROKER_TOKEN" \
+        "${MYDEVENV2_BROKER_URL%/}/api/agent-auth/fetch/$var" 2>/dev/null)" || status="000"
+    if [[ "$status" == "200" ]]; then
+        cat "$response"
+        rm -f "$response"
+        return 0
+    fi
+    body="$(tr -d '\r\n' <"$response" | cut -c1-300)"
+    rm -f "$response"
+    case "$status" in
+        000) die "secret broker unreachable at $MYDEVENV2_BROKER_URL" ;;
+        401) die "secret broker refused this session's token (HTTP 401); the engine no longer knows this session" ;;
+        403) die "secret broker refused $var (HTTP 403): ${body:-not in the manifest}" ;;
+        *) die "secret broker failed for $var (HTTP $status): ${body:-<empty body>}" ;;
+    esac
+}
+
 # Load every secret named in ENGINE_AGENT_AUTH_SECRETS, export it under its
 # manifest variable, and optionally alias one of them to GH_TOKEN.
 #
@@ -200,7 +298,16 @@ load_manifest_secrets() {
         read -r var project name flag <<<"$line"
         [[ -n "${var:-}" ]] || continue
         [[ -n "${project:-}" && -n "${name:-}" ]] || die \
-            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [optional]'): $line"
+            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [optional|ondemand]'): $line"
+        if [[ "${flag:-}" == "ondemand" ]]; then
+            # Declared for sessions, deliberately not resolved here (#568): it
+            # never sits in the session's environment for the whole session.
+            # Listed by name so the session knows what it may ask for.
+            [[ "$var" != "${ENGINE_AGENT_AUTH_GH_TOKEN_FROM:-}" ]] || die \
+                "ENGINE_AGENT_AUTH_GH_TOKEN_FROM names '$var', which is an ondemand entry; the git/gh identity must be resolved at launch"
+            AGENT_AUTH_ONDEMAND_VARS+="${AGENT_AUTH_ONDEMAND_VARS:+ }$var"
+            continue
+        fi
         value="$(get_secret "$access_token" "$project" "$name" || true)"
         if [[ -z "$value" && "${flag:-required}" != "optional" ]]; then
             die "Infisical secret $name is missing or empty"
@@ -320,6 +427,7 @@ load_agent_environment() {
     # fail with an actionable message. See docs/ENGINE.md §9.
     export AGENT_AUTH_MODE=brokered
     export AGENT_AUTH_GRANTED="$AGENT_AUTH_GRANTED_VARS"
+    export AGENT_AUTH_ONDEMAND="$AGENT_AUTH_ONDEMAND_VARS"
 
     # Drop the brokering identity before the shell/command this helper launches.
     # The engine re-grants exactly these to the helper (they are otherwise
@@ -373,6 +481,8 @@ check_access() {
     trap 'rm -f "${response_file:-}" "${error_file:-}"' EXIT
 
     printf 'ok: secrets-manager universal auth\n'
+    [[ -z "$AGENT_AUTH_ONDEMAND_VARS" ]] || \
+        printf 'ondemand (fetched on request through the engine broker): %s\n' "$AGENT_AUTH_ONDEMAND_VARS"
     run_configured_probes
 
     if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
@@ -443,6 +553,16 @@ main() {
             load_agent_environment
             trap cleanup_auth_artifacts EXIT
             "${SHELL:-/bin/bash}" -l
+            ;;
+        get)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "get requires exactly one VAR"
+            get_one "$1"
+            ;;
+        fetch)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "fetch requires exactly one VAR"
+            fetch_one "$1"
             ;;
         -h|--help|help)
             usage

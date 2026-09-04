@@ -1895,6 +1895,30 @@ rather than fetching it ad hoc. Honest caveat: the strip is a boundary between
 environment via `/proc/1/environ`, so the identity is out of the manifest's
 reach, not off the machine (#566).
 
+**Getting a secret after launch: the on-demand broker (#568).** The one
+sanctioned late path is a *manifest-constrained fetch*, and it keeps the
+contract above intact: the identity never leaves the engine. A manifest line
+may carry a third flag, `ondemand` — `VAR PROJECT_ID SECRET_NAME ondemand` —
+which declares `VAR` for sessions but does **not** resolve it at launch. It is
+never sitting in the session's environment for the whole session; it exists
+there only at the moment it is asked for. The session's environment lists
+those names in `AGENT_AUTH_ONDEMAND`, beside `AGENT_AUTH_GRANTED`. A session
+asks with `mydevenv2-agent-auth fetch VAR`, which calls the engine's
+`POST /api/agent-auth/fetch/{var}` on loopback (`MYDEVENV2_BROKER_URL`) with a
+per-session broker token the engine minted at spawn (`MYDEVENV2_BROKER_TOKEN`)
+and revokes when the session is forgotten. The engine — not the helper —
+enforces that `VAR` is in `ENGINE_AGENT_AUTH_SECRETS` (any entry, not only
+`ondemand`; an undeclared name is refused with the manifest line to add),
+rate-limits per session, then runs the configured helper's `get VAR` with the
+same re-granted environment a launch gets and returns the value. **Every fetch
+is audited** on `mydevenv2::audit` by session id, variable and secret name —
+never value. The engine bearer does not open this route, and the broker token
+opens nothing else. The engine reads the manifest itself at startup, with the
+helper's grammar; a malformed line is a startup error. Same honest caveat as
+above: at the same uid this narrows *ambient* exposure and adds an audit
+trail; it becomes an enforced boundary only once sessions run as a separate
+uid, and the design does not change when that lands.
+
 Operator-local notes about a particular deployment belong in the git-ignored
 `docs/local/`, not here.
 
