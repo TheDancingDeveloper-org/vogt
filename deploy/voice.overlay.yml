@@ -1,10 +1,15 @@
 # Self-hosted voice (STT + TTS) — an optional overlay.
 #
 #   docker compose \
-#     -f deploy/vogt.compose.yml \
-#     -f deploy/engine.overlay.yml \
+#     -f deploy/stack.compose.yml \
 #     -f deploy/voice.overlay.yml \
-#     up --build -d
+#     up -d
+#
+# Keyed on the published stack's one service, `vogt`, which is the engine's
+# container there. On the two-container contributor stack the engine is the
+# `engine` service instead; point it at these containers by setting the
+# `ENGINE_ASSISTANT_*_BASE_URLS` values in deploy/.env rather than layering
+# this file.
 #
 # The engine already speaks the standard OpenAI audio interface for speech —
 # `POST /v1/audio/transcriptions` (STT) and `POST /v1/audio/speech` (TTS) — and
@@ -35,7 +40,7 @@ services:
   # two images actually serve (a faster-whisper repo id for speaches, the
   # OpenAI-compatible `tts-1` + `nova` for openedai-speech) — kept overridable
   # so pointing at a real provider is a one-line change in deploy/.env.
-  engine:
+  vogt:
     environment:
       ENGINE_ASSISTANT_STT_BASE_URLS: "${ENGINE_ASSISTANT_STT_BASE_URLS:-http://whisper:8000/v1}"
       ENGINE_ASSISTANT_STT_MODEL: "${ENGINE_ASSISTANT_STT_MODEL:-Systran/faster-whisper-small}"

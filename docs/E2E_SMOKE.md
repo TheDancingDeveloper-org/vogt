@@ -72,6 +72,10 @@ a total.
 
 ### Bringing the stack up the way CI does
 
+This is the two-container *contributor* stack — a core and an engine built
+from the checkout — not the published image a deployment runs. The suite
+needs it that way: the fake agent below is built into the engine image.
+
 ```sh
 printf '%s' "$VOGT_FIXTURE_PAT" > deploy/github-token   # empty file ⇒ forge half skips
 openssl rand -hex 32 > deploy/vogt-core-token

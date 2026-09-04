@@ -8,131 +8,139 @@ data safe across upgrades.
 This is the operator's document. [`GETTING_STARTED.md`](GETTING_STARTED.md)
 covers a first local run; [`CONFIG.md`](CONFIG.md) is the generated reference
 for every core setting; [`CUSTOMISATION.md`](CUSTOMISATION.md) is how to layer
-your own deployment onto the base without forking it; [`ENGINE.md`](ENGINE.md)
-is the optional session engine in full.
+your own estate onto the published image; [`ENGINE.md`](ENGINE.md) is the
+session engine in full.
 
 ## 1. What gets deployed
 
-Vogt is one required component and two optional ones.
-
-**The core** (required) — the Python service built by the root `Dockerfile`
-and published as `ghcr.io/thedancingdeveloper-org/vogt`. One process serves
-everything on one port:
+One image, `ghcr.io/thedancingdeveloper-org/vogt-stack`, and inside it two
+processes on one published port:
 
 ```
-vogt serve
-  ├── /api/...     REST (FastAPI; OpenAPI at /openapi.json, UI at /docs)
-  ├── /mcp         MCP streamable HTTP transport
+vogt-engine  (the front door, :8910)
+  ├── /               the Solid PWA
+  ├── /api/...        sessions, terminals, files, git, agent tasks, push
+  ├── /api/vogt/...   proxied to the core, with the core token injected
+  ├── /mcp            proxied to the core
+  └── /healthz, /readyz
+vogt serve   (the core, loopback only, :8000 inside the container)
+  ├── /api/...        REST (FastAPI; OpenAPI at /openapi.json, UI at /docs)
+  ├── /mcp            MCP streamable HTTP transport
   ├── /health/live, /health/ready, /version
   └── collector scheduler (in-process background sweeps)
 ```
 
-The core serves the API and nothing else — no browser front end of its own.
-The Solid PWA is served by the engine (below), which fronts the core.
-
-Any port that serves MCP also serves plain HTTP health and version, so
-`curl`, Compose health checks and uptime monitors work without an MCP client.
-A core with nothing else configured is a complete, supported product.
-
-**The session engine and PWA** (optional) — a Rust server under `engine/`
-that embeds the web UI from `web/`, owns the terminals a work item's session
-runs in, hosts the voice assistant, and can act as the front door in front
-of the core. It is built from `engine/Dockerfile`. No image of the engine
-*alone* is published, but it does not have to be built: the all-in-one
-`vogt-stack` image carries the engine, the PWA and the core together (§1.1).
-A generic Compose overlay builds one beside the core instead, if you would
-rather (§3.2). Without the engine, the core's `session.*` operations report
-that no engine is configured, and nothing else changes.
+**The core** is the Python service that owns the data and serves the API.
+**The engine** is the Rust server that embeds the web UI from `web/`, owns
+the terminals a work item's session runs in, hosts the voice assistant, and
+fronts the core. The image also carries the `claude` and `codex` agent CLIs
+those sessions run. The entrypoint starts the core on loopback and supervises
+both; the core is never published on its own port.
 
 **The mobile shell** (optional) — a Capacitor wrapper under `mobile/` around
 the same PWA. Nothing server-side depends on it. It loads the deployed front
 door, so ordinary server and PWA releases reach installed phones without an
 APK rebuild; the production APK procedure is in §7.1.
 
-### 1.1 Which shape do you want?
+### 1.1 What you are running, and what you are not
 
-Three supported ways to run this, and the difference between them is
-containment, not features. State it before you pick, because moving between
-them later means moving data.
+The image is a **development pod**, deliberately. It exists to run coding
+agents, and an agent session needs a machine: a writable home, a fixed
+`sprooty` uid, passwordless `sudo`, an SSH server, and a Docker CLI for
+talking to a socket you may choose to mount. It cannot run `read_only` and
+does not drop capabilities. Treat it the way you would treat a dev box: keep
+it on loopback or a private network, put something that terminates TLS in
+front of it, and give it only the mounts and credentials its sessions need.
 
-| | Core only | Core + engine | All-in-one (`vogt-stack`) |
-|---|---|---|---|
-| Files | [`vogt.compose.yml`](../deploy/vogt.compose.yml) | the above + [`engine.overlay.yml`](../deploy/engine.overlay.yml) | [`stack.compose.yml`](../deploy/stack.compose.yml) |
-| Containers | 1 | 2 | 1 |
-| Web UI, terminals, sessions | no | yes | yes |
-| Build required | no | yes (the engine) | no |
-| Core posture | hardened | hardened | inside the pod |
-| Engine posture | — | development pod | development pod |
-| Agent CLIs | no | if you build them in | `claude`, `codex` included |
+**Decision (2026-09-04).** Vogt is offered in this one shape. Earlier
+releases also documented a *core-only* deployment — the Python core alone in
+a hardened container, no UI and no sessions — and a *core + engine* pair of
+containers that kept the core hardened and built the engine from a checkout.
+Both are withdrawn as supported ways to run Vogt: three doors sent every
+newcomer through the wrong one, and the containment the core-only shape
+offered was containment of the half of the product nobody deploys alone. The
+consequences, plainly:
 
-**Hardened** means what it says: a slim base with `git` and nothing else, any
-uid with gid 0, `nologin`, `read_only`, `cap_drop: [ALL]`,
-`no-new-privileges`, a `noexec` tmpfs and one writable volume.
+- **The core image (`ghcr.io/thedancingdeveloper-org/vogt`) is still
+  published**, because the stack image is built from it by digest and the
+  release manifest records both. It is a build input, not a product. Nothing
+  in this document tells you to deploy it.
+- **The two-container files (`deploy/vogt.compose.yml` and
+  `deploy/engine.overlay.yml`) remain**, as the contributor's way to run a
+  core and an engine they are changing, and as what the end-to-end suite
+  drives in CI. §3 covers them under that heading.
+- **There is no hardened deployment of Vogt.** If your posture needs one, the
+  shape to build is the published image behind your own front door, with the
+  sessions feature understood as what it is: arbitrary code running as the
+  pod's user.
 
-**Development pod** means the opposite, deliberately. The engine image exists
-to run coding agents, so it carries a writable home, a fixed `sprooty` uid,
-passwordless `sudo`, an SSH server, and a Docker CLI for talking to a socket
-you may choose to mount. It cannot run `read_only`. That is not an oversight
-to be hardened away later — an agent session needs a machine, and this is the
-machine. `engine/Dockerfile`'s header records why the two images are never
-collapsed into one: doing so would quietly delete Vogt's containment story
-under an unchanged image name.
+`engine/Dockerfile`'s header records why the core image and the pod are still
+two images rather than one build: collapsing them would silently change what
+the core image is under an unchanged name.
 
-So the choice is straightforward. Run the **core only** where you want an API
-and the containment. Run the **AIO** where you would otherwise run a dev box.
-Run **core + engine** when you want the core's containment kept intact and are
-willing to build the engine to get it.
-
-## 2. Run from published images
+## 2. Run from the published image
 
 The supported self-hosting path is the Compose base at
-[`deploy/vogt.compose.yml`](../deploy/vogt.compose.yml).
+[`deploy/stack.compose.yml`](../deploy/stack.compose.yml).
 
 ```console
 git clone https://github.com/TheDancingDeveloper-org/vogt
 cd vogt
-cp deploy/.env.example deploy/.env
-$EDITOR deploy/.env                   # at minimum: VOGT_PUBLIC_URL
-docker compose -f deploy/vogt.compose.yml up -d
-curl -fsS http://127.0.0.1:8080/health/ready
+cp deploy/stack.env.example deploy/.env
+$EDITOR deploy/.env                    # at minimum: ENGINE_TOKEN
+openssl rand -hex 32 > deploy/vogt-core-token
+docker compose -f deploy/stack.compose.yml up -d --wait
+curl -fsS http://127.0.0.1:8910/readyz
 ```
 
 What the base does, and why it does it that way:
 
-- **`vogt init && exec vogt serve`** is the container command. `init` is
-  required, not decoration: `serve` on an empty data directory answers
-  `/health/ready` with 503 and "run `vogt init` first". It is idempotent — it
-  creates the instance on a new volume, brings an existing one forward, and
-  leaves the audit history alone on every restart after that. `serve` also
-  migrates both stores before it accepts traffic, so an image carrying a new
-  migration cannot come up ready against an old schema.
+- **There is no `--build`.** The image carries the core, the engine, the PWA
+  and the agent CLIs. A deployment pulls a digest; it never compiles.
+- **`vogt init` runs before `serve`**, inside the container, on every start.
+  It is idempotent — it creates the instance on a new volume, brings an
+  existing one forward, and leaves the audit history alone after that.
+  `serve` migrates both stores before it accepts traffic, so an image
+  carrying a new migration cannot come up ready against an old schema.
 - **Host exposure defaults to loopback.** The port is published on
-  `${VOGT_BIND_IP:-127.0.0.1}:${VOGT_PORT:-8080}`. Set `VOGT_BIND_IP` to a
+  `${ENGINE_BIND:-127.0.0.1}:${ENGINE_PORT:-8910}`. Set `ENGINE_BIND` to a
   real interface only when you mean to expose the instance, and read §6
   first.
-- **`VOGT_PUBLIC_URL` is required** and the base refuses to start without it.
-  The process cannot know the address clients reach it at, so it is asked
-  rather than guessed.
-- **The container is hardened by construction**: `read_only: true`,
-  `cap_drop: [ALL]`, `no-new-privileges`, a 64 MB `noexec` tmpfs at `/tmp`,
-  and one named volume at `/var/lib/vogt`. Those are the only writable paths.
-- **The health check is plain HTTP** against `/health/ready` — no MCP
-  handshake, no bearer token. A health check that needs a credential fails
-  for the wrong reason.
+- **`ENGINE_TOKEN` is required** and the base refuses to start without it. A
+  token the file invented would be a token nobody knows they are trusting.
+- **The core token is a file, not a variable.** `deploy/vogt-core-token` is
+  mounted as a Compose secret both halves read: the engine presents it on
+  `/api/vogt`, and the core adopts it at `init` as the actor and scopes in
+  `.env`. That is the whole first-boot bootstrap — no mint-then-redeploy.
+  Legitimately empty until you mint one; `/api/vogt` then answers 401.
+- **The core is not published.** It listens on loopback inside the
+  container, and the entrypoint refuses to start if `VOGT_CORE_URL` names
+  anything else. The engine is the only way in.
+- **Two named volumes, no host binds.** `vogt-data` holds the core's SQLite
+  stores and backups; `engine-home` holds the pod's home — agent state,
+  session scratch, the `Working` tree sessions run in. They are separate so
+  the data outlives a pod you decide to reset.
+- **The health check is the lifecycle runner** probing the engine's
+  `/readyz`. That endpoint reports the core's state but deliberately stays
+  ready when the core is absent: restarting the container would not revive a
+  core and would kill every live terminal.
 
 ### 2.1 The `.env` file
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `VOGT_PUBLIC_URL` | yes | — | The URL clients use to reach this instance. |
-| `VOGT_PORT` | no | `8080` | Host port the container's 8000 is published on. |
-| `VOGT_BIND_IP` | no | `127.0.0.1` | Host interface the port is published on. |
-| `VOGT_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt:0.5.2` | The image to run. |
-| `VOGT_UID` | no | `1000` | The uid the container runs as (gid is always 0). |
-| `VOGT_LOG_LEVEL` | no | `info` | Verbosity of Vogt's own logger. |
+| `ENGINE_TOKEN` | yes | — | The engine's bearer token, ≥16 characters. What the browser and agents present. |
+| `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
+| `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. |
+| `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one; `connect` renders against it. |
+| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.2` | The image to run. Pin a digest (§2.2). |
+| `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted core token acts as. |
+| `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | How much it may do. Everything in the pod can read the file, so this is the blast radius. |
+| `VOGT_HOOKS_REQUIRED` | no | `false` | Whether a missing lifecycle hook bundle is fatal. |
 
-Every other core setting (`VOGT_*`) can be added to the `environment:` block
-of an overlay; [`CONFIG.md`](CONFIG.md) lists them all.
+Every other setting — the core's `VOGT_*` ([`CONFIG.md`](CONFIG.md)) and the
+engine's `ENGINE_*` (§5.2) — can be added to the `environment:` block of an
+overlay.
 
 ### 2.2 Pin a digest
 
@@ -140,6 +148,11 @@ The base names a tag so the example reads. A deployment should name a
 digest, because a digest is the only form of "which image is this" that a
 rebuild cannot silently change — publishing an image and moving a
 deployment are separate acts, and the digest line is what moves one.
+
+Pin the **release family** — `X.Y.Z`, or `latest` while you are trying it.
+The same registry organisation also holds `vogt-stack-estate`, the
+maintainer's own dev/prod pods; §7 says why that is a separate package and
+why it is not a "fuller" release.
 
 For a release, verify the keyless signature before starting Compose. Replace
 `<digest>` with the exact release digest; this command performs an anonymous
@@ -150,52 +163,62 @@ issuer:
 cosign verify \
   --certificate-identity-regexp '^https://github.com/TheDancingDeveloper-org/vogt/.github/workflows/release.yml@refs/tags/v[0-9].*$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/thedancingdeveloper-org/vogt@sha256:<digest>
+  ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
 ```
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt:0.5.2 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.2 \
   | grep -m1 Digest
 # then, in deploy/.env:
-VOGT_IMAGE=ghcr.io/thedancingdeveloper-org/vogt@sha256:<digest>
+VOGT_STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
 ```
 
 An upgrade is then a change to that one line plus `docker compose up -d`
-(§7.3); a rollback is the reverse, with one caveat about schema migrations
-that §7.4 spells out.
+(§7.4); a rollback is the reverse, with one caveat about schema migrations
+that §7.5 spells out.
 
 ### 2.3 The uid
 
-The image runs as **any uid as long as the gid is 0**. `/var/lib/vogt` is
-owned by `root:0` and mode `0770`, so a fresh named volume — which Docker
-seeds from the image directory's ownership — is writable whatever uid you
-choose, and a restore onto a recreated volume does not break. Set `VOGT_UID`
-to whoever owns the files this instance will observe if you bind-mount an
-estate ([`CUSTOMISATION.md`](CUSTOMISATION.md#observing-an-estate-on-a-host-path)).
+The pod runs as a fixed user, `sprooty`, uid 1000, gid 1000. Named volumes
+are seeded from the image so they arrive correctly owned; a host directory
+you bind-mount arrives with the host's ownership, so anything a session must
+write — a checkout under `Working`, say — has to be writable by uid 1000
+([`CUSTOMISATION.md`](CUSTOMISATION.md#observing-an-estate-on-a-host-path)).
+The uid is not a deploy-time choice; change it by extending the image.
 
 ### 2.4 A second instance on the same host
 
 Supported, and exactly the case where every host-wide default collides.
-Give the second instance its own Compose project name, port and public URL:
+Give the second instance its own Compose project name, port, public URL and
+core token file:
 
 ```console
 docker compose -p vogt-staging \
   --env-file deploy/staging.env \
-  -f deploy/vogt.compose.yml up -d
+  -f deploy/stack.compose.yml up -d --wait
 ```
 
-The named volume and network in the base are project-scoped, so a distinct
-`-p` already separates the data. What you must still change per instance is
-`VOGT_PORT`, `VOGT_PUBLIC_URL`, and any host path or explicitly `name:`d
+The named volumes in the base are project-scoped, so a distinct `-p` already
+separates the data. What you must still change per instance is
+`ENGINE_PORT`, `ENGINE_PUBLIC_URL`, and any host path or explicitly `name:`d
 volume your own overlay adds — two writers on one SQLite database does not
 stop the deploy and shows up later looking like corruption.
 
-## 3. Build from source
+## 3. Build from source (contributors)
+
+Nothing in this section is a way to deploy Vogt. It is how you run a core or
+an engine you are *changing*, and how CI's end-to-end suite brings the
+product up from a checkout. The files it uses — `deploy/vogt.compose.yml`,
+`deploy/vogt.build.yml`, `deploy/engine.overlay.yml` and `deploy/.env.example`
+— are the two-container developer stack: the core in one container, the
+engine built beside it in another.
 
 ### 3.1 The core
 
-**With Compose.** Add the build overlay; it swaps the published image for a
-build of the checkout and changes nothing else:
+**With Compose.** The core base runs the published core image alone
+(`VOGT_IMAGE`, defaulting to `ghcr.io/thedancingdeveloper-org/vogt:0.5.2`);
+the build overlay swaps that for a build of the checkout and changes nothing
+else:
 
 ```console
 docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d
@@ -229,11 +252,8 @@ run it as a system service, wrap exactly that `init && serve` pair.
 ### 3.2 The session engine and PWA
 
 No image of the engine *by itself* is published, so this path always builds
-one from the checkout. (If you would rather not build, the all-in-one
-`vogt-stack` image carries the engine with a core already inside it — §1.1
-compares the two, and `deploy/stack.compose.yml` runs it.) The generic
-overlay `deploy/engine.overlay.yml` builds the engine and wires it in front of
-the core in one command:
+one from the checkout. The overlay `deploy/engine.overlay.yml` builds the
+engine and wires it in front of the core base in one command:
 
 ```console
 cp deploy/.env.example deploy/.env          # fill in the "session engine" block
@@ -269,32 +289,17 @@ persisted home volume would shadow an image-managed CLI (set
 `VOGT_AGENT_SHADOW_POLICY=warn` only for a deliberate user-local override).
 
 The flag defaults to `false`, so an engine you build yourself is CLI-free
-unless you say otherwise. Two published images differ here, and the difference
-is the point:
-
-- The release **core** image (`vogt`) runs the register alone and carries no
-  CLIs. It is not a pod and has nowhere to run a session.
-- The release **stack** image (`vogt-stack`) *does* carry them. It is the
-  all-in-one dev pod, and a pod that cannot run `claude` or `codex` is not the
-  thing it is published to be. The versions are the `engine/agent-versions.env`
-  pins baked at build time, and the release build runs both binaries before it
-  publishes the digest — a build arg nothing executes is a default waiting to
-  be forgotten.
-
-So a deployment that runs agent sessions either pins a `vogt-stack` release
-digest or builds its own engine with `VOGT_INSTALL_AI_CLIENTS=true`. Pinning
-the plain `vogt` core image and expecting sessions leaves the `Claude Code
-(protected)` and `Codex (protected)` templates registered but unable to start,
-because the binaries are simply not in that image.
-
-Be aware before you run it: the engine image is a **development pod**, not a
-hardened service image — it carries a writable home, `sudo`, optional agent
-CLIs, and an entrypoint that supports integrations this repository's
-maintainer uses. It cannot be run `read_only` the way the core can.
+unless you say otherwise. The published `vogt-stack` image *does* carry them:
+the versions are the `engine/agent-versions.env` pins baked at build time,
+and the release build runs both binaries before it publishes the digest — a
+build arg nothing executes is a default waiting to be forgotten. An engine
+built here without the flag leaves the `Claude Code (protected)` and `Codex
+(protected)` session templates registered but unable to start, because the
+binaries are simply not in the image.
 
 #### Deployment-owned lifecycle hooks
 
-Both images contain the neutral `/usr/local/bin/vogt-lifecycle` runner, but no
+The image contains the neutral `/usr/local/bin/vogt-lifecycle` runner, but no
 operator scripts or credentials. A private Compose overlay may mount a
 read-only hook bundle at `/run/vogt/hooks` with `pre-start.d`, `post-start.d`,
 and `post-health.d` directories. Executable files run in lexical order with
@@ -319,9 +324,8 @@ The values you must decide before a network-facing deployment:
 
 | Setting | Why you must set it |
 |---|---|
-| `VOGT_PUBLIC_URL` | An exposure value with no default. `connect` and `/connection-info` render client configuration against it. |
-| `--host` / `--port` on `serve`, and `VOGT_BIND_IP` / `VOGT_PORT` in Compose | Also exposure; nothing in the image will bind an address for you. |
-| `VOGT_UID` | Who owns the observed files (§2.3). |
+| `ENGINE_PUBLIC_URL` (fronted) or `VOGT_PUBLIC_URL` (core alone) | An exposure value with no default. `connect` and `/connection-info` render client configuration against it. |
+| `--host` / `--port` on `serve`, and `ENGINE_BIND` / `ENGINE_PORT` in Compose | Also exposure; nothing in the image will bind an address for you. |
 | `VOGT_DATA_DIR` | Allocation, so it defaults (`/var/lib/vogt` in the image). One instance per directory. |
 
 ### 4.1 Tokens
@@ -332,8 +336,8 @@ scopes (`read`, `work.write`, `project.write`, `admin`, `writeback`), and is
 minted from the container that owns the data directory:
 
 ```console
-docker compose -f deploy/vogt.compose.yml exec vogt \
-  vogt token issue --actor local:alice --name claude-code \
+docker compose -f deploy/stack.compose.yml exec vogt \
+  vogt token issue --actor local:sprooty --name claude-code \
   --scopes read,work.write --reason "first agent credential"
 ```
 
@@ -368,9 +372,9 @@ Beyond these the core needs only SQLite (bundled with Python) and `git`
 
 ### 5.2 Engine integrations
 
-These are read by the engine process, not the core. `deploy/engine.overlay.yml`
-(§3.2) already wires the common ones from `deploy/.env`, so for a Compose
-deployment you set these in `.env` rather than by hand. `ENGINE_*` is the
+These are read by the engine process, not the core. `deploy/stack.compose.yml`
+wires the required ones from `deploy/.env`; the rest go in the `environment:`
+block of an overlay of yours. `ENGINE_*` is the
 current prefix; legacy `MYDEVENV2_*` names are still accepted as aliases for
 one release and log a warning. Each can also be set in the engine's TOML config
 file under the same name without the prefix ([`ENGINE.md`](ENGINE.md) §3).
@@ -458,6 +462,11 @@ What the release digests do *not* carry is Flutter and the Android SDK: those
 belong to the `full` pod base, and the signed APK is built by `release.yml`'s
 own Android job rather than from inside a pod.
 
+A release also publishes the **core image** (`vogt`) at the same version. It
+is the build input the stack image lifts its core from, recorded in the
+release manifest so the chain from source to pod is verifiable; it is not a
+deployment target (§1.1).
+
 ### 7.1 Promote `dev` to production
 
 Promotion is two explicit, fast-forward-only pushes. First deploy the
@@ -524,7 +533,7 @@ sanitized checked-in example.
    its data volume:
 
    ```console
-   docker compose -f deploy/vogt.compose.yml exec vogt \
+   docker compose -f deploy/stack.compose.yml exec vogt \
      vogt backup --reason "pre-production release"
    ```
 
@@ -533,9 +542,9 @@ sanitized checked-in example.
    workflow aligned. Create and push the matching `v<version>` tag. The tagged release publishes
    signed, immutable core and merged-stack image digests. It also builds the
    signed APK when its release prerequisites are configured.
-3. A tag also creates one durable GitHub Release after the distribution, signed
-   images, and signed APK succeed. The Release contains the wheel, sdist, APK,
-   and `vogt-release-manifest.json` with the source SHA, image digests,
+3. A tag also creates one durable GitHub Release after the version check,
+   signed images, and signed APK succeed. The Release contains the APK and
+   `vogt-release-manifest.json` with the source SHA, image digests,
    provenance, and #377 handoff. Publishing still does not deploy.
 4. Configure the `vogt-prod` environment with a narrowly scoped GitHub App
    (`VOGT_DEPLOYMENT_APP_ID`, `VOGT_DEPLOYMENT_APP_PRIVATE_KEY`) and the
@@ -603,20 +612,22 @@ for test runs.
 ### 7.3 Backup and restore
 
 ```console
-docker compose -f deploy/vogt.compose.yml exec vogt \
+docker compose -f deploy/stack.compose.yml exec vogt \
   vogt backup --reason "nightly"
 # → /var/lib/vogt/backups/<timestamp>/ with both stores and manifest.json
 ```
 
 `backup` uses SQLite's online backup API, so it is consistent while the
-server is running. The manifest records the schema version of each store;
-if `VOGT_ENGINE_STATE_DIR` is set and readable, the engine's state is copied
-too and the manifest says so — otherwise it says `not configured`, so a
-core-only backup never pretends to be more. Copy the backup directory off
+server is running. The manifest records the schema version of each store.
+In the published stack `VOGT_ENGINE_STATE_DIR` is set and readable, so the
+engine's state — session history, push subscriptions, agent tasks — is
+copied too and the manifest says so; `/readyz`'s `backup_agreement` check is
+what tells you that is still true. Where it is not, the manifest says
+`not configured`, so a core-only backup never pretends to be more. Copy the backup directory off
 the host; a backup on the volume it protects is not a backup.
 
 ```console
-docker compose -f deploy/vogt.compose.yml exec vogt \
+docker compose -f deploy/stack.compose.yml exec vogt \
   vogt restore --source /var/lib/vogt/backups/<timestamp> \
   --confirm --reason "restore after volume loss"
 ```
@@ -630,8 +641,8 @@ binary.
 ### 7.4 Upgrade
 
 1. Take a backup (§7.3).
-2. Change the digest (or tag) in `deploy/.env`.
-3. `docker compose -f deploy/vogt.compose.yml up -d`.
+2. Change `VOGT_STACK_IMAGE` in `deploy/.env` to the new digest (or tag).
+3. `docker compose -f deploy/stack.compose.yml up -d --wait`.
 4. Watch `/health/ready`: it answers 503 — naming the store and both
    schema numbers — until `init` and the startup migration complete,
    then 200 with the applied and expected schema versions. Migrations

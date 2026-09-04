@@ -911,9 +911,12 @@ Deployment: [`DEPLOYMENT.md`](DEPLOYMENT.md).
     `**/*.md`: markdown lint, link check, config-docs-drift check only.
   - `ci.yml` — runs on `src/**`, `tests/**`, `pyproject.toml`, lockfile,
     migration files: lint, mypy strict, tests, coverage gate.
-  - `release.yml` — tag-triggered only: semver image tags, `latest`, the
-    wheel, SBOM and provenance attestations, keyless cosign signing,
-    publish to GHCR. It publishes; it does not deploy.
+  - `release.yml` — tag-triggered only: semver image tags, `latest`, SBOM
+    and provenance attestations, keyless cosign signing, publish to GHCR.
+    It publishes; it does not deploy. *(r6, 2026-09-04: the wheel and sdist
+    it once attached to the GitHub Release are gone — nothing consumed them,
+    and the one supported artefact is the `vogt-stack` image; see
+    `DEPLOYMENT.md` §1.1.)*
   - `build.yml` *(r5)* — a push to main, docs paths ignored: the same
     image, tagged `sha-<commit>` only, signed, with no semver and `latest`
     unmoved. A build is not a release.

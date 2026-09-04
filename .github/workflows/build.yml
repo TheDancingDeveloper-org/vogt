@@ -56,13 +56,17 @@ permissions:
   contents: read
 
 env:
+  # The core alone. Built and pushed per commit because the merged image
+  # below copies `/opt/vogt` out of it by digest (#143) — a build input, not
+  # a deployment target (DEPLOYMENT.md §1.1). The estate's dev deploy still
+  # resolves its digest to keep the pair pinned together.
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
-  # The merged product — the Python core *and* the session engine in one
-  # container, which is what the stack compose runs. A separate repository
-  # rather than a tag on the one above, because they are different artefacts
-  # for different deployments: `vogt` is the supported install of Vogt alone
-  # (NFR-PO4), and this is the merged stack. One repository with two kinds of
-  # tag in it is how somebody eventually pins the wrong one.
+  # The product — the Python core *and* the session engine in one container,
+  # which is what `deploy/stack.compose.yml` runs and the one supported
+  # install of Vogt. A separate repository rather than a tag on the one
+  # above, because they are different artefacts: one is a build input, this
+  # is what gets deployed. One repository with two kinds of tag in it is how
+  # somebody eventually pins the wrong one.
   #
   # That last sentence was written about *pinning*, and it turned out to
   # understate the problem. `vogt-stack` is now a public package — it is the
@@ -308,13 +312,15 @@ jobs:
             stack="production"
           fi
           {
-            echo "### Built from \`${GITHUB_SHA:0:7}\`"
+            echo "### Built the core from \`${GITHUB_SHA:0:7}\`"
             echo
-            echo "Nothing has been deployed. To move ${stack}, dispatch the"
-            echo "approved estate deployment workflow with this digest:"
+            echo "A build input: the merged image job lifts its core from this"
+            echo "digest. Nothing has been deployed, and this is not the image"
+            echo "to pin — ${stack} moves when the estate deployment workflow"
+            echo "is dispatched with the *merged* digest reported below."
             echo
-            echo '```yaml'
-            echo "    image: ${IMAGE}@${DIGEST}"
+            echo '```'
+            echo "${IMAGE}@${DIGEST}"
             echo '```'
             echo
             echo "This is a build, not a release: no version was assigned, no"

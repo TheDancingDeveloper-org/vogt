@@ -1,15 +1,17 @@
 # Customising Vogt
 
-Vogt ships as a generic product: one Python core image, one Compose base, and
+Vogt ships as a generic product: one published image (`vogt-stack`), one
+Compose base ([`deploy/stack.compose.yml`](../deploy/stack.compose.yml)), and
 a configuration schema that decides everything an operator is allowed to
-decide. It is also meant to be customised heavily. This document names the
-supported extension points, so that a large customisation is a documented
-deployment rather than a fork.
+decide. It is also meant to be customised heavily — the expected way to run
+it in an estate of your own is to fork this repository and layer your estate
+on top of that image. This document names the supported extension points, so
+that a large customisation is a documented deployment rather than a divergent
+fork.
 
 The rule underneath all of it: **the base is never edited.** If you find
-yourself changing [`deploy/vogt.compose.yml`](../deploy/vogt.compose.yml) or
-the root `Dockerfile` to make your deployment work, that is a gap in this
-document — please raise it.
+yourself changing `deploy/stack.compose.yml` or `engine/Dockerfile` to make
+your deployment work, that is a gap in this document — please raise it.
 
 ## Three layers
 
@@ -17,9 +19,11 @@ document — please raise it.
 |---|---|---|
 | **Configuration** | Anything the schema already decides | None. New image, same settings. |
 | **Compose overlay** | Extra services, mounts, networks, ports, secrets | None. Your overlay states only differences. |
-| **Image extension** | Extra binaries, certificates, collectors | A rebuild against the new base tag. |
+| **Image extension** | Extra binaries, certificates, collectors, your estate's integrations | A rebuild against the new base digest. |
 
-Reach for them in that order. Most customisations stop at the first.
+Reach for them in that order. Most customisations stop at the first; an
+estate that needs its own tools inside sessions ends at the third, and
+[Extending the stack image](#extending-the-stack-image) is the worked pattern.
 
 ## Layer 1 — configuration
 
@@ -81,12 +85,14 @@ The base file is designed to be layered on. Compose merges files
 left-to-right, so an overlay states only its difference:
 
 ```console
-docker compose -f deploy/vogt.compose.yml -f my-deployment.yml up -d
+docker compose -f deploy/stack.compose.yml -f my-deployment.yml up -d
 ```
 
-The repository ships the smallest possible example of this,
-[`deploy/vogt.build.yml`](../deploy/vogt.build.yml), which does nothing but
-swap the published image for a build from the checkout.
+The repository ships small examples of this: [`deploy/voice.overlay.yml`](../deploy/voice.overlay.yml)
+adds two speech containers beside the engine, and
+[`deploy/vogt.build.yml`](../deploy/vogt.build.yml) — for the contributor
+stack — does nothing but swap a published image for a build from the
+checkout.
 
 An overlay is the right place for extra services, host mounts, a different
 network, additional secrets, TLS material, or a reverse proxy. Keep your
@@ -110,23 +116,23 @@ needs no hook mount and remains functional unchanged.
 
 Vogt's collectors read the repositories you register, so a deployment that
 observes a host directory has to mount it into the container *and* be able to
-read it:
+read it. Mount it under the pod's `Working` tree, which is both the core's
+import root and the root a session opens in — the two must agree, and
+`/readyz` reports `workspace_agreement` false when they do not:
 
 ```yaml
 services:
   vogt:
-    user: "1000:0"          # the uid that owns the files being observed
-    environment:
-      VOGT_IMPORT_ROOT: /workspace/repos
     volumes:
-      - /srv/repos:/workspace:rw
+      - /srv/repos:/home/sprooty/Working/repos:rw
 ```
 
-The uid matters. The image runs as any uid provided the gid is 0 — that is
-why `/var/lib/vogt` is owned by group 0 and group-writable — but a bind mount
-or a fresh named volume carries the *host's* ownership, not the image's. A
-directory the container user cannot write to will fail at `project import`
-rather than at startup, which is a slow way to find out.
+The uid matters. The pod runs as a fixed user, `sprooty`, uid 1000, and a
+bind mount carries the *host's* ownership, not the image's. A directory that
+uid cannot read fails at `project import` rather than at startup, and one it
+cannot write fails the first time a session tries to commit — both slow ways
+to find out. Own the host directory by uid 1000, or extend the image and
+change the user there.
 
 ### Running a second instance on the same host
 
@@ -143,9 +149,11 @@ problem does not arise.
 
 What you must still change per instance:
 
-- `VOGT_PORT` — the bind fails otherwise, which at least tells you.
-- `VOGT_PUBLIC_URL` — each instance has its own address, and this one is
+- `ENGINE_PORT` — the bind fails otherwise, which at least tells you.
+- `ENGINE_PUBLIC_URL` — each instance has its own address, and this one is
   never inferred.
+- The core token file, if you keep it beside the Compose file — give each
+  instance its own.
 - Any host path an overlay of yours bind-mounts. Two instances writing one
   workspace is not an error, it is just wrong.
 - Any explicit `name:` you have put on a volume or network in your own
@@ -212,10 +220,9 @@ the engine's speech base URLs at them:
 
 ```bash
 docker compose \
-  -f deploy/vogt.compose.yml \
-  -f deploy/engine.overlay.yml \
+  -f deploy/stack.compose.yml \
   -f deploy/voice.overlay.yml \
-  up --build -d
+  up -d
 ```
 
 Notes:
@@ -274,8 +281,11 @@ token:
 openssl rand -hex 32 > core-token
 ```
 
-Mount that file into **both** containers. The front door presents it; the
-core adopts it at `init`:
+The published stack does this for you: `deploy/stack.compose.yml` mounts
+`deploy/vogt-core-token` as a secret both halves read, so the file above is
+the only step. What follows is the same mechanism spelled out for a
+deployment that runs the halves in separate containers — mount the file into
+**both**. The front door presents it; the core adopts it at `init`:
 
 ```yaml
 services:
@@ -309,9 +319,11 @@ path exactly as before.
 
 ### In a split deployment, the CLI and the database are in different containers
 
-Worth knowing before you run an administrative command against a two-service
-deployment, because the wrong container fails in a way that reads like a
-broken instance rather than like a typo.
+Not a concern for the published stack — one container holds both halves, and
+`docker compose exec vogt vogt …` reaches the data. Worth knowing before you
+run an administrative command against a deployment of your own that splits
+them into two services, because the wrong container fails in a way that
+reads like a broken instance rather than like a typo.
 
 The core owns the data directory. The front door does not — it proxies to
 the core over the network and never opens the database. If your front-door
@@ -349,29 +361,18 @@ for a *login* shell. `docker exec core vogt status` finds it;
 
 ## Layer 3 — extending the image
 
-The published image is built to be a base:
+This is the layer an estate lives in, and
+[Extending the stack image](#extending-the-stack-image) below is the whole
+pattern: a Dockerfile a few lines long that starts `FROM` the published
+`vogt-stack` digest and adds what your sessions need. Keep it in your fork,
+build it in your CI, deploy it by digest.
 
-- `ENTRYPOINT ["vogt"]` with `CMD ["--help"]`, so it has no default listen
-  address to inherit;
-- runs as any uid with gid 0;
-- `/var/lib/vogt` owned by `root:0`, mode `0770`;
-- the virtualenv at `/opt/vogt/.venv`, already on `PATH`;
-- `git` installed, because `project import` and the git collector shell out
-  to it.
-
-```dockerfile
-FROM ghcr.io/thedancingdeveloper-org/vogt:0.5.2
-USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ripgrep \
-    && rm -rf /var/lib/apt/lists/*
-USER 1000:0
-```
-
-Keep the uid/gid contract and the data directory's ownership; everything else
-in the image is yours to add to. Preserve `ENTRYPOINT` unless you have a
-reason — the absence of a default host and port is a safety property, not an
-oversight.
+The core image (`ghcr.io/thedancingdeveloper-org/vogt:0.5.2`) is also built
+to be a base, and the contributor stack extends it the same way — `USER
+root`, install, `USER 1000:0`, keeping `ENTRYPOINT ["vogt"]` and the
+`root:0`-owned data directory. It is a build input to the stack image rather
+than something to deploy on its own, so extend it only when you are changing
+what the *core* carries.
 
 ## Optional integrations
 
@@ -405,77 +406,25 @@ environment: a token in the environment is a token in every `docker inspect`.
 
 ## A worked example
 
-The largest customisation this repository knows about is a two-service
-deployment: the session engine as the front door on the published port, the
-core detached behind it on the Compose network, a shared workspace mount, a
-chosen uid, and a bootstrapped core token. It is built entirely from the
-extension points above — front door, detached core, host mounts, uid
-selection, optional integrations — and is described in
-[`DEPLOYMENT.md`](DEPLOYMENT.md) §3.2 and §6 rather than as the way Vogt is
-meant to be run.
+The largest customisation this repository knows about is the maintainer's
+own estate: the public `vogt-stack` digest, plus a layer that adds the
+estate's integrations (a tailnet, a secrets broker, an infrastructure MCP
+server), plus a private Compose overlay carrying host mounts and addresses.
+It is built entirely from the extension points above — image extension,
+overlay, configuration — and nothing else. Neither the layer nor the overlay
+is tracked here: a deployment tied to one operator's paths and addresses
+does not belong in a public tree, and lives in the operator's private
+repository instead.
 
-You can read it as a diff. [`deploy/engine.overlay.yml`](../deploy/engine.overlay.yml)
-is that deployment expressed against this same base:
+That is the shape a fork of your own should take. Every estate-specific value
+is an environment value, a mount, or a line in your own Dockerfile — never a
+default baked into a file a stranger clones — so a new release of the public
+image is a digest change in your fork and a rebuild, not a merge.
 
-```console
-docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d
-```
-
-It adds one service and some configuration. It does not rebuild, repin, or
-restate the core — that is the published image, unmodified, which is what
-makes "a customised deployment is the public image plus configuration" a
-claim you can check rather than one you have to believe
-(`tests/test_public_delivery.py` checks it). No image of the engine alone is
-published, so the overlay always builds one from this checkout; it carries no
-host paths, no tailnet and no maintainer integrations, so it runs on any host
-unchanged.
-
-The maintainer's own estate layers its host mounts, tailnet, and secret
-integrations on top of this same base. That overlay is not tracked in this
-repository — a deployment tied to one operator's paths and addresses
-does not belong in a public tree — and lives in the operator's private ops
-repository instead. Treat `engine.overlay.yml` as the pattern: every
-estate-specific value it would add is an environment value or a mount an
-operator supplies, never a default baked into a file a stranger clones.
-
-## Extending the stack image
-
-The same claim holds one level up. `engine/Dockerfile`'s final stage says of
-the core it lifts in that "the private path is the public path plus
-configuration — now it is a digest", and the all-in-one `vogt-stack` image is
-where that stops being a statement about one image and becomes the deployment
-model. A deployment that needs tools the public image does not carry adds them
-in a layer of its own:
-
-```dockerfile
-FROM ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:...
-
-# The image ends as `USER sprooty`, so an extending build must take root back
-# for anything that installs, and hand it over again at the end. Forgetting the
-# second half yields a pod running as root, which is a different container from
-# the one whose digest you pinned.
-USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends your-tool \
-    && rm -rf /var/lib/apt/lists/*
-USER sprooty
-```
-
-That is not a hypothetical: it is exactly how the maintainer's own `vogt-dev`
-and `vogt-prod` images are built — the public digest, plus the estate's
-integrations, plus nothing else. Whatever a private deployment adds is
-therefore visible as a Dockerfile a few lines long, and what it *started* from
-is a digest anyone can pull and verify. A private image built any other way
-would be an assertion about the public one rather than a layer on it.
-
-Two things about the base are worth knowing before you extend it. It is a
-development pod, not a hardened service image (see
-[`DEPLOYMENT.md`](DEPLOYMENT.md) §1.1), so it will not accept `read_only` and
-its uid is fixed. And it contains a core, so a layer that adds a *second* one
-— or a compose file that layers `stack.compose.yml` onto
-`vogt.compose.yml` — runs two.
-
-If your deployment needs something none of these layers reach, that is worth
-an issue. The generic base is only generic if the customisations people
-actually need are supported ones. Notes about a particular host of your own
-belong in the git-ignored `docs/local/`.
+The two-container contributor stack ([`deploy/vogt.compose.yml`](../deploy/vogt.compose.yml)
+plus [`deploy/engine.overlay.yml`](../deploy/engine.overlay.yml)) is a second
+worked example, of the *overlay* layer: the engine overlay adds one service
+and some configuration in front of the unmodified core image, and
+`tests/test_public_delivery.py` pins that it carries no host paths, no
+tailnet and no maintainer integrations. Read it as a diff to see what an
+overlay is allowed to say; run it when you are changing the engine.

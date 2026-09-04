@@ -427,10 +427,9 @@ voice — running beside it in Compose:
 
 ```bash
 docker compose \
-  -f deploy/vogt.compose.yml \
-  -f deploy/engine.overlay.yml \
+  -f deploy/stack.compose.yml \
   -f deploy/voice.overlay.yml \
-  up --build -d
+  up -d
 ```
 
 Nothing else to configure: the overlay points the engine's `STT`/`TTS` base

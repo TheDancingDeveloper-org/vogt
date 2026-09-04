@@ -6,9 +6,11 @@
 # The base (`deploy/vogt.compose.yml`) runs vogt-core alone. This overlay adds
 # the Rust **session engine** in front of it: the engine embeds the PWA, owns
 # the terminals a work item's session runs in, hosts the voice assistant, and
-# proxies `/api/vogt` and `/mcp` back to the core. It is the
-# supported, estate-neutral way to run the engine from a checkout — no
-# published engine image exists, so this overlay always builds one.
+# proxies `/api/vogt` and `/mcp` back to the core. It is the estate-neutral
+# way to run the engine from a checkout — no published engine image exists,
+# so this overlay always builds one — and together with the base it is the
+# *contributor* stack, not a deployment. To deploy Vogt, run the published
+# all-in-one image with `stack.compose.yml` (DEPLOYMENT.md §1.1).
 #
 # It knows nothing about any particular deployment: no host paths, no tailnet,
 # no Infisical/Komodo/Cadastre, no maintainer hostnames. Every value an

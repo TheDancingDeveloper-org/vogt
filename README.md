@@ -5,14 +5,14 @@ agents that work with them. It combines project registration, work items,
 ranked backlogs, repository observations, drift proposals, audit history, and
 an HTTP API, all backed by SQLite.
 
-The product is a two-container stack: a small Python **core** that owns the
-data and serves the API, and a Rust **engine** that fronts it — serving the
-Solid PWA at `/`, owning the terminal sessions a work item runs in, and
-proxying the core's API back through one published port. The core is also
-useful on its own over the CLI, REST, and MCP, and reports missing
-integrations honestly rather than failing startup; plain folders and local Git
-repositories are first-class, and GitHub and agent integrations add capability
-when you opt in.
+The product ships as **one image**, `vogt-stack`: a small Python **core**
+that owns the data and serves the API, and a Rust **engine** that fronts it —
+serving the Solid PWA at `/`, owning the terminal sessions a work item runs
+in, and carrying the `claude` and `codex` agent CLIs those sessions run. Pull
+it, start it, open a browser. Everything beyond that is optional and reports
+its absence honestly rather than failing startup: plain folders and local Git
+repositories are first-class, and GitHub and agent integrations add
+capability when you opt in.
 
 ## Live demo
 
@@ -27,87 +27,48 @@ the write API is isolated, so nothing there persists and no sign-in is needed:
 
 ## Run it
 
-There are three shapes, and they trade containment against convenience:
-
-| | What it is | Web UI | Build |
-|---|---|---|---|
-| **Core only** | `deploy/vogt.compose.yml` — the API, hardened | no | no |
-| **Core + engine** | the above + `deploy/engine.overlay.yml` | yes | the engine |
-| **All-in-one** | `deploy/stack.compose.yml` — one published image | yes | no |
-
-The first two keep the core in a hardened container: slim base, `read_only`,
-all capabilities dropped. The all-in-one is a **development pod** — writable
-home, `sudo`, sshd, and the `claude` and `codex` CLIs — because it exists to
-run coding agents, and an agent session needs a machine. Pick it where you
-would run a dev box, not where you would run a hardened service.
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §1.1 lays the three out in full.
-
-No image of the engine alone is published, so the overlay path always builds
-one from this checkout; the all-in-one image carries it with a core inside.
-
-The quickstart below **builds the core from this checkout** with the
-one-service build overlay `deploy/vogt.build.yml`, a path that works without
-registry credentials. When using a published package, drop
-`-f deploy/vogt.build.yml` and set `VOGT_IMAGE` to the release tag or digest.
+One published image, no build. Copy the settings file, mint two secrets,
+start it:
 
 ```console
 git clone https://github.com/TheDancingDeveloper-org/vogt.git
 cd vogt
-cp deploy/.env.example deploy/.env     # set VOGT_PUBLIC_URL
-docker compose -f deploy/vogt.compose.yml -f deploy/vogt.build.yml up --build -d --wait
-curl http://localhost:8080/health/ready
+cp deploy/stack.env.example deploy/.env      # set ENGINE_TOKEN
+openssl rand -hex 32 > deploy/vogt-core-token
+docker compose -f deploy/stack.compose.yml up -d --wait
+curl http://localhost:8910/readyz
 ```
 
-That runs the core on its own — the full API, CLI, and MCP, no browser front
-end. `--wait` blocks until the healthcheck reports healthy; without it a curl
-can race the idempotent `vogt init` bootstrap and the healthcheck's
-`start_period`.
+Open `http://localhost:8910/` and paste the `ENGINE_TOKEN` you chose into
+**Settings (⚙)**. [`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md) takes
+it from there — first project, tokens for agents, backup, upgrade — and
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) covers running it somewhere real:
+digest pinning, a reverse proxy, TLS, data.
 
-**Add the engine (the PWA).** The engine overlay builds the Rust engine from
-this checkout and fronts the core with it, serving the Solid PWA at `/`; see
-[`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) for the tour. The engine image lifts
-the core image in (`CORE_IMAGE`); to run against the core you build here
-instead of the published image, layer all three files and name the local
-core:
+Know what you are running. The image is a **development pod**, not a
+hardened service: a writable home, passwordless `sudo`, an SSH server, and
+the agent CLIs, because an agent session needs a machine and this is the
+machine. It publishes on loopback until you say otherwise. Put it where you
+would put a dev box, and put something that terminates TLS in front of it.
 
-```console
-VOGT_IMAGE=vogt:local docker compose \
-  -f deploy/vogt.compose.yml -f deploy/vogt.build.yml -f deploy/engine.overlay.yml \
-  up --build -d --wait
-```
+**Make it yours.** Vogt is meant to be customised, and the model is simple:
+the published image is never edited, and your deployment states only its
+difference from it. Settings go in `deploy/.env`; extra services, mounts and
+secrets go in a Compose overlay of your own; extra tools go in an image of
+your own that starts `FROM` the published digest. That last one is exactly
+how the maintainer's own estate is built — the public image plus a few lines.
+[`docs/CUSTOMISATION.md`](docs/CUSTOMISATION.md) is the guide.
 
-Fill in the engine block of `deploy/.env` first — the overlay's own header and
-[`docs/ENGINE.md`](docs/ENGINE.md) list the keys.
-
-**Once the `vogt` package is public**, the build overlay is optional: the base
-pulls the published core and the engine overlay pulls it as `CORE_IMAGE` too,
-so the stack is just the base plus the engine overlay. Set `VOGT_IMAGE` in
-`deploy/.env` to the tag — or better, the digest — you intend to run:
-
-```console
-docker compose -f deploy/vogt.compose.yml -f deploy/engine.overlay.yml up --build -d --wait
-```
-
-Or skip containers altogether — the core is a plain Python 3.11+ package:
-
-```console
-uv sync
-uv run vogt init
-VOGT_PUBLIC_URL=http://127.0.0.1:8000 \
-  uv run vogt serve --host 127.0.0.1 --port 8000 --no-auth
-```
-
-The base-plus-overlay pairing is the whole customisation model in miniature:
-the base is never edited, and every deployment states only its difference from
-it. The full walkthrough — first project, tokens, backup, upgrades — is in
-[`docs/GETTING_STARTED.md`](docs/GETTING_STARTED.md); production concerns
-(reverse proxy, TLS, backups, pinning, the engine) are in
-[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+**Working on Vogt itself?** The core is a plain Python package (`uv sync &&
+uv run vogt init`), and the two-container developer stack — a core you build
+beside an engine you build — is in
+[`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md). Neither is a way to deploy
+Vogt; they are ways to change it.
 
 ## Dependencies and optional integrations
 
-Everything except SQLite is optional, and absence is reported honestly rather
-than failing startup. Core settings are `VOGT_*` environment variables or a
+Everything except SQLite and the engine is optional, and absence is reported
+honestly rather than failing startup. Core settings are `VOGT_*` environment variables or a
 TOML file named by `VOGT_CONFIG_FILE`; the generated reference is
 [`docs/CONFIG.md`](docs/CONFIG.md).
 
@@ -115,7 +76,7 @@ TOML file named by `VOGT_CONFIG_FILE`; the generated reference is
 |---|---|---|---|
 | SQLite | built in | All storage: declared and observed stores, audit, events, backups. Nothing else to install. | `VOGT_DATA_DIR` (default `~/.local/share/vogt`) |
 | GitHub token | optional | Issue/PR collection, forge links, and opt-in write-back. Without it the sweep records forge subjects as *not collected*, never as absent. | `VOGT_GITHUB_TOKEN_FILE` (a file, so the secret stays out of process listings); per-host `VOGT_FORGE_TOKEN_FILES` |
-| Rust session engine + PWA | optional | PTY sessions over WebSocket, the Solid PWA, file/git APIs, agent tasks, push. Built from source with `engine/Dockerfile`; the core image does not contain it. | core side: `VOGT_ENGINE_URL`, `VOGT_ENGINE_TOKEN_FILE`, `VOGT_ENGINE_STATE_DIR`; engine side: `ENGINE_*` — see [`docs/ENGINE.md`](docs/ENGINE.md) |
+| Rust session engine + PWA | in the image | PTY sessions over WebSocket, the Solid PWA, file/git APIs, agent tasks, push. The published image carries it wired to the core; the wiring is only yours to set when you run the halves apart. | engine side: `ENGINE_*` — see [`docs/ENGINE.md`](docs/ENGINE.md); core side, when split: `VOGT_ENGINE_URL`, `VOGT_ENGINE_TOKEN_FILE`, `VOGT_ENGINE_STATE_DIR` |
 | Voice/chat assistant provider | optional (engine only) | The assistant loop in the PWA. Any OpenAI-compatible chat endpoint works; unset key means the feature is off. | `ENGINE_ASSISTANT_BASE_URL`, `ENGINE_ASSISTANT_API_KEY`, `ENGINE_ASSISTANT_MODEL`; speech via `ENGINE_ASSISTANT_STT_*` / `ENGINE_ASSISTANT_TTS_*`. Legacy `MYDEVENV2_*` names are still accepted as aliases. |
 | MCP | optional | Lets an agent drive the same operation registry: `vogt-mcp` (stdio, local data dir) or `vogt-mcp-remote` (bridge to a running instance). Not needed for CLI, REST, GUI, or health. | `VOGT_DATA_DIR` for `vogt-mcp`; `VOGT_URL` + `VOGT_TOKEN_FILE` for `vogt-mcp-remote` |
 | External MCP integrations | optional | Other MCP servers (an infrastructure register such as Cadastre, LSPs, and so on) an operator wires into their agents alongside Vogt. The image installs, contacts, and requires none of them. | Your agent client's MCP configuration, not Vogt's |
@@ -195,8 +156,8 @@ workflow and [`docs/CONFIG.md`](docs/CONFIG.md) for every setting.
 
 - [Getting started](docs/GETTING_STARTED.md) — install, run, configure, and
   make the first project visible.
-- [Deployment](docs/DEPLOYMENT.md) — production: images, Compose, environment,
-  reverse proxy, backups, upgrades, the optional engine.
+- [Deployment](docs/DEPLOYMENT.md) — production: the image, Compose,
+  environment, reverse proxy, backups, upgrades, releases.
 - [User guide](docs/USER_GUIDE.md) — daily use of the PWA, CLI, REST, and
   optional agent surfaces.
 - [Agent guide](docs/AGENT_GUIDE.md) — for an agent running a stream of product

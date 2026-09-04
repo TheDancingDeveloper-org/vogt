@@ -82,10 +82,12 @@ Rust engine front door <- Solid PWA <- browser / installed PWA / Android shell
 - `voice/` — an optional, separate Rust workspace implementing the
   OpenAI-compatible speech sidecar. Its native build prerequisites and test
   commands are in `voice/README.md`.
-- `deploy/` — the self-hosting base and overlays. `vogt.compose.yml` is the
-  public core-only base; each overlay states only its difference. Operator
-  notes and estate-specific values belong in git-ignored `docs/local/`, not in
-  tracked public examples.
+- `deploy/` — the self-hosting base and overlays. `stack.compose.yml` runs
+  the published all-in-one image and is the one supported deployment;
+  `vogt.compose.yml` + `engine.overlay.yml` are the contributor stack (core
+  and engine from a checkout, also what e2e drives). Each overlay states only
+  its difference. Operator notes and estate-specific values belong in
+  git-ignored `docs/local/`, not in tracked public examples.
 - `scripts/` — generators, local/CI checks, deployment helpers, and smoke
   tests. Prefer the established script when it owns the workflow.
 - `docs/` — `USER_GUIDE.md` describes use, `ENGINE.md` the engine and wire
@@ -320,8 +322,10 @@ does not need an APK rebuild.
 
 ## Deployment and CI rules
 
-- The public core image comes from the root `Dockerfile` and runs through
-  `deploy/vogt.compose.yml`. It contains no PWA or agent CLI.
+- The core image comes from the root `Dockerfile`. It contains no PWA or
+  agent CLI, and it is a build input to the stack image rather than a
+  deployment target (`docs/DEPLOYMENT.md` §1.1); `deploy/vogt.compose.yml`
+  runs it alone for contributors.
 - `engine/Dockerfile` builds the merged core + engine + embedded-PWA stack and
   development pod from the repository root. The core image and merged stack
   are distinct artifacts built by distinct jobs in `.github/workflows/build.yml`;
