@@ -1351,6 +1351,7 @@ Every setting, with the TOML key for a `--config` file and its default
 | `assistant_tts_base_urls` | `ENGINE_ASSISTANT_TTS_BASE_URLS` (comma-separated) | empty (server TTS off) | ordered list of OpenAI-compatible `/audio/speech` bases |
 | `assistant_tts_model` | `ENGINE_ASSISTANT_TTS_MODEL` | `tts-1-hd` | speech model |
 | `assistant_tts_voice` | `ENGINE_ASSISTANT_TTS_VOICE` | `nova` | voice name; `/audio/speech` requires one |
+| `assistant_tts_format` | `ENGINE_ASSISTANT_TTS_FORMAT` | `mp3` | `response_format` requested from `/audio/speech`; the shipped stack sets `wav` for the bundled Piper sidecar, which serves only wav. The engine passes the upstream content type through, so either plays in the PWA |
 | `assistant_tts_api_key` | `ENGINE_ASSISTANT_TTS_API_KEY` | unset | key for whichever TTS entry needs one |
 | `assistant_speech_attempt_timeout_ms` | `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS` | `30000` | per-attempt bound on one speech upstream, not on the whole request |
 
@@ -1388,18 +1389,20 @@ ENGINE_ASSISTANT_STT_API_KEY=sk-...   # used only by the entry that needs it
 ENGINE_ASSISTANT_TTS_API_KEY=sk-...
 ```
 
-An optional first-party alternative is the Rust `voice/` sidecar. Its native
-providers are `whisper-rs` (GGML Whisper) and `piper-rs` over ONNX. They load
-operator-mounted model files in-process; no executable or shell is involved,
-and audio is not retained. The first-party Compose path is
-`deploy/voice.firstparty.overlay.yml`; it requires an operator model directory
-and keeps that mount read-only. A missing or invalid required model keeps the
-sidecar unhealthy. If native model paths are absent, either half can instead
-use the explicit JSON-argv subprocess adapter, or remain unconfigured. See
-[`voice/README.md`](../voice/README.md) for model naming, supported
+The shipped stack bundles the first-party Rust `voice/` sidecar (#565), on by
+default, so a fresh install has working speech with no provider. Its native
+providers are `whisper-rs` (GGML Whisper) and `piper-rs` over ONNX, loaded
+in-process; no executable or shell is involved, and audio is not retained. The
+published `vogt-voice` image carries a small, permissively-licensed default
+model set baked in (Whisper `base.en`, a public-domain Piper English voice);
+its Piper backend answers `wav` and rejects other formats, so the stack sets
+`ENGINE_ASSISTANT_TTS_FORMAT=wav`. `/health` gates on the configured models
+loading, so a bad model mount keeps the sidecar unhealthy rather than serving
+errors. An operator points it at models of their own by overriding
+`VOGT_VOICE_STT_MODEL_PATH` / `VOGT_VOICE_TTS_MODEL_CONFIG_PATH` (or the
+JSON-argv subprocess adapter) in an image that starts `FROM` the published one.
+See [`voice/README.md`](../voice/README.md) for model naming, supported
 WAV/WebM/Opus/Ogg input and WAV output limits, placeholders, and the contract.
-The existing
-`deploy/voice.overlay.yml` third-party overlay is independent and unchanged.
 
 #### Provider profiles (FR-T9, r16)
 

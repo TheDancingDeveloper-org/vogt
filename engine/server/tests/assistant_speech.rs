@@ -146,6 +146,7 @@ fn test_config() -> Config {
         assistant_tts_api_key: None,
         assistant_tts_model: "tts-1-hd".into(),
         assistant_tts_voice: "nova".into(),
+        assistant_tts_format: "mp3".into(),
         // Short per-attempt bound so the "hanging endpoint" cases resolve fast.
         assistant_speech_attempt_timeout_ms: 300,
         public_url: None,
@@ -248,6 +249,33 @@ async fn tts_posts_json_and_streams_the_audio_back() {
     assert_eq!(sent["model"], "tts-1-hd");
     assert_eq!(sent["input"], "read me the backlog");
     assert_eq!(sent["voice"], "nova");
+    // The default response format is mp3 — what a cloud provider serves.
+    assert_eq!(sent["response_format"], "mp3");
+}
+
+#[tokio::test]
+async fn tts_response_format_is_configurable_for_a_wav_only_backend() {
+    // The bundled vogt-voice Piper sidecar only speaks wav and rejects mp3, so
+    // the shipped stack sets ENGINE_ASSISTANT_TTS_FORMAT=wav. Prove the engine
+    // asks the backend for exactly the configured format rather than a
+    // hard-coded mp3 (which that sidecar would answer with 400).
+    let (mock, log) = mock_audio_server().await;
+    let mut cfg = test_config();
+    cfg.assistant_tts_base_urls = vec![mock];
+    cfg.assistant_tts_format = "wav".into();
+    let base = boot(cfg).await;
+
+    let res = auth_client()
+        .post(format!("{base}/api/assistant/tts"))
+        .json(&json!({ "text": "read me the backlog" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let seen = log.lock().unwrap();
+    let sent = seen.tts_body.as_ref().expect("tts body");
+    assert_eq!(sent["response_format"], "wav");
 }
 
 #[tokio::test]

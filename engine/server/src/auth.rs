@@ -572,6 +572,7 @@ mod tests {
             assistant_tts_api_key: None,
             assistant_tts_model: "tts-1".into(),
             assistant_tts_voice: "alloy".into(),
+            assistant_tts_format: "mp3".into(),
             assistant_speech_attempt_timeout_ms: 30_000,
             public_url: None,
             vogt_core_url: None,

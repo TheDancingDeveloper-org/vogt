@@ -1,6 +1,7 @@
 # Vogt voice sidecar
 
-`vogt-voice` is an optional Rust service for issue #326. It speaks
+`vogt-voice` is Vogt's first-party voice sidecar (#326, #565), bundled on by
+default in the shipped stack. It speaks
 the OpenAI-compatible sidecar contract used by the engine:
 
 - `GET /health`
@@ -63,8 +64,13 @@ invocation, or model weight in the image by default. The operator must mount
 the model cache and should run the sidecar on an internal network. A native
 model path takes precedence over a subprocess command for that half; either
 half can be configured independently. The first-party deployment is
-`deploy/voice.firstparty.overlay.yml`. The existing third-party
-`deploy/voice.overlay.yml` remains available as an alternative.
+the `voice` service in `deploy/stack.compose.yml`, which is on by default
+(#565). The published image bakes in a small, permissively-licensed default
+model set — Whisper `base.en` (GGML) and a public-domain Piper English voice
+(`en_US-ljspeech-medium`) — so it transcribes and speaks with no operator
+input; `VOGT_VOICE_STT_MODEL_PATH` and `VOGT_VOICE_TTS_MODEL_CONFIG_PATH`
+default to those baked files. Override them (or the subprocess commands below)
+to point at models of your own.
 
 Run from this directory:
 

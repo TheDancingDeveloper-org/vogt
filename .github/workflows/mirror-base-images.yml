@@ -73,12 +73,14 @@ on:
       - "Dockerfile"
       - "engine/Dockerfile"
       - "engine/Dockerfile.pod"
+      - "voice/Dockerfile"
       - ".github/workflows/mirror-base-images.yml"
   pull_request:
     paths:
       - "Dockerfile"
       - "engine/Dockerfile"
       - "engine/Dockerfile.pod"
+      - "voice/Dockerfile"
       - ".github/workflows/mirror-base-images.yml"
   schedule:
     # Renovate's window is "before 5am on monday" (`.github/renovate.json5`).
@@ -138,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           bad=0
-          for file in engine/Dockerfile engine/Dockerfile.pod; do
+          for file in engine/Dockerfile engine/Dockerfile.pod voice/Dockerfile; do
             while IFS= read -r ref; do
               # A stage name, not an image: no registry path and no tag.
               case "$ref" in
@@ -199,7 +201,7 @@ jobs:
 
           refs="$(
             {
-              grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile engine/Dockerfile.pod
+              grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile engine/Dockerfile.pod voice/Dockerfile
               # The root Dockerfile defaults to an upstream public base for
               # external builders, but CI supplies its equivalent mirror as
               # PYTHON_IMAGE. Mirror that default before the CI override is
@@ -299,7 +301,7 @@ jobs:
           {
             echo "### Base images in GHCR"
             echo
-            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile engine/Dockerfile.pod \
+            grep -Eho "${MIRROR_PREFIX}[A-Za-z0-9._/:@-]+" engine/Dockerfile engine/Dockerfile.pod voice/Dockerfile \
               | sort -u \
               | sed 's/^/- `/; s/$/`/'
             echo
