@@ -339,6 +339,13 @@ pub struct Config {
     /// Voice name sent to `/audio/speech`; `/audio/speech` requires one.
     /// Defaults to `nova` (voicemode's cloud default).
     pub assistant_tts_voice: String,
+    /// `response_format` sent to `/audio/speech`. Defaults to `mp3` — what a
+    /// cloud provider (OpenAI, Groq) serves and what the browser plays — but a
+    /// self-hosted backend may only speak one container. The bundled
+    /// `vogt-voice` Piper sidecar returns `wav` and rejects anything else, so
+    /// the shipped stack sets this to `wav`; the engine passes the upstream
+    /// content type straight through, so either plays in the PWA.
+    pub assistant_tts_format: String,
     /// Bounded per-attempt timeout for a single speech upstream, in
     /// milliseconds. Applied to each entry in the base-URL list independently,
     /// so a hanging or dead first endpoint cannot stall the request — the
@@ -429,6 +436,7 @@ struct FileConfig {
     assistant_tts_api_key: Option<String>,
     assistant_tts_model: Option<String>,
     assistant_tts_voice: Option<String>,
+    assistant_tts_format: Option<String>,
     assistant_speech_attempt_timeout_ms: Option<u64>,
     public_url: Option<String>,
     vogt_core_url: Option<String>,
@@ -785,6 +793,11 @@ pub fn load(
             .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_VOICE").ok())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "nova".to_string()),
+        assistant_tts_format: from_file
+            .assistant_tts_format
+            .or_else(|| engine_env("ENGINE_ASSISTANT_TTS_FORMAT").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "mp3".to_string()),
         assistant_speech_attempt_timeout_ms: parse_u64_env("ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS")?
             .or(from_file.assistant_speech_attempt_timeout_ms)
             .unwrap_or(30_000),

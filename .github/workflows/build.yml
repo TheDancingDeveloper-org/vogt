@@ -94,6 +94,13 @@ env:
   # is published only from dev; deployment remains a separate approved digest
   # handoff.
   DEMO_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-demo
+  # The first-party voice sidecar (#565): native Whisper + Piper with a small
+  # baked default model set, so the shipped stack has working speech out of the
+  # box. Always public and always generic — unlike vogt-stack there is no
+  # estate variant, because the sidecar carries no estate integration — so it
+  # publishes to one repository from every branch. `stack.compose.yml` names it
+  # by version and reaches it over the Compose network.
+  VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
   # Where BuildKit's layer cache lives (#184, superseding #55's GHCR backend).
   #
   # The estate's own `local-registry` container on Node B, not GHCR and not a
@@ -326,6 +333,119 @@ jobs:
             echo "This is a build, not a release: no version was assigned, no"
             echo "semver tag was created, and \`latest\` did not move."
           } >> "$GITHUB_STEP_SUMMARY"
+
+  voice-image:
+    name: build and publish the voice sidecar
+    needs: base-images
+    runs-on: [self-hosted, publish]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
+              http = true
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        id: meta
+        with:
+          images: ${{ env.VOICE_IMAGE }}
+          # Same rule as the core image: a commit, never a moving alias, plus
+          # the one `dev` tag that moves inside its own stream.
+          tags: |
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,format=long,prefix=prod-,enable=${{ github.ref == 'refs/heads/prod' }}
+            type=sha,format=long,prefix=dev-,enable=${{ github.ref == 'refs/heads/dev' }}
+            type=raw,value=dev,enable=${{ github.ref == 'refs/heads/dev' }}
+          flavor: |
+            latest=false
+
+      # Built and *run* before it is pushed. A voice image that assembles is
+      # not a voice image that transcribes: the native runtimes and the baked
+      # models are exactly the parts a green build does not exercise. This does
+      # a full local round trip — synthesise wav, feed it back, read a
+      # transcript — so a broken model or a missing runtime library fails here
+      # rather than as inert controls on a fresh install.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: candidate
+        with:
+          context: voice
+          file: voice/Dockerfile
+          load: true
+          tags: ${{ env.VOICE_IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }},mode=max
+
+      - name: the sidecar transcribes and speaks
+        env:
+          CANDIDATE: ${{ env.VOICE_IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /usr/local/bin/vogt-voice "$CANDIDATE" --version
+          docker run -d --name voice-smoke "$CANDIDATE"
+          trap 'docker logs voice-smoke || true; docker rm -f voice-smoke >/dev/null 2>&1 || true' EXIT
+
+          # Wait for the baked models to load — /health gates on it.
+          ready=""
+          for _ in $(seq 1 60); do
+            if docker exec voice-smoke curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 2
+          done
+          [ -n "$ready" ] || { echo "voice sidecar never became healthy" >&2; exit 1; }
+
+          # The OpenAI sidecar contract advertises both halves.
+          models="$(docker exec voice-smoke curl -fsS http://127.0.0.1:8000/v1/models)"
+          echo "$models" | grep -q '"whisper-1"'
+          echo "$models" | grep -q '"tts-1"'
+
+          # TTS: synthesise real wav from the baked Piper voice.
+          docker exec voice-smoke sh -c 'curl -fsS -X POST http://127.0.0.1:8000/v1/audio/speech -H "content-type: application/json" -d "{\"model\":\"tts-1\",\"voice\":\"alloy\",\"input\":\"the quick brown fox\",\"response_format\":\"wav\"}" -o /tmp/out.wav'
+          docker exec voice-smoke sh -c 'test "$(wc -c < /tmp/out.wav)" -gt 1000' || { echo "TTS produced a trivially small file" >&2; exit 1; }
+          docker exec voice-smoke sh -c 'head -c 4 /tmp/out.wav | grep -q RIFF' || { echo "TTS output is not a RIFF/WAV" >&2; exit 1; }
+
+          # STT: feed that audio back through the baked Whisper model and prove
+          # it returns a non-empty transcript.
+          transcript="$(docker exec voice-smoke curl -fsS -X POST http://127.0.0.1:8000/v1/audio/transcriptions -F model=whisper-1 -F file=@/tmp/out.wav)"
+          echo "transcript: $transcript"
+          echo "$transcript" | grep -qE '"text":"[^"]+"' || { echo "STT returned an empty transcript" >&2; exit 1; }
+          echo "voice sidecar speaks and transcribes with the baked models"
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: push
+        with:
+          context: voice
+          file: voice/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }}
+          cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }},mode=max
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: sign the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${VOICE_IMAGE}@${DIGEST}"
 
   demo-image:
     name: build, smoke, and publish the static public demo

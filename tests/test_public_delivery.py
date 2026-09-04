@@ -42,6 +42,12 @@ def test_public_delivery_defaults_to_the_current_product_release() -> None:
         assert stack in path.read_text(encoding="utf-8"), (
             f"{path.relative_to(REPO_ROOT)} must name the current release {stack}"
         )
+    # The bundled voice sidecar (#565) is versioned with the product: it is
+    # published from the same release and named beside the stack image.
+    voice = f"ghcr.io/thedancingdeveloper-org/vogt-voice:{version}"
+    assert voice in STACK_COMPOSE.read_text(encoding="utf-8"), (
+        f"{STACK_COMPOSE.relative_to(REPO_ROOT)} must name the current release {voice}"
+    )
     core = f"ghcr.io/thedancingdeveloper-org/vogt:{version}"
     for path in (
         PUBLIC_COMPOSE,
@@ -324,6 +330,10 @@ def test_the_stack_compose_is_a_base_not_an_overlay() -> None:
     files are alternatives. This is worth asserting because every other
     deployment file in `deploy/` *is* an overlay, which makes combining them
     the natural guess and a wrong one.
+
+    The stack is the pod plus the bundled `voice` sidecar (#565) — two
+    services, not one — but it is still a base: it declares its own image,
+    volumes and secrets rather than stating a difference from another file.
     """
     stack = _without_comments(STACK_COMPOSE.read_text(encoding="utf-8"))
     # A base declares what it runs: image, volumes and secrets of its own.
@@ -335,8 +345,9 @@ def test_the_stack_compose_is_a_base_not_an_overlay() -> None:
     block = re.search(r"^services:\n(.*?)(?=^\S)", stack, re.MULTILINE | re.DOTALL)
     assert block, "no services block"
     services = re.findall(r"^  ([a-z][a-z0-9-]*):$", block.group(1), re.MULTILINE)
-    assert services == ["vogt"], (
-        f"the AIO is one container by definition; found services {services}"
+    assert services == ["vogt", "voice"], (
+        "the AIO is the pod plus its bundled voice sidecar (#565); found "
+        f"services {services}"
     )
 
 
@@ -408,3 +419,92 @@ def test_docker_compose_renders_the_base_and_the_engine_overlay() -> None:
         pytest.skip(f"docker compose unavailable: {result.stderr.strip()[:200]}")
     assert "http://vogt:8000" in result.stdout
     assert "127.0.0.1" in result.stdout
+
+
+# ── The bundled voice sidecar (#565) ─────────────────────────────────────────
+#
+# Voice used to be two Compose overlays keyed on a specific engine service name
+# and pinned to moving third-party tags, absent from the one supported stack.
+# It is now a first-party service in `stack.compose.yml`, published from the
+# release like the stack image, and reached over the Compose network. These
+# pin the properties a stranger is entitled to assume of it.
+
+DEPLOY = REPO_ROOT / "deploy"
+
+
+def test_the_stack_bundles_voice_wired_to_the_engine() -> None:
+    stack = _without_comments(STACK_COMPOSE.read_text(encoding="utf-8"))
+    # A service of its own, behind a profile the example env turns on, so it can
+    # be switched off without editing this file.
+    assert re.search(r"^  voice:\n", stack, re.MULTILINE), "no voice service"
+    assert re.search(r"^    profiles:\s*\[\"voice\"\]", stack, re.MULTILINE), (
+        "voice must sit behind a profile so COMPOSE_PROFILES can turn it off"
+    )
+    # A published image, never a build — same rule as the stack image itself.
+    voice_block = re.search(
+        r"^  voice:\n(.*?)(?=^  [a-z]|^volumes:|^secrets:|\Z)",
+        stack,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert voice_block, "no voice service block"
+    assert "build:" not in voice_block.group(1), (
+        "the sidecar is the published image; a build here would decouple it "
+        "from the digest a consumer pinned"
+    )
+    assert "${VOGT_VOICE_IMAGE:-" in voice_block.group(1)
+    # The engine is pointed at it, and told the format the Piper backend serves.
+    assert "http://voice:8000/v1" in stack
+    assert re.search(
+        r'ENGINE_ASSISTANT_TTS_FORMAT:\s*"\$\{ENGINE_ASSISTANT_TTS_FORMAT:-wav\}"',
+        stack,
+    ), "the bundled Piper backend only speaks wav; the engine must ask for wav"
+    # The example env turns the profile on, so a documented `up` runs voice.
+    env = (DEPLOY / "stack.env.example").read_text(encoding="utf-8")
+    assert re.search(r"^COMPOSE_PROFILES=voice\b", env, re.MULTILINE), (
+        "stack.env.example must enable the voice profile so voice is on by default"
+    )
+
+
+def test_the_voice_sidecar_is_internal_only() -> None:
+    """Like the core, the sidecar is never published to the host.
+
+    The engine is the only front door (NFR-D11); the sidecar is reached over
+    the Compose network and must not open a port on the host.
+    """
+    stack = _without_comments(STACK_COMPOSE.read_text(encoding="utf-8"))
+    match = re.search(
+        r"^  voice:\n(.*?)(?=^  [a-z]|^volumes:|^secrets:|\Z)",
+        stack,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match, "no voice service block"
+    assert "ports:" not in match.group(1), "the voice sidecar must not publish a port"
+
+
+def test_no_deploy_file_names_a_mutable_voice_image_tag() -> None:
+    """Acceptance (#565): no file under deploy/ names a mutable image tag for voice.
+
+    The old third-party overlay pinned `speaches:latest-cpu` and
+    `openedai-speech:latest` by moving tag — the only mutable pins in deploy/.
+    Those files are gone; assert they cannot creep back, and that the bundled
+    image is pinned to a release version (or a digest), never `latest`/`dev`.
+    """
+    mutable_markers = ("speaches", "openedai-speech", "latest-cpu")
+    for path in sorted(DEPLOY.rglob("*.yml")) + sorted(DEPLOY.rglob("*.example")):
+        text = path.read_text(encoding="utf-8")
+        for marker in mutable_markers:
+            assert marker not in text, (
+                f"{path.relative_to(REPO_ROOT)} names the mutable third-party "
+                f"voice image marker {marker!r}"
+            )
+    # The bundled image is a release version or a digest, not a moving alias.
+    for path in (STACK_COMPOSE, DEPLOY / "stack.env.example"):
+        text = path.read_text(encoding="utf-8")
+        for ref in re.findall(r"vogt-voice[:@][^\s\"}]+", text):
+            assert not ref.endswith((":latest", ":dev")), (
+                f"{path.relative_to(REPO_ROOT)} pins voice to a moving tag: {ref}"
+            )
+            assert re.search(r"vogt-voice:\d+\.\d+\.\d+", ref) or "@sha256:" in ref, (
+                f"{path.relative_to(REPO_ROOT)} must pin voice to a version or "
+                f"digest, not {ref}"
+            )

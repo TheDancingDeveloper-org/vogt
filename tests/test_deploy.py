@@ -757,6 +757,32 @@ def test_a_tag_can_release_the_merged_image() -> None:
     )
 
 
+def test_the_voice_sidecar_is_built_signed_and_published_generically() -> None:
+    """The bundled voice sidecar (#565) is published the way the stack is.
+
+    A signed, digest-pinned image with provenance and an SBOM, from both the
+    per-commit build and the release. Unlike `vogt-stack` it has no estate
+    variant — the sidecar carries no estate integration — so it always names
+    the one public package, from every branch.
+    """
+    build = (WORKFLOWS / "build.yml").read_text(encoding="utf-8")
+    release = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
+    for raw in (build, release):
+        assert "VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice\n" in raw, (
+            "voice publishes to one public package, never an estate variant"
+        )
+        assert "-estate" not in raw.split("VOICE_IMAGE:")[1].split("\n")[0]
+        job = raw[raw.index("  voice-image:") :]
+        # A real artefact gate: built, signed, with provenance and an SBOM.
+        assert "provenance: true" in job and "sbom: true" in job
+        assert 'cosign sign --yes "${VOICE_IMAGE}@${DIGEST}"' in job
+        # The run gate is a full round trip through the baked models, not just
+        # that the image assembles — a green build of a mute sidecar is exactly
+        # the failure #565 is about.
+        assert "/v1/audio/transcriptions" in job
+        assert "/v1/audio/speech" in job
+
+
 # ── The build cache and the pod-toolchain split (#184) ─────────────────────
 #
 # `dev`'s merged image recompiled everything from scratch on every push:
@@ -2054,7 +2080,10 @@ def test_dev_deploy_helper_updates_only_the_active_digest_pins() -> None:
 def test_github_release_collects_and_publishes_the_complete_release() -> None:
     workflow = (WORKFLOWS / "release.yml").read_text(encoding="utf-8")
     job = workflow[workflow.index("\n  github-release:") :]
-    assert "needs: [validate-release, distribution, image, stack-image, android]" in job
+    assert (
+        "needs: [validate-release, distribution, image, "
+        "voice-image, stack-image, android]"
+    ) in job
     assert "vogt-android-release-${{ github.ref_name }}" in job
     assert "signed APK is required" in job
     # No wheel, no sdist (2026-09-04): nothing consumed them — no PyPI

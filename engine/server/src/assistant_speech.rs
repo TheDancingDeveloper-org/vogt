@@ -67,6 +67,10 @@ struct AudioBackend {
     /// Voice name — meaningful for TTS (`/audio/speech` requires one) and
     /// unused for STT, where it is left empty.
     voice: String,
+    /// `response_format` to request from `/audio/speech`. Meaningful for TTS
+    /// (the bundled Piper sidecar only speaks `wav`, a cloud provider `mp3`);
+    /// left empty for STT, which uploads rather than names a format.
+    format: String,
 }
 
 impl AudioBackend {
@@ -76,6 +80,7 @@ impl AudioBackend {
         api_key: &Option<String>,
         model: &str,
         voice: &str,
+        format: &str,
     ) -> Option<Self> {
         if base_urls.is_empty() {
             return None;
@@ -85,6 +90,7 @@ impl AudioBackend {
             api_key: api_key.clone(),
             model: model.to_string(),
             voice: voice.to_string(),
+            format: format.to_string(),
         })
     }
 }
@@ -112,12 +118,14 @@ impl AssistantSpeech {
             &cfg.assistant_stt_api_key,
             &cfg.assistant_stt_model,
             "",
+            "",
         );
         let tts = AudioBackend::from_parts(
             &cfg.assistant_tts_base_urls,
             &cfg.assistant_tts_api_key,
             &cfg.assistant_tts_model,
             &cfg.assistant_tts_voice,
+            &cfg.assistant_tts_format,
         );
         if stt.is_none() && tts.is_none() {
             return None;
@@ -272,7 +280,7 @@ pub async fn tts(State(state): State<Arc<AppState>>, Json(req): Json<TtsReq>) ->
         "model": backend.model,
         "input": req.text,
         "voice": backend.voice,
-        "response_format": "mp3",
+        "response_format": backend.format,
     });
 
     let mut last_error = String::new();

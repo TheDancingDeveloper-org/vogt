@@ -88,8 +88,7 @@ left-to-right, so an overlay states only its difference:
 docker compose -f deploy/stack.compose.yml -f my-deployment.yml up -d
 ```
 
-The repository ships small examples of this: [`deploy/voice.overlay.yml`](../deploy/voice.overlay.yml)
-adds two speech containers beside the engine, and
+The repository ships a small example of this:
 [`deploy/vogt.build.yml`](../deploy/vogt.build.yml) — for the contributor
 stack — does nothing but swap a published image for a build from the
 checkout.
@@ -188,18 +187,32 @@ The two-service shape this enables — your front door on the published port,
 the core reachable only on the Compose network — is a supported topology, not
 a workaround.
 
-### Self-hosted voice (STT/TTS) as an optional overlay
+### Voice (STT/TTS)
 
-The engine's voice assistant speaks the standard OpenAI audio interface —
+Voice works out of the box. The supported all-in-one stack bundles a
+first-party `voice` sidecar — the Rust `vogt-voice` image, carrying native
+Whisper and Piper and a small, permissively-licensed default model set
+(Whisper `base.en`, a public-domain Piper English voice) — and
+[`deploy/stack.compose.yml`](../deploy/stack.compose.yml) wires the engine to
+it over the Compose network. A fresh `docker compose -f deploy/stack.compose.yml
+up -d --wait` transcribes the microphone and speaks replies with no account and
+no extra file. The sidecar is never published to the host; the engine stays the
+only front door.
+
+The engine speaks the standard OpenAI audio interface —
 `POST /v1/audio/transcriptions` for speech-to-text and `POST /v1/audio/speech`
-for text-to-speech — configured entirely by environment. On the public stack
-both point at nothing, so a fresh install shows the voice controls but they are
-inert until you name an audio provider.
+for text-to-speech — and its base URLs are an ordered fallback list, so none of
+this locks you to the sidecar or to any one vendor.
 
-You have two ways to make them work, and neither locks you to a vendor.
+**Turn it off.** The sidecar sits behind a Compose profile that
+`deploy/stack.env.example` enables. Clear `COMPOSE_PROFILES` in `deploy/.env`
+and the sidecar does not start; the voice controls stay present but inert.
 
-**Point at any provider.** Set the base URLs (and a key, model and voice) in
-`deploy/.env` to OpenAI, Groq, or any OpenAI-compatible speech endpoint:
+**Point at another provider.** Set the base URLs (and a key, model, voice and
+format) in `deploy/.env` to OpenAI, Groq, or any OpenAI-compatible speech
+endpoint. A cloud provider serves `mp3`, so set the format back to `mp3` when
+you repoint TTS; you can then also clear `COMPOSE_PROFILES` so the local sidecar
+does not run:
 
 ```dotenv
 ENGINE_ASSISTANT_STT_BASE_URLS=https://api.openai.com/v1
@@ -209,59 +222,24 @@ ENGINE_ASSISTANT_TTS_BASE_URLS=https://api.openai.com/v1
 ENGINE_ASSISTANT_TTS_API_KEY=sk-...
 ENGINE_ASSISTANT_TTS_MODEL=tts-1
 ENGINE_ASSISTANT_TTS_VOICE=nova
+ENGINE_ASSISTANT_TTS_FORMAT=mp3
 ```
 
-**Or run it locally with no account.** Layer `deploy/voice.overlay.yml`. It
-adds two small, CPU-only, OpenAI-compatible containers — `whisper`
-([speaches](https://github.com/speaches-ai/speaches), faster-whisper) for STT
-and `tts` ([openedai-speech](https://github.com/matatonic/openedai-speech),
-Piper voices) for TTS — on the same Compose network as the engine, and points
-the engine's speech base URLs at them:
+The `ENGINE_ASSISTANT_TTS_FORMAT` value is what the engine asks the TTS
+endpoint for and defaults to `wav` in the stack, because the sidecar's Piper
+backend serves only `wav`; the engine streams the upstream content type straight
+through, so either plays in the PWA.
 
-```bash
-docker compose \
-  -f deploy/stack.compose.yml \
-  -f deploy/voice.overlay.yml \
-  up -d
-```
-
-Notes:
-
-- Neither service is published to the host; the engine reaches them by service
-  name over the Compose network (`http://whisper:8000/v1`,
-  `http://tts:8000/v1`).
-- Model weights persist in named volumes (`whisper-cache`, `tts-voices`), so
-  the download happens once. The `whisper` container pre-fetches its
-  faster-whisper model at boot before it serves, so the first utterance works
-  without a manual download step; the first start therefore takes a minute or
-  two longer while the model lands.
-- The defaults are the ids these two images actually serve —
-  `Systran/faster-whisper-small` for STT, `tts-1` + voice `nova` for TTS. Every
-  one stays a `${VAR:-default}`, so the same overlay can front a different
-  local model or a hosted provider by setting the matching `ENGINE_ASSISTANT_*`
-  variable in `deploy/.env`.
-
-This is an ordinary Layer 2 overlay: it states only the speech wiring and the
-two services, and it composes with any other overlay you already layer.
-
-For a Vogt-owned runtime, use `deploy/voice.firstparty.overlay.yml` instead:
-it builds the Rust `vogt-voice` image from `voice/Dockerfile`, mounts a
-read-only operator model directory, and points both audio halves at the one
-sidecar. Set these values in `deploy/.env` before starting it:
-
-```dotenv
-VOGT_VOICE_MODEL_DIR=/srv/vogt/voice-models
-VOGT_VOICE_STT_MODEL_FILE=ggml-base.en.bin
-VOGT_VOICE_TTS_MODEL_CONFIG_FILE=en_US-lessac-medium.onnx.json
-```
-
-The Piper JSON file must have its neighboring ONNX file under the same stem
-(for example `voice.onnx.json` beside `voice.onnx`). The native sidecar accepts
-WAV, WebM/Opus, and Ogg audio for STT and returns WAV for TTS; it loads both
-models at startup and does not download weights. Its `/health` probe remains
-`503` until a required
-model is valid. See [`../voice/README.md`](../voice/README.md) for the native
-model and request details.
+**Bring your own models.** The sidecar's default weights are baked in, but its
+`/health` still gates on whatever model paths it is given, so an operator can
+point it at models of their own — build an image that starts `FROM` the
+published sidecar and overrides `VOGT_VOICE_STT_MODEL_PATH` /
+`VOGT_VOICE_TTS_MODEL_CONFIG_PATH`, or set `VOGT_VOICE_STT_COMMAND` /
+`VOGT_VOICE_TTS_COMMAND` to run inference executables of your own. The Piper
+JSON model configuration must sit beside its ONNX file under the same stem (for
+example `voice.onnx.json` beside `voice.onnx`). See
+[`../voice/README.md`](../voice/README.md) for the native model and request
+details.
 
 ### Giving the front door its core token in one deploy
 

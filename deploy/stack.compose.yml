@@ -78,6 +78,28 @@ services:
       # reachable at a stable URL.
       ENGINE_PUBLIC_URL: "${ENGINE_PUBLIC_URL:-}"
 
+      # ── Voice (STT + TTS) ──────────────────────────────────────────────────
+      # Server-side speech points at the bundled `voice` sidecar below over the
+      # Compose network, so a fresh stack transcribes the microphone and speaks
+      # replies with no account and no extra file. The sidecar carries a small
+      # default model set; the engine's speech list is an ordered fallback, so
+      # overriding any value here in `.env` points at OpenAI, Groq or any other
+      # OpenAI-compatible provider instead — you are never bound to the sidecar.
+      #
+      # The sidecar's Piper backend answers `wav` and rejects `mp3`, so the
+      # engine is told to ask it for `wav`; the engine streams the upstream
+      # content type straight through and the PWA plays either. A cloud provider
+      # wants `mp3` — set ENGINE_ASSISTANT_TTS_FORMAT=mp3 in `.env` when you
+      # repoint TTS at one. Turn voice off entirely by clearing COMPOSE_PROFILES
+      # in `.env` (the sidecar then never starts and these URLs answer nothing,
+      # which the engine treats as "voice unavailable").
+      ENGINE_ASSISTANT_STT_BASE_URLS: "${ENGINE_ASSISTANT_STT_BASE_URLS:-http://voice:8000/v1}"
+      ENGINE_ASSISTANT_STT_MODEL: "${ENGINE_ASSISTANT_STT_MODEL:-whisper-1}"
+      ENGINE_ASSISTANT_TTS_BASE_URLS: "${ENGINE_ASSISTANT_TTS_BASE_URLS:-http://voice:8000/v1}"
+      ENGINE_ASSISTANT_TTS_MODEL: "${ENGINE_ASSISTANT_TTS_MODEL:-tts-1}"
+      ENGINE_ASSISTANT_TTS_VOICE: "${ENGINE_ASSISTANT_TTS_VOICE:-alloy}"
+      ENGINE_ASSISTANT_TTS_FORMAT: "${ENGINE_ASSISTANT_TTS_FORMAT:-wav}"
+
       # One value both starts the core and tells the engine where to proxy.
       # Loopback means "the core is ours to run", so the entrypoint supervises
       # `vogt init && vogt serve` here; the engine proxies `/api/vogt`, `/mcp`
@@ -145,6 +167,53 @@ services:
 
     secrets:
       - vogt_core_token
+
+  # ── voice: the first-party STT + TTS sidecar (#565) ─────────────────────────
+  #
+  # A published, signed image carrying native Whisper + Piper and a small
+  # default model set, so voice works out of the box. It is reached by the
+  # engine over the Compose network as `http://voice:8000/v1` and is never
+  # published to the host — the engine stays the only front door (NFR-D11).
+  #
+  # On by default via `COMPOSE_PROFILES=voice` in `.env` (see
+  # `stack.env.example`); clear that line to run the stack without it. There is
+  # deliberately no `depends_on` from `vogt` to here — that would drag the
+  # sidecar in even with the profile cleared — so `up --wait` waits on both
+  # only because both are in the active profile, and with voice off the engine
+  # simply finds nothing at the URL above (FR-T6 fallback).
+  #
+  # Baked models make it self-contained: no volume, no download, no model file
+  # to supply. Point it at your own weights with an image of your own that
+  # starts `FROM` this one, or repoint the engine's speech URLs above at another
+  # provider — either way this service can be removed.
+  voice:
+    profiles: ["voice"]
+    # Digest-pin this for a real deployment (NFR-D10), exactly as the stack
+    # image above. Pin the release family (`X.Y.Z`, `latest`); the default is a
+    # tag so the file is runnable as-is.
+    image: ${VOGT_VOICE_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.2}
+    restart: unless-stopped
+    # It only reads its baked models and writes audio to tmpfs, so it can run
+    # locked down even though the pod beside it cannot.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    healthcheck:
+      # `/health` reports "starting" until the baked models load, then "ok".
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
 volumes:
   engine-home:
