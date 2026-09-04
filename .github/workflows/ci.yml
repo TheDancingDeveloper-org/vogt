@@ -375,6 +375,20 @@ jobs:
           PLAYWRIGHT_PORT: "4175"
         run: pnpm exec playwright test tests/browser/demo.spec.ts --project=desktop --project=phone
 
+      # A screenshot that disagrees with its baseline is undiagnosable from
+      # the log alone, and a baseline can only be refreshed from the renderer
+      # that took it — this one. Keep the actual/expected/diff images so the
+      # disagreement can be read, and the baseline re-cut from CI's own
+      # rendering when the change is the intended one.
+      - name: keep the demo browser evidence when a screenshot disagrees
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: demo-playwright-results
+          path: web/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
       # Built *before* cargo, so the engine embeds the real bundle and the
       # compile is over what actually ships. The engine's pipeline built the
       # PWA only in its image stage and compiled Rust against a placeholder;
