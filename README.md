@@ -150,8 +150,11 @@ Configuration reference files are generated from `src/vogt/config.py`:
 uv run python scripts/gen_config_docs.py
 ```
 
-See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the contribution
-workflow and [`docs/CONFIG.md`](docs/CONFIG.md) for every setting.
+Development targets the `dev` branch: base branches on `origin/dev` and open
+pull requests against it. `main` and `prod` are promotion-only release
+branches. See [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md) for the
+contribution workflow and [`docs/CONFIG.md`](docs/CONFIG.md) for every
+setting.
 
 ## Documentation
 

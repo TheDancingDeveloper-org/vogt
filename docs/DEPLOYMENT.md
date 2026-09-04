@@ -465,7 +465,7 @@ maintainer's estate:
 
 | Package | Built by | Visibility | Pod base | Carries | Meant for |
 |---|---|---|---|---|---|
-| `vogt-stack` | `release.yml` (version tag), `main` | public | `lean` | `claude`, `codex` | the signed public artifact — anyone |
+| `vogt-stack` | `release.yml` (version tag reachable from `prod`) | public | `lean` | `claude`, `codex` | the signed public artifact — anyone |
 | `vogt-stack-estate` | `build.yml` on `dev` / `prod` | private | `full` | the above, plus Flutter/Android SDK, Cadastre MCP, theclawbay | the maintainer's own dev/prod pods |
 
 `vogt-stack` is the one to pin. The estate package is not a "fuller" release —
@@ -491,6 +491,14 @@ release manifest so the chain from source to pod is verifiable; it is not a
 deployment target (§1.1).
 
 ### 7.1 Promote `dev` to production
+
+Three branches, three roles. `dev` is the integration branch: every change
+lands there first, the dev pod runs it, and it is the only branch development
+targets. `prod` is what production runs. `main` is the transient waypoint
+between them — it only ever receives a fast-forward of a validated `dev`
+SHA and is then fast-forwarded on to `prod`; no branch is based on it, no
+pull request targets it, and no release is cut from it (a version tag must
+be reachable from `prod`).
 
 Promotion is two explicit, fast-forward-only pushes. First deploy the
 exact `dev-<sha>` images and obtain the verified receipt; the promotion
