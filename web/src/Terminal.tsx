@@ -32,8 +32,10 @@ import {
   clampTerminalFontSize,
   DEFAULT_TERMINAL_FONT_SIZE,
   readTerminalFontSize,
+  TERMINAL_FONT_FAMILY,
   TERMINAL_FONT_SIZE_EVENT,
 } from "./terminalFont";
+import { installTerminalSymbolFonts } from "./terminalSymbolFonts";
 import Dialog from "./Dialog";
 import {
   formatQueuedBytes,
@@ -515,9 +517,10 @@ const TerminalView: Component<Props> = (props) => {
     if (!hostRef) return;
     const cleanupTouchGestures = installTouchGestures();
 
+    // The symbol fallback must be registered before xterm measures and draws.
+    installTerminalSymbolFonts();
     term = new XTerm({
-      fontFamily:
-        '"JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace',
+      fontFamily: TERMINAL_FONT_FAMILY,
       fontSize: readTerminalFontSize(),
       lineHeight: 1.2,
       cursorBlink: true,

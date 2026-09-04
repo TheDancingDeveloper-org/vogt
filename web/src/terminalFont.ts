@@ -1,4 +1,13 @@
+import { TERMINAL_SYMBOL_FONT_FAMILY } from "./terminalSymbolFonts";
+
 export const DEFAULT_TERMINAL_FONT_SIZE = 13;
+/**
+ * xterm's font list. Real monospace fonts first, the `monospace` generic,
+ * and last the bundled symbol fallback — reached only for a glyph nothing
+ * earlier has (WI-76), so it never changes the cell metrics.
+ */
+export const TERMINAL_FONT_FAMILY =
+  `"JetBrainsMono Nerd Font", "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace, "${TERMINAL_SYMBOL_FONT_FAMILY}"`;
 export const MIN_TERMINAL_FONT_SIZE = 9;
 export const MAX_TERMINAL_FONT_SIZE = 24;
 export const TERMINAL_FONT_SIZE_STORAGE_KEY = "vogt.terminalFontSize.v1";
