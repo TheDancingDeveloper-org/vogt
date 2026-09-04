@@ -431,7 +431,7 @@ little longer while the models load. To run without it, clear
 `ENGINE_ASSISTANT_STT_BASE_URLS` / `ENGINE_ASSISTANT_TTS_BASE_URLS` (with a key
 and the provider's model/voice names) — the engine is bound to neither the
 sidecar nor any one vendor. See
-[`CUSTOMISATION.md`](CUSTOMISATION.md#voice-sttts).
+[`CUSTOMISATION.md`](CUSTOMISATION.md#voice-stttts).
 
 It can read every session's scrollback and a curated read slice of Vogt
 (`backlog`, `bugs`, `why`, `project.brief`, `project.list`, `work.get`,

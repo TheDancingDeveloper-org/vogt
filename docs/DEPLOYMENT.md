@@ -65,6 +65,11 @@ consequences, plainly:
   published**, because the stack image is built from it by digest and the
   release manifest records both. It is a build input, not a product. Nothing
   in this document tells you to deploy it.
+- **The voice sidecar image (`ghcr.io/thedancingdeveloper-org/vogt-voice`) is
+  part of the shape**, not a third door: `deploy/stack.compose.yml` runs it
+  beside the pod so voice works out of the box (§5.2), it is published and
+  signed by the same release as the stack and versioned with it, and it is
+  never published to the host. Clearing `COMPOSE_PROFILES` leaves it out.
 - **The two-container files (`deploy/vogt.compose.yml` and
   `deploy/engine.overlay.yml`) remain**, as the contributor's way to run a
   core and an engine they are changing, and as what the end-to-end suite
@@ -134,6 +139,8 @@ What the base does, and why it does it that way:
 | `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one; `connect` renders against it. |
 | `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.2` | The image to run. Pin a digest (§2.2). |
+| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.2` | The bundled voice sidecar. Versioned with the stack — pin the same release as `VOGT_STACK_IMAGE` (§2.2). |
+| `COMPOSE_PROFILES` | no | `voice` | Compose profiles to start. `voice` runs the speech sidecar (§5.2); clear it to run the stack without one — the voice controls stay present but inert. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted core token acts as. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | How much it may do. Everything in the pod can read the file, so this is the blast radius. |
 | `VOGT_HOOKS_REQUIRED` | no | `false` | Whether a missing lifecycle hook bundle is fatal. |
@@ -173,7 +180,23 @@ docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.
 VOGT_STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
 ```
 
-An upgrade is then a change to that one line plus `docker compose up -d`
+The voice sidecar is a second image from the same release —
+`ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.2`, signed by the same
+workflow identity, so the `cosign verify` above applies to it unchanged — and
+`stack.compose.yml` names it beside the stack. Pin it the same way, to the
+same release:
+
+```console
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.2 \
+  | grep -m1 Digest
+# then, in deploy/.env:
+VOGT_VOICE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-voice@sha256:<digest>
+```
+
+The two are versioned together; a stack from one release with a sidecar
+from another is not a tested pair.
+
+An upgrade is then a change to those two lines plus `docker compose up -d`
 (§7.4); a rollback is the reverse, with one caveat about schema migrations
 that §7.5 spells out.
 
@@ -385,7 +408,7 @@ file under the same name without the prefix ([`ENGINE.md`](ENGINE.md) §3).
 | **The core behind it** | Proxies `/api/vogt` and `/mcp` to a core, injecting the core token for `/api/vogt` | yes | The engine runs alone; `/readyz` reports the core's state and stays ready (an absent core must not cost running terminals); Vogt routes answer 503 naming the reason | `VOGT_CORE_URL` (loopback → the entrypoint also *runs* the core there; anything else → proxy only), `VOGT_CORE_TOKEN_FILE` (preferred) or `VOGT_CORE_TOKEN`, `ENGINE_PUBLIC_URL`, `VOGT_IMPORT_ROOT`, `VOGT_ENGINE_STATE_DIR` |
 | **Voice assistant provider** | The chat model behind the assistant tab and spoken requests | yes | The assistant routes answer 404 and the PWA hides the tab | `ENGINE_ASSISTANT_API_KEY`, `ENGINE_ASSISTANT_BASE_URL`, `ENGINE_ASSISTANT_MODEL` — any **OpenAI-compatible chat endpoint**. A key with no base URL is a startup error, not a silent default provider. Tuning: `ENGINE_ASSISTANT_MAX_TOOL_CALLS`, `ENGINE_ASSISTANT_REASONING_EFFORT`, `ENGINE_ASSISTANT_LOG_RETENTION_DAYS`; several providers at once: `ENGINE_ASSISTANT_PROFILES_JSON`, `ENGINE_ASSISTANT_DEFAULT_PROFILE` |
 | **Speech-to-text** | Server-side transcription for voice input | on by default | Voice input is unavailable; text chat unaffected | Provided by the bundled `voice` sidecar out of the box (`COMPOSE_PROFILES=voice`); the stack points `ENGINE_ASSISTANT_STT_BASE_URLS` at it. Repoint at any OpenAI-compatible audio endpoint with `ENGINE_ASSISTANT_STT_BASE_URLS` (comma-separated, ordered fallback — empty means off), `ENGINE_ASSISTANT_STT_API_KEY`, `ENGINE_ASSISTANT_STT_MODEL` (default `whisper-1`), and clear the profile to stop the sidecar |
-| **Text-to-speech** | Spoken replies | on by default | Replies are text only | Provided by the bundled `voice` sidecar out of the box. Repoint with `ENGINE_ASSISTANT_TTS_BASE_URLS`, `ENGINE_ASSISTANT_TTS_API_KEY`, `ENGINE_ASSISTANT_TTS_MODEL` (default `tts-1-hd`), `ENGINE_ASSISTANT_TTS_VOICE` (default `nova`), `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS`. `ENGINE_ASSISTANT_TTS_FORMAT` is the `response_format` requested (default `mp3`; the stack sets `wav`, the only format the bundled Piper backend serves; the engine passes the upstream content type through) |
+| **Text-to-speech** | Spoken replies | on by default | Replies are text only | Provided by the bundled `voice` sidecar out of the box. Repoint with `ENGINE_ASSISTANT_TTS_BASE_URLS`, `ENGINE_ASSISTANT_TTS_API_KEY`, `ENGINE_ASSISTANT_TTS_MODEL` (default `tts-1-hd`), `ENGINE_ASSISTANT_TTS_VOICE` (default `nova`), `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS`. `ENGINE_ASSISTANT_TTS_FORMAT` is the `response_format` requested (default `mp3`; the stack sets `wav`, the only format the bundled Piper backend serves; the engine passes the upstream content type through). The stack also sets `ENGINE_ASSISTANT_TTS_MODEL=tts-1` and `ENGINE_ASSISTANT_TTS_VOICE=alloy`, the names the bundled sidecar advertises; the `tts-1-hd` / `nova` defaults are for a cloud provider |
 | **Push notifications** | Web push to browsers; native push via Firebase Cloud Messaging | yes | Web push works with no configuration beyond a sensible `ENGINE_VAPID_SUBJECT`; without FCM only the native transport is disabled | `ENGINE_VAPID_SUBJECT` (a `mailto:`, default `mailto:admin@example.invalid`), `ENGINE_FCM_SERVICE_ACCOUNT_JSON` |
 | **Browser origins** | CORS allow-list for the PWA | yes | Only same-origin use | `ENGINE_ALLOWED_ORIGINS` |
 | **GUI streaming** | An iframed remote desktop inside the PWA | yes | `/readyz` reports `gui: disabled`; the affordance is withdrawn with a reason | `GUI_STREAM_URL`, `GUI_STREAM_VERIFIED` |
@@ -641,7 +664,8 @@ binary.
 ### 7.4 Upgrade
 
 1. Take a backup (§7.3).
-2. Change `VOGT_STACK_IMAGE` in `deploy/.env` to the new digest (or tag).
+2. Change `VOGT_STACK_IMAGE` **and** `VOGT_VOICE_IMAGE` in `deploy/.env` to the
+   new release's digests (or tags) — the pair is versioned together (§2.2).
 3. `docker compose -f deploy/stack.compose.yml up -d --wait`.
 4. Watch `/health/ready`: it answers 503 — naming the store and both
    schema numbers — until `init` and the startup migration complete,
@@ -654,7 +678,7 @@ migration and what each changes.
 
 ### 7.5 Rollback
 
-A rollback is the digest line reverted plus `up -d` — **unless the upgrade
+A rollback is the two digest lines reverted plus `up -d` — **unless the upgrade
 applied a migration**. Migrations are forward-only: an older build against a
 newer store keeps answering `ready` (deliberately, so a deliberate rollback
 does not look like a broken container), but `vogt migrate` refuses the
