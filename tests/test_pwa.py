@@ -162,7 +162,17 @@ def test_primary_surfaces_use_the_shared_header_grammar() -> None:
     """A primary surface cannot quietly reintroduce an ad-hoc top section."""
     foundation = source(WEB_SRC / "SurfaceHeader.tsx")
     slots = re.findall(r'data-surface-header-slot="([a-z]+)"', foundation)
-    assert slots == ["title", "honesty", "spacer", "controls", "action", "detail"]
+    # "goto" is the phone's inline Go to… (WI-75): rendered only on a narrow
+    # client inside the shell, but it is part of the grammar the header owns.
+    assert slots == [
+        "title",
+        "goto",
+        "honesty",
+        "spacer",
+        "controls",
+        "action",
+        "detail",
+    ]
 
     for name in ("Board", "Backlog", "Inbox", "Sessions"):
         text = source(WEB_SRC / f"{name}.tsx")
