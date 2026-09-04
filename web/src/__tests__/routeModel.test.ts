@@ -32,6 +32,7 @@ describe("route truth", () => {
     ["/backlog", "backlog", null],
     ["/projects", "projects", null],
     ["/audit", "audit", null],
+    ["/files", "files", null],
     ["/w/WI-7", "board", null],
     ["/t/known", "sessions", "terminal"],
     ["/e/src%2Fmain.ts", "sessions", "editor"],

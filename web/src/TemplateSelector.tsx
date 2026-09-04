@@ -72,6 +72,7 @@ const TemplateSelector: Component<Props> = (props) => {
         title="Create New Session"
         onClose={closeSelector}
         dialogClass="modal template-selector"
+        dismissOnBackdrop
       >
 
           <Show
@@ -212,6 +213,15 @@ const TemplateSelector: Component<Props> = (props) => {
                   )}
                 </For>
               </Show>
+            </div>
+            {/* Choosing a preset is not the only way out. Before this the list
+                step had no Cancel, and on a phone — no Escape key, no visible
+                backdrop to tap — a reader who opened it by mistake had to
+                create a session to leave. */}
+            <div class="modal-actions">
+              <button type="button" onClick={closeSelector}>
+                Cancel
+              </button>
             </div>
           </Show>
       </Dialog>

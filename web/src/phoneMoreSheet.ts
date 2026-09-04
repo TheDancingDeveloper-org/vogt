@@ -23,7 +23,7 @@ export type MoreSheetItem =
 /**
  * The places that the four-slot bottom bar cannot reach, plus Settings and
  * Sign out. Order mirrors the desktop rail: Estate (Projects, Audit) then
- * Machine (Git, History, Tasks, GUI stream, Assistant), then the account
+ * Machine (Git, Files, History, Tasks, GUI stream, Assistant), then the account
  * actions last.
  */
 export function moreSheetItems(input: MoreSheetInput): MoreSheetItem[] {
@@ -33,6 +33,9 @@ export function moreSheetItems(input: MoreSheetInput): MoreSheetItem[] {
     items.push({ kind: "place", id: "audit", label: "Audit", href: "#/audit" });
   }
   items.push({ kind: "place", id: "git", label: "Git", href: "#/g" });
+  // The file tree is the rail's on a desk; a phone has no rail, and this is
+  // where a reader uploads into a chosen folder.
+  items.push({ kind: "place", id: "files", label: "Files", href: "#/files" });
   items.push({ kind: "place", id: "history", label: "History", href: "#/history" });
   items.push({ kind: "place", id: "tasks", label: "Tasks", href: "#/tasks" });
   if (input.guiEnabled) {

@@ -13,6 +13,7 @@ import {
   Show,
 } from "solid-js";
 import { Capacitor } from "@capacitor/core";
+import GoToButton from "./GoToButton";
 
 import {
   api,
@@ -959,6 +960,7 @@ export default function Assistant(props: AssistantProps) {
             {watchState()}
           </span>
         </div>
+        <GoToButton />
         {/*
           Offered only when there is a choice to make (FR-T9). One configured
           profile is not a decision, and a select with one option is a control

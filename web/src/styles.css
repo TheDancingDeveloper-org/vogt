@@ -11158,7 +11158,7 @@ a.vogt-projects-tag:hover {
   .connection-state { flex: 0 0 auto; padding: 3px 10px; border-radius: 999px; color: var(--activity-errored); background: color-mix(in srgb, var(--activity-errored) 10%, transparent); font-size: 11px; font-weight: 600; }
   .connection-state.connected { color: var(--activity-done); background: color-mix(in srgb, var(--activity-done) 12%, transparent); }
   .sessions-new-icon { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; }
-  .sessions-place:not(.has-workspace) .surface-header-action button { gap: 6px; height: 40px; min-height: 40px; padding: 0 14px; border-radius: 10px; color: var(--fg); background: var(--bg-elev); border-color: var(--bd); }
+  .sessions-place:not(.has-workspace) .surface-header-action button { gap: 6px; height: 44px; min-height: 44px; padding: 0 14px; border-radius: 10px; color: var(--fg); background: var(--bg-elev); border-color: var(--bd); }
   .sessions-place:not(.has-workspace) .surface-header-action button:disabled { color: var(--fg-muted); background: var(--bg-elev); }
   .sessions-place:not(.has-workspace) .surface-header-controls { margin: 2px -16px -12px; padding: 0 16px 12px; overflow: hidden; border-bottom: 1px solid var(--bg-tab); }
   .sessions-place:not(.has-workspace) .sessions-tools { flex-wrap: nowrap; gap: 8px; overflow-x: auto; scrollbar-width: none; }
@@ -11382,4 +11382,138 @@ a.vogt-projects-tag:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .terminal-mobile-slide { transition: none; }
+}
+
+/* -- Phone uplift (debug/2026-09-04 screenshots) ---------------------------
+   Four faults seen on a phone, each fixed at its own cause:
+   1. "Go to…" took a full row above every screen — it now rides inline in the
+      title row of each surface header, the terminal's phone header and the
+      assistant's head (`GoToButton`).
+   2. The bottom bar's count badges were clipped by the icon slot's own
+      `overflow: hidden` (set for label ellipsis, which the slot never needs).
+   3. A terminal screen hides the bottom bar but `.main` kept the room it
+      reserved for it, so the terminal ended above a bar-sized band of
+      nothing.
+   4. The palette and the preset picker could only be left by choosing
+      something: no Escape key on a phone, no visible backdrop to tap.
+   Plus the Files place, so a phone can browse the tree and upload into a
+   chosen folder. This block deliberately sits after the mobile composition
+   block so it wins on source order. */
+
+.go-to-inline {
+  display: inline-grid;
+  place-items: center;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 1px solid var(--bd);
+  border-radius: 10px;
+  color: var(--fg-muted);
+  background: var(--bg-elev);
+}
+.go-to-inline svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.terminal-mobile-header .go-to-inline { border: 0; background: transparent; }
+
+/* Files place: the rail's tree as a whole surface. */
+.files-place {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.files-place > .surface-header {
+  flex: 0 0 auto;
+  padding: 16px 16px 8px;
+}
+.files-place-honesty {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+.files-place-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+.files-place .file-tree { flex: 1; min-height: 0; border-top: 0; }
+.files-place .file-tree--standalone .places-section-toggle:disabled {
+  opacity: 1;
+  cursor: default;
+}
+.files-place .tree-scroll { font-size: 13px; }
+
+/* The palette's touch exits: hidden on a desk, where Escape and the backdrop
+   already do the job and the hints in the footer describe them. */
+.command-palette-close,
+.command-palette-footer-close { display: none; }
+
+@media (max-width: 768px), (pointer: coarse) {
+  .command-palette-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .command-palette-input { flex: 1 1 auto; min-width: 0; }
+  .command-palette-close {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 8px;
+    font-size: 24px;
+    line-height: 1;
+  }
+  .command-palette-footer { align-items: center; }
+  .command-palette-footer-close {
+    display: inline-flex;
+    align-items: center;
+    margin-left: auto;
+    min-height: 40px;
+    padding: 0 18px;
+  }
+  /* A row's ⋯ only appeared on hover; a thumb never hovers. */
+  .tree-actions-toggle { opacity: 0.85; font-size: 14px; }
+}
+@media (pointer: coarse) {
+  .command-palette-hint { display: none; }
+}
+
+@media (max-width: 768px) {
+  .surface-header-goto {
+    order: 1;
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
+  .surface-header-goto ~ .surface-header-action { margin-left: 0; }
+
+  .phone-bottom-nav a > .phone-nav-icon-slot,
+  .phone-bottom-nav .phone-more-trigger > .phone-nav-icon-slot {
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .phone-bottom-nav .place-count { top: -4px; right: 3px; }
+
+  .app--phone-nav-hidden .main { padding-bottom: 0; }
+
+  .files-place > .surface-header { padding: 10px 16px 8px; }
+  .files-place > .surface-header h1 { margin-top: 2px; font-size: 22px; font-weight: 650; letter-spacing: -.01em; }
+  .files-place .tree-scroll { padding: 4px 10px; font-size: 14px; }
+  .files-place .tree-row { padding: 2px 4px; }
+  .files-place .tree-actions button,
+  .files-place .file-tree-more-actions button { min-height: 40px; font-size: 13px; }
+  .files-place .file-tree-more-actions { min-width: 160px; }
 }

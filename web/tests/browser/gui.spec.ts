@@ -1656,7 +1656,9 @@ test("primary surface headers keep their shared order and geometry across zoom",
         .evaluateAll((elements) => elements.map((element) =>
           element.getAttribute("data-surface-header-slot"),
         ));
-      const expected = ["title", "honesty", "spacer", "controls", "action", "detail"]
+      // "goto" is the phone's inline Go to… (WI-75); it exists only on a
+      // narrow client, and the filter drops it wherever it is absent.
+      const expected = ["title", "goto", "honesty", "spacer", "controls", "action", "detail"]
         .filter((slot) => slots.includes(slot));
       expect(slots).toEqual(expected);
 
@@ -1728,7 +1730,7 @@ test("Projects and Work item headers answer the shared geometry contract", async
           element.getAttribute("data-surface-header-slot"),
         ));
       expect(slots).toEqual(
-        ["title", "honesty", "spacer", "controls", "action", "detail"]
+        ["title", "goto", "honesty", "spacer", "controls", "action", "detail"]
           .filter((slot) => slots.includes(slot)),
       );
 
@@ -3909,8 +3911,10 @@ test("Phone secondary routes are contained, titled and addressable", async ({ pa
     await page.goto(`/#/${route.path}`);
     await page.waitForLoadState("networkidle");
 
-    // Inside the phone shell, not instead of it.
-    await expect(page.locator(".mobile-go-to"), `/${route.path} keeps Go to`).toBeVisible();
+    // Inside the phone shell, not instead of it. Go to… rides inline in the
+    // surface header on a phone (WI-75); the standalone bar is the fallback
+    // for a screen with no header of its own.
+    await expect(page.locator(".mobile-go-to, .go-to-inline").first(), `/${route.path} keeps Go to`).toBeVisible();
     await expect(
       page.getByRole("navigation", { name: "Primary navigation" }),
       `/${route.path} keeps the bottom bar`,
@@ -4831,7 +4835,8 @@ const SURFACE_HEADERS = [
 
 test("all six surface headers share the grammar and read the same at both sizes", async ({ page }) => {
   await installFixtures(page, {}, [liveSession]);
-  const order = ["title", "honesty", "spacer", "controls", "action", "detail"];
+  // "goto" is the phone's inline Go to… (WI-75), present only on a narrow client.
+  const order = ["title", "goto", "honesty", "spacer", "controls", "action", "detail"];
 
   for (const surface of SURFACE_HEADERS) {
     await page.goto(surface.goto);

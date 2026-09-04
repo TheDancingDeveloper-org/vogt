@@ -20,12 +20,25 @@ const dialogStack: HTMLElement[] = [];
 
 function focusableElements(dialog: HTMLElement): HTMLElement[] {
   return [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((element) => {
-    return !element.hidden && element.getAttribute("aria-hidden") !== "true";
+    if (element.hidden || element.getAttribute("aria-hidden") === "true") return false;
+    // A control taken out of the tab order on purpose (a touch-only close
+    // button carries tabindex="-1") is not a stop the trap should wrap to,
+    // and neither is one a media query has display:none'd — focusing it is a
+    // silent no-op that leaves the trap standing on the wrong element.
+    if (element.tabIndex < 0) return false;
+    const style = window.getComputedStyle(element);
+    return style.display !== "none" && style.visibility !== "hidden";
   });
 }
 
 function topDialog(): HTMLElement | undefined {
   return dialogStack.at(-1);
+}
+
+/** Whether any Dialog is mounted — the phone's back button asks before it
+ *  falls through to history. */
+export function dialogIsOpen(): boolean {
+  return dialogStack.length > 0;
 }
 
 export interface DialogProps {

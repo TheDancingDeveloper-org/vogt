@@ -45,6 +45,9 @@ interface Props {
   ) => Promise<string | null>;
   confirmAction?: (title: string, body?: string) => Promise<boolean>;
   onError?: (message: string) => void;
+  /** Outside the rail (the Files place) the tree is the whole surface: it
+   *  ignores the rail's collapsed/expanded memory and shows no caret. */
+  alwaysExpanded?: boolean;
 }
 
 interface NodeProps {
@@ -544,9 +547,10 @@ const FileTree: Component<Props> = (props) => {
     }
   };
   const searchActive = () => searchQuery().trim().length > 0;
+  const filesShown = () => props.alwaysExpanded === true || railSections.files;
 
   return (
-    <div class="file-tree">
+    <div class={`file-tree${props.alwaysExpanded ? " file-tree--standalone" : ""}`}>
       <input
         ref={uploadInputRef}
         type="file"
@@ -559,10 +563,13 @@ const FileTree: Component<Props> = (props) => {
           <button
             type="button"
             class="places-section-toggle"
-            aria-expanded={railSections.files}
+            aria-expanded={filesShown()}
+            disabled={props.alwaysExpanded === true}
             onClick={() => setRailSection("files", !railSections.files)}
           >
-            <span class="places-section-caret" aria-hidden="true">{railSections.files ? "▾" : "▸"}</span>
+            <Show when={!props.alwaysExpanded}>
+              <span class="places-section-caret" aria-hidden="true">{railSections.files ? "▾" : "▸"}</span>
+            </Show>
             <span>Files</span>
           </button>
           <span class="places-section-header-actions">
@@ -618,7 +625,7 @@ const FileTree: Component<Props> = (props) => {
           placeholder="Search files…"
           value={searchQuery()}
           onInput={(e) => setSearchQuery(e.currentTarget.value)}
-          hidden={!railSections.files}
+          hidden={!filesShown()}
         />
       </div>
       <Show when={tree.error}>
@@ -626,7 +633,7 @@ const FileTree: Component<Props> = (props) => {
           {String(tree.error)}
         </div>
       </Show>
-      <div class="tree-scroll" hidden={!railSections.files}>
+      <div class="tree-scroll" hidden={!filesShown()}>
         <Show
           when={searchActive()}
           fallback={

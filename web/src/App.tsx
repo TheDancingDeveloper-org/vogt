@@ -25,6 +25,7 @@ import FileTree from "./FileTree";
 import type { FileWorkflow } from "./FileWorkflowDialog";
 import CommandPalette, { invalidateCommandPaletteProviders } from "./CommandPalette";
 import Dialog from "./Dialog";
+import { ShellActionsContext } from "./shellActions";
 import FeedbackCenter, {
   createFeedbackQueue,
   type FeedbackOptions,
@@ -156,6 +157,7 @@ const History = lazy(() => import("./History"));
 const KeyboardShortcuts = lazy(() => import("./KeyboardShortcuts"));
 const Settings = lazy(() => import("./Settings"));
 const TemplateSelector = lazy(() => import("./TemplateSelector"));
+const FilesPlace = lazy(() => import("./FilesPlace"));
 const FileWorkflowDialog = lazy(() => import("./FileWorkflowDialog"));
 
 
@@ -794,6 +796,7 @@ const App: Component = () => {
         "/inbox": "Inbox",
         "/projects": "Projects",
         "/audit": "Audit",
+        "/files": "Files",
         "/setup": "Setup",
         "/sessions": "Sessions",
         "/g": "Git",
@@ -1301,7 +1304,9 @@ const App: Component = () => {
   onCleanup(() => window.removeEventListener("keydown", onKeyDown));
 
   return (
-    <>
+    <ShellActionsContext.Provider
+      value={{ openCommandPalette: () => setCommandPaletteOpen(true) }}
+    >
       <Show when={authState() === "authenticated"} fallback={
         <Show when={authState() === "unauthenticated"} fallback={<main class="login-loading">Checking your session…</main>}>
           <Show
@@ -1324,7 +1329,13 @@ const App: Component = () => {
       }>
       <div
         class="app"
-        classList={{ "app--rail-collapsed": !shellNarrow() && placesRail.collapsed() }}
+        classList={{
+          "app--rail-collapsed": !shellNarrow() && placesRail.collapsed(),
+          // The phone bottom bar steps aside for a terminal; `.main` must give
+          // back the room it reserved for the bar, or the terminal ends above
+          // a band of nothing the height of a bar that is not there.
+          "app--phone-nav-hidden": terminalScreenActive(),
+        }}
         style={
           shellNarrow() || placesRail.collapsed()
             ? undefined
@@ -1660,9 +1671,16 @@ const App: Component = () => {
               </section>
             )}
           </Show>
-          <button type="button" class="mobile-go-to" title="Go to… (Ctrl/Cmd+K)" onClick={() => setCommandPaletteOpen(true)}>
-            Go to…
-          </button>
+          {/* On a phone "Go to…" rides inline in each surface's own header
+              row (SurfaceHeader, the terminal's phone header, the assistant's
+              head). This standalone button is the fallback for the one screen
+              with no header of its own: a route outcome (loading, not found,
+              unavailable). */}
+          <Show when={routeProblem()}>
+            <button type="button" class="mobile-go-to" title="Go to… (Ctrl/Cmd+K)" onClick={() => setCommandPaletteOpen(true)}>
+              Go to…
+            </button>
+          </Show>
           {/* The rail's own reopen affordance, in `main`'s own document flow
               rather than fixed to the viewport — fixed positioning put this
               on top of the connection-lost banner, which spans the same
@@ -1729,6 +1747,16 @@ const App: Component = () => {
           </Show>
           <Show when={location.pathname === "/audit"}>
             <div class="stable-place"><AuditBrowser onError={(msg) => showToast(msg, { kind: "error" })} /></div>
+          </Show>
+          <Show when={location.pathname === "/files"}>
+            <div class="stable-place">
+              <FilesPlace
+                promptPath={promptUser}
+                confirmAction={confirmUser}
+                onCreatePresetHere={(path) => { void onCreate(path); }}
+                onError={(msg) => showToast(msg, { kind: "error" })}
+              />
+            </div>
           </Show>
           <Show when={location.pathname.startsWith("/w/") && params.ref}>
             <div class="stable-place">
@@ -2164,7 +2192,7 @@ const App: Component = () => {
         />
       </Show>
       </Show>
-    </>
+    </ShellActionsContext.Provider>
   );
 };
 
