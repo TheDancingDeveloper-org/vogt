@@ -330,7 +330,12 @@ pub async fn require_bearer(
     Ok(response)
 }
 
-async fn record_auth_failure(method: &Method, path: &str, request_id: &str, reason: &'static str) {
+pub(crate) async fn record_auth_failure(
+    method: &Method,
+    path: &str,
+    request_id: &str,
+    reason: &'static str,
+) {
     let count = AUTH_FAILURES.fetch_add(1, Ordering::Relaxed) + 1;
     tracing::warn!(
         target: "mydevenv2::audit",
@@ -547,6 +552,7 @@ mod tests {
             allowed_origins: vec![],
             auto_agent_auth: false,
             agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
+            agent_auth_secrets: vec![],
             session_templates: vec![],
             assistant_api_key: None,
             assistant_base_url: "https://assistant.invalid/v1".into(),

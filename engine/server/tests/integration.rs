@@ -42,6 +42,7 @@ fn test_config() -> Config {
         allowed_origins: vec![],
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
+        agent_auth_secrets: vec![],
         // The synthetic agent CLI is registered as a session preset in the
         // *test* config — never the production defaults — so agent-task
         // scenarios can be driven without a real `claude`/`codex` in a PTY
@@ -5887,4 +5888,295 @@ async fn a_cost_line_is_parsed_into_the_conclusion() {
     let cost = &run["conclusion"]["cost"];
     assert_eq!(cost["total_usd"].as_f64().unwrap(), 0.42);
     assert_eq!(cost["input_tokens"].as_u64().unwrap(), 1200);
+}
+
+// ── On-demand secret broker (#568) ───────────────────────────────────────
+
+/// A stand-in for `mydevenv2-agent-auth get VAR`. It answers with a value
+/// that names the variable, fails for `BROKEN` exactly as the reference
+/// helper does for an empty secret, and refuses every other subcommand with
+/// a distinctive status — so if the engine ever ran anything but `get` here,
+/// the test would say so.
+fn fake_broker_helper(dir: &std::path::Path) -> std::path::PathBuf {
+    let helper = dir.join("agent-auth");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n\
+         [ \"$1\" = get ] || { echo \"unexpected subcommand: $*\" >&2; exit 64; }\n\
+         [ \"$2\" = BROKEN ] && { echo 'mydevenv2-agent-auth: Infisical secret broken is missing or empty' >&2; exit 1; }\n\
+         printf 'value-of-%s' \"$2\"\n",
+    )
+    .unwrap();
+    let mut permissions = std::fs::metadata(&helper).unwrap().permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&helper, permissions).unwrap();
+    helper
+}
+
+fn broker_config(tmp: &tempfile::TempDir, manifest: &str) -> Config {
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.agent_auth_helper = fake_broker_helper(tmp.path());
+    cfg.agent_auth_secrets = vogt_engine_server::secret_broker::parse_manifest(manifest).unwrap();
+    cfg
+}
+
+async fn create_session_id(client: &reqwest::Client, base: &str, name: &str) -> String {
+    client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": name }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn secret_broker_hands_a_session_one_declared_secret_and_only_that() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(
+        &tmp,
+        "LAUNCHED proj launched\nLATER proj later ondemand\nBROKEN proj broken ondemand\n",
+    );
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_id(&client, &base, "broker").await;
+    let session: uuid::Uuid = id.parse().unwrap();
+    let token = state.sessions.secret_broker().issue(session);
+    // A session, not an operator: no engine bearer on this client.
+    let plain = reqwest::Client::new();
+    let fetch = |var: &str| format!("{base}/api/agent-auth/fetch/{var}");
+
+    // The declared, on-demand name: the value, verbatim, marked no-store.
+    let r = plain
+        .post(fetch("LATER"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["cache-control"], "no-store");
+    assert_eq!(r.text().await.unwrap(), "value-of-LATER");
+
+    // Policy is manifest membership, not only `ondemand`.
+    let r = plain
+        .post(fetch("LAUNCHED"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "value-of-LAUNCHED");
+
+    // An undeclared name is refused with the manifest line to add — the
+    // message a session sees is the fix, not "credential missing".
+    let r = plain
+        .post(fetch("NOPE"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let error = r.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("NOPE"), "{error}");
+    assert!(error.contains("ENGINE_AGENT_AUTH_SECRETS"), "{error}");
+    assert!(error.contains("ondemand"), "names the flag to use: {error}");
+
+    // A helper failure is reported as the upstream's own reason, never as a
+    // value and never as an engine fault.
+    let r = plain
+        .post(fetch("BROKEN"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 502);
+    let error = r.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("missing or empty"), "{error}");
+
+    // Only the session's own token opens the broker: not a made-up one, not
+    // none, and not the engine bearer — a token that can create sessions has
+    // no business reading their secrets.
+    for (label, request) in [
+        (
+            "wrong token",
+            plain.post(fetch("LATER")).bearer_auth("not-it"),
+        ),
+        ("no token", plain.post(fetch("LATER"))),
+        (
+            "engine bearer",
+            plain.post(fetch("LATER")).bearer_auth(TEST_TOKEN),
+        ),
+    ] {
+        let r = request.send().await.unwrap();
+        assert_eq!(r.status(), 401, "{label}");
+    }
+
+    // Forgetting the session forgets its leave to ask.
+    assert!(client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    let r = plain
+        .post(fetch("LATER"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "revoked with the session");
+}
+
+#[tokio::test]
+async fn a_session_is_handed_the_token_the_broker_honours() {
+    // End to end through the real spawn: the token that lands in the child's
+    // environment is the one the broker authenticates as that session — and
+    // it lands in a caller-command session too, not only the auto-agent-auth
+    // shell, because the policy is the manifest, not the launch path.
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let out = tmp.path().join("child-env");
+    let id = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "reads-its-grant",
+            "command": ["/bin/sh", "-c",
+                "printenv MYDEVENV2_BROKER_TOKEN > \"$OUT\"; printenv MYDEVENV2_BROKER_URL >> \"$OUT\"; sleep 30"],
+            "env": [["OUT", out.to_string_lossy()]],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let session: uuid::Uuid = id.parse().unwrap();
+
+    let lines = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&out) {
+                let lines: Vec<String> = text.lines().map(str::to_string).collect();
+                if lines.len() >= 2 {
+                    break lines;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the child should write both broker variables");
+    let (token, url) = (&lines[0], &lines[1]);
+    assert_eq!(token.len(), 64, "two simple v4 uuids of randomness");
+    assert!(
+        url.starts_with("http://127.0.0.1:"),
+        "the engine on loopback: {url}"
+    );
+    assert_eq!(
+        state.sessions.secret_broker().authenticate(token),
+        Some(session),
+        "the token the child holds is this session's"
+    );
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/agent-auth/fetch/LATER"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "value-of-LATER");
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn secret_broker_is_an_honest_absence_when_nothing_is_declared() {
+    // NFR-O5: an empty manifest is a reported state, not a fault. No session
+    // is handed a token, and the route says why it refuses.
+    let (base, state, _h) = boot_with_state(test_config()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_id(&client, &base, "no-broker").await;
+    let session: uuid::Uuid = id.parse().unwrap();
+    assert!(state.sessions.secret_broker().grant(session).is_none());
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/agent-auth/fetch/ANY"))
+        .bearer_auth("whatever")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 503);
+    let error = r.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("ENGINE_AGENT_AUTH_SECRETS"), "{error}");
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn secret_broker_rate_limits_a_session_that_asks_in_a_loop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_id(&client, &base, "loop").await;
+    let token = state.sessions.secret_broker().issue(id.parse().unwrap());
+    let plain = reqwest::Client::new();
+    for _ in 0..60 {
+        let r = plain
+            .post(format!("{base}/api/agent-auth/fetch/LATER"))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+    }
+    let r = plain
+        .post(format!("{base}/api/agent-auth/fetch/LATER"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 429);
+    assert!(r.headers().contains_key("retry-after"));
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
 }

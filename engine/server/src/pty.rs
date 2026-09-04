@@ -238,6 +238,9 @@ pub struct SpawnDefaults<'a> {
     pub default_cwd: &'a Path,
     pub scrollback_bytes: usize,
     pub activity_idle_after_ms: u64,
+    /// The session's credential for the on-demand secret broker (#568), or
+    /// `None` when the deployment declares nothing to broker.
+    pub secret_broker: Option<crate::secret_broker::BrokerGrant>,
 }
 
 fn command_display(spec: &SessionSpec, defaults: &SpawnDefaults<'_>) -> String {
@@ -333,7 +336,7 @@ fn is_agent_auth_helper_env(key: &str) -> bool {
 /// The subset of the engine's environment the agent-auth helper is re-granted:
 /// the brokering identity and manifest [`is_agent_auth_helper_env`] names, which
 /// [`sanitized_child_env`] would otherwise have stripped.
-fn agent_auth_helper_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+pub(crate) fn agent_auth_helper_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
     std::env::vars_os()
         .filter(|(k, _)| match k.to_str() {
             Some(s) => is_agent_auth_helper_env(s),
@@ -420,6 +423,15 @@ pub fn spawn(
     // which session it is. `MYDEVENV2_SESSION` is the display name and is not
     // unique, so it cannot be used to identify a session.
     cmd.env("MYDEVENV2_SESSION_ID", id.to_string());
+    // The broker credential is set here, after the strip, because it is
+    // minted for this child and never lives in the engine's own environment
+    // (where `is_secret_env` would rightly withhold it). It survives the
+    // helper's own `unset` of the brokering identity: it is not the identity,
+    // it is the session's leave to ask for one manifest secret at a time.
+    if let Some(grant) = defaults.secret_broker.as_ref() {
+        cmd.env(crate::secret_broker::BROKER_TOKEN_ENV, &grant.token);
+        cmd.env(crate::secret_broker::BROKER_URL_ENV, &grant.url);
+    }
     if let Some(env) = spec.env.as_ref() {
         for (k, v) in env {
             cmd.env(k, v);

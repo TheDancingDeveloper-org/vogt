@@ -3,6 +3,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use uuid::Uuid;
 
+use crate::secret_broker::SecretBroker;
+
 use crate::{
     agent_cli,
     config::Config,
@@ -19,18 +21,28 @@ pub struct SessionRegistry {
     bus: EventBus,
     history: Option<Arc<SessionHistory>>,
     sessions: DashMap<Uuid, Arc<Session>>,
+    /// Owned here because a broker token's lifetime is a session record's
+    /// lifetime: issued as the session is created, revoked as it is
+    /// forgotten (#568).
+    secret_broker: Arc<SecretBroker>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
 
 impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
+        let secret_broker = Arc::new(SecretBroker::new(&cfg));
         Self {
             cfg,
             bus,
             history,
             sessions: DashMap::new(),
+            secret_broker,
         }
+    }
+
+    pub fn secret_broker(&self) -> &Arc<SecretBroker> {
+        &self.secret_broker
     }
 
     pub fn create(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
@@ -111,6 +123,7 @@ impl SessionRegistry {
                 default_cwd: &self.cfg.default_cwd,
                 scrollback_bytes: self.cfg.scrollback_bytes,
                 activity_idle_after_ms: self.cfg.activity_idle_after_ms,
+                secret_broker: self.secret_broker.grant(id),
             },
             self.bus.clone(),
             self.history.clone(),
@@ -118,6 +131,9 @@ impl SessionRegistry {
         let spawned = match spawned {
             Ok(spawned) => spawned,
             Err(e) => {
+                // A grant for a child that never started is a live token for
+                // nobody; forget it with the rest of the failed spawn.
+                self.secret_broker.revoke(id);
                 // No child means nothing will ever read the brief.
                 if prompt_file.is_some() {
                     prompt_files::remove_session_prompt(&self.cfg.state_dir, id);
@@ -230,6 +246,8 @@ impl SessionRegistry {
             .map(|(_, v)| v)
             .ok_or(ApiError::NotFound)?;
         let _ = s.kill();
+        // Forgetting the session forgets its leave to ask the broker.
+        self.secret_broker.revoke(id);
         // The brief outlives the child on purpose — a killed session is still
         // inspectable, and an agent may re-read its prompt after a restart —
         // but not the session record. Forgetting the session forgets its

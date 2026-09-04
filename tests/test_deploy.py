@@ -1411,6 +1411,201 @@ def test_the_breadcrumb_is_published_before_the_identity_is_stripped() -> None:
 
 
 @needs_engine
+def test_an_ondemand_entry_is_declared_but_never_exported_at_launch() -> None:
+    """#568: `ondemand` is the flag that makes a late fetch mean something.
+
+    Every other manifest entry is already in the session's environment for
+    the whole session — `env`, a prompt-injected `printenv`, a crash dump.
+    An `ondemand` entry is declared for sessions but not resolved at launch,
+    so it exists in the session only at the moment it is asked for, and that
+    moment is audited. The session is told the name so it knows what it may
+    ask for, and told it apart from what it already holds.
+    """
+    script = _AGENT_AUTH_STUB_PRELUDE + "main run -- env"
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **_AGENT_AUTH_STUB_ENV,
+            "ENGINE_AGENT_AUTH_SECRETS": (
+                "LAUNCHED proj launched\nLATER proj later ondemand\n"
+            ),
+        },
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    child_env = dict(line.partition("=")[::2] for line in completed.stdout.splitlines())
+    assert child_env.get("LAUNCHED") == "val-launched"
+    assert "LATER" not in child_env, "ondemand is not exported at launch"
+    assert child_env.get("AGENT_AUTH_GRANTED", "").split() == ["LAUNCHED"]
+    assert child_env.get("AGENT_AUTH_ONDEMAND", "").split() == ["LATER"]
+
+
+@needs_engine
+def test_the_gh_alias_cannot_name_an_ondemand_entry() -> None:
+    """git/gh need their identity at launch; an alias to a name that is only
+    resolved later would leave GH_TOKEN empty with a green launch."""
+    script = _AGENT_AUTH_STUB_PRELUDE + "main run -- true"
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **_AGENT_AUTH_STUB_ENV,
+            "ENGINE_AGENT_AUTH_SECRETS": "GH proj gh ondemand\n",
+            "ENGINE_AGENT_AUTH_GH_TOKEN_FROM": "GH",
+        },
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "ondemand entry" in completed.stderr
+
+
+@needs_engine
+def test_get_resolves_exactly_one_manifest_entry_and_prints_only_its_value() -> None:
+    """#568, the engine's half: `get VAR` is what the engine runs, holding the
+    identity, when a session asks for a manifest secret.
+
+    stdout *is* the value, so it must be the value and nothing else — no
+    newline, no banner — and a name the deployment did not declare is refused
+    before any identity is touched, naming the manifest.
+    """
+    env = {
+        **_AGENT_AUTH_STUB_ENV,
+        "ENGINE_AGENT_AUTH_SECRETS": "A proj alpha\nB proj beta ondemand\n",
+    }
+    ok = subprocess.run(
+        ["bash", "-c", _AGENT_AUTH_STUB_PRELUDE + "main get B"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert ok.returncode == 0, ok.stderr
+    assert ok.stdout == "val-beta", "the value, verbatim, and nothing else"
+
+    refused = subprocess.run(
+        ["bash", "-c", _AGENT_AUTH_STUB_PRELUDE + "main get NOPE"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert refused.stdout == "", "a refusal never puts anything on the value stream"
+    assert "NOPE is not a variable in ENGINE_AGENT_AUTH_SECRETS" in refused.stderr
+
+    # A refusal for an undeclared name must not need the identity at all: the
+    # manifest is checked first, so an unconfigured pod gives the same answer.
+    no_identity = {k: v for k, v in env.items() if not k.startswith("INFISICAL_")}
+    refused_early = subprocess.run(
+        ["bash", "-c", _AGENT_AUTH_STUB_PRELUDE + "main get NOPE"],
+        capture_output=True,
+        text=True,
+        env=no_identity,
+        check=False,
+    )
+    assert "NOPE is not a variable in ENGINE_AGENT_AUTH_SECRETS" in refused_early.stderr
+
+
+# `fetch` is curl against the engine; stub curl the way the probe tests do,
+# recording the invocation so the test can see which URL and bearer went out.
+_FETCH_STUB = """
+source {auth}
+curl() {{
+    local output_file=""
+    printf '%s\\n' "$@" >"$CURL_ARGS_FILE"
+    while (($#)); do
+        case "$1" in
+            -o) output_file="$2"; shift 2 ;;
+            -w) shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    printf '%s' "$FETCH_BODY" >"$output_file"
+    printf '%s' "$FETCH_STATUS"
+}}
+main fetch {var}
+"""
+
+
+@needs_engine
+@pytest.mark.parametrize(
+    ("status", "body", "expected_exit", "expect_stdout", "expect_stderr"),
+    [
+        ("200", "s3cr3t-value", 0, "s3cr3t-value", ""),
+        (
+            "403",
+            '{"error":"X is not in ENGINE_AGENT_AUTH_SECRETS"}',
+            1,
+            "",
+            "ENGINE_AGENT_AUTH_SECRETS",
+        ),
+        ("401", "", 1, "", "no longer knows this session"),
+        ("502", '{"error":"helper failed"}', 1, "", "helper failed"),
+    ],
+    ids=["value", "not-in-manifest", "revoked", "upstream-failure"],
+)
+def test_fetch_asks_the_engine_with_the_sessions_own_broker_token(
+    tmp_path: Path,
+    status: str,
+    body: str,
+    expected_exit: int,
+    expect_stdout: str,
+    expect_stderr: str,
+) -> None:
+    """#568, the session's half: no identity, only the broker token.
+
+    The value is printed verbatim and nothing else; every refusal repeats the
+    engine's own reason, so the message a session sees for an undeclared name
+    is the manifest line to add.
+    """
+    args_file = tmp_path / "curl-args"
+    completed = subprocess.run(
+        ["bash", "-c", _FETCH_STUB.format(auth=AGENT_AUTH, var="X")],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "MYDEVENV2_BROKER_URL": "http://127.0.0.1:8910/",
+            "MYDEVENV2_BROKER_TOKEN": "tok-for-this-session",
+            "CURL_ARGS_FILE": str(args_file),
+            "FETCH_STATUS": status,
+            "FETCH_BODY": body,
+        },
+        check=False,
+    )
+    assert completed.returncode == expected_exit, completed.stderr
+    assert completed.stdout == expect_stdout
+    if expect_stderr:
+        assert expect_stderr in completed.stderr
+    args = args_file.read_text(encoding="utf-8").splitlines()
+    assert "http://127.0.0.1:8910/api/agent-auth/fetch/X" in args, (
+        "the engine on loopback, the one route, the trailing slash normalised"
+    )
+    assert "Authorization: Bearer tok-for-this-session" in args
+    assert "POST" in args
+
+
+@needs_engine
+def test_fetch_outside_a_brokered_session_says_so() -> None:
+    """Not a misleading 'credential missing': the message names the broker
+    variables and the two reasons they can be absent."""
+    completed = subprocess.run(
+        ["bash", "-c", f"source {AGENT_AUTH!s}\nmain fetch X"],
+        capture_output=True,
+        text=True,
+        env={"PATH": "/usr/bin:/bin"},
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert "MYDEVENV2_BROKER_URL/_TOKEN" in completed.stderr
+    assert "ENGINE_AGENT_AUTH_SECRETS" in completed.stderr
+
+
+@needs_engine
 def test_the_opencode_registration_does_not_freeze_an_endpoint() -> None:
     """It is written once and reused by every later session.
 

@@ -25,6 +25,7 @@ use crate::{
     history::SessionHistory,
     history_api, observability,
     push::PushManager,
+    secret_broker,
     sessions::SessionRegistry,
     vogt_core::{self, VogtCore},
     ws,
@@ -367,6 +368,14 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/mcp/", any(vogt_core::mcp))
         .route("/mcp/{*path}", any(vogt_core::mcp));
 
+    // The on-demand secret broker (#568) is outside the gate for the same
+    // structural reason `/mcp` is: the caller is a *session*, which holds no
+    // engine bearer (#511 withholds it on purpose) and presents its own
+    // per-session broker token instead. The handler authenticates that
+    // token, rate-limits, checks the manifest and audits — see
+    // `secret_broker::fetch`. The engine bearer does not open it.
+    let broker_routes = Router::new().route(secret_broker::FETCH_ROUTE, post(secret_broker::fetch));
+
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
     let ws_routes = Router::new().route("/api/sessions/{id}/attach", get(ws::attach));
@@ -402,6 +411,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .merge(public)
         .merge(api_routes)
         .merge(vogt_open_routes)
+        .merge(broker_routes)
         .merge(ws_routes)
         .merge(api_fallback)
         .merge(asset_routes)

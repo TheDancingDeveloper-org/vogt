@@ -253,6 +253,12 @@ pub struct Config {
     pub auto_agent_auth: bool,
     /// Helper executable used when `auto_agent_auth` is enabled.
     pub agent_auth_helper: std::path::PathBuf,
+    /// `ENGINE_AGENT_AUTH_SECRETS`, parsed: what a deployment declared for
+    /// sessions, and therefore the policy the on-demand secret broker
+    /// enforces (#568). Empty when nothing is declared, which turns the
+    /// broker off. A malformed line is a startup error, not a silent skip —
+    /// the helper would refuse every session launch over it anyway.
+    pub agent_auth_secrets: Vec<crate::secret_broker::ManifestSecret>,
     /// Session templates available for quick session creation.
     pub session_templates: Vec<SessionTemplate>,
     /// Bearer key for the assistant's LLM backend. Sourced from
@@ -619,6 +625,19 @@ pub fn load(
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("/usr/local/bin/mydevenv2-agent-auth"));
 
+    // Environment only, like the helper reads it: the manifest is a property
+    // of the stack, and the engine parses the same text so the two cannot
+    // disagree about what was declared.
+    let agent_auth_secrets = match engine_env("ENGINE_AGENT_AUTH_SECRETS") {
+        Ok(text) => crate::secret_broker::parse_manifest(&text).map_err(ApiError::Config)?,
+        Err(std::env::VarError::NotPresent) => Vec::new(),
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_AGENT_AUTH_SECRETS: {e}"
+            )));
+        }
+    };
+
     // A file wins over a bare value everywhere it appears: a deployment that
     // brokered the token into a file has gone to the trouble deliberately,
     // and reading an inline copy it also set would silently undo that.
@@ -689,6 +708,7 @@ pub fn load(
         ),
         auto_agent_auth,
         agent_auth_helper,
+        agent_auth_secrets,
         session_templates: from_file
             .session_templates
             .unwrap_or_else(SessionTemplate::default_templates),

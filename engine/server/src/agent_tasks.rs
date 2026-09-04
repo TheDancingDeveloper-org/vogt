@@ -5184,6 +5184,7 @@ mod tests {
             allowed_origins: vec![],
             auto_agent_auth: false,
             agent_auth_helper: "/usr/local/bin/mydevenv2-agent-auth".into(),
+            agent_auth_secrets: vec![],
             session_templates: vec![],
             assistant_api_key: None,
             assistant_base_url: "http://unused.invalid".into(),
