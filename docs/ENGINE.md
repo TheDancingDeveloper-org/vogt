@@ -1875,7 +1875,25 @@ service behind it is not there, and exactly which setting turns it on.
 | **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason (FR-E10). |
 | **Agent CLIs** (`codex`, `claude`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build, or a user-managed install in the pod's home | Sessions are ordinary shells; the two "(protected)" templates cannot start. |
 | **Cadastre** (external MCP server) | an extra MCP server for agents in a session | `INSTALL_CADASTRE_MCP=true` at build + `CADASTRE_MCP_ENABLED=1` + `CADASTRE_MCP_URL` (§4) | Agents in a session cannot reach it; every other MCP server and all core function is unchanged. A separate product, never assumed present. |
-| **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + `ENGINE_AGENT_AUTH_HELPER` naming a helper (the bundled Infisical example is auto-selected from a machine identity), configured through the env vars in `agent-auth.sh`'s header | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is one pluggable example** — it bakes in no address, project or secret name and is driven by `ENGINE_AGENT_AUTH_SECRETS`/`_PROBES`; point the variable at your own, or leave it off. |
+| **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + `ENGINE_AGENT_AUTH_HELPER` naming a helper (the bundled Infisical example is auto-selected from a machine identity), configured through the env vars in `agent-auth.sh`'s header | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is one pluggable example** — it bakes in no address, project or secret name and is driven by `ENGINE_AGENT_AUTH_SECRETS`/`_PROBES`; point the variable at your own, or leave it off. When it *is* on, a session gets exactly the manifest and never the machine identity — see the credential contract below. |
+
+**The agent-auth session credential contract.** A session launched under this
+helper gets exactly the manifest — every secret named in
+`ENGINE_AGENT_AUTH_SECRETS`, plus the brokered Vogt/Cadastre/GitHub tokens —
+resolved once at launch and exported as brokered tokens. The secrets-manager
+machine identity that could read the rest of the vault is **deliberately
+dropped** before the session's shell starts (#511), so an agent's own "log in
+to the secrets manager and fetch a secret" step finds `INFISICAL_CLIENT_ID`
+empty *by design*, not because the credential is missing. Two names-only
+breadcrumbs mark that boundary for tooling that must tell the two apart:
+`AGENT_AUTH_MODE=brokered` and `AGENT_AUTH_GRANTED` — the space-separated
+*names* (never the values) of the credentials the session was granted. So any
+"look up a secret" agent tooling has to be written against this model: to make
+a new secret reachable from sessions, add a line to `ENGINE_AGENT_AUTH_SECRETS`
+rather than fetching it ad hoc. Honest caveat: the strip is a boundary between
+*processes*, not a kernel one — a same-uid process can still read PID 1's
+environment via `/proc/1/environ`, so the identity is out of the manifest's
+reach, not off the machine (#566).
 
 Operator-local notes about a particular deployment belong in the git-ignored
 `docs/local/`, not here.

@@ -1289,6 +1289,127 @@ def test_no_credential_is_fetched_in_a_way_that_hides_a_failure() -> None:
     )
 
 
+# `agent-auth run --` under stubs: the real launch path. `main run` calls
+# `load_agent_environment` and then execs the command, so a `bash -c` that
+# dumps its environment reads exactly what the boundary #511/#566 is about
+# hands a session. The identity, the login and every secret fetch are stubbed;
+# nothing here reaches Infisical.
+_AGENT_AUTH_STUB_PRELUDE = f"""
+source {AGENT_AUTH!s}
+require_command() {{ :; }}
+mint_access_token() {{ printf 'tok'; }}
+get_secret() {{ printf 'val-%s' "$3"; }}
+"""
+
+_AGENT_AUTH_STUB_ENV = {
+    "PATH": "/usr/bin:/bin",
+    "INFISICAL_API_URL": "https://vault.invalid",
+    "INFISICAL_CLIENT_ID": "cid",
+    "INFISICAL_CLIENT_SECRET": "csec",
+    # No Cadastre, and skip the real mcp-bootstrap binary the launch would run.
+    "CADASTRE_MCP_ENABLED": "0",
+    "MYDEVENV2_AUTO_CADASTRE_MCP": "0",
+}
+
+
+@needs_engine
+def test_the_strip_leaves_a_breadcrumb_for_the_brokered_model() -> None:
+    """#566: the strip was right but silent, and silence read as 'missing'.
+
+    #511 drops the machine identity before the launched shell, so an agent's
+    own `infisical login` finds INFISICAL_CLIENT_ID empty — and the natural,
+    wrong conclusion is that the credential does not exist rather than that it
+    was withheld by design. The fix is a names-only breadcrumb that survives
+    the strip: `AGENT_AUTH_MODE=brokered` and `AGENT_AUTH_GRANTED`, the names
+    (never the values) of the credentials the session was actually granted.
+
+    Asserted across the real exec boundary — a child `bash -c` that prints its
+    own environment — because that, not the helper's own shell, is what a
+    session inherits.
+    """
+    # `env`, not a hand-quoted printf: the child's own environment is exactly
+    # what a session inherits, and parsing it here avoids a nested-quoting trap.
+    script = _AGENT_AUTH_STUB_PRELUDE + "main run -- env"
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **_AGENT_AUTH_STUB_ENV,
+            "ENGINE_AGENT_AUTH_SECRETS": (
+                "GHTOK proj gh-secret\nOTHER proj other optional\n"
+            ),
+            "ENGINE_AGENT_AUTH_GH_TOKEN_FROM": "GHTOK",
+        },
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    child_env: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        key, _, value = line.partition("=")
+        child_env[key] = value
+    # The breadcrumb crossed the boundary...
+    assert child_env.get("AGENT_AUTH_MODE") == "brokered"
+    granted = child_env.get("AGENT_AUTH_GRANTED", "").split()
+    # ...and names exactly the credentials the session was granted, GH_TOKEN
+    # included, and nothing it was not.
+    assert {"GHTOK", "OTHER", "GH_TOKEN"} <= set(granted), granted
+    assert "INFISICAL_CLIENT_ID" not in granted
+    assert "AGENT_AUTH_MODE" not in granted
+    # ...while the identity and the manifest did not: the whole point of #511.
+    assert "INFISICAL_CLIENT_ID" not in child_env
+    assert "INFISICAL_API_URL" not in child_env, (
+        "the secrets-manager URL is dropped too, not signposted"
+    )
+    assert "ENGINE_AGENT_AUTH_SECRETS" not in child_env
+    # ...and the one manifest credential that is aliased for git/gh survived.
+    assert child_env.get("GH_TOKEN") == "val-gh-secret"
+
+
+@needs_engine
+def test_a_gh_token_alias_that_names_nothing_fails_the_helper() -> None:
+    """#566 note: ENGINE_AGENT_AUTH_GH_TOKEN_FROM naming a non-manifest var.
+
+    The alias only fires while iterating manifest entries, so a name that is
+    not among them aliased no GH_TOKEN and said nothing — every later `gh`
+    call then failed as if unauthenticated, a long way from the typo. It must
+    fail loudly instead, naming the mismatch; under ENGINE_AGENT_AUTH_REQUIRED
+    the entrypoint runs this at boot so it surfaces before a session starts.
+    """
+    script = _AGENT_AUTH_STUB_PRELUDE + "main run -- true"
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **_AGENT_AUTH_STUB_ENV,
+            "ENGINE_AGENT_AUTH_SECRETS": "GHTOK proj gh-secret\n",
+            "ENGINE_AGENT_AUTH_GH_TOKEN_FROM": "TYPO_NOT_IN_MANIFEST",
+        },
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "TYPO_NOT_IN_MANIFEST" in completed.stderr
+    assert "is not a variable in ENGINE_AGENT_AUTH_SECRETS" in completed.stderr
+
+
+@needs_engine
+def test_the_breadcrumb_is_published_before_the_identity_is_stripped() -> None:
+    """Ordering is the whole property: a breadcrumb exported after the `unset`
+    would still be there, but one exported before proves the two live in the
+    same block and cannot drift apart. And the API URL stays *in* the unset —
+    it is dropped, never kept as a signpost (#566 chose names-only)."""
+    body = _without_comments(AGENT_AUTH.read_text(encoding="utf-8"))
+    assert "export AGENT_AUTH_MODE=brokered" in body
+    assert 'export AGENT_AUTH_GRANTED="$AGENT_AUTH_GRANTED_VARS"' in body
+    mode_at = body.index("export AGENT_AUTH_MODE=brokered")
+    unset_at = body.index("unset INFISICAL_CLIENT_ID")
+    assert mode_at < unset_at, "the breadcrumb must be published before the strip"
+    assert "INFISICAL_API_URL" in body[unset_at:], (
+        "the API URL is dropped, not signposted"
+    )
+
+
 @needs_engine
 def test_the_opencode_registration_does_not_freeze_an_endpoint() -> None:
     """It is written once and reused by every later session.
