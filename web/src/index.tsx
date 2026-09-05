@@ -5,6 +5,7 @@ import { migrateStorageKeys } from "./storageMigration";
 import "./styles.css";
 import { initializeRuntimeTransport } from "./runtimeTransport";
 import { dialogIsOpen } from "./Dialog";
+import { keyboardInsetFor } from "./viewportInsets";
 import { installNativeBackButton } from "./nativeBack";
 
 await initializeRuntimeTransport();
@@ -33,10 +34,9 @@ function installVisualViewportSizing() {
     const viewport = window.visualViewport;
     const width = viewport?.width ?? window.innerWidth;
     const height = viewport?.height ?? window.innerHeight;
-    const keyboardInset = Math.max(
-      0,
-      window.innerHeight - height - (viewport?.offsetTop ?? 0),
-    );
+    // Scale-aware: a pinch-zoomed viewport is a crop, not a keyboard
+    // (viewportInsets.ts).
+    const keyboardInset = keyboardInsetFor(window.innerHeight, viewport);
 
     document.documentElement.style.setProperty("--app-width", `${width}px`);
     document.documentElement.style.setProperty("--app-height", `${height}px`);

@@ -11500,8 +11500,11 @@ a.vogt-projects-tag:hover {
   }
   .surface-header-goto ~ .surface-header-action { margin-left: 0; }
 
-  .phone-bottom-nav a > .phone-nav-icon-slot,
-  .phone-bottom-nav .phone-more-trigger > .phone-nav-icon-slot {
+  /* Outranks `.phone-bottom-nav a > span:first-child { overflow: hidden }`
+     (0,2,2) — the first attempt at this rule was (0,2,1) and lost, which is
+     why the badges were still cut at the bar's top edge on the 0.5.3 phone. */
+  .phone-bottom-nav a > span:first-child.phone-nav-icon-slot,
+  .phone-bottom-nav .phone-more-trigger > span:first-child.phone-nav-icon-slot {
     overflow: visible;
     text-overflow: clip;
   }
