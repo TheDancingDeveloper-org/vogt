@@ -408,8 +408,8 @@ section that documents it.
   capability, and those say so; where nothing is said, any valid token will
   do. The capabilities are `sessions`, `filesystem-write`, `git-write`,
   `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, `history`,
-  `assistant` and `vogt-write`; the primary token holds all ten, and a scoped
-  token holds what its `extra_tokens` entry lists. The mapping lives in
+  `assistant`, `vogt-write` and `agent-clis-write`; the primary token holds all
+  eleven, and a scoped token holds what its `extra_tokens` entry lists. The mapping lives in
   `required_capability` in `engine/server/src/auth.rs` and is keyed on method
   *and* path, so `GET /api/sessions` needs no capability while
   `POST /api/sessions` needs `sessions`.
@@ -708,6 +708,25 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   are configured, and nested `history`, `agent_tasks`, `auth_broker` and
   `storage` blocks. Storage numbers are counts and byte totals, never paths
   into the workspace beyond the two roots themselves.
+- `GET /api/agent-clis[?upstream=true]` -> `AgentCliReport` — the
+  runtime-pinned agent CLIs (#590, [`DEPLOYMENT.md`](DEPLOYMENT.md) §3): for
+  each tool in the image's table its package, binary, the variable that pins
+  it at boot, the baked version, the active version and its `source` (`image`,
+  `runtime` or `absent`), and the versions already on the volume. With
+  `upstream=true` the engine also asks npm for each package's `latest` (cached
+  an hour; omitted when npm does not answer) and says whether
+  `update_available`. Any valid token.
+- `POST /api/agent-clis/{tool}` with `{"version": "2.1.261"}` -> the same
+  report after the move. Runs `vogt-agent-cli-install` for the tool: an exact
+  version, `image` for the baked copy, or a dist-tag the deployment opted
+  into. New sessions get the new version; running sessions keep the files
+  they started with. `400` for a malformed or refused version, `404` for a
+  tool the image's table does not name, `409` when the install or its smoke
+  check failed (the previous version stays current; the installer's words are
+  in the body). Needs the `agent-clis-write` capability: it downloads and
+  executes a package from npm inside the pod. The pin an environment variable
+  sets is re-applied at the next container start, so a move meant to survive
+  a restart belongs in the deployment's `.env` as well.
 
 The stream sends a `ka` comment every 15 seconds. A client must not treat that
 interval as a timeout budget of its own, but its absence is the fastest signal

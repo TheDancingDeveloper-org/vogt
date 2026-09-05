@@ -334,6 +334,18 @@ writes `/opt/vogt/agent-clis/manifest` (`<tool>=<version>`), and
 own updaters stay disabled (`DISABLE_UPDATES=1`), so the installer is the only
 sanctioned writer.
 
+The same installer can be reached while the pod is running: `GET
+/api/agent-clis` on the engine reports each tool's active, baked and (on
+request) newest upstream version, `POST /api/agent-clis/{tool}` moves the pin
+in place (`agent-clis-write` capability), and Vogt puts both on its own
+surfaces as `agent_cli.list` / `agent_cli.update` — `vogt agent-cli list`, the
+REST route, and the MCP tools an agent session holds — so a session can say
+what it runs and an operator can update it with a reason attached. Settings →
+Operational visibility shows the rows and a "newer version available" hint. A
+move made this way lasts until the next container start re-applies whatever
+the environment says, so a change meant to stick belongs in `.env` too. See
+[`ENGINE.md`](ENGINE.md) §5 for the wire shape.
+
 The flag defaults to `false`, so an engine you build yourself is CLI-free
 unless you say otherwise. The published `vogt-stack` image *does* carry them:
 the versions are the `engine/agent-versions.env` pins baked at build time,

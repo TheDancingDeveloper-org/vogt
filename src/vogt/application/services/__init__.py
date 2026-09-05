@@ -6,6 +6,7 @@ transports are generated and there is only one of each use-case.
 
 from __future__ import annotations
 
+from vogt.application.services.agent_clis import agent_cli_list, agent_cli_update
 from vogt.application.services.auth import (
     issue_token,
     list_auth_decisions,
@@ -120,6 +121,8 @@ from vogt.application.services.writeback import (
 
 __all__ = [
     "adopt",
+    "agent_cli_list",
+    "agent_cli_update",
     "archive_inbox",
     "backlog",
     "backup",

@@ -5211,6 +5211,7 @@ mod tests {
             vogt_import_root: None,
             vogt_engine_state_dir: None,
             vogt_core_token: None,
+            agent_clis: crate::agent_clis::AgentCliPaths::default(),
         }
     }
 

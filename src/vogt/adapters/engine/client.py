@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vogt.errors import VogtError
+from vogt.errors import Conflict, InvalidRequest, NotFound, VogtError
 
 USER_AGENT = "vogt"
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -524,6 +524,55 @@ class EngineClient:
 
     # -- transport ---------------------------------------------------------
 
+    # -- runtime-pinned agent CLIs (#590) ------------------------------------
+
+    def agent_clis(self, *, upstream: bool = False) -> dict[str, Any]:
+        """The engine's agent CLI report: active, baked and (asked) upstream."""
+        query = "?upstream=true" if upstream else ""
+        payload = self._call(f"/api/agent-clis{query}")
+        return payload if isinstance(payload, dict) else {}
+
+    def update_agent_cli(self, tool: str, version: str) -> dict[str, Any]:
+        """Ask the engine to make `version` of `tool` current; the new report.
+
+        The engine's refusals are the caller's to hear verbatim — a malformed
+        version, an unknown tool, an install that failed its smoke check —
+        so the four statuses it uses for them are mapped to Vogt's errors
+        rather than flattened into "the engine did not answer".
+        """
+        url = f"{self.base_url}/api/agent-clis/{urllib.parse.quote(tool, safe='')}"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        body = json.dumps({"version": version}).encode("utf-8")
+        status, response = self._fetch(url, headers, body=body, method="POST")
+        text = response.decode("utf-8", errors="replace").strip()
+        said = _engine_error_text(text)
+        if status == 400:
+            raise InvalidRequest(
+                said or f"the {self.label} refused the version {version!r}"
+            )
+        if status == 404:
+            msg = f"the {self.label} knows no agent CLI named {tool!r}"
+            raise NotFound(msg)
+        if status == 409:
+            raise Conflict(said or f"{tool} {version} was not made current")
+        if status in (401, 403):
+            msg = (
+                f"the {self.label} refused this request ({status}): the token "
+                "lacks the `agent-clis-write` capability"
+            )
+            raise EngineUnavailable(msg)
+        if status >= 400:
+            msg = f"the {self.label} answered {status} for POST /api/agent-clis/{tool}"
+            raise EngineUnavailable(msg)
+        payload = json.loads(text) if text else {}
+        return payload if isinstance(payload, dict) else {}
+
     def _call(
         self,
         path: str,
@@ -578,6 +627,17 @@ class EngineClient:
             # sessions are unavailable while everything else still works.
             msg = f"the {self.label} is not answering: {exc}"
             raise EngineUnavailable(msg) from exc
+
+
+def _engine_error_text(text: str) -> str:
+    """The engine's `{"error": "..."}` body as a sentence, or the raw text."""
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+        return str(payload["error"])
+    return text
 
 
 __all__ = [

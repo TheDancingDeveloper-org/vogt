@@ -403,6 +403,11 @@ pub struct Config {
     /// The per-token pairings live on `extra_tokens`; this is what the proxy
     /// falls back to.
     pub vogt_core_token: Option<String>,
+    /// Where the runtime-pinned agent CLIs live and how they are moved (#590):
+    /// the root, the installer, the image's tool table and resolved pins. Read
+    /// from the same `VOGT_AGENT_CLI_*` variables the shell half honours, so
+    /// the engine and the entrypoint agree by construction.
+    pub agent_clis: crate::agent_clis::AgentCliPaths,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -831,6 +836,7 @@ pub fn load(
             .or_else(|| std::env::var("VOGT_CORE_URL").ok())
             .filter(|s| !s.trim().is_empty()),
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
+        agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
             .ok()
             .map(|value| value.trim().to_string())

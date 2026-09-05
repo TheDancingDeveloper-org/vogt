@@ -16,6 +16,10 @@ from vogt.application.models import (
     ActorResult,
     AdoptParams,
     AdoptResult,
+    AgentCliListParams,
+    AgentCliListResult,
+    AgentCliUpdateParams,
+    AgentCliUpdateResult,
     AuditListResult,
     AuthDecisionListParams,
     AuthDecisionListResult,
@@ -852,6 +856,35 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.stop_session,
             route=HttpRoute("POST", "/sessions/stop"),
             cli=CliBinding(("session", "stop")),
+        ),
+        # -- runtime-pinned agent CLIs (#590) ------------------------------
+        #
+        # The engine decides which Claude Code / Codex a new session runs;
+        # these put its report and its installer on the three surfaces so an
+        # agent can say what it runs and an operator can move the pin with a
+        # reason, without an image build. `admin` for the move: it downloads
+        # and executes a package from npm inside the pod.
+        Operation(
+            name="agent_cli.list",
+            summary="Report the pod's agent CLIs: active, baked and upstream versions.",
+            scope="read",
+            mutating=False,
+            params_model=AgentCliListParams,
+            result_model=AgentCliListResult,
+            handler=services.agent_cli_list,
+            route=HttpRoute("GET", "/agent-clis"),
+            cli=CliBinding(("agent-cli", "list")),
+        ),
+        Operation(
+            name="agent_cli.update",
+            summary="Make a version of an agent CLI the one new sessions run.",
+            scope="admin",
+            mutating=True,
+            params_model=AgentCliUpdateParams,
+            result_model=AgentCliUpdateResult,
+            handler=services.agent_cli_update,
+            route=HttpRoute("POST", "/agent-clis/update"),
+            cli=CliBinding(("agent-cli", "update")),
         ),
         # -- session history (#491) ---------------------------------------
         #
