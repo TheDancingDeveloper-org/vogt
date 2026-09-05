@@ -21,12 +21,28 @@ export interface SavedTerminalLayout {
   broadcast?: boolean;
 }
 
+/**
+ * The legacy session-derived pane id (#212). Panes no longer mint their id
+ * this way — a pane's identity is now independent of the session it shows
+ * (#600), so retargeting a pane keeps its id and only untouched panes are left
+ * alone by the renderer. Kept for saved layouts written before #600, whose
+ * stored ids happen to be `pane:<sessionId>`; `normalizeTerminalLayout`
+ * preserves whatever id it finds, so those layouts still load. New code that
+ * needs the pane showing a session must use `findPaneBySession`.
+ */
 export function paneIdFor(sessionId: string): string {
   return `pane:${sessionId}`;
 }
 
+function newPaneId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return `pane:${crypto.randomUUID()}`;
+  }
+  return `pane:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+}
+
 export function makePane(sessionId: string): PaneNode {
-  return { type: "pane", id: paneIdFor(sessionId), sessionId };
+  return { type: "pane", id: newPaneId(), sessionId };
 }
 
 function newSplitId(): string {
@@ -82,6 +98,18 @@ export function findPane(
   if (node.type === "pane") return node.id === paneId ? node : null;
   for (const child of node.children) {
     const found = findPane(child, paneId);
+    if (found) return found;
+  }
+  return null;
+}
+
+export function findPaneBySession(
+  node: TerminalLayoutNode,
+  sessionId: string,
+): PaneNode | null {
+  if (node.type === "pane") return node.sessionId === sessionId ? node : null;
+  for (const child of node.children) {
+    const found = findPaneBySession(child, sessionId);
     if (found) return found;
   }
   return null;
@@ -165,8 +193,9 @@ export function dropSessionIntoPane(
   direction: SplitDirection,
   before = false,
 ): DropOutcome | null {
-  if (containsSession(root, sessionId)) {
-    return { root, activePaneId: paneIdFor(sessionId), inserted: false };
+  const shown = findPaneBySession(root, sessionId);
+  if (shown) {
+    return { root, activePaneId: shown.id, inserted: false };
   }
   const nextPane = makePane(sessionId);
   const next = insertPane(root, targetPaneId, direction, nextPane, before);
@@ -194,8 +223,9 @@ export function removePane(
 /**
  * Rewrite each pane's session according to `remap`, leaving unmapped panes
  * untouched by reference so only the panes that changed re-render (and their
- * terminals re-attach). Panes carry a session-derived id, so a remapped pane
- * gets a fresh id and its `<Terminal>` remounts against the new session.
+ * terminals re-attach). A remapped pane keeps its stable id (#600) and only
+ * its `sessionId` changes, so the renderer touches exactly the retargeted pane
+ * and every other pane keeps its xterm instance, scrollback and socket.
  */
 function mapPaneSessions(
   node: TerminalLayoutNode,
@@ -203,7 +233,7 @@ function mapPaneSessions(
 ): TerminalLayoutNode {
   if (node.type === "pane") {
     const next = remap.get(node.sessionId);
-    return next && next !== node.sessionId ? makePane(next) : node;
+    return next && next !== node.sessionId ? { ...node, sessionId: next } : node;
   }
   let changed = false;
   const children = node.children.map((child) => {
@@ -237,9 +267,11 @@ export function retargetPane(
   if (containsSession(root, sessionId)) {
     remap.set(sessionId, target.sessionId);
   }
+  // The target pane keeps its id — only the session it shows changes — so the
+  // caller can focus it without deriving an id from the session (#600).
   return {
     root: mapPaneSessions(root, remap),
-    activePaneId: paneIdFor(sessionId),
+    activePaneId: target.id,
   };
 }
 

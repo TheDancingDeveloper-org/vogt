@@ -2,9 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   collectPanes,
   dropSessionIntoPane,
+  findPaneBySession,
   insertPane,
   makePane,
-  paneIdFor,
 } from "../terminalLayout";
 import {
   directionForZone,
@@ -49,7 +49,7 @@ describe("drop-zone edge hit-testing (#355)", () => {
 describe("dropping a session into a pane (#355)", () => {
   it("inserts a new pane in the hit-tested direction", () => {
     const root = makePane("one");
-    const outcome = dropSessionIntoPane(root, paneIdFor("one"), "two", "column");
+    const outcome = dropSessionIntoPane(root, root.id, "two", "column");
     expect(outcome).not.toBeNull();
     expect(outcome!.inserted).toBe(true);
     expect(outcome!.root.type).toBe("split");
@@ -58,13 +58,14 @@ describe("dropping a session into a pane (#355)", () => {
       "one",
       "two",
     ]);
-    // The new pane is focused, and its id derives from the session.
-    expect(outcome!.activePaneId).toBe(paneIdFor("two"));
+    // The new pane is focused — its id is stable and independent of the
+    // session (#600), so resolve it through the session it now shows.
+    expect(outcome!.activePaneId).toBe(findPaneBySession(outcome!.root, "two")!.id);
   });
 
   it("places the new pane before the target when dropped on a left/top edge", () => {
     const root = makePane("one");
-    const outcome = dropSessionIntoPane(root, paneIdFor("one"), "two", "row", true);
+    const outcome = dropSessionIntoPane(root, root.id, "two", "row", true);
     expect(collectPanes(outcome!.root).map((p) => p.sessionId)).toEqual([
       "two",
       "one",
@@ -72,13 +73,14 @@ describe("dropping a session into a pane (#355)", () => {
   });
 
   it("focuses the existing pane instead of duplicating a session already shown", () => {
-    const root = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"))!;
-    const outcome = dropSessionIntoPane(root, paneIdFor("one"), "two", "column");
+    const one = makePane("one");
+    const root = insertPane(one, one.id, "row", makePane("two"))!;
+    const outcome = dropSessionIntoPane(root, one.id, "two", "column");
     expect(outcome).not.toBeNull();
     // No insertion: the session was already on screen, so its pane is focused.
     expect(outcome!.inserted).toBe(false);
     expect(outcome!.root).toBe(root);
-    expect(outcome!.activePaneId).toBe(paneIdFor("two"));
+    expect(outcome!.activePaneId).toBe(findPaneBySession(root, "two")!.id);
     // Exactly one pane per session — no duplicate.
     expect(collectPanes(outcome!.root).map((p) => p.sessionId)).toEqual([
       "one",
@@ -90,8 +92,9 @@ describe("dropping a session into a pane (#355)", () => {
     // A session already in pane "two" is dropped onto pane "one". Because the
     // guard focuses rather than inserts, "two" keeps rendering it — a mirror,
     // not a detach/move.
-    const root = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"))!;
-    const outcome = dropSessionIntoPane(root, paneIdFor("one"), "two", "row");
+    const one = makePane("one");
+    const root = insertPane(one, one.id, "row", makePane("two"))!;
+    const outcome = dropSessionIntoPane(root, one.id, "two", "row");
     expect(collectPanes(outcome!.root)).toHaveLength(2);
     expect(collectPanes(outcome!.root).map((p) => p.sessionId).sort()).toEqual([
       "one",
