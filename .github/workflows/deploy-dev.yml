@@ -25,6 +25,15 @@ on:
         required: false
         type: string
 
+      repair_environment:
+        description: >-
+          One-shot repair of the stack environment corrupted on 2026-09-05
+          (whole .env collapsed to one literal-\n line). "dry-run" prints the
+          restored keys-only shape and writes nothing; "apply" writes it and
+          then deploys. Leave blank for a normal deploy.
+        required: false
+        type: string
+
 permissions:
   contents: read
   packages: read
@@ -117,6 +126,7 @@ jobs:
           STACK_DIGEST: ${{ steps.images.outputs.stack_digest }}
           KOMODO_API_KEY: ${{ secrets.KOMODO_API_KEY }}
           KOMODO_API_SECRET: ${{ secrets.KOMODO_API_SECRET }}
+          REPAIR_ENVIRONMENT: ${{ inputs.repair_environment }}
           # The dev stack stores its front-door token as an
           # `[[infisical://…]]` reference that Komodo resolves out of band;
           # GetStack returns the raw template, so deploy_dev.py resolves it

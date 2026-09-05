@@ -3252,3 +3252,31 @@ def test_deploy_dev_reports_environment_shape_without_values() -> None:
     assert "literal-backslash-n=True" in out2 and "real-newlines=False" in out2
     assert "keys=['A', 'B']" in out2 and "malformed-lines=1" in out2
     assert dd.env_shape({"config": {}}) == "environment: <absent>"
+
+
+def test_deploy_dev_restore_environment_undoes_the_literal_newline_collapse() -> None:
+    """The exact corruption observed on vogt-dev (2026-09-05): the whole
+    original .env as one literal-backslash-n line, then two real-newline lines
+    a deploy appended. Restoring must recover the original lines exactly,
+    drop only the two appended keys, and be idempotent on a healthy env."""
+    dd = _load_deploy_dev()
+    original = (
+        "# vogt-dev — managed by Komodo\n"
+        "\n"
+        "VOGT_PORT=8910\n"
+        "VOGT_GITHUB_TOKEN=[[infisical://p/prod/GH]]\n"
+        "MYDEVENV2_TOKEN=[[infisical://p/prod/T]]\n"
+    )
+    collapsed = original.replace("\n", "\\n")
+    corrupted = (
+        f"{collapsed}\nVOGT_CODEX_VERSION=0.153.4\nVOGT_CLAUDE_CODE_VERSION=2.1.261\n"
+    )
+    assert dd.restore_environment(corrupted) == original
+    assert dd.restore_environment(original) == original, "idempotent"
+    # The restored env is what the pre_deploy hook needs: a real line start.
+    assert "\nVOGT_GITHUB_TOKEN=" in dd.restore_environment(corrupted)
+    # A healthy env that legitimately carries the two keys elsewhere keeps
+    # everything else byte-for-byte.
+    shape = dd.shape_of(dd.restore_environment(corrupted))
+    assert "keys=['VOGT_PORT', 'VOGT_GITHUB_TOKEN', 'MYDEVENV2_TOKEN']" in shape
+    assert "literal-backslash-n=False" in shape and "real-newlines=True" in shape
