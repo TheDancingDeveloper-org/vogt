@@ -294,6 +294,51 @@ def env_shape(stack: dict[str, object]) -> str:
     )
 
 
+REPAIR_DROP_KEYS = ("VOGT_CODEX_VERSION", "VOGT_CLAUDE_CODE_VERSION")
+
+
+def restore_environment(raw: str) -> str:
+    """Undo the 2026-09-05 environment corruption, losslessly.
+
+    A prior deploy wrote `config.environment` back in the escaped form
+    `read/GetStack` returns it in, so the whole original `.env` became one
+    line joined by literal backslash-n, followed by two real-newline lines
+    it had appended. Komodo writes that blob verbatim and the stack's
+    pre_deploy hook — `sed -n 's/^KEY=//p' .env` — can no longer match a line
+    start. The original content is intact inside the blob: turn every
+    literal backslash-n back into a newline, drop only the two lines that
+    run added, and end with exactly one newline. Idempotent on a healthy env.
+    """
+    text = raw.replace("\\n", "\n")
+    kept = [
+        line
+        for line in text.splitlines()
+        if not any(line.startswith(f"{key}=") for key in REPAIR_DROP_KEYS)
+    ]
+    return "\n".join(kept).rstrip("\n") + "\n"
+
+
+def shape_of(environment: str) -> str:
+    return env_shape({"config": {"environment": environment}})
+
+
+def repair_environment(stack: dict[str, object], mode: str) -> None:
+    """Gated one-shot repair. `dry-run` prints the restored shape and writes
+    nothing; `apply` writes it with real newlines (the form Komodo expects —
+    never the escaped form GetStack returns) and reports the shape read back."""
+    config = stack.get("config")
+    raw = config.get("environment") if isinstance(config, dict) else None
+    if not isinstance(raw, str):
+        raise KomodoError("repair: Komodo stack response has no environment")
+    restored = restore_environment(raw)
+    print(f"repair[{mode}] restored {shape_of(restored)}")
+    if mode != "apply":
+        return
+    api("write/UpdateStack", {"id": STACK, "config": {"environment": restored}})
+    after = api("read/GetStack", {"stack": STACK})
+    print(f"repair[apply] read-back {env_shape(after)}")
+
+
 def remote_files(stack: dict[str, object]) -> dict[str, str]:
     info = stack.get("info")
     if not isinstance(info, dict):
@@ -375,6 +420,18 @@ def main() -> int:
         raise KomodoError("Komodo stack response has no config")
     # Keys only, never values: the shape of the .env Komodo will write.
     print(env_shape(stack))
+    repair = os.environ.get("REPAIR_ENVIRONMENT", "").strip()
+    if repair:
+        if repair not in ("dry-run", "apply"):
+            raise KomodoError("REPAIR_ENVIRONMENT must be 'dry-run' or 'apply'")
+        repair_environment(stack, repair)
+        if repair == "dry-run":
+            print("repair[dry-run]: nothing written; not deploying")
+            return 0
+        stack = api("read/GetStack", {"stack": STACK})
+        config = stack.get("config")
+        if not isinstance(config, dict):
+            raise KomodoError("Komodo stack response has no config")
     original_webhook = bool(config.get("webhook_enabled", True))
     files = remote_files(stack)
     changed: list[tuple[str, str]] = []
