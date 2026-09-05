@@ -398,6 +398,11 @@ const TerminalView: Component<Props> = (props) => {
     try {
       fit.fit();
       sendResize();
+      // Repaint after a (re)fit. A pane opened or resumed while its host had no
+      // size buffers writes without painting; the fit restores a valid cell
+      // size and the refresh flushes the buffered rows, so an inactive split
+      // pane no longer looks frozen until it is clicked (#599).
+      term.refresh(0, Math.max(0, term.rows - 1));
     } catch {
       /* xterm can throw while its DOM is detaching or hidden */
     }
@@ -733,6 +738,11 @@ const TerminalView: Component<Props> = (props) => {
     });
 
     // Resize plumbing
+    // Observing delivers an initial callback with the host's current size and
+    // fires again on any 0→N transition. Either way `fitAndResize` runs a fit —
+    // which restores a valid cell size — and then repaints, so a pane whose
+    // renderer paused because it was opened at 0×0 (mounted mid-layout) recovers
+    // without a click, live output included (#599).
     resizeObserver = new ResizeObserver(() => {
       scheduleFit();
     });
@@ -970,6 +980,10 @@ const TerminalView: Component<Props> = (props) => {
               exitForegroundReplay();
               setStatusText(null);
               term?.scrollToBottom();
+              // Repaint in case this pane was paused (never focused) while its
+              // snapshot replayed, so the restored scrollback shows without a
+              // click (#599).
+              scheduleFit();
               persistCache();
             });
           } else if (ctrl.type === "lag") {
