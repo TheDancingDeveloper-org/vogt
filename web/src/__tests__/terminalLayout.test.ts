@@ -12,6 +12,7 @@ import {
   removePane,
   retargetPane,
   type SavedTerminalLayout,
+  type SplitNode,
   type TerminalLayoutNode,
 } from "../terminalLayout";
 
@@ -143,5 +144,54 @@ describe("composing existing sessions (#212)", () => {
       .toEqual(["alpha", "beta", "gamma"]);
     expect(findPane(root!, reloaded.activePaneId)?.sessionId).toBe("beta");
     expect(reloaded.broadcast).toBe(true);
+  });
+});
+
+// #600: a re-target rebuilds only the spine down to the pane that changed and
+// returns every untouched node by the same object reference. TerminalWorkspace
+// renders split children through Solid's `<For>`, which is keyed by reference,
+// so this identity is exactly what keeps sibling panes — their xterm, scrollback
+// and socket — mounted while one pane switches sessions.
+describe("re-target preserves untouched pane identity (#600)", () => {
+  it("leaves an untouched sibling subtree referentially identical", () => {
+    const inner: SplitNode = {
+      type: "split",
+      id: "split:inner",
+      direction: "column",
+      children: [makePane("two"), makePane("three")],
+    };
+    const root: TerminalLayoutNode = {
+      type: "split",
+      id: "split:outer",
+      direction: "row",
+      children: [makePane("one"), inner],
+    };
+
+    const result = retargetPane(root, paneIdFor("one"), "four");
+    expect(result).not.toBeNull();
+    // The whole inner split (and both its panes) is the same object, so `<For>`
+    // never disposes it; only the "one" pane is replaced.
+    expect((result!.root as SplitNode).children[1]).toBe(inner);
+    expect(result!.activePaneId).toBe(paneIdFor("four"));
+    expect(collectPanes(result!.root).map((pane) => pane.sessionId))
+      .toEqual(["four", "two", "three"]);
+  });
+
+  it("swaps two panes and leaves the third untouched by reference", () => {
+    const third = makePane("c");
+    const root: TerminalLayoutNode = {
+      type: "split",
+      id: "split:row",
+      direction: "row",
+      children: [makePane("a"), makePane("b"), third],
+    };
+
+    // Point pane "a" at "b", which pane 2 already shows: the two swap.
+    const result = retargetPane(root, paneIdFor("a"), "b");
+    expect(result).not.toBeNull();
+    expect((result!.root as SplitNode).children[2]).toBe(third);
+    expect(collectPanes(result!.root).map((pane) => pane.sessionId))
+      .toEqual(["b", "a", "c"]);
+    expect(result!.activePaneId).toBe(paneIdFor("b"));
   });
 });
