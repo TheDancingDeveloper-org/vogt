@@ -497,7 +497,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=dev
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.5.2
+            VOGT_PRODUCT_VERSION=0.5.3
           cache-from: |
             type=registry,ref=${{ env.CACHE_IMAGE }}:stack-dev
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-dev
@@ -613,7 +613,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=dev
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.5.2
+            VOGT_PRODUCT_VERSION=0.5.3
           provenance: true
           sbom: true
           cache-from: |
@@ -784,7 +784,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.5.2
+            VOGT_PRODUCT_VERSION=0.5.3
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
@@ -849,7 +849,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.5.2
+            VOGT_PRODUCT_VERSION=0.5.3
             INSTALL_AI_CLIENTS=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_CADASTRE_MCP=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
             INSTALL_THECLAWBAY=${{ github.ref == 'refs/heads/dev' || github.ref == 'refs/heads/prod' }}
