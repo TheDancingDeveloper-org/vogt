@@ -102,6 +102,8 @@ def api_raw(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
     return result
 
 
+# Update fields that carry the stack config (environment included).
+WITHHELD_UPDATE_FIELDS = frozenset({"prev_toml", "current_toml", "other_data"})
 SECRET_KEY = re.compile(r"token|secret|password|passwd|api_key|apikey", re.IGNORECASE)
 CRED_URL = re.compile(r"(\w+://)[^/\s@]+@")
 
@@ -122,6 +124,12 @@ def failure_detail(update: dict[str, object], limit: int = 6000) -> str:
     lines: list[str] = ["Komodo update:"]
     for key, value in update.items():
         if key == "logs":
+            continue
+        if key in WITHHELD_UPDATE_FIELDS:
+            # The stack's serialised config, environment included — never
+            # into a workflow log. Its presence and size are enough.
+            size = len(value) if isinstance(value, str) else len(repr(value))
+            lines.append(f"  {key}=<withheld, {size} chars>")
             continue
         lines.append(f"  {key}={redact(repr(value))[:200]}")
     logs = update.get("logs")
