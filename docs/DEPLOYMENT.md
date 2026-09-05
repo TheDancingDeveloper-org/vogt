@@ -313,7 +313,8 @@ user-local override).
 
 **Runtime pin.** The version a pod actually runs is a deploy-time value
 (#590). `VOGT_CLAUDE_CODE_VERSION` and `VOGT_CODEX_VERSION` in the
-container's environment — the overlay passes them through from `.env`; an
+container's environment — the published `stack.compose.yml` and the
+build-from-source overlay both pass them through from `deploy/.env`; an
 image that bakes further CLIs lists their variables in its
 `/usr/local/share/vogt/agent-clis.tools` — are read by the entrypoint at every
 start. An exact
