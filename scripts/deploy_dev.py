@@ -185,6 +185,73 @@ def replace_image(
     return updated, updated != contents
 
 
+VERSION_INPUT = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9.\-]*\Z")
+
+
+def set_env_var(text: str, key: str, value: str) -> tuple[str, str | None]:
+    """Set `KEY=value` in a `.env` document, returning (new_text, previous).
+
+    Replaces the existing line if the key is present (anywhere), else appends
+    one. `previous` is the old value, or None when the key was absent — so the
+    caller can log what changed. Every other line is left byte-for-byte alone.
+    """
+    pattern = re.compile(rf"(?m)^{re.escape(key)}=(.*)$")
+    match = pattern.search(text)
+    if match:
+        if match.group(1) == value:
+            return text, value
+        return pattern.sub(f"{key}={value}", text, count=1), match.group(1)
+    suffix = "" if text.endswith("\n") or text == "" else "\n"
+    return f"{text}{suffix}{key}={value}\n", None
+
+
+def apply_cli_version_pins(stack: dict[str, object]) -> None:
+    """Set the agent-CLI version pins in the stack's `.env`, if any were asked.
+
+    `codex_version` / `claude_code_version` deploy-dispatch inputs arrive as
+    PIN_CODEX_VERSION / PIN_CLAUDE_CODE_VERSION. Each sets its VOGT_*_VERSION in
+    the Komodo stack `environment` (a partial `UpdateStack`, so nothing else in
+    the config is touched), which the entrypoint reads at the next start to
+    install that exact version — the "bump a CLI without a release" path
+    (DEPLOYMENT.md §3), driven from CI instead of a manual Komodo edit. Only
+    runs when an input is present, so an ordinary deploy is unchanged.
+    """
+    pins = {
+        "VOGT_CODEX_VERSION": os.environ.get("PIN_CODEX_VERSION", "").strip(),
+        "VOGT_CLAUDE_CODE_VERSION": os.environ.get(
+            "PIN_CLAUDE_CODE_VERSION", ""
+        ).strip(),
+    }
+    pins = {key: value for key, value in pins.items() if value}
+    if not pins:
+        return
+    for key, value in pins.items():
+        if not VERSION_INPUT.match(value):
+            raise KomodoError(f"{key} pin {value!r} is not a plain version string")
+    config = stack.get("config")
+    if not isinstance(config, dict):
+        raise KomodoError("Komodo stack response has no config")
+    raw = config.get("environment")
+    if not isinstance(raw, str):
+        raise KomodoError("Komodo stack response has no environment")
+    # Komodo may hand the `.env` document back with literal `\n` sequences
+    # rather than real newlines; round-trip through the same encoding so a value
+    # elsewhere in the file is never re-escaped by accident.
+    escaped = "\\n" in raw and "\n" not in raw
+    text = raw.replace("\\n", "\n") if escaped else raw
+    changed = False
+    for key, value in pins.items():
+        text, previous = set_env_var(text, key, value)
+        if previous != value:
+            changed = True
+            print(f"pin {key}: {previous or '(unset)'} -> {value}")
+    if not changed:
+        print("agent-CLI version pins already at the requested values")
+        return
+    new_raw = text.replace("\n", "\\n") if escaped else text
+    api("write/UpdateStack", {"id": STACK, "config": {"environment": new_raw}})
+
+
 def remote_files(stack: dict[str, object]) -> dict[str, str]:
     info = stack.get("info")
     if not isinstance(info, dict):
@@ -270,11 +337,18 @@ def main() -> int:
         if did_change:
             changed.append((path, updated))
 
+    pins_requested = any(
+        os.environ.get(name, "").strip()
+        for name in ("PIN_CODEX_VERSION", "PIN_CLAUDE_CODE_VERSION")
+    )
     webhook_disabled = False
     try:
-        if changed and original_webhook:
+        if (changed or pins_requested) and original_webhook:
             update_config(False)
             webhook_disabled = True
+        # Move the agent-CLI version pins (if any were requested) before the
+        # deploy, so the entrypoint installs them on this same recreate.
+        apply_cli_version_pins(stack)
         for path, contents in changed:
             update_file(path, contents)
         api("write/RefreshStackCache", {"stack": STACK})

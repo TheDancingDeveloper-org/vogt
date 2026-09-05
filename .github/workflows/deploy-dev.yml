@@ -24,6 +24,19 @@ on:
           LAN-only IP, so a tailnet address is required here).
         required: false
         type: string
+      codex_version:
+        description: >-
+          Optional. Exact Codex version to pin in the dev stack's environment
+          (e.g. 0.153.4), installed at container start — a CLI bump without an
+          image rebuild or release (DEPLOYMENT.md §3). Blank leaves it as-is.
+        required: false
+        type: string
+      claude_code_version:
+        description: >-
+          Optional. Exact Claude Code version to pin in the dev stack's
+          environment (e.g. 2.1.261). Blank leaves it as-is.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -117,6 +130,10 @@ jobs:
           STACK_DIGEST: ${{ steps.images.outputs.stack_digest }}
           KOMODO_API_KEY: ${{ secrets.KOMODO_API_KEY }}
           KOMODO_API_SECRET: ${{ secrets.KOMODO_API_SECRET }}
+          # Optional agent-CLI version pins — set the dev stack's environment so
+          # the entrypoint installs them on this recreate, no rebuild (§3).
+          PIN_CODEX_VERSION: ${{ inputs.codex_version }}
+          PIN_CLAUDE_CODE_VERSION: ${{ inputs.claude_code_version }}
           # The dev stack stores its front-door token as an
           # `[[infisical://…]]` reference that Komodo resolves out of band;
           # GetStack returns the raw template, so deploy_dev.py resolves it
