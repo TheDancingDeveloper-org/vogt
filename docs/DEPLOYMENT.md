@@ -138,8 +138,8 @@ What the base does, and why it does it that way:
 | `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
 | `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one; `connect` renders against it. |
-| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.2` | The image to run. Pin a digest (§2.2). |
-| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.2` | The bundled voice sidecar. Versioned with the stack — pin the same release as `VOGT_STACK_IMAGE` (§2.2). |
+| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.3` | The image to run. Pin a digest (§2.2). |
+| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.3` | The bundled voice sidecar. Versioned with the stack — pin the same release as `VOGT_STACK_IMAGE` (§2.2). |
 | `COMPOSE_PROFILES` | no | `voice` | Compose profiles to start. `voice` runs the speech sidecar (§5.2); clear it to run the stack without one — the voice controls stay present but inert. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted core token acts as. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | How much it may do. Everything in the pod can read the file, so this is the blast radius. |
@@ -174,20 +174,20 @@ cosign verify \
 ```
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.2 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.3 \
   | grep -m1 Digest
 # then, in deploy/.env:
 VOGT_STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
 ```
 
 The voice sidecar is a second image from the same release —
-`ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.2`, signed by the same
+`ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.3`, signed by the same
 workflow identity, so the `cosign verify` above applies to it unchanged — and
 `stack.compose.yml` names it beside the stack. Pin it the same way, to the
 same release:
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.2 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.3 \
   | grep -m1 Digest
 # then, in deploy/.env:
 VOGT_VOICE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-voice@sha256:<digest>
@@ -239,7 +239,7 @@ engine built beside it in another.
 ### 3.1 The core
 
 **With Compose.** The core base runs the published core image alone
-(`VOGT_IMAGE`, defaulting to `ghcr.io/thedancingdeveloper-org/vogt:0.5.2`);
+(`VOGT_IMAGE`, defaulting to `ghcr.io/thedancingdeveloper-org/vogt:0.5.3`);
 the build overlay swaps that for a build of the checkout and changes nothing
 else:
 

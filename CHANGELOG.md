@@ -12,6 +12,16 @@ git log rather than being reconstructed here.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.5.3] - 2026-09-05
+
+A patch on 0.5.2 for the phone: the app resumes into a live view instead of a
+stale "Disconnected", the terminal draws every symbol an agent CLI uses, and
+the phone composition gains the room and the exits it lacked. It also lands
+the generic, bundled voice sidecar and the on-demand session secret broker
+that reached `dev` after 0.5.2. No schema migration is required.
+
 ### Fixed
 
 - **The phone no longer sits on "Disconnected" after a warm open.** The
@@ -313,7 +323,8 @@ minor bump.
 Baseline entry for this changelog. See the git log and release notes for the
 full history up to this tag.
 
-[Unreleased]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.5.2...v0.5.3
 [0.4.0]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.2.0...v0.3.0
