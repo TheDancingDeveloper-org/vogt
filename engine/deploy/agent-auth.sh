@@ -17,13 +17,18 @@
 #   INFISICAL_CLIENT_ID/_SECRET    required — the machine identity
 #   ENGINE_INFISICAL_ENV           Infisical environment slug (default: prod)
 #   ENGINE_AGENT_AUTH_SECRETS      the secrets to load, one per line:
-#                                    VAR PROJECT_ID SECRET_NAME [optional|ondemand]
-#                                  each fetched and exported as VAR; a missing
+#                                    VAR PROJECT_ID SECRET_NAME [flags]
+#                                  where flags is a comma-separated list drawn
+#                                  from {optional, ondemand, writable}. Each is
+#                                  fetched and exported as VAR; a missing
 #                                  required secret fails, naming the secret.
 #                                  `ondemand` declares VAR for sessions but
 #                                  does NOT fetch it at launch: it is reachable
 #                                  only through the engine's broker, on request
 #                                  (`fetch`, below), and every fetch is audited.
+#                                  `writable` lets a session *store* VAR through
+#                                  the broker (`store`/`set`, below), audited by
+#                                  name; it is orthogonal to the read policy.
 #   ENGINE_AGENT_AUTH_GH_TOKEN_FROM  a VAR from the manifest to also export as
 #                                    GH_TOKEN (the git/gh default identity).
 #   ENGINE_AGENT_AUTH_PROBES       optional `check` probes, one per line:
@@ -68,8 +73,19 @@
 #                engine enforces the manifest, rate-limits, and audits the
 #                fetch by session and name, never value.
 #
+# The write mirror (#598), for a session that has just *produced* a secret:
+#
+#   set VAR      engine-side. Reads the value on stdin (never argv), re-checks
+#                the manifest and the `writable` flag, upserts, and prints
+#                `created`/`updated`. Used by the engine's store broker.
+#   store VAR    session-side. Sends a value on stdin to the engine's
+#                `POST /api/agent-auth/store/VAR`; the engine enforces the
+#                manifest and the `writable` flag, rate-limits, and audits the
+#                write by session and name, never value.
+#
 # A session's environment therefore says which names it may ask for, in
-# `AGENT_AUTH_ONDEMAND`, beside what it already holds in `AGENT_AUTH_GRANTED`.
+# `AGENT_AUTH_ONDEMAND`, and which it may store, in `AGENT_AUTH_WRITABLE`,
+# beside what it already holds in `AGENT_AUTH_GRANTED`.
 
 set -euo pipefail
 
@@ -98,6 +114,10 @@ AGENT_AUTH_GRANTED_VARS=""
 # Names declared `ondemand`: reachable through the broker, never exported at
 # launch. Published as the `AGENT_AUTH_ONDEMAND` breadcrumb.
 AGENT_AUTH_ONDEMAND_VARS=""
+# Names flagged `writable`: a session may *store* these through the engine's
+# broker (#598). Published as the `AGENT_AUTH_WRITABLE` breadcrumb, so a session
+# knows what it may write rather than guessing and being refused.
+AGENT_AUTH_WRITABLE_VARS=""
 # Set when a manifest entry matched ENGINE_AGENT_AUTH_GH_TOKEN_FROM and GH_TOKEN
 # was aliased from it. Checked after the manifest load: a GH_TOKEN_FROM that
 # names no manifest entry aliased nothing and, before #566, did so in silence.
@@ -123,6 +143,8 @@ Usage:
   mydevenv2-agent-auth shell
   mydevenv2-agent-auth get <VAR>
   mydevenv2-agent-auth fetch <VAR>
+  mydevenv2-agent-auth set <VAR>     (value on stdin)
+  mydevenv2-agent-auth store <VAR>   (value on stdin)
 
 Commands:
   check  Fetch credentials and validate secrets-manager access, any configured
@@ -134,6 +156,12 @@ Commands:
          on-demand broker; needs the identity, so it cannot run in a session.
   fetch  (session-side) Ask the engine's broker for one manifest secret and
          print its value to stdout. Needs only the session's broker token.
+  set    (engine-side) Store one `writable` ENGINE_AGENT_AUTH_SECRETS entry,
+         reading the value from stdin and printing created/updated. Used by the
+         engine's store broker; needs the identity, so it cannot run in a
+         session.
+  store  (session-side) Send a value on stdin to the engine's broker to store
+         under one `writable` manifest entry. Needs only the broker token.
 EOF
 }
 
@@ -213,7 +241,55 @@ get_secret() {
         --plain --silent
 }
 
-# Print `PROJECT_ID SECRET_NAME FLAG` for one manifest variable, or return 1
+# Write one secret value, reading the value from stdin (never argv — this is the
+# pluggable write half of the broker, mirroring `get_secret`; a different
+# secrets manager replaces exactly this function). #598.
+write_secret() {
+    local access_token="$1" project_id="$2" secret_name="$3" value
+    value="$(cat)"
+    infisical secrets set "$secret_name=$value" \
+        --domain "${INFISICAL_API_URL:-}" \
+        --projectId "$project_id" \
+        --env "$INFISICAL_ENV" \
+        --token "$access_token" \
+        --silent
+}
+
+# True when a comma-separated flag list contains a given flag. The flag field
+# of a manifest line is now a list — `ondemand,writable` — parsed the same way
+# here and in the engine's `parse_flags` so the two cannot disagree (#598).
+flags_contain() {
+    local list="$1" want="$2"
+    case ",${list}," in
+        *",${want},"*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Reject an unknown flag or two conflicting policy flags, mirroring the engine's
+# `parse_flags` so a bad manifest fails the launch here as it does there (#598).
+validate_flags() {
+    local list="$1" line="$2" flag seen_policy=""
+    [[ -n "$list" ]] || return 0
+    local -a parts
+    IFS=',' read -ra parts <<<"$list"
+    for flag in "${parts[@]}"; do
+        case "$flag" in
+            required | optional | ondemand)
+                if [[ -n "$seen_policy" && "$seen_policy" != "$flag" ]]; then
+                    die "ENGINE_AGENT_AUTH_SECRETS entry sets conflicting policy flags: $line"
+                fi
+                seen_policy="$flag"
+                ;;
+            writable) ;;
+            *)
+                die "ENGINE_AGENT_AUTH_SECRETS entry has unknown flag '$flag' (flags are a comma-separated list of optional, ondemand, writable): $line"
+                ;;
+        esac
+    done
+}
+
+# Print `PROJECT_ID SECRET_NAME FLAGS` for one manifest variable, or return 1
 # when the manifest does not declare it. The one place the manifest is read
 # for a *single* name; the launch-time loop below reads it for all of them.
 manifest_entry() {
@@ -224,7 +300,8 @@ manifest_entry() {
         read -r var project name flag <<<"$line"
         [[ "${var:-}" == "$want" ]] || continue
         [[ -n "${project:-}" && -n "${name:-}" ]] || die \
-            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [optional|ondemand]'): $line"
+            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [flags]'): $line"
+        validate_flags "${flag:-}" "$line"
         printf '%s %s %s' "$project" "$name" "${flag:-required}"
         return 0
     done <<<"${ENGINE_AGENT_AUTH_SECRETS}"
@@ -247,6 +324,67 @@ get_one() {
     value="$(get_secret "$access_token" "$project" "$name" || true)"
     [[ -n "$value" ]] || die "Infisical secret $name is missing or empty"
     printf '%s' "$value"
+}
+
+# `set VAR`: the engine's half of the *write* broker (#598). The engine holds
+# the identity and runs this with the same re-granted environment a session
+# launch gets, after enforcing the manifest and the `writable` flag itself;
+# this enforces both again because the helper is the pluggable part and must
+# stand alone. The value is read from stdin — never argv, so `ps`, shell
+# history and audit excerpts never see it — and stdout is only `created` or
+# `updated`, nothing else.
+set_one() {
+    local var="$1" entry project name flag access_token value existing
+    entry="$(manifest_entry "$var")" || die \
+        "$var is not a variable in ENGINE_AGENT_AUTH_SECRETS; nothing is stored that the deployment did not declare"
+    read -r project name flag <<<"$entry"
+    flags_contain "${flag:-}" writable || die \
+        "$var is declared in ENGINE_AGENT_AUTH_SECRETS but not writable; add the 'writable' flag to its line (e.g. 'ondemand,writable') to let sessions store it"
+    value="$(cat)"
+    [[ -n "$value" ]] || die "no value on stdin to store for $var"
+    require_identity
+    require_command infisical
+    access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
+    # Create vs update is the one thing the caller cares to hear back; decide it
+    # by whether the secret already resolves, then upsert.
+    existing="$(get_secret "$access_token" "$project" "$name" 2>/dev/null || true)"
+    printf '%s' "$value" | write_secret "$access_token" "$project" "$name" >/dev/null \
+        || die "Infisical secret $name could not be stored"
+    if [[ -n "$existing" ]]; then printf 'updated'; else printf 'created'; fi
+}
+
+# `store VAR`: the session's half of the write broker (#598). Runs *inside* a
+# session, which holds no identity — only the broker address and token — and
+# POSTs the value (read from stdin, never argv) to the engine's store route.
+# Every refusal repeats the engine's own reason, which for an undeclared or
+# non-writable name is the manifest line or flag to add.
+store_one() {
+    local var="$1" value response status body
+    [[ -n "${MYDEVENV2_BROKER_URL:-}" && -n "${MYDEVENV2_BROKER_TOKEN:-}" ]] || die \
+        "no secret broker in this environment (MYDEVENV2_BROKER_URL/_TOKEN are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    require_command curl
+    value="$(cat)"
+    [[ -n "$value" ]] || die "no value on stdin to store for $var"
+    umask 077
+    response="$(mktemp)"
+    status="$(printf '%s' "$value" | curl -sS --max-time 45 -o "$response" -w '%{http_code}' \
+        -X POST -H "Authorization: Bearer $MYDEVENV2_BROKER_TOKEN" \
+        -H 'Content-Type: text/plain' --data-binary @- \
+        "${MYDEVENV2_BROKER_URL%/}/api/agent-auth/store/$var" 2>/dev/null)" || status="000"
+    if [[ "$status" == "200" ]]; then
+        cat "$response"
+        rm -f "$response"
+        return 0
+    fi
+    body="$(tr -d '\r\n' <"$response" | cut -c1-300)"
+    rm -f "$response"
+    case "$status" in
+        000) die "secret broker unreachable at $MYDEVENV2_BROKER_URL" ;;
+        401) die "secret broker refused this session's token (HTTP 401); the engine no longer knows this session" ;;
+        403) die "secret broker refused storing $var (HTTP 403): ${body:-not writable in the manifest}" ;;
+        413) die "secret broker refused storing $var (HTTP 413): value over the size cap" ;;
+        *) die "secret broker failed storing $var (HTTP $status): ${body:-<empty body>}" ;;
+    esac
 }
 
 # `fetch VAR`: the session's half of the broker (#568). Runs *inside* a
@@ -298,8 +436,14 @@ load_manifest_secrets() {
         read -r var project name flag <<<"$line"
         [[ -n "${var:-}" ]] || continue
         [[ -n "${project:-}" && -n "${name:-}" ]] || die \
-            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [optional|ondemand]'): $line"
-        if [[ "${flag:-}" == "ondemand" ]]; then
+            "malformed ENGINE_AGENT_AUTH_SECRETS entry (want 'VAR PROJECT_ID SECRET_NAME [flags]'): $line"
+        validate_flags "${flag:-}" "$line"
+        # `writable` is orthogonal to the read policy: record it for the
+        # breadcrumb whether the entry is launched or ondemand (#598).
+        if flags_contain "${flag:-}" writable; then
+            AGENT_AUTH_WRITABLE_VARS+="${AGENT_AUTH_WRITABLE_VARS:+ }$var"
+        fi
+        if flags_contain "${flag:-}" ondemand; then
             # Declared for sessions, deliberately not resolved here (#568): it
             # never sits in the session's environment for the whole session.
             # Listed by name so the session knows what it may ask for.
@@ -309,7 +453,7 @@ load_manifest_secrets() {
             continue
         fi
         value="$(get_secret "$access_token" "$project" "$name" || true)"
-        if [[ -z "$value" && "${flag:-required}" != "optional" ]]; then
+        if [[ -z "$value" ]] && ! flags_contain "${flag:-}" optional; then
             die "Infisical secret $name is missing or empty"
         fi
         printf -v "$var" '%s' "$value"
@@ -428,6 +572,9 @@ load_agent_environment() {
     export AGENT_AUTH_MODE=brokered
     export AGENT_AUTH_GRANTED="$AGENT_AUTH_GRANTED_VARS"
     export AGENT_AUTH_ONDEMAND="$AGENT_AUTH_ONDEMAND_VARS"
+    # Names a session may *store* through the broker (#598), beside the names it
+    # may fetch. A session reads this instead of guessing and being refused.
+    export AGENT_AUTH_WRITABLE="$AGENT_AUTH_WRITABLE_VARS"
 
     # Drop the brokering identity before the shell/command this helper launches.
     # The engine re-grants exactly these to the helper (they are otherwise
@@ -483,6 +630,8 @@ check_access() {
     printf 'ok: secrets-manager universal auth\n'
     [[ -z "$AGENT_AUTH_ONDEMAND_VARS" ]] || \
         printf 'ondemand (fetched on request through the engine broker): %s\n' "$AGENT_AUTH_ONDEMAND_VARS"
+    [[ -z "$AGENT_AUTH_WRITABLE_VARS" ]] || \
+        printf 'writable (stored on request through the engine broker): %s\n' "$AGENT_AUTH_WRITABLE_VARS"
     run_configured_probes
 
     if [[ "$CADASTRE_MCP_ENABLED" == "1" ]]; then
@@ -563,6 +712,16 @@ main() {
             shift
             [[ $# -eq 1 && -n "${1:-}" ]] || die "fetch requires exactly one VAR"
             fetch_one "$1"
+            ;;
+        set)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "set requires exactly one VAR"
+            set_one "$1"
+            ;;
+        store)
+            shift
+            [[ $# -eq 1 && -n "${1:-}" ]] || die "store requires exactly one VAR"
+            store_one "$1"
             ;;
         -h|--help|help)
             usage

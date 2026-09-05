@@ -1952,6 +1952,32 @@ above: at the same uid this narrows *ambient* exposure and adds an audit
 trail; it becomes an enforced boundary only once sessions run as a separate
 uid, and the design does not change when that lands.
 
+**Storing a secret from a session: the write broker (#598).** The mirror of the
+fetch, for a session that has just *produced* a secret — minted an API token,
+generated a keypair, rotated a password it was asked to rotate. Without it the
+agent's only options are to hand the value back through a transcript (the
+exposure the whole brokered model exists to avoid) or to reach around the strip;
+with it there is a sanctioned path that keeps every property above. The
+manifest's flag field is a **comma-separated list** drawn from `optional`,
+`ondemand` and `writable` — `VAR PROJECT_ID SECRET_NAME ondemand,writable` —
+where `writable` is orthogonal to the read policy and means a session may store
+that entry. The common case is `ondemand,writable` (a secret a session will
+create or rotate, never exported at launch); `optional,writable` covers "create
+it once, read it every launch after"; `writable` alone is a rotate-in-place
+secret that must already exist. A session sees the names it may store in
+`AGENT_AUTH_WRITABLE`, beside `AGENT_AUTH_ONDEMAND`, and asks with
+`mydevenv2-agent-auth store VAR`, the value on **stdin** — which calls the
+engine's `POST /api/agent-auth/store/{var}` with the same broker token. The
+engine authenticates the token, rate-limits (tighter than the fetch — writes are
+rarer), checks that `VAR` is declared **and** `writable` (an undeclared name and
+a declared-but-not-writable one get distinct refusals naming the manifest edit),
+caps the body, then runs the helper's `set VAR` with the value on stdin — never
+argv, an env var or a log line — and returns `created`/`updated`. **Every store
+is audited** on `mydevenv2::audit` by session id, variable and secret name and
+byte length — never value. `writable` widens blast radius only to the entries an
+operator pre-authorised, and every overwrite is in the audit log. The same
+honest caveat applies.
+
 Operator-local notes about a particular deployment belong in the git-ignored
 `docs/local/`, not here.
 

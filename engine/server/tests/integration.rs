@@ -5899,14 +5899,31 @@ async fn a_cost_line_is_parsed_into_the_conclusion() {
 /// helper does for an empty secret, and refuses every other subcommand with
 /// a distinctive status — so if the engine ever ran anything but `get` here,
 /// the test would say so.
+///
+/// It also answers `set VAR` (#598): `FAILWRITE` fails with a distinctive
+/// stderr, and otherwise it records the value it read on stdin, its argv and
+/// its whole environment into files under `dir` — so a test can prove the value
+/// arrived on stdin and nowhere else — then prints `created`.
 fn fake_broker_helper(dir: &std::path::Path) -> std::path::PathBuf {
     let helper = dir.join("agent-auth");
+    let rec = dir.display();
     std::fs::write(
         &helper,
-        "#!/bin/sh\n\
-         [ \"$1\" = get ] || { echo \"unexpected subcommand: $*\" >&2; exit 64; }\n\
-         [ \"$2\" = BROKEN ] && { echo 'mydevenv2-agent-auth: Infisical secret broken is missing or empty' >&2; exit 1; }\n\
-         printf 'value-of-%s' \"$2\"\n",
+        format!(
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             get)\n\
+             [ \"$2\" = BROKEN ] && {{ echo 'mydevenv2-agent-auth: Infisical secret broken is missing or empty' >&2; exit 1; }}\n\
+             printf 'value-of-%s' \"$2\" ;;\n\
+             set)\n\
+             [ \"$2\" = FAILWRITE ] && {{ echo 'mydevenv2-agent-auth: upstream refused the write' >&2; exit 1; }}\n\
+             cat > '{rec}/store-stdin'\n\
+             printf '%s' \"$*\" > '{rec}/store-argv'\n\
+             env > '{rec}/store-env'\n\
+             echo created ;;\n\
+             *) echo \"unexpected subcommand: $*\" >&2; exit 64 ;;\n\
+             esac\n"
+        ),
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&helper).unwrap().permissions();
@@ -6111,6 +6128,221 @@ async fn a_session_is_handed_the_token_the_broker_honours() {
         .unwrap();
     assert_eq!(r.status(), 200);
     assert_eq!(r.text().await.unwrap(), "value-of-LATER");
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn secret_store_writes_a_writable_secret_on_stdin_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(
+        &tmp,
+        "RW proj rw ondemand,writable\nRO proj ro ondemand\nFAILWRITE proj fw ondemand,writable\n",
+    );
+    let recorded = tmp.path().to_path_buf();
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_id(&client, &base, "store").await;
+    let session: uuid::Uuid = id.parse().unwrap();
+    let token = state.sessions.secret_broker().issue(session);
+    let plain = reqwest::Client::new();
+    let store = |var: &str| format!("{base}/api/agent-auth/store/{var}");
+
+    // A declared, writable name: 200, and the helper reports what it did.
+    let secret = "line1\nline2 super-secret-value";
+    let r = plain
+        .post(store("RW"))
+        .bearer_auth(&token)
+        .body(secret)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers()["cache-control"], "no-store");
+    assert_eq!(r.text().await.unwrap(), "created");
+    // The value reached the helper on stdin — and nowhere else.
+    assert_eq!(
+        std::fs::read_to_string(recorded.join("store-stdin")).unwrap(),
+        secret
+    );
+    let argv = std::fs::read_to_string(recorded.join("store-argv")).unwrap();
+    assert_eq!(argv, "set RW");
+    assert!(
+        !argv.contains("super-secret-value"),
+        "value must not appear in argv: {argv}"
+    );
+    let child_env = std::fs::read_to_string(recorded.join("store-env")).unwrap();
+    assert!(
+        !child_env.contains("super-secret-value"),
+        "value must not appear in the child environment"
+    );
+
+    // Declared-but-not-writable and undeclared are two distinct 403s.
+    let r = plain
+        .post(store("RO"))
+        .bearer_auth(&token)
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let err = r.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("not writable"), "{err}");
+
+    let r = plain
+        .post(store("NOPE"))
+        .bearer_auth(&token)
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+    let err = r.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("ENGINE_AGENT_AUTH_SECRETS"), "{err}");
+    assert!(
+        err.contains("writable"),
+        "suggests the writable flag: {err}"
+    );
+
+    // A helper failure is a bad gateway carrying the upstream reason.
+    let r = plain
+        .post(store("FAILWRITE"))
+        .bearer_auth(&token)
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 502);
+    let err = r.json::<Value>().await.unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("refused the write"), "{err}");
+
+    // An empty body stores nothing.
+    let r = plain
+        .post(store("RW"))
+        .bearer_auth(&token)
+        .body("")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+
+    // Only the session's own token opens the route; the engine bearer does not.
+    for (label, request) in [
+        (
+            "wrong token",
+            plain.post(store("RW")).bearer_auth("not-it").body("x"),
+        ),
+        ("no token", plain.post(store("RW")).body("x")),
+        (
+            "engine bearer",
+            plain.post(store("RW")).bearer_auth(TEST_TOKEN).body("x"),
+        ),
+    ] {
+        assert_eq!(request.send().await.unwrap().status(), 401, "{label}");
+    }
+
+    // Forgetting the session forgets its leave to write.
+    assert!(client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+        .is_success());
+    let r = plain
+        .post(store("RW"))
+        .bearer_auth(&token)
+        .body("x")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "revoked with the session");
+}
+
+#[tokio::test]
+async fn secret_store_caps_the_body_over_64_kib() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "RW proj rw ondemand,writable\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_session_id(&client, &base, "store-big").await;
+    let token = state.sessions.secret_broker().issue(id.parse().unwrap());
+
+    // Over the 64 KiB cap: refused before the helper runs. The body is drained
+    // so the client gets a clean 413 rather than deadlocking mid-write.
+    let r = reqwest::Client::new()
+        .post(format!("{base}/api/agent-auth/store/RW"))
+        .bearer_auth(&token)
+        .body(vec![b'x'; 64 * 1024 + 1])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 413);
+
+    let _ = client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await;
+}
+
+#[tokio::test]
+async fn secret_store_rate_limits_tighter_than_fetch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "RW proj rw ondemand,writable\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let store = format!("{base}/api/agent-auth/store/RW");
+
+    // The store limit is far below the 60/min fetch limit: a session's writes
+    // are refused within the first eleven calls, with a Retry-After.
+    let id = create_session_id(&client, &base, "store-rate").await;
+    let token = state.sessions.secret_broker().issue(id.parse().unwrap());
+    let plain = reqwest::Client::new();
+    let mut tripped_at = None;
+    for i in 0..12u32 {
+        let r = plain
+            .post(&store)
+            .bearer_auth(&token)
+            .body("v")
+            .send()
+            .await
+            .unwrap();
+        if r.status() == 429 {
+            assert!(
+                r.headers().contains_key("retry-after"),
+                "a 429 carries Retry-After"
+            );
+            tripped_at = Some(i);
+            break;
+        }
+        assert_eq!(r.status(), 200, "call {i} is under the limit");
+    }
+    let tripped_at = tripped_at.expect("the store rate limit should trip");
+    assert!(
+        tripped_at <= 10,
+        "tighter than fetch's 60/min: tripped at call {tripped_at}"
+    );
 
     let _ = client
         .delete(format!("{base}/api/sessions/{id}"))
