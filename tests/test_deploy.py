@@ -3192,6 +3192,7 @@ def test_deploy_dev_surfaces_the_failing_komodo_stage() -> None:
         "success": False,
         "status": "Complete",
         "operation": "DeployStack",
+        "current_toml": "[[stack]]\nenvironment = 'ENGINE_TOKEN=plain-secret-value'",
         "logs": [
             {"stage": "pull", "success": True, "stdout": "pulled fine", "stderr": ""},
             {
@@ -3208,6 +3209,8 @@ def test_deploy_dev_surfaces_the_failing_komodo_stage() -> None:
     out = dd.failure_detail(update)
     assert "stage: Pre Deploy" in out
     assert "operation='DeployStack'" in out, "update-level fields are shown"
+    assert "plain-secret-value" not in out, "the stack config/env is never printed"
+    assert "current_toml=<withheld" in out
     assert "exit status 128" in out, "non-stream fields carry the reason"
     assert "https://***@forge.example/ops.git" in out, "URL credential masked"
     assert "s3cr3t" not in out
