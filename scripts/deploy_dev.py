@@ -102,25 +102,49 @@ def api_raw(endpoint: str, payload: dict[str, object]) -> dict[str, object]:
     return result
 
 
+SECRET_KEY = re.compile(r"token|secret|password|passwd|api_key|apikey", re.IGNORECASE)
+CRED_URL = re.compile(r"(\w+://)[^/\s@]+@")
+
+
+def redact(text: str) -> str:
+    """Mask credentials embedded in URLs (`scheme://user:pass@host`). Komodo
+    holds the desired-state repository credential itself, outside GitHub's
+    secret masking, so a clone command echoed into an update log must not
+    reach the workflow log intact."""
+    return CRED_URL.sub(r"\1***@", text)
+
+
 def failure_detail(update: dict[str, object], limit: int = 6000) -> str:
-    """Render the failing stages of a Komodo update so the workflow log says
-    *why* a deploy failed, not only that it did. Stderr first, then stdout,
-    tail-truncated; entries that succeeded are skipped unless nothing failed."""
+    """Render why a Komodo update failed: the update's own fields, then every
+    field of each failing stage (a stage can fail with empty stdout/stderr and
+    its reason elsewhere), tail-truncated and credential-redacted. Successful
+    stages are skipped unless nothing is flagged failed."""
+    lines: list[str] = ["Komodo update:"]
+    for key, value in update.items():
+        if key == "logs":
+            continue
+        lines.append(f"  {key}={redact(repr(value))[:200]}")
     logs = update.get("logs")
-    if not isinstance(logs, list):
-        return ""
-    entries = [entry for entry in logs if isinstance(entry, dict)]
-    failed = [entry for entry in entries if entry.get("success") is False]
-    lines: list[str] = ["Komodo update logs:"]
-    for entry in failed or entries[-1:]:
-        stage = entry.get("stage") or entry.get("command") or "?"
-        lines.append(f"--- stage: {stage} (success={entry.get('success')})")
-        for stream in ("stderr", "stdout"):
-            text = entry.get(stream)
-            if isinstance(text, str) and text.strip():
-                tail = text.strip().splitlines()[-40:]
-                lines.append(f"[{stream}]")
-                lines.extend(tail)
+    if isinstance(logs, list):
+        entries = [entry for entry in logs if isinstance(entry, dict)]
+        failed = [entry for entry in entries if entry.get("success") is False]
+        for entry in failed or entries[-1:]:
+            stage = entry.get("stage") or entry.get("command") or "?"
+            lines.append(f"--- stage: {stage} (success={entry.get('success')})")
+            for key, value in entry.items():
+                if key in ("stage", "success"):
+                    continue
+                if SECRET_KEY.search(key):
+                    lines.append(f"[{key}] ***")
+                elif isinstance(value, str):
+                    if not value.strip():
+                        continue
+                    lines.append(f"[{key}]")
+                    lines.extend(
+                        redact(line) for line in value.strip().splitlines()[-40:]
+                    )
+                else:
+                    lines.append(f"[{key}] {redact(repr(value))[:300]}")
     rendered = "\n".join(lines)
     return rendered if len(rendered) <= limit else rendered[-limit:]
 

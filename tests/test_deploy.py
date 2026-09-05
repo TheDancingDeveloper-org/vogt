@@ -3182,45 +3182,53 @@ def _load_deploy_dev() -> Any:
 
 
 def test_deploy_dev_surfaces_the_failing_komodo_stage() -> None:
-    """A failed Komodo deploy must say *why*: the update record's failing
-    stage(s) with their stderr/stdout, not just "reported failure". Without
-    this the workflow log carried no cause at all (the dev incident of
-    2026-09-05 was diagnosed blind because of it)."""
+    """A failed Komodo deploy must say *why*. A stage can fail with empty
+    stdout/stderr and its reason in another field, so every field of a
+    failing stage is rendered — with URL credentials and token-named keys
+    masked, because Komodo's repo credential sits outside GitHub's masking.
+    (The 2026-09-05 dev incident was diagnosed blind without this.)"""
     dd = _load_deploy_dev()
     update = {
         "success": False,
+        "status": "Complete",
+        "operation": "DeployStack",
         "logs": [
             {"stage": "pull", "success": True, "stdout": "pulled fine", "stderr": ""},
             {
-                "stage": "compose up",
+                "stage": "Pre Deploy",
                 "success": False,
-                "stdout": "creating",
-                "stderr": "service vogt: bad env line 'X'",
+                "stdout": "",
+                "stderr": "",
+                "command": "git clone https://bot:s3cr3t@forge.example/ops.git",
+                "detail": "exit status 128",
+                "git_token": "should-never-print",
             },
         ],
     }
     out = dd.failure_detail(update)
-    assert "stage: compose up" in out
-    assert "bad env line 'X'" in out
-    assert "creating" in out
+    assert "stage: Pre Deploy" in out
+    assert "operation='DeployStack'" in out, "update-level fields are shown"
+    assert "exit status 128" in out, "non-stream fields carry the reason"
+    assert "https://***@forge.example/ops.git" in out, "URL credential masked"
+    assert "s3cr3t" not in out
+    assert "should-never-print" not in out and "[git_token] ***" in out
     assert "stage: pull" not in out, "successful stages are noise"
     # Nothing flagged failed but the update failed: fall back to the last stage.
     out2 = dd.failure_detail(
         {
             "success": False,
-            "logs": [
-                {"stage": "only", "success": True, "stdout": "", "stderr": "boom"}
-            ],
+            "logs": [{"stage": "only", "success": True, "stderr": "boom"}],
         }
     )
     assert "stage: only" in out2 and "boom" in out2
-    # No logs at all: nothing to render (the caller still raises).
-    assert dd.failure_detail({"success": False}) == ""
+    # No logs at all: only the update's own fields.
+    assert (
+        dd.failure_detail({"success": False}).strip()
+        == "Komodo update:\n  success=False"
+    )
     # Long output is tail-truncated to the limit.
     big = {
         "success": False,
-        "logs": [
-            {"stage": "s", "success": False, "stderr": "x\n" * 5000, "stdout": ""}
-        ],
+        "logs": [{"stage": "s", "success": False, "stderr": "x\n" * 5000}],
     }
     assert len(dd.failure_detail(big, limit=500)) <= 500
