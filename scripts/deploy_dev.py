@@ -359,6 +359,90 @@ def repair_environment(stack: dict[str, object], mode: str) -> None:
     print(f"repair[apply] read-back {env_shape(after)}")
 
 
+WITHHELD_INFO_FIELDS = frozenset({"remote_contents", "remote_errors"})
+
+
+def stack_log(stack: dict[str, object]) -> None:
+    """Best-effort: the containers' own recent logs (docker compose logs),
+    tail-truncated and credential-redacted. This is where the entrypoint says
+    whether tailscale joined and whether the core came up."""
+    name = stack.get("name") if isinstance(stack.get("name"), str) else STACK
+    try:
+        log = api_raw("read/GetStackLog", {"stack": name, "tail": 200})
+    except KomodoError as exc:
+        print(f"GetStackLog unavailable: {exc}")
+        return
+    print("--- stack log (tail) ---")
+    for stream in ("stdout", "stderr"):
+        text = log.get(stream)
+        if isinstance(text, str) and text.strip():
+            print(f"[{stream}]")
+            for line in text.strip().splitlines()[-200:]:
+                print(redact(line)[:300])
+
+
+def inspect_stack(stack: dict[str, object]) -> None:
+    """Read-only: what Komodo knows about the stack right now — its info
+    (state, deployed hash, containers) and the most recent update's stages
+    including the ones that succeeded (compose up output lives there).
+    Prints nothing that could hold a secret: file contents withheld, values
+    redacted, config never printed."""
+    info = stack.get("info")
+    print("stack info:")
+    if isinstance(info, dict):
+        for key, value in info.items():
+            if key in WITHHELD_INFO_FIELDS or key.endswith("_contents"):
+                size = len(value) if isinstance(value, (str, list)) else 0
+                print(f"  {key}=<withheld, {size}>")
+            else:
+                print(f"  {key}={redact(repr(value))[:400]}")
+    stack_id = stack.get("_id")
+    if isinstance(stack_id, dict):
+        stack_id = stack_id.get("$oid")
+    if not isinstance(stack_id, str):
+        print("stack id unavailable; skipping update history")
+        return
+    try:
+        listed = api_raw(
+            "read/ListUpdates",
+            {"query": {"target": {"type": "Stack", "id": stack_id}}, "page": 0},
+        )
+    except KomodoError as exc:
+        print(f"ListUpdates unavailable: {exc}")
+        return
+    updates = listed.get("updates")
+    if not isinstance(updates, list) or not updates:
+        print("no updates listed")
+        return
+    latest = updates[0]
+    if not isinstance(latest, dict):
+        return
+    ident = latest.get("id") or latest.get("_id")
+    print(
+        f"latest update: operation={latest.get('operation')} "
+        f"success={latest.get('success')} status={latest.get('status')} id={ident}"
+    )
+    if isinstance(ident, dict):
+        ident = ident.get("$oid")
+    stack_log(stack)
+    if isinstance(ident, str):
+        full = api_raw("read/GetUpdate", {"id": ident})
+        logs = full.get("logs")
+        if isinstance(logs, list):
+            for entry in logs:
+                if not isinstance(entry, dict):
+                    continue
+                print(
+                    f"--- stage: {entry.get('stage')} (success={entry.get('success')})"
+                )
+                for stream in ("stdout", "stderr"):
+                    text = entry.get(stream)
+                    if isinstance(text, str) and text.strip():
+                        print(f"[{stream}]")
+                        for line in text.strip().splitlines()[-60:]:
+                            print(redact(line)[:300])
+
+
 def remote_files(stack: dict[str, object]) -> dict[str, str]:
     info = stack.get("info")
     if not isinstance(info, dict):
@@ -441,9 +525,15 @@ def main() -> int:
     # Keys only, never values: the shape of the .env Komodo will write.
     print(env_shape(stack))
     repair = os.environ.get("REPAIR_ENVIRONMENT", "").strip()
+    if repair == "inspect":
+        inspect_stack(stack)
+        print("inspect: read-only; not deploying")
+        return 0
     if repair:
         if repair not in ("dry-run", "apply"):
-            raise KomodoError("REPAIR_ENVIRONMENT must be 'dry-run' or 'apply'")
+            raise KomodoError(
+                "REPAIR_ENVIRONMENT must be 'dry-run', 'apply' or 'inspect'"
+            )
         repair_environment(stack, repair)
         if repair == "dry-run":
             print("repair[dry-run]: nothing written; not deploying")
