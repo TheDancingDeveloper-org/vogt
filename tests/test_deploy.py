@@ -1631,6 +1631,240 @@ def test_fetch_outside_a_brokered_session_says_so() -> None:
     assert "ENGINE_AGENT_AUTH_SECRETS" in completed.stderr
 
 
+# ── The write broker (#598): `set` engine-side, `store` session-side ─────────
+
+# `store` is curl against the engine with the value on stdin; stub curl to
+# record both the invocation and what it read on stdin, so a test can prove the
+# value went on stdin and never onto the command line.
+_STORE_STUB = """
+source {auth}
+curl() {{
+    local output_file=""
+    printf '%s\\n' "$@" >"$CURL_ARGS_FILE"
+    cat >"$CURL_STDIN_FILE"
+    while (($#)); do
+        case "$1" in
+            -o) output_file="$2"; shift 2 ;;
+            -w) shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    printf '%s' "$STORE_BODY" >"$output_file"
+    printf '%s' "$STORE_STATUS"
+}}
+printf '%s' "$STORE_VALUE" | main store {var}
+"""
+
+
+@needs_engine
+def test_store_sends_the_value_on_stdin_and_never_on_the_command_line(
+    tmp_path: Path,
+) -> None:
+    """#598, the session's half: no identity, only the broker token, and the
+    value on stdin. The engine's outcome word is relayed verbatim."""
+    args_file = tmp_path / "curl-args"
+    stdin_file = tmp_path / "curl-stdin"
+    completed = subprocess.run(
+        ["bash", "-c", _STORE_STUB.format(auth=AGENT_AUTH, var="RW")],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "MYDEVENV2_BROKER_URL": "http://127.0.0.1:8910/",
+            "MYDEVENV2_BROKER_TOKEN": "tok-for-this-session",
+            "CURL_ARGS_FILE": str(args_file),
+            "CURL_STDIN_FILE": str(stdin_file),
+            "STORE_STATUS": "200",
+            "STORE_BODY": "created",
+            "STORE_VALUE": "brand-new-secret",
+        },
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "created", "relays the engine's outcome"
+    args = args_file.read_text(encoding="utf-8").splitlines()
+    assert "http://127.0.0.1:8910/api/agent-auth/store/RW" in args, (
+        "the engine on loopback, the store route, the trailing slash normalised"
+    )
+    assert "Authorization: Bearer tok-for-this-session" in args
+    assert "POST" in args
+    # The value went on stdin, and nowhere near argv.
+    assert stdin_file.read_text(encoding="utf-8") == "brand-new-secret"
+    assert "brand-new-secret" not in "\n".join(args)
+
+
+@needs_engine
+@pytest.mark.parametrize(
+    ("status", "body", "expect_stderr"),
+    [
+        ("403", '{"error":"X is declared but not writable"}', "not writable"),
+        ("401", "", "no longer knows this session"),
+        ("413", '{"error":"too large"}', "size cap"),
+    ],
+    ids=["not-writable", "revoked", "too-large"],
+)
+def test_store_repeats_the_engines_refusal(
+    tmp_path: Path, status: str, body: str, expect_stderr: str
+) -> None:
+    completed = subprocess.run(
+        ["bash", "-c", _STORE_STUB.format(auth=AGENT_AUTH, var="X")],
+        capture_output=True,
+        text=True,
+        env={
+            "PATH": "/usr/bin:/bin",
+            "MYDEVENV2_BROKER_URL": "http://127.0.0.1:8910/",
+            "MYDEVENV2_BROKER_TOKEN": "tok",
+            "CURL_ARGS_FILE": str(tmp_path / "a"),
+            "CURL_STDIN_FILE": str(tmp_path / "b"),
+            "STORE_STATUS": status,
+            "STORE_BODY": body,
+            "STORE_VALUE": "v",
+        },
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert completed.stdout == "", "a refusal never puts anything on the value stream"
+    assert expect_stderr in completed.stderr
+
+
+@needs_engine
+def test_set_refuses_an_entry_that_is_not_writable() -> None:
+    """#598, the engine's half re-checks the `writable` flag itself: the helper
+    is pluggable and must stand alone."""
+    completed = subprocess.run(
+        ["bash", "-c", _AGENT_AUTH_STUB_PRELUDE + "printf 'x' | main set RO"],
+        capture_output=True,
+        text=True,
+        env={
+            **_AGENT_AUTH_STUB_ENV,
+            "ENGINE_AGENT_AUTH_SECRETS": "RO proj ro ondemand\n",
+        },
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert "not writable" in completed.stderr
+
+
+@needs_engine
+def test_set_upserts_a_writable_entry_and_prints_only_the_outcome(
+    tmp_path: Path,
+) -> None:
+    """`set` reads the value on stdin (never argv), upserts, and prints only
+    `created`/`updated` — nothing else on the value stream."""
+    written = tmp_path / "written"
+    # write_secret is the pluggable write half; stub it to capture stdin.
+    prelude = _AGENT_AUTH_STUB_PRELUDE + f"write_secret() {{ cat > '{written}'; }}\n"
+    env = {
+        **_AGENT_AUTH_STUB_ENV,
+        "ENGINE_AGENT_AUTH_SECRETS": "RW proj rw ondemand,writable\n",
+    }
+
+    # get_secret (stub) resolves a value, so the secret exists → updated.
+    updated = subprocess.run(
+        ["bash", "-c", prelude + "printf 'multi\\nline secret' | main set RW"],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert updated.returncode == 0, updated.stderr
+    assert updated.stdout == "updated"
+    # The value arrived on stdin, verbatim, multi-line and all.
+    assert written.read_text(encoding="utf-8") == "multi\nline secret"
+
+    # An absent prior value → created.
+    created = subprocess.run(
+        [
+            "bash",
+            "-c",
+            prelude + "get_secret() { printf ''; }\nprintf 'v' | main set RW",
+        ],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    assert created.stdout == "created"
+
+
+@needs_engine
+def test_the_writable_breadcrumb_lists_only_writable_names() -> None:
+    """#598: a session is told what it may store in AGENT_AUTH_WRITABLE, beside
+    what it may fetch (AGENT_AUTH_ONDEMAND) and what it holds (AGENT_AUTH_GRANTED).
+    `writable` is orthogonal to the read policy."""
+    script = _AGENT_AUTH_STUB_PRELUDE + "main run -- env"
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **_AGENT_AUTH_STUB_ENV,
+            "ENGINE_AGENT_AUTH_SECRETS": (
+                "LAUNCHED proj l\n"
+                "RW proj rw ondemand,writable\n"
+                "RWLAUNCH proj rl writable\n"
+            ),
+        },
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    child_env = dict(line.partition("=")[::2] for line in completed.stdout.splitlines())
+    # Both writable names, ondemand or launched, and nothing that is not writable.
+    assert child_env.get("AGENT_AUTH_WRITABLE", "").split() == ["RW", "RWLAUNCH"]
+    assert child_env.get("AGENT_AUTH_ONDEMAND", "").split() == ["RW"]
+    # An ondemand entry is not exported at launch; a launched one (writable-only,
+    # so still required) is.
+    assert "RW" not in child_env
+    assert child_env.get("RWLAUNCH") == "val-rl"
+
+
+@needs_engine
+def test_a_writable_only_entry_is_still_required_at_launch() -> None:
+    """`writable` alone does not relax the read policy: the entry is still
+    required, so an absent value fails the launch as any required one does."""
+    prelude = _AGENT_AUTH_STUB_PRELUDE + "get_secret() { printf ''; }\n"
+    completed = subprocess.run(
+        ["bash", "-c", prelude + "main run -- true"],
+        capture_output=True,
+        text=True,
+        env={
+            **_AGENT_AUTH_STUB_ENV,
+            "ENGINE_AGENT_AUTH_SECRETS": "RW proj rw writable\n",
+        },
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "missing or empty" in completed.stderr
+
+
+@needs_engine
+def test_the_writable_breadcrumb_is_published_before_the_strip() -> None:
+    """Same ordering property as the other breadcrumbs: exported before the
+    identity and manifest are unset, so the three cannot drift apart."""
+    body = _without_comments(AGENT_AUTH.read_text(encoding="utf-8"))
+    assert 'export AGENT_AUTH_WRITABLE="$AGENT_AUTH_WRITABLE_VARS"' in body
+    writable_at = body.index("export AGENT_AUTH_WRITABLE")
+    unset_at = body.index("unset INFISICAL_CLIENT_ID")
+    assert writable_at < unset_at, "the breadcrumb must be published before the strip"
+
+
+@needs_engine
+def test_an_unknown_manifest_flag_fails_the_launch() -> None:
+    """The helper mirrors the engine: an unknown flag is an error, not a silent
+    'required' (#598)."""
+    completed = subprocess.run(
+        ["bash", "-c", _AGENT_AUTH_STUB_PRELUDE + "main run -- true"],
+        capture_output=True,
+        text=True,
+        env={**_AGENT_AUTH_STUB_ENV, "ENGINE_AGENT_AUTH_SECRETS": "X proj s bogus\n"},
+        check=False,
+    )
+    assert completed.returncode != 0
+    assert "unknown flag" in completed.stderr
+
+
 @needs_engine
 def test_the_opencode_registration_does_not_freeze_an_endpoint() -> None:
     """It is written once and reused by every later session.
