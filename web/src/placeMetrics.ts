@@ -60,6 +60,18 @@ export interface PlaceMetricsController {
 const COALESCE_MS = 750;
 
 /**
+ * How long the badges wait before asking again after a read that failed, and
+ * the ceiling that wait grows to. A read that fails is most often a read that
+ * exceeded its deadline, and a deadline without backoff is a retry loop: on
+ * prod the badge aggregate took 9 s against an 8 s deadline, so every tab
+ * aborted and re-asked every 8 s while the core still ran each abandoned read
+ * to completion — until nothing else could get through (#581). The first
+ * wait matches the read deadline; each failure doubles it.
+ */
+export const RETRY_BASE_MS = 8_000;
+export const RETRY_CAP_MS = 120_000;
+
+/**
  * One shell-owned set of glanceable counts for desktop and phone navigation.
  * Each number comes from the same canonical read as its surface. Providers
  * settle independently so a core outage never turns an unknown value into 0.
@@ -84,19 +96,56 @@ export function createPlaceMetrics(): PlaceMetricsController {
   });
   let generation = 0;
   let aggregateSupported: boolean | null = null;
+  let failures = 0;
+  let retryAt = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const names = ["inbox", "projects", "board", "backlog", "drift"] as const;
+
+  /**
+   * A read did not answer. Keep what is known, labelled as such: a count from
+   * a minute ago is worth more than a dash, and a value only becomes
+   * "unavailable" when there has never been one. Then hold off — nudges
+   * during the wait are dropped, and one timed read brings the badges back
+   * without needing an event to happen first.
+   */
+  const failed = () => {
+    for (const name of names) {
+      setMetrics(name, "state", metrics[name].value === null ? "unavailable" : "stale");
+    }
+    failures += 1;
+    const wait = Math.min(RETRY_BASE_MS * 2 ** (failures - 1), RETRY_CAP_MS);
+    retryAt = Date.now() + wait;
+    if (retryTimer !== null) clearTimeout(retryTimer);
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      void refresh();
+    }, wait);
+  };
+
+  const succeeded = () => {
+    failures = 0;
+    retryAt = 0;
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
+  };
 
   const load = async (
     name: keyof PlaceMetrics,
     read: () => Promise<number>,
     currentGeneration: number,
-  ) => {
+  ): Promise<boolean> => {
     try {
       const value = await read();
-      if (generation !== currentGeneration) return;
+      if (generation !== currentGeneration) return true;
       setMetrics(name, { value, state: "ready" });
+      return true;
     } catch {
-      if (generation !== currentGeneration) return;
+      if (generation !== currentGeneration) return true;
       setMetrics(name, "state", "unavailable");
+      return false;
     }
   };
 
@@ -130,13 +179,12 @@ export function createPlaceMetrics(): PlaceMetricsController {
           value: result.drift_present === null || result.drift_present === undefined ? null : result.drift_present ? 1 : 0,
           state: result.drift_present === null || result.drift_present === undefined ? "unavailable" : "ready",
         });
+        succeeded();
         return;
       } catch (error) {
         if (!(error instanceof ApiError) || error.status !== 404) {
           if (generation !== currentGeneration) return;
-          for (const name of ["inbox", "projects", "board", "backlog", "drift"] as const) {
-            setMetrics(name, "state", "unavailable");
-          }
+          failed();
           return;
         }
         // Mixed deployments may have an older core. Detect that once, then
@@ -146,7 +194,7 @@ export function createPlaceMetrics(): PlaceMetricsController {
       }
     }
 
-    await Promise.all([
+    const settled = await Promise.all([
       load(
         "inbox",
         async () => {
@@ -177,6 +225,11 @@ export function createPlaceMetrics(): PlaceMetricsController {
         currentGeneration,
       ),
     ]);
+    if (generation !== currentGeneration) return;
+    // One provider down is that provider's badge; every provider down is the
+    // core not answering, and that is what the backoff is for.
+    if (settled.every((ok) => !ok)) failed();
+    else succeeded();
   };
 
   let inFlight: Promise<void> | null = null;
@@ -210,6 +263,11 @@ export function createPlaceMetrics(): PlaceMetricsController {
     // core — the counts would never be read while anything was happening,
     // which is precisely when they are wrong.
     if (timer !== null) return;
+    // Backing off after a failed read: the timed retry owns the next read,
+    // and an event arriving in the meantime does not shorten the wait. A
+    // core that could not answer eight seconds ago is not helped by being
+    // asked again because something else changed (#581).
+    if (Date.now() < retryAt) return;
     timer = setTimeout(() => {
       timer = null;
       void refresh();
@@ -217,6 +275,10 @@ export function createPlaceMetrics(): PlaceMetricsController {
   };
 
   const dispose = (): void => {
+    if (retryTimer !== null) {
+      clearTimeout(retryTimer);
+      retryTimer = null;
+    }
     if (timer === null) return;
     clearTimeout(timer);
     timer = null;

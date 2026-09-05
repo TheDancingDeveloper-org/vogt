@@ -123,6 +123,30 @@ describe("fetchWithRetry (#198 dropped-connection retry)", () => {
     vi.useRealTimers();
   });
 
+  it("does not retry an attempt that exceeded its deadline (#581)", async () => {
+    // A slow server and a dead socket look the same from here, and a blind
+    // retry costs a slow server a whole read per attempt: on prod one badge
+    // refresh was three 8 s reads, each abandoned by the browser and each
+    // run to completion by the core. The deadline is the caller's signal.
+    vi.useFakeTimers();
+    const fetchMock = vi.fn((_url: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason));
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const expectation = expect(fetchWithRetry(
+      "/x",
+      { method: "GET" },
+      { deadlineMs: 25, backoffMs: 0 },
+    )).rejects.toBeInstanceOf(TransportError);
+    await vi.advanceTimersByTimeAsync(25);
+    await expectation;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    vi.useRealTimers();
+  });
+
   it("aborts a retry backoff when the caller supersedes the read", async () => {
     vi.useFakeTimers();
     const controller = new AbortController();
