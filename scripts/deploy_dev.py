@@ -292,9 +292,17 @@ def env_shape(stack: dict[str, object]) -> str:
     malformed = sum(
         1 for line in lines if "=" not in line and not line.lstrip().startswith("#")
     )
+    joined = [
+        line.split("=", 1)[0].strip()
+        for line in lines
+        if "=" in line
+        and not line.lstrip().startswith("#")
+        and "\\n" in line.split("=", 1)[1]
+    ]
     return (
         f"environment: {len(lines)} non-empty lines; literal-backslash-n={literal}; "
-        f"real-newlines={real}; malformed-lines={malformed}; keys={keys}"
+        f"real-newlines={real}; malformed-lines={malformed}; "
+        f"values-with-literal-backslash-n={joined}; keys={keys}"
     )
 
 
@@ -316,20 +324,30 @@ def restore_environment(raw: str) -> str:
     pre_deploy hook — `sed -n 's/^KEY=//p' .env` — can no longer match a line
     start.
 
-    Not every literal backslash-n is a lost line break: a value such as the
-    FCM service-account JSON carries `\\n` *inside* its private key, as data.
-    So a backslash-n becomes a newline only where what follows begins an env
-    line (`KEY=`, a comment, a blank); otherwise it is value data and is kept.
-    The two lines that run added are dropped; nothing else changes. Idempotent
-    on a healthy environment.
+    Not every literal backslash-n is a lost line break: the FCM
+    service-account JSON carries `\\n` *inside* its private key, as data. A
+    backslash-n is kept as data only while the current line's value is a
+    JSON/quoted value (starts with `{`, `"` or `'`) and the next token does
+    not itself begin an env line; everywhere else — including after a plain
+    value, before an indented comment — it is a line break. The two lines
+    that run added are dropped; nothing else changes. Idempotent on a
+    healthy environment.
     """
     lines: list[str] = []
     for chunk in raw.replace("\r\n", "\n").split("\n"):
         for i, token in enumerate(chunk.split("\\n")):
-            if i == 0 or ENV_LINE_START.match(token) or not lines:
+            if i == 0 or not lines:
                 lines.append(token)
+                continue
+            prev = lines[-1]
+            match = re.match(r"\A[A-Z][A-Z0-9_]*=(.*)\Z", prev, re.S)
+            in_data = match is not None and match.group(1).lstrip().startswith(
+                ("{", '"', "'")
+            )
+            if in_data and not ENV_LINE_START.match(token):
+                lines[-1] = prev + "\\n" + token
             else:
-                lines[-1] += "\\n" + token
+                lines.append(token)
     kept = [
         line
         for line in lines
@@ -363,22 +381,53 @@ WITHHELD_INFO_FIELDS = frozenset({"remote_contents", "remote_errors"})
 
 
 def stack_log(stack: dict[str, object]) -> None:
-    """Best-effort: the containers' own recent logs (docker compose logs),
-    tail-truncated and credential-redacted. This is where the entrypoint says
-    whether tailscale joined and whether the core came up."""
-    name = stack.get("name") if isinstance(stack.get("name"), str) else STACK
-    try:
-        log = api_raw("read/GetStackLog", {"stack": name, "tail": 200})
-    except KomodoError as exc:
-        print(f"GetStackLog unavailable: {exc}")
+    """Best-effort: the engine container's own recent logs, tail-truncated and
+    credential-redacted — where the entrypoint says whether tailscale joined
+    and whether the core came up."""
+    raw_config = stack.get("config")
+    config: dict[str, object] = raw_config if isinstance(raw_config, dict) else {}
+    raw_info = stack.get("info")
+    info: dict[str, object] = raw_info if isinstance(raw_info, dict) else {}
+    raw_name = stack.get("name")
+    name = raw_name if isinstance(raw_name, str) else STACK
+    container = "vogt-dev"
+    services = info.get("deployed_services")
+    if isinstance(services, list):
+        for svc in services:
+            if not isinstance(svc, dict) or svc.get("service_name") != "engine":
+                continue
+            found = svc.get("container_name")
+            if isinstance(found, str):
+                container = found
+    attempts: list[tuple[str, dict[str, object]]] = [
+        (
+            "read/GetStackLog",
+            {"stack": name, "services": ["engine"], "tail": 200, "timestamps": False},
+        ),
+        (
+            "read/GetContainerLog",
+            {
+                "server": config.get("server_id", ""),
+                "container": container,
+                "tail": 200,
+                "timestamps": False,
+            },
+        ),
+    ]
+    for endpoint, payload in attempts:
+        try:
+            log = api_raw(endpoint, payload)
+        except KomodoError as exc:
+            print(f"{endpoint} unavailable: {exc}")
+            continue
+        print(f"--- {endpoint} for {container} (tail) ---")
+        for stream in ("stdout", "stderr"):
+            text = log.get(stream)
+            if isinstance(text, str) and text.strip():
+                print(f"[{stream}]")
+                for line in text.strip().splitlines()[-200:]:
+                    print(redact(line)[:300])
         return
-    print("--- stack log (tail) ---")
-    for stream in ("stdout", "stderr"):
-        text = log.get(stream)
-        if isinstance(text, str) and text.strip():
-            print(f"[{stream}]")
-            for line in text.strip().splitlines()[-200:]:
-                print(redact(line)[:300])
 
 
 def inspect_stack(stack: dict[str, object]) -> None:
