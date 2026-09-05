@@ -2687,6 +2687,75 @@ class HistoryListResult(Result):
     engine: str | None = Field(default=None, description=_HISTORY_ENGINE_FIELD_DESC)
 
 
+# -- runtime-pinned agent CLIs (#590) ----------------------------------------
+#
+# The engine decides which version of Claude Code or Codex a new session runs
+# (a deploy-time pin, movable while the pod is up). Vogt surfaces the report
+# and the move so an agent session can say what it is running and an operator
+# can update it from the CLI, REST or MCP without an image build.
+
+_AGENT_CLI_ENGINE_FIELD_DESC = (
+    "What the engine said, when it could not be asked. An empty tool list is "
+    "returned rather than an error, so an outage never reads as 'no agent "
+    "CLIs' (FR-E9)."
+)
+
+
+class AgentCliListParams(Params):
+    upstream: bool = Field(
+        default=False,
+        description=(
+            "Also ask npm for each package's latest version; the engine caches "
+            "the answer for an hour and leaves it out when npm does not answer."
+        ),
+    )
+
+
+class AgentCliRow(Result):
+    """One agent CLI as the engine reports it."""
+
+    tool: str
+    package: str
+    binary: str
+    env_var: str = Field(description="The variable that pins it at container start.")
+    baked_version: str | None = None
+    active_version: str | None = None
+    source: str = Field(
+        description="Which copy a new session runs: image, runtime or absent."
+    )
+    installed_versions: list[str] = []
+    upstream_latest: str | None = None
+    update_available: bool | None = None
+
+
+class AgentCliListResult(Result):
+    tools: list[AgentCliRow] = []
+    installer_present: bool = False
+    engine: str | None = Field(default=None, description=_AGENT_CLI_ENGINE_FIELD_DESC)
+
+
+class AgentCliUpdateParams(Params):
+    tool: str = Field(
+        description="A tool from agent_cli.list, e.g. claude-code or codex."
+    )
+    version: str = Field(
+        description=(
+            "An exact version (2.1.261), `image` for the copy baked into the "
+            "pod, or a dist-tag (`latest`, `stable`) the deployment has opted "
+            "into."
+        )
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class AgentCliUpdateResult(Result):
+    tool: str
+    requested: str
+    active_version: str | None = None
+    source: str | None = None
+    tools: list[AgentCliRow] = []
+
+
 class SearchOutputParams(Params):
     q: str = Field(
         description=(

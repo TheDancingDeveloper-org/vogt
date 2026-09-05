@@ -9,6 +9,7 @@ import {
   setToken,
   signOut,
   validateCredentials,
+  type AgentCliReport,
   type OperationalStatus,
   type PublicConfig,
   type PushPreferences,
@@ -190,6 +191,12 @@ const Settings: Component<Props> = (props) => {
   const [storageMsg, setStorageMsg] = createSignal<string | null>(null);
   const [opsStatus, setOpsStatus] = createSignal<OperationalStatus | null>(null);
   const [opsError, setOpsError] = createSignal<string | null>(null);
+  // Runtime-pinned agent CLIs (#590): the engine's report, and one move at a time.
+  const [agentClis, setAgentClis] = createSignal<AgentCliReport | null>(null);
+  const [agentClisError, setAgentClisError] = createSignal<string | null>(null);
+  const [agentCliBusy, setAgentCliBusy] = createSignal<string | null>(null);
+  const [agentCliMsg, setAgentCliMsg] = createSignal<string | null>(null);
+  const [agentCliDrafts, setAgentCliDrafts] = createSignal<Record<string, string>>({});
   const [historyRetentionDays, setHistoryRetentionDays] = createSignal(30);
   const [taskPromptKeepRuns, setTaskPromptKeepRuns] = createSignal(10);
   const [serverCleanupBusy, setServerCleanupBusy] = createSignal(false);
@@ -315,6 +322,39 @@ const Settings: Component<Props> = (props) => {
     }
   };
 
+  const refreshAgentClis = async () => {
+    try {
+      setAgentClisError(null);
+      setAgentClis(await api.agentClis(true));
+    } catch (e) {
+      // An engine from before #590 answers 404 here; that is "no runtime
+      // pin in this image", not a fault worth a red line.
+      setAgentClis(null);
+      setAgentClisError(e instanceof ApiError && e.status === 404 ? null : (e as Error).message);
+    }
+  };
+
+  const moveAgentCli = async (tool: string, version: string) => {
+    const wanted = version.trim();
+    if (!wanted) return;
+    setAgentCliBusy(tool);
+    setAgentCliMsg(null);
+    try {
+      const report = await api.updateAgentCli(tool, wanted);
+      setAgentClis(report);
+      const moved = report.tools.find((row) => row.tool === tool);
+      setAgentCliMsg(
+        `${tool} is now ${moved?.active_version ?? wanted} (${moved?.source ?? "runtime"}). ` +
+          "New sessions get it; running sessions keep theirs. Set the pin in the " +
+          "deployment's .env too if it should survive a restart.",
+      );
+    } catch (e) {
+      setAgentCliMsg(`${tool}: ${(e as Error).message}`);
+    } finally {
+      setAgentCliBusy(null);
+    }
+  };
+
   const refreshBrowserStorage = async () => {
     let localStorageBytes = 0;
     let localStorageEntries = 0;
@@ -376,6 +416,7 @@ const Settings: Component<Props> = (props) => {
       void refreshPushState();
     }
     void refreshOperationalState();
+    void refreshAgentClis();
     void refreshBrowserStorage();
     if (getToken()) void validateAuth();
   });
@@ -1741,6 +1782,102 @@ const Settings: Component<Props> = (props) => {
               )}
             </Show>
           </div>
+          <Show when={agentClis() || agentClisError()}>
+            <div
+              aria-label="Agent CLIs"
+              style={{ display: "flex", "flex-direction": "column", gap: "8px", "margin-top": "8px" }}
+            >
+              <div style={{ "font-size": "13px", color: "var(--fg)", "font-weight": 600 }}>
+                Agent CLIs
+              </div>
+              <div style={{ "font-size": "12px", color: "var(--fg-muted)" }}>
+                Which Claude Code and Codex new sessions run. The pin is a deployment value; a
+                move made here lasts until the next container start re-applies it.
+              </div>
+              <Show when={agentClisError()}>
+                <div style={{ "font-size": "11px", color: "var(--danger)" }}>{agentClisError()}</div>
+              </Show>
+              <Show when={agentClis()}>
+                {(report) => (
+                  <>
+                    <Show when={!report().installer_present}>
+                      <div style={{ "font-size": "11px", color: "var(--fg-muted)" }}>
+                        This image carries no runtime installer; versions change with an image build.
+                      </div>
+                    </Show>
+                    <div
+                      style={{
+                        display: "grid",
+                        "grid-template-columns": "repeat(auto-fit, minmax(240px, 1fr))",
+                        gap: "8px",
+                      }}
+                    >
+                      <For each={report().tools}>
+                        {(row) => (
+                          <div style={opsCardStyle} data-agent-cli={row.tool}>
+                            <div style={opsLabelStyle}>{row.tool}</div>
+                            <div style={opsValueStyle}>
+                              {row.active_version ?? "not installed"}
+                              <span style={{ "font-size": "11px", color: "var(--fg-muted)", "margin-left": "6px" }}>
+                                {row.source}
+                              </span>
+                            </div>
+                            <div style={opsMetaStyle}>
+                              image {row.baked_version ?? "—"}
+                              <Show when={row.upstream_latest}>
+                                {" "}• npm latest {row.upstream_latest}
+                              </Show>
+                              <Show when={row.update_available}>
+                                <span class="agent-cli-update-hint" style={{ color: "var(--accent)", "margin-left": "6px" }}>
+                                  newer version available
+                                </span>
+                              </Show>
+                            </div>
+                            <Show when={report().installer_present}>
+                              <div style={{ display: "flex", gap: "6px", "flex-wrap": "wrap", "margin-top": "6px" }}>
+                                <input
+                                  type="text"
+                                  aria-label={`${row.tool} version`}
+                                  placeholder={row.upstream_latest ?? "2.1.261"}
+                                  value={agentCliDrafts()[row.tool] ?? ""}
+                                  onInput={(e) =>
+                                    setAgentCliDrafts({ ...agentCliDrafts(), [row.tool]: e.currentTarget.value })
+                                  }
+                                  style={{ width: "9em" }}
+                                />
+                                <button
+                                  disabled={agentCliBusy() !== null}
+                                  onClick={() =>
+                                    void moveAgentCli(
+                                      row.tool,
+                                      agentCliDrafts()[row.tool] || row.upstream_latest || "",
+                                    )
+                                  }
+                                >
+                                  {agentCliBusy() === row.tool ? "Installing…" : "Update"}
+                                </button>
+                                <Show when={row.source === "runtime"}>
+                                  <button
+                                    disabled={agentCliBusy() !== null}
+                                    onClick={() => void moveAgentCli(row.tool, "image")}
+                                  >
+                                    Use image copy
+                                  </button>
+                                </Show>
+                              </div>
+                            </Show>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </>
+                )}
+              </Show>
+              <Show when={agentCliMsg()}>
+                <div role="status" style={{ "font-size": "11px", color: "var(--fg-muted)" }}>{agentCliMsg()}</div>
+              </Show>
+            </div>
+          </Show>
           </section>
         </div>
 

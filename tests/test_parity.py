@@ -403,6 +403,12 @@ SCRIPT: list[tuple[str, StepParams]] = [
     # proves the three surfaces agree on the engine's canned answers.
     ("session.history_list", {}),
     ("session.search_output", {"q": "needle"}),
+    # Runtime-pinned agent CLIs (#590), against the same stand-in engine.
+    ("agent_cli.list", {}),
+    (
+        "agent_cli.update",
+        {"tool": "claude-code", "version": "2.1.261", "reason": WHY},
+    ),
     (
         "session.log_tail",
         {"id": "01000000-0000-0000-0000-000000000001"},
@@ -807,6 +813,28 @@ def _stand_in_engine() -> EngineClient:
                     "bytes": 13,
                     "total_bytes": 13,
                     "truncated": False,
+                }
+            ).encode()
+        # Runtime-pinned agent CLIs (#590): one canned report, whichever
+        # surface asks, and the same report back after a move.
+        if path.endswith("/api/agent-clis") or "/api/agent-clis/" in path:
+            active = "2.1.261" if method == "POST" else "2.1.258"
+            return 200, json.dumps(
+                {
+                    "root": "/opt/vogt/agent-clis",
+                    "installer_present": True,
+                    "tools": [
+                        {
+                            "tool": "claude-code",
+                            "package": "@anthropic-ai/claude-code",
+                            "binary": "claude",
+                            "env_var": "VOGT_CLAUDE_CODE_VERSION",
+                            "baked_version": "2.1.258",
+                            "active_version": active,
+                            "source": "runtime" if method == "POST" else "image",
+                            "installed_versions": [],
+                        }
+                    ],
                 }
             ).encode()
         return 404, b""

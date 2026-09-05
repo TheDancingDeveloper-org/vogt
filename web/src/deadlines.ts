@@ -1,5 +1,5 @@
 /** Foreground read deadlines, by operation class. */
-export type OpClass = "auth" | "metadata" | "list" | "detail" | "long";
+export type OpClass = "auth" | "metadata" | "list" | "detail" | "long" | "install";
 
 /**
  * Generous enough for a healthy remote deployment, while preventing a
@@ -11,6 +11,9 @@ export const DEADLINE_MS: Record<OpClass, number> = {
   list: 8_000,
   detail: 8_000,
   long: 30_000,
+  /** A package download plus a smoke check (#590): minutes on a slow link,
+   *  and the engine finishes it whether or not the browser waits. */
+  install: 180_000,
 };
 
 export interface DeadlineSignal {

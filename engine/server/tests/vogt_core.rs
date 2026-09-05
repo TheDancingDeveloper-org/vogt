@@ -206,6 +206,7 @@ fn base_config() -> Config {
         vogt_import_root: None,
         vogt_engine_state_dir: None,
         vogt_core_token: None,
+        agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
     }
 }
 

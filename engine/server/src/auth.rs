@@ -54,9 +54,15 @@ pub enum TokenCapability {
     /// only a valid token; a write needs to have been granted this, because
     /// what it changes is the estate's declared state and not this pod's.
     VogtWrite,
+    /// Changing which version of an agent CLI new sessions run
+    /// (`POST /api/agent-clis/{tool}`, #590). A deploy-time decision made
+    /// from a running pod: it runs the installer, which downloads and
+    /// executes a package from npm, so it is an operator grant and not a
+    /// thing every token that can open a session may do.
+    AgentClisWrite,
 }
 
-const ALL_CAPABILITIES: [TokenCapability; 10] = [
+const ALL_CAPABILITIES: [TokenCapability; 11] = [
     TokenCapability::Sessions,
     TokenCapability::FilesystemWrite,
     TokenCapability::GitWrite,
@@ -67,6 +73,7 @@ const ALL_CAPABILITIES: [TokenCapability; 10] = [
     TokenCapability::History,
     TokenCapability::Assistant,
     TokenCapability::VogtWrite,
+    TokenCapability::AgentClisWrite,
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -446,6 +453,9 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path == "/api/git/op" && *method == Method::POST {
         return Some(TokenCapability::GitWrite);
     }
+    if path.starts_with("/api/agent-clis/") && *method == Method::POST {
+        return Some(TokenCapability::AgentClisWrite);
+    }
     if (path == "/api/gui/launch" || path == "/api/gui/kill") && *method == Method::POST {
         return Some(TokenCapability::GuiControl);
     }
@@ -579,6 +589,7 @@ mod tests {
             vogt_import_root: None,
             vogt_engine_state_dir: None,
             vogt_core_token: None,
+            agent_clis: crate::agent_clis::AgentCliPaths::default(),
         }
     }
 

@@ -977,6 +977,24 @@ export const api = {
     ),
   operationalStatus: (signal?: AbortSignal) =>
     req<OperationalStatus>("GET", "/api/status", undefined, signal, "metadata"),
+  /** The runtime-pinned agent CLIs (#590); `upstream` also asks npm's latest. */
+  agentClis: (upstream = false, signal?: AbortSignal) =>
+    req<AgentCliReport>(
+      "GET",
+      `/api/agent-clis${upstream ? "?upstream=true" : ""}`,
+      undefined,
+      signal,
+      upstream ? "long" : "metadata",
+    ),
+  /** Make `version` of `tool` the one new sessions run; the report after. */
+  updateAgentCli: (tool: string, version: string) =>
+    req<AgentCliReport>(
+      "POST",
+      `/api/agent-clis/${encodeURIComponent(tool)}`,
+      { version },
+      undefined,
+      "install",
+    ),
 
   guiLaunch: (command: string[], via_sway = true) =>
     req<GuiProc>("POST", "/api/gui/launch", { command, via_sway }),
@@ -1212,6 +1230,27 @@ export interface OperationalStatus {
     state_dir: string;
     workspace_root: string;
   };
+}
+
+/** One runtime-pinned agent CLI as the engine reports it (#590). */
+export interface AgentCliTool {
+  tool: string;
+  package: string;
+  binary: string;
+  /** The variable that pins it at container start. */
+  env_var: string;
+  baked_version: string | null;
+  active_version: string | null;
+  source: "image" | "runtime" | "absent";
+  installed_versions: string[];
+  upstream_latest?: string | null;
+  update_available?: boolean | null;
+}
+
+export interface AgentCliReport {
+  root: string;
+  installer_present: boolean;
+  tools: AgentCliTool[];
 }
 
 export interface AuthCheck {

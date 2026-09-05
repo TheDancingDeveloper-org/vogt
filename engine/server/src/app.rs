@@ -11,6 +11,7 @@ use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLay
 use crate::gui as gui_handlers;
 use crate::push_api;
 use crate::{
+    agent_clis,
     agent_tasks::{self, AgentTaskRegistry},
     api, assets,
     assistant::AssistantRuntime,
@@ -70,6 +71,10 @@ pub struct AppState {
     /// it always has. The Vogt routes then answer 503 with a named reason
     /// and every session keeps working (FR-E9).
     pub vogt_core: Option<Arc<VogtCore>>,
+    /// The runtime-pinned agent CLIs (#590): where they live and the one
+    /// installer that may move them. Always present; an image without the
+    /// installer reports `installer_present: false` and refuses the POST.
+    pub agent_clis: Arc<agent_clis::AgentCliRuntime>,
 }
 
 pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
@@ -182,6 +187,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         }
     }
 
+    let agent_clis_paths = cfg.agent_clis.clone();
     let state = Arc::new(AppState {
         config: cfg,
         auth: Arc::new(auth::AuthRuntime::default()),
@@ -195,6 +201,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         assistant_speech,
         assistant_log,
         vogt_core,
+        agent_clis: Arc::new(agent_clis::AgentCliRuntime::new(agent_clis_paths)),
     });
 
     // Background task: fan out a push notification whenever a session enters
@@ -271,6 +278,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/events", get(api::events_stream))
         .route("/api/auth/check", get(api::auth_check))
         .route("/api/status", get(api::operational_status))
+        // Runtime-pinned agent CLIs (#590): what is active, and the installer
+        // reached from a running pod. The POST needs `agent-clis-write`.
+        .route("/api/agent-clis", get(agent_clis::list))
+        .route("/api/agent-clis/{tool}", post(agent_clis::update))
         .route("/api/files", get(files::read_file).put(files::write_file))
         .route("/api/files/op", post(files::operate))
         .route("/api/files/download", get(files::download_file))
