@@ -307,6 +307,21 @@ ARG THECLAWBAY_VERSION
 # away and nothing was red.
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
 COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
+# The pin below is the *baked baseline*. A deployment may name a different
+# version per tool at runtime (`VOGT_CLAUDE_CODE_VERSION` and friends in the
+# container's environment, #590; `agent-clis.tools`, written below, is the
+# table of tool → package → binary → variable the runtime scripts read, so
+# they name no tool themselves): the entrypoint installs it into a versioned
+# prefix under this root and flips a `current` symlink, so the CLI a session
+# runs is decided at deploy time and changed with a restart rather than with
+# an image build and a release cut. PATH puts the root's `bin/` ahead of
+# /usr/local/bin — set here rather than in the pod base so it lands with this
+# image and needs no base rebuild — and the image copy under /usr/local stays
+# untouched as the fallback for an empty volume or a failed install. The
+# directory is created below, once the runtime uid is known, so a named volume
+# mounted over it inherits `sprooty` ownership.
+ENV VOGT_AGENT_CLI_ROOT=/opt/vogt/agent-clis
+ENV PATH=/opt/vogt/agent-clis/bin:$PATH
 # One `npm install -g` for whichever packages are wanted, not one per package:
 # a second global install into the same prefix reconciles the whole tree for no
 # benefit. No `sudo`: the pod base hands this stage over as root.
@@ -328,6 +343,8 @@ RUN set -eu; \
     printf 'codex=%s\nclaude-code=%s\ntheclawbay=%s\n' \
         "$codex_version" "$claude_code_version" "$theclawbay_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
+    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\ntheclawbay\ttheclawbay\ttheclawbay\tVOGT_THECLAWBAY_VERSION\n' \
+        > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         pkgs="$pkgs @openai/codex@${codex_version}"; \
@@ -365,9 +382,11 @@ RUN set -eu; \
 #
 # `DISABLE_UPDATES` rather than `DISABLE_AUTOUPDATER`: the latter stops the
 # background check but leaves `claude update` able to fork the image's version
-# anyway. Here the image *is* the statement of what runs (NFR-C3), so every
-# update path is closed and a new version arrives the way every other pinned
-# dependency does — by editing the ARG above and rebuilding.
+# anyway. Here the pin *is* the statement of what runs (NFR-C3), so every
+# vendor update path is closed and a new version arrives one of two ways: by
+# editing the manifest above and rebuilding (the baked baseline), or through
+# the runtime pin the entrypoint applies (#590) — `vogt-agent-cli-install` is
+# the only sanctioned writer of a non-image copy.
 ENV DISABLE_UPDATES=1
 
 # Cadastre is a separate product. The private estate can opt into its bridge,
@@ -414,13 +433,15 @@ RUN ln -s /opt/vogt/.venv/bin/vogt /usr/local/bin/vogt \
 # base defaults them to the same 1000/1000.
 ARG SPROOTY_UID=1000
 ARG SPROOTY_GID=1000
-RUN install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0750 /var/lib/vogt
+RUN install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0750 /var/lib/vogt \
+    && install -d -o ${SPROOTY_UID} -g ${SPROOTY_GID} -m 0755 /opt/vogt/agent-clis
 
 # Runtime scripts. Agent-specific CLIs are optional; these helpers only broker
 # credentials on demand for neutral tools already present in the image.
 COPY vogt-lifecycle.sh /usr/local/bin/vogt-lifecycle
 COPY engine/deploy/entrypoint.sh /usr/local/bin/mydevenv2-entrypoint
 COPY engine/deploy/verify-agent-clis.sh /usr/local/bin/vogt-verify-agent-clis
+COPY engine/deploy/agent-cli-install.sh /usr/local/bin/vogt-agent-cli-install
 COPY engine/deploy/agent-auth.sh /usr/local/bin/mydevenv2-agent-auth
 COPY engine/deploy/cadastre-mcp-auth.sh /usr/local/bin/mydevenv2-cadastre-mcp
 COPY engine/deploy/vogt-mcp-auth.sh /usr/local/bin/mydevenv2-vogt-mcp
@@ -431,6 +452,7 @@ RUN chmod +x \
     /usr/local/bin/vogt-lifecycle \
     /usr/local/bin/mydevenv2-entrypoint \
     /usr/local/bin/vogt-verify-agent-clis \
+    /usr/local/bin/vogt-agent-cli-install \
     /usr/local/bin/mydevenv2-agent-auth \
     /usr/local/bin/mydevenv2-cadastre-mcp \
     /usr/local/bin/mydevenv2-vogt-mcp \

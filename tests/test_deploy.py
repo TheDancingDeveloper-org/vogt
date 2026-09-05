@@ -2306,6 +2306,414 @@ def test_the_pinned_claude_proves_it_is_not_a_stub() -> None:
     )
 
 
+# ── Runtime-pinned agent CLIs (#590) ─────────────────────────────────────────
+#
+# The baked pin is the baseline; the version a pod runs is a deploy-time value
+# applied by `engine/deploy/agent-cli-install.sh` at container start. These
+# exercise the installer and the verifier against a fake `npm`, so the
+# contract — exact pins, dist-tags only by opt-in, a failed install leaves
+# `current` alone, the image copy is the offline fallback — is pinned without
+# a network or an image build.
+
+INSTALLER = REPO_ROOT / "engine" / "deploy" / "agent-cli-install.sh"
+VERIFIER = REPO_ROOT / "engine" / "deploy" / "verify-agent-clis.sh"
+ENTRYPOINT = REPO_ROOT / "engine" / "deploy" / "entrypoint.sh"
+
+_FAKE_NPM = r"""#!/usr/bin/env bash
+# A stand-in for npm: `install -g --prefix` lays down a bin that prints its
+# version, `view` answers a dist-tag, `list` reports what was installed.
+set -euo pipefail
+printf '%s\n' "$*" >> "${FAKE_NPM_LOG:?}"
+case "$1" in
+  install)
+    prefix=""; spec=""
+    shift
+    while (( $# )); do
+      case "$1" in
+        --prefix) prefix="$2"; shift ;;
+        -g|--global) ;;
+        *) spec="$1" ;;
+      esac
+      shift
+    done
+    pkg="${spec%@*}"; ver="${spec##*@}"
+    if [[ "$ver" == "${FAKE_NPM_FAIL_VERSION:-}" ]]; then
+      echo "npm ERR! 404 Not Found - $spec" >&2
+      exit 1
+    fi
+    case "$pkg" in
+      @anthropic-ai/claude-code) bin=claude ;;
+      @openai/codex) bin=codex ;;
+      theclawbay) bin=theclawbay ;;
+      *) echo "unexpected package $pkg" >&2; exit 2 ;;
+    esac
+    mkdir -p "$prefix/bin" "$prefix/lib/node_modules/$pkg"
+    printed="$ver"
+    [[ "$ver" == "${FAKE_NPM_STUB_VERSION:-}" ]] && printed="0.0.0-stub"
+    printf '#!/usr/bin/env bash\necho "%s %s"\n' "$bin" "$printed" > "$prefix/bin/$bin"
+    chmod +x "$prefix/bin/$bin"
+    printf '{"name":"%s","version":"%s"}\n' "$pkg" "$ver" \
+      > "$prefix/lib/node_modules/$pkg/package.json"
+    ;;
+  view)
+    echo "${FAKE_NPM_LATEST:-9.9.9}"
+    ;;
+  list)
+    prefix=""; pkg=""
+    for arg in "$@"; do
+      case "$arg" in
+        --prefix=*) prefix="${arg#--prefix=}" ;;
+        list|--*) ;;
+        *) pkg="$arg" ;;
+      esac
+    done
+    read_version='import json,sys; print(json.load(open(sys.argv[1]))["version"])'
+    ver="$(python3 -c "$read_version" "$prefix/lib/node_modules/$pkg/package.json" \
+      2>/dev/null || true)"
+    printf '{"dependencies":{"%s":{"version":"%s"}}}\n' "$pkg" "$ver"
+    ;;
+  *)
+    echo "fake npm: unsupported $*" >&2
+    exit 2
+    ;;
+esac
+"""
+
+
+class _AgentCliSandbox:
+    """A root, a baked manifest, a fake image bin and a fake npm, in tmp_path."""
+
+    def __init__(self, tmp_path: Path) -> None:
+        self.root = tmp_path / "agent-clis"
+        self.root.mkdir()
+        self.image_bin = tmp_path / "image" / "bin"
+        self.image_bin.mkdir(parents=True)
+        self.home_bin = tmp_path / "home" / ".npm-global" / "bin"
+        self.home_bin.mkdir(parents=True)
+        self.tools = tmp_path / "tools"
+        self.tools.mkdir()
+        (self.tools / "npm").write_text(_FAKE_NPM, encoding="utf-8")
+        (self.tools / "npm").chmod(0o755)
+        self.npm_log = tmp_path / "npm.log"
+        self.npm_log.write_text("", encoding="utf-8")
+        self.baked = tmp_path / "agent-versions.resolved"
+        self.baked.write_text("codex=0.149.1\nclaude-code=2.1.258\n", encoding="utf-8")
+        # The table engine/Dockerfile writes beside the resolved versions.
+        self.table = tmp_path / "agent-clis.tools"
+        self.table.write_text(
+            "codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\n"
+            "claude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\n",
+            encoding="utf-8",
+        )
+        # The image's own copy of claude, so PATH has something to fall back to.
+        # `npm list` against the image prefix needs the package there too.
+        image_pkg = (
+            tmp_path
+            / "image"
+            / "lib"
+            / "node_modules"
+            / "@anthropic-ai"
+            / "claude-code"
+        )
+        image_pkg.mkdir(parents=True)
+        image_pkg.joinpath("package.json").write_text(
+            '{"name":"@anthropic-ai/claude-code","version":"2.1.258"}\n',
+            encoding="utf-8",
+        )
+        (self.image_bin / "claude").write_text(
+            '#!/usr/bin/env bash\necho "claude 2.1.258 (image)"\n', encoding="utf-8"
+        )
+        (self.image_bin / "claude").chmod(0o755)
+
+    def env(self, **extra: str) -> dict[str, str]:
+        return {
+            "PATH": f"{self.tools}:{self.root / 'bin'}:{self.image_bin}:/usr/bin:/bin",
+            "HOME": str(self.home_bin.parent.parent),
+            "VOGT_AGENT_CLI_ROOT": str(self.root),
+            "VOGT_AGENT_CLI_BAKED_MANIFEST": str(self.baked),
+            "VOGT_AGENT_CLI_TOOLS": str(self.table),
+            "VOGT_AGENT_CLI_IMAGE_BIN": str(self.image_bin),
+            "VOGT_AGENT_CLI_HOME_BIN": str(self.home_bin),
+            "FAKE_NPM_LOG": str(self.npm_log),
+            **extra,
+        }
+
+    def install(
+        self, tool: str, version: str, **extra: str
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(INSTALLER), tool, version],
+            env=self.env(**extra),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def verify(self, **extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(VERIFIER)],
+            env=self.env(**extra),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def which(self, name: str) -> str:
+        return subprocess.run(
+            ["bash", "-c", f"command -v {name}"],
+            env=self.env(),
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    def manifest(self) -> dict[str, str]:
+        text = (self.root / "manifest").read_text(encoding="utf-8")
+        return dict(line.split("=", 1) for line in text.splitlines() if line)
+
+    def current(self, tool: str) -> str | None:
+        link = self.root / tool / "current"
+        return link.readlink().name if link.is_symlink() else None
+
+    def npm_calls(self) -> list[str]:
+        return [
+            line
+            for line in self.npm_log.read_text(encoding="utf-8").splitlines()
+            if line
+        ]
+
+
+@pytest.fixture
+def agent_clis(tmp_path: Path) -> _AgentCliSandbox:
+    return _AgentCliSandbox(tmp_path)
+
+
+def test_an_exact_runtime_pin_is_installed_and_put_on_path(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    result = agent_clis.install("claude-code", "2.1.261")
+    assert result.returncode == 0, result.stderr
+
+    assert agent_clis.current("claude-code") == "2.1.261"
+    assert (agent_clis.root / "claude-code" / "2.1.261" / "bin" / "claude").exists()
+    # PATH-first: a session's `claude` is the pinned one, not the image's.
+    assert agent_clis.which("claude") == str(agent_clis.root / "bin" / "claude")
+    assert agent_clis.manifest() == {"codex": "0.149.1", "claude-code": "2.1.261"}
+    # The image copy is untouched: it is the fallback, not a casualty.
+    assert "image" in (agent_clis.image_bin / "claude").read_text(encoding="utf-8")
+    # And the verifier is satisfied by the manifest, not by the image pin.
+    verified = agent_clis.verify()
+    assert verified.returncode == 0, verified.stderr
+
+
+def test_setting_the_pin_back_to_the_baked_version_needs_no_network(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    assert agent_clis.install("claude-code", "2.1.261").returncode == 0
+    calls_before = len(agent_clis.npm_calls())
+
+    result = agent_clis.install("claude-code", "2.1.258")
+    assert result.returncode == 0, result.stderr
+    assert agent_clis.current("claude-code") is None
+    assert not (agent_clis.root / "bin" / "claude").exists()
+    assert agent_clis.which("claude") == str(agent_clis.image_bin / "claude")
+    assert agent_clis.manifest()["claude-code"] == "2.1.258"
+    assert len(agent_clis.npm_calls()) == calls_before, "reverting must not touch npm"
+    # `image` is the explicit spelling of the same request, and unset reads as
+    # `image` in the entrypoint.
+    assert agent_clis.install("claude-code", "image").returncode == 0
+    assert agent_clis.verify().returncode == 0
+
+
+def test_a_version_already_on_the_volume_is_switched_to_offline(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    assert agent_clis.install("claude-code", "2.1.261").returncode == 0
+    assert agent_clis.install("claude-code", "2.1.262").returncode == 0
+    calls_before = len(agent_clis.npm_calls())
+
+    result = agent_clis.install("claude-code", "2.1.261")
+    assert result.returncode == 0, result.stderr
+    assert agent_clis.current("claude-code") == "2.1.261"
+    assert len(agent_clis.npm_calls()) == calls_before
+
+
+def test_a_failed_install_leaves_current_where_it_was(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    assert agent_clis.install("claude-code", "2.1.261").returncode == 0
+
+    result = agent_clis.install(
+        "claude-code", "2.1.999", FAKE_NPM_FAIL_VERSION="2.1.999"
+    )
+    assert result.returncode == 1
+    assert "stays on 2.1.261" in result.stderr
+    assert agent_clis.current("claude-code") == "2.1.261"
+    assert agent_clis.manifest()["claude-code"] == "2.1.261"
+    assert not (agent_clis.root / "claude-code" / "2.1.999").exists()
+    assert not list((agent_clis.root / "claude-code").glob(".tmp-*")), (
+        "no half-install left behind"
+    )
+
+
+def test_a_stub_install_fails_the_smoke_check_and_is_discarded(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    """The 2.1.237 shape: npm exits 0 and `claude --version` does not say 2.1.237."""
+    result = agent_clis.install(
+        "claude-code", "2.1.237", FAKE_NPM_STUB_VERSION="2.1.237"
+    )
+    assert result.returncode == 1
+    assert "stub" in result.stderr
+    assert agent_clis.current("claude-code") is None
+    assert not (agent_clis.root / "claude-code" / "2.1.237").exists()
+    assert agent_clis.which("claude") == str(agent_clis.image_bin / "claude")
+
+
+def test_dist_tags_are_refused_unless_opted_into(agent_clis: _AgentCliSandbox) -> None:
+    refused = agent_clis.install("claude-code", "latest")
+    assert refused.returncode == 64
+    assert "VOGT_AGENT_CLI_ALLOW_DIST_TAGS" in refused.stderr
+    assert agent_clis.npm_calls() == []
+
+    accepted = agent_clis.install(
+        "claude-code",
+        "latest",
+        VOGT_AGENT_CLI_ALLOW_DIST_TAGS="1",
+        FAKE_NPM_LATEST="2.1.270",
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert agent_clis.current("claude-code") == "2.1.270"
+
+
+def test_a_malformed_version_is_refused_before_npm_is_asked(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    for bad in ("2.1", "v2.1.261", "2.1.261; rm -rf /", "../escape", "--flag"):
+        result = agent_clis.install("claude-code", bad)
+        assert result.returncode == 64, (bad, result.stderr)
+    # A tool the image's table does not name is refused, not guessed at.
+    unknown = agent_clis.install("opencode", "1.0.0")
+    assert unknown.returncode == 64
+    assert "agent-clis.tools" in unknown.stderr
+    assert agent_clis.npm_calls() == []
+
+
+def test_old_versions_are_pruned_but_current_is_kept(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    for version in ("2.1.260", "2.1.261", "2.1.262", "2.1.263", "2.1.264"):
+        assert (
+            agent_clis.install(
+                "claude-code", version, VOGT_AGENT_CLI_KEEP="2"
+            ).returncode
+            == 0
+        )
+    kept = sorted(
+        p.name
+        for p in (agent_clis.root / "claude-code").iterdir()
+        if p.is_dir() and not p.is_symlink()
+    )
+    assert "2.1.264" in kept
+    assert len(kept) == 3, kept  # current plus two more
+
+
+def test_codex_runs_through_the_full_access_wrapper_whichever_copy_is_current(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    """Codex has no PATH-first link; the wrapper picks the runtime copy itself."""
+    wrapper = (REPO_ROOT / "engine" / "deploy" / "codex-full-access.sh").read_text(
+        encoding="utf-8"
+    )
+    assert "codex/current/bin/codex" in wrapper
+    assert "/usr/local/libexec/codex-real" in wrapper
+
+    assert agent_clis.install("codex", "0.150.0").returncode == 0
+    assert agent_clis.current("codex") == "0.150.0"
+    assert not (agent_clis.root / "bin" / "codex").exists()
+    assert agent_clis.manifest()["codex"] == "0.150.0"
+
+
+def test_a_persisted_home_copy_still_fails_the_boot_check(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    """The one door #196 closed stays closed: the runtime prefix is the only
+    sanctioned non-image copy, so `~/.npm-global/bin/claude` is still exit 78."""
+    assert agent_clis.install("claude-code", "2.1.261").returncode == 0
+    (agent_clis.home_bin / "claude").write_text(
+        "#!/usr/bin/env bash\necho stray\n", encoding="utf-8"
+    )
+    (agent_clis.home_bin / "claude").chmod(0o755)
+
+    result = agent_clis.verify()
+    assert result.returncode == 78
+    assert "persisted home copy" in result.stderr
+    assert agent_clis.verify(VOGT_AGENT_SHADOW_POLICY="warn").returncode == 0
+
+
+def test_the_verifier_reports_a_current_that_disagrees_with_the_manifest(
+    agent_clis: _AgentCliSandbox,
+) -> None:
+    assert agent_clis.install("claude-code", "2.1.261").returncode == 0
+    # Somebody edited the manifest by hand — or a second writer got in.
+    (agent_clis.root / "manifest").write_text(
+        "codex=0.149.1\nclaude-code=2.1.262\n", encoding="utf-8"
+    )
+    result = agent_clis.verify()
+    assert result.returncode == 78
+    assert "expected pin 2.1.262" in result.stderr
+
+
+@pytest.mark.skipif(
+    not ENGINE_DOCKERFILE.exists(),
+    reason="the core-alone job (NFR-Q6) deletes engine/; this reads its Dockerfile",
+)
+def test_the_runtime_agent_cli_prefix_is_wired_into_the_image() -> None:
+    """The mechanism ships only if every half is in the image (#590).
+
+    PATH must prefer the runtime prefix, the installer must be copied and
+    runnable, the directory must exist owned by the runtime user so a named
+    volume inherits that ownership, and the entrypoint must apply the pin
+    *before* the verifier judges the result.
+    """
+    text = ENGINE_DOCKERFILE.read_text("utf-8")
+    assert re.search(
+        r"^ENV\s+PATH=/opt/vogt/agent-clis/bin:\$PATH\s*$", text, re.MULTILINE
+    )
+    assert (
+        "engine/deploy/agent-cli-install.sh /usr/local/bin/vogt-agent-cli-install"
+        in text
+    )
+    assert "/usr/local/bin/vogt-agent-cli-install" in text.split("RUN chmod +x", 1)[1]
+    assert re.search(
+        r"install -d -o \$\{SPROOTY_UID\} -g \$\{SPROOTY_GID\} -m 0755 "
+        r"/opt/vogt/agent-clis",
+        text,
+    )
+    # Still closed: the installer is the only writer (#196).
+    assert re.search(r"^ENV\s+DISABLE_UPDATES=1\s*$", text, re.MULTILINE)
+
+    # The table the runtime scripts read, so they name no tool themselves
+    # (the shipped scripts must stay estate-free, #205).
+    assert "> /usr/local/share/vogt/agent-clis.tools" in text
+    for row in (
+        "codex\\t@openai/codex\\tcodex\\tVOGT_CODEX_VERSION",
+        "claude-code\\t@anthropic-ai/claude-code\\tclaude\\tVOGT_CLAUDE_CODE_VERSION",
+    ):
+        assert row in text, row
+
+    entrypoint = _without_comments(ENTRYPOINT.read_text("utf-8"))
+    install_at = entrypoint.index("vogt-agent-cli-install")
+    verify_at = entrypoint.index("/usr/local/bin/vogt-verify-agent-clis\n")
+    assert install_at < verify_at, "the pin must be applied before it is verified"
+    assert "agent-clis.tools" in entrypoint
+
+    overlay = (REPO_ROOT / "deploy" / "engine.overlay.yml").read_text("utf-8")
+    for var in ("VOGT_CLAUDE_CODE_VERSION", "VOGT_CODEX_VERSION"):
+        assert f'{var}: "${{{var}:-}}"' in overlay
+    assert "engine-agent-clis:/opt/vogt/agent-clis" in overlay
+
+
 def test_latest_moves_only_on_a_semver_tag() -> None:
     """NFR-C3: a commit build never moves `latest`; a release does.
 
