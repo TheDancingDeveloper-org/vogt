@@ -73,8 +73,29 @@
 
 set -euo pipefail
 
-# Image-managed agent CLIs are checked before any optional service starts.
-# This catches a stale persisted-home copy before it can be used by a session.
+# Runtime-pinned agent CLIs (#590). The image bakes a baseline; a deployment
+# may name a different version per tool and it is installed here, into a
+# versioned prefix under /opt/vogt/agent-clis that PATH prefers, before any
+# session can start. Unset means the image's copy. A failed install is logged
+# and the pod starts on whatever was current before — the pin is a request
+# for a version, not a reason to refuse to boot — and `vogt-verify-agent-clis`
+# below then judges the result against the manifest the installer wrote.
+# Which tools, and which variable names each, is the image's table
+# (`agent-clis.tools`: tool, package, binary, env var — `VOGT_CLAUDE_CODE_VERSION`
+# and `VOGT_CODEX_VERSION` for the two every build carries).
+agent_cli_tools="${VOGT_AGENT_CLI_TOOLS:-/usr/local/share/vogt/agent-clis.tools}"
+if [[ -x /usr/local/bin/vogt-agent-cli-install && -r "$agent_cli_tools" ]]; then
+    while IFS=$'\t' read -r tool _ _ var; do
+        [[ -n "$tool" && -n "$var" && "$tool" != \#* ]] || continue
+        if ! /usr/local/bin/vogt-agent-cli-install "$tool" "${!var:-image}"; then
+            echo "agent-clis: ${tool} runtime pin (${var}=${!var:-}) was not applied; continuing on the previous version" >&2
+        fi
+    done < "$agent_cli_tools"
+fi
+
+# Agent CLIs are checked before any optional service starts: the active copy
+# must be the one the manifest names, and a stale persisted-home copy must not
+# be able to shadow it (exit 78 if it would).
 if [[ -x /usr/local/bin/vogt-verify-agent-clis ]]; then
     /usr/local/bin/vogt-verify-agent-clis
 fi

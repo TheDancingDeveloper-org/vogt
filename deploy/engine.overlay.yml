@@ -135,6 +135,16 @@ services:
       VOGT_HOOK_DIR: /run/vogt/hooks
       VOGT_HOOKS_REQUIRED: "${VOGT_HOOKS_REQUIRED:-false}"
 
+      # ── Runtime-pinned agent CLIs (#590) ────────────────────────────────
+      # The same names the build args above read, now also read by the
+      # entrypoint at container start: set one to an exact version and that
+      # version is installed into the `engine-agent-clis` volume and put on
+      # PATH ahead of the image's copy, so a CLI update is a `.env` edit and a
+      # restart rather than an image build. Empty means the image's copy.
+      # `docs/DEPLOYMENT.md` §3 has the details, including rollback.
+      VOGT_CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
+      VOGT_CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
+
     secrets:
       - vogt_core_token
 
@@ -145,6 +155,11 @@ services:
     # No host paths appear in this file by design.
     volumes:
       - engine-home:/home/sprooty
+      # Runtime-pinned agent CLIs (#590): one directory per installed version
+      # plus the `current` symlinks. Named for the same ownership reason as
+      # the home above. Optional in the sense that the pod starts without it —
+      # the entrypoint just re-downloads the pinned version on every recreate.
+      - engine-agent-clis:/opt/vogt/agent-clis
 
     # `/readyz` is the aggregate. It reports the core's state but deliberately
     # stays ready when the core is absent — restarting the engine would not
@@ -164,6 +179,7 @@ services:
 
 volumes:
   engine-home:
+  engine-agent-clis:
 
 secrets:
   # The core token, shared by both halves (see the bootstrap block above).

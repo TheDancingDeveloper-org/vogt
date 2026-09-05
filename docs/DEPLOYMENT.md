@@ -305,11 +305,34 @@ its toolchain build args are also covered in [`ENGINE.md`](ENGINE.md) §3, which
 covers running the engine from `cargo` without a container.
 
 The overlay exposes `VOGT_INSTALL_AI_CLIENTS`. When enabled, Codex and Claude
-are installed from the Renovate-managed `engine/agent-versions.env` manifest;
-`VOGT_CODEX_VERSION` and `VOGT_CLAUDE_CODE_VERSION` are explicit build-time
-overrides. The image records the resolved versions and refuses to start when a
-persisted home volume would shadow an image-managed CLI (set
-`VOGT_AGENT_SHADOW_POLICY=warn` only for a deliberate user-local override).
+are baked into the image from the Renovate-managed `engine/agent-versions.env`
+manifest, and that baked copy is the **baseline**. The image records the
+resolved versions and refuses to start when a persisted home volume would
+shadow an agent CLI (set `VOGT_AGENT_SHADOW_POLICY=warn` only for a deliberate
+user-local override).
+
+**Runtime pin.** The version a pod actually runs is a deploy-time value
+(#590). `VOGT_CLAUDE_CODE_VERSION` and `VOGT_CODEX_VERSION` in the
+container's environment — the overlay passes them through from `.env`; an
+image that bakes further CLIs lists their variables in its
+`/usr/local/share/vogt/agent-clis.tools` — are read by the entrypoint at every
+start. An exact
+version that differs from the baked one is installed by
+`vogt-agent-cli-install` into `/opt/vogt/agent-clis/<tool>/<version>` (the
+`engine-agent-clis` named volume), smoke-checked the same way the image build
+checks its own install (`claude --version` must print the pinned version), and
+made current through a symlink that PATH prefers. Updating a CLI is therefore
+an `.env` edit and `docker compose up -d engine`; rolling back is the same
+edit in reverse, and a version already on the volume is switched to without
+network access. Unset, or set to the baked version, means the image's copy —
+also offline. A version that fails to install or fails its smoke check is
+logged and the pod starts on whatever was current before. `latest` and
+`stable` (npm dist-tags) are refused unless `VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1`,
+so floating is a deliberate opt-in rather than the default. The installer
+writes `/opt/vogt/agent-clis/manifest` (`<tool>=<version>`), and
+`vogt-verify-agent-clis` checks the active CLI against it at boot; the CLIs'
+own updaters stay disabled (`DISABLE_UPDATES=1`), so the installer is the only
+sanctioned writer.
 
 The flag defaults to `false`, so an engine you build yourself is CLI-free
 unless you say otherwise. The published `vogt-stack` image *does* carry them:

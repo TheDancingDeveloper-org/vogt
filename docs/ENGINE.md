@@ -132,7 +132,11 @@ not something to deploy on its own (`DEPLOYMENT.md` §1.1).
 Build arguments worth knowing, all off by default: `INSTALL_AI_CLIENTS=true`
 bakes in the `codex` and `claude` CLIs at the Renovate-pinned versions in
 `engine/agent-versions.env` (otherwise
-agents are user-managed inside the pod); `INSTALL_CADASTRE_MCP=true` installs
+agents are user-managed inside the pod) — that baked copy is the baseline, and
+the version a running pod uses can be moved without a rebuild by the runtime
+pin described in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION`
+and friends, applied by `engine/deploy/agent-cli-install.sh` at container
+start, #590); `INSTALL_CADASTRE_MCP=true` installs
 the optional Cadastre MCP bridge (§4); a further provider-specific agent CLI
 has its own build arg in the same block. `POD_BASE_IMAGE` selects the pod
 base; CI passes it by digest.
