@@ -5,8 +5,9 @@ MCP session. This bridge is the shim: stdio in, streamable HTTP out.
 
 Cadastre's biggest MCP duplication was the same twenty tool signatures
 hand-mirrored across its server, its remote bridge and its registry. This
-bridge **hardcodes no tools at all** — it discovers the remote's tool list at
-startup and forwards everything. There is nothing here to drift.
+bridge **hardcodes no tools at all** — it forwards everything, and learns the
+tool count from the client's own `tools/list` as it passes. There is nothing
+here to drift.
 
 Two rules from `DEPLOYMENT.md` §4.5 and DESIGN §4.1:
 
@@ -39,6 +40,11 @@ TOKEN_FILE_ENV = "VOGT_TOKEN_FILE"
 #: auth broker for everything else. See `resolve_token` for which wins.
 HTTP_TOKEN_ENV = "VOGT_HTTP_TOKEN"
 DEFAULT_TIMEOUT_SECONDS = 30
+#: The budget for the optional banner read. Discovery is a courtesy — a
+#: version-skew warning and a tool count on stderr — and a client gives the
+#: whole handshake about 30 s, so a pre-flight that may take 30 s of it is a
+#: pre-flight that turns a slow core into "server failed to connect" (#582).
+DISCOVERY_TIMEOUT_SECONDS = 3
 
 #: (url, headers, body) -> (status, body). Injected in tests; urllib live.
 Transport = Callable[[str, dict[str, str], bytes], "tuple[int, bytes]"]
@@ -73,6 +79,8 @@ class Bridge:
         self._stdout = stdout if stdout is not None else sys.stdout
         self._stderr = stderr if stderr is not None else sys.stderr
         self._transport = transport
+        self._discovered = False
+        self._announced = False
         self.report = BridgeReport(warned=[])
 
     # -- diagnostics -------------------------------------------------------
@@ -94,7 +102,9 @@ class Bridge:
         die at launch.
         """
         try:
-            status, body = self._get(f"{self._url}/connection-info")
+            status, body = self._get(
+                f"{self._url}/connection-info", timeout=DISCOVERY_TIMEOUT_SECONDS
+            )
         except OSError as exc:
             self.warn(f"could not reach {self._url}: {exc}")
             return
@@ -140,19 +150,37 @@ class Bridge:
                 f"{', '.join(str(v) for v in remote_versions)}. Continuing."
             )
 
-        listed = self._forward({"jsonrpc": "2.0", "id": 0, "method": "tools/list"})
-        if listed is not None and "result" in listed:
-            tools = listed["result"].get("tools", [])
-            self.report.remote_tools = len(tools)
-            # Not stored, not filtered, not remembered: the bridge forwards
-            # whatever the server accepts. Caching the list here is exactly
-            # how a bridge starts lying about what a server can do.
+    def _note_tools(self, message: dict[str, Any], response: dict[str, Any]) -> None:
+        """Learn the tool count from the client's own `tools/list`.
+
+        The bridge used to ask for the list itself at startup, before it had
+        read a byte of stdin. Every client sends `tools/list` right after
+        `initialize` anyway, so the pre-flight was a second copy of a call
+        that was about to happen — and, behind a slow core, the copy that
+        spent the client's connect budget (#582). Not stored, not filtered,
+        not remembered: the bridge forwards whatever the server accepts.
+        Caching the list here is exactly how a bridge starts lying about
+        what a server can do.
+        """
+        if message.get("method") != "tools/list" or "result" not in response:
+            return
+        tools = response["result"].get("tools", [])
+        self.report.remote_tools = len(tools)
+        if not self._announced:
+            self._announced = True
             self.warn(f"connected: {len(tools)} tools available")
 
     # -- the loop ----------------------------------------------------------
 
     def serve(self) -> BridgeReport:
-        self.discover()
+        """Forward stdin to the remote until stdin closes.
+
+        The client's first message — its `initialize` — is answered before
+        discovery runs. Discovery is a courtesy on stderr; the handshake is
+        the contract, and a bridge that pre-flights for 30 s before reading
+        stdin is a bridge that fails to connect precisely when the core is
+        slow, which is when an operator most needs the tools that say why.
+        """
         for line in self._stdin:
             stripped = line.strip()
             if not stripped:
@@ -171,7 +199,11 @@ class Bridge:
                 continue
             response = self._forward(message)
             if response is not None:
+                self._note_tools(message, response)
                 self._write(response)
+            if not self._discovered:
+                self._discovered = True
+                self.discover()
         return self.report
 
     def _forward(self, message: dict[str, Any]) -> dict[str, Any] | None:
@@ -216,11 +248,13 @@ class Bridge:
             headers["Authorization"] = f"Bearer {self._token}"
         return headers
 
-    def _get(self, url: str) -> tuple[int, bytes]:
+    def _get(
+        self, url: str, *, timeout: float = DEFAULT_TIMEOUT_SECONDS
+    ) -> tuple[int, bytes]:
         if self._transport is not None:
             return self._transport(url, self._headers(), b"")
         request = urllib.request.Request(url, headers=self._headers())
-        return self._open(request)
+        return self._open(request, timeout=timeout)
 
     def _post(self, url: str, message: dict[str, Any]) -> tuple[int, bytes]:
         body = json.dumps(message).encode("utf-8")
@@ -232,11 +266,14 @@ class Bridge:
         return self._open(request)
 
     def _open(  # pragma: no cover - the live path; tests inject a transport
-        self, request: urllib.request.Request
+        self,
+        request: urllib.request.Request,
+        *,
+        timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> tuple[int, bytes]:
         try:
             with urllib.request.urlopen(  # the URL comes from configuration
-                request, timeout=DEFAULT_TIMEOUT_SECONDS
+                request, timeout=timeout
             ) as response:
                 return int(response.status), bytes(response.read())
         except urllib.error.HTTPError as exc:

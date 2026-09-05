@@ -103,9 +103,59 @@ def _run(
 def test_the_tool_list_comes_from_the_remote() -> None:
     """Nothing is hardcoded: whatever the server offers is what is offered."""
     transport = _remote(tools=["backlog", "work_create", "something_new"])
-    report, _, stderr = _run(transport, {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+    report, responses, stderr = _run(
+        transport, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    )
     assert report.remote_tools == 3
     assert "3 tools available" in stderr
+    assert [t["name"] for t in responses[0]["result"]["tools"]] == [
+        "backlog",
+        "work_create",
+        "something_new",
+    ]
+
+
+def test_the_handshake_is_answered_before_discovery_starts() -> None:
+    """#582: a slow core must not turn into "server failed to connect".
+
+    The bridge pre-flighted `/connection-info` and its own `tools/list`
+    before reading stdin, each on a 30 s timeout. When the core was slow the
+    client's `initialize` sat unanswered behind them and the client gave up
+    at its own 30 s budget — the bridge and the token were fine. The first
+    thing on the wire has to be the client's first message.
+    """
+    transport = _remote(tools=["backlog"])
+    _, responses, stderr = _run(
+        transport,
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+    )
+    urls = [call["url"] for call in transport.calls]
+    assert urls[0].endswith("/mcp"), "the client's initialize goes first"
+    assert json.loads(transport.calls[0]["body"])["method"] == "initialize"
+    assert urls[1].endswith("/connection-info"), "then, once, the banner"
+    assert urls.count(f"{REMOTE}/connection-info") == 1
+    # No pre-flight tools/list of the bridge's own: the only one on the wire
+    # is the client's, and that is where the count comes from.
+    listed = [
+        json.loads(c["body"])
+        for c in transport.calls
+        if c["url"].endswith("/mcp") and b"tools/list" in c["body"]
+    ]
+    assert [m["id"] for m in listed] == [2]
+    assert responses[0]["id"] == 1
+    assert "1 tools available" in stderr
+
+
+def test_discovery_gets_a_short_budget_not_the_clients_whole_one() -> None:
+    from vogt.adapters.mcp.bridge import (
+        DEFAULT_TIMEOUT_SECONDS,
+        DISCOVERY_TIMEOUT_SECONDS,
+    )
+
+    assert DISCOVERY_TIMEOUT_SECONDS <= 5
+    assert DISCOVERY_TIMEOUT_SECONDS < DEFAULT_TIMEOUT_SECONDS
 
 
 def test_messages_are_forwarded_verbatim() -> None:
@@ -114,7 +164,8 @@ def test_messages_are_forwarded_verbatim() -> None:
         transport,
         {"jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": {"name": "x"}},
     )
-    forwarded = json.loads(transport.calls[-1]["body"].decode("utf-8"))
+    posted = [c for c in transport.calls if c["url"].endswith("/mcp")]
+    forwarded = json.loads(posted[-1]["body"].decode("utf-8"))
     assert forwarded["id"] == 7
     assert forwarded["method"] == "tools/call"
     assert responses[-1]["id"] == 7
