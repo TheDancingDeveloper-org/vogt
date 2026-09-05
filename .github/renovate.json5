@@ -13,6 +13,13 @@
 
   timezone: "Etc/UTC",
   schedule: ["before 5am on monday"],
+
+  // Work lands on `dev` and is promoted to `main` by fast-forward (see
+  // docs/DEPLOYMENT.md on releases), so a dependency PR merged into `main`
+  // directly would put `main` ahead of `dev` and break the next promotion.
+  // Renovate therefore targets `dev` — which matters most for the automerged
+  // agent CLI pins below, where nobody is watching the merge happen.
+  baseBranches: ["dev"],
   labels: ["dependencies"],
   semanticCommits: "disabled",
 
@@ -88,6 +95,31 @@
     {
       matchManagers: ["github-actions"],
       groupName: "github actions",
+    },
+    {
+      // #590 option 2: the agent CLI pins move faster than everything else.
+      // Upstream ships roughly one Claude Code release per working day, and
+      // a pin held to the Monday window was routinely three to five releases
+      // behind by the time it merged. These pins get their own PR, on every
+      // run, and automerge once CI is green: `engine/Dockerfile` proves the
+      // install with `claude --version` (the 2.1.237 stub that motivated the
+      // pin in the first place fails that check), so a green `ci` is the
+      // human gate in executable form rather than a reviewer eyeballing a
+      // version number. The build-time pin is still only the *baked* baseline
+      // — `docs/DEPLOYMENT.md` §3 describes the runtime pin that updates a
+      // running pod without a rebuild — but a baseline that stops rotting is
+      // worth having regardless.
+      matchManagers: ["custom.regex"],
+      matchFileNames: ["engine/agent-versions.env"],
+      groupName: "agent CLI pins",
+      schedule: ["at any time"],
+      prPriority: 10,
+      automerge: true,
+      automergeType: "pr",
+      // Rebase-only branch protection with a strict up-to-date rule: a PR
+      // that falls behind `dev` cannot merge until it is rebased, so let
+      // Renovate keep it current rather than waiting for a human to.
+      rebaseWhen: "behind-base-branch",
     },
     {
       // The dev toolchain moves together and is not shipped to anyone.
