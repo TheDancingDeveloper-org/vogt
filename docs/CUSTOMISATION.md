@@ -345,7 +345,7 @@ pattern: a Dockerfile a few lines long that starts `FROM` the published
 `vogt-stack` digest and adds what your sessions need. Keep it in your fork,
 build it in your CI, deploy it by digest.
 
-The core image (`ghcr.io/thedancingdeveloper-org/vogt:0.5.3`) is also built
+The core image (`ghcr.io/thedancingdeveloper-org/vogt:0.5.4`) is also built
 to be a base, and the contributor stack extends it the same way — `USER
 root`, install, `USER 1000:0`, keeping `ENTRYPOINT ["vogt"]` and the
 `root:0`-owned data directory. It is a build input to the stack image rather

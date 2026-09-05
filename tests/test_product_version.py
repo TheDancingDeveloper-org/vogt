@@ -16,7 +16,7 @@ pytestmark = pytest.mark.skipif(
 
 def test_product_version_contract_is_in_sync() -> None:
     result = subprocess.run(
-        [sys.executable, "scripts/check_product_version.py", "0.5.3"],
+        [sys.executable, "scripts/check_product_version.py", "0.5.4"],
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -28,6 +28,6 @@ def test_product_version_contract_is_in_sync() -> None:
 def test_android_version_name_is_derived_from_the_canonical_mobile_manifest() -> None:
     package = (ROOT / "mobile/package.json").read_text(encoding="utf-8")
     gradle = (ROOT / "mobile/android/app/build.gradle").read_text(encoding="utf-8")
-    assert '"version": "0.5.3"' in package
+    assert '"version": "0.5.4"' in package
     assert "new JsonSlurper().parse(file('../../package.json'))" in gradle
     assert "versionName androidVersionName" in gradle

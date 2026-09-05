@@ -29,7 +29,7 @@ services:
     # digest — publishing an image and moving a deployment are separate acts
     # (NFR-D10), and a digest is the only form of "which image is this" a
     # rebuild cannot silently change.
-    image: ${VOGT_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt:0.5.3}
+    image: ${VOGT_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt:0.5.4}
     restart: unless-stopped
 
     # The image runs as any uid so long as the gid is 0: `/var/lib/vogt` is
