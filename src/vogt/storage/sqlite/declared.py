@@ -64,6 +64,10 @@ from vogt.storage.sqlite.migrator import (
     table_exists as _sqlite_table_exists,
 )
 
+#: How many keys one `IN (...)` lookup carries; below SQLite's default
+#: bound-parameter ceiling with room for the rest of the statement.
+_IN_CLAUSE_SLICE = 500
+
 MIGRATIONS_DIR = Path(__file__).parent / "migrations" / "declared"
 
 META_INSTANCE_ID = "instance_id"
@@ -895,6 +899,25 @@ class SqliteReadView:
             (entry_key,),
         ).fetchone()
         return None if row is None else _row_to_inbox_triage(row)
+
+    def inbox_triage_by_keys(self, entry_keys: list[str]) -> dict[str, InboxTriage]:
+        found: dict[str, InboxTriage] = {}
+        # SQLite caps bound parameters per statement (999 on older builds), so
+        # a large page goes in slices rather than one statement that fails
+        # only once the estate is big enough to matter.
+        for start in range(0, len(entry_keys), _IN_CLAUSE_SLICE):
+            keys = entry_keys[start : start + _IN_CLAUSE_SLICE]
+            placeholders = ", ".join("?" for _ in keys)
+            rows = self._conn.execute(
+                "SELECT t.*, a.identity_ref AS actor_identity_ref "
+                "FROM inbox_triage t JOIN actors a ON a.id = t.actor_id "
+                f"WHERE t.entry_key IN ({placeholders})",
+                tuple(keys),
+            ).fetchall()
+            for row in rows:
+                triage = _row_to_inbox_triage(row)
+                found[triage.entry_key] = triage
+        return found
 
     def list_inbox_triage(self, *, limit: int = 10_000) -> list[InboxTriage]:
         rows = self._conn.execute(

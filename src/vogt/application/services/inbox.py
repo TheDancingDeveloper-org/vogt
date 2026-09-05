@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
@@ -282,17 +282,30 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
             )
         )
 
+    # One roll-up per project, computed from the checks already in hand. The
+    # previous shape re-read every latest check of the project and rolled it
+    # up again *for each failing check*, so the projection cost
+    # Σ failing × checks-per-project — 730 queries and 732k observation
+    # objects for one page on a two-week-old estate, and the read crossed the
+    # PWA's deadline, which turned every badge refresh into a retry (#580).
+    checks_by_project: dict[str, list[Observation]] = {}
+    for observation in checks_all:
+        if observation.project_id is not None:
+            checks_by_project.setdefault(observation.project_id, []).append(observation)
+    newest_revision_ids: dict[str, frozenset[str]] = {}
+
     for observation in checks_all:
         if _text(observation.payload.get("conclusion")) in (None, "success", "skipped"):
             continue
         project = projects.get(observation.project_id or "")
         if project is None:
             continue
-        checks = ctx.observed.latest(
-            kinds=(KIND_CHECK,), project_id=project.id, limit=MAX_SCAN
-        )
-        rolled = roll_up(checks)
-        if rolled is None or observation not in rolled.checks:
+        if project.id not in newest_revision_ids:
+            rolled = roll_up(checks_by_project.get(project.id, []))
+            newest_revision_ids[project.id] = frozenset(
+                check.id for check in (rolled.checks if rolled is not None else ())
+            )
+        if observation.id not in newest_revision_ids[project.id]:
             continue
         check = _text(observation.payload.get("check")) or "CI check"
         revision = _text(observation.payload.get("revision")) or "unknown revision"
@@ -332,7 +345,8 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                 )
         except EngineUnavailable:
             pass
-    return [_apply_triage(ctx, view, entry) for entry in entries]
+    triage = view.inbox_triage_by_keys([entry.entry_key for entry in entries])
+    return [_apply_triage(ctx, triage, entry) for entry in entries]
 
 
 def _observation_entry(
@@ -447,8 +461,10 @@ def _session_entry(
     )
 
 
-def _apply_triage(ctx: AppContext, view: ReadView, entry: InboxEntry) -> InboxEntry:
-    triage = view.inbox_triage_by_key(entry.entry_key)
+def _apply_triage(
+    ctx: AppContext, decisions: Mapping[str, InboxTriage], entry: InboxEntry
+) -> InboxEntry:
+    triage = decisions.get(entry.entry_key)
     if triage is None or (
         triage.state == "snoozed"
         and triage.snooze_until is not None

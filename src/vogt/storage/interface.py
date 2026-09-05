@@ -371,6 +371,15 @@ class ReadView(Protocol):
 
     def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None: ...
 
+    def inbox_triage_by_keys(self, entry_keys: list[str]) -> dict[str, InboxTriage]:
+        """Every triage decision among `entry_keys`, keyed by entry key.
+
+        One query for a page of entries rather than one per entry: the Inbox
+        projection applies triage to every entry it collects, and a lookup
+        per entry made the projection's cost scale with the estate (#580).
+        """
+        ...
+
     def list_inbox_triage(self, *, limit: int = 10_000) -> list[InboxTriage]: ...
 
     # -- sessions ----------------------------------------------------------
