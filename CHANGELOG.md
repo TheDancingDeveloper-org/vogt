@@ -14,6 +14,14 @@ git log rather than being reconstructed here.
 
 ### Fixed
 
+- **The phone no longer sits on "Disconnected" after a warm open.** The
+  session store only counted a server *event* as proof of connection, so a
+  resumed app whose first session-list refresh met a still-waking network
+  showed "Disconnected" until some session changed state — minutes, with a
+  long-running command. The stream opening and the engine's 15-second
+  keep-alive comments now count as liveness, a failed list is retried once
+  the stream is up, and a stream silent for 45 seconds is presumed dead and
+  reopened at once (WI-77).
 - **The phone terminal renders agent-CLI symbols instead of tofu.** Claude
   Code's "⏵⏵ bypass permissions" footer drew two empty boxes on Android
   because the system monospace font has no U+23F5. xterm now falls back, last
