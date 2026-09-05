@@ -16,11 +16,20 @@ const encoder = new TextEncoder();
 function scriptedTransport() {
   const streams: Controller[] = [];
   let sessionsStatus = 200;
+  let sessionsHang = false;
   const requests: string[] = [];
   const transport: RuntimeTransport = {
-    request: async (input) => {
+    request: async (input, init) => {
       const url = String(input instanceof Request ? input.url : input);
       requests.push(url);
+      if (url.includes("/api/sessions") && sessionsHang) {
+        // A transport that never settles and only honours abort — the shape
+        // of a tunnel that swallowed the request.
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")));
+        });
+      }
       if (url.includes("/api/events")) {
         const body = new ReadableStream<Uint8Array>({
           start(controller) { streams.push(controller); },
@@ -40,6 +49,8 @@ function scriptedTransport() {
     transport,
     requests,
     setSessionsStatus: (status: number) => { sessionsStatus = status; },
+    setSessionsHang: (hang: boolean) => { sessionsHang = hang; },
+    sessionRequests: () => requests.filter((url) => url.includes("/api/sessions")).length,
     feed: (text: string) => streams.at(-1)!.enqueue(encoder.encode(text)),
     streamCount: () => streams.length,
   };
@@ -128,6 +139,58 @@ describe("event stream liveness", () => {
     await settle();
     expect(script.streamCount()).toBe(2);
     expect(store.isConnected()).toBe(true);
+  });
+
+  // #591: the Places rail sat on "…" with an empty Running list and no error.
+  // A list aborted by a newer wake reports neither success nor failure, and
+  // the stream-open retry only asked "did the last list fail?".
+  it("lands a session list whose boot read was aborted by a newer wake", async () => {
+    const boot = new AbortController();
+    const pending = store.refreshSessions(boot.signal);
+    boot.abort();
+    await pending;
+    expect(store.sessionsStore.ready).toBe(false);
+    expect(store.sessionsError()).toBeNull();
+
+    store.startEventStream();
+    await settle();
+    expect(store.sessionsStore.ready).toBe(true);
+    expect(store.sessionsError()).toBeNull();
+  });
+
+  it("does not re-read a list that already landed when the stream opens", async () => {
+    await store.refreshSessions();
+    const before = script.sessionRequests();
+    store.startEventStream();
+    await settle();
+    expect(script.sessionRequests()).toBe(before);
+  });
+
+  it("states a list that never landed as a fault after a while, and asks again", async () => {
+    // The transport's own deadline already turns a *hung* read into an error;
+    // this is the read nothing is waiting on any more — aborted by a newer
+    // wake, no stream open to trigger the retry — which used to leave "…"
+    // in the rail for good.
+    const boot = new AbortController();
+    const pending = store.refreshSessions(boot.signal);
+    boot.abort();
+    await pending;
+    const before = script.sessionRequests();
+
+    script.setSessionsHang(true);
+    await vi.advanceTimersByTimeAsync(store.SESSION_LIST_STALL_MS - 1);
+    expect(store.sessionsError()).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    // Stated, with the reason, rather than an ellipsis forever…
+    expect(store.sessionsError()).toMatch(/has not answered/);
+    expect(store.sessionsStore.ready).toBe(false);
+    // …and a fresh list is asked for.
+    expect(script.sessionRequests()).toBe(before + 1);
+
+    script.setSessionsHang(false);
+    await store.refreshSessions();
+    expect(store.sessionsStore.ready).toBe(true);
+    expect(store.sessionsError()).toBeNull();
   });
 
   it("does not presume death while frames keep coming", async () => {

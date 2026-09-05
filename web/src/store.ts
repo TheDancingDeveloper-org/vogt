@@ -28,10 +28,58 @@ export const sessionsStore = store;
 export const sessionsError = error;
 export const isConnected = connected;
 
+/**
+ * How long the rail may sit on "…" with no answer of any kind before it says
+ * so. The list itself gives up at the PWA's request deadline, so this is the
+ * case that deadline cannot see: every list that was started got *aborted*
+ * by a newer wake, or hung in a transport that never settled, and nothing
+ * ever reported success or failure (#591). Past this, the badge reads
+ * `unavailable` with a reason instead of an ellipsis, and a fresh list is
+ * asked for.
+ */
+export const SESSION_LIST_STALL_MS = 15_000;
+let stallTimer: ReturnType<typeof setTimeout> | null = null;
+
+function disarmStallTimer(): void {
+  if (stallTimer !== null) {
+    clearTimeout(stallTimer);
+    stallTimer = null;
+  }
+}
+
+/** Arm once per "not yet ready" episode; a definitive answer disarms it. */
+function armStallTimer(): void {
+  if (stallTimer !== null || store.ready) return;
+  stallTimer = setTimeout(() => {
+    stallTimer = null;
+    if (store.ready) return;
+    setError(
+      `The session list has not answered in ${Math.round(SESSION_LIST_STALL_MS / 1000)}s.`,
+    );
+    void refreshSessions();
+  }, SESSION_LIST_STALL_MS);
+}
+
+/**
+ * Whether the rail still needs a list: nothing has ever landed, or the last
+ * attempt failed. Both are retried the moment the same origin answers on the
+ * stream — the first because an aborted read (superseded by a newer wake, see
+ * `wakeCoordinator.reconcile`) reports neither success nor failure and would
+ * otherwise leave the badge on "…" for good (#591); the second because a list
+ * that failed while the network was still waking is now likely to succeed.
+ */
+function sessionListPending(): boolean {
+  return !store.ready || error() !== null;
+}
+
 export async function refreshSessions(signal?: AbortSignal): Promise<void> {
+  armStallTimer();
   try {
     const list = await api.listSessions(signal);
+    // Superseded by a newer read, not answered: say nothing, and leave the
+    // stall timer armed so *some* list still has to land.
     if (signal?.aborted) return;
+    disarmStallTimer();
     setStore(
       produce((s) => {
         s.sessions = {};
@@ -48,6 +96,7 @@ export async function refreshSessions(signal?: AbortSignal): Promise<void> {
     setStore("lastAnswerAt", new Date().toISOString());
   } catch (e) {
     if (signal?.aborted) return;
+    disarmStallTimer();
     setError((e as Error).message);
     // A list that failed is reported as such; whether the front door is
     // reachable is the stream's to say while it is open (WI-77).
@@ -303,9 +352,10 @@ export function startEventStream(): void {
     {
       onOpen: () => {
         noteStreamAlive();
-        // The first load is the boot wake's; this retries only a list that
-        // failed, now that the same origin has just answered.
-        if (error() !== null) void refreshSessions();
+        // The first load is the boot wake's; this retries a list that failed
+        // — or one that never landed at all — now that the same origin has
+        // just answered (#591).
+        if (sessionListPending()) void refreshSessions();
       },
       onHeartbeat: noteStreamAlive,
     },
@@ -316,6 +366,7 @@ export function stopEventStream(): void {
   streamStarted = false;
   streamOpen = false;
   disarmStaleTimer();
+  disarmStallTimer();
   unsubscribeEvents?.();
   unsubscribeEvents = null;
   if (reconnectTimer !== null) {
