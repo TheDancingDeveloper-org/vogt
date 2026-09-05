@@ -137,6 +137,19 @@ services:
       VOGT_HOOK_DIR: /run/vogt/hooks
       VOGT_HOOKS_REQUIRED: "${VOGT_HOOKS_REQUIRED:-false}"
 
+      # ── Agent CLIs: update without a rebuild (#590) ────────────────────────
+      # The image bakes Claude Code and Codex at the versions in
+      # engine/agent-versions.env. Set one of these to an *exact* version and
+      # the entrypoint installs it at start into the `engine-agent-clis` volume
+      # and puts it on PATH ahead of the image's copy — so updating a CLI is a
+      # `deploy/.env` edit and `docker compose up -d engine`, never an image
+      # rebuild or a release. Empty means the image's baked copy. `latest` and
+      # `stable` (npm dist-tags) are refused unless ALLOW_DIST_TAGS=1, so a
+      # floating pin is a deliberate opt-in. See DEPLOYMENT.md §3.
+      VOGT_CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
+      VOGT_CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
+      VOGT_AGENT_CLI_ALLOW_DIST_TAGS: "${VOGT_AGENT_CLI_ALLOW_DIST_TAGS:-}"
+
     # Named volumes, not host binds. Docker seeds a fresh named volume from the
     # image, so the `sprooty` ownership the image built is preserved — a host
     # directory would arrive root-owned and break the pod. No host paths appear
@@ -148,6 +161,11 @@ services:
       # The core's SQLite databases and backups. Separate from the home volume
       # so the data outlives a pod you decide to reset.
       - vogt-data:/var/lib/vogt
+      # Runtime-pinned agent CLIs (#590): one directory per installed version
+      # plus the `current` symlinks. Named for the same ownership reason as the
+      # home above. Optional — the pod starts without it and just re-downloads
+      # the pinned version on every recreate.
+      - engine-agent-clis:/opt/vogt/agent-clis
 
     # `/readyz` is the aggregate. It reports the core's state but deliberately
     # stays ready when the core is absent — restarting the container would not
@@ -218,6 +236,7 @@ services:
 volumes:
   engine-home:
   vogt-data:
+  engine-agent-clis:
 
 secrets:
   # The core token, shared by both halves inside the container. Create it
