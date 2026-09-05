@@ -1,4 +1,5 @@
 import { Component, Show, For, createEffect, createSignal, onMount } from "solid-js";
+import ViewportReadout from "./ViewportReadout";
 import {
   api,
   ApiError,
@@ -1624,6 +1625,7 @@ const Settings: Component<Props> = (props) => {
               <button onClick={() => void refreshOperationalState()}>Refresh runtime</button>
               <button onClick={() => void refreshBrowserStorage()}>Refresh storage</button>
             </div>
+            <ViewportReadout />
             <Show when={opsError()}>
               <div style={{ "font-size": "11px", color: "var(--danger)" }}>{opsError()}</div>
             </Show>

@@ -1796,6 +1796,34 @@ test("Phone shell keeps labelled primary navigation and Go to reachability", asy
   await expect(page).toHaveURL(/#\/audit$/);
 });
 
+// WI-79: the count badge pokes above its icon slot; the slot's own overflow
+// must stay visible or the bar cuts every badge in half at its top edge.
+// The first fix for this lost on selector specificity, so this pins the
+// computed value rather than the rule.
+test("Phone bottom bar badges are not clipped by their icon slot", async ({ page }) => {
+  test.skip(test.info().project.name !== "phone", "The bottom bar is the phone's");
+  await installFixtures(page);
+  await page.goto("/#/sessions");
+  const nav = page.getByRole("navigation", { name: "Primary navigation" });
+  await expect(nav).toBeVisible();
+  const overflows = await nav.locator(".phone-nav-icon-slot").evaluateAll((slots) =>
+    slots.map((slot) => getComputedStyle(slot).overflow),
+  );
+  expect(overflows.length).toBeGreaterThanOrEqual(5);
+  expect(new Set(overflows)).toEqual(new Set(["visible"]));
+  // And a badge that is drawn is drawn whole: its box lies inside its link's.
+  const boxes = await nav.locator("a").first().evaluate((link) => {
+    const badge = link.querySelector(".place-count");
+    const l = link.getBoundingClientRect();
+    const b = badge?.getBoundingClientRect();
+    return b ? { linkTop: l.top, badgeTop: b.top, badgeBottom: b.bottom, linkBottom: l.bottom } : null;
+  });
+  if (boxes) {
+    expect(boxes.badgeTop).toBeGreaterThanOrEqual(boxes.linkTop - 0.5);
+    expect(boxes.badgeBottom).toBeLessThanOrEqual(boxes.linkBottom + 0.5);
+  }
+});
+
 test("Phone More sheet reaches every remaining place plus Settings and Sign out", async ({ page }) => {
   test.skip(test.info().project.name !== "phone", "The More sheet is the phone bottom bar's fifth slot");
   await installFixtures(page, { assistant_enabled: true, gui_stream_available: true });
