@@ -284,7 +284,11 @@ def env_shape(stack: dict[str, object]) -> str:
     literal, real = "\\n" in raw, "\n" in raw
     text = raw.replace("\\n", "\n") if literal and not real else raw
     lines = [line for line in text.splitlines() if line.strip()]
-    keys = [line.split("=", 1)[0].strip() for line in lines if "=" in line]
+    keys = [
+        line.split("=", 1)[0].strip()
+        for line in lines
+        if "=" in line and not line.lstrip().startswith("#")
+    ]
     malformed = sum(
         1 for line in lines if "=" not in line and not line.lstrip().startswith("#")
     )
@@ -295,24 +299,40 @@ def env_shape(stack: dict[str, object]) -> str:
 
 
 REPAIR_DROP_KEYS = ("VOGT_CODEX_VERSION", "VOGT_CLAUDE_CODE_VERSION")
+# What begins a new .env line: a key assignment, a comment, or a blank. Keys
+# here are UPPER_SNAKE (VOGT_*, MYDEVENV2_*, ...); base64/PEM material inside
+# a JSON value is mixed-case and never matches, so a literal \n followed by it
+# is value data and stays literal.
+ENV_LINE_START = re.compile(r"\A(#.*|\s*|[A-Z][A-Z0-9_]*=.*)\Z")
 
 
 def restore_environment(raw: str) -> str:
-    """Undo the 2026-09-05 environment corruption, losslessly.
+    """Undo the 2026-09-05 environment corruption, losslessly and structurally.
 
     A prior deploy wrote `config.environment` back in the escaped form
     `read/GetStack` returns it in, so the whole original `.env` became one
     line joined by literal backslash-n, followed by two real-newline lines
     it had appended. Komodo writes that blob verbatim and the stack's
     pre_deploy hook — `sed -n 's/^KEY=//p' .env` — can no longer match a line
-    start. The original content is intact inside the blob: turn every
-    literal backslash-n back into a newline, drop only the two lines that
-    run added, and end with exactly one newline. Idempotent on a healthy env.
+    start.
+
+    Not every literal backslash-n is a lost line break: a value such as the
+    FCM service-account JSON carries `\\n` *inside* its private key, as data.
+    So a backslash-n becomes a newline only where what follows begins an env
+    line (`KEY=`, a comment, a blank); otherwise it is value data and is kept.
+    The two lines that run added are dropped; nothing else changes. Idempotent
+    on a healthy environment.
     """
-    text = raw.replace("\\n", "\n")
+    lines: list[str] = []
+    for chunk in raw.replace("\r\n", "\n").split("\n"):
+        for i, token in enumerate(chunk.split("\\n")):
+            if i == 0 or ENV_LINE_START.match(token) or not lines:
+                lines.append(token)
+            else:
+                lines[-1] += "\\n" + token
     kept = [
         line
-        for line in text.splitlines()
+        for line in lines
         if not any(line.startswith(f"{key}=") for key in REPAIR_DROP_KEYS)
     ]
     return "\n".join(kept).rstrip("\n") + "\n"
