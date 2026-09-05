@@ -905,7 +905,10 @@ fn fcm_service_account(
             unsafe { std::env::remove_var(name) };
         }
         tracing::warn!(
-            "ENGINE_FCM_SERVICE_ACCOUNT_JSON carries a private key in the process              environment; it has been removed from this process's environment so              sessions do not inherit it, but prefer ENGINE_FCM_SERVICE_ACCOUNT_FILE              (a path to the document) and rotate the key (#583)"
+            "ENGINE_FCM_SERVICE_ACCOUNT_JSON carries a private key in the process \
+             environment; it has been removed from this process's environment so \
+             sessions do not inherit it, but prefer ENGINE_FCM_SERVICE_ACCOUNT_FILE \
+             (a path to the document) and rotate the key (#583)"
         );
     }
     Ok(inline)
