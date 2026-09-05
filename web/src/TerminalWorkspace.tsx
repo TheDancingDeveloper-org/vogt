@@ -1,7 +1,9 @@
 import {
   Component,
   For,
+  Match,
   Show,
+  Switch,
   createEffect,
   createMemo,
   createSignal,
@@ -36,8 +38,10 @@ import {
   pruneTerminalLayout,
   removePane,
   retargetPane,
+  type PaneNode,
   type SavedTerminalLayout,
   type SplitDirection,
+  type SplitNode,
   type TerminalLayoutNode,
 } from "./terminalLayout";
 import {
@@ -188,108 +192,134 @@ interface LayoutNodeProps {
   onPaneBell: (sessionId: string) => void;
 }
 
-const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
-  <Show when={props.node} keyed>
-    {(node) =>
-      node.type === "pane" ? (
-        (() => {
-          const paneId = node.id;
-          const paneSession = () =>
-            props.sessions.find((s) => s.id === node.sessionId);
-        return (
-          <div
-            class={`terminal-pane ${
-              props.activePaneId === paneId ? "active" : ""
-            }`}
-            onPointerDown={() => props.onFocusPane(paneId)}
-            onDragOver={(event) => props.onPaneDragOver(paneId, event)}
-            onDragLeave={(event) => props.onPaneDragLeave(paneId, event)}
-            onDrop={(event) => props.onPaneDrop(paneId, event)}
+/**
+ * One pane in the split tree.
+ *
+ * The terminal is keyed on its session id, so re-targeting this pane (the
+ * header dropdown, or the command palette) tears the old attach down and mounts
+ * a fresh one for the new session. Panes that did not change keep their object
+ * identity through the layout update, so the `<For>` in `LayoutNodeView` leaves
+ * their DOM, xterm instance and socket in place — only the retargeted pane
+ * reloads (#600).
+ */
+const PaneView: Component<Omit<LayoutNodeProps, "node"> & { node: PaneNode }> = (
+  props,
+) => {
+  const paneId = () => props.node.id;
+  const paneSession = () =>
+    props.sessions.find((s) => s.id === props.node.sessionId);
+  let selectRef: HTMLSelectElement | undefined;
+  // Keep the dropdown showing the session this pane actually holds. Setting
+  // `value` on a <select> can be applied before its <For> options exist, which
+  // drops the browser back to the first option and makes the control lie about
+  // the pane — re-assert it once the options are rendered and whenever the
+  // pane's session or the session list changes (#600 symptom 1).
+  createEffect(() => {
+    const want = props.node.sessionId;
+    props.sessions.length;
+    if (selectRef && selectRef.value !== want) selectRef.value = want;
+  });
+  return (
+    <div
+      class={`terminal-pane ${
+        props.activePaneId === paneId() ? "active" : ""
+      }`}
+      onPointerDown={() => props.onFocusPane(paneId())}
+      onDragOver={(event) => props.onPaneDragOver(paneId(), event)}
+      onDragLeave={(event) => props.onPaneDragLeave(paneId(), event)}
+      onDrop={(event) => props.onPaneDrop(paneId(), event)}
+    >
+      <Show when={props.dropTarget?.paneId === paneId()}>
+        <div
+          class={`terminal-pane-dropzone ${props.dropTarget?.zone ?? ""}`}
+          aria-hidden="true"
+        />
+      </Show>
+      <Show when={props.withHeaders}>
+        <div class="terminal-pane-header">
+          <span class={`activity-dot ${activityClass(paneSession())}`} />
+          <label class="visually-hidden" for={`pane-session-${paneId()}`}>
+            Session shown in this pane
+          </label>
+          <select
+            ref={selectRef}
+            id={`pane-session-${paneId()}`}
+            class="terminal-pane-session"
+            aria-label="Session shown in this pane"
+            title="Show a different session in this pane"
+            value={props.node.sessionId}
+            onPointerDown={(event) => event.stopPropagation()}
+            onChange={(event) => {
+              const next = event.currentTarget.value;
+              if (next && next !== props.node.sessionId) {
+                props.onRetargetPane(paneId(), next);
+              }
+            }}
           >
-            <Show when={props.dropTarget?.paneId === paneId}>
-              <div
-                class={`terminal-pane-dropzone ${props.dropTarget?.zone ?? ""}`}
-                aria-hidden="true"
-              />
-            </Show>
-            <Show when={props.withHeaders}>
-              <div class="terminal-pane-header">
-                <span class={`activity-dot ${activityClass(paneSession())}`} />
-                <label class="visually-hidden" for={`pane-session-${paneId}`}>
-                  Session shown in this pane
-                </label>
-                <select
-                  id={`pane-session-${paneId}`}
-                  class="terminal-pane-session"
-                  aria-label="Session shown in this pane"
-                  title="Show a different session in this pane"
-                  value={node.sessionId}
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onChange={(event) => {
-                    const next = event.currentTarget.value;
-                    if (next && next !== node.sessionId) {
-                      props.onRetargetPane(paneId, next);
-                    }
-                  }}
+            <For each={props.sessions}>
+              {(session) => (
+                <option
+                  value={session.id}
+                  selected={session.id === props.node.sessionId}
                 >
-                  <For each={props.sessions}>
-                    {(session) => (
-                      <option value={session.id}>{session.name}</option>
-                    )}
-                  </For>
-                </select>
-              </div>
-            </Show>
-            <Terminal
-              parked={terminalPaneParked(!props.parked, props.activePaneId === paneId)}
-              interceptInput={(data) => props.interceptPaneInput(paneId, data)}
-              sessionId={node.sessionId}
-              registerSend={(fn) => props.registerPaneSend(paneId, fn)}
-              registerActions={(actions) =>
-                props.registerPaneActions(paneId, actions)
-              }
-              onNotify={props.onNotify}
-              onRequestFind={props.onRequestFind}
-              onSearchResults={(info) =>
-                props.onPaneSearchResults(paneId, info)
-              }
-              onTitle={(title) => props.onPaneTitle(node.sessionId, title)}
-              onBell={() => props.onPaneBell(node.sessionId)}
-            />
-          </div>
-        );
-        })()
-      ) : (
-        <div class={`terminal-split ${node.direction}`}>
-          <For each={node.children}>
-            {(child) => (
-              <LayoutNodeView
-                node={child}
-                activePaneId={props.activePaneId}
-                parked={props.parked}
-                withHeaders={props.withHeaders}
-                sessions={props.sessions}
-                onFocusPane={props.onFocusPane}
-                onRetargetPane={props.onRetargetPane}
-                dropTarget={props.dropTarget}
-                onPaneDragOver={props.onPaneDragOver}
-                onPaneDragLeave={props.onPaneDragLeave}
-                onPaneDrop={props.onPaneDrop}
-                interceptPaneInput={props.interceptPaneInput}
-                registerPaneSend={props.registerPaneSend}
-                registerPaneActions={props.registerPaneActions}
-                onNotify={props.onNotify}
-                onRequestFind={props.onRequestFind}
-                onPaneSearchResults={props.onPaneSearchResults}
-                onPaneTitle={props.onPaneTitle}
-                onPaneBell={props.onPaneBell}
-              />
-            )}
-          </For>
+                  {session.name}
+                </option>
+              )}
+            </For>
+          </select>
         </div>
-      )
-    }
-  </Show>
+      </Show>
+      <Show when={props.node.sessionId} keyed>
+        {(sessionId) => (
+          <Terminal
+            parked={terminalPaneParked(
+              !props.parked,
+              props.activePaneId === paneId(),
+            )}
+            interceptInput={(data) => props.interceptPaneInput(paneId(), data)}
+            sessionId={sessionId}
+            registerSend={(fn) => props.registerPaneSend(paneId(), fn)}
+            registerActions={(actions) =>
+              props.registerPaneActions(paneId(), actions)
+            }
+            onNotify={props.onNotify}
+            onRequestFind={props.onRequestFind}
+            onSearchResults={(info) =>
+              props.onPaneSearchResults(paneId(), info)
+            }
+            onTitle={(title) => props.onPaneTitle(props.node.sessionId, title)}
+            onBell={() => props.onPaneBell(props.node.sessionId)}
+          />
+        )}
+      </Show>
+    </div>
+  );
+};
+
+/**
+ * Render the split tree.
+ *
+ * Split children go through `<For>`, which is keyed by object identity, and the
+ * layout transforms in `terminalLayout.ts` preserve the reference of every pane
+ * they do not touch. So a layout change — a re-target, a split, a close —
+ * remounts only the panes that actually changed and leaves the rest (their
+ * xterm, scrollback and socket) exactly as they were. Keying the whole subtree
+ * on the node object, as this used to, tore every pane down on any edit (#600
+ * symptom 2, and the "all panes reload" half of #599/#601).
+ */
+const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
+  <Switch>
+    <Match when={props.node.type === "split"}>
+      <div class={`terminal-split ${(props.node as SplitNode).direction}`}>
+        <For each={(props.node as SplitNode).children}>
+          {(child) => <LayoutNodeView {...props} node={child} />}
+        </For>
+      </div>
+    </Match>
+    <Match when={props.node.type === "pane"}>
+      <PaneView {...props} node={props.node as PaneNode} />
+    </Match>
+  </Switch>
 );
 
 const TerminalWorkspace: Component<Props> = (props) => {
