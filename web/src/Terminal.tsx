@@ -398,6 +398,14 @@ const TerminalView: Component<Props> = (props) => {
     try {
       fit.fit();
       sendResize();
+      // Repaint after every fit (#599). A pane mounted while its host had no
+      // layout size — the common case for a background pane created during a
+      // split — opens with xterm's renderer paused, so bytes written to it
+      // buffer without ever painting until some later interaction (a focus
+      // click) happens to resize it. Refreshing here, and on the 0→sized
+      // transition the ResizeObserver detects, flushes that buffer so inactive
+      // panes scroll live. `refresh` is cheap and idempotent.
+      term.refresh(0, Math.max(0, term.rows - 1));
     } catch {
       /* xterm can throw while its DOM is detaching or hidden */
     }
@@ -970,6 +978,10 @@ const TerminalView: Component<Props> = (props) => {
               exitForegroundReplay();
               setStatusText(null);
               term?.scrollToBottom();
+              // Repaint once the snapshot has drained (#599): a pane that was
+              // render-paused while its snapshot replayed would otherwise show
+              // nothing until the next resize.
+              if (term) term.refresh(0, Math.max(0, term.rows - 1));
               persistCache();
             });
           } else if (ctrl.type === "lag") {
