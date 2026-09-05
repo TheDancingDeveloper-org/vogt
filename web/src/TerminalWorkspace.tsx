@@ -28,16 +28,22 @@ import {
   collectPanes,
   commitCreatedPane,
   containsSession,
+  applyDividerDelta,
   dropSessionIntoPane,
   findPane,
   findPaneBySession,
+  findSplit,
   firstPane,
   insertPane,
   makePane,
+  normalizeSizes,
   normalizeTerminalLayout,
   pruneTerminalLayout,
   removePane,
+  resetDivider,
+  resizeSplit,
   retargetPane,
+  setSplitSizes,
   type PaneNode,
   type SavedTerminalLayout,
   type SplitDirection,
@@ -191,6 +197,24 @@ interface LayoutNodeProps {
   onPaneTitle: (sessionId: string, title: string) => void;
   /** A pane's PTY rang the bell — the workspace lights the tab's activity. */
   onPaneBell: (sessionId: string) => void;
+  /** This node's share of its parent split's main axis, as a flex-grow weight
+   *  (#601). Undefined at the root, where the node fills its container. */
+  size?: number;
+  /** Effective child sizes for a split — the live drag override while a divider
+   *  in it is being dragged, otherwise the split's committed sizes. */
+  resolveSizes: (split: SplitNode) => number[];
+  onDividerPointerDown: (
+    splitId: string,
+    dividerIndex: number,
+    event: PointerEvent,
+    splitEl: HTMLElement | undefined,
+  ) => void;
+  onDividerKeyDown: (
+    splitId: string,
+    dividerIndex: number,
+    event: KeyboardEvent,
+  ) => void;
+  onDividerDoubleClick: (splitId: string, dividerIndex: number) => void;
 }
 
 // Rendered with <Switch>/<Match> on the node's *type*, not keyed on the node
@@ -228,6 +252,11 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => {
               class={`terminal-pane ${
                 props.activePaneId === paneId ? "active" : ""
               }`}
+              style={
+                props.size !== undefined
+                  ? { "flex-grow": String(props.size), "flex-basis": "0" }
+                  : undefined
+              }
               onPointerDown={() => props.onFocusPane(paneId)}
               onDragOver={(event) => props.onPaneDragOver(paneId, event)}
               onDragLeave={(event) => props.onPaneDragLeave(paneId, event)}
@@ -288,33 +317,79 @@ const LayoutNodeView: Component<LayoutNodeProps> = (props) => {
         })()}
       </Match>
       <Match when={props.node.type === "split"}>
-        <div class={`terminal-split ${split().direction}`}>
-          <For each={split().children}>
-            {(child) => (
-              <LayoutNodeView
-                node={child}
-                activePaneId={props.activePaneId}
-                parked={props.parked}
-                withHeaders={props.withHeaders}
-                sessions={props.sessions}
-                onFocusPane={props.onFocusPane}
-                onRetargetPane={props.onRetargetPane}
-                dropTarget={props.dropTarget}
-                onPaneDragOver={props.onPaneDragOver}
-                onPaneDragLeave={props.onPaneDragLeave}
-                onPaneDrop={props.onPaneDrop}
-                interceptPaneInput={props.interceptPaneInput}
-                registerPaneSend={props.registerPaneSend}
-                registerPaneActions={props.registerPaneActions}
-                onNotify={props.onNotify}
-                onRequestFind={props.onRequestFind}
-                onPaneSearchResults={props.onPaneSearchResults}
-                onPaneTitle={props.onPaneTitle}
-                onPaneBell={props.onPaneBell}
-              />
-            )}
-          </For>
-        </div>
+        {(() => {
+          let splitEl: HTMLDivElement | undefined;
+          const sizes = () => props.resolveSizes(split());
+          return (
+            <div
+              class={`terminal-split ${split().direction}`}
+              ref={splitEl}
+              style={
+                props.size !== undefined
+                  ? { "flex-grow": String(props.size), "flex-basis": "0" }
+                  : undefined
+              }
+            >
+              <For each={split().children}>
+                {(child, index) => (
+                  <>
+                    <Show when={index() > 0}>
+                      <div
+                        class="terminal-split-divider"
+                        role="separator"
+                        tabindex="0"
+                        aria-label="Resize panes"
+                        aria-orientation={
+                          split().direction === "row" ? "vertical" : "horizontal"
+                        }
+                        onPointerDown={(event) =>
+                          props.onDividerPointerDown(
+                            split().id,
+                            index() - 1,
+                            event,
+                            splitEl,
+                          )
+                        }
+                        onDblClick={() =>
+                          props.onDividerDoubleClick(split().id, index() - 1)
+                        }
+                        onKeyDown={(event) =>
+                          props.onDividerKeyDown(split().id, index() - 1, event)
+                        }
+                      />
+                    </Show>
+                    <LayoutNodeView
+                      node={child}
+                      size={sizes()[index()]}
+                      activePaneId={props.activePaneId}
+                      parked={props.parked}
+                      withHeaders={props.withHeaders}
+                      sessions={props.sessions}
+                      onFocusPane={props.onFocusPane}
+                      onRetargetPane={props.onRetargetPane}
+                      dropTarget={props.dropTarget}
+                      onPaneDragOver={props.onPaneDragOver}
+                      onPaneDragLeave={props.onPaneDragLeave}
+                      onPaneDrop={props.onPaneDrop}
+                      interceptPaneInput={props.interceptPaneInput}
+                      registerPaneSend={props.registerPaneSend}
+                      registerPaneActions={props.registerPaneActions}
+                      onNotify={props.onNotify}
+                      onRequestFind={props.onRequestFind}
+                      onPaneSearchResults={props.onPaneSearchResults}
+                      onPaneTitle={props.onPaneTitle}
+                      onPaneBell={props.onPaneBell}
+                      resolveSizes={props.resolveSizes}
+                      onDividerPointerDown={props.onDividerPointerDown}
+                      onDividerKeyDown={props.onDividerKeyDown}
+                      onDividerDoubleClick={props.onDividerDoubleClick}
+                    />
+                  </>
+                )}
+              </For>
+            </div>
+          );
+        })()}
       </Match>
     </Switch>
   );
@@ -881,6 +956,119 @@ const TerminalWorkspace: Component<Props> = (props) => {
     setActivePaneId(result.activePaneId);
   };
 
+  // Divider drag-resize (#601). While a drag is live the effective sizes come
+  // from `dragSizes`, applied as inline flex-grow, so the tree is never mutated
+  // mid-drag — panes reflow smoothly without any remount. The final sizes are
+  // committed onto the split (and thereby persisted) on pointer-up only.
+  const [dragSizes, setDragSizes] = createSignal<
+    { splitId: string; sizes: number[] } | null
+  >(null);
+
+  const resolveSizes = (splitNode: SplitNode): number[] => {
+    const drag = dragSizes();
+    if (drag && drag.splitId === splitNode.id) return drag.sizes;
+    return normalizeSizes(splitNode.children.length, splitNode.sizes);
+  };
+
+  let dividerDrag:
+    | {
+        splitId: string;
+        dividerIndex: number;
+        direction: SplitDirection;
+        mainAxisPx: number;
+        baseSizes: number[];
+        startPos: number;
+      }
+    | null = null;
+
+  const onDividerMove = (event: PointerEvent) => {
+    if (!dividerDrag) return;
+    const pos =
+      dividerDrag.direction === "row" ? event.clientX : event.clientY;
+    const delta = (pos - dividerDrag.startPos) / dividerDrag.mainAxisPx;
+    setDragSizes({
+      splitId: dividerDrag.splitId,
+      sizes: applyDividerDelta(
+        dividerDrag.baseSizes,
+        dividerDrag.dividerIndex,
+        delta,
+      ),
+    });
+  };
+
+  const endDividerDrag = () => {
+    window.removeEventListener("pointermove", onDividerMove);
+    window.removeEventListener("pointerup", endDividerDrag);
+    window.removeEventListener("pointercancel", endDividerDrag);
+    const drag = dividerDrag;
+    const pending = dragSizes();
+    dividerDrag = null;
+    setDragSizes(null);
+    if (drag && pending && pending.splitId === drag.splitId) {
+      setRoot((current) => setSplitSizes(current, drag.splitId, pending.sizes));
+    }
+  };
+
+  const beginDividerDrag = (
+    splitId: string,
+    dividerIndex: number,
+    event: PointerEvent,
+    splitEl: HTMLElement | undefined,
+  ) => {
+    if (!splitEl || event.button !== 0) return;
+    const node = findSplit(root(), splitId);
+    if (!node) return;
+    const rect = splitEl.getBoundingClientRect();
+    const mainAxisPx = node.direction === "row" ? rect.width : rect.height;
+    if (mainAxisPx <= 0) return;
+    event.preventDefault();
+    (event.currentTarget as HTMLElement).setPointerCapture?.(event.pointerId);
+    dividerDrag = {
+      splitId,
+      dividerIndex,
+      direction: node.direction,
+      mainAxisPx,
+      baseSizes: normalizeSizes(node.children.length, node.sizes),
+      startPos: node.direction === "row" ? event.clientX : event.clientY,
+    };
+    setDragSizes({ splitId, sizes: dividerDrag.baseSizes });
+    window.addEventListener("pointermove", onDividerMove);
+    window.addEventListener("pointerup", endDividerDrag);
+    window.addEventListener("pointercancel", endDividerDrag);
+  };
+
+  const onDividerKeyDown = (
+    splitId: string,
+    dividerIndex: number,
+    event: KeyboardEvent,
+  ) => {
+    const node = findSplit(root(), splitId);
+    if (!node) return;
+    const decrease =
+      node.direction === "row" ? "ArrowLeft" : "ArrowUp";
+    const increase =
+      node.direction === "row" ? "ArrowRight" : "ArrowDown";
+    const STEP = 0.02;
+    if (event.key === decrease || event.key === increase) {
+      event.preventDefault();
+      const delta = event.key === increase ? STEP : -STEP;
+      setRoot((current) => resizeSplit(current, splitId, dividerIndex, delta));
+    } else if (event.key === "Home" || event.key === "Enter") {
+      event.preventDefault();
+      setRoot((current) => resetDivider(current, splitId, dividerIndex));
+    }
+  };
+
+  const onDividerDoubleClick = (splitId: string, dividerIndex: number) => {
+    setRoot((current) => resetDivider(current, splitId, dividerIndex));
+  };
+
+  onCleanup(() => {
+    window.removeEventListener("pointermove", onDividerMove);
+    window.removeEventListener("pointerup", endDividerDrag);
+    window.removeEventListener("pointercancel", endDividerDrag);
+  });
+
   // Detach the active pane: drop it from the layout but leave its session
   // running and listed. This never kills or deletes — that is `killActivePane`
   // below, a separate, confirmed act (#212).
@@ -1111,6 +1299,10 @@ const TerminalWorkspace: Component<Props> = (props) => {
         if (sessionId === props.sessionId) props.onTitle?.(title);
       }}
       onPaneBell={(sessionId) => props.onBell?.(sessionId)}
+      resolveSizes={resolveSizes}
+      onDividerPointerDown={beginDividerDrag}
+      onDividerKeyDown={onDividerKeyDown}
+      onDividerDoubleClick={onDividerDoubleClick}
     />
   );
 

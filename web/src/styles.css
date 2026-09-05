@@ -2761,6 +2761,32 @@ textarea {
   background: var(--term-bg);
   overflow: hidden;
 }
+/* Drag-to-resize divider between split children (#601). A thin grabbable bar
+   that does not grow; reuses the rail handle's highlight language. */
+.terminal-split-divider {
+  flex: 0 0 4px;
+  align-self: stretch;
+  border-radius: 2px;
+  background: transparent;
+  touch-action: none;
+  z-index: 4;
+}
+.terminal-split.row > .terminal-split-divider {
+  cursor: col-resize;
+}
+.terminal-split.column > .terminal-split-divider {
+  cursor: row-resize;
+}
+.terminal-split-divider:hover,
+.terminal-split-divider:focus-visible {
+  background: var(--accent);
+  opacity: 0.5;
+}
+.terminal-split-divider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  opacity: 1;
+}
 /* Drop-zone highlight (#355): a rail session dragged over a pane previews the
    half the mirrored split will occupy — VS Code style edge hit-testing picks
    left/right (a row split) or top/bottom (a column split). */
