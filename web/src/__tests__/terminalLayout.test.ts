@@ -6,10 +6,14 @@ import {
   findPane,
   insertPane,
   makePane,
+  MIN_SPLIT_FRACTION,
+  normalizeSizes,
   normalizeTerminalLayout,
   paneIdFor,
   pruneTerminalLayout,
   removePane,
+  resetDivider,
+  resizeSplit,
   retargetPane,
   type SavedTerminalLayout,
   type SplitNode,
@@ -193,5 +197,83 @@ describe("re-target preserves untouched pane identity (#600)", () => {
     expect(collectPanes(result!.root).map((pane) => pane.sessionId))
       .toEqual(["b", "a", "c"]);
     expect(result!.activePaneId).toBe(paneIdFor("b"));
+  });
+});
+
+// #601: dividers carry `sizes` — fractions of a split's main axis. The model
+// keeps them normalised through every structural edit and rebuilds only the
+// spine down to a resized split, so a drag never disturbs another pane.
+describe("split sizes and divider resize (#601)", () => {
+  const rowSplit = (...ids: string[]): SplitNode => ({
+    type: "split",
+    id: "split:row",
+    direction: "row",
+    children: ids.map((id) => makePane(id)),
+  });
+
+  it("falls back to equal shares for missing, wrong-length or bad input", () => {
+    expect(normalizeSizes(2)).toEqual([0.5, 0.5]);
+    expect(normalizeSizes(3, [0.5, 0.5])).toEqual([1 / 3, 1 / 3, 1 / 3]);
+    expect(normalizeSizes(2, [0, 1])).toEqual([0.5, 0.5]);
+    expect(normalizeSizes(2, [Number.NaN, 1])).toEqual([0.5, 0.5]);
+  });
+
+  it("rescales a valid but unnormalised array, preserving proportions", () => {
+    expect(normalizeSizes(2, [3, 1])).toEqual([0.75, 0.25]);
+  });
+
+  it("a fresh split from a pane starts at equal shares", () => {
+    const split = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"));
+    expect((split as SplitNode).sizes).toEqual([0.5, 0.5]);
+  });
+
+  it("moves space between the two neighbours only, leaving the third alone", () => {
+    const root = rowSplit("a", "b", "c"); // [1/3, 1/3, 1/3]
+    const next = resizeSplit(root, "split:row", 0, 0.1) as SplitNode;
+    expect(next.sizes![0]).toBeCloseTo(1 / 3 + 0.1);
+    expect(next.sizes![1]).toBeCloseTo(1 / 3 - 0.1);
+    expect(next.sizes![2]).toBeCloseTo(1 / 3); // untouched
+    // The pair's combined share, and the total, are conserved.
+    expect(next.sizes![0]! + next.sizes![1]!).toBeCloseTo(2 / 3);
+    expect(next.sizes!.reduce((s, x) => s + x, 0)).toBeCloseTo(1);
+  });
+
+  it("clamps a drag so no neighbour falls below the minimum", () => {
+    const root = rowSplit("a", "b"); // [0.5, 0.5]
+    const next = resizeSplit(root, "split:row", 0, 5) as SplitNode; // shove hard
+    expect(next.sizes![1]).toBeCloseTo(MIN_SPLIT_FRACTION);
+    expect(next.sizes![0]).toBeCloseTo(1 - MIN_SPLIT_FRACTION);
+  });
+
+  it("leaves untouched sibling panes referentially identical while resizing", () => {
+    const root = rowSplit("a", "b", "c");
+    const c = root.children[2];
+    const next = resizeSplit(root, "split:row", 0, 0.1) as SplitNode;
+    expect(next.children[2]).toBe(c);
+    // Only the sizes array changed; the children array kept every reference.
+    expect(next.children[0]).toBe(root.children[0]);
+  });
+
+  it("double-click resets a divider to equal neighbours", () => {
+    const root: SplitNode = { ...rowSplit("a", "b"), sizes: [0.8, 0.2] };
+    const next = resetDivider(root, "split:row", 0) as SplitNode;
+    expect(next.sizes).toEqual([0.5, 0.5]);
+  });
+
+  it("renormalises sizes when a child is removed", () => {
+    const root: SplitNode = { ...rowSplit("a", "b", "c"), sizes: [0.5, 0.25, 0.25] };
+    const closed = removePane(root, paneIdFor("a")) as SplitNode;
+    // b and c kept their 1:1 proportion and were rescaled to sum to 1.
+    expect(closed.sizes).toEqual([0.5, 0.5]);
+  });
+
+  it("round-trips sizes through normalizeTerminalLayout and drops bad ones", () => {
+    const saved = { ...rowSplit("a", "b"), sizes: [0.7, 0.3] };
+    const reloaded = normalizeTerminalLayout(JSON.parse(JSON.stringify(saved))) as SplitNode;
+    expect(reloaded.sizes).toEqual([0.7, 0.3]);
+    const legacy = normalizeTerminalLayout(
+      JSON.parse(JSON.stringify({ ...rowSplit("a", "b"), sizes: undefined })),
+    ) as SplitNode;
+    expect(legacy.sizes).toEqual([0.5, 0.5]);
   });
 });

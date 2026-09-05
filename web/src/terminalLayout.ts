@@ -11,6 +11,31 @@ export interface SplitNode {
   id: string;
   direction: SplitDirection;
   children: TerminalLayoutNode[];
+  /** Fractions of the split's main axis, one per child, summing to 1 (#601).
+   *  Absent on legacy layouts and freshly created splits; treated as equal
+   *  shares by `normalizeSizes`. */
+  sizes?: number[];
+}
+
+/** Smallest share a divider drag will leave a neighbour, so a terminal can
+ *  never be dragged to nothing (xterm throws / `fitAndResize` bails at 0). */
+export const MIN_SPLIT_FRACTION = 0.05;
+
+/**
+ * Resolve a split's child fractions.
+ *
+ * Missing, wrong-length or non-positive input falls back to equal shares; a
+ * valid but unnormalised array (what removing a child leaves behind) is
+ * rescaled to sum to 1, preserving the surviving children's proportions.
+ */
+export function normalizeSizes(childCount: number, sizes?: number[]): number[] {
+  if (childCount <= 0) return [];
+  const equal = Array.from({ length: childCount }, () => 1 / childCount);
+  if (!sizes || sizes.length !== childCount) return equal;
+  if (!sizes.every((s) => Number.isFinite(s) && s > 0)) return equal;
+  const total = sizes.reduce((sum, s) => sum + s, 0);
+  if (total <= 0) return equal;
+  return sizes.map((s) => s / total);
 }
 
 export type TerminalLayoutNode = PaneNode | SplitNode;
@@ -57,11 +82,16 @@ export function normalizeTerminalLayout(value: unknown): TerminalLayoutNode | nu
       .filter((child): child is TerminalLayoutNode => child !== null);
     if (children.length === 0) return null;
     if (children.length === 1) return children[0] ?? null;
+    const rawSizes =
+      Array.isArray(obj.sizes) && obj.sizes.every((s) => typeof s === "number")
+        ? (obj.sizes as number[])
+        : undefined;
     return {
       type: "split",
       id: obj.id,
       direction: obj.direction,
       children,
+      sizes: normalizeSizes(children.length, rawSizes),
     };
   }
   return null;
@@ -120,6 +150,7 @@ export function insertPane(
       type: "split",
       id: newSplitId(),
       direction,
+      sizes: [0.5, 0.5],
       // `before` places the new pane ahead of the target — a drop on the
       // left/top edge lands the mirror there rather than always after.
       children: before ? [nextPane, node] : [node, nextPane],
@@ -179,16 +210,23 @@ export function removePane(
   targetPaneId: string,
 ): TerminalLayoutNode | null {
   if (node.type === "pane") return node.id === targetPaneId ? null : node;
+  const oldSizes = normalizeSizes(node.children.length, node.sizes);
   let changed = false;
   const children: TerminalLayoutNode[] = [];
-  for (const child of node.children) {
+  const keptSizes: number[] = [];
+  node.children.forEach((child, index) => {
     const next = removePane(child, targetPaneId);
     if (next !== child) changed = true;
-    if (next) children.push(next);
-  }
+    if (next) {
+      children.push(next);
+      keptSizes.push(oldSizes[index] ?? 0);
+    }
+  });
   if (children.length === 0) return null;
   if (children.length === 1) return children[0] ?? null;
-  return changed ? { ...node, children } : node;
+  return changed
+    ? { ...node, children, sizes: normalizeSizes(children.length, keptSizes) }
+    : node;
 }
 
 /**
@@ -243,6 +281,78 @@ export function retargetPane(
   };
 }
 
+/**
+ * Rewrite one split's `sizes`, rebuilding only the spine down to it and
+ * leaving every other node — panes included — referentially identical, so the
+ * `<For>` that renders the tree never remounts a pane while a divider is
+ * dragged (#601, and the identity contract from #600).
+ */
+function updateSplitSizes(
+  node: TerminalLayoutNode,
+  splitId: string,
+  update: (sizes: number[]) => number[] | null,
+): TerminalLayoutNode {
+  if (node.type === "pane") return node;
+  if (node.id === splitId) {
+    const next = update(normalizeSizes(node.children.length, node.sizes));
+    return next ? { ...node, sizes: next } : node;
+  }
+  let changed = false;
+  const children = node.children.map((child) => {
+    const mapped = updateSplitSizes(child, splitId, update);
+    if (mapped !== child) changed = true;
+    return mapped;
+  });
+  return changed ? { ...node, children } : node;
+}
+
+/**
+ * Move `delta` (a fraction of the split's main axis) from the child after a
+ * divider to the child before it, clamping both to `minFraction`. Neighbours
+ * only — the rest of the split keeps its proportions.
+ */
+export function resizeSplit(
+  root: TerminalLayoutNode,
+  splitId: string,
+  dividerIndex: number,
+  delta: number,
+  minFraction: number = MIN_SPLIT_FRACTION,
+): TerminalLayoutNode {
+  return updateSplitSizes(root, splitId, (sizes) => {
+    const i = dividerIndex;
+    const j = i + 1;
+    if (i < 0 || j >= sizes.length) return null;
+    const first = sizes[i] ?? 0;
+    const second = sizes[j] ?? 0;
+    const pair = first + second;
+    const lo = Math.min(minFraction, pair / 2);
+    const hi = pair - lo;
+    const nextI = Math.min(hi, Math.max(lo, first + delta));
+    const out = sizes.slice();
+    out[i] = nextI;
+    out[j] = pair - nextI;
+    return out;
+  });
+}
+
+/** Equalise the two neighbours of a divider (double-click / Home/End). */
+export function resetDivider(
+  root: TerminalLayoutNode,
+  splitId: string,
+  dividerIndex: number,
+): TerminalLayoutNode {
+  return updateSplitSizes(root, splitId, (sizes) => {
+    const i = dividerIndex;
+    const j = i + 1;
+    if (i < 0 || j >= sizes.length) return null;
+    const pair = (sizes[i] ?? 0) + (sizes[j] ?? 0);
+    const out = sizes.slice();
+    out[i] = pair / 2;
+    out[j] = pair / 2;
+    return out;
+  });
+}
+
 export function pruneTerminalLayout(
   node: TerminalLayoutNode,
   sessionExists: (sessionId: string) => boolean,
@@ -250,16 +360,23 @@ export function pruneTerminalLayout(
   if (node.type === "pane") {
     return sessionExists(node.sessionId) ? node : null;
   }
+  const oldSizes = normalizeSizes(node.children.length, node.sizes);
   let changed = false;
   const children: TerminalLayoutNode[] = [];
-  for (const child of node.children) {
+  const keptSizes: number[] = [];
+  node.children.forEach((child, index) => {
     const next = pruneTerminalLayout(child, sessionExists);
-    if (next) children.push(next);
+    if (next) {
+      children.push(next);
+      keptSizes.push(oldSizes[index] ?? 0);
+    }
     if (next !== child) changed = true;
-  }
+  });
   if (children.length === 0) return null;
   if (children.length === 1) return children[0] ?? null;
-  return changed ? { ...node, children } : node;
+  return changed
+    ? { ...node, children, sizes: normalizeSizes(children.length, keptSizes) }
+    : node;
 }
 
 /**

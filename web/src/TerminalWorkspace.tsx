@@ -33,10 +33,14 @@ import {
   firstPane,
   insertPane,
   makePane,
+  MIN_SPLIT_FRACTION,
+  normalizeSizes,
   normalizeTerminalLayout,
   paneIdFor,
   pruneTerminalLayout,
   removePane,
+  resetDivider,
+  resizeSplit,
   retargetPane,
   type PaneNode,
   type SavedTerminalLayout,
@@ -190,7 +194,128 @@ interface LayoutNodeProps {
   onPaneTitle: (sessionId: string, title: string) => void;
   /** A pane's PTY rang the bell — the workspace lights the tab's activity. */
   onPaneBell: (sessionId: string) => void;
+  /** This node's share of its parent split's main axis (#601). Undefined at the
+   *  root, which fills the whole layout. */
+  flexGrow?: number;
+  /** Move `delta` (a fraction) across the divider at `dividerIndex` of a split. */
+  onResizeSplit: (
+    splitId: string,
+    dividerIndex: number,
+    delta: number,
+    minFraction: number,
+  ) => void;
+  /** Equalise the two neighbours of a divider (double-click / Home/End). */
+  onResetDivider: (splitId: string, dividerIndex: number) => void;
 }
+
+/**
+ * A draggable divider between two split children (#601).
+ *
+ * Its neighbours and container are its own DOM siblings/parent, so it needs no
+ * refs threaded down. The drag is imperative — it writes `flex-grow` straight
+ * onto the two neighbour elements for a smooth 60fps update — and commits once,
+ * on pointer-up, through `onResize`, at which point the reactive size re-asserts
+ * the same value. Keyboard and double-click go straight to the model.
+ */
+const DIVIDER_MIN_PANE_PX = 48;
+
+const SplitDivider: Component<{
+  direction: SplitDirection;
+  onResize: (delta: number, minFraction: number) => void;
+  onReset: () => void;
+}> = (props) => {
+  let el!: HTMLDivElement;
+  const horizontal = () => props.direction === "row";
+  const growOf = (node: HTMLElement | null) =>
+    node ? Number.parseFloat(node.style.flexGrow || "1") || 1 : 1;
+
+  let dragging = false;
+  let startPos = 0;
+  let containerPx = 0;
+  let prevStart = 1;
+  let nextStart = 1;
+  let prevEl: HTMLElement | null = null;
+  let nextEl: HTMLElement | null = null;
+
+  const onPointerDown = (event: PointerEvent) => {
+    if (event.button !== 0) return;
+    const prev = el.previousElementSibling as HTMLElement | null;
+    const next = el.nextElementSibling as HTMLElement | null;
+    const container = el.parentElement;
+    if (!prev || !next || !container) return;
+    event.preventDefault();
+    event.stopPropagation();
+    prevEl = prev;
+    nextEl = next;
+    containerPx = horizontal() ? container.clientWidth : container.clientHeight;
+    startPos = horizontal() ? event.clientX : event.clientY;
+    prevStart = growOf(prev);
+    nextStart = growOf(next);
+    dragging = true;
+    el.setPointerCapture(event.pointerId);
+    el.classList.add("dragging");
+  };
+
+  const onPointerMove = (event: PointerEvent) => {
+    if (!dragging || !prevEl || !nextEl || containerPx <= 0) return;
+    const pos = horizontal() ? event.clientX : event.clientY;
+    const pair = prevStart + nextStart;
+    const min = Math.min(DIVIDER_MIN_PANE_PX / containerPx, pair / 2);
+    const wanted = prevStart + (pos - startPos) / containerPx;
+    const nextPrev = Math.min(pair - min, Math.max(min, wanted));
+    prevEl.style.flexGrow = String(nextPrev);
+    nextEl.style.flexGrow = String(pair - nextPrev);
+  };
+
+  const end = (event: PointerEvent) => {
+    if (!dragging) return;
+    dragging = false;
+    el.classList.remove("dragging");
+    try {
+      el.releasePointerCapture(event.pointerId);
+    } catch {
+      /* not captured */
+    }
+    if (prevEl) {
+      const min =
+        containerPx > 0 ? DIVIDER_MIN_PANE_PX / containerPx : MIN_SPLIT_FRACTION;
+      props.onResize(growOf(prevEl) - prevStart, min);
+    }
+    prevEl = nextEl = null;
+  };
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    const decrease = horizontal() ? "ArrowLeft" : "ArrowUp";
+    const increase = horizontal() ? "ArrowRight" : "ArrowDown";
+    if (event.key === decrease) {
+      event.preventDefault();
+      props.onResize(-0.02, MIN_SPLIT_FRACTION);
+    } else if (event.key === increase) {
+      event.preventDefault();
+      props.onResize(0.02, MIN_SPLIT_FRACTION);
+    } else if (event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      props.onReset();
+    }
+  };
+
+  return (
+    <div
+      ref={el}
+      class={`terminal-split-divider ${props.direction}`}
+      role="separator"
+      tabindex="0"
+      aria-orientation={horizontal() ? "vertical" : "horizontal"}
+      aria-label="Resize panes"
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={end}
+      onPointerCancel={end}
+      onDblClick={() => props.onReset()}
+      onKeyDown={onKeyDown}
+    />
+  );
+};
 
 /**
  * One pane in the split tree.
@@ -224,6 +349,7 @@ const PaneView: Component<Omit<LayoutNodeProps, "node"> & { node: PaneNode }> = 
       class={`terminal-pane ${
         props.activePaneId === paneId() ? "active" : ""
       }`}
+      style={{ "flex-grow": String(props.flexGrow ?? 1) }}
       onPointerDown={() => props.onFocusPane(paneId())}
       onDragOver={(event) => props.onPaneDragOver(paneId(), event)}
       onDragLeave={(event) => props.onPaneDragLeave(paneId(), event)}
@@ -307,20 +433,56 @@ const PaneView: Component<Omit<LayoutNodeProps, "node"> & { node: PaneNode }> = 
  * on the node object, as this used to, tore every pane down on any edit (#600
  * symptom 2, and the "all panes reload" half of #599/#601).
  */
-const LayoutNodeView: Component<LayoutNodeProps> = (props) => (
-  <Switch>
-    <Match when={props.node.type === "split"}>
-      <div class={`terminal-split ${(props.node as SplitNode).direction}`}>
-        <For each={(props.node as SplitNode).children}>
-          {(child) => <LayoutNodeView {...props} node={child} />}
-        </For>
-      </div>
-    </Match>
-    <Match when={props.node.type === "pane"}>
-      <PaneView {...props} node={props.node as PaneNode} />
-    </Match>
-  </Switch>
-);
+const LayoutNodeView: Component<LayoutNodeProps> = (props) => {
+  const split = () => props.node as SplitNode;
+  // Fractions for this split's children (equal when a legacy/fresh split has
+  // none). A drag changes only this array, so the memo — and the flex-grow it
+  // drives — updates without any pane remounting (#601).
+  const sizes = createMemo(() =>
+    props.node.type === "split"
+      ? normalizeSizes(split().children.length, split().sizes)
+      : [],
+  );
+  return (
+    <Switch>
+      <Match when={props.node.type === "split"}>
+        <div
+          class={`terminal-split ${split().direction}`}
+          style={{ "flex-grow": String(props.flexGrow ?? 1) }}
+        >
+          <For each={split().children}>
+            {(child, index) => (
+              <>
+                <Show when={index() > 0}>
+                  <SplitDivider
+                    direction={split().direction}
+                    onResize={(delta, minFraction) =>
+                      props.onResizeSplit(
+                        split().id,
+                        index() - 1,
+                        delta,
+                        minFraction,
+                      )
+                    }
+                    onReset={() => props.onResetDivider(split().id, index() - 1)}
+                  />
+                </Show>
+                <LayoutNodeView
+                  {...props}
+                  node={child}
+                  flexGrow={sizes()[index()] ?? 1}
+                />
+              </>
+            )}
+          </For>
+        </div>
+      </Match>
+      <Match when={props.node.type === "pane"}>
+        <PaneView {...props} node={props.node as PaneNode} />
+      </Match>
+    </Switch>
+  );
+};
 
 const TerminalWorkspace: Component<Props> = (props) => {
   const initial = readSavedLayout(props.tabId, props.sessionId);
@@ -883,6 +1045,23 @@ const TerminalWorkspace: Component<Props> = (props) => {
     setActivePaneId(result.activePaneId);
   };
 
+  // Divider drag/keyboard: adjust one split's child fractions. Pure transforms
+  // that touch only the split's spine, so no pane remounts and the new ratios
+  // ride along into the saved layout via the persistence effect (#601).
+  const resizeSplitBy = (
+    splitId: string,
+    dividerIndex: number,
+    delta: number,
+    minFraction: number,
+  ) => {
+    setRoot((current) =>
+      resizeSplit(current, splitId, dividerIndex, delta, minFraction),
+    );
+  };
+  const resetSplitDivider = (splitId: string, dividerIndex: number) => {
+    setRoot((current) => resetDivider(current, splitId, dividerIndex));
+  };
+
   // Detach the active pane: drop it from the layout but leave its session
   // running and listed. This never kills or deletes — that is `killActivePane`
   // below, a separate, confirmed act (#212).
@@ -1112,6 +1291,8 @@ const TerminalWorkspace: Component<Props> = (props) => {
         if (sessionId === props.sessionId) props.onTitle?.(title);
       }}
       onPaneBell={(sessionId) => props.onBell?.(sessionId)}
+      onResizeSplit={resizeSplitBy}
+      onResetDivider={resetSplitDivider}
     />
   );
 

@@ -2742,13 +2742,41 @@ textarea {
   min-height: 0;
   min-width: 0;
   display: flex;
-  gap: 4px;
+  /* No gap: the draggable dividers between children supply the gutter (#601). */
+  gap: 0;
 }
 .terminal-split.row {
   flex-direction: row;
 }
 .terminal-split.column {
   flex-direction: column;
+}
+/* Draggable divider between two split children (#601), at any nesting depth.
+   A flex item of its own so it takes real space between the panes; stretches
+   the cross axis to the full gutter. Modelled on `.rail-resize-handle`. */
+.terminal-split-divider {
+  flex: 0 0 6px;
+  align-self: stretch;
+  position: relative;
+  z-index: 4;
+  background: transparent;
+  touch-action: none;
+}
+.terminal-split-divider.row {
+  cursor: col-resize;
+}
+.terminal-split-divider.column {
+  cursor: row-resize;
+}
+.terminal-split-divider:hover,
+.terminal-split-divider.dragging {
+  background: var(--accent);
+  opacity: 0.35;
+}
+.terminal-split-divider:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  opacity: 1;
 }
 .terminal-pane {
   position: relative;
