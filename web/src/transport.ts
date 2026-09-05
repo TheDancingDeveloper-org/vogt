@@ -15,7 +15,17 @@
 //     re-thrown untouched so those paths keep working;
 //   * a transient wire failure — retried for idempotent methods, then raised as
 //     a typed `TransportError` carrying a written reason instead of the
-//     browser's implementation detail.
+//     browser's implementation detail;
+//   * an attempt that exceeded its deadline — raised as the same typed
+//     `TransportError`, but **not retried** (#581). A deadline is exceeded
+//     because the server is slow or the socket is dead, and the client cannot
+//     tell which; retrying blindly costs a slow server another full read per
+//     attempt while the caller waits three deadlines instead of one. On prod
+//     that was the badge aggregate: three 8 s reads per refresh, one every
+//     8 s, each of which the core ran to completion after the browser had
+//     moved on. The deadline is the caller's signal to decide — back off,
+//     keep what it has, tell the reader — and every foreground surface
+//     already has that handling for a `TransportError`.
 
 import { runtimeTransport } from "./runtimeTransport";
 
@@ -42,10 +52,13 @@ function isAbort(
   attemptSignal?: AbortSignal | null,
 ): boolean {
   if (callerSignal?.aborted) return true;
-  if (attemptSignal?.aborted && attemptSignal.reason?.name === "TimeoutError") {
-    return false;
-  }
+  if (isDeadline(attemptSignal)) return false;
   return (err as { name?: string } | null)?.name === "AbortError";
+}
+
+/** True when the attempt's own deadline fired, as opposed to a caller abort. */
+function isDeadline(attemptSignal?: AbortSignal | null): boolean {
+  return attemptSignal?.aborted === true && attemptSignal.reason?.name === "TimeoutError";
 }
 
 function jitter(baseMs: number): number {
@@ -148,6 +161,9 @@ export async function fetchWithRetry(
     } catch (err) {
       if (isAbort(err, callerSignal, attemptSignal)) throw err;
       lastError = err;
+      // A deadline is terminal for this read: see the header. The caller
+      // gets the typed error now, not after two more deadlines.
+      if (isDeadline(attemptSignal)) break;
       const isLast = attempt === attempts - 1;
       if (isLast) break;
       await sleep(jitter(backoffMs * (attempt + 1)), callerSignal);
