@@ -269,6 +269,31 @@ def replace_image(
     return updated, updated != contents
 
 
+def env_shape(stack: dict[str, object]) -> str:
+    """Describe the stack's `environment` without exposing a single value.
+
+    Line count, whether newlines arrived real or as literal `\\n`, the key
+    names in order, and how many lines are not `KEY=value` at all — enough to
+    tell a well-formed `.env` from a mangled one, which is what a silently
+    failing Pre Deploy hook (it sources the file) turns on.
+    """
+    config = stack.get("config")
+    raw = config.get("environment") if isinstance(config, dict) else None
+    if not isinstance(raw, str):
+        return "environment: <absent>"
+    literal, real = "\\n" in raw, "\n" in raw
+    text = raw.replace("\\n", "\n") if literal and not real else raw
+    lines = [line for line in text.splitlines() if line.strip()]
+    keys = [line.split("=", 1)[0].strip() for line in lines if "=" in line]
+    malformed = sum(
+        1 for line in lines if "=" not in line and not line.lstrip().startswith("#")
+    )
+    return (
+        f"environment: {len(lines)} non-empty lines; literal-backslash-n={literal}; "
+        f"real-newlines={real}; malformed-lines={malformed}; keys={keys}"
+    )
+
+
 def remote_files(stack: dict[str, object]) -> dict[str, str]:
     info = stack.get("info")
     if not isinstance(info, dict):
@@ -348,6 +373,8 @@ def main() -> int:
     config = stack.get("config")
     if not isinstance(config, dict):
         raise KomodoError("Komodo stack response has no config")
+    # Keys only, never values: the shape of the .env Komodo will write.
+    print(env_shape(stack))
     original_webhook = bool(config.get("webhook_enabled", True))
     files = remote_files(stack)
     changed: list[tuple[str, str]] = []
