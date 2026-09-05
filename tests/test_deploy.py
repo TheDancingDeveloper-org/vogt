@@ -3290,8 +3290,8 @@ def test_deploy_dev_restore_environment_undoes_the_literal_newline_collapse() ->
     shape = dd.shape_of(restored)
     assert "malformed-lines=0" in shape
     assert (
-        "keys=['VOGT_PORT', 'VOGT_GITHUB_TOKEN', 'MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON', 'MYDEVENV2_TOKEN']"
-        in shape
+        "keys=['VOGT_PORT', 'VOGT_GITHUB_TOKEN', "
+        "'MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON', 'MYDEVENV2_TOKEN']" in shape
     )
     assert "literal-backslash-n=True" in shape, "the FCM data keeps its escapes"
     assert "real-newlines=True" in shape
