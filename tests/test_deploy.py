@@ -2488,6 +2488,7 @@ def agent_clis(tmp_path: Path) -> _AgentCliSandbox:
     return _AgentCliSandbox(tmp_path)
 
 
+@needs_engine
 def test_an_exact_runtime_pin_is_installed_and_put_on_path(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2506,6 +2507,7 @@ def test_an_exact_runtime_pin_is_installed_and_put_on_path(
     assert verified.returncode == 0, verified.stderr
 
 
+@needs_engine
 def test_setting_the_pin_back_to_the_baked_version_needs_no_network(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2525,6 +2527,7 @@ def test_setting_the_pin_back_to_the_baked_version_needs_no_network(
     assert agent_clis.verify().returncode == 0
 
 
+@needs_engine
 def test_a_version_already_on_the_volume_is_switched_to_offline(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2538,6 +2541,7 @@ def test_a_version_already_on_the_volume_is_switched_to_offline(
     assert len(agent_clis.npm_calls()) == calls_before
 
 
+@needs_engine
 def test_a_failed_install_leaves_current_where_it_was(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2556,6 +2560,7 @@ def test_a_failed_install_leaves_current_where_it_was(
     )
 
 
+@needs_engine
 def test_a_stub_install_fails_the_smoke_check_and_is_discarded(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2570,6 +2575,7 @@ def test_a_stub_install_fails_the_smoke_check_and_is_discarded(
     assert agent_clis.which("claude") == str(agent_clis.image_bin / "claude")
 
 
+@needs_engine
 def test_dist_tags_are_refused_unless_opted_into(agent_clis: _AgentCliSandbox) -> None:
     refused = agent_clis.install("claude-code", "latest")
     assert refused.returncode == 64
@@ -2586,6 +2592,7 @@ def test_dist_tags_are_refused_unless_opted_into(agent_clis: _AgentCliSandbox) -
     assert agent_clis.current("claude-code") == "2.1.270"
 
 
+@needs_engine
 def test_a_malformed_version_is_refused_before_npm_is_asked(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2599,6 +2606,7 @@ def test_a_malformed_version_is_refused_before_npm_is_asked(
     assert agent_clis.npm_calls() == []
 
 
+@needs_engine
 def test_old_versions_are_pruned_but_current_is_kept(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2618,6 +2626,7 @@ def test_old_versions_are_pruned_but_current_is_kept(
     assert len(kept) == 3, kept  # current plus two more
 
 
+@needs_engine
 def test_codex_runs_through_the_full_access_wrapper_whichever_copy_is_current(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2634,6 +2643,7 @@ def test_codex_runs_through_the_full_access_wrapper_whichever_copy_is_current(
     assert agent_clis.manifest()["codex"] == "0.150.0"
 
 
+@needs_engine
 def test_a_persisted_home_copy_still_fails_the_boot_check(
     agent_clis: _AgentCliSandbox,
 ) -> None:
@@ -2651,6 +2661,7 @@ def test_a_persisted_home_copy_still_fails_the_boot_check(
     assert agent_clis.verify(VOGT_AGENT_SHADOW_POLICY="warn").returncode == 0
 
 
+@needs_engine
 def test_the_verifier_reports_a_current_that_disagrees_with_the_manifest(
     agent_clis: _AgentCliSandbox,
 ) -> None:
