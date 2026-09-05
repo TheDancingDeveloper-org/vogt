@@ -1276,15 +1276,32 @@ export interface GitDiffResp {
  * Uses fetch + ReadableStream rather than the native EventSource so the
  * Authorization header can be sent (EventSource has no header support).
  */
+export interface EventStreamHooks {
+  /** The stream is established: the response was accepted and has a body. */
+  onOpen?: () => void;
+  /**
+   * A complete frame arrived — an event, or one of the server's `:ka`
+   * keep-alive comments (every 15s, `events_stream` in the engine). Comments
+   * carry no data and never reach `onEvent`; this is the only way a client
+   * can tell a quiet, healthy stream from a dead one.
+   */
+  onHeartbeat?: () => void;
+}
+
 export function subscribeEvents(
   onEvent: (ev: ServerEvent) => void,
   onError?: (e: Event) => void,
+  hooks: EventStreamHooks = {},
 ): () => void {
   if (isDemoMode()) {
     const candidate = runtimeTransport() as {
       subscribe?: (listener: (event: ServerEvent) => void) => () => void;
     };
-    if (candidate.subscribe) return candidate.subscribe(onEvent);
+    if (candidate.subscribe) {
+      const unsubscribe = candidate.subscribe(onEvent);
+      hooks.onOpen?.();
+      return unsubscribe;
+    }
   }
   let cancelled = false;
   const controller = new AbortController();
@@ -1304,6 +1321,8 @@ export function subscribeEvents(
         if (!res.ok) reportAuthResponse(res.status, "the event stream was refused");
         throw new Error(`SSE failed: ${res.status}`);
       }
+      if (cancelled) return;
+      hooks.onOpen?.();
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buf = "";
@@ -1325,6 +1344,7 @@ export function subscribeEvents(
         while ((idx = buf.indexOf("\n\n")) !== -1) {
           const frame = buf.slice(0, idx);
           buf = buf.slice(idx + 2);
+          hooks.onHeartbeat?.();
           const lines = frame.split("\n");
           let data = "";
           for (const line of lines) {

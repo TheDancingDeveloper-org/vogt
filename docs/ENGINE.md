@@ -691,7 +691,14 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   reason?}` where `outcome` is `approved` or `blocked`), and `task.steered`
   (`{…, actor, interrupt, reason?}`) — plus `task.run.concluded` (`{…, outcome,
   exit_code?, duration_ms, retries, branch?, final_sha?, files_changed?,
-  insertions?, deletions?, cost_usd?}`, #291), each tagged by `type`.
+  insertions?, deletions?, cost_usd?}`, #291), each tagged by `type`. The
+  stream carries a `:ka` keep-alive comment every 15 seconds while nothing
+  else is happening. A client should treat the accepted response and every
+  frame, comment included, as proof the front door is alive — a quiet
+  session emits no event for as long as it runs — and presume a stream
+  dead after about three missed keep-alives, reconnecting without backoff:
+  Android in particular lets a backgrounded socket die without ever raising
+  an error. The PWA's session store does exactly this (WI-77).
 - `GET /api/status` -> `OperationalStatus` — version, session count, push
   subscription count, live GUI process count, whether the GUI stream and FCM
   are configured, and nested `history`, `agent_tasks`, `auth_broker` and

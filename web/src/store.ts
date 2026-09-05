@@ -49,7 +49,9 @@ export async function refreshSessions(signal?: AbortSignal): Promise<void> {
   } catch (e) {
     if (signal?.aborted) return;
     setError((e as Error).message);
-    setConnected(false);
+    // A list that failed is reported as such; whether the front door is
+    // reachable is the stream's to say while it is open (WI-77).
+    if (!streamOpen) setConnected(false);
   }
 }
 
@@ -120,6 +122,61 @@ let unsubscribeEvents: (() => void) | null = null;
 let reconnectAttempts = 0;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let streamStarted = false;
+/** The stream has been accepted and not yet lost — liveness the header can trust. */
+let streamOpen = false;
+
+/**
+ * How long an open stream may stay silent before it is presumed dead. The
+ * engine sends a `:ka` keep-alive every 15s, so this is three missed ones:
+ * long enough that one delayed frame is not a reconnect, short enough that
+ * Android's habit of letting a backgrounded socket die without an error
+ * (see `forceReconnectEventStream`) is caught within a minute of resume even
+ * when no lifecycle event fires.
+ */
+export const EVENT_STREAM_STALE_MS = 45_000;
+let staleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function disarmStaleTimer(): void {
+  if (staleTimer !== null) {
+    clearTimeout(staleTimer);
+    staleTimer = null;
+  }
+}
+
+function armStaleTimer(): void {
+  disarmStaleTimer();
+  staleTimer = setTimeout(() => {
+    staleTimer = null;
+    if (!unsubscribeEvents) return;
+    // Silence past the deadline: drop the stream and come straight back.
+    // Straight back, not through the backoff — the stream *was* up, so
+    // this is a dead socket, not a refusing server.
+    unsubscribeEvents();
+    unsubscribeEvents = null;
+    streamOpen = false;
+    setConnected(false);
+    reconnectAttempts = 0;
+    noteForeground("sse-reconnect");
+    startEventStream();
+  }, EVENT_STREAM_STALE_MS);
+}
+
+/**
+ * The stream is up. That alone is the connection the header reports: a
+ * quiet session emits no event for as long as it runs, and before this the
+ * flag could only be set by an event or a session-list refresh — so a warm
+ * open whose first refresh met a still-waking network (a tunnel coming back
+ * after resume) showed "Disconnected" until something happened to change
+ * state. A list that failed to load is retried here, now that the same
+ * origin has just answered.
+ */
+function noteStreamAlive(): void {
+  streamOpen = true;
+  setConnected(true);
+  reconnectAttempts = 0;
+  markAnswered();
+  armStaleTimer();
+}
 
 function nextReconnectDelay(): number {
   // Exponential backoff with jitter, capped at ~30s. Starts at 1s.
@@ -194,9 +251,7 @@ export function startEventStream(): void {
   }
   unsubscribeEvents = subscribeEvents(
     (ev: ServerEvent) => {
-      setConnected(true);
-      markAnswered();
-      reconnectAttempts = 0;
+      noteStreamAlive();
       switch (ev.type) {
         case "session-created":
           // Skip the refetch if we already know this id (the local create
@@ -234,6 +289,8 @@ export function startEventStream(): void {
       }
     },
     () => {
+      disarmStaleTimer();
+      streamOpen = false;
       setConnected(false);
       unsubscribeEvents = null;
       noteForeground("sse-reconnect");
@@ -243,11 +300,22 @@ export function startEventStream(): void {
         startEventStream();
       }, delay);
     },
+    {
+      onOpen: () => {
+        noteStreamAlive();
+        // The first load is the boot wake's; this retries only a list that
+        // failed, now that the same origin has just answered.
+        if (error() !== null) void refreshSessions();
+      },
+      onHeartbeat: noteStreamAlive,
+    },
   );
 }
 
 export function stopEventStream(): void {
   streamStarted = false;
+  streamOpen = false;
+  disarmStaleTimer();
   unsubscribeEvents?.();
   unsubscribeEvents = null;
   if (reconnectTimer !== null) {
@@ -264,6 +332,8 @@ export function stopEventStream(): void {
 export function forceReconnectEventStream(): void {
   if (!streamStarted) return;
   reconnectAttempts = 0;
+  streamOpen = false;
+  disarmStaleTimer();
   if (unsubscribeEvents) {
     unsubscribeEvents();
     unsubscribeEvents = null;
