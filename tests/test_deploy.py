@@ -3272,6 +3272,8 @@ def test_deploy_dev_restore_environment_undoes_the_literal_newline_collapse() ->
         "# vogt-dev — managed by Komodo\n"
         "\n"
         "VOGT_PORT=8910\n"
+        "VOGT_TAILSCALE_DIR=/srv/vogt-dev/tailscale\n"
+        "  # indented note after a plain value must stay its own line\n"
         "VOGT_GITHUB_TOKEN=[[infisical://p/prod/GH]]\n"
         f"MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON={fcm}\n"
         "MYDEVENV2_TOKEN=[[infisical://p/prod/T]]\n"
@@ -3290,8 +3292,13 @@ def test_deploy_dev_restore_environment_undoes_the_literal_newline_collapse() ->
     shape = dd.shape_of(restored)
     assert "malformed-lines=0" in shape
     assert (
-        "keys=['VOGT_PORT', 'VOGT_GITHUB_TOKEN', "
+        "keys=['VOGT_PORT', 'VOGT_TAILSCALE_DIR', 'VOGT_GITHUB_TOKEN', "
         "'MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON', 'MYDEVENV2_TOKEN']" in shape
     )
+    # Only the JSON value legitimately carries a literal backslash-n; a plain
+    # value followed by an indented comment must not have been glued to it.
+    joined = "values-with-literal-backslash-n=['MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON']"
+    assert joined in shape
+    assert "VOGT_TAILSCALE_DIR=/srv/vogt-dev/tailscale\n" in restored
     assert "literal-backslash-n=True" in shape, "the FCM data keeps its escapes"
     assert "real-newlines=True" in shape
