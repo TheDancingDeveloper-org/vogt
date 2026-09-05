@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -3158,14 +3159,14 @@ def test_the_bootstrap_skips_cadastre_without_an_endpoint() -> None:
     )
 
 
-def _load_deploy_dev() -> object:
+def _load_deploy_dev() -> Any:
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(
         "deploy_dev", REPO_ROOT / "scripts" / "deploy_dev.py"
     )
+    assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
