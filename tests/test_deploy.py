@@ -3257,26 +3257,41 @@ def test_deploy_dev_reports_environment_shape_without_values() -> None:
 def test_deploy_dev_restore_environment_undoes_the_literal_newline_collapse() -> None:
     """The exact corruption observed on vogt-dev (2026-09-05): the whole
     original .env as one literal-backslash-n line, then two real-newline lines
-    a deploy appended. Restoring must recover the original lines exactly,
-    drop only the two appended keys, and be idempotent on a healthy env."""
+    a deploy appended. Restoring must recover the original lines exactly —
+    including a value that legitimately holds literal backslash-n as data
+    (the FCM service-account JSON's private key), which must stay on ONE
+    line — drop only the two appended keys, and be idempotent."""
     dd = _load_deploy_dev()
+    fcm = (
+        '{"type":"service_account","private_key":"-----BEGIN PRIVATE KEY-----'
+        "\\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC\\n"
+        "G+Rg0/NlU4SlFJH6Aws5NYo=\\n-----END PRIVATE KEY-----\\n"
+        '","client_email":"x@y.iam"}'
+    )
     original = (
         "# vogt-dev — managed by Komodo\n"
         "\n"
         "VOGT_PORT=8910\n"
         "VOGT_GITHUB_TOKEN=[[infisical://p/prod/GH]]\n"
+        f"MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON={fcm}\n"
         "MYDEVENV2_TOKEN=[[infisical://p/prod/T]]\n"
     )
     collapsed = original.replace("\n", "\\n")
     corrupted = (
         f"{collapsed}\nVOGT_CODEX_VERSION=0.153.4\nVOGT_CLAUDE_CODE_VERSION=2.1.261\n"
     )
-    assert dd.restore_environment(corrupted) == original
+    restored = dd.restore_environment(corrupted)
+    assert restored == original
     assert dd.restore_environment(original) == original, "idempotent"
-    # The restored env is what the pre_deploy hook needs: a real line start.
-    assert "\nVOGT_GITHUB_TOKEN=" in dd.restore_environment(corrupted)
-    # A healthy env that legitimately carries the two keys elsewhere keeps
-    # everything else byte-for-byte.
-    shape = dd.shape_of(dd.restore_environment(corrupted))
-    assert "keys=['VOGT_PORT', 'VOGT_GITHUB_TOKEN', 'MYDEVENV2_TOKEN']" in shape
-    assert "literal-backslash-n=False" in shape and "real-newlines=True" in shape
+    assert "\nVOGT_GITHUB_TOKEN=" in restored, "a real line start for the hook"
+    # The FCM value survived as one line with its internal \\n intact.
+    fcm_lines = [line for line in restored.splitlines() if "FCM" in line]
+    assert len(fcm_lines) == 1 and fcm in fcm_lines[0]
+    shape = dd.shape_of(restored)
+    assert "malformed-lines=0" in shape
+    assert (
+        "keys=['VOGT_PORT', 'VOGT_GITHUB_TOKEN', 'MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON', 'MYDEVENV2_TOKEN']"
+        in shape
+    )
+    assert "literal-backslash-n=True" in shape, "the FCM data keeps its escapes"
+    assert "real-newlines=True" in shape
