@@ -294,3 +294,40 @@ def test_namespace_matches_the_source_package() -> None:
     manifest resolves to a class that is not there.
     """
     assert f'namespace "{DEFAULT_APP_ID}"' in GRADLE.read_text(encoding="utf-8")
+
+
+# ── #592: a touch over a terminal is the page's, never the WebView's ─────────
+#
+# Back-scroll did not work in a terminal on the Android app. `touch-action:
+# pan-y pinch-zoom` on the terminal host let the WebView start a native pan on
+# the first unprevented move and cancel the touch for the scrollers that would
+# have worked, and page zoom let a pinch hijack the drag that followed. The
+# stylesheet is not applied under jsdom and the Capacitor config is read by no
+# JavaScript test, so the two halves the fix depends on are pinned here.
+
+STYLES = REPO_ROOT / "web" / "src" / "styles.css"
+
+
+def _css_block(css: str, selector: str) -> str:
+    # The rule of its own, not the tail of a comma-separated selector list
+    # that happens to end with the same selector.
+    for match in re.finditer(r"\n" + re.escape(selector) + r" \{", css):
+        if css[match.start() - 1] != ",":
+            return css[match.start() + 1 : css.index("}", match.end())]
+    raise AssertionError(f"no rule for {selector}")
+
+
+def test_the_terminal_host_leaves_the_browser_no_touch_action() -> None:
+    css = STYLES.read_text(encoding="utf-8")
+    for selector in (".terminal-host", ".terminal-host .xterm-screen"):
+        block = _css_block(css, selector)
+        assert re.search(r"touch-action:\s*none", block), selector
+        assert "pinch-zoom" not in block, selector
+
+
+def test_the_android_shell_does_not_zoom_the_page() -> None:
+    config = CAPACITOR.read_text(encoding="utf-8")
+    assert "zoomEnabled: true" not in config
+    assert config.count("zoomEnabled: false") == 2, (
+        "both the top-level and the android block must turn page zoom off"
+    )

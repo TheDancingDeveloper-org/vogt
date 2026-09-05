@@ -2479,7 +2479,14 @@ textarea {
   background: var(--term-bg);
   overflow: hidden;
   overscroll-behavior: contain;
-  touch-action: pan-y pinch-zoom;
+  /* Every touch over the terminal is JavaScript's (#592): xterm 6 moves its
+     buffer from touch events and leaves the browser nothing to pan, so a
+     `pan-y` here only let an Android WebView start a native pan on the first
+     unprevented move and then cancel the touch for the scrollers that would
+     have worked. Pinch is out too — page zoom over a terminal hijacked the
+     follow-up drag; font size is a setting. The phone pager's horizontal
+     swipe is also JavaScript, so it loses nothing. */
+  touch-action: none;
 }
 .terminal-host .xterm,
 .terminal-host .xterm-viewport,
@@ -2493,7 +2500,7 @@ textarea {
   overscroll-behavior: contain;
 }
 .terminal-host .xterm-screen {
-  touch-action: pan-y pinch-zoom;
+  touch-action: none;
 }
 .terminal-host .xterm-helper-textarea {
   font-size: 16px;
