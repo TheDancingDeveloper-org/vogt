@@ -99,6 +99,10 @@ services:
       GUI_STREAM_URL: "${GUI_STREAM_URL:-}"
       # FCM service-account JSON (single-line). Empty disables the FCM
       # transport; web-push still works for any browser subscription.
+      # Prefer the file form: the document holds a private key, and an
+      # environment variable is inherited by every session the engine
+      # starts and readable from /proc by anything running as its user (#583).
+      ENGINE_FCM_SERVICE_ACCOUNT_FILE: "${ENGINE_FCM_SERVICE_ACCOUNT_FILE:-}"
       ENGINE_FCM_SERVICE_ACCOUNT_JSON: "${ENGINE_FCM_SERVICE_ACCOUNT_JSON:-}"
       # Conversational assistant. Empty key disables it — routes 404 and the PWA
       # hides the tab. A key with no base URL is a startup error, not a silent
