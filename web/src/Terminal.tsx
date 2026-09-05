@@ -43,6 +43,11 @@ import {
   ReconnectTracker,
 } from "./terminalReconnect";
 import { applyStickyMods } from "./terminalModifiers";
+import {
+  beginTerminalTouch,
+  moveTerminalTouch,
+  type TerminalTouchGesture,
+} from "./terminalTouch";
 import { onPageVisibility, onWake } from "./wakeCoordinator";
 import { SocketWatchdog } from "./terminalWatchdog";
 
@@ -425,66 +430,58 @@ const TerminalView: Component<Props> = (props) => {
   const installTouchGestures = () => {
     if (!hostRef) return () => {};
 
-    let mode: "idle" | "scroll" = "idle";
-    let startX = 0;
-    let startY = 0;
-    let lastY = 0;
-    let lineRemainder = 0;
-
-    const resetScroll = (touch: Touch) => {
-      mode = "idle";
-      startX = touch.clientX;
-      startY = touch.clientY;
-      lastY = touch.clientY;
-      lineRemainder = 0;
-    };
+    // Arbitration lives in `terminalTouch.ts` (#592): claim vertical moves
+    // from the browser at once, leave horizontal ones to the phone pager,
+    // and in the alternate buffer turn the swipe into what a mouse wheel
+    // would be. The normal buffer's scrollback is xterm's own gesture
+    // scroller's to move — one scroller, not two.
+    let gesture: TerminalTouchGesture | null = null;
 
     const onTouchStart = (event: TouchEvent) => {
-      if (event.touches.length === 1) {
-        const touch = event.touches[0];
-        if (touch) resetScroll(touch);
-        return;
-      }
+      const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+      gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
     };
 
     const onTouchMove = (event: TouchEvent) => {
-      if (!term) return;
-
-      if (event.touches.length !== 1) return;
+      if (!term || !gesture) return;
+      if (event.touches.length !== 1) {
+        gesture = null;
+        return;
+      }
       const touch = event.touches[0];
       if (!touch) return;
 
-      const totalX = touch.clientX - startX;
-      const totalY = touch.clientY - startY;
-      if (mode === "idle") {
-        const absX = Math.abs(totalX);
-        const absY = Math.abs(totalY);
-        if (absY < 8 && absX < 8) return;
-        if (absY < absX * 1.2) return;
-        mode = "scroll";
+      const move = moveTerminalTouch(
+        gesture,
+        touch.clientX,
+        touch.clientY,
+        estimateCellHeight(),
+        term.buffer.active.type === "alternate" ? "alternate" : "normal",
+      );
+      gesture = move.gesture;
+      if (move.claim && event.cancelable) event.preventDefault();
+      if (move.wheelLines !== 0) {
+        // Dispatched at the screen so it bubbles through xterm's own wheel
+        // listener on `.xterm`, which reports it to a mouse-tracking TUI or,
+        // in alternate-scroll mode, sends the arrow keys — exactly what a
+        // wheel over that TUI does on a desktop.
+        const target = term.element?.querySelector(".xterm-screen") ?? term.element ?? hostRef;
+        target?.dispatchEvent(
+          new WheelEvent("wheel", {
+            deltaY: move.wheelLines,
+            deltaMode: WheelEvent.DOM_DELTA_LINE,
+            clientX: touch.clientX,
+            clientY: touch.clientY,
+            bubbles: true,
+            cancelable: true,
+          }),
+        );
       }
-
-      if (mode !== "scroll") return;
-      const dy = touch.clientY - lastY;
-      lastY = touch.clientY;
-      lineRemainder += -dy / estimateCellHeight();
-      const wholeLines =
-        lineRemainder > 0 ? Math.floor(lineRemainder) : Math.ceil(lineRemainder);
-      if (wholeLines !== 0) {
-        term.scrollLines(wholeLines);
-        lineRemainder -= wholeLines;
-      }
-      event.preventDefault();
     };
 
     const onTouchEnd = (event: TouchEvent) => {
-      if (event.touches.length === 1) {
-        const touch = event.touches[0];
-        if (touch) resetScroll(touch);
-        return;
-      }
-      mode = "idle";
-      lineRemainder = 0;
+      const touch = event.touches.length === 1 ? event.touches[0] : undefined;
+      gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
     };
 
     const listenerOptions: AddEventListenerOptions = { passive: false };

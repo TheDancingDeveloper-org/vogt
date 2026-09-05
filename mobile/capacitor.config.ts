@@ -82,9 +82,13 @@ const config: CapacitorConfig = {
     process.env.MYDEVENV2_ANDROID_APP_NAME ||
     "Vogt",
   webDir: "web",
-  zoomEnabled: true,
+  // Page zoom is off (#592): with it on, a pinch over a terminal zoomed the
+  // whole WebView and the drag that followed panned the zoomed page instead
+  // of scrolling the buffer. Text size is a product setting (terminal font
+  // size, app theme), not a viewport gesture.
+  zoomEnabled: false,
   android: {
-    zoomEnabled: true,
+    zoomEnabled: false,
   },
   server: {
     url: SERVER_URL,
