@@ -14,6 +14,51 @@ git log rather than being reconstructed here.
 
 Nothing yet.
 
+## [0.5.4] - 2026-09-05
+
+A patch on 0.5.3 for the core stall that took the 0.5.3 production deploy
+down: one Inbox read had grown to nine seconds, the badges re-asked for it
+every eight seconds, and everything else queued behind it. No schema
+migration is required.
+
+### Fixed
+
+- **The Inbox no longer re-reads a project once per failing check.** The
+  projection rolled every latest check of a project up again *for each*
+  failing check in it, so one page cost Σ failing × checks-per-project —
+  730 queries and 732,425 observation objects on a two-week-old estate,
+  ~9.5 s, and rising with CI activity. Each project is now rolled up once,
+  and triage is applied from one batched lookup. The same read takes 0.3 s
+  (#580).
+- **A read that exceeds its deadline is no longer retried blindly.** The
+  PWA's transport treated a timed-out attempt as a wire failure and tried
+  twice more, so one badge refresh was three eight-second reads the core
+  still ran to completion after the browser had moved on. A deadline is
+  terminal; the caller decides (#581).
+- **The badges back off after a failed read** — 8 s, doubling to 2 min —
+  drop change nudges while waiting, retry once by themselves, and keep the
+  last known value on screen as stale rather than replacing it with a dash
+  (#581).
+- **The front door sheds a burst instead of queueing it.** `/api/vogt/*`
+  now carries an in-flight ceiling of 16; past it a caller gets `503` with a
+  `Retry-After` rather than a place in a queue the core cannot cancel.
+  Requests a client abandons are now logged with how long it waited; they
+  used to vanish from the front door's log entirely (#581).
+- **`vogt-mcp-remote` answers `initialize` before it looks around.** The
+  bridge pre-flighted the banner and its own `tools/list` on 30 s timeouts
+  before reading stdin, so a slow core made every agent session report
+  "MCP server vogt connection timed out". The client's first message goes
+  first; discovery follows once, with a 3 s budget of its own (#582).
+
+### Security
+
+- **The Firebase service-account key can be read from a file.**
+  `ENGINE_FCM_SERVICE_ACCOUNT_FILE` (or `fcm_service_account_file`) is the
+  documented form. The inline `ENGINE_FCM_SERVICE_ACCOUNT_JSON` still works
+  but is removed from the engine's environment as soon as it is read, so the
+  sessions the engine starts no longer inherit a private key, and a boot
+  warning names the file form until the deployment moves to it (#583).
+
 ## [0.5.3] - 2026-09-05
 
 A patch on 0.5.2 for the phone: the app resumes into a live view instead of a
@@ -323,7 +368,8 @@ minor bump.
 Baseline entry for this changelog. See the git log and release notes for the
 full history up to this tag.
 
-[Unreleased]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.5.3...HEAD
+[Unreleased]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.5.4...HEAD
+[0.5.4]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.5.3...v0.5.4
 [0.5.3]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.5.2...v0.5.3
 [0.4.0]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/TheDancingDeveloper-org/vogt/compare/v0.3.0...v0.3.1
