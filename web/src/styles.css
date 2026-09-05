@@ -2755,7 +2755,9 @@ textarea {
    A flex item of its own so it takes real space between the panes; stretches
    the cross axis to the full gutter. Modelled on `.rail-resize-handle`. */
 .terminal-split-divider {
-  flex: 0 0 6px;
+  /* Exactly the gutter the split used to draw as `gap`, so panes sit where they
+     always did — the divider replaces that empty space, it does not add to it. */
+  flex: 0 0 4px;
   align-self: stretch;
   position: relative;
   z-index: 4;
