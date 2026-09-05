@@ -3235,3 +3235,20 @@ def test_deploy_dev_surfaces_the_failing_komodo_stage() -> None:
         "logs": [{"stage": "s", "success": False, "stderr": "x\n" * 5000}],
     }
     assert len(dd.failure_detail(big, limit=500)) <= 500
+
+
+def test_deploy_dev_reports_environment_shape_without_values() -> None:
+    dd = _load_deploy_dev()
+    well_formed = {
+        "config": {"environment": "A=1\nSECRET_TOKEN=s3cr3t\n# note\nB=two\n"}
+    }
+    out = dd.env_shape(well_formed)
+    assert "keys=['A', 'SECRET_TOKEN', 'B']" in out
+    assert "s3cr3t" not in out and "two" not in out
+    assert "real-newlines=True" in out and "malformed-lines=0" in out
+    # Literal backslash-n (double-escaped) is recognised and unescaped for the count.
+    mangled = {"config": {"environment": "A=1\\nB=2\\njunk"}}
+    out2 = dd.env_shape(mangled)
+    assert "literal-backslash-n=True" in out2 and "real-newlines=False" in out2
+    assert "keys=['A', 'B']" in out2 and "malformed-lines=1" in out2
+    assert dd.env_shape({"config": {}}) == "environment: <absent>"
