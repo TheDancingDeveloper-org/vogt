@@ -55,6 +55,25 @@ use crate::observability::{RequestId, REQUEST_ID_HEADER};
 /// Front-door mount points. Public so the router and its tests name the same
 /// strings, and so a change to one is a change to both.
 pub const API_PREFIX: &str = "/api/vogt";
+
+/// How many `/api/vogt/*` requests this door will have open against the core
+/// at once. Beyond it a caller is told `503` with a `Retry-After` rather than
+/// queued.
+///
+/// A cap and not a queue, because the core cannot cancel work: a request the
+/// browser has abandoned still runs to completion there. On 2026-09-05 one
+/// slow read, re-asked every 8 s by every open tab, stacked twenty-odd
+/// copies of itself in the core's thread pool until `/api/sessions` and
+/// `/mcp` were minutes behind it (#581). Shedding at the door is what keeps
+/// a slow read a slow read. The number is well above what a few tabs need
+/// at once and well below the core's own thread pool, so a burst is refused
+/// here before it can starve the core's other callers. `/mcp` is not capped:
+/// its responses can be long-lived streams, and an agent's own tool call is
+/// the thing the badges must not crowd out.
+pub const PROXIED_READS_IN_FLIGHT: usize = 16;
+
+/// What a shed caller is told to wait before asking again, in seconds.
+const RETRY_AFTER_SECONDS: &str = "2";
 pub const MCP_PREFIX: &str = "/mcp";
 
 /// The core's own prefixes, which the ones above map onto.
@@ -115,6 +134,8 @@ pub struct VogtCore {
     /// exposure value carries no default (NFR-D2), and a URL this process
     /// guessed would be wrong in exactly the deployment the field exists for.
     public_url: Option<String>,
+    /// The in-flight cap for `/api/vogt/*`; see `PROXIED_READS_IN_FLIGHT`.
+    in_flight: Arc<tokio::sync::Semaphore>,
 }
 
 impl VogtCore {
@@ -143,6 +164,7 @@ impl VogtCore {
             base,
             fallback_token: cfg.vogt_core_token.clone(),
             public_url: cfg.public_url.clone(),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(PROXIED_READS_IN_FLIGHT)),
         }))
     }
 
@@ -402,6 +424,13 @@ pub async fn api(State(state): State<Arc<AppState>>, request: Request) -> Respon
         });
     };
 
+    // Held until the core has started answering, which for `/api/*` is
+    // when the work is done; the body that follows is a JSON document, not
+    // a stream. `try_acquire` rather than `acquire`: waiting here is the
+    // queue this cap exists to refuse.
+    let Ok(_permit) = Arc::clone(&core.in_flight).try_acquire_owned() else {
+        return busy();
+    };
     let path = map_prefix(request.uri(), API_PREFIX, CORE_API_PREFIX);
     core.forward(&path, Some(&injected), request).await
 }
@@ -483,6 +512,20 @@ fn has_dot_segment(raw_path: &str) -> bool {
 }
 
 // -- refusals, each with a reason (FR-U21) ----------------------------------
+
+/// Too many requests already open against the core (#581). A refusal with a
+/// reason and a `Retry-After`, so a client that backs off can, and one that
+/// does not is at least not queued.
+fn busy() -> Response {
+    let reason = format!(
+        "this front door already has {PROXIED_READS_IN_FLIGHT} requests open against vogt-core; retry shortly"
+    );
+    let mut response = unavailable(&reason);
+    if let Ok(value) = HeaderValue::from_str(RETRY_AFTER_SECONDS) {
+        response.headers_mut().insert(header::RETRY_AFTER, value);
+    }
+    response
+}
 
 fn not_configured() -> Response {
     unavailable("this front door has no vogt-core configured (VOGT_CORE_URL is unset)")

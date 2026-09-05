@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 use vogt_engine_server::{
     app::router,
     auth::{ScopedTokenConfig, TokenCapability},
+    vogt_core::PROXIED_READS_IN_FLIGHT,
     Config,
 };
 
@@ -87,6 +88,11 @@ async fn core_handler(
             .map(str::to_owned),
     });
     match uri.path() {
+        // A read the core takes its time over, for the in-flight cap (#581).
+        "/api/slow" => {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+            (AxumStatus::OK, Json(json!({"seen": "/api/slow"}))).into_response()
+        }
         "/health/ready" => (
             AxumStatus::OK,
             Json(json!({
@@ -1561,4 +1567,72 @@ async fn an_unusable_request_id_is_replaced_before_it_reaches_a_log() {
     assert_ne!(answered, "forged status=200");
     let seen = proxied(&log).last().cloned().unwrap();
     assert_eq!(seen.request_id.as_deref(), Some(answered));
+}
+
+/// The door has a ceiling on how many reads it will hold open against the
+/// core, and a caller past it is refused with a reason and a `Retry-After`
+/// rather than queued (#581). Once the burst drains, the door answers again.
+#[tokio::test]
+async fn a_burst_past_the_in_flight_cap_is_shed_with_a_retry_after() {
+    let (door, log) = front_door().await;
+    let client = client();
+    let burst = PROXIED_READS_IN_FLIGHT + 6;
+    let mut pending = Vec::with_capacity(burst);
+    for _ in 0..burst {
+        let client = client.clone();
+        let door = door.clone();
+        pending.push(tokio::spawn(async move {
+            client
+                .get(format!("{door}/api/vogt/slow"))
+                .headers(bearer(TEST_TOKEN))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+    let mut served = 0;
+    let mut shed = 0;
+    for task in pending {
+        let response = task.await.unwrap();
+        match response.status() {
+            StatusCode::OK => served += 1,
+            StatusCode::SERVICE_UNAVAILABLE => {
+                shed += 1;
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok()),
+                    Some("2")
+                );
+                let body: Value = response.json().await.unwrap();
+                let reason = body["error"]["message"].as_str().unwrap();
+                assert!(
+                    reason.contains("requests open against vogt-core"),
+                    "{reason}"
+                );
+            }
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert_eq!(served + shed, burst);
+    assert!(served <= PROXIED_READS_IN_FLIGHT, "served {served}");
+    assert!(shed >= 6, "shed {shed}");
+    // Nothing that was shed reached the core: the cap is at the door.
+    assert_eq!(
+        proxied(&log)
+            .iter()
+            .filter(|s| s.path == "/api/slow")
+            .count(),
+        served
+    );
+
+    // The burst has drained; the next read goes through.
+    let after = client
+        .get(format!("{door}/api/vogt/slow"))
+        .headers(bearer(TEST_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(after.status(), StatusCode::OK);
 }

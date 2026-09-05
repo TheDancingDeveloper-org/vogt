@@ -698,7 +698,8 @@ from source, not published.
   default off. Quiet hours digest instead of sending. Browser web-push needs
   only the engine's VAPID keypair, generated into its state directory on first
   run; push to the Android shell additionally needs
-  `ENGINE_FCM_SERVICE_ACCOUNT_JSON`, and without it only browser subscriptions
+  `ENGINE_FCM_SERVICE_ACCOUNT_FILE` (a path to the document; the inline
+  `ENGINE_FCM_SERVICE_ACCOUNT_JSON` still works), and without it only browser subscriptions
   are delivered.
 - **A session waiting for input becomes a card**, above the roster, showing
   the prompt it is actually waiting on. **Send y + Enter** and **Send Ctrl-C**

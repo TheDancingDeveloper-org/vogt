@@ -236,9 +236,19 @@ pub struct Config {
     /// Where persistent state lives (push subscriptions, VAPID keys).
     /// Defaults to $HOME/.local/share/mydevenv2.
     pub state_dir: std::path::PathBuf,
-    /// FCM service-account JSON (the full contents, not a path). Sourced
-    /// from `ENGINE_FCM_SERVICE_ACCOUNT_JSON` env or config file. Empty
-    /// disables FCM push (web-push still works for browser subscriptions).
+    /// FCM service-account JSON (the full contents, not a path). Read from
+    /// the file `ENGINE_FCM_SERVICE_ACCOUNT_FILE` (or `fcm_service_account_file`
+    /// in the config file) names, or — still accepted, and warned about —
+    /// inline from `ENGINE_FCM_SERVICE_ACCOUNT_JSON`. Empty disables FCM push
+    /// (web-push still works for browser subscriptions).
+    ///
+    /// A file, because the document carries a private key. Every process
+    /// this engine starts inherits its environment, and `/proc/<pid>/environ`
+    /// is readable by anything running as the same user — which is every
+    /// agent session (#583). The inline form is read once and removed from
+    /// this process's environment before any session is spawned, but the
+    /// only shape that keeps the key out of the environment altogether is
+    /// the file.
     pub fcm_service_account_json: Option<String>,
     /// VAPID `subject` (`mailto:` or `https:` URL). RFC 8292 requires this on
     /// the JWT we sign for web-push.
@@ -413,6 +423,7 @@ struct FileConfig {
     push_allow_insecure_endpoints: Option<bool>,
     state_dir: Option<String>,
     fcm_service_account_json: Option<String>,
+    fcm_service_account_file: Option<String>,
     vapid_subject: Option<String>,
     allowed_origins: Option<Vec<String>>,
     auto_agent_auth: Option<bool>,
@@ -701,10 +712,10 @@ pub fn load(
             .map(std::path::PathBuf::from)
             .or_else(|| dirs_home().map(|h| h.join(".local/share/mydevenv2")))
             .unwrap_or_else(|| std::path::PathBuf::from("/var/lib/mydevenv2")),
-        fcm_service_account_json: from_file
-            .fcm_service_account_json
-            .or_else(|| engine_env("ENGINE_FCM_SERVICE_ACCOUNT_JSON").ok())
-            .filter(|s| !s.trim().is_empty()),
+        fcm_service_account_json: fcm_service_account(
+            from_file.fcm_service_account_file.as_deref(),
+            from_file.fcm_service_account_json,
+        )?,
         vapid_subject: from_file
             .vapid_subject
             .or_else(|| engine_env("ENGINE_VAPID_SUBJECT").ok())
@@ -855,6 +866,64 @@ pub fn config_path_from_env() -> Option<std::path::PathBuf> {
 /// and exports their paths, which keeps the value out of the process
 /// environment — where `/proc/<pid>/environ` and every `docker inspect`
 /// would otherwise show it.
+/// The FCM service-account document, from the safest source that has it.
+///
+/// Order: the file the config names, the file the environment names, the
+/// inline config value, the inline environment value. The inline environment
+/// value is the one #583 is about: it is a private key in a place every
+/// child process inherits and every same-user process can read, so it is
+/// removed from this process's environment as soon as it has been read —
+/// the sessions this engine spawns do not get it — and its use is warned
+/// about at every boot until the deployment moves to the file.
+fn fcm_service_account(
+    file_from_config: Option<&str>,
+    inline_from_config: Option<String>,
+) -> Result<Option<String>> {
+    if let Some(path) = file_from_config.map(str::trim).filter(|p| !p.is_empty()) {
+        return read_secret_document("fcm_service_account_file", path).map(Some);
+    }
+    if let Some(path) = engine_env("ENGINE_FCM_SERVICE_ACCOUNT_FILE")
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+    {
+        return read_secret_document("ENGINE_FCM_SERVICE_ACCOUNT_FILE", &path).map(Some);
+    }
+    if let Some(inline) = inline_from_config.filter(|s| !s.trim().is_empty()) {
+        return Ok(Some(inline));
+    }
+    let inline = engine_env("ENGINE_FCM_SERVICE_ACCOUNT_JSON")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    if inline.is_some() {
+        for name in [
+            "ENGINE_FCM_SERVICE_ACCOUNT_JSON",
+            "MYDEVENV2_FCM_SERVICE_ACCOUNT_JSON",
+        ] {
+            // SAFETY: called once, from `load`, before any thread this
+            // process starts could be reading the environment.
+            unsafe { std::env::remove_var(name) };
+        }
+        tracing::warn!(
+            "ENGINE_FCM_SERVICE_ACCOUNT_JSON carries a private key in the process              environment; it has been removed from this process's environment so              sessions do not inherit it, but prefer ENGINE_FCM_SERVICE_ACCOUNT_FILE              (a path to the document) and rotate the key (#583)"
+        );
+    }
+    Ok(inline)
+}
+
+/// A secret-bearing document read from a path, which must exist and hold
+/// something: an empty file is a deployment mid-rotation, not a request to
+/// run without the feature, and failing the boot is the safe read.
+fn read_secret_document(setting: &str, path: &str) -> Result<String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| ApiError::Config(format!("reading {setting} ({path}): {e}")))?;
+    let value = raw.trim().to_string();
+    if value.is_empty() {
+        return Err(ApiError::Config(format!("{setting} ({path}) is empty")));
+    }
+    Ok(value)
+}
+
 /// Read a token from a path the config file gave, if it gave one.
 fn read_token_path(path: Option<&str>) -> Result<Option<String>> {
     let Some(path) = path.map(str::trim).filter(|p| !p.is_empty()) else {
@@ -1534,6 +1603,43 @@ mod prefix_tests {
             std::env::remove_var(current);
             std::env::remove_var(legacy);
         }
+    }
+
+    /// #583: the document comes from a file when one is named, the inline
+    /// environment value is accepted but withdrawn from the environment, and
+    /// an empty file fails the boot rather than silently disabling push.
+    #[test]
+    fn fcm_service_account_prefers_a_file_and_scrubs_the_inline_variable() {
+        let dir = std::env::temp_dir().join(format!("fcm-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let document = dir.join("sa.json");
+        std::fs::write(&document, "{\"type\": \"service_account\"}\n").unwrap();
+
+        // The config file's path wins over everything.
+        assert_eq!(
+            fcm_service_account(Some(document.to_str().unwrap()), Some("inline".into()))
+                .unwrap()
+                .as_deref(),
+            Some("{\"type\": \"service_account\"}")
+        );
+
+        // The inline environment value is read once and then gone.
+        unsafe { std::env::set_var("ENGINE_FCM_SERVICE_ACCOUNT_JSON", "{\"inline\": true}") };
+        assert_eq!(
+            fcm_service_account(None, None).unwrap().as_deref(),
+            Some("{\"inline\": true}")
+        );
+        assert!(
+            std::env::var("ENGINE_FCM_SERVICE_ACCOUNT_JSON").is_err(),
+            "the private key must not stay in the environment sessions inherit"
+        );
+
+        // An empty file is a fault, not "no push".
+        let empty = dir.join("empty.json");
+        std::fs::write(&empty, "\n").unwrap();
+        assert!(fcm_service_account(Some(empty.to_str().unwrap()), None).is_err());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A name that is not `ENGINE_`-prefixed gets no fallback invented for it.

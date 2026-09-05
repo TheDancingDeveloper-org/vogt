@@ -70,6 +70,37 @@ fn is_quiet(path: &str) -> bool {
     QUIET_PATHS.contains(&path) || path.starts_with(QUIET_PREFIX)
 }
 
+/// A request the client walked away from before a response was ready.
+///
+/// hyper drops the whole handler future when the connection closes, so the
+/// line below `next.run` is never reached and the request never appears in
+/// the log. That is how the 2026-09-05 stall was invisible from the front
+/// door: the browser aborted every badge read at its deadline, the door
+/// logged nothing, and the core logged 27 reads that took minutes each
+/// (#581). The guard says so on drop, with the time the client waited —
+/// which is the number an operator needs, because a request abandoned at
+/// exactly the client's deadline is a request the server was too slow for.
+struct Abandoned {
+    id: String,
+    method: axum::http::Method,
+    path: String,
+    started: Instant,
+    answered: bool,
+}
+
+impl Drop for Abandoned {
+    fn drop(&mut self) {
+        if self.answered {
+            return;
+        }
+        tracing::warn!(
+            request_id = %self.id, method = %self.method, path = %self.path,
+            duration_ms = %self.started.elapsed().as_millis(),
+            "request abandoned by the client before a response was ready"
+        );
+    }
+}
+
 /// Assign the id, serve the request, say what happened.
 pub async fn access_log(mut request: Request, next: Next) -> Response {
     let id = request
@@ -84,7 +115,15 @@ pub async fn access_log(mut request: Request, next: Next) -> Response {
     request.extensions_mut().insert(RequestId(id.clone()));
 
     let started = Instant::now();
+    let mut guard = Abandoned {
+        id: id.clone(),
+        method: method.clone(),
+        path: path.clone(),
+        started,
+        answered: false,
+    };
     let mut response = next.run(request).await;
+    guard.answered = true;
     let duration_ms = started.elapsed().as_millis();
     let status = response.status().as_u16();
 
