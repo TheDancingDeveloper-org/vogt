@@ -85,8 +85,14 @@
       customType: "regex",
       description: "npm CLIs pinned in the engine image manifest",
       managerFilePatterns: ["/^engine\\/agent-versions\\.env$/"],
+      // The `(?:\s*#[^\n]*)*` tolerates any number of ordinary comment lines
+      // between the `# renovate:` annotation and its `VOGT_*_VERSION=` line —
+      // without it, an explanatory comment under the annotation (as
+      // `VOGT_CLAUDE_CODE_VERSION` has) silently hides that pin from Renovate,
+      // and the pin then rots invisibly. The annotation must still be the last
+      // *annotation* before the value; only plain comments may sit between.
       matchStrings: [
-        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s+VOGT_[A-Z_]+_VERSION=(?<currentValue>\\S+)",
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)(?:\\s*#[^\\n]*)*\\s+VOGT_[A-Z_]+_VERSION=(?<currentValue>\\S+)",
       ],
     },
   ],

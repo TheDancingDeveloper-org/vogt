@@ -3156,3 +3156,48 @@ def test_the_bootstrap_skips_cadastre_without_an_endpoint() -> None:
     assert "skipping Cadastre registration" in body, (
         "enabled-but-unconfigured Cadastre is a reported skip, not a default endpoint"
     )
+
+
+def _load_deploy_dev() -> object:
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "deploy_dev", REPO_ROOT / "scripts" / "deploy_dev.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_deploy_dev_set_env_var_replaces_appends_and_preserves() -> None:
+    """#590: the deploy-time CLI pin edits exactly one `.env` line and leaves
+    every other line — secrets, tokens — byte-for-byte alone."""
+    dd = _load_deploy_dev()
+    env = (
+        "ENGINE_TOKEN=secret\n"
+        "VOGT_CODEX_VERSION=0.149.1\n"
+        "MYDEVENV2_TOKEN=[[infisical://p/prod/T]]\n"
+    )
+    # Replace in place, reporting the previous value; nothing else moves.
+    out, previous = dd.set_env_var(env, "VOGT_CODEX_VERSION", "0.153.4")
+    assert previous == "0.149.1"
+    assert "VOGT_CODEX_VERSION=0.153.4\n" in out
+    assert "ENGINE_TOKEN=secret\n" in out
+    assert "MYDEVENV2_TOKEN=[[infisical://p/prod/T]]\n" in out
+    # Absent key is appended with a trailing newline, previous is None.
+    out2, previous2 = dd.set_env_var(out, "VOGT_CLAUDE_CODE_VERSION", "2.1.261")
+    assert previous2 is None
+    assert out2.endswith("VOGT_CLAUDE_CODE_VERSION=2.1.261\n")
+    # Setting the same value is a no-op that still reports the current value.
+    out3, previous3 = dd.set_env_var(out2, "VOGT_CLAUDE_CODE_VERSION", "2.1.261")
+    assert out3 == out2
+    assert previous3 == "2.1.261"
+
+
+def test_deploy_dev_version_input_is_a_plain_version() -> None:
+    dd = _load_deploy_dev()
+    assert dd.VERSION_INPUT.match("0.153.4")
+    assert dd.VERSION_INPUT.match("2.1.261")
+    assert not dd.VERSION_INPUT.match("latest; rm -rf /")
+    assert not dd.VERSION_INPUT.match("")
