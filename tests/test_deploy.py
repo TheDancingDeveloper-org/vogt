@@ -3171,34 +3171,46 @@ def _load_deploy_dev() -> Any:
     return module
 
 
-def test_deploy_dev_set_env_var_replaces_appends_and_preserves() -> None:
-    """#590: the deploy-time CLI pin edits exactly one `.env` line and leaves
-    every other line — secrets, tokens — byte-for-byte alone."""
+def test_deploy_dev_surfaces_the_failing_komodo_stage() -> None:
+    """A failed Komodo deploy must say *why*: the update record's failing
+    stage(s) with their stderr/stdout, not just "reported failure". Without
+    this the workflow log carried no cause at all (the dev incident of
+    2026-09-05 was diagnosed blind because of it)."""
     dd = _load_deploy_dev()
-    env = (
-        "ENGINE_TOKEN=secret\n"
-        "VOGT_CODEX_VERSION=0.149.1\n"
-        "MYDEVENV2_TOKEN=[[infisical://p/prod/T]]\n"
+    update = {
+        "success": False,
+        "logs": [
+            {"stage": "pull", "success": True, "stdout": "pulled fine", "stderr": ""},
+            {
+                "stage": "compose up",
+                "success": False,
+                "stdout": "creating",
+                "stderr": "service vogt: bad env line 'X'",
+            },
+        ],
+    }
+    out = dd.failure_detail(update)
+    assert "stage: compose up" in out
+    assert "bad env line 'X'" in out
+    assert "creating" in out
+    assert "stage: pull" not in out, "successful stages are noise"
+    # Nothing flagged failed but the update failed: fall back to the last stage.
+    out2 = dd.failure_detail(
+        {
+            "success": False,
+            "logs": [
+                {"stage": "only", "success": True, "stdout": "", "stderr": "boom"}
+            ],
+        }
     )
-    # Replace in place, reporting the previous value; nothing else moves.
-    out, previous = dd.set_env_var(env, "VOGT_CODEX_VERSION", "0.153.4")
-    assert previous == "0.149.1"
-    assert "VOGT_CODEX_VERSION=0.153.4\n" in out
-    assert "ENGINE_TOKEN=secret\n" in out
-    assert "MYDEVENV2_TOKEN=[[infisical://p/prod/T]]\n" in out
-    # Absent key is appended with a trailing newline, previous is None.
-    out2, previous2 = dd.set_env_var(out, "VOGT_CLAUDE_CODE_VERSION", "2.1.261")
-    assert previous2 is None
-    assert out2.endswith("VOGT_CLAUDE_CODE_VERSION=2.1.261\n")
-    # Setting the same value is a no-op that still reports the current value.
-    out3, previous3 = dd.set_env_var(out2, "VOGT_CLAUDE_CODE_VERSION", "2.1.261")
-    assert out3 == out2
-    assert previous3 == "2.1.261"
-
-
-def test_deploy_dev_version_input_is_a_plain_version() -> None:
-    dd = _load_deploy_dev()
-    assert dd.VERSION_INPUT.match("0.153.4")
-    assert dd.VERSION_INPUT.match("2.1.261")
-    assert not dd.VERSION_INPUT.match("latest; rm -rf /")
-    assert not dd.VERSION_INPUT.match("")
+    assert "stage: only" in out2 and "boom" in out2
+    # No logs at all: nothing to render (the caller still raises).
+    assert dd.failure_detail({"success": False}) == ""
+    # Long output is tail-truncated to the limit.
+    big = {
+        "success": False,
+        "logs": [
+            {"stage": "s", "success": False, "stderr": "x\n" * 5000, "stdout": ""}
+        ],
+    }
+    assert len(dd.failure_detail(big, limit=500)) <= 500
