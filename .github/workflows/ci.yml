@@ -336,7 +336,8 @@ jobs:
 
       - name: audit the PWA's dependencies
         working-directory: web
-        run: pnpm audit
+        # Fatal on advisories, resilient to registry timeouts (#571).
+        run: bash ../scripts/pnpm-audit.sh
 
       # `pnpm build` runs `tsc --noEmit` itself; this is kept as its own step
       # so a type error is reported as a type error rather than as a failed
@@ -573,7 +574,8 @@ jobs:
 
       - name: audit the shell's dependencies
         working-directory: mobile
-        run: pnpm audit
+        # Fatal on advisories, resilient to registry timeouts (#571).
+        run: bash ../scripts/pnpm-audit.sh
 
       - name: write the dev Firebase config
         if: github.event_name != 'pull_request'

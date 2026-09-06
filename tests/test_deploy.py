@@ -468,11 +468,25 @@ def test_rust_dependency_audit_is_a_fatal_ci_gate() -> None:
 
 
 def test_javascript_dependency_audits_are_fatal_ci_gates() -> None:
-    """OSR-01: clean pnpm receipts stay clean after this review."""
+    """OSR-01: clean pnpm receipts stay clean after this review.
+
+    #571: both JS audits run through the resilient wrapper, which retries a
+    registry/network flake but keeps a real advisory answer fatal and never
+    retried — so a `registry.npmjs.org` timeout no longer fails the shared
+    compile+test job, while a vulnerability still gates the merge.
+    """
     workflow = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     assert "audit the PWA's dependencies" in workflow
     assert "audit the shell's dependencies" in workflow
-    assert workflow.count("run: pnpm audit") == 2
+    assert workflow.count("bash ../scripts/pnpm-audit.sh") == 2
+
+    audit = (REPO_ROOT / "scripts" / "pnpm-audit.sh").read_text(encoding="utf-8")
+    assert "pnpm audit" in audit
+    # A real advisory answer exits with pnpm's own non-zero code, never retried.
+    assert 'exit "$rc"' in audit
+    # A registry/network failure is retried and, if it never answers, reported
+    # distinctly rather than as a dependency finding.
+    assert "registry/network" in audit
 
 
 def test_buildkit_cache_topology_is_operator_configuration() -> None:
