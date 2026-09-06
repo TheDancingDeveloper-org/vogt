@@ -445,6 +445,17 @@ def inspect_stack(stack: dict[str, object]) -> None:
                 print(f"  {key}=<withheld, {size}>")
             else:
                 print(f"  {key}={redact(repr(value))[:400]}")
+    rendered = info.get("deployed_config") if isinstance(info, dict) else None
+    if isinstance(rendered, str):
+        # Compose template lines only (no resolved values): what the engine
+        # service is handed for the shadow policy, agent CLIs and tailscale.
+        print("deployed_config (matching template lines):")
+        pattern = re.compile(
+            r"(?i)shadow|agent_cli|agent-cli|tailscale|npm-global|environment:|volumes:|^\s*-\s"
+        )
+        for line in rendered.splitlines():
+            if pattern.search(line):
+                print("  " + redact(line)[:200])
     stack_id = stack.get("_id")
     if isinstance(stack_id, dict):
         stack_id = stack_id.get("$oid")
