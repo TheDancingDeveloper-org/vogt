@@ -3364,3 +3364,27 @@ def test_deploy_dev_workflow_accepts_expected_agent_clis() -> None:
     assert "EXPECT_AGENT_CLIS: ${{ inputs.expect_agent_clis }}" in workflow
     assert 'call("/api/agent-clis")' in workflow
     assert "expected {version}" in workflow
+
+
+def test_deploy_dev_refreshes_the_stack_cache_before_reading_files(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deploy rewrites stack files from Komodo's cached clone; read after
+    a refresh or a commit pushed since the last deploy is overwritten."""
+    mod = _load_deploy_dev()
+    calls: list[str] = []
+
+    def fake_api(endpoint: str, _payload: dict[str, object]) -> dict[str, object]:
+        calls.append(endpoint)
+        if endpoint == "read/GetStack":
+            return {"info": {"latest_hash": "35ae4d1", "latest_message": "pin CLIs"}}
+        return {}
+
+    monkeypatch.setattr(mod, "api", fake_api)
+    stack = mod.fresh_stack()
+    assert calls == ["write/RefreshStackCache", "read/GetStack"]
+    assert stack["info"]["latest_hash"] == "35ae4d1"
+    assert "stack repo head after refresh: 35ae4d1 pin CLIs" in capsys.readouterr().out
+    source = (REPO_ROOT / "scripts" / "deploy_dev.py").read_text()
+    body = source[source.index("def main(") :]
+    assert body.index("fresh_stack()") < body.index("remote_files(stack)")

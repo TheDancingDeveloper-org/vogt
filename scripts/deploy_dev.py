@@ -573,6 +573,21 @@ def update_id(result: dict[str, object]) -> str:
     raise KomodoError("Komodo deploy did not return an update id")
 
 
+def fresh_stack() -> dict[str, object]:
+    """`write/RefreshStackCache` then `read/GetStack`: the stack as the repo
+    branch head has it, not as Komodo last cached it. Says which repo commit
+    the deploy is about to rewrite, so the run log can be checked against
+    the repo."""
+    api("write/RefreshStackCache", {"stack": STACK})
+    stack = api("read/GetStack", {"stack": STACK})
+    info = stack.get("info")
+    if isinstance(info, dict):
+        head = info.get("latest_hash")
+        message = redact(str(info.get("latest_message", "")))[:120]
+        print(f"stack repo head after refresh: {head} {message}")
+    return stack
+
+
 def deploy() -> str:
     result = api("execute/DeployStack", {"stack": STACK})
     deployment_id = update_id(result)
@@ -628,6 +643,15 @@ def main() -> int:
         config = stack.get("config")
         if not isinstance(config, dict):
             raise KomodoError("Komodo stack response has no config")
+    # The files rewritten below are read from Komodo's *cached* clone of the
+    # stack repo. Without a refresh first, anything pushed to the repo since
+    # the last deploy is written back over from the stale copy — which is how
+    # the agent-CLI pins vanished from the dev overlay on 2026-09-06. Only the
+    # deploy path refreshes, so inspect and dry-run stay read-only.
+    stack = fresh_stack()
+    config = stack.get("config")
+    if not isinstance(config, dict):
+        raise KomodoError("Komodo stack response has no config after refresh")
     original_webhook = bool(config.get("webhook_enabled", True))
     files = remote_files(stack)
     changed: list[tuple[str, str]] = []
