@@ -211,3 +211,88 @@ jobs:
           # shellcheck disable=SC2086
           docker compose $COMPOSE_FILES down -v || true
           rm -f deploy/vogt-core-token deploy/github-token || true
+
+  # Clean-consumer contract (#613): prove the *published* pair is what a stranger
+  # can consume. The full boot-walk lives in `scripts/clean_consumer_smoke.sh`
+  # and runs on a real consumer host (where the docker daemon shares the host's
+  # filesystem and loopback); on these containerised runners the daemon cannot
+  # see a host-bind secret and the runner cannot reach the stack over host
+  # loopback (see the `e2e` job above), so here we gate the parts that are robust
+  # anywhere: both images resolve and pull over an *anonymous* token (#266), and
+  # the shipped compose renders with voice on and off.
+  clean-consumer:
+    name: published pair pulls anonymously and renders
+    runs-on: [self-hosted, docker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: the smoke script is well-formed
+        run: bash -n scripts/clean_consumer_smoke.sh
+
+      - name: both images resolve and pull over an anonymous token (#266)
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/vogt/__init__.py)"
+          for repo in vogt-stack vogt-voice; do
+            image="ghcr.io/thedancingdeveloper-org/${repo}:${version}"
+            token="$(curl -sS "https://ghcr.io/token?scope=repository:thedancingdeveloper-org/${repo}:pull" \
+              | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')"
+            digest="$(curl -sS -o /dev/null -D - -H "Authorization: Bearer ${token}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/thedancingdeveloper-org/${repo}/manifests/${version}" \
+              | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}')"
+            [ -n "$digest" ] || { echo "::error::${image} does not resolve over an anonymous token — is the package public? (#266)" >&2; exit 1; }
+            echo "${repo} ${version} -> ${digest}"
+          done
+
+      - name: the shipped stack renders with voice on and off
+        env:
+          ENGINE_TOKEN: "0123456789abcdef0123"
+        run: |
+          set -euo pipefail
+          on="$(COMPOSE_PROFILES=voice docker compose --env-file deploy/stack.env.example \
+            -f deploy/stack.compose.yml config --services | sort | tr '\n' ' ' | xargs)"
+          [ "$on" = "vogt voice" ] || { echo "::error::voice on rendered '$on', expected 'vogt voice'" >&2; exit 1; }
+          off="$(COMPOSE_PROFILES= docker compose --env-file deploy/stack.env.example \
+            -f deploy/stack.compose.yml config --services | sort | tr '\n' ' ' | xargs)"
+          [ "$off" = "vogt" ] || { echo "::error::voice off rendered '$off', expected 'vogt'" >&2; exit 1; }
+          echo "voice on -> vogt+voice; voice off -> vogt only"
+
+  # Custom-image extension contract (#614): the worked example must build FROM
+  # the published stack and its overlay must merge — with no estate integrations.
+  # Build works on these runners (the context is shipped to the daemon as a
+  # tarball); the boot-walk, like the clean-consumer one, is a real-host concern.
+  custom-image:
+    name: the custom-stack example builds and its overlay merges
+    runs-on: [self-hosted, docker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: build the example FROM the current published stack
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/vogt/__init__.py)"
+          # Override the pinned digest with the current published tag so the
+          # example does not rot the CI signal as releases move.
+          docker build \
+            --build-arg "STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack:${version}" \
+            -t vogt-custom-stack:ci deploy/examples/custom-stack
+
+      - name: the example carries the installed tool and stays USER sprooty
+        run: |
+          set -euo pipefail
+          docker run --rm --user root vogt-custom-stack:ci sh -c 'command -v rg'
+          test "$(docker run --rm vogt-custom-stack:ci id -un)" = "sprooty"
+
+      - name: the overlay merges onto the base
+        env:
+          ENGINE_TOKEN: "0123456789abcdef0123"
+          VOGT_CUSTOM_STACK_IMAGE: "vogt-custom-stack:ci"
+        run: |
+          set -euo pipefail
+          cd deploy/examples/custom-stack
+          COMPOSE_PROFILES=voice docker compose --project-directory . \
+            -f ../../stack.compose.yml -f overlay.yml config >/dev/null
+          echo "the custom-stack overlay renders onto the base"

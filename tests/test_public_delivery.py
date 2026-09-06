@@ -508,3 +508,84 @@ def test_no_deploy_file_names_a_mutable_voice_image_tag() -> None:
                 f"{path.relative_to(REPO_ROOT)} must pin voice to a version or "
                 f"digest, not {ref}"
             )
+
+
+# ── The worked custom-image example (#614) ───────────────────────────────────
+#
+# `deploy/examples/custom-stack/` is the public demonstration of the whole
+# extension contract: a Dockerfile deriving FROM the published stack digest, an
+# overlay mounting a deployment-owned hook and pinning a compatible voice image.
+# It is the exact shape the private `vogt-dev`/`vogt-prod` derivatives take, so
+# the suite holds it to the same estate-cleanliness the public deploy files
+# meet — a stranger must be able to build and boot it.
+
+EXAMPLE = DEPLOY / "examples" / "custom-stack"
+EXAMPLE_DOCKERFILE = EXAMPLE / "Dockerfile"
+EXAMPLE_OVERLAY = EXAMPLE / "overlay.yml"
+EXAMPLE_HOOK = EXAMPLE / "hooks" / "pre-start.d" / "10-example.sh"
+
+
+def _example_files() -> list[Path]:
+    return sorted(p for p in EXAMPLE.rglob("*") if p.is_file())
+
+
+def test_the_custom_image_example_exists() -> None:
+    assert EXAMPLE_DOCKERFILE.is_file(), "the #614 worked example Dockerfile is missing"
+    assert EXAMPLE_OVERLAY.is_file(), "the #614 worked example overlay is missing"
+    assert EXAMPLE_HOOK.is_file(), "the #614 worked example lifecycle hook is missing"
+
+
+def test_the_custom_image_derives_from_the_public_stack_digest() -> None:
+    """The contract is: derive FROM the *published* stack, by digest, and hand
+    the user back after installing. An estate derivative differs only in what it
+    installs — never in the base it starts from, and never `vogt-stack-estate`.
+    """
+    text = EXAMPLE_DOCKERFILE.read_text(encoding="utf-8")
+    assert "vogt-stack" in text
+    assert "vogt-stack-estate" not in text, (
+        "the public example must derive from the public stack, not the estate one"
+    )
+    assert "@sha256:" in text, "the example must pin the base by digest (NFR-D10)"
+    # Takes root to install, then returns to the image's unprivileged user — an
+    # example that skipped the second half would teach a pod running as root.
+    without = _without_comments(text)
+    assert "USER root" in without
+    assert without.rstrip().splitlines()[-1].strip() == "USER sprooty", (
+        "the example must end back on USER sprooty"
+    )
+    assert "apt-get install" in without, "the example should install one tool"
+
+
+def test_the_custom_image_overlay_mounts_a_hook_and_pins_a_compatible_pair() -> None:
+    overlay = _without_comments(EXAMPLE_OVERLAY.read_text(encoding="utf-8"))
+    # Deployment-owned hooks arrive by read-only mount, never baked into the
+    # image — this is the mount the public base is forbidden from carrying.
+    assert "/run/vogt/hooks:ro" in overlay, "the overlay must mount the hook bundle"
+    # It selects a voice image compatible with the stack it extends (#616): a
+    # version or a digest, never a moving alias.
+    voice_refs = re.findall(r"vogt-voice[:@][^\s\"}]+", overlay)
+    assert voice_refs, "the overlay must pin a matching VOGT_VOICE_IMAGE"
+    for ref in voice_refs:
+        assert re.search(r"vogt-voice:\d+\.\d+\.\d+", ref) or "@sha256:" in ref, (
+            f"the example must pin voice to a version or digest, not {ref}"
+        )
+
+
+def test_the_custom_image_hook_is_executable_and_safe() -> None:
+    import os
+
+    assert os.access(EXAMPLE_HOOK, os.X_OK), "the lifecycle hook must be executable"
+    text = EXAMPLE_HOOK.read_text(encoding="utf-8")
+    assert text.startswith("#!"), "the hook needs a shebang"
+
+
+def test_the_custom_image_example_carries_nothing_estate() -> None:
+    """The same estate ban the public deploy files meet, over the example — it
+    must consume no private base, path, endpoint, or integration.
+    """
+    for path in _example_files():
+        lowered = path.read_text(encoding="utf-8").lower()
+        for marker in ESTATE_MARKERS:
+            assert marker.lower() not in lowered, (
+                f"{path.relative_to(REPO_ROOT)} leaks estate marker {marker!r}"
+            )

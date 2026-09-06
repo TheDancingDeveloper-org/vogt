@@ -5,11 +5,13 @@ agents that work with them. It combines project registration, work items,
 ranked backlogs, repository observations, drift proposals, audit history, and
 an HTTP API, all backed by SQLite.
 
-The product ships as **one image**, `vogt-stack`: a small Python **core**
-that owns the data and serves the API, and a Rust **engine** that fronts it —
-serving the Solid PWA at `/`, owning the terminal sessions a work item runs
-in, and carrying the `claude` and `codex` agent CLIs those sessions run. Pull
-it, start it, open a browser. Everything beyond that is optional and reports
+The product ships as **one stack**, not one container: the `vogt-stack` image —
+a small Python **core** that owns the data and serves the API, and a Rust
+**engine** that fronts it, serving the Solid PWA at `/`, owning the terminal
+sessions a work item runs in, and carrying the `claude` and `codex` agent CLIs
+those sessions run — plus a bundled first-party `vogt-voice` sidecar that gives
+speech out of the box. Both images are one release pair. Pull it, start it,
+open a browser. Everything beyond that is optional and reports
 its absence honestly rather than failing startup: plain folders and local Git
 repositories are first-class, and GitHub and agent integrations add
 capability when you opt in.

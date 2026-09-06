@@ -12,9 +12,12 @@ instance.
 
 There are two:
 
-- **The published image (recommended)** — one container, pulled from the
-  registry, nothing to build. It carries the core, the engine that serves the
-  PWA at `/`, and the `claude` and `codex` CLIs. This is Vogt as it is meant
+- **The published stack (recommended)** — pulled from the registry, nothing to
+  build. It is one product stack, not one container: a pod carrying the core,
+  the engine that serves the PWA at `/`, and the `claude` and `codex` CLIs,
+  plus a bundled `voice` sidecar (a second container) that gives speech out of
+  the box. Voice is on by default and can be turned off or repointed at another
+  provider ([Voice](CUSTOMISATION.md#voice-stttts)). This is Vogt as it is meant
   to be run.
 - **Local Python** — the core alone as a plain package, for development or a
   single-user workstation over the CLI, REST and MCP. No browser front end.

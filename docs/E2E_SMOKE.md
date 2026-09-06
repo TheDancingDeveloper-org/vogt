@@ -130,3 +130,40 @@ live front door.
 On `dev` merges and nightly, plus `workflow_dispatch` — never on pull requests,
 which keep the mocked suites. A docs-only push skips the build. The job is
 self-hosted (NFR-C4), on a runner with the `docker` capability.
+
+## The clean-consumer smoke (#613)
+
+`scripts/e2e_stack_smoke.sh` walks a stack somebody else stood up.
+`scripts/clean_consumer_smoke.sh` owns the whole consumer path instead: it is
+the mechanical form of "a stranger installs the published product", and it is
+what proves the AIO is one product stack — the `vogt-stack` pod plus the bundled
+`vogt-voice` sidecar — that a third party can run with no checkout build and no
+private credential.
+
+```sh
+scripts/clean_consumer_smoke.sh
+# or pin a specific pair:
+VOGT_STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack:0.5.4 \
+VOGT_VOICE_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-voice:0.5.4 \
+  scripts/clean_consumer_smoke.sh
+```
+
+It resolves both images' digests over an **anonymous** registry token (the pull
+a stranger gets, so a private package fails before anything runs), pulls them by
+digest, boots `deploy/stack.compose.yml` from `deploy/stack.env.example` in a
+throwaway Compose project, and walks readiness → the PWA → the first token → one
+core read/write → a full voice round trip (synthesise a phrase, feed the audio
+back, read the transcript — the deterministic STT/TTS routing through the
+sidecar). It then repeats with voice disabled and checks that speech reports
+unavailable (the engine's 404 fallback) while the rest still works. Each run
+writes a receipt (`clean-consumer-receipt.json` by default,
+`VOGT_SMOKE_RECEIPT` to redirect) recording each image's digest, labels, and any
+SLSA provenance.
+
+Run it on a real consumer host, where the Docker daemon shares the host's
+filesystem and loopback. On the containerised CI runners the daemon cannot see a
+host-bind secret and the runner cannot reach the stack over host loopback (the
+same constraint the `e2e` job documents), so the `clean-consumer` CI job gates
+the parts that are robust anywhere — both images resolve over an anonymous token
+and the shipped compose renders with voice on and off — and leaves the full
+boot-walk to a run on a consumer host.

@@ -1,0 +1,40 @@
+# Overlay for the worked custom stack image (#614). It layers onto the public
+# base — `deploy/stack.compose.yml` — and states only its differences: the
+# extended image, the deployment-owned hook mount, a setting, and a voice image
+# pinned to a *compatible* release (see #616).
+#
+#   cd deploy/examples/custom-stack
+#   docker build -t my-vogt-stack:local .
+#   openssl rand -hex 32 > vogt-core-token
+#   ENGINE_TOKEN=$(openssl rand -hex 24) COMPOSE_PROFILES=voice \
+#     docker compose --project-directory . \
+#       -f ../../stack.compose.yml -f overlay.yml up -d --wait
+#
+# `--project-directory .` makes every relative path in *both* files resolve
+# here: the base's `./vogt-core-token` secret and this file's `./hooks` mount
+# both sit beside this overlay, so the example is self-contained.
+
+services:
+  vogt:
+    # The image you built above, deployed by its own name. In a real fork this
+    # is your registry digest, produced by your CI from the Dockerfile beside
+    # this file. Nothing about the mechanism differs from the estate images.
+    image: ${VOGT_CUSTOM_STACK_IMAGE:-my-vogt-stack:local}
+
+    # Deployment-owned lifecycle hooks (image-external by contract): mounted
+    # read-only, run by the image's generic runner before start. Required here
+    # so the boot proves the hook actually ran — a missing or failing hook
+    # fails the service rather than passing silently.
+    volumes:
+      - ./hooks:/run/vogt/hooks:ro
+    environment:
+      VOGT_HOOKS_REQUIRED: "true"
+      # A setting, carried as environment (never a token — tokens are file
+      # mounts). This one narrows what the bootstrapped core token may do.
+      VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES: "read,work.write"
+
+  # Pin voice to the release that matches the stack image above. The stack and
+  # voice images are one release pair (#616); an extension selects a compatible
+  # pair, it does not mix versions.
+  voice:
+    image: ${VOGT_VOICE_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-voice@sha256:23d38f27f9b018964d34489a0f97822e8df9756c87b8d7b56952ebac0d9c1309}
