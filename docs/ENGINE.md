@@ -1434,6 +1434,10 @@ JSON-argv subprocess adapter) in an image that starts `FROM` the published one.
 See [`voice/README.md`](../voice/README.md) for model naming, supported
 WAV/WebM/Opus/Ogg input and WAV output limits, placeholders, and the contract.
 
+#### Voice turn contract (FR-T14)
+
+Typed assistant turns send `{text, profile}`. Voice turns send `{text, utterance, profile}`, where `utterance` is the raw STT result and `text` is the visible repaired form. The engine stores both values in its durable assistant log. Aborting a request cancels the client fetch and any in-flight STT/TTS work; a cancelled turn is not recorded. If STT or TTS is unavailable (including a 404), the text conversation remains usable and the PWA reports that speech is unavailable so the user can type or read the response.
+
 #### Provider profiles (FR-T9, r16)
 
 A **profile** is one named OpenAI-compatible route:

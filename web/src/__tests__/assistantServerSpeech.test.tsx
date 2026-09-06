@@ -145,7 +145,7 @@ describe("the server-side speech pipeline", () => {
     const message = stub.mock.calls
       .filter(([input]) => String(input).includes("/api/assistant/message"))
       .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)[0];
-    expect(message?.text).toBe("open the backlog");
+    expect(message).toEqual({ text: "open the backlog", utterance: "open the backlog" });
     expect(mic.dataset.listening).toBe("no");
     expect(errors).toEqual([]);
   });
@@ -178,7 +178,7 @@ describe("the server-side speech pipeline", () => {
     const sent = stub.mock.calls
       .filter(([input]) => String(input).includes("/api/assistant/message"))
       .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)[0];
-    expect(sent?.text).toBe("open WI-7");
+    expect(sent).toEqual({ text: "open WI-7", utterance: "open issue seven" });
     // The repair is shown, not applied silently.
     expect(container.querySelector('[data-testid="voice-repair"]')?.textContent).toContain("WI-7");
     expect(errors).toEqual([]);

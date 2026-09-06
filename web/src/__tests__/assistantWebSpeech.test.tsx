@@ -116,7 +116,10 @@ describe("the desktop microphone (Web Speech)", () => {
     const body = stub.mock.calls
       .filter(([input]) => String(input).includes("/api/assistant/message"))
       .map(([, init]) => JSON.parse(String(init?.body)) as Record<string, unknown>)[0];
-    expect(body?.text).toBe("work on WI-12 for alpha");
+    expect(body).toEqual({
+      text: "work on WI-12 for alpha",
+      utterance: "work on issue twelve for alfa",
+    });
     expect(container.querySelector('[data-testid="voice-repair"]')?.textContent).toContain(
       "WI-12",
     );

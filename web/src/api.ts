@@ -1027,13 +1027,14 @@ export const api = {
   // `signal` lets the composer cancel a slow turn (the Stop button): aborting
   // the fetch tears the request down cleanly, and the engine treats the
   // dropped connection as a benign cancellation rather than a failure.
-  assistantMessage: (text: string, profile?: string, signal?: AbortSignal) =>
+  assistantMessage: (text: string, profile?: string, signal?: AbortSignal, utterance?: string) =>
     req<AssistantReply>(
       "POST",
       "/api/assistant/message",
       {
         text,
         ...(profile ? { profile } : {}),
+        ...(utterance !== undefined ? { utterance } : {}),
       },
       signal,
     ),
@@ -1049,7 +1050,7 @@ export const api = {
    * when the route is unconfigured, which the caller reads as "fall back"
    * (FR-T6) — audio is proxied, never stored.
    */
-  assistantStt: async (audio: Blob): Promise<{ text: string }> => {
+  assistantStt: async (audio: Blob, signal?: AbortSignal): Promise<{ text: string }> => {
     const form = new FormData();
     // The engine forwards the first file-bearing field regardless of name; the
     // filename's extension hints the provider at the container.
@@ -1058,6 +1059,7 @@ export const api = {
       method: "POST",
       headers: authHeaders(),
       body: form,
+      signal,
     });
     const text = await res.text();
     if (!res.ok) throw refused(res.status, text);
@@ -1068,11 +1070,12 @@ export const api = {
    * by a client with no on-device synthesis. Throws `ApiError` with
    * `status: 404` when unconfigured, so the caller falls back (FR-T6).
    */
-  assistantTts: async (text: string): Promise<Blob> => {
+  assistantTts: async (text: string, signal?: AbortSignal): Promise<Blob> => {
     const res = await runtimeTransport().request(`${getBase()}/api/assistant/tts`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ text }),
+      signal,
     });
     if (!res.ok) throw refused(res.status, await res.text());
     return res.blob();
