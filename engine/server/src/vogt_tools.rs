@@ -10,9 +10,9 @@
 //! Four decisions a future reader will ask about:
 //!
 //! **Why a curated list rather than everything the core serves.** The core
-//! serves fifty-odd operations including `token.issue`, `restore` and
+//! serves operations including `token.issue`, `restore` and
 //! `import`. An assistant driven by a voice utterance has no business
-//! reaching them, so the slice is named here (FR-T1) and intersected with
+//! reaching them, so the capability matrix in docs/ENGINE.md defines the slice (FR-T1) and intersected with
 //! what the core actually serves. A name in the curated list the core does
 //! not serve is logged and skipped — never fabricated, because a fabricated
 //! schema is a tool call that fails at the far end for a reason nobody can
@@ -55,7 +55,8 @@ use crate::{auth::AuthorizedIdentity, config::Config};
 /// being confused for one another, by the model or by the dispatcher.
 pub const TOOL_PREFIX: &str = "vogt_";
 
-/// The read slice of FR-T1, by registry operation name.
+/// Voice policy from docs/ENGINE.md §6.5.1. The Python contract test checks
+/// exhaustive registry coverage, classification and these exact sets (#621).
 pub const CURATED_READS: &[&str] = &[
     "backlog",
     "bugs",
@@ -65,26 +66,62 @@ pub const CURATED_READS: &[&str] = &[
     "work.get",
     "work.list",
     "compliance",
-    // FR-T10: "are there any notifications?" is the Inbox, and the Inbox is
-    // `inbox.list` — the normalized, server-ordered projection over GitHub,
-    // drift, CI and agent attention that carries its own coverage (FR-N4).
-    //
-    // Deliberately *not* the `notifications` operation, which is GitHub only.
-    // Offering both would leave the model free to answer the general question
-    // from one source and report the other three as nothing — which is the
-    // exact failure this tool exists to prevent, and the one a spoken answer
-    // hides best, because "no notifications" sounds complete.
     "inbox.list",
+    "status",
+    "place.metrics",
+    "project.get",
+    "board.list",
+    "label.list",
+    "initiative.list",
+    "actor.list",
+    "workflow.list",
+    "coverage",
+    "observations.list",
+    "deps",
+    "suppression.list",
+    "drift.list",
+    "session.list",
+    "agent_cli.list",
+    "session.history_list",
+    "session.search_output",
+    "session.log_tail",
+    "forge.account_status",
+    "forge.repos",
+    "forge.actions",
+    "events.list",
+    "audit.list",
 ];
 
-/// The write set of FR-T2. Every one of these passes the pending-action gate;
-/// `mutating` is not taken from the core's word for it, because the gate is
-/// the guarantee and it must not depend on a remote answer.
 pub const CURATED_WRITES: &[&str] = &[
     "work.create",
     "work.transition",
     "work.comment",
     "session.start",
+    "project.update",
+    "project.transition",
+    "work.update",
+    "work.relate",
+    "work.unrelate",
+    "work.bind_branch",
+    "label.create",
+    "initiative.create",
+    "initiative.publish",
+    "sweep",
+    "suppress",
+    "suppression.revoke",
+    "work.adopt",
+    "contract.check",
+    "contract.adopt",
+    "contract.decline",
+    "contract.inapplicable",
+    "contract.applicable",
+    "drift.detect",
+    "drift.resolve",
+    "session.stop",
+    "forge.onboard",
+    "inbox.archive",
+    "inbox.snooze",
+    "inbox.restore",
 ];
 
 /// How long a fetched tool list is reused before being asked for again.
@@ -113,6 +150,12 @@ const TARGET_KEYS: &[&str] = &[
     // they never crowd out the subject.
     "model",
     "effort",
+    "name",
+    "id",
+    "subject",
+    "entry_key",
+    "target",
+    "rule",
 ];
 
 /// Who the front door says is driving this turn.
@@ -663,18 +706,11 @@ pub mod stub {
                 vec!["reason"],
             ),
         ];
-        for name in [
-            "bugs",
-            "why",
-            "project_brief",
-            "project_list",
-            "work_list",
-            "compliance",
-            "inbox_list",
-            "work_transition",
-            "work_comment",
-        ] {
-            tools.push(tool(name, "generated summary.", json!({}), vec![]));
+        for operation in super::CURATED_READS.iter().chain(super::CURATED_WRITES) {
+            let name = super::mcp_tool_name(operation);
+            if !tools.iter().any(|tool| tool["name"] == name) {
+                tools.push(tool(&name, "generated summary.", json!({}), vec![]));
+            }
         }
         tools
     }
@@ -869,36 +905,8 @@ mod tests {
         // with `compliance` deleted. The requirement's value is that the
         // assistant's reach is a decision somebody wrote down, so the test
         // has to restate the decision rather than measure it.
-        assert_eq!(
-            CURATED_READS,
-            [
-                "backlog",
-                "bugs",
-                "why",
-                "project.brief",
-                "project.list",
-                "work.get",
-                "work.list",
-                "compliance",
-                // FR-T10 (r16). Added deliberately, and only this one: the
-                // `notifications` operation is GitHub-only and would let the
-                // general attention question be answered from a quarter of
-                // the sources without saying so.
-                "inbox.list",
-            ]
-        );
-        // Every one of these passes the pending-action gate. A name added
-        // here without that gate is the failure FR-T2 exists against, so
-        // adding one has to be a deliberate edit of this list too.
-        assert_eq!(
-            CURATED_WRITES,
-            [
-                "work.create",
-                "work.transition",
-                "work.comment",
-                "session.start"
-            ]
-        );
+        assert_eq!(CURATED_READS.len(), 32);
+        assert_eq!(CURATED_WRITES.len(), 29);
     }
 
     #[tokio::test]

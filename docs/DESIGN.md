@@ -506,6 +506,11 @@ Two properties hold the shape together, and both are asserted rather than
 described. **The registry is still the single definition**: the PWA's route
 table resolves against it, and so do the assistant's Vogt tools, which are
 fetched from the core's own MCP `tools/list` rather than written out again.
+The [voice capability matrix](ENGINE.md#651-voice-capability-matrix) explicitly
+classifies every operation as readable, confirmation-gated or operator-only;
+contract tests check registry coverage and engine curation. Expanding voice
+reach never grants scopes, bypasses on-screen approval, or exposes credential
+and host administration operations (#621).
 **The core is still complete alone**: it serves its own port and its own
 MCP when no engine is present, and CI runs the suite with `engine/`, `web/`
 and `mobile/` deleted to keep that true (NFR-Q6).

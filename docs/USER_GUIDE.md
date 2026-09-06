@@ -433,10 +433,22 @@ and the provider's model/voice names) — the engine is bound to neither the
 sidecar nor any one vendor. See
 [`CUSTOMISATION.md`](CUSTOMISATION.md#voice-stttts).
 
-It can read every session's scrollback and a curated read slice of Vogt
-(`backlog`, `bugs`, `why`, `project.brief`, `project.list`, `work.get`,
-`work.list`, `compliance`). It can propose four Vogt writes and typing into a
-terminal — and **every one of those waits for you to approve it on screen**.
+It can read session output, projects, work, labels, initiatives, actors,
+workflows, dependencies, evidence coverage, contracts, drift, the Inbox, forge
+status and audit history. You can ask it to update projects and work, manage
+relations and labels, create initiatives, publish initiative tracking issues,
+check or change contract adoption, collect evidence, resolve drift, suppress
+findings, triage the Inbox, synchronize forge observations, and start or stop
+sessions. These writes and terminal input **wait for on-screen approval**.
+
+Credentials, actor creation, host filesystem setup/import/export, repository
+publication/linking, forge policy changes, tool installation and instance
+maintenance remain unavailable through assistant tools. Listing actors and
+assigning work to them is supported. The
+[complete capability matrix](ENGINE.md#651-voice-capability-matrix) lists every
+operation and its reason. Your token scopes and configured integrations can
+further limit availability; a missing provider is reported as unavailable.
+
 One pending action at a time, carrying the exact payload, the target, and the
 reason that will be written to the audit log; it expires after 120 seconds —
 the card counts the seconds down — and a new message abandons it.
