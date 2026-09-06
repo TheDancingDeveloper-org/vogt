@@ -59,6 +59,8 @@ export interface AssistantUiEntry {
   tool_trace?: string[];
   /** A send that errored or was refused: shown as failed, with a Retry. */
   failed?: boolean;
+  /** Original recognized text, retained for retrying a failed voice turn. */
+  utterance?: string;
   created_at?: string;
   session_refs?: { id: string; name: string; activity: string }[];
   actions?: { kind: "open-session"; session_id: string; label: string }[];
@@ -326,7 +328,13 @@ export default function Assistant(props: AssistantProps) {
   let pushSpeakerCleanup: (() => void) | undefined;
 
   /** Stop every speech channel — on-device synthesis and a server clip alike. */
+  let speechController: AbortController | null = null;
+  let transcriptionController: AbortController | null = null;
+  const [speechStatus, setSpeechStatus] = createSignal("");
+
   const haltSpeech = () => {
+    speechController?.abort();
+    speechController = null;
     stopSpeaking();
     if (currentAudio) {
       try {
@@ -350,20 +358,28 @@ export default function Assistant(props: AssistantProps) {
       return;
     }
     if (serverTtsEnabled()) void playServerTts(text);
+    else setSpeechStatus("Spoken replies are unavailable. Read the reply below.");
   };
 
   const playServerTts = async (text: string) => {
     if (!text.trim()) return;
+    haltSpeech();
+    const controller = new AbortController();
+    speechController = controller;
     try {
-      const blob = await api.assistantTts(text);
+      const blob = await api.assistantTts(text, controller.signal);
+      if (controller.signal.aborted) return;
+      setSpeechStatus("");
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      audio.addEventListener("ended", () => URL.revokeObjectURL(url), { once: true });
+      const release = () => URL.revokeObjectURL(url);
+      audio.addEventListener("ended", release, { once: true });
+      controller.signal.addEventListener("abort", release, { once: true });
       currentAudio = audio;
       await audio.play();
     } catch (e) {
-      // Unconfigured (404): degrade this half silently, exactly as an absent
-      // recognizer does for STT (FR-T6). Any other failure is worth surfacing.
+      if (controller.signal.aborted) return;
+      setSpeechStatus("Spoken replies are unavailable. Read the reply below.");
       if (e instanceof ApiError && e.status === 404) {
         setServerTtsEnabled(false);
       } else {
@@ -478,6 +494,7 @@ export default function Assistant(props: AssistantProps) {
           setSttAvailable(true);
         }
       } catch {
+        setSpeechStatus("Voice input is unavailable. Type your message below.");
         setSttAvailable(false);
       }
     } else if (webSpeechCtor()) {
@@ -546,6 +563,8 @@ export default function Assistant(props: AssistantProps) {
       profile: profile(),
     });
     haltSpeech();
+    transcriptionController?.abort();
+    inFlight()?.abort();
     // Leaving the surface ends the conversation, so release the held service
     // and drop the native listeners (all no-ops on the desktop PWA).
     stopVoiceService();
@@ -577,7 +596,7 @@ export default function Assistant(props: AssistantProps) {
     }
   };
 
-  const send = async (text: string) => {
+  const send = async (text: string, utterance?: string) => {
     const trimmed = text.trim();
     if (!trimmed || busy()) return;
     setDraft("");
@@ -586,13 +605,13 @@ export default function Assistant(props: AssistantProps) {
     // The optimistic bubble is held by reference so the outcome can find it
     // again: a success leaves it be, a failure marks it, and a Stop removes
     // it. Kept off `failed` so it renders as an ordinary in-flight turn.
-    const userEntry: AssistantUiEntry = { role: "user", text: trimmed };
+    const userEntry: AssistantUiEntry = { role: "user", text: trimmed, utterance };
     setTranscript((cur) => [...cur, userEntry]);
     const controller = new AbortController();
     setInFlight(controller);
     try {
       applyReply(
-        await api.assistantMessage(trimmed, profile() || undefined, controller.signal),
+        await api.assistantMessage(trimmed, profile() || undefined, controller.signal, utterance),
       );
       invalidateAssistantSnapshot();
     } catch (e) {
@@ -631,7 +650,7 @@ export default function Assistant(props: AssistantProps) {
    *  the retry does not stack a second copy beneath it (#242). */
   const retry = (entry: AssistantUiEntry) => {
     setTranscript((cur) => cur.filter((row) => row !== entry));
-    void send(entry.text);
+    void send(entry.text, entry.utterance);
   };
 
   const resolve = async (approve: boolean) => {
@@ -766,8 +785,8 @@ export default function Assistant(props: AssistantProps) {
     // because releasing the button removes that listener and the release is
     // now the ordinary way a take ends. Under the toggle this lived in the
     // listener and worked because the recognizer usually stopped itself.
-    const heard = draft().trim();
-    if (!heard) return;
+    const heard = draft();
+    if (!heard.trim()) return;
     // FR-T13: the recognizer's best guess is put back into the vocabulary the
     // domain is made of before it is sent. `WI-7` and a project slug are
     // exactly what a recognizer mangles, and they are the subject of the
@@ -778,7 +797,7 @@ export default function Assistant(props: AssistantProps) {
     // what gets sent, so the speaker gets to see it in the transcript.
     setRepaired(repairs.length ? describeRepairs(repairs) : "");
     setDraft(text);
-    void send(text);
+    void send(text, heard);
   };
 
   /** End the take and send nothing — for leaving the surface mid-sentence. */
@@ -877,28 +896,36 @@ export default function Assistant(props: AssistantProps) {
   // send the on-device paths use (FR-T13). A 404 means the route is
   // unconfigured, and the take degrades to typed input with no error (FR-T6).
   const transcribeAndSend = async (blob: Blob) => {
+    transcriptionController?.abort();
+    const controller = new AbortController();
+    transcriptionController = controller;
     try {
-      const { text } = await api.assistantStt(blob);
-      const heard = text.trim();
-      if (!heard) return;
+      const { text: heard } = await api.assistantStt(blob, controller.signal);
+      if (controller.signal.aborted || !heard.trim()) return;
+      setSpeechStatus("");
       const { text: repairedText, repairs } = repairUtterance(heard, slugs());
       setRepaired(repairs.length ? describeRepairs(repairs) : "");
       setDraft(repairedText);
-      void send(repairedText);
+      void send(repairedText, heard);
     } catch (e) {
+      if (controller.signal.aborted) return;
       if (e instanceof ApiError && e.status === 404) {
         // Unconfigured: retire the server mic and fall back to typed input,
         // silently — the same degradation an absent recognizer gives.
+        setSpeechStatus("Voice input is unavailable. Type your message below.");
         setSttAvailable(false);
         sttBackend = null;
       } else {
         props.onError(`speech transcription: ${String(e)}`);
       }
+    } finally {
+      if (transcriptionController === controller) transcriptionController = null;
     }
   };
 
   const startListening = async () => {
     if (listening()) return;
+    transcriptionController?.abort();
     if (sttBackend === "web") {
       startListeningWeb();
       return;
@@ -1195,6 +1222,9 @@ export default function Assistant(props: AssistantProps) {
         is wrong, this line is the only thing that says why the answer is
         about the wrong item.
       */}
+      <Show when={speechStatus()}>
+        <p role="status" data-testid="speech-status">{speechStatus()}</p>
+      </Show>
       <Show when={repaired()}>
         <div
           data-testid="voice-repair"
