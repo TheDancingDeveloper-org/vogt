@@ -569,7 +569,7 @@ private key, Forgejo token, version tag, or GitHub Release is required. The
 receipt must cover readiness,
 authentication, a representative core read/write path, the engine/PWA front
 door, and the visible canonical product version/provenance. A failed or stale
-receipt is not a promotion approval. `expect_agent_clis` (`codex=<version>,claude-code=<version>`) makes the run fail unless the live pod reports those CLI versions as active — the acceptance for a runtime pin. `repair_environment=inspect` is a read-only dump of what Komodo holds for the stack, keys only.
+receipt is not a promotion approval. `expect_agent_clis` (`codex=<version>,claude-code=<version>`) makes the run fail unless the live pod reports those CLI versions as active — the acceptance for a runtime pin. `repair_environment=inspect` is a read-only dump of what the deployment controller holds for the stack, keys only.
 
 Then promotion is two explicit, fast-forward-only pushes. Run **Actions →
 promote**, choose `dev-to-main`, and type `PROMOTE`. The workflow verifies
