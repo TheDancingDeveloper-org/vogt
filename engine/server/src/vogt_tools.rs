@@ -899,14 +899,26 @@ mod tests {
     }
 
     #[test]
-    fn the_curated_set_is_the_operations_the_requirement_names() {
-        // FR-T1 and FR-T2 name these, and the existing assertion compares
-        // `CURATED_READS.len()` to itself — which would pass just as happily
-        // with `compliance` deleted. The requirement's value is that the
-        // assistant's reach is a decision somebody wrote down, so the test
-        // has to restate the decision rather than measure it.
-        assert_eq!(CURATED_READS.len(), 32);
-        assert_eq!(CURATED_WRITES.len(), 29);
+    fn curated_sets_match_the_documented_voice_policy() {
+        // The independent Python check additionally proves every registry
+        // operation has exactly one row and the correct mutation class.
+        let matrix = include_str!("../../../docs/ENGINE.md");
+        for (class, names) in [
+            ("Voice-readable", CURATED_READS),
+            ("Confirmation-gated", CURATED_WRITES),
+        ] {
+            let documented: std::collections::BTreeSet<_> = matrix
+                .lines()
+                .filter_map(|line| {
+                    let columns: Vec<_> = line.split('|').map(str::trim).collect();
+                    (columns.len() == 5 && columns[2] == class)
+                        .then(|| columns[1].trim_matches('`'))
+                })
+                .collect();
+            let curated: std::collections::BTreeSet<_> = names.iter().copied().collect();
+            assert_eq!(curated.len(), names.len(), "duplicate capability");
+            assert_eq!(curated, documented);
+        }
     }
 
     #[tokio::test]

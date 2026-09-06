@@ -2734,6 +2734,156 @@ mod tests {
         assert!(!offered.iter().any(|name| name.starts_with("vogt_")));
     }
 
+    // #621: exercise every available operation through the actual tool loop
+    // and HTTP MCP client, including newly added families. Domain validation
+    // and persisted audit are tested at the real Python MCP boundary.
+    #[tokio::test]
+    async fn every_voice_read_uses_mcp_and_delimits_the_result() {
+        for operation in vogt_tools::CURATED_READS {
+            let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+            let mcp_name = operation.replace('.', "_");
+            let function_name = format!("vogt_{mcp_name}");
+            let args = json!({"limit": 3});
+            let rt = runtime_with_vogt(
+                test_registry(),
+                vec![
+                    tool_call_reply(&function_name, args.clone()),
+                    final_reply("read"),
+                ],
+                &core.base_url,
+                Some("shared-core-token"),
+            );
+            let out = rt
+                .handle_message(paired_caller(), "read it".into(), None, None)
+                .await
+                .unwrap();
+            assert!(out.pending_action.is_none(), "{operation}");
+            let calls = core.tool_calls();
+            assert_eq!(calls.len(), 1, "{operation}");
+            assert_eq!(calls[0].tool.as_deref(), Some(mcp_name.as_str()));
+            assert_eq!(calls[0].arguments, args);
+            assert_eq!(
+                calls[0].authorization.as_deref(),
+                Some("Bearer phone-core-token")
+            );
+            let convo = rt.conversation.lock().await;
+            assert!(
+                convo
+                    .messages
+                    .iter()
+                    .any(|m| m["content"].as_str().is_some_and(|c| c
+                        .starts_with(&format!("<vogt-data operation=\"{operation}\">"))
+                        && c.ends_with("</vogt-data>"))),
+                "{operation}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn every_voice_write_requires_approval_and_the_approvers_credential() {
+        for operation in vogt_tools::CURATED_WRITES {
+            // Approval, denial, and an unpaired approver with a shared read
+            // fallback all take the same path for every operation.
+            for (approve, paired) in [(true, true), (false, true), (true, false)] {
+                let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+                let mcp_name = operation.replace('.', "_");
+                let function_name = format!("vogt_{mcp_name}");
+                let args =
+                    json!({"name": "triage", "reason": "The team needs a shared triage queue"});
+                let rt = runtime_with_vogt(
+                    test_registry(),
+                    vec![
+                        tool_call_reply(&function_name, args.clone()),
+                        final_reply("result"),
+                    ],
+                    &core.base_url,
+                    Some("shared-core-token"),
+                );
+                let out = rt
+                    .handle_message(terminal_caller(), "change it".into(), None, None)
+                    .await
+                    .unwrap();
+                let action = out.pending_action.expect(operation);
+                let card = as_vogt_write(&action);
+                assert_eq!(card.operation, *operation);
+                assert_eq!(serde_json::from_str::<Value>(&card.payload).unwrap(), args);
+                assert_eq!(card.reason, args["reason"]);
+                assert!(
+                    core.tool_calls().is_empty(),
+                    "{operation} wrote before approval"
+                );
+                let approver = if paired {
+                    paired_caller()
+                } else {
+                    terminal_caller()
+                };
+                rt.resolve_action(approver, action.id(), approve)
+                    .await
+                    .unwrap();
+                let calls = core.tool_calls();
+                if approve && paired {
+                    assert_eq!(calls.len(), 1, "{operation}");
+                    assert_eq!(calls[0].tool.as_deref(), Some(mcp_name.as_str()));
+                    assert_eq!(calls[0].arguments, args);
+                    assert_eq!(
+                        calls[0].authorization.as_deref(),
+                        Some("Bearer phone-core-token")
+                    );
+                } else {
+                    assert!(calls.is_empty(), "{operation} bypassed approval or pairing");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn newly_available_write_missing_a_reason_never_creates_an_approval_card() {
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply("vogt_label_create", json!({"name": "triage"})),
+                final_reply("Please explain why"),
+            ],
+            &core.base_url,
+            None,
+        );
+        let out = rt
+            .handle_message(paired_caller(), "add triage".into(), None, None)
+            .await
+            .unwrap();
+        assert!(out.pending_action.is_none());
+        assert!(core.tool_calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_model_cannot_call_a_scope_filtered_or_operator_only_tool() {
+        for function_name in ["vogt_label_create", "vogt_token_issue", "vogt_export"] {
+            let core = vogt_tools::stub::start(vec![vogt_tools::stub::tool(
+                "label_list",
+                "List labels",
+                json!({}),
+                vec![],
+            )])
+            .await;
+            let rt = runtime_with_vogt(
+                test_registry(),
+                vec![
+                    tool_call_reply(function_name, json!({"reason": "The team needs triage"})),
+                    final_reply("unavailable"),
+                ],
+                &core.base_url,
+                None,
+            );
+            let out = rt
+                .handle_message(paired_caller(), "change it".into(), None, None)
+                .await
+                .unwrap();
+            assert!(out.pending_action.is_none(), "{function_name}");
+            assert!(core.tool_calls().is_empty(), "{function_name}");
+        }
+    }
+
     #[tokio::test]
     async fn a_vogt_read_arrives_delimited_as_untrusted_data() {
         let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;

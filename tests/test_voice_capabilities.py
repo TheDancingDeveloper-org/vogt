@@ -38,3 +38,16 @@ def test_engine_sets_match_matrix_classes() -> None:
     assert reads == {n for n, c in rows.items() if c == "Voice-readable"}
     assert writes == {n for n, c in rows.items() if c == "Confirmation-gated"}
     assert not reads & writes
+
+
+def test_voice_classes_agree_with_registry_mutations_and_mcp_availability() -> None:
+    registry = default_registry()
+    for name, classification in ROW.findall(DOC.read_text()):
+        operation = registry.get(name)
+        if classification == "Operator-only":
+            continue
+        assert "mcp" in registry.transports_for(name), name
+        assert operation.mutating == (classification == "Confirmation-gated"), name
+        assert operation.scope != "admin", name
+        if operation.mutating:
+            assert operation.params_model.model_fields["reason"].is_required(), name
