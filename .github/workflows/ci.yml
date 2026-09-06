@@ -635,10 +635,23 @@ jobs:
           MYDEVENV2_ANDROID_APP_ID: "com.thedancingdeveloper.vogt.dev"
         run: npx cap sync android
 
+      # The clean sequence the acceptance names (#623): the `pnpm sync` above
+      # regenerates the uncommitted `capacitor.settings.gradle`, so Gradle can
+      # configure the plugin projects. Run the unit tests before assembling —
+      # they are the step a stale committed settings file used to break at
+      # configuration time, so keeping them in CI is what catches a regression.
+      - name: unit test
+        working-directory: mobile/android
+        env:
+          MYDEVENV2_ANDROID_APP_ID: "com.thedancingdeveloper.vogt.dev"
+        run: ./gradlew test --no-daemon
+
       # A *debug* APK: it is signed with Gradle's generated debug key, so it
       # needs no secret and proves what CI is here to prove — that the shell
-      # still assembles. Release signing and publishing did not come over;
-      # see the note at the bottom of this file.
+      # still assembles. The signed release build belongs to the separate
+      # secret-gated job in `release.yml` (never on every push — NFR-C3; see
+      # `tests/test_deploy.py`), which builds the release variant from a clean
+      # checkout on a release tag.
       - name: assemble
         working-directory: mobile/android
         env:
