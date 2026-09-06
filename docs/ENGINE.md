@@ -1535,11 +1535,11 @@ and would then drift silently as the registry changed.
 - **Naming.** `work.get` → MCP `work_get` → function `vogt_work_get`. The
   `vogt_` prefix keeps the engine's `list_sessions` and Vogt's `session_list`
   from ever being confused, by the model or by the dispatcher.
-- **Curation.** The slice is named in `vogt_tools.rs` and intersected with
-  what the core actually serves. Reads: `backlog`, `bugs`, `why`,
-  `project.brief`, `project.list`, `work.get`, `work.list`, `compliance`,
-  `inbox.list`. Writes: `work.create`, `work.transition`, `work.comment`,
-  `session.start`.
+- **Curation.** The [voice capability matrix](#651-voice-capability-matrix)
+  classifies every registered operation. `vogt_tools.rs` carries the available
+  read and approval sets; `tests/test_voice_capabilities.py` rejects missing,
+  stale, duplicate, or misclassified operations and any drift between those
+  sets and the matrix. MCP still supplies every schema and filters by scope.
   **`inbox.list` and not `notifications`** (FR-T10, r16): "are there any
   notifications?" is a question about *attention*, and the Inbox projection is
   the one that covers all four sources and carries its own coverage. The
@@ -1589,6 +1589,118 @@ every mutating assistant route). What a given write is *allowed* to do in Vogt
 is enforced at the core against the approver's own core token (FR-S4), which
 is the same check any other client of the core gets.
 
+
+#### 6.5.1 Voice capability matrix
+
+This policy applies equally to typed and spoken assistant requests (#621).
+**Voice-readable** means available without confirmation; **confirmation-gated**
+means available only after an on-screen approval of the exact payload and a
+meaningful caller-supplied reason. **Operator-only** means unavailable through
+assistant tools; use the appropriate CLI or product setup surface. It is an
+assistant policy classification, not a new registry authorization scope.
+
+Availability also requires the operation in the core's credential-filtered
+MCP list and its optional integrations to be configured. Writes use only the
+approver's paired core identity and retain the core's scope checks and audited
+write/action path. Reads retain the existing deployment-token fallback; personal
+forge reads therefore describe that credential's account when unpaired. No new
+credential scopes are granted. Linked work writes and initiative publication
+can affect the forge; the same approval gate and core writeback policy apply.
+
+<!-- voice-capabilities:start -->
+| Operation | Voice class | Availability and reason |
+|---|---|---|
+| `init` | Operator-only | Unavailable: Local instance initialization; no remote MCP tool. |
+| `migrate` | Operator-only | Unavailable: Local schema maintenance; no remote MCP tool. |
+| `status` | Voice-readable | Available: Report instance identity, schema versions, and row counts. |
+| `place.metrics` | Voice-readable | Available: Read all bounded shell navigation counts in one response. |
+| `connect` | Operator-only | Unavailable: Client and connection configuration belongs to operator setup. |
+| `mcp.stdio` | Operator-only | Unavailable: Local process transport; no remote MCP tool. |
+| `project.register` | Operator-only | Unavailable: Registers arbitrary host paths; use project setup outside the assistant. |
+| `project.create` | Operator-only | Unavailable: Creates host directories and files; use project setup outside the assistant. |
+| `project.import` | Operator-only | Unavailable: Clones into host paths and performs bulk import; use project setup. |
+| `project.get` | Voice-readable | Available: Fetch one project by slug. |
+| `project.list` | Voice-readable | Available: List registered projects. |
+| `project.brief` | Voice-readable | Available: The per-repo view: state, work, bugs, version, compliance. |
+| `project.update` | Confirmation-gated | Available after approval: Correct a project's declared repo URL or exclusions. |
+| `project.transition` | Confirmation-gated | Available after approval: Move a project through its lifecycle states. |
+| `work.create` | Confirmation-gated | Available after approval: Create a work item (feature / bug / chore / question). |
+| `work.get` | Voice-readable | Available: Fetch one work item with its relations, labels and comments. |
+| `work.list` | Voice-readable | Available: List work items with filters. |
+| `board.list` | Voice-readable | Available: Read bounded, independently pageable Board cells in one snapshot. |
+| `work.update` | Confirmation-gated | Available after approval: Change a work item's fields, assignee, or labels. |
+| `work.transition` | Confirmation-gated | Available after approval: Move a work item to another state, validating the edge. |
+| `work.relate` | Confirmation-gated | Available after approval: Add a typed relation between two work items. |
+| `work.unrelate` | Confirmation-gated | Available after approval: Remove a typed relation between two work items. |
+| `work.bind_branch` | Confirmation-gated | Available after approval: Declare the git branch a work item is worked on (#283). |
+| `work.comment` | Confirmation-gated | Available after approval: Comment on a work item, attributed to the acting actor. |
+| `backlog` | Voice-readable | Available: The ranked backlog, globally or for one project. |
+| `bugs` | Voice-readable | Available: Open bugs across every project, ranked. |
+| `why` | Voice-readable | Available: Per-input score contributions for one ranked item. |
+| `label.create` | Confirmation-gated | Available after approval: Define a label. |
+| `label.list` | Voice-readable | Available: List labels. |
+| `initiative.create` | Confirmation-gated | Available after approval: Create a cross-project initiative with a ranking weight. |
+| `initiative.list` | Voice-readable | Available: List initiatives. |
+| `initiative.publish` | Confirmation-gated | Available after approval: Create or adopt one forge tracking issue per linked repo the initiative spans, each carrying a managed checkbox task list of its member work items. Additive and forward-only; a closed initiative proposes closing its tracking issues, never writes it. |
+| `actor.create` | Operator-only | Unavailable: Admin identity provisioning; actors can be listed and assigned by voice. |
+| `actor.list` | Voice-readable | Available: List actors. |
+| `workflow.list` | Voice-readable | Available: The state machine each work-item kind is governed by. |
+| `sweep` | Confirmation-gated | Available after approval: Run collectors over the registered projects. |
+| `coverage` | Voice-readable | Available: What has looked at what, and how long ago. |
+| `observations.list` | Voice-readable | Available: Raw evidence, including subjects ranked views filter out. |
+| `deps` | Voice-readable | Available: Dependency references out of a project, and into it. |
+| `observations.prune` | Operator-only | Unavailable: Admin evidence retention and deletion. |
+| `suppress` | Confirmation-gated | Available after approval: Exclude an observed subject from ranked views. |
+| `suppression.list` | Voice-readable | Available: List suppressions. |
+| `suppression.revoke` | Confirmation-gated | Available after approval: Revoke a suppression, returning the subject to ranked views. |
+| `work.adopt` | Confirmation-gated | Available after approval: Promote an observed subject into a declared work item. |
+| `contract.evaluate` | Operator-only | Unavailable: Evaluates arbitrary host paths; use compliance or approved contract.check on a registered project. |
+| `contract.check` | Confirmation-gated | Available after approval: Evaluate the project contract; returns every failing rule. |
+| `contract.adopt` | Confirmation-gated | Available after approval: Opt a project into the contract; it is not applied by default. |
+| `contract.decline` | Confirmation-gated | Available after approval: Opt a project back out of the contract. |
+| `contract.inapplicable` | Confirmation-gated | Available after approval: Declare that a criterion cannot apply to a project, and why. |
+| `contract.applicable` | Confirmation-gated | Available after approval: Withdraw an inapplicability declaration. |
+| `project.scaffold` | Operator-only | Unavailable: Writes project files; use explicit project setup. |
+| `compliance` | Voice-readable | Available: A project's last recorded contract result, with its age. |
+| `drift.detect` | Confirmation-gated | Available after approval: Compare declared state against observation; raise proposals. |
+| `drift.list` | Voice-readable | Available: Open drift proposals and their evidence. |
+| `drift.resolve` | Confirmation-gated | Available after approval: Accept, reject, or contest a drift proposal. |
+| `serve` | Operator-only | Unavailable: Local server process management; no remote MCP tool. |
+| `session.start` | Confirmation-gated | Available after approval: Open a coding session for a work item or a project. |
+| `session.list` | Voice-readable | Available: List coding sessions with their live activity state. |
+| `session.stop` | Confirmation-gated | Available after approval: Stop a coding session and revoke the token it ran with. |
+| `agent_cli.list` | Voice-readable | Available: Report the pod's agent CLIs: active, baked and upstream versions. |
+| `agent_cli.update` | Operator-only | Unavailable: Installs executable tooling on the host. |
+| `session.history_list` | Voice-readable | Available: List archived sessions (history), newest first. |
+| `session.search_output` | Voice-readable | Available: Search session output (live sessions included). |
+| `session.log_tail` | Voice-readable | Available: Read the tail of a session's output log, readable. |
+| `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
+| `token.list` | Operator-only | Unavailable: Admin credential inventory. |
+| `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |
+| `auth.decisions` | Operator-only | Unavailable: Admin security diagnostics. |
+| `backup` | Operator-only | Unavailable: Local backup destination; no remote MCP tool. |
+| `restore` | Operator-only | Unavailable: Replaces instance stores; no remote MCP tool. |
+| `export` | Operator-only | Unavailable: Writes a host filesystem destination, despite its registry read classification. |
+| `import` | Operator-only | Unavailable: Local bulk state import; no remote MCP tool. |
+| `forge.onboard` | Confirmation-gated | Available after approval: Read a repository's existing issues, PRs, labels and releases into observations. Changes nothing upstream. |
+| `forge.writeback` | Operator-only | Unavailable: Arms future upstream writes; configure forge policy outside the assistant. |
+| `forge.link` | Operator-only | Unavailable: Arms upstream truth and migrates existing work; use explicit forge setup. |
+| `forge.publish` | Operator-only | Unavailable: Creates a remote repository and pushes local commits; use explicit forge setup. |
+| `forge.account_link` | Operator-only | Unavailable: Accepts a secret PAT; credentials must never enter model context. |
+| `forge.account_status` | Voice-readable | Available: Whether you have linked a forge account, and as whom. Never returns the token. |
+| `forge.account_unlink` | Operator-only | Unavailable: Changes credential fallback and upstream identity; use account settings. |
+| `forge.repos` | Voice-readable | Available: List the repositories your linked credential can see, so you can pick which to import (clone + full sync). |
+| `forge.import` | Operator-only | Unavailable: Clones into host paths and performs bulk import; use project setup. |
+| `forge.actions` | Voice-readable | Available: The ledger of what Vogt has said upstream, and what landed. |
+| `events.list` | Voice-readable | Available: Read the cursor-based event feed. |
+| `notifications` | Operator-only | Unavailable: GitHub-only view; voice uses inbox.list for complete attention coverage (FR-T10). |
+| `inbox.list` | Voice-readable | Available: List the normalized attention Inbox with coverage. |
+| `inbox.archive` | Confirmation-gated | Available after approval: Archive one normalized Inbox occurrence. |
+| `inbox.snooze` | Confirmation-gated | Available after approval: Snooze one normalized Inbox occurrence until a deadline. |
+| `inbox.restore` | Confirmation-gated | Available after approval: Restore one archived or snoozed Inbox occurrence. |
+| `audit.list` | Voice-readable | Available: Query the audit log. |
+<!-- voice-capabilities:end -->
+
 ### Threat model
 
 Extends the rule §7 states for agent tasks: external content must never
@@ -1634,7 +1746,7 @@ become instructions.
   tools, and its Vogt reach is the curated slice — no `token.issue`, no
   `restore`, no `import`, whatever else the core may serve. Its blast radius
   is: read scrollback, read that slice of Vogt, and (after approval) type into
-  a PTY or make one of four Vogt writes as the approving user.
+  a PTY or make a matrix-approved Vogt write as the approving user.
 - **The UI never auto-approves by voice.** Approval is an on-screen tap so a
   misheard utterance can't authorize an injection or a write. The spoken
   announcement says what is being asked and that it must be approved on
