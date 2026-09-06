@@ -336,7 +336,7 @@ ENV_LINE_START = re.compile(r"\A(#.*|\s*|[A-Z][A-Z0-9_]*=.*)\Z")
 
 
 def restore_environment(raw: str) -> str:
-    """Undo the 2026-09-05 environment corruption, losslessly and structurally.
+    """Undo a literal-newline environment collapse, losslessly and structurally.
 
     A prior deploy wrote `config.environment` back in the escaped form
     `read/GetStack` returns it in, so the whole original `.env` became one
