@@ -31,6 +31,12 @@ git log rather than being reconstructed here.
   schema gains an optional `voice_image_digest`.
 - `scripts/check_docs.py` now validates in-page heading anchors, not only file
   links (#615).
+- Bring-your-own terminal image recipe (`deploy/examples/container-sessions/`): a
+  session template whose command is `docker run -it <image>` runs a terminal in
+  your own container, sharing the pod's Working tree — one template per image, so
+  the session picker becomes an image picker. Ships an example engine config and
+  a Docker-socket overlay, with the socket/volume/uid/lifecycle caveats
+  documented. No engine change; uses the existing template mechanism.
 
 ### Changed
 

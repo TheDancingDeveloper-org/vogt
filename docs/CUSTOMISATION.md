@@ -241,6 +241,38 @@ example `voice.onnx.json` beside `voice.onnx`). See
 [`../voice/README.md`](../voice/README.md) for the native model and request
 details.
 
+### Running terminal sessions in your own image (per-session containers)
+
+Every terminal session runs as a process **inside the one pod**, so all sessions
+share its toolchains (python, rust, node/npm ship in the image already). To run a
+session in a *different* image — your own, with extra languages, and one or more
+available at once — you do not need a new feature. A session template's `command`
+is arbitrary argv run in a PTY, and the pod carries a Docker CLI, so a template
+whose command is `docker run -it <your image>` opens a terminal **inside that
+image**. Define one template per image and the session picker becomes an image
+picker.
+
+The worked, tested example is
+[`deploy/examples/container-sessions/`](../deploy/examples/container-sessions/):
+an engine config adding `Go dev (container)` / `Node dev (container)` templates,
+and an overlay that mounts the host Docker socket and puts the `Working` tree on
+a **named volume** (`vogt-work`). The templates share that volume
+(`-v vogt_vogt-work:/home/sprooty/Working`) into the session container, so the
+engine's file/git APIs and the session stay in agreement. The named volume also
+sidesteps the stack image's anonymous `VOLUME /home/sprooty/Working`, which would
+otherwise leave the work tree on a random, unshareable volume.
+
+This is a power-user recipe, not a managed feature — mind the caveats it spells
+out: the Docker socket is **root-equivalent on the host**; bind the named volume
+rather than the in-pod path (the socket is the host daemon); align the image's
+uid with the tree's (uid 1000); and the container's lifecycle is yours, not
+vogt's. A single user can instead create the same `docker run …` command as a
+Workspace Preset in the PWA. If you would rather vogt managed the image, volume
+and lifecycle for you, that is a first-class feature request rather than this
+recipe. Contrast with [extending the image](#extending-the-stack-image), which
+adds a tool to the *one* shared pod rather than giving a session its own
+container.
+
 ### Giving the front door its core token in one deploy
 
 A fronted deployment needs a token the front door presents to the core, so

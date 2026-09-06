@@ -589,3 +589,18 @@ def test_the_custom_image_example_carries_nothing_estate() -> None:
             assert marker.lower() not in lowered, (
                 f"{path.relative_to(REPO_ROOT)} leaks estate marker {marker!r}"
             )
+
+
+def test_every_deploy_example_carries_nothing_estate() -> None:
+    """Every worked example under deploy/examples/ is public-facing and must be
+    estate-clean — a stranger builds and runs these.
+    """
+    examples = DEPLOY / "examples"
+    files = sorted(p for p in examples.rglob("*") if p.is_file())
+    assert files, "no example files found under deploy/examples/"
+    for path in files:
+        lowered = path.read_text(encoding="utf-8").lower()
+        for marker in ESTATE_MARKERS:
+            assert marker.lower() not in lowered, (
+                f"{path.relative_to(REPO_ROOT)} leaks estate marker {marker!r}"
+            )
