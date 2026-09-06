@@ -5,6 +5,27 @@ Komodo owns the credentials for the operator's private deployment repository, so
 the GitHub workflow does not need a Forgejo token or a GitHub App.  This script
 uses Komodo's file-write API to keep the desired state in Git, then deploys
 the exact digests that CI verified.
+
+Rules this script lives by, each learned the hard way:
+
+* The stack files it rewrites (`vogt.compose.yml`, `estate.overlay.yml`) are
+  read from Komodo's *cached* clone of the stack repo. `fresh_stack()`
+  refreshes that cache first, so a commit pushed to the repo since the last
+  deploy is kept rather than written back over from the stale copy.
+* `read/GetStack` returns `config.environment` with newlines escaped;
+  `write/UpdateStack` takes the string verbatim. Writing a scraped value back
+  collapses the whole `.env` to one line and silently fails Komodo's
+  pre-deploy hook. `restore_environment` / `repair_environment` exist for that
+  case (`REPAIR_ENVIRONMENT=dry-run|apply`); `REPAIR_ENVIRONMENT=inspect` is a
+  read-only dump of what Komodo knows.
+* Nothing printed may hold a value. `info.deployed_config` is the *resolved*
+  compose (every secret interpolated) and is withheld; environment is shown as
+  keys only (`env_shape`, `rendered_shape`); every other line goes through
+  `redact()`. A Tailscale auth key once reached an Actions log through this
+  script.
+* The live validation accepts the deploy by what the pod reports, not by what
+  was sent: `EXPECT_AGENT_CLIS` in the workflow asserts the agent CLI versions
+  from `GET /api/agent-clis`.
 """
 
 from __future__ import annotations

@@ -340,6 +340,19 @@ writes `/opt/vogt/agent-clis/manifest` (`<tool>=<version>`), and
 own updaters stay disabled (`DISABLE_UPDATES=1`), so the installer is the only
 sanctioned writer.
 
+An overlay that defines the engine service itself — rather than layering on
+the published `stack.compose.yml` — inherits none of that passthrough: it must
+name the three variables (`VOGT_CLAUDE_CODE_VERSION`, `VOGT_CODEX_VERSION`,
+`VOGT_AGENT_CLI_ALLOW_DIST_TAGS`) in its own `environment:` and mount the
+`engine-agent-clis` volume, or the pins never reach the entrypoint and the pod
+silently keeps the baked copies. The maintainer's dev and prod stacks are that
+case: their private overlay carries the pins as overridable defaults, so a bump
+there is an edit to those defaults (or a stack-environment override) and a
+redeploy. Because the pin is applied at container start, the only proof that it
+took is the running pod: the `deploy dev` workflow's `expect_agent_clis` input
+(`codex=0.153.4,claude-code=2.1.261`) reads `GET /api/agent-clis` after the
+deploy and fails the run unless the active versions match.
+
 The same installer can be reached while the pod is running: `GET
 /api/agent-clis` on the engine reports each tool's active, baked and (on
 request) newest upstream version, `POST /api/agent-clis/{tool}` moves the pin
