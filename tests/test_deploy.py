@@ -3302,3 +3302,65 @@ def test_deploy_dev_restore_environment_undoes_the_literal_newline_collapse() ->
     assert "VOGT_TAILSCALE_DIR=/srv/vogt-dev/tailscale\n" in restored
     assert "literal-backslash-n=True" in shape, "the FCM data keeps its escapes"
     assert "real-newlines=True" in shape
+
+
+def test_deploy_dev_inspect_never_prints_resolved_compose_values(
+    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`info.deployed_config` is the resolved stack; a Tailscale auth key once
+    reached an Actions log through `inspect`. Keys and mounts only, ever."""
+    mod = _load_deploy_dev()
+    rendered = "\n".join(
+        [
+            "services:",
+            "  engine:",
+            "    image: ghcr.io/example/vogt-stack-estate@sha256:abc",
+            "    command:",
+            "      - tailscale up --authkey=tskey-auth-FROMCOMMAND",
+            "    environment:",
+            "      TAILSCALE_AUTH_KEY: tskey-auth-FROMMAPPING",
+            "      VOGT_CODEX_VERSION: 0.153.4",
+            "      EMPTY:",
+            "    volumes:",
+            "      - type: volume",
+            "        source: engine-agent-clis",
+            "        target: /opt/vogt/agent-clis",
+            "  vogt:",
+            "    environment:",
+            "      - MYDEVENV2_TOKEN=hunter2-list-form",
+        ]
+    )
+    stack = {
+        "_id": {"$oid": "0" * 24},
+        "info": {
+            "deployed_config": rendered,
+            "deployed_contents": [
+                {"path": "estate.overlay.yml", "contents": "tskey-auth-FILE"}
+            ],
+            "deployed_hash": "61433c6",
+        },
+    }
+
+    def offline(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise mod.KomodoError("offline")
+
+    monkeypatch.setattr(mod, "api_raw", offline)
+    mod.inspect_stack(stack)
+    out = capsys.readouterr().out
+    for leaked in ("tskey", "FROMCOMMAND", "FROMMAPPING", "hunter2", "0.153.4"):
+        assert leaked not in out, leaked
+    assert "deployed_config=<withheld" in out
+    assert "deployed_contents=<withheld" in out
+    assert "TAILSCALE_AUTH_KEY: <value>" in out
+    assert "VOGT_CODEX_VERSION: <value>" in out
+    assert "MYDEVENV2_TOKEN=<value>" in out
+    assert "target: /opt/vogt/agent-clis" in out
+    assert "deployed_hash='61433c6'" in out
+
+
+def test_deploy_dev_workflow_accepts_expected_agent_clis() -> None:
+    workflow = (REPO_ROOT / ".github" / "workflows" / "deploy-dev.yml").read_text()
+    assert "expect_agent_clis:" in workflow
+    assert "EXPECT_AGENT_CLIS: ${{ inputs.expect_agent_clis }}" in workflow
+    assert 'call("/api/agent-clis")' in workflow
+    assert "expected {version}" in workflow

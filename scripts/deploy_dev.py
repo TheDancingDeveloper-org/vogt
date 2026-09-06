@@ -377,7 +377,39 @@ def repair_environment(stack: dict[str, object], mode: str) -> None:
     print(f"repair[apply] read-back {env_shape(after)}")
 
 
-WITHHELD_INFO_FIELDS = frozenset({"remote_contents", "remote_errors"})
+# `info.deployed_config` is `docker compose config` output: the *resolved*
+# stack, every `${VAR}` and secret interpolated (a Tailscale auth key once
+# reached an Actions log through it). It is never printed whole, and the
+# lines `inspect` shows from it carry keys only — see `rendered_shape`.
+WITHHELD_INFO_FIELDS = frozenset(
+    {"remote_contents", "remote_errors", "deployed_config", "deployed_contents"}
+)
+ENV_MAPPING_LINE = re.compile(r"^(\s*)([A-Z][A-Z0-9_]*):(\s.*|$)")
+ENV_LIST_LINE = re.compile(r"^(\s*-\s*)([A-Z][A-Z0-9_]*)=.*$")
+STRUCTURAL_LINE = re.compile(
+    r"^\s*(-\s*)?(image|target|source|environment|volumes|secrets|container_name|name):(\s|$)"
+)
+
+
+def rendered_shape(rendered: str) -> list[str]:
+    """The lines of a rendered compose config that say what a service is
+    handed, with every environment value replaced by a marker: `KEY: <value>`
+    for mapping form, `- KEY=<value>` for list form. Structural lines (image,
+    mount source/target, section headers) pass through `redact`; every other
+    line is dropped, so a `command:` carrying a token never appears."""
+    shape: list[str] = []
+    for line in rendered.splitlines():
+        listed = ENV_LIST_LINE.match(line)
+        if listed:
+            shape.append(f"{listed.group(1)}{listed.group(2)}=<value>")
+            continue
+        mapped = ENV_MAPPING_LINE.match(line)
+        if mapped:
+            shape.append(f"{mapped.group(1)}{mapped.group(2)}: <value>")
+            continue
+        if STRUCTURAL_LINE.match(line):
+            shape.append(redact(line)[:200])
+    return shape
 
 
 def stack_log(stack: dict[str, object]) -> None:
@@ -434,28 +466,22 @@ def inspect_stack(stack: dict[str, object]) -> None:
     """Read-only: what Komodo knows about the stack right now — its info
     (state, deployed hash, containers) and the most recent update's stages
     including the ones that succeeded (compose up output lives there).
-    Prints nothing that could hold a secret: file contents withheld, values
-    redacted, config never printed."""
+    Prints nothing that could hold a secret: file contents and the resolved
+    config withheld, environment shown as keys only, the rest redacted."""
     info = stack.get("info")
     print("stack info:")
     if isinstance(info, dict):
         for key, value in info.items():
-            if key in WITHHELD_INFO_FIELDS or key.endswith("_contents"):
+            if key in WITHHELD_INFO_FIELDS or key.endswith(("_contents", "_config")):
                 size = len(value) if isinstance(value, (str, list)) else 0
                 print(f"  {key}=<withheld, {size}>")
             else:
                 print(f"  {key}={redact(repr(value))[:400]}")
     rendered = info.get("deployed_config") if isinstance(info, dict) else None
     if isinstance(rendered, str):
-        # Compose template lines only (no resolved values): what the engine
-        # service is handed for the shadow policy, agent CLIs and tailscale.
-        print("deployed_config (matching template lines):")
-        pattern = re.compile(
-            r"(?i)shadow|agent_cli|agent-cli|tailscale|npm-global|environment:|volumes:|^\s*-\s"
-        )
-        for line in rendered.splitlines():
-            if pattern.search(line):
-                print("  " + redact(line)[:200])
+        print("deployed_config (resolved values stripped; keys and mounts only):")
+        for line in rendered_shape(rendered):
+            print("  " + line)
     stack_id = stack.get("_id")
     if isinstance(stack_id, dict):
         stack_id = stack_id.get("$oid")

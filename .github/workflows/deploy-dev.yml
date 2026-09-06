@@ -25,6 +25,13 @@ on:
         required: false
         type: string
 
+      expect_agent_clis:
+        description: >-
+          Optional acceptance: comma-separated tool=version pairs the live pod
+          must report as active, e.g. codex=0.153.4,claude-code=2.1.261. The
+          run fails when the pod reports anything else.
+        required: false
+        default: ""
       repair_environment:
         description: >-
           One-shot repair of the stack environment corrupted on 2026-09-05
@@ -151,6 +158,7 @@ jobs:
         env:
           VOGT_SMOKE_BASE: ${{ inputs.public_url || vars.VOGT_DEV_SMOKE_URL }}
           SOURCE_SHA: ${{ inputs.source_sha }}
+          EXPECT_AGENT_CLIS: ${{ inputs.expect_agent_clis }}
         run: |
           set -euo pipefail
           : "${VOGT_SMOKE_BASE:?Set the VOGT_DEV_SMOKE_URL repository variable or pass public_url}"
@@ -210,6 +218,33 @@ jobs:
               raise SystemExit("live source SHA does not match the deployed commit")
           if not config.get("product_version"):
               raise SystemExit("live deployment did not report product_version")
+          # Which agent CLIs the pod actually runs (vogt #590): the pins are
+          # applied at container start, so this is the only place they can be
+          # accepted. Versions only — nothing here is a secret.
+          clis = call("/api/agent-clis")
+          tools = clis.get("tools")
+          if not isinstance(tools, list) or not tools:
+              raise SystemExit("live deployment did not report its agent CLIs")
+          active: dict[str, object] = {}
+          for tool in tools:
+              if not isinstance(tool, dict) or not isinstance(tool.get("tool"), str):
+                  raise SystemExit("live agent CLI report entry was malformed")
+              active[tool["tool"]] = tool.get("active_version")
+              print(
+                  f"agent cli {tool['tool']}: active={tool.get('active_version')} "
+                  f"baked={tool.get('baked_version')} source={tool.get('source')}"
+              )
+          expected = os.environ.get("EXPECT_AGENT_CLIS", "").strip()
+          for pair in filter(None, (part.strip() for part in expected.split(","))):
+              name, _, version = pair.partition("=")
+              if not name or not version:
+                  raise SystemExit(f"malformed expect_agent_clis entry: {pair!r}")
+              if active.get(name) != version:
+                  raise SystemExit(
+                      f"live pod reports {name} {active.get(name)!r}; expected {version}"
+                  )
+          if expected:
+              print(f"agent CLI acceptance passed: {expected}")
           status = call("/api/vogt/status")
           if not status:
               raise SystemExit("live status response was empty")
