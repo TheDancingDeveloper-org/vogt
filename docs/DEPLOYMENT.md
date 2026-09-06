@@ -734,6 +734,12 @@ binary.
    then 200 with the applied and expected schema versions. Migrations
    are forward-only and run under a lock, so two containers starting at once
    cannot race.
+5. With voice on, `up -d --wait` also waits on the `voice` sidecar's own
+   `/health`, which reports `starting` until its baked models load and then
+   `ok`. The sidecar carries no persistent store and runs no migration, so a
+   version step there is only an image swap — but it must stay the *pair* of
+   the stack image (step 2); a mismatched pair is what the release
+   compatibility gate exists to prevent.
 
 Read [`SCHEMA.md`](SCHEMA.md) before a major version: it lists every
 migration and what each changes.
@@ -747,6 +753,11 @@ does not look like a broken container), but `vogt migrate` refuses the
 store, naming the migration, and operations that touch the changed tables
 fail. Rolling back across a schema change means restoring the backup from
 step 1, not just running the older image.
+
+The `voice` sidecar has no such limit: it holds no data and runs no migration,
+so its rollback is purely the digest revert. Revert it together with the stack
+digest so the two stay a compatible release pair — never roll one half back
+without the other.
 
 ## 8. Public demo image
 

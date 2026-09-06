@@ -352,6 +352,71 @@ root`, install, `USER 1000:0`, keeping `ENTRYPOINT ["vogt"]` and the
 than something to deploy on its own, so extend it only when you are changing
 what the *core* carries.
 
+## Extending the stack image
+
+A worked, buildable version of everything below lives at
+[`deploy/examples/custom-stack/`](../deploy/examples/custom-stack/) — a
+Dockerfile, an overlay, and a lifecycle hook you can build and boot as-is. It is
+the exact shape the private `vogt-dev` and `vogt-prod` derivatives take: they
+differ from it only in *which* tools and integrations they add, never in the
+mechanism. CI builds and boots it with no private integrations, so the contract
+stays honest.
+
+**Derive from the published digest.** An extending image starts `FROM` the
+signed release, by digest, not by tag:
+
+```dockerfile
+FROM ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
+USER root
+RUN apt-get update && apt-get install --no-install-recommends -y <your tool> \
+    && rm -rf /var/lib/apt/lists/*
+USER sprooty
+```
+
+The image ends as `USER sprooty` (uid 1000). Take root back to install and hand
+it straight back — an image that forgets the second half runs your pod as root,
+a different container from the one whose digest you pinned.
+
+**Image-owned versus persisted versus deployment-owned.** Three kinds of path
+live in a running stack, and only one of them your `Dockerfile` owns:
+
+- **Image-owned** — what the `Dockerfile` writes: a tool in `/usr/local` or
+  `/usr/bin`. A new release replaces these wholesale.
+- **Persisted** — the named volumes the base declares: `engine-home`
+  (`/home/sprooty`, the writable pod home and the `Working` tree) and
+  `vogt-data` (`/var/lib/vogt`, the core's SQLite stores and backups). These
+  carry your data across upgrades.
+- **Deployment-owned** — what your overlay mounts: lifecycle hooks at
+  `/run/vogt/hooks:ro`, secrets as Compose secret/config mounts. The image's
+  hook runner never copies or discovers scripts from the image, so hooks are
+  mounted, never baked in.
+
+**The shadowing trap.** A named volume mounted over a path the image populated
+*hides* the image's copy. `engine-home` covers `/home/sprooty`, so a file your
+`Dockerfile` writes inside `$HOME` is invisible once the volume mounts — the
+volume wins. Put tools in `/usr/local` (outside any volume); let the deployment
+own what lives under `$HOME`.
+
+**The loopback-core invariant survives extension.** The AIO runs its own core on
+loopback and the engine is the only front door (NFR-D11). An extension adds
+tools and mounts; it does not publish the core's port or point `VOGT_CORE_URL`
+at anything but loopback. The entrypoint refuses to start if it does.
+
+**Prove it at build.** Build the extended image in your own CI and boot it there
+before you deploy it — the worked example's CI job is the template. A tool that
+fails to install, or a hook that fails its contract, is a broken build, not a
+surprise in production.
+
+**Upgrades, migrations, and rollback.** Upgrading is a digest change in your
+fork and a rebuild — bump the `FROM` stack digest and the matching
+`VOGT_VOICE_IMAGE` (they are one release pair; see
+[`DEPLOYMENT.md` §7.4](DEPLOYMENT.md#74-upgrade)), rebuild, redeploy. The core
+runs its forward-only migrations against `vogt-data` on start. **Rollback is not
+symmetric**: once a newer image has migrated the data, an older image may refuse
+that schema, so roll back only to a release whose schema the data still matches,
+or restore `vogt-data` from a pre-upgrade backup. See
+[`DEPLOYMENT.md` §7.5](DEPLOYMENT.md#75-rollback).
+
 ## Optional integrations
 
 Each of these is absent by default, and its absence is reported honestly

@@ -113,6 +113,7 @@ jobs:
     # The merged image copies /opt/vogt out of this one by digest (#143).
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
     # `publish` is advertised only by the Docker-in-Docker workers.
     runs-on: [self-hosted, publish]
     permissions:
@@ -266,6 +267,9 @@ jobs:
   voice-image:
     name: build, sign and publish the voice sidecar
     needs: [distribution, base-images]
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
     runs-on: [self-hosted, publish]
     permissions:
       contents: read
@@ -393,6 +397,7 @@ jobs:
     needs: [distribution, base-images, pod-base, image]
     outputs:
       digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
     runs-on: [self-hosted, publish]
     permissions:
       contents: read
@@ -732,9 +737,42 @@ jobs:
         if: always()
         run: rm -f mobile/android/app/google-services.json
 
+  # The stack and its voice sidecar are one release pair (#616). Both images
+  # take their version from the same tag via docker/metadata-action, so a
+  # mismatch here means a tagging change slipped one out of step — fail the
+  # release with a diagnosable message rather than publishing a pair a
+  # deployment cannot trust to be compatible.
+  release-pair:
+    name: the stack and voice images are a matching pair
+    needs: [validate-release, image, voice-image, stack-image]
+    runs-on: [self-hosted]
+    steps:
+      - name: versions agree with each other and the tag
+        env:
+          TAG: ${{ github.ref_name }}
+          CORE_VERSION: ${{ needs.image.outputs.version }}
+          STACK_VERSION: ${{ needs.stack-image.outputs.version }}
+          VOICE_VERSION: ${{ needs.voice-image.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected="${TAG#v}"
+          fail=""
+          for pair in "core:$CORE_VERSION" "stack:$STACK_VERSION" "voice:$VOICE_VERSION"; do
+            name="${pair%%:*}"; got="${pair#*:}"
+            if [ "$got" != "$expected" ]; then
+              echo "::error::${name} image published version '${got}', expected '${expected}' (tag ${TAG})" >&2
+              fail=1
+            fi
+          done
+          if [ -n "$fail" ]; then
+            echo "the stack and voice images are not a matching release pair — see the errors above" >&2
+            exit 1
+          fi
+          echo "core=stack=voice=${expected}: the release is a matching pair"
+
   github-release:
     name: create the durable GitHub Release
-    needs: [validate-release, distribution, image, voice-image, stack-image, android]
+    needs: [validate-release, distribution, image, voice-image, stack-image, android, release-pair]
     runs-on: [self-hosted]
     permissions:
       contents: write
@@ -755,15 +793,20 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
           CORE_DIGEST: ${{ needs.image.outputs.digest }}
           STACK_DIGEST: ${{ needs.stack-image.outputs.digest }}
+          VOICE_DIGEST: ${{ needs.voice-image.outputs.digest }}
           CORE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt
           STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+          VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
         run: |
           set -euo pipefail
           apk_count="$(find release-assets/android -type f -name '*.apk' | wc -l)"
           [ "$apk_count" -ge 1 ] || { echo "signed APK is required" >&2; exit 1; }
-          case "$CORE_DIGEST:$STACK_DIGEST" in
-            sha256:*:sha256:*) ;;
-            *) echo "release image digests are missing" >&2; exit 1;;
+          # All three digests must be present: the stack and its voice sidecar
+          # are one release pair (#616), so a manifest missing the voice half
+          # is not a complete release.
+          case "$CORE_DIGEST:$STACK_DIGEST:$VOICE_DIGEST" in
+            sha256:*:sha256:*:sha256:*) ;;
+            *) echo "release image digests are missing (core/stack/voice)" >&2; exit 1;;
           esac
           mkdir -p release-assets/final
           find release-assets/android -type f -name '*.apk' -exec cp {} release-assets/final/ \;
@@ -773,8 +816,9 @@ jobs:
             --arg source_sha "$SOURCE_SHA" \
             --arg core "${CORE_IMAGE}@${CORE_DIGEST}" \
             --arg stack "${STACK_IMAGE}@${STACK_DIGEST}" \
+            --arg voice "${VOICE_IMAGE}@${VOICE_DIGEST}" \
             --arg handoff "https://github.com/TheDancingDeveloper-org/vogt/issues/377" \
-            '{schema: $schema, product: "Vogt", product_version: ($tag | ltrimstr("v")), source_tag: $tag, source_sha: $source_sha, images: {core: $core, merged_stack: $stack}, provenance: {cosign: "keyless signature from .github/workflows/release.yml", sbom: "GitHub Actions SBOM attestation for the published image digests"}, production_deployment_handoff: $handoff, assets: {android: "signed APK"}}' \
+            '{schema: $schema, product: "Vogt", product_version: ($tag | ltrimstr("v")), source_tag: $tag, source_sha: $source_sha, images: {core: $core, merged_stack: $stack, voice: $voice}, provenance: {cosign: "keyless signature from .github/workflows/release.yml", sbom: "GitHub Actions SBOM attestation for the published image digests"}, production_deployment_handoff: $handoff, assets: {android: "signed APK"}}' \
             > release-assets/final/vogt-release-manifest.json
           jq empty release-assets/final/vogt-release-manifest.json
           jq -r . release-assets/final/vogt-release-manifest.json > release-assets/release-notes.json

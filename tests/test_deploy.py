@@ -2317,10 +2317,14 @@ def test_github_release_collects_and_publishes_the_complete_release() -> None:
     job = workflow[workflow.index("\n  github-release:") :]
     assert (
         "needs: [validate-release, distribution, image, "
-        "voice-image, stack-image, android]"
+        "voice-image, stack-image, android, release-pair]"
     ) in job
     assert "vogt-android-release-${{ github.ref_name }}" in job
     assert "signed APK is required" in job
+    # The stack and its voice sidecar are one release pair (#616): the manifest
+    # records the voice digest beside the core and merged-stack ones.
+    assert "VOICE_DIGEST" in job
+    assert "voice: $voice" in job
     # No wheel, no sdist (2026-09-04): nothing consumed them — no PyPI
     # publish, no image built from them, no doc pointing at them — and the
     # one supported artefact is the merged image. A release that attaches

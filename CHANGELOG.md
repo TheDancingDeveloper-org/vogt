@@ -12,7 +12,30 @@ git log rather than being reconstructed here.
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- Clean-consumer smoke (`scripts/clean_consumer_smoke.sh`, #613): resolves and
+  pulls `vogt-stack` and `vogt-voice` over an anonymous registry token, boots
+  `deploy/stack.compose.yml` from `stack.env.example`, walks readiness, the PWA,
+  the first token, a core read/write and a full voice round trip, then repeats
+  with voice disabled and records image digests and provenance to a receipt.
+- Worked custom-image example (`deploy/examples/custom-stack/`, #614): a
+  Dockerfile deriving `FROM` the published stack digest, an overlay mounting a
+  deployment-owned lifecycle hook and pinning a compatible voice image, and a
+  new CUSTOMISATION "Extending the stack image" section covering image-owned vs
+  persisted vs deployment-owned paths, the shadowing trap, and upgrade/rollback
+  limits — the public shape of the private `vogt-dev`/`vogt-prod` derivatives.
+- Release compatibility gate (#616): the release publishes `vogt-stack` and
+  `vogt-voice` as one pair, fails if their product versions disagree, records
+  both digests in `vogt-release-manifest.json`, and the deployment receipt
+  schema gains an optional `voice_image_digest`.
+- `scripts/check_docs.py` now validates in-page heading anchors, not only file
+  links (#615).
+
+### Changed
+
+- Public docs (README, GETTING_STARTED) state the AIO is one product stack with
+  a bundled voice sidecar, not one container (#615).
 
 ## [0.5.4] - 2026-09-05
 

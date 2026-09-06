@@ -62,6 +62,12 @@ deploy/github-token
 deploy/vogt-core-token
 deploy/vogt-engine-token
 
+# The clean-consumer smoke's receipt (scripts/clean_consumer_smoke.sh #613):
+# resolved image digests + provenance from a run. A run artifact, not source.
+clean-consumer-receipt.json
+# The custom-image example's operator-created core token (deploy/examples #614).
+deploy/examples/custom-stack/vogt-core-token
+
 # Operator-local documents. Runbooks, cutover plans and estate notes that are
 # specific to one deployment and have no place in a public repository — the
 # same reasoning as `deploy/.env` above. `docs/` proper is the product's
