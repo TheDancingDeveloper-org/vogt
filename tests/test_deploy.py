@@ -1408,6 +1408,46 @@ def test_the_strip_leaves_a_breadcrumb_for_the_brokered_model() -> None:
 
 
 @needs_engine
+def test_identity_passthrough_keeps_the_machine_identity() -> None:
+    """#637: an opted-in deployment reverses the #511 strip for the four identity
+    vars, so a session can `infisical login` and read/write any project directly.
+    Everything else stays stripped, the manifest and the switch itself do not
+    leak, and the breadcrumb flips to `identity` so tooling branches.
+
+    Asserted across the real exec boundary, like the brokered case above.
+    """
+    script = _AGENT_AUTH_STUB_PRELUDE + "main run -- env"
+    completed = subprocess.run(
+        ["bash", "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **_AGENT_AUTH_STUB_ENV,
+            "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH": "1",
+            "ENGINE_AGENT_AUTH_SECRETS": "GHTOK proj gh-secret\n",
+            "ENGINE_AGENT_AUTH_GH_TOKEN_FROM": "GHTOK",
+        },
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    child_env: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        key, _, value = line.partition("=")
+        child_env[key] = value
+    # The breadcrumb flips so session tooling uses infisical directly, not the broker.
+    assert child_env.get("AGENT_AUTH_MODE") == "identity"
+    # The machine identity is KEPT (the reversal) — `infisical login` can run.
+    assert child_env.get("INFISICAL_CLIENT_ID") == "cid"
+    assert child_env.get("INFISICAL_CLIENT_SECRET") == "csec"
+    assert child_env.get("INFISICAL_API_URL") == "https://vault.invalid"
+    # But the manifest and the switch itself are engine config, still dropped.
+    assert "ENGINE_AGENT_AUTH_SECRETS" not in child_env
+    assert "ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH" not in child_env
+    # Passthrough adds, it does not remove: the brokered token still resolved.
+    assert child_env.get("GH_TOKEN") == "val-gh-secret"
+
+
+@needs_engine
 def test_a_gh_token_alias_that_names_nothing_fails_the_helper() -> None:
     """#566 note: ENGINE_AGENT_AUTH_GH_TOKEN_FROM naming a non-manifest var.
 
