@@ -19,10 +19,13 @@ interface CapacitorGlobal {
   isNativePlatform?: () => boolean;
 }
 
-/** The bridge MainActivity injects on Android. Absent everywhere else. */
+/**
+ * The bridge MainActivity injects on Android: a WebMessageListener bound to the
+ * trusted origin and the main frame (#624), absent everywhere else. It takes a
+ * JSON string naming the op (`start`/`end`); the levers need no reply.
+ */
 interface AndroidVoiceBridge {
-  startConversation?: () => void;
-  endConversation?: () => void;
+  postMessage?: (data: string) => void;
 }
 
 /** DOM event MainActivity dispatches when the notification ended the call. */
@@ -40,7 +43,7 @@ function voiceBridge(): AndroidVoiceBridge | null {
 
 /** Whether the held foreground service is reachable at all (native + bridge). */
 export function voiceServiceAvailable(): boolean {
-  return isNativePlatform() && voiceBridge() !== null;
+  return isNativePlatform() && voiceBridge()?.postMessage != null;
 }
 
 /**
@@ -52,9 +55,9 @@ export function voiceServiceAvailable(): boolean {
  */
 export function startVoiceService(): void {
   const bridge = voiceBridge();
-  if (!isNativePlatform() || !bridge?.startConversation) return;
+  if (!isNativePlatform() || !bridge?.postMessage) return;
   try {
-    bridge.startConversation();
+    bridge.postMessage(JSON.stringify({ op: "start" }));
     console.info(`[voice] conversation service started at ${new Date().toISOString()}`);
   } catch (e) {
     // A failed start must not take the conversation down with it — the PWA
@@ -66,9 +69,9 @@ export function startVoiceService(): void {
 /** Release the foreground service. No-op off a native platform. Idempotent. */
 export function stopVoiceService(): void {
   const bridge = voiceBridge();
-  if (!isNativePlatform() || !bridge?.endConversation) return;
+  if (!isNativePlatform() || !bridge?.postMessage) return;
   try {
-    bridge.endConversation();
+    bridge.postMessage(JSON.stringify({ op: "end" }));
     console.info(`[voice] conversation service stopped at ${new Date().toISOString()}`);
   } catch (e) {
     console.warn(`[voice] could not stop conversation service: ${String(e)}`);
