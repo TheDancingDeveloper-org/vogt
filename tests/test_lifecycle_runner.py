@@ -124,6 +124,61 @@ def test_post_health_failure_fails_the_probe(tmp_path: Path) -> None:
     assert "010-fail" in result.stderr
 
 
+def test_health_prefers_python3_when_python_is_absent(tmp_path: Path) -> None:
+    """The published images ship `python3`, not a bare `python` alias.
+
+    The healthcheck used to assume `python`, so `vogt-lifecycle health` exited
+    127 ("python: not found") in the stack image and the pod read as unhealthy
+    forever while the core was serving. This shadows `python` with a stub that
+    always fails and leaves `python3` working: the probe must still pass,
+    proving the runner resolves `python3` rather than the broken `python`.
+    """
+    (tmp_path / "work").mkdir()
+    # A `python` earlier on PATH that fails if anything calls it, so a probe that
+    # succeeds can only have used python3.
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    _hook(fakebin / "python", "echo 'must not be called' >&2; exit 99")
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *_args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        env = os.environ.copy()
+        env.update(
+            {
+                "VOGT_HOOK_DIR": str(tmp_path / "hooks"),
+                "VOGT_LIFECYCLE_STATE_DIR": str(tmp_path / "state"),
+                "VOGT_LIFECYCLE_WORKDIR": str(tmp_path / "work"),
+                "VOGT_HOOKS_REQUIRED": "false",
+                "PATH": f"{fakebin}{os.pathsep}{env['PATH']}",
+                "VOGT_LIFECYCLE_HEALTHCHECK_URL": f"http://127.0.0.1:{server.server_port}",
+            }
+        )
+        env.pop("VOGT_LIFECYCLE_PYTHON", None)
+        result = subprocess.run(
+            ["sh", str(RUNNER), "health"],
+            cwd=tmp_path / "work",
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+    assert result.returncode == 0, result.stderr
+    assert "must not be called" not in result.stderr
+
+
 def test_restore_sample_refuses_dirty_checkout(tmp_path: Path) -> None:
     source = tmp_path / "source"
     target = tmp_path / "target"

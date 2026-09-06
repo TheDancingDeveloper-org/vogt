@@ -131,17 +131,25 @@ record_image() {
         return 1
     fi
 
-    labels="$(docker inspect --format '{{json .Config.Labels}}' "$pinned" 2>/dev/null || echo null)"
-    prov="$(docker buildx imagetools inspect "$pinned" --format '{{json .Provenance}}' 2>/dev/null || true)"
-    [[ -n "$prov" ]] || prov=null
+    # Labels and provenance are read from files, not passed as argv: an image's
+    # label set (and its SLSA provenance) is large enough to blow past ARG_MAX,
+    # which failed the receipt with "Argument list too long" on a real host.
+    local labels_file prov_file
+    labels_file="$(mktemp)"
+    prov_file="$(mktemp)"
+    docker inspect --format '{{json .Config.Labels}}' "$pinned" >"$labels_file" 2>/dev/null || echo null >"$labels_file"
+    docker buildx imagetools inspect "$pinned" --format '{{json .Provenance}}' >"$prov_file" 2>/dev/null || echo null >"$prov_file"
     RECEIPT_ENTRIES+=("$(python3 -c '
 import json, sys
+labels = json.load(open(sys.argv[5])) or {}
+prov_raw = open(sys.argv[6]).read().strip()
+prov = json.loads(prov_raw) if prov_raw and prov_raw != "null" else None
 print(json.dumps({
     "name": sys.argv[1], "image": sys.argv[2], "pinned": sys.argv[3],
-    "digest": sys.argv[4], "labels": json.loads(sys.argv[5]),
-    "provenance": json.loads(sys.argv[6]) if sys.argv[6] not in ("", "null") else None,
+    "digest": sys.argv[4], "labels": labels, "provenance": prov,
 }))
-' "$name" "$image" "$pinned" "$digest" "$labels" "$prov")")
+' "$name" "$image" "$pinned" "$digest" "$labels_file" "$prov_file")")
+    rm -f "$labels_file" "$prov_file"
 }
 
 # ── the consumer path, once, at a given voice posture ─────────────────────────
