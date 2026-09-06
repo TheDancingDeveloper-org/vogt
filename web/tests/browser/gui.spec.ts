@@ -5161,3 +5161,29 @@ for (const themeId of ["light", "hc-light", "hc-dark"] as const) {
     expect(ratios.onAccentOnAccent, "--on-accent on --accent").toBeGreaterThanOrEqual(3);
   });
 }
+
+test("Assistant completes a voice-shaped turn through approval denial and TTS fallback", async ({ page }) => {
+  await installFixtures(page, { assistant_enabled: true, assistant_tts_enabled: true });
+  let denied = false;
+  await page.route("**/api/assistant/message", async (route) =>
+    route.fulfill({ json: {
+      reply: "I found a pending change.",
+      pending_action: { kind: "vogt_write", id: "voice-action", operation: "work.transition", target: "WI-7", payload: "done", reason: "voice request" },
+      tool_trace: ["voice turn received"],
+    } }),
+  );
+  await page.route("**/api/assistant/actions/voice-action", async (route) => {
+    denied = JSON.parse(route.request().postData() ?? "{}").approve === false;
+    await route.fulfill({ json: { reply: "The change was denied.", pending_action: null, tool_trace: [] } });
+  });
+  await page.route("**/api/assistant/tts", async (route) => route.fulfill({ status: 404, body: "speech unavailable" }));
+  await page.goto("/#/assistant");
+  const composer = page.locator(".assistant-input");
+  await composer.fill("mark WI-7 done");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page.getByText("I found a pending change.")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Pending approval" })).toBeVisible();
+  await page.getByRole("button", { name: "Deny" }).click();
+  await expect.poll(() => denied).toBe(true);
+  await expect(page.getByRole("region", { name: "Pending approval" })).toHaveCount(0);
+});
