@@ -64,7 +64,25 @@ run_phase() {
 
 check_health() {
     url=${VOGT_LIFECYCLE_HEALTHCHECK_URL:?VOGT_LIFECYCLE_HEALTHCHECK_URL is required for health mode}
-    "${VOGT_LIFECYCLE_PYTHON:-python}" - "$url" <<'PY'
+    # Resolve the interpreter rather than assuming `python`: the images this
+    # runs in (the core and the stack pod) ship `python3`, and Debian/Ubuntu
+    # do not install a bare `python` alias by default. Assuming `python` made
+    # the container healthcheck exit 127 ("python: not found"), so the pod read
+    # as unhealthy forever even though the core was serving. An explicit
+    # override still wins; otherwise prefer python3, then python, and fail with
+    # a named reason rather than a bare 127 if neither exists.
+    py=${VOGT_LIFECYCLE_PYTHON:-}
+    if [ -z "$py" ]; then
+        if command -v python3 >/dev/null 2>&1; then
+            py=python3
+        elif command -v python >/dev/null 2>&1; then
+            py=python
+        else
+            echo "vogt lifecycle: no python3 or python on PATH for the health check" >&2
+            return 127
+        fi
+    fi
+    "$py" - "$url" <<'PY'
 import sys
 import urllib.request
 
