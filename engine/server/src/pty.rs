@@ -977,7 +977,14 @@ mod secret_env_tests {
                 "{v:?} should enable passthrough"
             );
         }
-        for v in [None, Some(""), Some("0"), Some("false"), Some("no"), Some("off")] {
+        for v in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("no"),
+            Some("off"),
+        ] {
             assert!(
                 !identity_passthrough_from(v),
                 "{v:?} should not enable passthrough"
