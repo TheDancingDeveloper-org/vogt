@@ -22,6 +22,7 @@ import {
   toggleHistoryPin,
 } from "./historyPins";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
+import { toReadableTranscript } from "./historyReplay";
 import { sessionsStore } from "./store";
 import { SafeSnippet } from "./SafeSnippet";
 import {
@@ -969,7 +970,7 @@ const History: Component<Props> = (props) => {
                   <div class="history-replay-toolbar">
                     <div>
                       <strong>Replay preview</strong>
-                      <div class="history-replay-note">Tail view of the archived raw terminal log.</div>
+                      <div class="history-replay-note">Tail of the archived session, rendered readable — escape codes resolved.</div>
                     </div>
                     <label class="history-field">
                       <span>Tail size</span>
@@ -1012,7 +1013,7 @@ const History: Component<Props> = (props) => {
                               <span>Preview is truncated to the requested tail size.</span>
                             </Show>
                           </div>
-                          <pre class="history-replay-output">{preview().text || "No output captured."}</pre>
+                          <pre class="history-replay-output">{toReadableTranscript(preview().text) || "No output captured."}</pre>
                         </>
                       )}
                     </Show>

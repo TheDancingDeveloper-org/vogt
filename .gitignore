@@ -77,3 +77,6 @@ docs/REQUIREMENTS*.md
 # docs/local/. Only the contract-required placeholder stays tracked.
 design/*
 !design/.gitkeep
+
+# Local triage material (screenshots, captures) — never committed
+/debug/
