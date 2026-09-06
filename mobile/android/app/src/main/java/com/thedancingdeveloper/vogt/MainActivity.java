@@ -6,8 +6,8 @@ import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.util.Log;
-import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -17,10 +17,19 @@ import androidx.core.content.ContextCompat;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowInsetsCompat;
+import androidx.webkit.JavaScriptReplyProxy;
+import androidx.webkit.WebMessageCompat;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
 
 import com.getcapacitor.BridgeActivity;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.File;
+import java.util.Collections;
+import java.util.Set;
 
 public class MainActivity extends BridgeActivity {
     private static final String TAG = "MainActivity";
@@ -44,12 +53,34 @@ public class MainActivity extends BridgeActivity {
             return;
         }
 
-        // The bridges are visible to every frame and origin the WebView loads,
-        // not just the PWA (#523), so each gates its sensitive methods on the
-        // WebView's current top-level origin being the trusted app origin.
-        final String allowedHost = getBridge() != null ? hostOf(getBridge().getServerUrl()) : null;
-        webView.addJavascriptInterface(new ClipboardBridge(this, webView, allowedHost), JS_CLIPBOARD_BRIDGE);
-        webView.addJavascriptInterface(new VoiceBridge(this, webView, allowedHost), JS_VOICE_BRIDGE);
+        // A JavaScript-interface bridge is visible to every frame and origin the
+        // WebView loads, so the old gate could only check the *top* document and
+        // could not stop a trusted page's embedded (cross-origin) iframe — e.g.
+        // gui_stream_url — from calling in (#523 residual, #624). WebMessageListener
+        // binds each bridge to an explicit origin allowlist: the framework delivers
+        // a message only from a frame whose origin matches, and reports whether the
+        // sender is the main frame, so a same-origin subframe is refused too.
+        //
+        // Timing: the listener injects its JS object into every navigation *after*
+        // this call, which is where the PWA's first load happens. The behavioural
+        // proof (an untrusted iframe is refused; the trusted PWA still works) is the
+        // emulator journey in #626; this change is unit-covered in MainActivityTest.
+        final Set<String> originRules =
+            allowedOriginRules(getBridge() != null ? getBridge().getServerUrl() : null);
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
+                && !originRules.isEmpty()) {
+            WebViewCompat.addWebMessageListener(
+                webView, JS_CLIPBOARD_BRIDGE, originRules, new ClipboardBridge(this));
+            WebViewCompat.addWebMessageListener(
+                webView, JS_VOICE_BRIDGE, originRules, new VoiceBridge(this));
+        } else {
+            // No safe per-origin channel: leave the bridges unregistered rather
+            // than fall back to the frame-blind interface. Clipboard and the voice
+            // service degrade to unavailable, which the PWA already treats as "not
+            // on this platform" (web/src/clipboard.ts, web/src/voiceService.ts).
+            Log.w(TAG, "WebMessageListener unsupported or no trusted origin; "
+                + "native clipboard/voice bridges disabled");
+        }
         // When the notification's "End conversation" action stops the service,
         // tell the PWA so it closes the conversation on its side too.
         VoiceConversationService.setEndFromUiListener(() ->
@@ -139,129 +170,218 @@ public class MainActivity extends BridgeActivity {
     }
 
     /**
-     * Start/stop the voice foreground service (FR-M6). Held only while a voice
-     * conversation is active in the PWA; the PWA is the authority on when that
-     * is, so this bridge is a pure lever with no policy of its own.
+     * The single origin the native bridges trust, as a WebMessageListener origin
+     * rule ({@code scheme://host[:port]}) derived from the URL Capacitor loads.
+     * Empty when the server URL is missing or unparseable, which leaves the
+     * bridges unregistered — fail closed, never open (#624).
      */
-    static class VoiceBridge {
-        private final Context context;
-        private final WebView webView;
-        private final String allowedHost;
-
-        VoiceBridge(Context context, WebView webView, String allowedHost) {
-            this.context = context.getApplicationContext();
-            this.webView = webView;
-            this.allowedHost = allowedHost;
+    static Set<String> allowedOriginRules(String serverUrl) {
+        if (serverUrl == null) {
+            return Collections.emptySet();
         }
-
-        @JavascriptInterface
-        public void startConversation() {
-            // A framed third party must not be able to spin up the mic
-            // foreground service (#523).
-            if (!topLevelHostTrusted(webView, allowedHost)) {
-                return;
+        // java.net.URI, not android.net.Uri: the origin rule is a pure string
+        // derivation, and keeping it off android.jar keeps it unit-testable.
+        try {
+            java.net.URI uri = new java.net.URI(serverUrl);
+            String scheme = uri.getScheme();
+            String host = uri.getHost();
+            if (scheme == null || host == null) {
+                return Collections.emptySet();
             }
-            Intent intent = new Intent(context, VoiceConversationService.class)
-                .setAction(VoiceConversationService.ACTION_START);
-            ContextCompat.startForegroundService(context, intent);
-        }
-
-        @JavascriptInterface
-        public void endConversation() {
-            // The web ended it, so stop directly without signalling back.
-            context.stopService(new Intent(context, VoiceConversationService.class));
+            String origin = scheme + "://" + host + (uri.getPort() >= 0 ? ":" + uri.getPort() : "");
+            return Collections.singleton(origin);
+        } catch (java.net.URISyntaxException e) {
+            return Collections.emptySet();
         }
     }
 
-    /** The host of a URL, or null. */
-    private static String hostOf(String url) {
-        if (url == null) {
-            return null;
+    /** A bridge request: {@code {"op":..., "id":..., "value":...}}. */
+    static final class Request {
+        final String op;
+        final String id;
+        final String value;
+
+        private Request(String op, String id, String value) {
+            this.op = op;
+            this.id = id;
+            this.value = value;
         }
-        return android.net.Uri.parse(url).getHost();
+
+        /** Parse a message payload, or null if it is not a JSON object. */
+        static Request parse(String data) {
+            if (data == null) {
+                return null;
+            }
+            try {
+                JSONObject obj = new JSONObject(data);
+                String op = obj.has("op") ? obj.optString("op", null) : null;
+                String id = obj.has("id") ? obj.optString("id", "") : null;
+                String value = obj.has("value") ? obj.optString("value", "") : null;
+                return new Request(op, id, value);
+            } catch (JSONException e) {
+                return null;
+            }
+        }
+    }
+
+    // ----- Voice foreground service bridge (FR-M6, #523/#624) ----------------
+
+    /** What a voice message asks for, once frame and payload are resolved. */
+    enum VoiceAction { START, END, NONE }
+
+    /**
+     * Resolve a voice message to an action. {@code NONE} unless it comes from the
+     * main frame and names a known op — origin is already gated by the listener's
+     * allowlist, and the main-frame requirement denies even a same-origin iframe,
+     * so no embedded frame can start or stop the mic service (#523/#624).
+     */
+    static VoiceAction voiceAction(String data, boolean isMainFrame) {
+        if (!isMainFrame) {
+            return VoiceAction.NONE;
+        }
+        Request req = Request.parse(data);
+        if (req == null || req.op == null) {
+            return VoiceAction.NONE;
+        }
+        switch (req.op) {
+            case "start":
+                return VoiceAction.START;
+            case "end":
+                return VoiceAction.END;
+            default:
+                return VoiceAction.NONE;
+        }
     }
 
     /**
-     * Whether the WebView's current <em>top-level</em> document is the trusted
-     * app origin (#523). A {@code @JavascriptInterface} bridge added with
-     * {@code addJavascriptInterface} is visible to every frame and origin the
-     * WebView loads, so a bridge must refuse to act unless the top page is ours.
-     *
-     * <p>Residual limitation: this checks the top-level document, not the
-     * calling frame, so it does not stop a trusted top-level page's own
-     * embedded iframe (e.g. {@code gui_stream_url}) from calling in. Restricting
-     * per calling frame means migrating the bridge to
-     * {@code WebViewCompat.addWebMessageListener} with allowedOriginRules
-     * (which Capacitor already builds from the server URL) or a Capacitor
-     * plugin; that turns the JS contract async and is the recommended complete
-     * fix. This gate is the low-risk first layer.
-     *
-     * <p>Runs off the WebView's private JavaBridge thread, so it reads the URL
-     * via a short post to the UI thread — never a deadlock, because the UI
-     * thread is not blocked waiting on the bridge.
+     * Start/stop the voice foreground service (FR-M6). Held only while a voice
+     * conversation is active in the PWA; the PWA is the authority on when that is,
+     * so this bridge is a pure lever with no policy of its own. Bound to the
+     * trusted origin and the main frame by {@link #voiceAction}.
      */
-    static boolean topLevelHostTrusted(final WebView webView, final String allowedHost) {
-        if (allowedHost == null || webView == null) {
-            return false;
+    static final class VoiceBridge implements WebViewCompat.WebMessageListener {
+        private final Context context;
+
+        VoiceBridge(Context context) {
+            this.context = context.getApplicationContext();
         }
-        final String[] holder = new String[1];
-        final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
-        webView.post(() -> {
-            holder[0] = webView.getUrl();
-            latch.countDown();
-        });
-        try {
-            if (!latch.await(1, java.util.concurrent.TimeUnit.SECONDS)) {
-                return false;
+
+        @Override
+        public void onPostMessage(WebView view, WebMessageCompat message, Uri sourceOrigin,
+                boolean isMainFrame, JavaScriptReplyProxy replyProxy) {
+            switch (voiceAction(message.getData(), isMainFrame)) {
+                case START:
+                    Intent start = new Intent(context, VoiceConversationService.class)
+                        .setAction(VoiceConversationService.ACTION_START);
+                    ContextCompat.startForegroundService(context, start);
+                    break;
+                case END:
+                    // The web ended it, so stop directly without signalling back.
+                    context.stopService(new Intent(context, VoiceConversationService.class));
+                    break;
+                default:
+                    break;
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
         }
-        return allowedHost.equalsIgnoreCase(hostOf(holder[0]));
     }
 
-    static class ClipboardBridge {
-        private final Context context;
-        private final WebView webView;
-        private final String allowedHost;
+    // ----- Clipboard bridge (#523/#624) --------------------------------------
 
-        ClipboardBridge(Context context, WebView webView, String allowedHost) {
-            this.context = context.getApplicationContext();
-            this.webView = webView;
-            this.allowedHost = allowedHost;
+    /** The privileged clipboard operations, isolated so the frame gate is testable. */
+    interface Clipboard {
+        String read();
+
+        void write(String value);
+    }
+
+    /**
+     * Handle a clipboard message. Returns the JSON reply for a {@code read}, or
+     * null. Refuses everything but the trusted main frame: the listener's origin
+     * allowlist already blocks foreign origins, and the main-frame requirement
+     * additionally blocks a same-origin embedded iframe, so no subframe can read
+     * or write the clipboard (#523/#624).
+     */
+    static String handleClipboard(String data, boolean isMainFrame, Clipboard clipboard) {
+        if (!isMainFrame) {
+            return null;
+        }
+        Request req = Request.parse(data);
+        if (req == null || req.op == null) {
+            return null;
+        }
+        switch (req.op) {
+            case "read":
+                return readReply(req.id, clipboard.read());
+            case "write":
+                if (req.value != null) {
+                    clipboard.write(req.value);
+                }
+                return null;
+            default:
+                return null;
+        }
+    }
+
+    /** The reply to a clipboard {@code read}: {@code {"id":..., "text":...}}. */
+    static String readReply(String id, String text) {
+        try {
+            JSONObject obj = new JSONObject();
+            obj.put("id", id == null ? JSONObject.NULL : id);
+            obj.put("text", text == null ? "" : text);
+            return obj.toString();
+        } catch (JSONException e) {
+            return null;
+        }
+    }
+
+    /** The real Android clipboard, backing {@link Clipboard} at runtime. */
+    static Clipboard androidClipboard(final Context appContext) {
+        return new Clipboard() {
+            @Override
+            public String read() {
+                ClipboardManager clipboard =
+                    (ClipboardManager) appContext.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard == null || !clipboard.hasPrimaryClip()) {
+                    return "";
+                }
+                ClipData clip = clipboard.getPrimaryClip();
+                if (clip == null || clip.getItemCount() == 0) {
+                    return "";
+                }
+                CharSequence text = clip.getItemAt(0).coerceToText(appContext);
+                return text != null ? text.toString() : "";
+            }
+
+            @Override
+            public void write(String value) {
+                ClipboardManager clipboard =
+                    (ClipboardManager) appContext.getSystemService(Context.CLIPBOARD_SERVICE);
+                if (clipboard == null) {
+                    return;
+                }
+                clipboard.setPrimaryClip(ClipData.newPlainText("Vogt", value != null ? value : ""));
+            }
+        };
+    }
+
+    /**
+     * The clipboard the PWA reads and writes (plausibly holding tokens), bound to
+     * the trusted origin and the main frame by {@link #handleClipboard}.
+     */
+    static final class ClipboardBridge implements WebViewCompat.WebMessageListener {
+        private final Clipboard clipboard;
+
+        ClipboardBridge(Context context) {
+            this.clipboard = androidClipboard(context.getApplicationContext());
         }
 
-        @JavascriptInterface
-        public String readText() {
-            // Refuse to hand the clipboard (plausibly holding tokens) to a
-            // page that is not the trusted app origin (#523).
-            if (!topLevelHostTrusted(webView, allowedHost)) {
-                return "";
+        @Override
+        public void onPostMessage(WebView view, WebMessageCompat message, Uri sourceOrigin,
+                boolean isMainFrame, JavaScriptReplyProxy replyProxy) {
+            String reply = handleClipboard(message.getData(), isMainFrame, clipboard);
+            if (reply != null) {
+                replyProxy.postMessage(reply);
             }
-            ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (clipboard == null || !clipboard.hasPrimaryClip()) {
-                return "";
-            }
-            ClipData clip = clipboard.getPrimaryClip();
-            if (clip == null || clip.getItemCount() == 0) {
-                return "";
-            }
-            CharSequence text = clip.getItemAt(0).coerceToText(context);
-            return text != null ? text.toString() : "";
-        }
-
-        @JavascriptInterface
-        public void writeText(String value) {
-            if (!topLevelHostTrusted(webView, allowedHost)) {
-                return;
-            }
-            ClipboardManager clipboard = (ClipboardManager) context.getSystemService(Context.CLIPBOARD_SERVICE);
-            if (clipboard == null) {
-                return;
-            }
-            String text = value != null ? value : "";
-            clipboard.setPrimaryClip(ClipData.newPlainText("Vogt", text));
         }
     }
 }

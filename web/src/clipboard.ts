@@ -2,19 +2,63 @@ interface CapacitorGlobal {
   isNativePlatform?: () => boolean;
 }
 
-interface AndroidClipboardBridge {
-  readText?: () => string;
-  writeText?: (value: string) => void;
+// The Android side exposes the clipboard through a WebMessageListener bound to
+// the trusted origin and the main frame (#624), not a synchronous
+// JavaScript-interface method. The injected object takes a JSON string and can
+// reply with one; a read is a request/reply correlated by id.
+interface WebMessageBridge {
+  postMessage: (data: string) => void;
+  onmessage: ((event: { data: string }) => void) | null;
+  addEventListener?: (
+    type: "message",
+    listener: (event: { data: string }) => void,
+  ) => void;
 }
+
+interface ClipboardChannel {
+  bridge: WebMessageBridge;
+  pending: Map<string, (text: string) => void>;
+  seq: number;
+}
+
+let clipboardChannel: ClipboardChannel | null = null;
 
 function isNativePlatform(): boolean {
   const w = window as unknown as { Capacitor?: CapacitorGlobal };
   return Boolean(w.Capacitor?.isNativePlatform?.());
 }
 
-function androidClipboardBridge(): AndroidClipboardBridge | null {
-  const w = window as unknown as { AndroidClipboard?: AndroidClipboardBridge };
-  return w.AndroidClipboard ?? null;
+// Resolve (and, once, wire up) the reply channel for the injected bridge. The
+// single message listener resolves pending reads by id; a stale channel (a new
+// bridge object after a reload) is replaced so we never listen on a dead one.
+function androidClipboardChannel(): ClipboardChannel | null {
+  const w = window as unknown as { AndroidClipboard?: WebMessageBridge };
+  const bridge = w.AndroidClipboard;
+  if (!bridge || typeof bridge.postMessage !== "function") return null;
+  if (clipboardChannel?.bridge === bridge) return clipboardChannel;
+
+  const channel: ClipboardChannel = { bridge, pending: new Map(), seq: 0 };
+  const onMessage = (event: { data: string }) => {
+    let msg: { id?: string; text?: string };
+    try {
+      msg = JSON.parse(event.data);
+    } catch {
+      return;
+    }
+    if (msg.id == null) return;
+    const resolve = channel.pending.get(msg.id);
+    if (resolve) {
+      channel.pending.delete(msg.id);
+      resolve(msg.text ?? "");
+    }
+  };
+  if (typeof bridge.addEventListener === "function") {
+    bridge.addEventListener("message", onMessage);
+  } else {
+    bridge.onmessage = onMessage;
+  }
+  clipboardChannel = channel;
+  return channel;
 }
 
 async function writeViaNavigator(text: string): Promise<void> {
@@ -32,19 +76,32 @@ async function readViaNavigator(): Promise<string> {
 }
 
 async function writeViaAndroidBridge(text: string): Promise<void> {
-  const bridge = androidClipboardBridge();
-  if (!bridge?.writeText) {
+  const channel = androidClipboardChannel();
+  if (!channel) {
     throw new Error("Android clipboard bridge unavailable");
   }
-  bridge.writeText(text);
+  channel.bridge.postMessage(JSON.stringify({ op: "write", value: text }));
 }
 
 async function readViaAndroidBridge(): Promise<string> {
-  const bridge = androidClipboardBridge();
-  if (!bridge?.readText) {
+  const channel = androidClipboardChannel();
+  if (!channel) {
     throw new Error("Android clipboard bridge unavailable");
   }
-  return bridge.readText() ?? "";
+  const id = String(++channel.seq);
+  return new Promise<string>((resolve, reject) => {
+    // The native side replies almost immediately; a bounded wait keeps a
+    // dropped reply (an unconfigured or torn-down bridge) from hanging a read.
+    const timer = setTimeout(() => {
+      channel.pending.delete(id);
+      reject(new Error("Android clipboard read timed out"));
+    }, 3000);
+    channel.pending.set(id, (value) => {
+      clearTimeout(timer);
+      resolve(value);
+    });
+    channel.bridge.postMessage(JSON.stringify({ op: "read", id }));
+  });
 }
 
 // Legacy fallback for the browser copy path: a hidden textarea + the
@@ -85,7 +142,7 @@ function writeViaExecCommand(text: string): void {
 }
 
 export async function writeClipboardText(text: string): Promise<void> {
-  if (isNativePlatform() && androidClipboardBridge()) {
+  if (isNativePlatform() && androidClipboardChannel()) {
     await writeViaAndroidBridge(text);
     return;
   }
@@ -111,7 +168,7 @@ export async function writeClipboardText(text: string): Promise<void> {
 }
 
 export async function readClipboardText(): Promise<string> {
-  if (isNativePlatform() && androidClipboardBridge()) {
+  if (isNativePlatform() && androidClipboardChannel()) {
     return readViaAndroidBridge();
   }
   return readViaNavigator();

@@ -26,19 +26,20 @@ import {
 
 interface TestWindow {
   Capacitor?: { isNativePlatform?: () => boolean };
-  AndroidVoice?: { startConversation?: () => void; endConversation?: () => void };
+  AndroidVoice?: { postMessage?: (data: string) => void };
 }
 
 function asWindow(): TestWindow {
   return window as unknown as TestWindow;
 }
 
-const startConversation = vi.fn();
-const endConversation = vi.fn();
+// The bridge is a WebMessageListener now (#624): a single postMessage taking a
+// JSON op string, not a pair of per-method functions.
+const voicePost = vi.fn();
 
 function goNative() {
   asWindow().Capacitor = { isNativePlatform: () => true };
-  asWindow().AndroidVoice = { startConversation, endConversation };
+  asWindow().AndroidVoice = { postMessage: voicePost };
 }
 
 afterEach(() => {
@@ -48,8 +49,7 @@ afterEach(() => {
 
 describe("voiceService off a native platform", () => {
   beforeEach(() => {
-    startConversation.mockClear();
-    endConversation.mockClear();
+    voicePost.mockClear();
     addListener.mockClear();
   });
 
@@ -57,8 +57,7 @@ describe("voiceService off a native platform", () => {
     expect(voiceServiceAvailable()).toBe(false);
     startVoiceService();
     stopVoiceService();
-    expect(startConversation).not.toHaveBeenCalled();
-    expect(endConversation).not.toHaveBeenCalled();
+    expect(voicePost).not.toHaveBeenCalled();
   });
 
   it("registers no push listener and returns a cleanup that removes nothing", async () => {
@@ -81,8 +80,7 @@ describe("voiceService off a native platform", () => {
 
 describe("voiceService on the native platform", () => {
   beforeEach(() => {
-    startConversation.mockClear();
-    endConversation.mockClear();
+    voicePost.mockClear();
     addListener.mockClear();
     goNative();
   });
@@ -90,9 +88,9 @@ describe("voiceService on the native platform", () => {
   it("holds and releases the foreground service through the bridge", () => {
     expect(voiceServiceAvailable()).toBe(true);
     startVoiceService();
-    expect(startConversation).toHaveBeenCalledTimes(1);
+    expect(voicePost).toHaveBeenNthCalledWith(1, JSON.stringify({ op: "start" }));
     stopVoiceService();
-    expect(endConversation).toHaveBeenCalledTimes(1);
+    expect(voicePost).toHaveBeenNthCalledWith(2, JSON.stringify({ op: "end" }));
   });
 
   it("routes the notification's End action to the handler and cleans up", () => {
