@@ -349,3 +349,57 @@ def test_the_scheme_follows_the_certificate(tmp_path: Path) -> None:
     options = ServeOptions(host="127.0.0.1", port=1, tls_cert=cert, tls_key=key)
     options.validate()
     assert options.scheme == "https"
+
+
+@pytest.mark.parametrize(
+    "operation,arguments",
+    [
+        ("label.create", {"name": "voice-triage"}),
+        ("initiative.create", {"title": "Voice accessibility"}),
+        ("project.transition", {"slug": "voice-project", "to_state": "maintenance"}),
+        ("contract.adopt", {"project": "voice-project"}),
+    ],
+)
+def test_new_voice_writes_over_mcp_enforce_scope_reason_and_persist_approver_audit(
+    instance: AppContext,
+    authed: TestClient,
+    secrets: dict[str, str],
+    operation: str,
+    arguments: dict[str, str],
+) -> None:
+    """#621: the engine's approved payload lands at the real MCP write plane."""
+    from vogt.application.models import RegisterProjectParams
+    from vogt.application.services import register_project
+
+    register_project(
+        instance,
+        RegisterProjectParams(
+            name="Voice project", root_path="/nonexistent/voice", reason=WHY
+        ),
+    )
+    reason = "The team agreed to track voice accessibility in this project"
+    name = operation.replace(".", "_")
+    args = {**arguments, "reason": reason}
+    reader_tools = _rpc(authed, "tools/list", secrets["read"])["result"]["tools"]
+    assert name not in {t["name"] for t in reader_tools}
+    writer_tools = _rpc(authed, "tools/list", secrets["write"])["result"]["tools"]
+    schema = next(t["inputSchema"] for t in writer_tools if t["name"] == name)
+    assert "reason" in schema["required"]
+    denied = _rpc(authed, "tools/call", secrets["read"], name=name, arguments=args)
+    assert denied["result"]["isError"]
+    assert "forbidden" in denied["result"]["content"][0]["text"]
+    invalid = _rpc(
+        authed, "tools/call", secrets["write"], name=name, arguments=arguments
+    )
+    assert invalid["result"]["isError"]
+    with instance.declared.read() as view:
+        assert not view.list_audit(operation=operation, limit=10)
+    result = _rpc(authed, "tools/call", secrets["write"], name=name, arguments=args)
+    assert not result["result"]["isError"], result
+    with instance.declared.read() as view:
+        records = view.list_audit(operation=operation, limit=10)
+        assert len(records) == 1
+        writer = view.actor_by_identity("agent:writer")
+        assert writer is not None
+        assert records[0].actor_id == writer.id
+        assert records[0].reason == reason
