@@ -569,25 +569,44 @@ load_agent_environment() {
     # never a value, and deliberately not the API URL — let session tooling
     # detect the brokered model and either read a credential it was granted or
     # fail with an actionable message. See docs/ENGINE.md §9.
-    export AGENT_AUTH_MODE=brokered
+    # #637: identity-passthrough is an explicit per-deployment opt-in that keeps
+    # the machine identity in the session (reverses the #511/#566 strip below).
+    # Decided here, before the identity is unset, and reused for both.
+    local identity_passthrough=0
+    if [[ "${ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH:-}" =~ ^(1|true|TRUE|yes|on)$ ]]; then
+        identity_passthrough=1
+    fi
+    if [[ "$identity_passthrough" -eq 1 ]]; then
+        # The session holds the full secrets-manager identity; session tooling
+        # should use `infisical` directly, not the manifest broker.
+        export AGENT_AUTH_MODE=identity
+    else
+        export AGENT_AUTH_MODE=brokered
+    fi
     export AGENT_AUTH_GRANTED="$AGENT_AUTH_GRANTED_VARS"
     export AGENT_AUTH_ONDEMAND="$AGENT_AUTH_ONDEMAND_VARS"
     # Names a session may *store* through the broker (#598), beside the names it
     # may fetch. A session reads this instead of guessing and being refused.
     export AGENT_AUTH_WRITABLE="$AGENT_AUTH_WRITABLE_VARS"
 
-    # Drop the brokering identity before the shell/command this helper launches.
-    # The engine re-grants exactly these to the helper (they are otherwise
-    # stripped from every child, #511); every Infisical secret is now fetched,
-    # so the launched shell must not keep the machine identity that could read
-    # the rest of the vault, nor the manifest that names what to read. The
-    # brokered agent tokens exported above are kept — that is the whole point.
-    unset INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET INFISICAL_API_URL \
-        ENGINE_INFISICAL_ENV ENGINE_AGENT_AUTH_SECRETS \
+    # Drop the brokering inputs before the shell/command this helper launches.
+    # The manifest, the secret-name breadcrumbs and the passthrough switch itself
+    # are engine config the launched shell never needs — dropped in either mode.
+    # The brokered agent tokens exported above are kept — that is the whole point.
+    unset ENGINE_AGENT_AUTH_SECRETS \
         ENGINE_AGENT_AUTH_GH_TOKEN_FROM ENGINE_AGENT_AUTH_TOKEN_PROJECT_ID \
-        ENGINE_AGENT_AUTH_PROBES \
+        ENGINE_AGENT_AUTH_PROBES ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH \
         MYDEVENV2_CADASTRE_SECRET_NAME MYDEVENV2_VOGT_SECRET_NAME \
         2>/dev/null || true
+    # The machine identity is dropped by default (#511/#566): a normal session
+    # must not keep the credential that could read the rest of the vault. In
+    # identity-passthrough mode (#637) it is deliberately KEPT so the session can
+    # use `infisical` directly against any project.
+    if [[ "$identity_passthrough" -eq 0 ]]; then
+        unset INFISICAL_CLIENT_ID INFISICAL_CLIENT_SECRET INFISICAL_API_URL \
+            ENGINE_INFISICAL_ENV \
+            2>/dev/null || true
+    fi
 }
 
 # The service-probe list is configuration, not a baked-in estate service map.

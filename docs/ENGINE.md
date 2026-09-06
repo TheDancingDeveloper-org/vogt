@@ -2044,6 +2044,26 @@ rather than fetching it ad hoc. Honest caveat: the strip is a boundary between
 environment via `/proc/1/environ`, so the identity is out of the manifest's
 reach, not off the machine (#566).
 
+**Opting out of the boundary: identity passthrough (#637).** A deployment may
+decide the manifest boundary is not earning its keep and hand sessions the full
+secrets-manager identity instead. Setting `ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH=1`
+keeps the four identity variables (`INFISICAL_API_URL`, `INFISICAL_CLIENT_ID`,
+`INFISICAL_CLIENT_SECRET`, `ENGINE_INFISICAL_ENV`) in the session instead of
+dropping them, so an agent can `infisical login` and read or write **any** secret
+in **any** project directly — no per-secret manifest line, no fetch/store broker
+round-trip. The breadcrumb flips to `AGENT_AUTH_MODE=identity` (from `brokered`)
+so tooling can branch; `AGENT_AUTH_GRANTED` is unchanged. Everything else the
+strip withholds stays withheld: the engine's own `ENGINE_TOKEN`, the scoped
+token set, the assistant/STT/TTS keys and `TAILSCALE_AUTH_KEY` never reach a
+session in either mode. The trade-off is explicit: passthrough removes the
+containment the manifest was meant to provide, in exchange for dropping its
+friction (every new secret otherwise needs an ops-repo edit and an engine
+restart). It is defensible precisely because of the same-uid caveat above — an
+agent that shares the engine's uid can already reach the identity off the host,
+so on such an estate the manifest was cost without a boundary. **Default is
+off**: the brokered model (#511/#566/#568/#598) stays the norm, and a deployment
+opts in per stack. Enabling it is an operator decision, not the engine's default.
+
 **Getting a secret after launch: the on-demand broker (#568).** The one
 sanctioned late path is a *manifest-constrained fetch*, and it keeps the
 contract above intact: the identity never leaves the engine. A manifest line

@@ -345,6 +345,51 @@ pub(crate) fn agent_auth_helper_env() -> Vec<(std::ffi::OsString, std::ffi::OsSt
         .collect()
 }
 
+/// The four Infisical machine-identity variables #511 strips from every child.
+/// In identity-passthrough mode (#637) an opted-in deployment re-grants exactly
+/// these to sessions so an operator can drive `infisical` directly against any
+/// project; the broad engine credentials `is_secret_env` withholds stay stripped.
+fn is_identity_env(key: &str) -> bool {
+    matches!(
+        key.to_ascii_uppercase().as_str(),
+        "INFISICAL_API_URL"
+            | "INFISICAL_CLIENT_ID"
+            | "INFISICAL_CLIENT_SECRET"
+            | "ENGINE_INFISICAL_ENV"
+    )
+}
+
+/// Parse the `ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH` switch (#637). Off unless
+/// explicitly truthy, so the manifest-brokered model stays the default.
+fn identity_passthrough_from(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some("1") | Some("true") | Some("TRUE") | Some("yes") | Some("on")
+    )
+}
+
+/// Whether this deployment opts every session into holding the full secrets-
+/// manager identity (#637), reversing #511's strip for the four identity vars.
+pub(crate) fn identity_passthrough_enabled() -> bool {
+    identity_passthrough_from(
+        std::env::var("ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH")
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// The Infisical identity variables re-granted to a session in identity-
+/// passthrough mode [`identity_passthrough_enabled`], which [`sanitized_child_env`]
+/// would otherwise have stripped.
+pub(crate) fn identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    std::env::vars_os()
+        .filter(|(k, _)| match k.to_str() {
+            Some(s) => is_identity_env(s),
+            None => false,
+        })
+        .collect()
+}
+
 /// Spawn a PTY-backed session running `spec.command` (or the default shell if
 /// `None`). Starts the reader thread, the exit waiter, and the activity watcher.
 ///
@@ -414,6 +459,17 @@ pub fn spawn(
     // caller command or a bare shell.
     if spawning_agent_auth_helper {
         for (k, v) in agent_auth_helper_env() {
+            cmd.env(k, v);
+        }
+    }
+    // #637: an opted-in deployment (ENGINE_AGENT_AUTH_IDENTITY_PASSTHROUGH) hands
+    // every session the full secrets-manager identity, reversing #511's strip for
+    // exactly the four Infisical identity vars. The agent-auth helper already
+    // holds them (above); this also covers a bare shell or a caller command. The
+    // broad engine credentials (ENGINE_TOKEN, the scoped token set, assistant/STT
+    // keys, TAILSCALE_AUTH_KEY) stay stripped in both modes.
+    if identity_passthrough_enabled() {
+        for (k, v) in identity_env() {
             cmd.env(k, v);
         }
     }
@@ -880,6 +936,52 @@ mod secret_env_tests {
             "vogt_core_token",
         ] {
             assert!(is_secret_env(key), "{key} should be treated as a secret");
+        }
+    }
+
+    #[test]
+    fn identity_passthrough_reverses_only_the_four_identity_vars() {
+        use super::{identity_passthrough_from, is_identity_env};
+        // Exactly the four #511 identity strips are what passthrough re-grants,
+        // and each must still be one is_secret_env would strip by default.
+        for key in [
+            "INFISICAL_API_URL",
+            "INFISICAL_CLIENT_ID",
+            "INFISICAL_CLIENT_SECRET",
+            "ENGINE_INFISICAL_ENV",
+        ] {
+            assert!(is_identity_env(key), "{key} is an identity var");
+            assert!(is_secret_env(key), "{key} must be one #511 strips");
+        }
+        // Passthrough is identity, never the engine's own credentials or the
+        // manifest — those stay stripped in both modes (acceptance: ENGINE_TOKEN
+        // never present).
+        for key in [
+            "ENGINE_TOKEN",
+            "ENGINE_EXTRA_TOKENS_JSON",
+            "ENGINE_ASSISTANT_API_KEY",
+            "TAILSCALE_AUTH_KEY",
+            "VOGT_CORE_TOKEN",
+            "GITHUB_TOKEN",
+            "ENGINE_AGENT_AUTH_SECRETS",
+        ] {
+            assert!(
+                !is_identity_env(key),
+                "{key} must not be granted by passthrough"
+            );
+        }
+        // The switch is off unless explicitly truthy; default stays brokered.
+        for v in ["1", "true", "TRUE", "yes", "on", " 1 "] {
+            assert!(
+                identity_passthrough_from(Some(v)),
+                "{v:?} should enable passthrough"
+            );
+        }
+        for v in [None, Some(""), Some("0"), Some("false"), Some("no"), Some("off")] {
+            assert!(
+                !identity_passthrough_from(v),
+                "{v:?} should not enable passthrough"
+            );
         }
     }
 
