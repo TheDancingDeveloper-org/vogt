@@ -34,10 +34,12 @@ on:
         default: ""
       repair_environment:
         description: >-
-          One-shot repair of the stack environment corrupted on 2026-09-05
-          (whole .env collapsed to one literal-\n line). "dry-run" prints the
-          restored keys-only shape and writes nothing; "apply" writes it and
-          then deploys. Leave blank for a normal deploy.
+          Diagnostics and repair, no deploy unless "apply". "inspect" prints
+          what Komodo knows about the stack (info, environment keys, rendered
+          compose keys and mounts, last update's stages, engine log tail) and
+          exits. "dry-run" prints the keys-only shape a structural repair of a
+          collapsed environment (the 2026-09-05 one-line .env) would write;
+          "apply" writes it and then deploys. Leave blank for a normal deploy.
         required: false
         type: string
 
