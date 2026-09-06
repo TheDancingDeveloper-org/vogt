@@ -345,13 +345,13 @@ the published `stack.compose.yml` — inherits none of that passthrough: it must
 name the three variables (`VOGT_CLAUDE_CODE_VERSION`, `VOGT_CODEX_VERSION`,
 `VOGT_AGENT_CLI_ALLOW_DIST_TAGS`) in its own `environment:` and mount the
 `engine-agent-clis` volume, or the pins never reach the entrypoint and the pod
-silently keeps the baked copies. The maintainer's dev and prod stacks are that
-case: their private overlay carries the pins as overridable defaults, so a bump
-there is an edit to those defaults (or a stack-environment override) and a
-redeploy. Because the pin is applied at container start, the only proof that it
-took is the running pod: the `deploy dev` workflow's `expect_agent_clis` input
-(`codex=0.153.4,claude-code=2.1.261`) reads `GET /api/agent-clis` after the
-deploy and fails the run unless the active versions match.
+silently keeps the baked copies. Carrying the pins as overridable defaults in
+that overlay (`"${VOGT_CODEX_VERSION:-<version>}"`) keeps them in version
+control beside the image digest. Because a pin is applied at container start,
+the only proof that it took is the running pod: after a deploy, `GET
+/api/agent-clis` reports each tool's active and baked version, and whatever
+drives the deployment should fail when the active version is not the one it
+set.
 
 The same installer can be reached while the pod is running: `GET
 /api/agent-clis` on the engine reports each tool's active, baked and (on

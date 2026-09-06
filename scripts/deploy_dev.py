@@ -14,15 +14,15 @@ Rules this script lives by, each learned the hard way:
   deploy is kept rather than written back over from the stale copy.
 * `read/GetStack` returns `config.environment` with newlines escaped;
   `write/UpdateStack` takes the string verbatim. Writing a scraped value back
-  collapses the whole `.env` to one line and silently fails Komodo's
+  collapses the whole `.env` to one line and silently fails the stack's
   pre-deploy hook. `restore_environment` / `repair_environment` exist for that
   case (`REPAIR_ENVIRONMENT=dry-run|apply`); `REPAIR_ENVIRONMENT=inspect` is a
   read-only dump of what Komodo knows.
 * Nothing printed may hold a value. `info.deployed_config` is the *resolved*
   compose (every secret interpolated) and is withheld; environment is shown as
   keys only (`env_shape`, `rendered_shape`); every other line goes through
-  `redact()`. A Tailscale auth key once reached an Actions log through this
-  script.
+  `redact()`. Workflow logs outlive the run and are readable by everyone with
+  access to the repository.
 * The live validation accepts the deploy by what the pod reports, not by what
   was sent: `EXPECT_AGENT_CLIS` in the workflow asserts the agent CLI versions
   from `GET /api/agent-clis`.
@@ -399,9 +399,8 @@ def repair_environment(stack: dict[str, object], mode: str) -> None:
 
 
 # `info.deployed_config` is `docker compose config` output: the *resolved*
-# stack, every `${VAR}` and secret interpolated (a Tailscale auth key once
-# reached an Actions log through it). It is never printed whole, and the
-# lines `inspect` shows from it carry keys only — see `rendered_shape`.
+# stack, every `${VAR}` and secret interpolated. It is never printed whole,
+# and the lines `inspect` shows from it carry keys only — see `rendered_shape`.
 WITHHELD_INFO_FIELDS = frozenset(
     {"remote_contents", "remote_errors", "deployed_config", "deployed_contents"}
 )
@@ -666,9 +665,9 @@ def main() -> int:
             raise KomodoError("Komodo stack response has no config")
     # The files rewritten below are read from Komodo's *cached* clone of the
     # stack repo. Without a refresh first, anything pushed to the repo since
-    # the last deploy is written back over from the stale copy — which is how
-    # the agent-CLI pins vanished from the dev overlay on 2026-09-06. Only the
-    # deploy path refreshes, so inspect and dry-run stay read-only.
+    # the last deploy is written back over from the stale copy (an overlay edit
+    # made between deploys would be lost). Only the deploy path refreshes, so
+    # inspect and dry-run stay read-only.
     stack = fresh_stack()
     config = stack.get("config")
     if not isinstance(config, dict):
