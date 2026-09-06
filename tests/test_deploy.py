@@ -2883,17 +2883,27 @@ def test_a_persisted_home_copy_still_fails_the_boot_check(
     agent_clis: _AgentCliSandbox,
 ) -> None:
     """The one door #196 closed stays closed: the runtime prefix is the only
-    sanctioned non-image copy, so `~/.npm-global/bin/claude` is still exit 78."""
+    sanctioned non-image copy. Under the strict policy a stray
+    `~/.npm-global/bin/claude` is still exit 78; by default it is quarantined
+    (moved aside, warned) and the pod boots on the managed copy — refusing to
+    boot is what took vogt-dev down on 2026-09-05 after a CLI "update now"."""
     assert agent_clis.install("claude-code", "2.1.261").returncode == 0
-    (agent_clis.home_bin / "claude").write_text(
-        "#!/usr/bin/env bash\necho stray\n", encoding="utf-8"
-    )
-    (agent_clis.home_bin / "claude").chmod(0o755)
+    stray = agent_clis.home_bin / "claude"
+    stray.write_text("#!/usr/bin/env bash\necho stray\n", encoding="utf-8")
+    stray.chmod(0o755)
 
-    result = agent_clis.verify()
-    assert result.returncode == 78
-    assert "persisted home copy" in result.stderr
+    strict = agent_clis.verify(VOGT_AGENT_SHADOW_POLICY="fail")
+    assert strict.returncode == 78
+    assert "persisted home copy" in strict.stderr
+    assert stray.exists(), "the strict gate refuses but touches nothing"
     assert agent_clis.verify(VOGT_AGENT_SHADOW_POLICY="warn").returncode == 0
+    assert stray.exists(), "warn acknowledges a deliberate override in place"
+
+    quarantined = agent_clis.verify()
+    assert quarantined.returncode == 0, quarantined.stderr
+    assert "quarantined to" in quarantined.stderr
+    assert not stray.exists()
+    assert list(agent_clis.home_bin.glob("claude.shadowed-*"))
 
 
 @needs_engine

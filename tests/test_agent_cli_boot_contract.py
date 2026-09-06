@@ -8,8 +8,10 @@ and a local tarball (an `npm` shim rewrites only the package spec, so the run
 is offline while `npm list`, the check that verify relies on, stays real):
 
 - a pin, satisfied or not, never fails the boot;
-- a manifest/active mismatch or a persisted-home shadow does (exit 78), and
-  `VOGT_AGENT_SHADOW_POLICY=warn` is the acknowledged override.
+- a manifest/active mismatch does (exit 78);
+- a persisted-home shadow is quarantined (moved aside, warned) and the pod
+  boots; `VOGT_AGENT_SHADOW_POLICY=fail` restores the strict refusal and
+  `warn` acknowledges a deliberate override.
 
 Characterised empirically on 2026-09-05 after a dev deploy failure was first
 misattributed to the verify step; this keeps that reasoning honest in CI.
@@ -187,19 +189,43 @@ def test_a_manifest_the_active_copy_does_not_match_is_fatal(sandbox: Sandbox) ->
     assert "expected pin 7.7.7" in checked.stderr
 
 
-def test_a_persisted_home_shadow_is_fatal_unless_acknowledged(
+def test_a_persisted_home_shadow_is_quarantined_and_the_pod_boots(
     sandbox: Sandbox,
 ) -> None:
-    """#196: a stray copy in the persisted home would hijack the CLI. Fatal by
-    default; VOGT_AGENT_SHADOW_POLICY=warn is the deliberate override."""
+    """#196 kept the managed CLI authoritative by refusing to boot when a stray
+    copy sat in the persisted home — which took vogt-dev down on 2026-09-05
+    after a Codex "Update now" wrote ~/.npm-global/bin/codex. The default now
+    quarantines the stray (moved aside, warned) and boots; the managed copy is
+    still what PATH resolves."""
     assert sandbox.install(PINNED).returncode == 0
     stray = sandbox.home / ".npm-global" / "bin" / "tool"
     stray.parent.mkdir(parents=True)
     stray.write_text("#!/bin/sh\necho stale\n", encoding="utf-8")
     stray.chmod(0o755)
-    fatal = sandbox.verify()
-    assert fatal.returncode == 78
-    assert "would shadow" in fatal.stderr
+    quarantined = sandbox.verify()
+    assert quarantined.returncode == 0, quarantined.stderr
+    assert "quarantined to" in quarantined.stderr
+    assert not stray.exists(), "the stray is no longer where it could shadow"
+    assert list(stray.parent.glob("tool.shadowed-*")), "moved aside, not deleted"
+    # A second boot finds nothing to quarantine and stays clean.
+    assert sandbox.verify().returncode == 0
+
+
+def test_the_strict_shadow_policy_still_refuses_and_warn_still_acknowledges(
+    sandbox: Sandbox,
+) -> None:
+    """`fail` is the old gate, for operators who want a stray to stop the pod;
+    `warn` leaves the stray in place and only says so."""
+    assert sandbox.install(PINNED).returncode == 0
+    stray = sandbox.home / ".npm-global" / "bin" / "tool"
+    stray.parent.mkdir(parents=True)
+    stray.write_text("#!/bin/sh\necho stale\n", encoding="utf-8")
+    stray.chmod(0o755)
+    strict = sandbox.verify(VOGT_AGENT_SHADOW_POLICY="fail")
+    assert strict.returncode == 78
+    assert "would shadow" in strict.stderr
+    assert stray.exists(), "fail refuses but touches nothing"
     acknowledged = sandbox.verify(VOGT_AGENT_SHADOW_POLICY="warn")
     assert acknowledged.returncode == 0
     assert "warning" in acknowledged.stderr
+    assert stray.exists(), "warn leaves the deliberate override in place"
