@@ -1,0 +1,51 @@
+# Example engine config that adds "bring your own image" terminal-session
+# templates. Mount it at ENGINE_CONFIG — see docker-socket.overlay.yml beside
+# this file.
+#
+# How it works: a session template's `command` is arbitrary argv run in a PTY
+# inside the pod, and the pod has a Docker CLI. So a template whose command is
+# `docker run -it <your image>` opens a terminal *inside your own container*,
+# with the pod's Working tree shared in. Define one template per image and the
+# session picker becomes an image picker — one or more images available at once,
+# chosen per session.
+#
+# IMPORTANT — this REPLACES the engine's built-in templates (Shell, Node Dev,
+# Rust Build, the agent-CLI ones). Re-add any you still want. This file keeps a
+# plain in-pod Shell and adds two container templates.
+#
+# The `-v vogt_vogt-work:/home/sprooty/Working` mount shares the **named work
+# volume** the overlay attaches to the pod at the same path, so the container
+# and the pod see the identical repository tree (that is what keeps the engine's
+# file/git APIs and the session in agreement). `vogt_` is COMPOSE_PROJECT_NAME;
+# set `COMPOSE_PROJECT_NAME=vogt` in .env, or change the name here to match
+# `docker volume ls`. Only the work tree is shared, not the pod's whole home.
+
+[[session_templates]]
+name = "Shell"
+description = "Default shell session (in the pod)"
+env = []
+tags = ["shell"]
+
+[[session_templates]]
+name = "Go dev (container)"
+description = "Terminal in your own Go image; shares the pod's Working tree"
+command = [
+    "docker", "run", "--rm", "-it",
+    "-v", "vogt_vogt-work:/home/sprooty/Working",
+    "-w", "/home/sprooty/Working",
+    "ghcr.io/example/go-dev:latest", "bash",
+]
+env = []
+tags = ["container", "go"]
+
+[[session_templates]]
+name = "Node dev (container)"
+description = "Terminal in an upstream Node image; shares the pod's Working tree"
+command = [
+    "docker", "run", "--rm", "-it",
+    "-v", "vogt_vogt-work:/home/sprooty/Working",
+    "-w", "/home/sprooty/Working",
+    "docker.io/library/node:22-bookworm", "bash",
+]
+env = []
+tags = ["container", "node"]

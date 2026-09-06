@@ -605,6 +605,15 @@ cwd = "~/projects/myapp"
 env = [["DJANGO_SETTINGS_MODULE", "myapp.settings.dev"], ["DEBUG", "1"]]
 ```
 
+A template sets the command, working directory and environment — it does **not**
+install a toolchain. Sessions run in the pod's image, which already carries
+python, rust and node/npm; to add another language, extend the image
+([CUSTOMISATION — Extending the stack image](CUSTOMISATION.md#extending-the-stack-image)).
+A template can also run a session **inside your own container image** — its
+command is just `docker run -it <image>` — so one template per image turns this
+picker into an image picker; see
+[CUSTOMISATION — per-session containers](CUSTOMISATION.md#running-terminal-sessions-in-your-own-image-per-session-containers).
+
 ### 2.7 Scheduled agent tasks
 
 A task is a command, a prompt, a schedule (`manual`, `interval`, or UTC
