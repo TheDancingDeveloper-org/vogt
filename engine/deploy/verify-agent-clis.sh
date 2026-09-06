@@ -8,9 +8,22 @@
 # question asked here is "does the active CLI match the manifest?" — the
 # runtime manifest when a pin has been applied, the image's resolved versions
 # otherwise. A copy anywhere else — above all a persisted `~/.npm-global` that
-# would shadow both — is still an error: the runtime prefix is the only
-# sanctioned home for a non-image copy, and the CLI's own updater stays off
+# would shadow both — is not sanctioned: the runtime prefix is the only home
+# for a non-image copy, and the CLI's own updater stays off
 # (`DISABLE_UPDATES=1`, #196), so `vogt-agent-cli-install` is the only writer.
+#
+# What happens to such a stray is VOGT_AGENT_SHADOW_POLICY:
+#   quarantine (default)  move it aside (`<path>.shadowed-<epoch>`), warn, and
+#                         boot — the managed copy stays the one that runs, and
+#                         a stray can no longer keep the whole pod (core, live
+#                         terminals, everything) from starting. Refusing to
+#                         boot was what a `codex` "Update now" into the
+#                         persisted home did to vogt-dev on 2026-09-05.
+#   fail                  the strict gate: report and exit 78, refuse to boot.
+#   warn / allow          leave it, warn (or say nothing): a deliberate
+#                         user-local override the operator has acknowledged.
+# A stray that cannot be moved is still an error under quarantine — integrity
+# cannot be guaranteed, so the pod refuses as `fail` would.
 
 set -euo pipefail
 
@@ -24,7 +37,7 @@ home_bin="${VOGT_AGENT_CLI_HOME_BIN:-${HOME:-/nonexistent}/.npm-global/bin}"
 tools_table="${VOGT_AGENT_CLI_TOOLS:-/usr/local/share/vogt/agent-clis.tools}"
 [[ -r "$versions" || -r "$manifest" ]] || exit 0
 
-policy="${VOGT_AGENT_SHADOW_POLICY:-fail}"
+policy="${VOGT_AGENT_SHADOW_POLICY:-quarantine}"
 failures=0
 
 report() {
@@ -90,8 +103,25 @@ check_tool() {
         fi
     fi
     if [[ -e "$home" && "$(readlink -f "$home")" != "$(readlink -f "$system")" ]]; then
-        report "persisted home copy $home would shadow image-managed $system"
+        if [[ "$policy" == "quarantine" ]]; then
+            quarantine_shadow "$home" "$system"
+        else
+            report "persisted home copy $home would shadow image-managed $system"
+        fi
     fi
+}
+
+# Move a stray persisted-home copy out of the way and carry on. The managed
+# copy is what runs either way (PATH prefers the runtime prefix and /usr/local);
+# quarantining keeps that true without making the pod's boot depend on it.
+quarantine_shadow() {
+    local home="$1" system="$2" moved
+    moved="$home.shadowed-$(date +%s)"
+    if mv -f "$home" "$moved" 2>/dev/null; then
+        echo "vogt-agent-clis: warning: persisted home copy $home would shadow image-managed $system; quarantined to $moved (#196)" >&2
+        return 0
+    fi
+    report "persisted home copy $home would shadow image-managed $system and could not be quarantined"
 }
 
 # Every tool the image knows (`agent-clis.tools`: tool, package, binary, env
@@ -111,6 +141,6 @@ else
 fi
 
 if (( failures )); then
-    echo "vogt-agent-clis: set VOGT_AGENT_SHADOW_POLICY=warn to acknowledge a deliberate user-local override" >&2
+    echo "vogt-agent-clis: set VOGT_AGENT_SHADOW_POLICY=warn to acknowledge a deliberate user-local override (the default quarantines a stray copy and boots)" >&2
     exit 78
 fi

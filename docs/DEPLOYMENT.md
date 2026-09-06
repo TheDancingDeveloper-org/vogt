@@ -307,9 +307,14 @@ covers running the engine from `cargo` without a container.
 The overlay exposes `VOGT_INSTALL_AI_CLIENTS`. When enabled, Codex and Claude
 are baked into the image from the Renovate-managed `engine/agent-versions.env`
 manifest, and that baked copy is the **baseline**. The image records the
-resolved versions and refuses to start when a persisted home volume would
-shadow an agent CLI (set `VOGT_AGENT_SHADOW_POLICY=warn` only for a deliberate
-user-local override).
+resolved versions and checks them at every start. A stray copy in the
+persisted home volume (`~/.npm-global/bin/<cli>` — what a CLI's own "update
+now" leaves behind) would shadow the managed one; by default it is
+**quarantined** (moved aside as `<path>.shadowed-<epoch>`, with a warning) and
+the pod boots on the managed copy. `VOGT_AGENT_SHADOW_POLICY=fail` restores the
+strict gate that refuses to start; `warn` leaves a deliberate user-local
+override in place and only says so. A pod that could not move the stray still
+refuses, since integrity could not be guaranteed.
 
 **Runtime pin.** The version a pod actually runs is a deploy-time value
 (#590). `VOGT_CLAUDE_CODE_VERSION` and `VOGT_CODEX_VERSION` in the
