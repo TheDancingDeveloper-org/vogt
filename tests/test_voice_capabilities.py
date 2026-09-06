@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 from vogt.registry import default_registry
 
 ENGINE = Path(__file__).parents[1] / "engine/server/src/vogt_tools.rs"
@@ -29,6 +31,8 @@ def test_voice_matrix_covers_every_registered_operation_once() -> None:
 
 
 def test_engine_sets_match_matrix_classes() -> None:
+    if not ENGINE.exists():
+        pytest.skip("engine subtree is intentionally absent in core-only CI")
     rows = dict(ROW.findall(DOC.read_text()))
     reads, writes = _const("CURATED_READS"), _const("CURATED_WRITES")
     assert reads == {n for n, c in rows.items() if c == "Voice-readable"}
