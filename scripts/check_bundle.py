@@ -73,8 +73,24 @@ def load_manifest() -> Manifest:
     return manifest
 
 
+# Dynamic imports the entry `await`s unconditionally before first paint (#538):
+# `index.tsx` does `Promise.all([import("./App"), import("./push"),
+# import("./appThemes")])` before `render`, so these are first-screen in every
+# deployment even though they are dynamic imports. Without counting them the
+# budget saw only ~50 kB and was blind to growth in `App` and the Board /
+# Sessions / CommandPalette / FileTree it eagerly pulls (App.tsx:125) — the
+# chunks that actually gate paint. Matched by source-module stem so the list
+# tracks `index.tsx`'s startup imports, not a build-hashed filename.
+STARTUP_DYNAMIC = ("App", "push", "appThemes")
+
+
+def _stem(key: str) -> str:
+    return key.rsplit("/", 1)[-1].split(".", 1)[0]
+
+
 def initial_graph(manifest: Manifest) -> tuple[set[str], set[str]]:
-    """The entry, what it statically imports, and the CSS that comes with it."""
+    """The entry, what it statically imports, the startup dynamic imports it
+    always awaits before paint (#538), and the CSS that comes with all of it."""
     entries = [key for key, chunk in manifest.items() if chunk.get("isEntry")]
     if not entries:
         sys.exit("the manifest declares no entry chunk")
@@ -92,12 +108,19 @@ def initial_graph(manifest: Manifest) -> tuple[set[str], set[str]]:
             return
         js.add(chunk["file"])
         css.update(chunk.get("css", []))
-        # `imports` is static; `dynamicImports` is deliberately not walked.
+        # `imports` is static; `dynamicImports` is not walked here — except the
+        # entry's startup roots, added explicitly below.
         for name in chunk.get("imports", []):
             walk(name)
 
     for entry in entries:
         walk(entry)
+        # The startup roots the entry unconditionally awaits, plus their own
+        # static graph. A route-lazy dynamic import (the editor, the terminal)
+        # is still not first-screen and is not added.
+        for dyn in manifest.get(entry, {}).get("dynamicImports", []):
+            if _stem(dyn) in STARTUP_DYNAMIC:
+                walk(dyn)
     return js, css
 
 
