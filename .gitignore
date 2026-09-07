@@ -61,6 +61,9 @@ vogt-engine-token
 deploy/github-token
 deploy/vogt-core-token
 deploy/vogt-engine-token
+# The FCM service-account JSON (an RSA private key): a file secret, never
+# committed and never an env var (#583).
+deploy/fcm-service-account.json
 
 # The clean-consumer smoke's receipt (scripts/clean_consumer_smoke.sh #613):
 # resolved image digests + provenance from a run. A run artifact, not source.

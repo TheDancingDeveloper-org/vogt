@@ -100,6 +100,21 @@ services:
       ENGINE_ASSISTANT_TTS_VOICE: "${ENGINE_ASSISTANT_TTS_VOICE:-alloy}"
       ENGINE_ASSISTANT_TTS_FORMAT: "${ENGINE_ASSISTANT_TTS_FORMAT:-wav}"
 
+      # ── Push notifications (FCM) ───────────────────────────────────────────
+      # The Firebase service account that signs push is delivered as a FILE
+      # secret, never an env var: the JSON carries an RSA private key, and an
+      # inline value is readable by every agent session through
+      # /proc/<engine>/environ — which is exactly how it leaked (#583). The
+      # engine reads the file once and never places it in its own environment.
+      #
+      # Off until you enable it: leave this unset and push stays disabled
+      # (fcm_enabled=false). To enable, put the service account at
+      # deploy/fcm-service-account.json (mounted below at
+      # /run/secrets/fcm_service_account, mode 0400) and set
+      # ENGINE_FCM_SERVICE_ACCOUNT_FILE=/run/secrets/fcm_service_account in
+      # `.env`. ENGINE_FCM_SERVICE_ACCOUNT_JSON is deliberately never set here.
+      ENGINE_FCM_SERVICE_ACCOUNT_FILE: "${ENGINE_FCM_SERVICE_ACCOUNT_FILE:-}"
+
       # One value both starts the core and tells the engine where to proxy.
       # Loopback means "the core is ours to run", so the entrypoint supervises
       # `vogt init && vogt serve` here; the engine proxies `/api/vogt`, `/mcp`
@@ -185,6 +200,7 @@ services:
 
     secrets:
       - vogt_core_token
+      - fcm_service_account
 
   # ── voice: the first-party STT + TTS sidecar (#565) ─────────────────────────
   #
@@ -249,3 +265,16 @@ secrets:
   # which is the pre-bootstrap behaviour rather than a broken one.
   vogt_core_token:
     file: ./vogt-core-token
+
+  # The Firebase Cloud Messaging service account that signs push notifications.
+  # It holds an RSA private key, so it is a file secret mounted at
+  # /run/secrets/fcm_service_account (mode 0400), never an env var (#583).
+  # Create it beside this file before deploying push:
+  #
+  #   cp /path/to/service-account.json deploy/fcm-service-account.json
+  #
+  # Legitimately empty until you add one — with ENGINE_FCM_SERVICE_ACCOUNT_FILE
+  # unset the engine never reads it and reports push disabled, so an empty file
+  # here keeps the stack booting exactly as before push was wired.
+  fcm_service_account:
+    file: ./fcm-service-account.json

@@ -323,6 +323,48 @@ def test_the_stack_compose_runs_the_published_aio_and_its_own_core() -> None:
     assert ":8000" not in "".join(published)
 
 
+def test_the_stack_compose_wires_fcm_as_a_file_secret_never_inline() -> None:
+    """#583: the push-signing key reaches the engine as a file, never an env var.
+
+    The Firebase service account carries an RSA private key. Passed inline as
+    `ENGINE_FCM_SERVICE_ACCOUNT_JSON`, it sat in the engine's environment where
+    any agent session could read it from /proc/<engine>/environ — which is how
+    it leaked. The stack must offer only the file mechanism
+    (`ENGINE_FCM_SERVICE_ACCOUNT_FILE` -> a mounted secret) and must never set
+    the inline JSON variable anywhere, so the regression cannot come back
+    quietly. The credential itself is never committed (an operator supplies it),
+    so nothing estate-specific lands in the public AIO — only the secure plumbing.
+    """
+    raw = STACK_COMPOSE.read_text(encoding="utf-8")
+    stack = _without_comments(raw)
+
+    # The inline private-key variable must never be SET as an env key (a prose
+    # mention in a comment explaining its absence is fine and expected).
+    assert not re.search(
+        r"^\s*ENGINE_FCM_SERVICE_ACCOUNT_JSON\s*:", stack, re.MULTILINE
+    ), (
+        "the FCM service-account JSON (an RSA private key) must never be an env "
+        "var in the shipped stack — deliver it as a file secret (#583)"
+    )
+
+    # The file mechanism is offered, defaulting off so an unpopulated deploy
+    # still boots (an empty secret file is never read while the var is unset).
+    assert 'ENGINE_FCM_SERVICE_ACCOUNT_FILE: "${ENGINE_FCM_SERVICE_ACCOUNT_FILE:-}"' in stack, (
+        "the stack must offer the FCM file-secret path, opt-in and off by default"
+    )
+
+    # And the secret is defined and attached like vogt_core_token: a file
+    # source, mounted into the engine service.
+    assert re.search(
+        r"^  fcm_service_account:\n    file: \./fcm-service-account\.json",
+        stack,
+        re.MULTILINE,
+    ), "the stack must define an fcm_service_account file secret"
+    assert "- fcm_service_account" in stack, (
+        "the engine service must mount the fcm_service_account secret"
+    )
+
+
 def test_the_stack_compose_is_a_base_not_an_overlay() -> None:
     """Layering it onto `vogt.compose.yml` would run two cores.
 
