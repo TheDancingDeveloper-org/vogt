@@ -589,3 +589,35 @@ def test_the_custom_image_example_carries_nothing_estate() -> None:
             assert marker.lower() not in lowered, (
                 f"{path.relative_to(REPO_ROOT)} leaks estate marker {marker!r}"
             )
+
+
+def test_public_base_images_are_asserted_anonymously_pullable() -> None:
+    """#620: a from-source build pulls the org's mirror bases with no auth, so a
+    package flipped private or renamed would break a fork at FROM with a bare
+    403/404. A dedicated check asserts anonymous pullability loudly, wired into
+    the mirror workflow on every Dockerfile change and the daily cron.
+    """
+    script = REPO_ROOT / "scripts" / "check_public_bases.sh"
+    assert script.exists(), "the #620 anonymous-pullability check is missing"
+    body = script.read_text(encoding="utf-8")
+    # It reads the real public Dockerfiles, not a hand-maintained image list.
+    for dockerfile in (
+        "engine/Dockerfile",
+        "engine/Dockerfile.pod",
+        "voice/Dockerfile",
+        "Dockerfile",
+    ):
+        assert dockerfile in body, f"the check must read {dockerfile}"
+    # Product images a from-source build makes or overrides locally are excluded,
+    # so the assertion never false-alarms on the core/stack images a fork builds.
+    assert "vogt|vogt-stack" in body
+    # A private package is a hard, named failure; a network hiccup is retried and
+    # reported distinctly, not conflated with a private finding.
+    assert "NOT anonymously pullable" in body
+    assert "registry/network failure" in body
+
+    wf = (REPO_ROOT / ".github" / "workflows" / "mirror-base-images.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "scripts/check_public_bases.sh" in wf, "the check is not wired into CI"
+    assert "anonymously-pullable" in wf

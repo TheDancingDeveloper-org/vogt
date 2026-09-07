@@ -167,6 +167,20 @@ jobs:
           [ "$bad" -eq 0 ] || exit 1
           echo "every base image and every cross-image COPY names a registry this organisation controls"
 
+  anonymously-pullable:
+    name: every public base is anonymously pullable
+    # #620: the mirror bases default into the *public* Dockerfiles, so a
+    # from-source build (DEPLOYMENT.md §3) pulls them with no auth. If one is
+    # flipped private or renamed, a fork breaks at FROM with a bare 403/404.
+    # This asserts anonymous pullability loudly here instead — on every
+    # Dockerfile change and on the daily cron, so a package going private is
+    # caught within a day rather than by the next stranger to try a build.
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: the public bases pull without authentication
+        run: bash scripts/check_public_bases.sh
+
   mirror:
     name: copy the pinned bases into GHCR
     needs: check
