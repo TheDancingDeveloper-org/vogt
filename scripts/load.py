@@ -42,11 +42,24 @@ labels the report with *how* the numbers were produced (`--produced-by`).
 compares a fresh run to it and exits non-zero on drift past the issue's 2×
 rule (`compare_to_baseline`), for the nightly job to gate on.
 
-DEFERRED still (not built here): the *S-hour* soak on the self-hosted runner
-against a stood-up stack, whose numbers are the authoritative baseline (this
-increment records honest in-process numbers as the starting point — see
-`bench/README.md`); the K concurrent WebSocket attach clients (that needs the
-Rust engine); and the nightly CI job / `vogt/bench` results branch.
+The DEPLOYED-SHAPE dimension (`--mode deployed`, #540) closes the soak's
+biggest blind spot. The soak drives operations in-process: no server, no auth,
+one caller — a configuration structurally incapable of showing the top perf
+regressions the holistic review found (the per-request auth write floor #526
+needs `require_auth` on; event-loop serialization #525 needs requests in flight
+over HTTP; both need concurrency). This mode seeds a dataset, stands the *real*
+server up on a loopback port with auth on, and drives the hot read surfaces
+(`work.list`, `backlog`, `board.list`, `inbox.list`, `bugs`) and the write path
+(`work.create`, `work.update`) with a pool of concurrent HTTP clients carrying a
+real bearer token. It records the same p50/p95/throughput shape, so the one
+drift gate (`compare_to_baseline`) reads it the same way. `bench/deployed_baseline.json`
+is its committed baseline and `.github/workflows/bench-deployed.yml` the nightly
+gate. A deployed number is only comparable to another taken the same way
+(`produced_by`): the committed file is a dev-box starting point to be re-recorded
+on the self-hosted runner — see `bench/README.md`.
+
+DEFERRED still (not built here): the K concurrent WebSocket attach clients (that
+needs the Rust engine) and the `vogt/bench` results branch.
 
 The numbers this prints are local/dev-box measurements, not production SLAs.
 
@@ -55,23 +68,32 @@ Usage::
     uv run python scripts/load.py --scale 1 --out /tmp/load.json
     uv run python scripts/load.py --mode soak --iterations 200 \\
         --check-baseline bench/soak_baseline.json
+    uv run python scripts/load.py --mode deployed --scale 5 --requests 2000 \\
+        --concurrency 16 --check-baseline bench/deployed_baseline.json
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import platform
 import resource
+import socket
 import sys
 import tempfile
+import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from random import Random
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import httpx
 
 from vogt.application.context import AppContext, build_context
 from vogt.application.models import (
@@ -383,6 +405,52 @@ def soak_plan_from_scale(scale: int, *, iterations: int, sweep_every: int) -> So
     return SoakPlan(base=seeded, iterations=iterations, sweep_every=sweep_every)
 
 
+@dataclass(frozen=True)
+class DeployedPlan:
+    """A deployed-shape run (#540): a base dataset, then a concurrent HTTP mix.
+
+    ``base`` is the dataset seeded in-process before the server comes up.
+    ``requests`` is the total number of timed HTTP calls the driver makes,
+    spread across ``concurrency`` clients that keep that many requests in
+    flight at once — the concurrency is what lets the single event loop's
+    serialization (#525) and the per-request auth write floor (#526) show up
+    in the numbers, which an in-process soak of one caller cannot.
+    """
+
+    base: DatasetPlan
+    requests: int
+    concurrency: int
+
+    def __post_init__(self) -> None:
+        if self.requests < 1:
+            msg = f"requests must be >= 1, not {self.requests}"
+            raise ValueError(msg)
+        if self.concurrency < 1:
+            msg = f"concurrency must be >= 1, not {self.concurrency}"
+            raise ValueError(msg)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "requests": self.requests,
+            "concurrency": self.concurrency,
+            "base": self.base.to_dict(),
+        }
+
+
+def deployed_plan_from_scale(
+    scale: int, *, requests: int, concurrency: int
+) -> DeployedPlan:
+    """A deployed plan sized by the same single knob the other modes use."""
+    base = plan_from_scale(scale)
+    seeded = DatasetPlan(
+        projects=base.projects,
+        work_items_per_project=base.work_items_per_project,
+        relations=base.relations,
+        ranking_iterations=1,
+    )
+    return DeployedPlan(base=seeded, requests=requests, concurrency=concurrency)
+
+
 def relation_triples(
     refs: Sequence[str], count: int, *, seed: int
 ) -> list[tuple[str, str, RelationKind]]:
@@ -448,9 +516,27 @@ def build_report(
     }
 
 
+#: The note stamped on a soak report, quoted verbatim so the shape stays stable.
+_SOAK_NOTE = (
+    "Soak measurements from scripts/load.py --mode soak (#297, "
+    "increment 2). Not a production SLA; comparable only to another "
+    "run with the same `produced_by`."
+)
+
+#: The note on a deployed-shape report (#540): the same recorded-numbers shape,
+#: but measured over real HTTP with `require_auth` on and concurrent clients, so
+#: it can see the auth write floor (#526) and event-loop serialization (#525)
+#: the in-process soak is structurally blind to.
+_DEPLOYED_NOTE = (
+    "Deployed-shape measurements from scripts/load.py --mode deployed (#540): "
+    "real HTTP (uvicorn), require_auth on, concurrent clients. Not a "
+    "production SLA; comparable only to another run with the same `produced_by`."
+)
+
+
 def build_soak_report(
     *,
-    plan: SoakPlan,
+    plan: SoakPlan | DeployedPlan,
     stats: dict[str, SoakOperationStats],
     successful_calls: int,
     total_errors: int,
@@ -461,27 +547,28 @@ def build_soak_report(
     duration_s: float,
     produced_by: str,
     generated_at: datetime,
+    kind: str = "soak",
+    note: str = _SOAK_NOTE,
 ) -> dict[str, Any]:
     """Assemble the JSON-serialisable soak report. Pure, given its inputs.
 
     ``produced_by`` labels *how* the numbers were measured — an in-process run
     on a dev box or a self-hosted runner — because a soak number is only
     comparable to another taken the same way, and the recorded-numbers file
-    exists to be compared against.
+    exists to be compared against. ``kind`` / ``note`` distinguish the
+    in-process soak from the deployed-shape run (#540) that shares this shape;
+    the drift comparator reads only `operations` and `throughput`, so both
+    kinds are compared the same way.
     """
     attempts = successful_calls + total_errors
     throughput = successful_calls / duration_s if duration_s > 0 else 0.0
     error_rate = total_errors / attempts if attempts > 0 else 0.0
     return {
         "schema_version": SOAK_REPORT_SCHEMA_VERSION,
-        "kind": "soak",
+        "kind": kind,
         "generated_at": generated_at.astimezone(UTC).isoformat(),
         "produced_by": produced_by,
-        "note": (
-            "Soak measurements from scripts/load.py --mode soak (#297, "
-            "increment 2). Not a production SLA; comparable only to another "
-            "run with the same `produced_by`."
-        ),
+        "note": note,
         "host": {
             "python": platform.python_version(),
             "platform": platform.platform(),
@@ -865,6 +952,288 @@ def run_soak(
     )
 
 
+# -- the deployed shape: real HTTP, auth on, concurrent clients (#540) ------
+#
+# The soak above drives operations in-process: no server, no auth, one caller.
+# That configuration is structurally blind to the regressions the holistic
+# review found — the per-request auth write floor (#526) needs `require_auth`
+# on; the event-loop serialization (#525) needs requests actually in flight
+# over HTTP; and neither shows without concurrency. This mode stands the real
+# server up on an ephemeral port with auth on and drives it with a pool of
+# concurrent HTTP clients, recording the same p50/p95/throughput shape so the
+# two are compared by the one drift gate.
+
+#: The request mix the deployed driver cycles through, one op per slot. Weighted
+#: to the hot read surfaces the issue names (`work.list` twice as the hottest,
+#: plus `backlog`, `board.list`, `inbox.list`, `bugs`), with a `work.create`
+#: and a `work.update` so the authenticated write path (#526) is measured too.
+_DEPLOYED_MIX: tuple[str, ...] = (
+    "work.list",
+    "backlog",
+    "board.list",
+    "inbox.list",
+    "work.list",
+    "bugs",
+    "work.create",
+    "work.update",
+)
+
+#: A board request with two cells (the default `none` lane mode, so lane_key is
+#: blank): a structured read that exercises the board projection over two states
+#: rather than an empty walk.
+_BOARD_BODY: dict[str, Any] = {
+    "cells": [
+        {"state": "open"},
+        {"state": "in_progress"},
+    ]
+}
+
+
+class _ConcurrentRecorder(SoakRecorder):
+    """A `SoakRecorder` safe to call from many client threads at once.
+
+    The deployed driver keeps `concurrency` requests in flight, so several
+    threads record latencies and errors against the same maps concurrently. A
+    single lock around the two mutating methods keeps that bookkeeping honest
+    without touching the recorded numbers or the `guard` timing contract.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._lock = threading.Lock()
+
+    def record(self, operation: str, elapsed_ms: float) -> None:
+        with self._lock:
+            super().record(operation, elapsed_ms)
+
+    def record_error(self, operation: str) -> None:
+        with self._lock:
+            super().record_error(operation)
+
+
+def _free_port() -> int:
+    """A port the OS just confirmed is free, for uvicorn to bind next.
+
+    Bind `:0`, read the assigned port, release it. There is a small race
+    between release and uvicorn's rebind; `SO_REUSEADDR` and the loopback-only
+    host make it negligible for a benchmark that owns the machine.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@contextlib.contextmanager
+def _serve_in_thread(
+    config: VogtConfig, *, registry: OperationRegistry
+) -> Iterator[str]:
+    """Run the real server with auth on, on a loopback port, for the run's life.
+
+    Collectors are *not* scheduled: a sweep firing mid-run would add untimed
+    write load and make the numbers non-reproducible. The soak drives sweeps
+    explicitly; the deployed run is measuring the request path, so it holds the
+    background schedule still and yields the base URL.
+    """
+    import uvicorn
+
+    from vogt.adapters.http.server import ServeOptions, build_server
+
+    port = _free_port()
+    options = ServeOptions(
+        host="127.0.0.1",
+        port=port,
+        require_auth=True,
+        schedule_collectors=False,
+    )
+    app = build_server(options, config=config, registry=registry)
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="warning",
+            access_log=False,
+        )
+    )
+    thread = threading.Thread(target=server.run, name="vogt-load-uvicorn", daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 30.0
+        while not server.started:
+            if time.monotonic() > deadline:
+                msg = "uvicorn did not report started within 30s"
+                raise RuntimeError(msg)
+            time.sleep(0.02)
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=15.0)
+
+
+def _mint_admin_token(ctx: AppContext) -> str:
+    """Create the benchmark's own actor and mint an admin bearer for it.
+
+    The deployed surface authenticates every request against a real token, not
+    the OS user (auth.py), so the driver needs one. Admin scope covers both the
+    read surfaces and the write path the mix exercises.
+    """
+    from vogt.application.models import CreateActorParams, IssueTokenParams
+    from vogt.application.services import create_actor, issue_token
+
+    create_actor(
+        ctx,
+        CreateActorParams(
+            identity_ref="agent:load-generator",
+            kind="agent",
+            display_name="Load Generator",
+            reason="load generator: deployed-shape benchmark actor (#540)",
+        ),
+    )
+    issued = issue_token(
+        ctx,
+        IssueTokenParams(
+            actor="agent:load-generator",
+            name="deployed-bench",
+            scopes="admin",
+            reason="load generator: deployed-shape benchmark token (#540)",
+        ),
+    )
+    return str(issued.secret)
+
+
+def _request_for(
+    client: httpx.Client, op: str, index: int, refs: Sequence[str]
+) -> httpx.Response:
+    """Fire one request for ``op`` and return the response (unchecked)."""
+    if op == "work.list":
+        return client.get("/api/work", params={"limit": 50})
+    if op == "backlog":
+        return client.get("/api/backlog", params={"limit": 20})
+    if op == "bugs":
+        return client.get("/api/bugs", params={"limit": 50})
+    if op == "inbox.list":
+        return client.get("/api/inbox", params={"limit": 50})
+    if op == "board.list":
+        return client.post("/api/board/list", json=_BOARD_BODY)
+    if op == "work.create":
+        return client.post(
+            "/api/work",
+            json={
+                "kind": _KINDS[index % len(_KINDS)],
+                "title": f"Deployed item {index}",
+                "body": "Generated by scripts/load.py --mode deployed for #540.",
+                "priority": _PRIORITIES[index % len(_PRIORITIES)],
+                "reason": "deployed bench: creating a work item (#540)",
+            },
+        )
+    if op == "work.update":
+        return client.post(
+            "/api/work/update",
+            json={
+                "ref": refs[index % len(refs)],
+                "priority": _PRIORITIES[index % len(_PRIORITIES)],
+                "reason": "deployed bench: updating a work item (#540)",
+            },
+        )
+    msg = f"unknown deployed op {op!r}"
+    raise ValueError(msg)
+
+
+def _drive_deployed(
+    base_url: str, token: str, plan: DeployedPlan, refs: Sequence[str]
+) -> tuple[_ConcurrentRecorder, float]:
+    """Drive ``plan.requests`` HTTP calls across ``plan.concurrency`` clients.
+
+    One shared, thread-safe `httpx.Client` carries the bearer on every request;
+    a thread pool keeps `concurrency` of them in flight. Each call is timed on a
+    2xx and counted as an error otherwise (`guard`), so a request that fails
+    under concurrent load is a number, not a crashed run.
+    """
+    import httpx
+
+    recorder = _ConcurrentRecorder()
+    client = httpx.Client(
+        base_url=base_url,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=30.0,
+    )
+
+    def fire(index: int) -> None:
+        op = _DEPLOYED_MIX[index % len(_DEPLOYED_MIX)]
+
+        def call() -> None:
+            _request_for(client, op, index, refs).raise_for_status()
+
+        recorder.guard(op, call)
+
+    started = time.perf_counter()
+    try:
+        with ThreadPoolExecutor(max_workers=plan.concurrency) as pool:
+            # Consume the map so every request completes before we stop timing.
+            for _ in pool.map(fire, range(plan.requests)):
+                pass
+        duration_s = time.perf_counter() - started
+    finally:
+        client.close()
+    return recorder, duration_s
+
+
+def run_deployed(
+    plan: DeployedPlan,
+    *,
+    data_dir: Path,
+    seed: int = 0,
+    produced_by: str = "deployed",
+    registry: OperationRegistry | None = None,
+) -> dict[str, Any]:
+    """Seed a dataset in-process, then drive the real HTTP surface under auth.
+
+    The seed reuses the load run's builders and is untimed; the server then
+    comes up on the same store with `require_auth` on, and a pool of HTTP
+    clients drives the hot read surfaces and the write path. Only the HTTP
+    phase is recorded, in the same shape the soak uses, so the drift gate reads
+    both the same way.
+    """
+    registry = registry or default_registry()
+    ctx = build_context(
+        config=VogtConfig(data_dir=data_dir, sqlite_synchronous="off"),
+        principal=LOAD_PRINCIPAL,
+    )
+    init_instance(ctx, InitParams())
+
+    trees = data_dir / "trees"
+    trees.mkdir(parents=True, exist_ok=True)
+
+    seed_recorder = LatencyRecorder()
+    _register_projects(registry, ctx, seed_recorder, plan.base, trees)
+    refs = _create_work_items(registry, ctx, seed_recorder, plan.base)
+    _relate_work_items(registry, ctx, seed_recorder, refs, plan.base, seed)
+    _sweep(registry, ctx, seed_recorder)
+    token = _mint_admin_token(ctx)
+
+    rss_start = current_rss_mb()
+    with _serve_in_thread(ctx.config, registry=registry) as base_url:
+        recorder, duration_s = _drive_deployed(base_url, token, plan, refs)
+    rss_end = current_rss_mb()
+
+    return build_soak_report(
+        plan=plan,
+        stats=recorder.stats(),
+        successful_calls=recorder.successful_calls,
+        total_errors=recorder.total_errors,
+        rss_start_mb=rss_start,
+        rss_end_mb=rss_end,
+        rss_peak_mb=rss_mb(),
+        seed=seed,
+        duration_s=duration_s,
+        produced_by=produced_by,
+        generated_at=datetime.now(UTC),
+        kind="deployed",
+        note=_DEPLOYED_NOTE,
+    )
+
+
 # -- CLI -------------------------------------------------------------------
 
 
@@ -886,15 +1255,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--mode",
-        choices=("load", "soak"),
+        choices=("load", "soak", "deployed"),
         default="load",
-        help="`load` (default) times a one-shot build; `soak` runs sustained.",
+        help=(
+            "`load` (default) times a one-shot build; `soak` runs a sustained "
+            "in-process mix; `deployed` drives the real HTTP surface with "
+            "auth on and concurrent clients (#540)."
+        ),
     )
     parser.add_argument(
         "--iterations",
         type=int,
         default=200,
         help="Soak only: rounds of the steady operation mix to drive.",
+    )
+    parser.add_argument(
+        "--requests",
+        type=int,
+        default=400,
+        help="Deployed only: total timed HTTP requests to drive (#540).",
+    )
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=8,
+        help=(
+            "Deployed only: how many requests to keep in flight at once — the "
+            "knob that makes event-loop serialization (#525) visible (#540)."
+        ),
     )
     parser.add_argument(
         "--sweep-every",
@@ -996,6 +1384,20 @@ def soak_plan_from_args(args: argparse.Namespace) -> SoakPlan:
     )
 
 
+def deployed_plan_from_args(args: argparse.Namespace) -> DeployedPlan:
+    """Resolve the deployed plan: --scale/explicit flags size the base dataset."""
+    base = plan_from_args(args)
+    seeded = DatasetPlan(
+        projects=base.projects,
+        work_items_per_project=base.work_items_per_project,
+        relations=base.relations,
+        ranking_iterations=1,
+    )
+    return DeployedPlan(
+        base=seeded, requests=args.requests, concurrency=args.concurrency
+    )
+
+
 def _run_with_data_dir(args: argparse.Namespace, run: Any) -> dict[str, Any]:  # noqa: ANN401
     """Call ``run(data_dir)`` against a caller-supplied or ephemeral data dir."""
     if args.data_dir is not None:
@@ -1009,7 +1411,26 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     out = args.out if args.out is not None else _default_out()
 
-    if args.mode == "soak":
+    if args.mode == "deployed":
+        deployed_plan = deployed_plan_from_args(args)
+        # A deployed run's default `produced_by` says so, since a deployed
+        # number is only comparable to another deployed one; an explicit
+        # --produced-by still wins.
+        produced_by = (
+            args.produced_by
+            if args.produced_by != "in-process"
+            else "deployed (uvicorn, require_auth)"
+        )
+        report = _run_with_data_dir(
+            args,
+            lambda data_dir: run_deployed(
+                deployed_plan,
+                data_dir=data_dir,
+                seed=args.seed,
+                produced_by=produced_by,
+            ),
+        )
+    elif args.mode == "soak":
         soak_plan = soak_plan_from_args(args)
         report = _run_with_data_dir(
             args,
