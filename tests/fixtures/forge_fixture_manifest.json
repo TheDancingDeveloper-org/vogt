@@ -1,0 +1,157 @@
+{
+  "$comment": "The known state of the TheDancingDeveloper-org/vogt-fixture repository. scripts/fixture_reset.py rebuilds the repo to match this via the API (close/reopen/relabel; never deletes history), and the `live_forge` tests assert the live reads against `expected`. The `number` fields hold for a *fresh* fixture repo built in this order: GitHub shares one counter between issues and pull requests, so the five issues take #1-#5 and the four pull requests take #6-#9. After the first build the script is idempotent and never renumbers.",
+  "repo": "TheDancingDeveloper-org/vogt-fixture",
+  "default_branch": "main",
+  "labels": [
+    {"name": "bug", "color": "d73a4a", "description": "Something is not working"},
+    {"name": "enhancement", "color": "a2eeef", "description": "New feature or request"},
+    {"name": "documentation", "color": "0075ca", "description": "Docs and guides"},
+    {"name": "good first issue", "color": "7057ff", "description": "Good for newcomers"},
+    {"name": "wontfix", "color": "ffffff", "description": "This will not be worked on"}
+  ],
+  "milestones": [
+    {"title": "v0.1 - first cut", "state": "open", "description": "The initial fixture surface"},
+    {"title": "v0.2 - hardening", "state": "open", "description": "Follow-up robustness work"}
+  ],
+  "issues": [
+    {
+      "key": "open-bug",
+      "number": 1,
+      "title": "Crash on an empty config file",
+      "state": "open",
+      "labels": ["bug"],
+      "milestone": "v0.1 - first cut",
+      "body": "Loading an empty config raises instead of defaulting.\n\nTODO: cover the empty-file path with a test."
+    },
+    {
+      "key": "open-enhancement",
+      "number": 2,
+      "title": "Add pagination to the list view",
+      "state": "open",
+      "labels": ["enhancement"],
+      "milestone": "v0.2 - hardening",
+      "body": "The list endpoint returns everything at once. It should page.\n\nThis is the issue the live_forge write-back test comments on."
+    },
+    {
+      "key": "closed-bug",
+      "number": 3,
+      "title": "Typo in the README",
+      "state": "closed",
+      "labels": ["bug", "good first issue"],
+      "milestone": "v0.1 - first cut",
+      "body": "A stray word in the intro. Closed by the merged pull request."
+    },
+    {
+      "key": "open-docs",
+      "number": 4,
+      "title": "Document the fixture reset script",
+      "state": "open",
+      "labels": ["documentation", "good first issue"],
+      "milestone": "v0.1 - first cut",
+      "body": "Explain how an operator rebuilds this repo.\n\nFIXME: link the manifest once it lands."
+    },
+    {
+      "key": "closed-wontfix",
+      "number": 5,
+      "title": "Support Python 2.7",
+      "state": "closed",
+      "labels": ["wontfix"],
+      "milestone": null,
+      "body": "Out of scope. Kept closed as a labelled-closed fixture."
+    }
+  ],
+  "pulls": [
+    {
+      "key": "open-pr",
+      "number": 6,
+      "title": "Refactor the client transport",
+      "state": "open",
+      "draft": false,
+      "branch": "gh-2-pagination",
+      "base": "main",
+      "closes": null,
+      "body": "An ordinary open pull request. Relates to #2.",
+      "checks": null
+    },
+    {
+      "key": "draft-pr",
+      "number": 7,
+      "title": "WIP: experimental cache layer",
+      "state": "open",
+      "draft": true,
+      "branch": "feature/gh-4-cache",
+      "base": "main",
+      "closes": null,
+      "body": "A draft pull request; not ready for review.",
+      "checks": null
+    },
+    {
+      "key": "merged-closes-pr",
+      "number": 8,
+      "title": "Fix the README typo",
+      "state": "closed",
+      "merged": true,
+      "draft": false,
+      "branch": "wi-3/readme-typo",
+      "base": "main",
+      "closes": 3,
+      "body": "Closes #3.\n\nMerged so the fixture has a merged-with-Closes pull request.",
+      "checks": null
+    },
+    {
+      "key": "failing-checks-pr",
+      "number": 9,
+      "title": "Add a feature that fails CI",
+      "state": "open",
+      "draft": false,
+      "branch": "gh-1-open-bug",
+      "base": "main",
+      "closes": null,
+      "body": "Open pull request whose CI workflow is expected to fail.",
+      "checks": "failure"
+    }
+  ],
+  "branches": [
+    {"name": "gh-1-open-bug", "from": "main", "binds_issue": 1, "pattern": "gh-<n>-<slug>"},
+    {"name": "gh-2-pagination", "from": "main", "binds_issue": 2, "pattern": "gh-<n>-<slug>"},
+    {"name": "feature/gh-4-cache", "from": "main", "binds_issue": 4, "pattern": "feature/gh-<n>-<slug>"},
+    {"name": "wi-3/readme-typo", "from": "main", "binds_issue": 3, "pattern": "wi-<n>/<slug>"}
+  ],
+  "markers": {
+    "files": [
+      {
+        "path": "src/markers.py",
+        "contents": "\"\"\"A module carrying the fixture's TODO/FIXME markers.\"\"\"\n\n\ndef pending() -> None:\n    # TODO: replace this stub with the real implementation.\n    return None\n\n\ndef broken() -> None:\n    # FIXME: this path double-counts and needs a guard.\n    return None\n",
+        "markers": ["TODO", "FIXME"]
+      }
+    ]
+  },
+  "dependency_manifest": {
+    "path": "requirements.txt",
+    "contents": "requests==2.31.0\nrich==13.7.0\n",
+    "packages": ["requests", "rich"]
+  },
+  "posture": {
+    "path": ".github/dependabot.yml",
+    "contents": "version: 2\nupdates:\n  - package-ecosystem: pip\n    directory: /\n    schedule:\n      interval: weekly\n"
+  },
+  "writeback_target": {
+    "issue_key": "open-enhancement",
+    "issue_number": 2,
+    "comment_marker": "vogt-live-forge writeback probe"
+  },
+  "expected": {
+    "labels_total": 5,
+    "milestones_open": 2,
+    "issues_open": 3,
+    "issues_closed": 2,
+    "issues_total": 5,
+    "issue_labels_present": ["bug", "enhancement", "documentation", "good first issue", "wontfix"],
+    "pulls_total": 4,
+    "pulls_open": 3,
+    "pulls_draft": 1,
+    "pulls_with_closes": 1,
+    "branches_total": 4,
+    "branch_patterns": ["gh-<n>-<slug>", "feature/gh-<n>-<slug>", "wi-<n>/<slug>"]
+  }
+}

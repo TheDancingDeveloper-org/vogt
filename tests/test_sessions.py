@@ -1,0 +1,848 @@
+"""Coding sessions.
+
+The engine is stood in for by a transport that records what was sent. That
+is the only honest way to assert the thing these tests are actually about:
+not that a session was created, but *where* it was told to open and *what
+credential* it was given. A stub that returned a session id without keeping
+the spec could not tell a session opened in a project's tree from one opened
+wherever the engine felt like.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+from typing import Any
+
+import pytest
+
+from vogt.adapters.engine import EngineClient, EngineUnavailable
+from vogt.application.context import AppContext
+from vogt.application.models import (
+    CreateWorkParams,
+    GetWorkParams,
+    HistoryListParams,
+    ListAuditParams,
+    ListEventsParams,
+    ListSessionsParams,
+    LogTailParams,
+    RegisterProjectParams,
+    RelateWorkParams,
+    SearchOutputParams,
+    StartSessionParams,
+    StopSessionParams,
+)
+from vogt.application.services import (
+    create_work,
+    get_work,
+    history_list,
+    list_audit,
+    list_events,
+    list_sessions,
+    log_tail,
+    register_project,
+    relate_work,
+    search_output,
+    start_session,
+    stop_session,
+)
+from vogt.core.auth import hash_token
+from vogt.errors import InvalidRequest, MissingReason, NotFound
+
+from tests.conftest import native_work_item
+
+WHY = "session test"
+ROOT = "/srv/estate/vogt"
+
+
+class StandInEngine:
+    """An engine that answers, and remembers what it was asked."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.killed: list[str] = []
+        self.alive: dict[str, str] = {}
+        self.counter = 0
+        #: When set, the history log endpoint 404s — the engine has no log for
+        #: that id (history off, or the id is unknown).
+        self.log_missing = False
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: bytes = b"",
+        method: str = "GET",
+    ) -> tuple[int, bytes]:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+        self.sent.append({"url": url, "method": method, "body": payload})
+
+        if method == "POST" and url.endswith("/api/sessions"):
+            self.counter += 1
+            engine_id = f"eng-{self.counter}"
+            self.alive[engine_id] = "running"
+            return 200, json.dumps(
+                {
+                    "id": engine_id,
+                    "name": payload.get("name", ""),
+                    "activity": "running",
+                    "cwd": payload.get("cwd", ""),
+                    "exit_code": None,
+                }
+            ).encode()
+        if method == "POST" and url.endswith("/kill"):
+            engine_id = url.rsplit("/", 2)[-2]
+            self.killed.append(engine_id)
+            existed = self.alive.pop(engine_id, None) is not None
+            return (200, b'{"ok":true}') if existed else (404, b"")
+        if method == "GET" and url.endswith("/api/sessions"):
+            return 200, json.dumps(
+                [
+                    {"id": key, "name": key, "activity": state, "cwd": ROOT}
+                    for key, state in self.alive.items()
+                ]
+            ).encode()
+        # Session history. Canned rows; tests assert both the mapping
+        # and, via `self.sent`, that the query params were forwarded.
+        path = url.split("?", 1)[0]
+        if method == "GET" and path.endswith("/api/history/sessions"):
+            return 200, json.dumps(
+                [
+                    {
+                        "id": "hist-1",
+                        "name": "old-session",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "ended_at": "2026-01-01T00:05:00Z",
+                        "exit_code": 0,
+                        "cwd": ROOT,
+                        "command": "make test",
+                        "scrollback_bytes": 128,
+                    }
+                ]
+            ).encode()
+        if method == "GET" and path.endswith("/api/history/search"):
+            return 200, json.dumps(
+                [
+                    {
+                        "session_id": "hist-1",
+                        "session_name": "old-session",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "match_snippet": "found the needle here",
+                        "rank": -2.0,
+                        "live": False,
+                    },
+                    {
+                        "session_id": "live-9",
+                        "session_name": "running-now",
+                        "created_at": "2026-01-02T00:00:00Z",
+                        "match_snippet": "a needle in a live run",
+                        "rank": 0.0,
+                        "live": True,
+                    },
+                ]
+            ).encode()
+        if method == "GET" and path.endswith("/log"):
+            if self.log_missing:
+                return 404, b""
+            return 200, json.dumps(
+                {
+                    "session_id": "hist-1",
+                    "text": "plain readable tail",
+                    "bytes": 19,
+                    "total_bytes": 40,
+                    "truncated": True,
+                }
+            ).encode()
+        return 404, b""
+
+    @property
+    def last_spec(self) -> dict[str, Any]:
+        creates = [
+            row
+            for row in self.sent
+            if row["method"] == "POST" and "kill" not in row["url"]
+        ]
+        spec: dict[str, Any] = creates[-1]["body"]
+        return spec
+
+    def env_of_last_start(self) -> dict[str, str]:
+        return dict(self.last_spec.get("env", []))
+
+
+class DeadEngine:
+    """An engine that is configured and not answering."""
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        body: bytes = b"",
+        method: str = "GET",
+    ) -> tuple[int, bytes]:
+        raise EngineUnavailable("the engine is not answering: connection refused")
+
+
+@pytest.fixture
+def engine() -> StandInEngine:
+    return StandInEngine()
+
+
+@pytest.fixture
+def wired(instance: AppContext, engine: StandInEngine) -> AppContext:
+    """An instance with a project, a work item, and an engine to talk to."""
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    register_project(
+        ctx, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    native_work_item(
+        ctx, kind="bug", title="A bug to open a terminal on", project="vogt"
+    )
+    return ctx
+
+
+# -- where the session opens ---------------------------------------
+
+
+def test_a_session_opens_in_the_path_the_registry_records(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The one property the working-directory rule exists for.
+
+    The engine would default the working directory to its own workspace
+    root. A session that opened there when Vogt meant this project's tree
+    would look right in every list and be wrong about the only thing that
+    matters.
+    """
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert engine.last_spec["cwd"] == ROOT
+
+
+def test_a_session_can_be_opened_on_a_project(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert result.session.project == "vogt"
+    assert result.session.work_item is None
+    assert engine.last_spec["cwd"] == ROOT
+
+
+def test_a_session_needs_exactly_one_subject(wired: AppContext) -> None:
+    with pytest.raises(InvalidRequest):
+        start_session(wired, StartSessionParams(reason=WHY))
+    with pytest.raises(InvalidRequest):
+        start_session(
+            wired, StartSessionParams(work_item="WI-1", project="vogt", reason=WHY)
+        )
+
+
+def test_a_blank_reason_is_refused_before_the_engine_starts(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Audit validation must precede the external side effect.
+
+    The engine and SQLite cannot share a transaction. If the reason is first
+    validated inside ``audited_write``, the terminal has already started by
+    the time the write is refused, leaving an unrecorded process with a token
+    that can never authenticate. Blank input is fully knowable before making
+    the HTTP call, so it is rejected there.
+    """
+    before = len(engine.sent)
+
+    with pytest.raises(MissingReason):
+        start_session(
+            wired,
+            # Adapters validate this shape before the service sees it. Build
+            # the impossible transport value directly to prove the service's
+            # own write boundary still cannot put an external side effect
+            # ahead of its audit invariant.
+            StartSessionParams.model_construct(work_item="WI-1", reason=" \t\n"),
+        )
+
+    assert len(engine.sent) == before, "an invalid write must start no terminal"
+    assert list_sessions(wired, ListSessionsParams()).sessions == []
+
+
+def test_a_work_item_with_no_project_has_no_tree_to_open_in(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Refused rather than guessed.
+
+    Opening in the estate root, or in the first project that happened to
+    match, is exactly the heuristic the rule was written against.
+    """
+    create_work(wired, CreateWorkParams(kind="chore", title="Unassigned", reason=WHY))
+    before = len(engine.sent)
+    with pytest.raises(InvalidRequest) as raised:
+        start_session(wired, StartSessionParams(work_item="WI-2", reason=WHY))
+    assert "belongs to no project" in str(raised.value)
+    assert len(engine.sent) == before, "nothing should have been started"
+
+
+# -- who the session writes as -----------------------------
+
+
+def test_the_session_carries_its_own_token(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """A per-session actor, so its writes are distinguishable from every other."""
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    env = engine.env_of_last_start()
+    assert env["VOGT_SESSION_ID"] == result.session.id
+    assert env["VOGT_HTTP_TOKEN"].startswith("vogt_")
+    assert result.session.actor == f"agent:session:{result.session.id}"
+
+    with wired.declared.read() as view:
+        stored = view.token_by_hash(hash_token(env["VOGT_HTTP_TOKEN"]))
+    assert stored is not None, "the token the session was given must authenticate"
+    assert stored.actor_identity_ref == result.session.actor
+    assert set(stored.scopes) == {"read", "work.write"}, (
+        "a terminal opened on one bug may read and record work, and nothing else"
+    )
+
+
+def test_the_secret_is_written_nowhere(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """A credential in a history row is a leak with a timestamp on it.
+
+    Checked against the rows a reader can actually get at — the audit trail
+    and the event stream — rather than against the code that writes them.
+    The audit row stores a digest of its payload rather than the payload, so
+    the failure this guards against would arrive through the *summary*: the
+    one part of a write that is stored verbatim and is easy to widen.
+    """
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    secret = engine.env_of_last_start()["VOGT_HTTP_TOKEN"]
+
+    with wired.declared.read() as view:
+        audit = view.list_audit(limit=50)
+        events = view.list_events(after=0, limit=50)
+    assert audit, "the start is an audited write"
+    written = json.dumps([row.model_dump(mode="json") for row in (*audit, *events)])
+    assert secret not in written
+
+
+def test_stopping_a_session_revokes_what_it_held(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    secret = engine.env_of_last_start()["VOGT_HTTP_TOKEN"]
+
+    stop_session(wired, StopSessionParams(id=result.session.id, reason=WHY))
+
+    assert engine.killed == [result.session.engine_session_id]
+    with wired.declared.read() as view:
+        token = view.token_by_hash(hash_token(secret))
+    assert token is not None
+    assert token.revoked_at is not None, (
+        "the session is over, so what it was running with must stop working"
+    )
+
+
+# -- the link, and what it is not ---------------------------
+
+
+def test_the_session_is_linked_to_its_work_item(wired: AppContext) -> None:
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    listed = list_sessions(wired, ListSessionsParams(work_item="WI-1"))
+    assert [row.id for row in listed.sessions] == [result.session.id]
+    assert listed.sessions[0].work_item == "WI-1"
+    assert listed.sessions[0].reason == WHY
+
+
+def test_activity_comes_from_the_engine_not_from_storage(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Liveness is read at the moment of asking, never cached.
+
+    The engine forgetting a session is how a session ends; a stored
+    "running" would outlive the process it described.
+    """
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert list_sessions(wired, ListSessionsParams()).sessions[0].activity == "running"
+
+    engine.alive.clear()
+    after = list_sessions(wired, ListSessionsParams()).sessions[0]
+    assert after.activity is None
+    assert after.alive is False
+    assert after.id == result.session.id, "the link survives the process"
+
+
+def test_a_stopped_session_leaves_the_list(wired: AppContext) -> None:
+    result = start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    stop_session(wired, StopSessionParams(id=result.session.id, reason=WHY))
+
+    assert list_sessions(wired, ListSessionsParams()).sessions == []
+    kept = list_sessions(wired, ListSessionsParams(include_stopped=True))
+    assert [row.id for row in kept.sessions] == [result.session.id]
+    assert kept.sessions[0].stopped_at is not None
+
+
+def test_stopping_an_unknown_session_is_a_not_found(wired: AppContext) -> None:
+    with pytest.raises(NotFound):
+        stop_session(wired, StopSessionParams(id="ses_nope", reason=WHY))
+
+
+# -- an absent engine costs sessions and nothing else --------------
+
+
+def test_with_no_engine_configured_starting_says_so(instance: AppContext) -> None:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    with pytest.raises(EngineUnavailable) as raised:
+        start_session(instance, StartSessionParams(project="vogt", reason=WHY))
+    assert "VOGT_ENGINE_URL" in str(raised.value), (
+        "a refusal names what is missing; 'unavailable' alone reads like an outage"
+    )
+
+
+def test_with_no_engine_the_links_still_list(wired: AppContext) -> None:
+    """Vogt's record of what it started does not depend on the engine being up."""
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    without = dataclasses.replace(wired, engine=None)
+
+    listed = list_sessions(without, ListSessionsParams())
+    assert [row.id for row in listed.sessions] == [result.session.id]
+    assert listed.engine is not None and "VOGT_ENGINE_URL" in listed.engine
+    assert listed.sessions[0].alive is None, (
+        "unasked is not the same answer as not running"
+    )
+
+
+def test_a_dead_engine_is_reported_not_rendered_as_stopped(
+    wired: AppContext,
+) -> None:
+    dead = dataclasses.replace(
+        wired,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=DeadEngine()),
+    )
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    listed = list_sessions(dead, ListSessionsParams())
+    assert len(listed.sessions) == 1
+    assert listed.engine is not None and "not answering" in listed.engine
+    assert listed.sessions[0].alive is None
+
+
+def test_a_session_can_be_closed_when_the_engine_is_gone(wired: AppContext) -> None:
+    """Otherwise an engine outage would strand every open session in Vogt."""
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    dead = dataclasses.replace(
+        wired,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=DeadEngine()),
+    )
+    stopped = stop_session(dead, StopSessionParams(id=result.session.id, reason=WHY))
+    assert stopped.session.stopped_at is not None
+
+
+# -- the brief the agent is handed ---------------------------------
+
+
+def test_the_work_items_brief_travels_with_the_session(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The agent is told what it is working on, from what Vogt records.
+
+    Sent as text, not as a path: the file it will be read from lives on the
+    engine's state directory, and the engine is the process that owns that
+    filesystem even when both halves share a container.
+    """
+    native_work_item(
+        wired,
+        kind="bug",
+        title="Sweep drops a page",
+        body="The second page of results never arrives.",
+        project="vogt",
+    )
+    result = start_session(wired, StartSessionParams(work_item="WI-2", reason=WHY))
+
+    brief = engine.last_spec["prompt"]
+    assert "WI-2 — Sweep drops a page" in brief
+    assert "The second page of results never arrives." in brief
+    assert result.session.id in brief, "the brief says which session it belongs to"
+    assert "VOGT_HTTP_TOKEN" in brief, (
+        "a brief that describes the work without saying how to record what was "
+        "found leaves the write capability undiscovered"
+    )
+
+
+def test_the_brief_carries_the_items_relations(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The brief names the relations, and they change what the work *is*.
+
+    An item that blocks another is not the same job as one that stands alone,
+    and an agent handed only a title and a body cannot discover that: the
+    relation lives in Vogt and nowhere in the item's own text. It is rendered
+    by the related item's ref and title rather than by its id, because an id
+    tells a reader nothing they can act on.
+    """
+    native_work_item(wired, kind="bug", title="Sweep drops a page", project="vogt")
+    native_work_item(
+        wired, kind="feature", title="Paginate the collector", project="vogt"
+    )
+    relate_work(
+        wired,
+        RelateWorkParams(ref="WI-2", kind="depends_on", target="WI-3", reason=WHY),
+    )
+
+    start_session(wired, StartSessionParams(work_item="WI-2", reason=WHY))
+    brief = engine.last_spec["prompt"]
+
+    assert "## Relations" in brief
+    assert "depends on" in brief, (
+        "the kind is spelled for a reader, not left as `depends_on`"
+    )
+    assert "WI-3 — Paginate the collector" in brief, (
+        "the related item is named by ref and title; an id is not something "
+        "an agent can act on"
+    )
+
+
+def test_the_brief_says_why_the_item_is_ranked_where_it_is(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The brief names the `why`, and it is the half an agent cannot reconstruct.
+
+    A description says what the item is. The ranking says why it is above the
+    others, which is the question "should I be working on this?" actually
+    turns on — and it is computed from inputs (blocking fan-out, initiative
+    weight, age) that are nowhere in the item's own text.
+    """
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert "## Why this is ranked where it is" in brief
+    assert "Score " in brief
+    # Every contribution the ranking reports, named — not a single number.
+    assert brief.count("- **") >= 2, (
+        "the explanation is the per-input contributions; one total is a score, "
+        "not a reason"
+    )
+
+
+def test_a_brief_survives_a_ranking_that_cannot_be_computed(
+    wired: AppContext,
+    engine: StandInEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The session starts either way.
+
+    A brief that refused to be written because a score was unavailable would
+    make the ranking a precondition for starting work — the inversion the
+    compliance-gates-nothing rule spends its whole sentence forbidding.
+    """
+
+    def explodes(*args: object, **kwargs: object) -> None:
+        raise NotFound("no such ranked entry")
+
+    monkeypatch.setattr("vogt.application.services.sessions.why", explodes)
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    assert result.session.work_item == "WI-1"
+    brief = engine.last_spec["prompt"]
+    assert "WI-1" in brief
+    assert "## Why this is ranked where it is" not in brief
+
+
+def test_the_brief_carries_no_credential(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert engine.env_of_last_start()["VOGT_HTTP_TOKEN"] not in brief, (
+        "the token is passed in the environment; a copy in a file on disk is "
+        "one more place it can be read from"
+    )
+
+
+def test_a_project_session_is_told_no_task_was_asked_for(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Vogt does not invent work for a terminal nobody attached an item to.
+
+    Suggesting "have a look at the backlog" would be the system deciding to
+    start work, which is the half of the reversed non-goal that stayed
+    refused.
+    """
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert "No work item is attached" in brief
+    assert "backlog" not in brief.lower()
+
+
+def test_the_work_item_view_shows_what_is_running_for_it(
+    wired: AppContext,
+) -> None:
+    """The brief's last clause, read through the operation a client actually
+    calls."""
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    item = get_work(wired, GetWorkParams(ref="WI-1"))
+    assert [row.id for row in item.sessions] == [started.session.id]
+    assert item.sessions[0].activity == "running"
+
+    stop_session(wired, StopSessionParams(id=started.session.id, reason=WHY))
+    assert get_work(wired, GetWorkParams(ref="WI-1")).sessions == []
+
+
+# -- which model, and where a subjectless request goes -------
+
+
+def test_a_model_and_an_effort_reach_the_engine(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Vogt says which model; how it reaches a CLI is the engine's business.
+
+    Asserted on the wire rather than on the returned summary, because a
+    session that recorded `gpt-5.6` in its own row and started the default
+    model would satisfy every reader of `session_list` and be wrong about
+    the only thing the caller asked for.
+    """
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", model="gpt-5.6", effort="medium", reason=WHY
+        ),
+    )
+    assert engine.last_spec["model"] == "gpt-5.6"
+    assert engine.last_spec["effort"] == "medium"
+
+
+def test_naming_no_model_sends_no_model(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The ordinary request is unchanged, field for field.
+
+    The engine refuses a command it cannot pass a model to, so a client that
+    started sending an empty field and had it arrive as a present one would
+    break every plain shell session.
+    """
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "model" not in engine.last_spec
+    assert "effort" not in engine.last_spec
+
+
+def test_the_model_asked_for_is_recorded_and_read_back(
+    wired: AppContext,
+) -> None:
+    started = start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", model="claude-opus-4-5", effort="high", reason=WHY
+        ),
+    )
+    assert started.session.model == "claude-opus-4-5"
+    assert started.session.effort == "high"
+
+    listed = list_sessions(wired, ListSessionsParams()).sessions
+    assert [(row.model, row.effort) for row in listed] == [("claude-opus-4-5", "high")]
+
+
+def test_a_subjectless_session_is_refused_when_no_scratch_project_exists(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The working-directory rule, held.
+
+    The tempting alternative is a default working directory, and it is the
+    one failure the rule is written against: it succeeds, somewhere plausible.
+    The refusal names the setting so a reader can make it work rather than
+    guess why it did not.
+    """
+    before = len(engine.sent)
+    with pytest.raises(InvalidRequest) as raised:
+        start_session(wired, StartSessionParams(reason=WHY))
+    assert "session_scratch_project" in str(raised.value)
+    assert len(engine.sent) == before, "nothing should have been started"
+
+
+def _with_scratch(ctx: AppContext) -> AppContext:
+    register_project(
+        ctx,
+        RegisterProjectParams(
+            name="Scratch", root_path="/srv/estate/scratch", reason=WHY
+        ),
+    )
+    return dataclasses.replace(
+        ctx,
+        config=ctx.config.model_copy(update={"session_scratch_project": "scratch"}),
+    )
+
+
+def test_a_subjectless_session_opens_in_the_configured_scratch_project(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """U4: "research the best risotto in Wollongong" has no repository.
+
+    It still opens in a *registered* project's tree — the scratch project is
+    a project like any other, chosen by an operator — so the path comes from
+    the registry and nowhere else.
+    """
+    ctx = _with_scratch(wired)
+
+    started = start_session(ctx, StartSessionParams(model="gpt-5.6", reason=WHY))
+
+    assert started.session.project == "scratch"
+    assert started.session.work_item is None
+    assert engine.last_spec["cwd"] == "/srv/estate/scratch"
+    # The name says it fell back rather than being chosen, so a list of
+    # sessions does not read as though somebody picked this project.
+    assert engine.last_spec["name"].startswith("scratch/")
+
+
+def test_a_scratch_fallback_says_so_on_the_record(
+    wired: AppContext,
+) -> None:
+    """Otherwise the record names a project nobody asked for.
+
+    A session that fell back to scratch and one deliberately opened in it
+    are different decisions, and months later the trail is the only place
+    that difference survives. The write is audited either way — this is
+    about the summary being able to tell them apart.
+    """
+    ctx = _with_scratch(wired)
+    started = start_session(ctx, StartSessionParams(model="gpt-5.6", reason=WHY))
+
+    assert list_audit(ctx, ListAuditParams(operation="session.start")).records, (
+        "the start is audited like every other write"
+    )
+
+    events = [
+        event
+        for event in list_events(ctx, ListEventsParams()).events
+        if event.kind == "session.started"
+    ]
+    assert events, "the start should raise an event"
+    summary = events[-1].summary
+    assert summary["scratch"] is True
+    assert summary["project"] == "scratch"
+    assert summary["model"] == "gpt-5.6"
+    assert summary["effort"] is None
+    assert started.session.project == "scratch"
+
+
+def test_a_session_somebody_chose_is_not_marked_scratch(
+    wired: AppContext,
+) -> None:
+    """The other half: `scratch` must mean "fell back", not "is that project"."""
+    ctx = _with_scratch(wired)
+    start_session(ctx, StartSessionParams(project="scratch", reason=WHY))
+
+    events = [
+        event
+        for event in list_events(ctx, ListEventsParams()).events
+        if event.kind == "session.started"
+    ]
+    assert events[-1].summary["scratch"] is False
+
+
+def test_naming_both_a_work_item_and_a_project_is_still_refused(
+    wired: AppContext,
+) -> None:
+    with pytest.raises(InvalidRequest):
+        start_session(
+            wired, StartSessionParams(work_item="WI-1", project="vogt", reason=WHY)
+        )
+
+
+# -- session history reads ------------------------------------------
+#
+# Thin pass-throughs to the engine, degrading the same way `list_sessions`
+# does. The stand-in returns canned rows; `engine.sent` lets a test assert the
+# query params were forwarded, since that forwarding is the whole behaviour.
+
+
+def _history_urls(engine: StandInEngine) -> list[str]:
+    return [row["url"] for row in engine.sent if "/api/history" in row["url"]]
+
+
+def test_history_list_forwards_pagination_and_maps_rows(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = history_list(wired, HistoryListParams(limit=10, offset=5))
+    assert result.engine is None
+    assert [row.id for row in result.sessions] == ["hist-1"]
+    row = result.sessions[0]
+    assert row.name == "old-session"
+    assert row.exit_code == 0
+    assert row.scrollback_bytes == 128
+    url = _history_urls(engine)[-1]
+    assert "limit=10" in url and "offset=5" in url
+
+
+def test_search_output_maps_hits_and_flags_live(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = search_output(wired, SearchOutputParams(q="needle", limit=25))
+    assert result.engine is None
+    assert [m.live for m in result.matches] == [False, True]
+    assert result.matches[0].match_snippet == "found the needle here"
+    assert result.matches[1].session_id == "live-9"
+    url = _history_urls(engine)[-1]
+    assert "q=needle" in url
+    assert "include_live=true" in url
+    assert "limit=25" in url
+
+
+def test_search_output_can_ask_for_archive_only(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    search_output(wired, SearchOutputParams(q="needle", include_live=False))
+    assert "include_live=false" in _history_urls(engine)[-1]
+
+
+def test_log_tail_maps_the_preview_and_forwards_flags(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = log_tail(
+        wired, LogTailParams(id="hist-1", tail_bytes=4096, strip_ansi=True)
+    )
+    assert result.engine is None
+    assert result.session_id == "hist-1"
+    assert result.text == "plain readable tail"
+    assert result.bytes == 19
+    assert result.total_bytes == 40
+    assert result.truncated is True
+    url = _history_urls(engine)[-1]
+    assert "tail_bytes=4096" in url
+    assert "strip_ansi=true" in url
+
+
+def test_log_tail_missing_log_is_empty_not_an_error(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    engine.log_missing = True
+    result = log_tail(wired, LogTailParams(id="gone"))
+    assert result.engine is None
+    assert result.session_id is None
+    assert result.text == ""
+
+
+def test_history_reads_report_no_engine_configured(instance: AppContext) -> None:
+    ctx = dataclasses.replace(instance, engine=None)
+    assert "VOGT_ENGINE_URL" in (history_list(ctx, HistoryListParams()).engine or "")
+    assert "VOGT_ENGINE_URL" in (
+        search_output(ctx, SearchOutputParams(q="x")).engine or ""
+    )
+    assert "VOGT_ENGINE_URL" in (log_tail(ctx, LogTailParams(id="x")).engine or "")
+
+
+def test_history_reads_report_a_dead_engine_not_an_error(
+    instance: AppContext,
+) -> None:
+    dead = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=DeadEngine()),
+    )
+    hist = history_list(dead, HistoryListParams())
+    assert hist.sessions == []
+    assert hist.engine is not None and "not answering" in hist.engine
+    search = search_output(dead, SearchOutputParams(q="x"))
+    assert search.matches == []
+    assert search.engine is not None and "not answering" in search.engine
+    tail = log_tail(dead, LogTailParams(id="x"))
+    assert tail.session_id is None
+    assert tail.engine is not None and "not answering" in tail.engine

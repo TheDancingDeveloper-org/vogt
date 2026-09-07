@@ -1,0 +1,280 @@
+# The all-in-one Vogt stack: core, engine and PWA in one container.
+#
+#   cp deploy/stack.env.example deploy/.env      # then fill in ENGINE_TOKEN
+#   openssl rand -hex 32 > deploy/vogt-core-token
+#   docker compose -f deploy/stack.compose.yml up -d --wait
+#
+# There is no `--build`: the published image already carries all three.
+#
+# This is a *base*, not an overlay. It stands alone and does not layer onto
+# `vogt.compose.yml` — that file runs a core, and so does this image, so
+# combining them would run two.
+#
+# ── What you are running ────────────────────────────────────────────────────
+#
+# This is the supported way to run Vogt, and the only one (DEPLOYMENT.md
+# §1.1). The image is a **development pod**, and that is a deliberate posture
+# rather than an oversight. It carries a writable home, passwordless `sudo`,
+# an SSH server, a Docker CLI that talks to a socket you may mount, and the
+# `claude` and `codex` agent CLIs. It cannot run `read_only`, and it does not
+# drop capabilities — a pod that exists to run arbitrary agent sessions
+# cannot be hardened against the sessions it runs. Run it where you would run
+# a dev box: on loopback or a private network, behind something that
+# terminates TLS, with only the mounts and credentials its sessions need.
+#
+# Customising it means layering on top, never editing this file: settings in
+# `.env`, extra services and mounts in an overlay of your own, extra tools in
+# an image of your own that starts `FROM` this one's digest. CUSTOMISATION.md
+# is the guide. `vogt.compose.yml` + `engine.overlay.yml` beside this file are
+# the *contributor* stack — a core and an engine built from a checkout — and
+# are not a deployment.
+#
+# Nothing here names a host, a path, or a tailnet. Every value an operator must
+# choose is a `${VAR}`; where one is genuinely required the reference fails the
+# deploy with a message rather than guessing.
+
+services:
+  vogt:
+    # Digest-pin this for a real deployment — a tag can move, and
+    # the whole point of a signed release is that the bytes cannot. The default
+    # is a tag so the file is runnable as-is.
+    #
+    # Pin the *release* family (`X.Y.Z`, `latest`). The `dev-<sha>` and
+    # `prod-<sha>` tags in the same repository are the maintainer's own pods:
+    # same CLIs, plus estate integrations that address one estate's
+    # infrastructure and mean nothing outside it. See DEPLOYMENT.md.
+    image: ${VOGT_STACK_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-stack:0.6.0}
+    restart: unless-stopped
+
+    # tini as PID 1 reaps the processes agent sessions leave behind. The
+    # entrypoint deliberately does *not* adopt a supervision framework, and
+    # this is the half of that decision the compose owns.
+    init: true
+
+    # The engine is the only way in. The core listens on loopback
+    # *inside* the container and is never published — the entrypoint enforces
+    # that rather than trusting this comment, refusing to start if
+    # `VOGT_CORE_URL` names anything but a loopback address.
+    #
+    # Loopback on the host too, unless told otherwise: this file will not put a
+    # pod carrying sudo and agent CLIs on a network interface because nobody
+    # said to. Set `ENGINE_BIND` to a real address to expose it, and put
+    # something that terminates TLS in front.
+    ports:
+      - "${ENGINE_BIND:-127.0.0.1}:${ENGINE_PORT:-8910}:8910"
+
+    environment:
+      # The engine's own listen socket, inside the container's namespace — all
+      # interfaces so the published port above can reach it. Fixed, not an
+      # exposure decision: `ENGINE_BIND` in `.env` decides exposure, on the
+      # host side of the port mapping.
+      ENGINE_BIND: "0.0.0.0:8910"
+      # The engine's bearer token (at least 16 characters), required for every
+      # API and WebSocket call. Keep it in `deploy/.env` (git-ignored) rather
+      # than your shell.
+      ENGINE_TOKEN: "${ENGINE_TOKEN:?Set ENGINE_TOKEN in deploy/.env — the engine bearer token, at least 16 characters}"
+      # The address clients reach the front door at. The engine cannot
+      # advertise an address it is not told, so set it once the stack is
+      # reachable at a stable URL.
+      ENGINE_PUBLIC_URL: "${ENGINE_PUBLIC_URL:-}"
+
+      # ── Voice (STT + TTS) ──────────────────────────────────────────────────
+      # Server-side speech points at the bundled `voice` sidecar below over the
+      # Compose network, so a fresh stack transcribes the microphone and speaks
+      # replies with no account and no extra file. The sidecar carries a small
+      # default model set; the engine's speech list is an ordered fallback, so
+      # overriding any value here in `.env` points at OpenAI, Groq or any other
+      # OpenAI-compatible provider instead — you are never bound to the sidecar.
+      #
+      # The sidecar's Piper backend answers `wav` and rejects `mp3`, so the
+      # engine is told to ask it for `wav`; the engine streams the upstream
+      # content type straight through and the PWA plays either. A cloud provider
+      # wants `mp3` — set ENGINE_ASSISTANT_TTS_FORMAT=mp3 in `.env` when you
+      # repoint TTS at one. Turn voice off entirely by clearing COMPOSE_PROFILES
+      # in `.env` (the sidecar then never starts and these URLs answer nothing,
+      # which the engine treats as "voice unavailable").
+      ENGINE_ASSISTANT_STT_BASE_URLS: "${ENGINE_ASSISTANT_STT_BASE_URLS:-http://voice:8000/v1}"
+      ENGINE_ASSISTANT_STT_MODEL: "${ENGINE_ASSISTANT_STT_MODEL:-whisper-1}"
+      ENGINE_ASSISTANT_TTS_BASE_URLS: "${ENGINE_ASSISTANT_TTS_BASE_URLS:-http://voice:8000/v1}"
+      ENGINE_ASSISTANT_TTS_MODEL: "${ENGINE_ASSISTANT_TTS_MODEL:-tts-1}"
+      ENGINE_ASSISTANT_TTS_VOICE: "${ENGINE_ASSISTANT_TTS_VOICE:-alloy}"
+      ENGINE_ASSISTANT_TTS_FORMAT: "${ENGINE_ASSISTANT_TTS_FORMAT:-wav}"
+
+      # ── Push notifications (FCM) ───────────────────────────────────────────
+      # The Firebase service account that signs push is delivered as a FILE
+      # secret, never an env var: the JSON carries an RSA private key, and an
+      # inline value is readable by every agent session through
+      # /proc/<engine>/environ — which is exactly how it leaked. The
+      # engine reads the file once and never places it in its own environment.
+      #
+      # Off until you enable it: leave this unset and push stays disabled
+      # (fcm_enabled=false). To enable, put the service account at
+      # deploy/fcm-service-account.json (mounted below at
+      # /run/secrets/fcm_service_account, mode 0400) and set
+      # ENGINE_FCM_SERVICE_ACCOUNT_FILE=/run/secrets/fcm_service_account in
+      # `.env`. ENGINE_FCM_SERVICE_ACCOUNT_JSON is deliberately never set here.
+      ENGINE_FCM_SERVICE_ACCOUNT_FILE: "${ENGINE_FCM_SERVICE_ACCOUNT_FILE:-}"
+
+      # One value both starts the core and tells the engine where to proxy.
+      # Loopback means "the core is ours to run", so the entrypoint supervises
+      # `vogt init && vogt serve` here; the engine proxies `/api/vogt`, `/mcp`
+      # and `/ui-legacy` to the same address. Deriving one from the other is
+      # what stops a front door confidently pointed at a port nothing serves.
+      VOGT_CORE_URL: "http://127.0.0.1:8000"
+      # The token the engine presents on `/api/vogt`; the core adopts the same
+      # file at `init` if it does not already hold one. Both halves reading one
+      # file is the whole bootstrap mechanism — no second deploy. Brokered as a
+      # file, never a bare value, so it stays out of every `docker inspect`.
+      VOGT_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+      VOGT_BOOTSTRAP_CORE_TOKEN_FILE: /run/secrets/vogt_core_token
+      # Who that adopted token acts as, and how much it may do. Everything that
+      # can read the file runs as this identity, so this scope is the blast
+      # radius; narrow it if you do not need project writes.
+      VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR: "${VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR:-agent:engine}"
+      VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES: "${VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES:-read,work.write,project.write}"
+      # The engine is the front door, so `connect` and `/connection-info`
+      # render against the identity the engine states per request (its
+      # `X-Vogt-*` headers) rather than the core's own loopback address.
+      # `VOGT_PUBLIC_URL` is deliberately absent: when fronted, the door is the
+      # only thing that knows where clients arrive, and it says so per request.
+      VOGT_FRONTED: "true"
+
+      # Both halves must agree about where the estate is: the core's import
+      # root and the engine's workspace root are the same tree, or a session
+      # opened "for" a project opens somewhere the registry never recorded.
+      # The entrypoint warns at boot if these drift apart.
+      VOGT_DATA_DIR: /var/lib/vogt
+      VOGT_IMPORT_ROOT: /home/sprooty/Working
+
+      VOGT_LIFECYCLE_STATE_DIR: /home/sprooty/.vogt-lifecycle
+      VOGT_LIFECYCLE_WORKDIR: /home/sprooty/Working
+      VOGT_LIFECYCLE_HEALTHCHECK_URL: http://127.0.0.1:8910/readyz
+      VOGT_HOOK_DIR: /run/vogt/hooks
+      VOGT_HOOKS_REQUIRED: "${VOGT_HOOKS_REQUIRED:-false}"
+
+      # ── Agent CLIs: update without a rebuild ────────────────────────
+      # The image bakes Claude Code and Codex at the versions in
+      # engine/agent-versions.env. Set one of these to an *exact* version and
+      # the entrypoint installs it at start into the `engine-agent-clis` volume
+      # and puts it on PATH ahead of the image's copy — so updating a CLI is a
+      # `deploy/.env` edit and `docker compose up -d engine`, never an image
+      # rebuild or a release. Empty means the image's baked copy. `latest` and
+      # `stable` (npm dist-tags) are refused unless ALLOW_DIST_TAGS=1, so a
+      # floating pin is a deliberate opt-in. See DEPLOYMENT.md.
+      VOGT_CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
+      VOGT_CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
+      VOGT_AGENT_CLI_ALLOW_DIST_TAGS: "${VOGT_AGENT_CLI_ALLOW_DIST_TAGS:-}"
+
+    # Named volumes, not host binds. Docker seeds a fresh named volume from the
+    # image, so the `sprooty` ownership the image built is preserved — a host
+    # directory would arrive root-owned and break the pod. No host paths appear
+    # in this file by design.
+    volumes:
+      # The pod's writable home: agent state, caches, session scratch, and the
+      # `Working` tree sessions run in.
+      - engine-home:/home/sprooty
+      # The core's SQLite databases and backups. Separate from the home volume
+      # so the data outlives a pod you decide to reset.
+      - vogt-data:/var/lib/vogt
+      # Runtime-pinned agent CLIs: one directory per installed version
+      # plus the `current` symlinks. Named for the same ownership reason as the
+      # home above. Optional — the pod starts without it and just re-downloads
+      # the pinned version on every recreate.
+      - engine-agent-clis:/opt/vogt/agent-clis
+
+    # `/readyz` is the aggregate. It reports the core's state but deliberately
+    # stays ready when the core is absent — restarting the container would not
+    # revive a core and would kill every live terminal.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/vogt-lifecycle", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    secrets:
+      - vogt_core_token
+      - fcm_service_account
+
+  # ── voice: the first-party STT + TTS sidecar ─────────────────────────
+  #
+  # A published, signed image carrying native Whisper + Piper and a small
+  # default model set, so voice works out of the box. It is reached by the
+  # engine over the Compose network as `http://voice:8000/v1` and is never
+  # published to the host — the engine stays the only front door.
+  #
+  # On by default via `COMPOSE_PROFILES=voice` in `.env` (see
+  # `stack.env.example`); clear that line to run the stack without it. There is
+  # deliberately no `depends_on` from `vogt` to here — that would drag the
+  # sidecar in even with the profile cleared — so `up --wait` waits on both
+  # only because both are in the active profile, and with voice off the engine
+  # simply finds nothing at the URL above and falls back.
+  #
+  # Baked models make it self-contained: no volume, no download, no model file
+  # to supply. Point it at your own weights with an image of your own that
+  # starts `FROM` this one, or repoint the engine's speech URLs above at another
+  # provider — either way this service can be removed.
+  voice:
+    profiles: ["voice"]
+    # Digest-pin this for a real deployment, exactly as the stack
+    # image above. Pin the release family (`X.Y.Z`, `latest`); the default is a
+    # tag so the file is runnable as-is.
+    image: ${VOGT_VOICE_IMAGE:-ghcr.io/thedancingdeveloper-org/vogt-voice:0.6.0}
+    restart: unless-stopped
+    # It only reads its baked models and writes audio to tmpfs, so it can run
+    # locked down even though the pod beside it cannot.
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=128m
+    healthcheck:
+      # `/health` reports "starting" until the baked models load, then "ok".
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  engine-home:
+  vogt-data:
+  engine-agent-clis:
+
+secrets:
+  # The core token, shared by both halves inside the container. Create it
+  # beside this file before the first deploy:
+  #
+  #   openssl rand -hex 32 > deploy/vogt-core-token
+  #
+  # A relative path, so nothing here is tied to one host. Legitimately empty
+  # until you mint one — an empty file just leaves `/api/vogt` answering 401,
+  # which is the pre-bootstrap behaviour rather than a broken one.
+  vogt_core_token:
+    file: ./vogt-core-token
+
+  # The Firebase Cloud Messaging service account that signs push notifications.
+  # It holds an RSA private key, so it is a file secret mounted at
+  # /run/secrets/fcm_service_account (mode 0400), never an env var.
+  # Create it beside this file before deploying push:
+  #
+  #   cp /path/to/service-account.json deploy/fcm-service-account.json
+  #
+  # Legitimately empty until you add one — with ENGINE_FCM_SERVICE_ACCOUNT_FILE
+  # unset the engine never reads it and reports push disabled, so an empty file
+  # here keeps the stack booting exactly as before push was wired.
+  fcm_service_account:
+    file: ./fcm-service-account.json

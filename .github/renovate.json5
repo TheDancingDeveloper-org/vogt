@@ -1,0 +1,143 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+
+  // Vogt's own dependencies practice what the product preaches.
+  // The three things Vogt will report on for other projects are
+  // three *independent* toggles, never one boolean — so all three are
+  // enabled here explicitly, by name.
+  //
+  //   1. version updates          — the scheduled PRs below
+  //   2. vulnerability alerts     — osvVulnerabilityAlerts
+  //   3. automated security fixes — vulnerabilityAlerts.enabled
+
+  timezone: "Etc/UTC",
+  schedule: ["before 5am on monday"],
+
+  // Work lands on `dev` and is promoted to `main` by fast-forward (see
+  // docs/DEPLOYMENT.md on releases), so a dependency PR merged into `main`
+  // directly would put `main` ahead of `dev` and break the next promotion.
+  // Renovate therefore targets `dev` — which matters most for the automerged
+  // agent CLI pins below, where nobody is watching the merge happen.
+  baseBranches: ["dev"],
+  labels: ["dependencies"],
+  semanticCommits: "disabled",
+
+  // 2. Alerts: OSV advisories raise a PR regardless of the weekly window.
+  osvVulnerabilityAlerts: true,
+
+  // 3. Fixes: security updates are not held for the schedule.
+  vulnerabilityAlerts: {
+    enabled: true,
+    labels: ["dependencies", "security"],
+    schedule: null,
+  },
+
+  // Keep uv.lock fresh even when no manifest range moved; CI fails on a
+  // manifest/lockfile mismatch, so the lockfile is not optional here.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 5am on monday"],
+  },
+
+  // Base images move by digest, not by tag. A pinned digest is the only
+  // form of "which image is this" that a rebuild cannot silently change —
+  // and Vogt reports exactly this gap on other repositories, so
+  // leaving its own base floating would be hard to defend.
+  pinDigests: true,
+
+  // The private engine bases are pulled from this organisation's GHCR mirror
+  // rather than from Docker Hub (a self-hosted runner is one IP, so the anonymous
+  // per-IP allowance runs out on a busy afternoon, and a credential shared
+  // across an organisation's CI is emptier still). The mirror name is
+  // the upstream name with `docker.io/library/` replaced, and this teaches
+  // Renovate the substitution so a digest bump still comes from *upstream*
+  // rather than from whatever this organisation last mirrored — which would
+  // be a version check that can only ever agree with itself.
+  //
+  // The same rule is applied in the other direction by
+  // `.github/workflows/mirror-base-images.yml`, which derives what to copy
+  // from the Dockerfiles. Changing the prefix means changing both.
+  //
+  // If this ever stops matching, the failure is that the bases quietly go
+  // stale — Renovate finds nothing newer in the mirror and raises no PR. It
+  // is not a broken build, but it is invisible, so check here first when a
+  // base image has not moved in a suspiciously long time.
+  registryAliases: {
+    "ghcr.io/thedancingdeveloper-org/vogt-base": "docker.io/library",
+  },
+
+  // The engine image installs three npm CLIs, and they are pinned in a small
+  // manifest rather than floating on `latest`. Keeping the source of truth out
+  // of a Dockerfile build arg makes local overlays and CI consume the same
+  // value, while the image copies the resolved values for runtime inspection.
+  //
+  //     # renovate: datasource=npm depName=@openai/codex
+  //     VOGT_CODEX_VERSION=0.149.1
+  //
+  // If this ever stops matching, the failure is silent in the same way the
+  // registryAlias failure is: the pins simply go stale and no PR is raised.
+  // Check here first if one of them has not moved in a suspiciously long
+  // time. (On a Renovate older than the `managerFilePatterns` rename, this
+  // key is spelled `fileMatch`.)
+  customManagers: [
+    {
+      customType: "regex",
+      description: "npm CLIs pinned in the engine image manifest",
+      managerFilePatterns: ["/^engine\\/agent-versions\\.env$/"],
+      // The `(?:\s*#[^\n]*)*` tolerates any number of ordinary comment lines
+      // between the `# renovate:` annotation and its `VOGT_*_VERSION=` line —
+      // without it, an explanatory comment under the annotation (as
+      // `VOGT_CLAUDE_CODE_VERSION` has) silently hides that pin from Renovate,
+      // and the pin then rots invisibly. The annotation must still be the last
+      // *annotation* before the value; only plain comments may sit between.
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)(?:\\s*#[^\\n]*)*\\s+VOGT_[A-Z_]+_VERSION=(?<currentValue>\\S+)",
+      ],
+    },
+  ],
+
+  packageRules: [
+    {
+      matchManagers: ["github-actions"],
+      groupName: "github actions",
+    },
+    {
+      // The agent CLI pins move faster than everything else.
+      // Upstream ships roughly one Claude Code release per working day, and
+      // a pin held to the Monday window was routinely three to five releases
+      // behind by the time it merged. These pins get their own PR, on every
+      // run, and automerge once CI is green: `engine/Dockerfile` proves the
+      // install with `claude --version` (the 2.1.237 stub that motivated the
+      // pin in the first place fails that check), so a green `ci` is the
+      // human gate in executable form rather than a reviewer eyeballing a
+      // version number. The build-time pin is still only the *baked* baseline
+      // — `docs/DEPLOYMENT.md` describes the runtime pin that updates a
+      // running pod without a rebuild — but a baseline that stops rotting is
+      // worth having regardless.
+      matchManagers: ["custom.regex"],
+      matchFileNames: ["engine/agent-versions.env"],
+      groupName: "agent CLI pins",
+      schedule: ["at any time"],
+      prPriority: 10,
+      automerge: true,
+      automergeType: "pr",
+      // Rebase-only branch protection with a strict up-to-date rule: a PR
+      // that falls behind `dev` cannot merge until it is rebased, so let
+      // Renovate keep it current rather than waiting for a human to.
+      rebaseWhen: "behind-base-branch",
+    },
+    {
+      // The dev toolchain moves together and is not shipped to anyone.
+      matchDepTypes: ["dev"],
+      groupName: "dev dependencies",
+    },
+    {
+      // Both stages of the Dockerfile use the same base, so a digest bump
+      // that lands on one and not the other would build the runtime from a
+      // different image than the build. One PR, both lines.
+      matchManagers: ["dockerfile"],
+      groupName: "container base image",
+    },
+  ],
+}

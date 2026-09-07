@@ -1,0 +1,7 @@
+# Optional difference for a mobile-first public-demo hostname. Layer this over
+# demo.overlay.yml in a separate Compose project so both sites can pin the same
+# signed image digest while exposing different root documents.
+services:
+  vogt-demo:
+    environment:
+      DEMO_ROOT_DOCUMENT: mobile-demo.html

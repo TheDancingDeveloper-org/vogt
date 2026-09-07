@@ -1,0 +1,12 @@
+# BuildKit uses THIS file (not the root allow-list, which admits only the Python
+# core) for `-f deploy/e2e.playwright.Dockerfile` builds. The image COPYs web/
+# only, so a deny-list keeps that tree and drops the heavy/irrelevant ones. A
+# stale web/node_modules or web/dist must not shadow the frozen install.
+.git
+**/node_modules
+**/target
+web/dist
+src
+engine
+mobile
+docs

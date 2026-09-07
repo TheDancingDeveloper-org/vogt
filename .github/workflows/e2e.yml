@@ -1,0 +1,298 @@
+# End-to-end stack smoke.
+#
+# Everything else that calls itself a test stops short of the whole product:
+# the core parity harness is in-process, `test_front_door.py` pairs two
+# processes, the Playwright suite runs against a mocked API (`installFixtures`),
+# and `test_public_delivery.py` only renders `docker compose config`. This job
+# is the mechanical form of a human-on-a-phone smoke: it
+# clones `main` fresh, builds and starts the two-container stack, and
+# walks the stranger's path against it — `/health/ready`, the PWA, the first
+# token, the forge, a work item, a session, a synthetic agent task — then runs
+# the *same* Playwright specs against the live stack so mock/truth drift fails.
+#
+# ── What the operator must set ───────────────────────────────────────────
+#
+#   `VOGT_FIXTURE_TOKEN` (repository secret) — a GitHub PAT with read/write to
+#   `TheDancingDeveloper-org/vogt-fixture` (classic `repo` scope, plus
+#   `workflow` for the fixture's failing-checks PR file). It is the ONLY
+#   credential this job needs. With it, the forge half runs: reset the fixture,
+#   import it, link, sweep, rank, and create a work item that appears upstream.
+#   WITHOUT it the job still runs the whole credential-free half — health, the
+#   PWA, the first token, a native work item, a session, and the fake-agent —
+#   and the forge steps print `SKIP (no VOGT_FIXTURE_TOKEN)`. So an operator who
+#   has not set the secret still gets a real end-to-end signal.
+#
+# ── Where it runs, and when ──────────────────────────────────────────────
+#
+# On `main` merges and nightly, plus manual — never on pull requests, which keep
+# the mocked suites (that is the whole point). Self-hosted by design, with
+# the `docker` label because it builds and runs the compose stack.
+#
+# Run the smoke locally against any stack (see docs/CONTRIBUTING.md):
+#
+#   scripts/e2e_stack_smoke.sh https://vogt.example.com "$FRONT_DOOR_TOKEN"
+
+name: e2e
+
+on:
+  # `main` merges, nightly to catch drift no merge would, and manual re-runs.
+  # Not `pull_request` — PRs keep the mocked suites. A docs-only push skips the
+  # expensive build.
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+concurrency:
+  # One live stack per ref at a time — two builds racing for the same loopback
+  # port would fight. Not cancel-in-progress: a nightly and a push should not
+  # evict each other's teardown, and every run tears its own stack down.
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: compose up, walk the path, live Playwright
+    # Self-hosted, `docker` because it builds and runs the stack. A
+    # static selector — dynamic `runs-on` is what the runner-policy gate forbids.
+    runs-on: [self-hosted, docker]
+    env:
+      # The three compose files: the public base, the engine overlay, and the
+      # e2e overlay that mounts the fake-agent and its preset.
+      COMPOSE_FILES: "-f deploy/vogt.compose.yml -f deploy/engine.overlay.yml -f deploy/e2e.overlay.yml"
+      # The stack publishes the engine to host loopback; the smoke and the live
+      # Playwright both reach it there.
+      SMOKE_BASE: "http://127.0.0.1:8910"
+      VOGT_PUBLIC_URL: "http://127.0.0.1:8910"
+      ENGINE_BIND: "127.0.0.1"
+      ENGINE_PORT: "8910"
+      ENGINE_PUBLIC_URL: "http://127.0.0.1:8910"
+      # Build the core image locally and point BOTH the core service's `image:`
+      # and the engine build's `CORE_IMAGE` arg (both read `${VOGT_IMAGE}`) at
+      # it, so nothing pulls the private GHCR core — the job runs with no
+      # registry credentials.
+      VOGT_IMAGE: "vogt-core:local"
+    steps:
+      # A clean clone, every run: the whole point is that nothing on the runner
+      # is carried between runs except the layer/toolchain caches.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: mint the stack's secrets
+        env:
+          VOGT_FIXTURE_TOKEN: ${{ secrets.VOGT_FIXTURE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # The engine bearer (>= 16 chars) and the shared core token the
+          # bootstrap adopts. Kept out of the log; the engine token is exported
+          # for the later steps that act as the front-door client.
+          engine_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$engine_token"
+          echo "ENGINE_TOKEN=$engine_token" >> "$GITHUB_ENV"
+          # The shared core token the bootstrap adopts, and the fixture PAT,
+          # are both injected as Compose `environment:` secrets rather than host
+          # files: the CI runner's filesystem is not the docker daemon's, so a
+          # bind-mounted file secret's source does not exist for the daemon.
+          # Export them to GITHUB_ENV so the `up` step materialises the secrets.
+          core_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$core_token"
+          echo "VOGT_CORE_TOKEN_VALUE=$core_token" >> "$GITHUB_ENV"
+          # Empty when the secret is unset -> no github.com provider -> the forge
+          # half skips (the credential-free run). Masked when present.
+          if [ -n "${VOGT_FIXTURE_TOKEN:-}" ]; then echo "::add-mask::$VOGT_FIXTURE_TOKEN"; fi
+          printf 'VOGT_FIXTURE_TOKEN=%s\n' "${VOGT_FIXTURE_TOKEN:-}" >> "$GITHUB_ENV"
+
+      - name: build the images locally (no GHCR pull, no registry creds)
+        run: |
+          set -euo pipefail
+          # The core is private on GHCR and the runner has no registry
+          # creds, so build everything from the repo's own Dockerfiles. VOGT_IMAGE
+          # points the core service and the engine build-arg at the local core.
+          # The e2e engine bakes in the fake-agent + preset, so nothing is
+          # host-bind-mounted (the runner's FS is not the docker daemon's).
+          docker build -t vogt-core:local -f Dockerfile .
+          docker build -t vogt-engine:local -f engine/Dockerfile --build-arg CORE_IMAGE=vogt-core:local .
+          docker build -t vogt-engine-e2e:local -f deploy/e2e.engine.Dockerfile .
+          # The live-Playwright image: web/ + browsers baked in so the
+          # `live` project runs in-network with no bind-mount. Public base image,
+          # so this pull needs no registry creds.
+          docker build -t vogt-e2e-playwright:local -f deploy/e2e.playwright.Dockerfile .
+
+      - name: start the stack (images prebuilt; no --build, no bind-mounts)
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # COMPOSE_FILES is intentionally split
+          docker compose $COMPOSE_FILES up -d
+
+      - name: wait for the core to be ready (in-network)
+        run: |
+          set -euo pipefail
+          # The runner is a container and the daemon publishes ports on the
+          # host, so the stack is NOT reachable over the runner's loopback.
+          # Everything that talks to the stack therefore runs INSIDE the compose
+          # network via `docker compose exec`. Gate on the core's own readiness,
+          # reached from the engine container by service DNS.
+          # shellcheck disable=SC2086
+          dc() { docker compose $COMPOSE_FILES "$@"; }
+          ok=""
+          for _ in $(seq 1 60); do
+            if dc exec -T engine curl -fsS http://vogt:8000/health/ready >/dev/null 2>&1; then
+              ok=yes; break
+            fi
+            sleep 5
+          done
+          if [ -z "$ok" ]; then
+            echo "vogt-core did not report ready within 300s" >&2
+            dc exec -T engine curl -sS http://vogt:8000/health/ready || true
+            dc logs --tail=200 || true
+            exit 1
+          fi
+          echo "vogt-core is ready"
+
+      - name: stack smoke — walk the stranger's path (in-network)
+        env:
+          VOGT_SMOKE_TOKEN: ${{ env.ENGINE_TOKEN }}
+          VOGT_FIXTURE_TOKEN: ${{ secrets.VOGT_FIXTURE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Copy the walk + fixture reset + manifest into the engine container at
+          # the layout the smoke expects (REPO_ROOT = the script dir's parent),
+          # then run it from inside the network against the engine's own port.
+          # The fake-agent is already baked into this image at /opt/vogt-e2e.
+          # fixture_reset.py is stdlib-only and the image carries python3+curl.
+          # shellcheck disable=SC2086
+          dc() { docker compose $COMPOSE_FILES "$@"; }
+          dc exec -T engine mkdir -p /tmp/e2e/scripts /tmp/e2e/tests/fixtures
+          dc cp scripts/e2e_stack_smoke.sh engine:/tmp/e2e/scripts/e2e_stack_smoke.sh
+          dc cp scripts/fixture_reset.py engine:/tmp/e2e/scripts/fixture_reset.py
+          dc cp tests/fixtures/forge_fixture_manifest.json engine:/tmp/e2e/tests/fixtures/forge_fixture_manifest.json
+          dc exec -T \
+            -e VOGT_SMOKE_TOKEN="$VOGT_SMOKE_TOKEN" \
+            -e VOGT_FIXTURE_TOKEN="${VOGT_FIXTURE_TOKEN:-}" \
+            engine bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
+
+      # The live Playwright project, in-network. A Playwright
+      # container on the compose network runs the SAME gui.spec.ts specs against
+      # http://engine:8910 with the real API (no installFixtures), so mock/truth
+      # drift fails a test. The runner cannot reach the stack over host loopback,
+      # so this runs via `docker compose run` on the network like the smoke walk.
+      #
+      # First landing is advisory (continue-on-error): the in-network smoke walk
+      # above is the hard end-to-end gate, and this project is being brought up
+      # on the self-hosted runner — promote it to a hard gate once it is green
+      # across a few runs. Its failures still surface in the run for triage.
+      - name: live Playwright — the same specs against the running stack (in-network)
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_LIVE_TOKEN: ${{ env.ENGINE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086  # COMPOSE_FILES is intentionally split
+          docker compose $COMPOSE_FILES --profile live run --rm -T \
+            -e PLAYWRIGHT_LIVE_TOKEN="$PLAYWRIGHT_LIVE_TOKEN" \
+            playwright
+
+      - name: stack logs on failure
+        if: failure()
+        run: |
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES logs --tail=400 || true
+
+      # Always tear the stack down and drop its volumes — a run must leave the
+      # runner as clean as it found it, whatever happened above.
+      - name: teardown
+        if: always()
+        run: |
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES down -v || true
+          rm -f deploy/vogt-core-token deploy/github-token || true
+
+  # Clean-consumer contract: prove the *published* pair is what a stranger
+  # can consume. The full boot-walk lives in `scripts/clean_consumer_smoke.sh`
+  # and runs on a real consumer host (where the docker daemon shares the host's
+  # filesystem and loopback); on these containerised runners the daemon cannot
+  # see a host-bind secret and the runner cannot reach the stack over host
+  # loopback (see the `e2e` job above), so here we gate the parts that are robust
+  # anywhere: both images resolve and pull over an *anonymous* token, and
+  # the shipped compose renders with voice on and off.
+  clean-consumer:
+    name: published pair pulls anonymously and renders
+    runs-on: [self-hosted, docker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: the smoke script is well-formed
+        run: bash -n scripts/clean_consumer_smoke.sh
+
+      - name: both images resolve and pull over an anonymous token
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/vogt/__init__.py)"
+          for repo in vogt-stack vogt-voice; do
+            image="ghcr.io/thedancingdeveloper-org/${repo}:${version}"
+            token="$(curl -sS "https://ghcr.io/token?scope=repository:thedancingdeveloper-org/${repo}:pull" \
+              | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')"
+            digest="$(curl -sS -o /dev/null -D - -H "Authorization: Bearer ${token}" \
+              -H 'Accept: application/vnd.oci.image.index.v1+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/thedancingdeveloper-org/${repo}/manifests/${version}" \
+              | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{print $2}')"
+            [ -n "$digest" ] || { echo "::error::${image} does not resolve over an anonymous token — is the package public?" >&2; exit 1; }
+            echo "${repo} ${version} -> ${digest}"
+          done
+
+      - name: the shipped stack renders with voice on and off
+        env:
+          ENGINE_TOKEN: "0123456789abcdef0123"
+        run: |
+          set -euo pipefail
+          on="$(COMPOSE_PROFILES=voice docker compose --env-file deploy/stack.env.example \
+            -f deploy/stack.compose.yml config --services | sort | tr '\n' ' ' | xargs)"
+          [ "$on" = "vogt voice" ] || { echo "::error::voice on rendered '$on', expected 'vogt voice'" >&2; exit 1; }
+          off="$(COMPOSE_PROFILES= docker compose --env-file deploy/stack.env.example \
+            -f deploy/stack.compose.yml config --services | sort | tr '\n' ' ' | xargs)"
+          [ "$off" = "vogt" ] || { echo "::error::voice off rendered '$off', expected 'vogt'" >&2; exit 1; }
+          echo "voice on -> vogt+voice; voice off -> vogt only"
+
+  # Custom-image extension contract: the worked example must build FROM
+  # the published stack and its overlay must merge — with nothing private in it.
+  # Build works on these runners (the context is shipped to the daemon as a
+  # tarball); the boot-walk, like the clean-consumer one, is a real-host concern.
+  custom-image:
+    name: the custom-stack example builds and its overlay merges
+    runs-on: [self-hosted, docker]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: build the example FROM the current published stack
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' src/vogt/__init__.py)"
+          # Override the pinned digest with the current published tag so the
+          # example does not rot the CI signal as releases move.
+          docker build \
+            --build-arg "STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack:${version}" \
+            -t vogt-custom-stack:ci deploy/examples/custom-stack
+
+      - name: the example carries the installed tool and stays USER sprooty
+        run: |
+          set -euo pipefail
+          docker run --rm --user root vogt-custom-stack:ci sh -c 'command -v rg'
+          test "$(docker run --rm vogt-custom-stack:ci id -un)" = "sprooty"
+
+      - name: the overlay merges onto the base
+        env:
+          ENGINE_TOKEN: "0123456789abcdef0123"
+          VOGT_CUSTOM_STACK_IMAGE: "vogt-custom-stack:ci"
+        run: |
+          set -euo pipefail
+          cd deploy/examples/custom-stack
+          COMPOSE_PROFILES=voice docker compose --project-directory . \
+            -f ../../stack.compose.yml -f overlay.yml config >/dev/null
+          echo "the custom-stack overlay renders onto the base"

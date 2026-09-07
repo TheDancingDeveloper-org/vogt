@@ -1,0 +1,279 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  collectPanes,
+  commitCreatedPane,
+  containsSession,
+  findPane,
+  insertPane,
+  makePane,
+  MIN_SPLIT_FRACTION,
+  normalizeSizes,
+  normalizeTerminalLayout,
+  paneIdFor,
+  pruneTerminalLayout,
+  removePane,
+  resetDivider,
+  resizeSplit,
+  retargetPane,
+  type SavedTerminalLayout,
+  type SplitNode,
+  type TerminalLayoutNode,
+} from "../terminalLayout";
+
+describe("terminal layout transactions", () => {
+  it("atomically changes a pane to a split and supports nested insertion", () => {
+    const first = makePane("one");
+    const split = insertPane(first, first.id, "row", makePane("two"));
+    expect(split?.type).toBe("split");
+
+    const nested = insertPane(split!, paneIdFor("two"), "column", makePane("three"));
+    expect(collectPanes(nested!).map((pane) => pane.sessionId))
+      .toEqual(["one", "two", "three"]);
+  });
+
+  it("returns a failed insertion instead of silently retaining an orphan", () => {
+    expect(insertPane(makePane("one"), "pane:gone", "row", makePane("two")))
+      .toBeNull();
+  });
+
+  it("rolls back a created session if insertion fails", async () => {
+    const rollback = vi.fn(async () => undefined);
+    await expect(commitCreatedPane("two", () => false, rollback))
+      .rejects.toThrow("target pane changed");
+    expect(rollback).toHaveBeenCalledWith("two");
+  });
+
+  it("preserves nested structure through persistence, close and pruning", () => {
+    const stored: TerminalLayoutNode = {
+      type: "split",
+      id: "split:outer",
+      direction: "row",
+      children: [
+        makePane("one"),
+        {
+          type: "split",
+          id: "split:inner",
+          direction: "column",
+          children: [makePane("two"), makePane("three")],
+        },
+      ],
+    };
+    const reloaded = normalizeTerminalLayout(JSON.parse(JSON.stringify(stored)));
+    expect(collectPanes(reloaded!).map((pane) => pane.sessionId))
+      .toEqual(["one", "two", "three"]);
+
+    const closed = removePane(reloaded!, paneIdFor("two"));
+    expect(collectPanes(closed!).map((pane) => pane.sessionId))
+      .toEqual(["one", "three"]);
+
+    const pruned = pruneTerminalLayout(reloaded!, (id) => id !== "three");
+    expect(collectPanes(pruned!).map((pane) => pane.sessionId))
+      .toEqual(["one", "two"]);
+  });
+});
+
+// Composing existing sessions into a split, re-targeting a pane and
+// detaching one are all pure tree transforms — no session is ever created.
+describe("composing existing sessions", () => {
+  it("inserts an existing session as a new pane without spawning one", () => {
+    const root = makePane("one");
+    const split = insertPane(root, root.id, "row", makePane("two"));
+    expect(collectPanes(split!).map((pane) => pane.sessionId))
+      .toEqual(["one", "two"]);
+    // Every pane is bound to a session the caller already had, and each pane id
+    // is derived from that session — nothing here manufactures a new one.
+    expect(collectPanes(split!).map((pane) => pane.id))
+      .toEqual([paneIdFor("one"), paneIdFor("two")]);
+  });
+
+  it("re-targets a pane at a session not already shown", () => {
+    const root = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"))!;
+    const result = retargetPane(root, paneIdFor("two"), "three");
+    expect(result).not.toBeNull();
+    expect(collectPanes(result!.root).map((pane) => pane.sessionId))
+      .toEqual(["one", "three"]);
+    // The pane's id follows its new session, and the layout is otherwise intact.
+    expect(result!.activePaneId).toBe(paneIdFor("three"));
+    expect(containsSession(result!.root, "two")).toBe(false);
+  });
+
+  it("swaps two panes when the target session is already on screen", () => {
+    const root = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"))!;
+    // Point the first pane at "two", which the second pane already shows.
+    const result = retargetPane(root, paneIdFor("one"), "two");
+    expect(collectPanes(result!.root).map((pane) => pane.sessionId))
+      .toEqual(["two", "one"]);
+    // A swap, not a duplication: both sessions survive, exactly once each.
+    expect(collectPanes(result!.root)).toHaveLength(2);
+    expect(result!.activePaneId).toBe(paneIdFor("two"));
+  });
+
+  it("re-targeting a missing pane changes nothing", () => {
+    const root = makePane("one");
+    expect(retargetPane(root, "pane:gone", "two")).toBeNull();
+  });
+
+  it("detaches a pane by dropping it from the tree, leaving its session alone", () => {
+    const root = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"))!;
+    const detached = removePane(root, paneIdFor("two"));
+    expect(collectPanes(detached!).map((pane) => pane.sessionId)).toEqual(["one"]);
+    // `removePane` is a layout function only: it names no session-kill verb, so
+    // detaching cannot reach the kill/DELETE path.
+    expect(findPane(detached!, paneIdFor("two"))).toBeNull();
+  });
+
+  it("round-trips a saved layout's session bindings", () => {
+    const saved: SavedTerminalLayout = {
+      root: {
+        type: "split",
+        id: "split:outer",
+        direction: "row",
+        children: [
+          makePane("alpha"),
+          {
+            type: "split",
+            id: "split:inner",
+            direction: "column",
+            children: [makePane("beta"), makePane("gamma")],
+          },
+        ],
+      },
+      activePaneId: paneIdFor("beta"),
+      broadcast: true,
+    };
+    // Persist and reload the way `TerminalWorkspace` does.
+    const reloaded = JSON.parse(JSON.stringify(saved)) as SavedTerminalLayout;
+    const root = normalizeTerminalLayout(reloaded.root);
+    expect(collectPanes(root!).map((pane) => pane.sessionId))
+      .toEqual(["alpha", "beta", "gamma"]);
+    expect(findPane(root!, reloaded.activePaneId)?.sessionId).toBe("beta");
+    expect(reloaded.broadcast).toBe(true);
+  });
+});
+
+// A re-target rebuilds only the spine down to the pane that changed and
+// returns every untouched node by the same object reference. TerminalWorkspace
+// renders split children through Solid's `<For>`, which is keyed by reference,
+// so this identity is exactly what keeps sibling panes — their xterm, scrollback
+// and socket — mounted while one pane switches sessions.
+describe("re-target preserves untouched pane identity", () => {
+  it("leaves an untouched sibling subtree referentially identical", () => {
+    const inner: SplitNode = {
+      type: "split",
+      id: "split:inner",
+      direction: "column",
+      children: [makePane("two"), makePane("three")],
+    };
+    const root: TerminalLayoutNode = {
+      type: "split",
+      id: "split:outer",
+      direction: "row",
+      children: [makePane("one"), inner],
+    };
+
+    const result = retargetPane(root, paneIdFor("one"), "four");
+    expect(result).not.toBeNull();
+    // The whole inner split (and both its panes) is the same object, so `<For>`
+    // never disposes it; only the "one" pane is replaced.
+    expect((result!.root as SplitNode).children[1]).toBe(inner);
+    expect(result!.activePaneId).toBe(paneIdFor("four"));
+    expect(collectPanes(result!.root).map((pane) => pane.sessionId))
+      .toEqual(["four", "two", "three"]);
+  });
+
+  it("swaps two panes and leaves the third untouched by reference", () => {
+    const third = makePane("c");
+    const root: TerminalLayoutNode = {
+      type: "split",
+      id: "split:row",
+      direction: "row",
+      children: [makePane("a"), makePane("b"), third],
+    };
+
+    // Point pane "a" at "b", which pane 2 already shows: the two swap.
+    const result = retargetPane(root, paneIdFor("a"), "b");
+    expect(result).not.toBeNull();
+    expect((result!.root as SplitNode).children[2]).toBe(third);
+    expect(collectPanes(result!.root).map((pane) => pane.sessionId))
+      .toEqual(["b", "a", "c"]);
+    expect(result!.activePaneId).toBe(paneIdFor("b"));
+  });
+});
+
+// Dividers carry `sizes` — fractions of a split's main axis. The model
+// keeps them normalised through every structural edit and rebuilds only the
+// spine down to a resized split, so a drag never disturbs another pane.
+describe("split sizes and divider resize", () => {
+  const rowSplit = (...ids: string[]): SplitNode => ({
+    type: "split",
+    id: "split:row",
+    direction: "row",
+    children: ids.map((id) => makePane(id)),
+  });
+
+  it("falls back to equal shares for missing, wrong-length or bad input", () => {
+    expect(normalizeSizes(2)).toEqual([0.5, 0.5]);
+    expect(normalizeSizes(3, [0.5, 0.5])).toEqual([1 / 3, 1 / 3, 1 / 3]);
+    expect(normalizeSizes(2, [0, 1])).toEqual([0.5, 0.5]);
+    expect(normalizeSizes(2, [Number.NaN, 1])).toEqual([0.5, 0.5]);
+  });
+
+  it("rescales a valid but unnormalised array, preserving proportions", () => {
+    expect(normalizeSizes(2, [3, 1])).toEqual([0.75, 0.25]);
+  });
+
+  it("a fresh split from a pane starts at equal shares", () => {
+    const split = insertPane(makePane("one"), paneIdFor("one"), "row", makePane("two"));
+    expect((split as SplitNode).sizes).toEqual([0.5, 0.5]);
+  });
+
+  it("moves space between the two neighbours only, leaving the third alone", () => {
+    const root = rowSplit("a", "b", "c"); // [1/3, 1/3, 1/3]
+    const next = resizeSplit(root, "split:row", 0, 0.1) as SplitNode;
+    expect(next.sizes![0]).toBeCloseTo(1 / 3 + 0.1);
+    expect(next.sizes![1]).toBeCloseTo(1 / 3 - 0.1);
+    expect(next.sizes![2]).toBeCloseTo(1 / 3); // untouched
+    // The pair's combined share, and the total, are conserved.
+    expect(next.sizes![0]! + next.sizes![1]!).toBeCloseTo(2 / 3);
+    expect(next.sizes!.reduce((s, x) => s + x, 0)).toBeCloseTo(1);
+  });
+
+  it("clamps a drag so no neighbour falls below the minimum", () => {
+    const root = rowSplit("a", "b"); // [0.5, 0.5]
+    const next = resizeSplit(root, "split:row", 0, 5) as SplitNode; // shove hard
+    expect(next.sizes![1]).toBeCloseTo(MIN_SPLIT_FRACTION);
+    expect(next.sizes![0]).toBeCloseTo(1 - MIN_SPLIT_FRACTION);
+  });
+
+  it("leaves untouched sibling panes referentially identical while resizing", () => {
+    const root = rowSplit("a", "b", "c");
+    const c = root.children[2];
+    const next = resizeSplit(root, "split:row", 0, 0.1) as SplitNode;
+    expect(next.children[2]).toBe(c);
+    // Only the sizes array changed; the children array kept every reference.
+    expect(next.children[0]).toBe(root.children[0]);
+  });
+
+  it("double-click resets a divider to equal neighbours", () => {
+    const root: SplitNode = { ...rowSplit("a", "b"), sizes: [0.8, 0.2] };
+    const next = resetDivider(root, "split:row", 0) as SplitNode;
+    expect(next.sizes).toEqual([0.5, 0.5]);
+  });
+
+  it("renormalises sizes when a child is removed", () => {
+    const root: SplitNode = { ...rowSplit("a", "b", "c"), sizes: [0.5, 0.25, 0.25] };
+    const closed = removePane(root, paneIdFor("a")) as SplitNode;
+    // b and c kept their 1:1 proportion and were rescaled to sum to 1.
+    expect(closed.sizes).toEqual([0.5, 0.5]);
+  });
+
+  it("round-trips sizes through normalizeTerminalLayout and drops bad ones", () => {
+    const saved = { ...rowSplit("a", "b"), sizes: [0.7, 0.3] };
+    const reloaded = normalizeTerminalLayout(JSON.parse(JSON.stringify(saved))) as SplitNode;
+    expect(reloaded.sizes).toEqual([0.7, 0.3]);
+    const legacy = normalizeTerminalLayout(
+      JSON.parse(JSON.stringify({ ...rowSplit("a", "b"), sizes: undefined })),
+    ) as SplitNode;
+    expect(legacy.sizes).toEqual([0.5, 0.5]);
+  });
+});

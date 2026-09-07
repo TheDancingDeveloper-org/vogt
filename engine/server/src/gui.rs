@@ -1,0 +1,351 @@
+use std::sync::Arc;
+
+use axum::{
+    extract::{Query, State},
+    Json,
+};
+use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use tokio::process::Command;
+
+use crate::{
+    app::AppState,
+    error::{ApiError, Result},
+};
+
+/// Tracks GUI processes we've launched via `/api/gui/launch`. Read-only from
+/// the perspective of the launched process — when it exits naturally, the
+/// next call to `processes` cleans the stale entry up.
+#[derive(Debug, Clone, Serialize)]
+pub struct GuiProc {
+    pub pid: u32,
+    pub command: Vec<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub launched_at: time::OffsetDateTime,
+}
+
+pub struct GuiRegistry {
+    procs: Mutex<Vec<GuiProc>>,
+}
+
+impl GuiRegistry {
+    pub fn new() -> Self {
+        Self {
+            procs: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn add(&self, p: GuiProc) {
+        self.procs.lock().push(p);
+    }
+
+    /// Snapshot the list, dropping entries whose pid no longer exists.
+    fn list_alive(&self) -> Vec<GuiProc> {
+        let mut g = self.procs.lock();
+        g.retain(|p| pid_alive(p.pid));
+        g.clone()
+    }
+
+    pub fn count_alive(&self) -> usize {
+        self.list_alive().len()
+    }
+
+    /// Whether `pid` names a GUI process this engine launched and that is
+    /// still alive. The kill endpoint consults it so it can only signal
+    /// processes it owns, never an arbitrary pid on the box.
+    pub fn is_tracked(&self, pid: u32) -> bool {
+        let mut g = self.procs.lock();
+        g.retain(|p| pid_alive(p.pid));
+        g.iter().any(|p| p.pid == pid)
+    }
+}
+
+impl Default for GuiRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    // Signal 0 returns ESRCH if the process is gone, EPERM if it exists but
+    // we lack permission. Either case other than "alive and ours" we treat
+    // as alive=false to be safe.
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LaunchReq {
+    /// argv to exec. Treated as opaque — we do NOT pass through a shell, so
+    /// shell metacharacters in args are literal.
+    pub command: Vec<String>,
+    /// If true, prefix with `swaymsg exec --` so the process is owned by sway
+    /// and inherits its WAYLAND_DISPLAY. Requires sway running.
+    #[serde(default)]
+    pub via_sway: bool,
+}
+
+pub async fn launch(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LaunchReq>,
+) -> Result<Json<GuiProc>> {
+    if req.command.is_empty() {
+        return Err(ApiError::BadRequest("command must not be empty".into()));
+    }
+    let (exe, args): (String, Vec<String>) = if req.via_sway {
+        // swaymsg exec -- <argv...>
+        let mut all = vec!["exec".to_string(), "--".to_string()];
+        all.extend(req.command.iter().cloned());
+        ("swaymsg".to_string(), all)
+    } else {
+        (req.command[0].clone(), req.command[1..].to_vec())
+    };
+
+    let child = Command::new(&exe)
+        .args(&args)
+        // Do not leak the engine's credentials into a launched GUI process
+        // Start from the engine env with secrets stripped, exactly as
+        // PTY sessions now do.
+        .env_clear()
+        .envs(crate::pty::sanitized_child_env())
+        // Detach from the parent's stdio so a backgrounded GUI app doesn't
+        // wedge the parent terminal if it writes to stderr.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| ApiError::Internal(format!("spawn {exe}: {e}")))?;
+
+    let pid = match child.id() {
+        Some(p) => p,
+        None => return Err(ApiError::Internal("no pid for spawned child".into())),
+    };
+    let proc = GuiProc {
+        pid,
+        command: req.command,
+        launched_at: time::OffsetDateTime::now_utc(),
+    };
+    state.gui.add(proc.clone());
+
+    // We intentionally don't await the child — it lives until killed externally
+    // (X11/Wayland window close, swaykill, kill_proc endpoint). The blocking
+    // wait task ensures we don't accumulate zombies; portable_pty uses
+    // process_id() differently — here it's a tokio Child so we just spawn the
+    // wait in the background.
+    tokio::spawn(async move {
+        let mut child = child;
+        let _ = child.wait().await;
+    });
+
+    Ok(Json(proc))
+}
+
+pub async fn processes(State(state): State<Arc<AppState>>) -> Json<Vec<GuiProc>> {
+    Json(state.gui.list_alive())
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KillQuery {
+    pub pid: u32,
+}
+
+pub async fn kill_proc(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<KillQuery>,
+) -> Result<Json<serde_json::Value>> {
+    // Only signal a process this engine actually launched. The handler
+    // used to SIGTERM any pid the caller named, so a `gui-control`-scoped
+    // token could kill vogt-core or another session's shell —
+    // DoS well outside the "GUI launcher" contract. Consult the registry.
+    if !state.gui.is_tracked(q.pid) {
+        return Err(ApiError::NotFound);
+    }
+    #[cfg(unix)]
+    unsafe {
+        let rc = libc::kill(q.pid as libc::pid_t, libc::SIGTERM);
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            if err.raw_os_error() != Some(libc::ESRCH) {
+                return Err(ApiError::Internal(format!("kill({}): {err}", q.pid)));
+            }
+        }
+    }
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
+/// Public-ish endpoint exposing the bits of config the web UI needs at boot.
+/// Intentionally NOT behind bearer auth: it returns no secrets, and the
+/// browser fetches it before the user has typed the token into Settings.
+#[derive(Debug, Serialize)]
+pub struct PublicConfig {
+    pub gui_stream_url: Option<String>,
+    /// One server-owned visibility decision: a configured URL, an installed
+    /// streamer and an operator's recorded end-to-end verification.
+    pub gui_stream_available: bool,
+    pub version: &'static str,
+    pub product_version: &'static str,
+    pub source_ref: &'static str,
+    pub source_sha: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release_url: Option<String>,
+    /// Build-time feature availability, read from `/etc/vogt/features.json`.
+    /// `{"selkies": "1.6.2"}` when present, `{"selkies": null}` when the image
+    /// was built without Selkies. UI hides the GUI tab when selkies is null.
+    pub features: serde_json::Value,
+    /// Session templates for quick session creation.
+    pub session_templates: Vec<crate::config::SessionTemplate>,
+    /// Whether the conversational assistant is provisioned (key present).
+    /// Presence only — never the key itself.
+    pub assistant_enabled: bool,
+    /// Whether the server-side STT route is configured. A client with
+    /// no on-device recognizer uses it as its speech path; presence lets it
+    /// choose that path by capability rather than by probing for a 404. Never
+    /// the key or the base URL — a base URL is an exposure value.
+    pub assistant_stt_enabled: bool,
+    /// Whether the server-side TTS route is configured. A client with
+    /// no on-device synthesis speaks replies through it. Presence only.
+    pub assistant_tts_enabled: bool,
+    /// Whether this front door has a vogt-core behind it, and where its
+    /// surfaces are mounted. Presence only, never a token: a client that has
+    /// to provoke a 503 to find out whether Vogt exists cannot render an
+    /// honest absent state, and a Vogt tab that appears and then
+    /// errors is worse than one that says why it is disabled.
+    pub vogt: serde_json::Value,
+    /// Model id the assistant uses, for display. None when disabled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assistant_model: Option<String>,
+    /// The configured provider profiles a request may name: a name,
+    /// the model that name runs by default, and which one is the deployment's
+    /// default. **Never a key or a base URL** — a client offering the choice
+    /// needs neither, and a base URL is an exposure value.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub assistant_profiles: Vec<AssistantProfileSummary>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct AssistantProfileSummary {
+    pub name: String,
+    pub model: String,
+    pub default: bool,
+}
+
+pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicConfig> {
+    let features = load_features();
+    let gui_stream_available = gui_stream_available(
+        state.config.gui_stream_url.as_deref(),
+        state.config.gui_stream_verified,
+        &features,
+    );
+    Json(PublicConfig {
+        gui_stream_url: state.config.gui_stream_url.clone(),
+        gui_stream_available,
+        version: crate::product::VERSION,
+        product_version: crate::product::VERSION,
+        source_ref: crate::product::SOURCE_REF,
+        source_sha: crate::product::SOURCE_SHA,
+        release_url: crate::product::release_url(),
+        features,
+        session_templates: state.config.session_templates.clone(),
+        vogt: crate::vogt_core::public_status(&state),
+        assistant_enabled: state.assistant.is_some(),
+        assistant_stt_enabled: state
+            .assistant_speech
+            .as_ref()
+            .is_some_and(|s| s.stt_enabled()),
+        assistant_tts_enabled: state
+            .assistant_speech
+            .as_ref()
+            .is_some_and(|s| s.tts_enabled()),
+        assistant_model: state.assistant.as_ref().map(|a| a.model().to_string()),
+        assistant_profiles: state
+            .assistant
+            .as_ref()
+            .map(|a| {
+                a.profile_summaries()
+                    .into_iter()
+                    .map(|(name, model, default)| AssistantProfileSummary {
+                        name,
+                        model,
+                        default,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+    })
+}
+
+fn gui_stream_available(
+    gui_stream_url: Option<&str>,
+    verified: bool,
+    features: &serde_json::Value,
+) -> bool {
+    verified
+        && gui_stream_url.is_some_and(|url| !url.trim().is_empty())
+        && features
+            .get("selkies")
+            .is_some_and(|version| !version.is_null())
+}
+
+fn load_features() -> serde_json::Value {
+    // Read once per request — the file is tiny and avoids needing a refresh
+    // on process restart if the operator updates it out of band.
+    std::fs::read_to_string("/etc/vogt/features.json")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gui_stream_available, GuiProc, GuiRegistry};
+
+    #[test]
+    fn kill_only_targets_launched_processes() {
+        let reg = GuiRegistry::new();
+        // Our own pid stands in for a live process the engine did not launch.
+        let unlaunched = std::process::id();
+        assert!(!reg.is_tracked(unlaunched), "nothing launched yet");
+        assert!(!reg.is_tracked(4_000_000_000), "a pid we never saw");
+
+        reg.add(GuiProc {
+            pid: unlaunched,
+            command: vec!["x".to_string()],
+            launched_at: time::OffsetDateTime::now_utc(),
+        });
+        assert!(reg.is_tracked(unlaunched), "now it is one of ours");
+    }
+
+    #[test]
+    fn gui_visibility_requires_url_streamer_and_operator_verification() {
+        assert!(!gui_stream_available(
+            None,
+            true,
+            &serde_json::json!({ "selkies": "1.6.2" }),
+        ));
+        assert!(!gui_stream_available(
+            Some("https://stream.example.test"),
+            true,
+            &serde_json::json!({ "selkies": null }),
+        ));
+        assert!(!gui_stream_available(
+            Some("   "),
+            true,
+            &serde_json::json!({ "selkies": "1.6.2" }),
+        ));
+        assert!(!gui_stream_available(
+            Some("https://stream.example.test"),
+            false,
+            &serde_json::json!({ "selkies": "1.6.2" }),
+        ));
+        assert!(gui_stream_available(
+            Some("https://stream.example.test"),
+            true,
+            &serde_json::json!({ "selkies": "1.6.2" }),
+        ));
+    }
+}

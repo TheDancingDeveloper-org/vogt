@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Launch the remote Vogt stdio bridge with an ephemeral brokered token.
+# This is intended as the MCP command for Claude Code and OpenCode.
+#
+# The client registration records this command and the endpoint, never a bearer
+# value, so no token is written into ~/.claude.json or opencode.json. Codex
+# takes the URL directly with --bearer-token-env-var and does not need this.
+set -euo pipefail
+
+# The front door on loopback, for the reason `mcp-bootstrap.sh` gives at
+# length: in the merged stack the engine is the only published port
+# and this wrapper runs inside that container, so loopback needs no
+# DNS and no certificate. It is only a fallback — a session exports its own
+# `VOGT_URL` and that wins — but a fallback naming a specific deployment stops
+# working the day that deployment is retired, so the fallback here is the front
+# door on loopback, which belongs to whatever deployment this session is part
+# of, rather than any named host.
+readonly VOGT_URL_DEFAULT="http://127.0.0.1:8910"
+
+# Inside a coding session, the session already holds a credential of its own
+# — one Vogt minted for this session's actor so that what the agent writes
+# is attributable to *this* session. Brokering here would replace
+# it with the container-wide token and file every session's work under one
+# identity, which fails silently: the agent still writes, the audit log is
+# just wrong about who. So a session's token is used as it stands, and the
+# broker is only asked when there is nothing to use.
+if [[ -n "${VOGT_SESSION_ID:-}" && -n "${VOGT_HTTP_TOKEN:-}" ]]; then
+    exec env \
+        VOGT_URL="${VOGT_URL:-$VOGT_URL_DEFAULT}" \
+        vogt-mcp-remote "$@"
+fi
+
+# Defensive fast-path. The pair above is the invariant `_session_env()`
+# promises — token and session id set together — but a deployment can split it:
+# v0.5.1 provisioned coding sessions with `VOGT_HTTP_TOKEN` (and the brokered
+# token *file*) yet no `VOGT_SESSION_ID`, so the guard above missed and the
+# broker below ran. In a coding session there are no secrets-manager credentials — brokering
+# there is designed not to work — so the wrapper exited 1 and every client saw
+# CONNECTION_CLOSED, despite holding a token that connects. When a usable
+# credential is already in the environment, run the bridge directly and let its
+# `resolve_token()` decide which source wins; only broker when there is nothing
+# to use.
+if [[ -n "${VOGT_HTTP_TOKEN:-}" || -s "${VOGT_TOKEN_FILE:-}" ]]; then
+    exec env \
+        VOGT_URL="${VOGT_URL:-$VOGT_URL_DEFAULT}" \
+        vogt-mcp-remote "$@"
+fi
+
+exec /usr/local/bin/vogt-agent-auth run -- env \
+    VOGT_URL="${VOGT_URL:-$VOGT_URL_DEFAULT}" \
+    vogt-mcp-remote "$@"

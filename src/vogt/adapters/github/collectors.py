@@ -1,0 +1,205 @@
+"""Read-only GitHub collectors.
+
+Issues, pull requests, Actions runs, and releases — as observations, in the
+same store and the same shape as everything the offline collectors find. CI
+is modelled as a generic per-revision check: GitHub Actions is one
+producer of those, not the model.
+
+No writes here. Consolidation lives in `consolidate.py`, update-automation
+posture in `posture.py`, and write-back in `writeback.py` — separate files
+because "reads the forge" and "changes the forge" should not share one.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
+from vogt.adapters.forge import GitHubProvider, RepoRef
+from vogt.adapters.github.client import (
+    DEFAULT_PER_PAGE,
+    NO_CONTENT,
+    GitHubClient,
+    GitHubUnavailable,
+    Transport,
+)
+from vogt.collectors.base import Collector, CollectorContext, Finding, finding
+from vogt.config import VogtConfig
+from vogt.core.entities import Project
+
+KIND_ISSUE = "forge.issue"
+KIND_PULL_REQUEST = "forge.pull_request"
+KIND_CHECK = "ci.check"
+KIND_RELEASE = "release"
+
+
+class _GitHubCollector:
+    """Shared plumbing: resolve the repo, call the API, skip what is absent."""
+
+    kind = ""
+    endpoint = ""
+
+    def __init__(self, client: GitHubClient) -> None:
+        self._client = client
+        # The provider owns the host check and the subject-key scheme (D2, D5);
+        # the client is still what talks HTTP here until Phase 4 moves the read
+        # surface behind the provider too.
+        self._provider = GitHubProvider(client)
+
+    @property
+    def requires_network(self) -> bool:
+        return True
+
+    def collect(self, ctx: CollectorContext, project: Project) -> Iterable[Finding]:
+        del ctx
+        ref = self._provider.parse(project.repo_url)
+        if ref is None:
+            # Not a GitHub project. Nothing to say — and saying nothing is
+            # different from saying there is nothing.
+            return []
+        # Merged rather than splatted alongside a default: a subclass that
+        # sets its own `per_page` would otherwise pass the argument twice.
+        query: dict[str, str | int] = {"per_page": DEFAULT_PER_PAGE}
+        query.update(self.query)
+        payloads = self._client.get(
+            self.endpoint.format(owner=ref.owner, repo=ref.repo), **query
+        )
+        if payloads is None or payloads is NO_CONTENT:
+            return []
+        if isinstance(payloads, dict):
+            payloads = payloads.get(self.envelope_key, [])
+        return list(self.to_findings(project, ref, payloads))
+
+    @property
+    def query(self) -> dict[str, str | int]:
+        return {}
+
+    @property
+    def envelope_key(self) -> str:
+        return ""
+
+    def to_findings(
+        self, project: Project, ref: RepoRef, payloads: list[Any]
+    ) -> Iterable[Finding]:
+        raise NotImplementedError  # pragma: no cover - subclasses implement
+
+
+class GitHubActionsCollector(_GitHubCollector):
+    """Workflow runs, as generic per-revision checks."""
+
+    endpoint = "/repos/{owner}/{repo}/actions/runs"
+
+    @property
+    def name(self) -> str:
+        return "gh-actions"
+
+    @property
+    def envelope_key(self) -> str:
+        return "workflow_runs"
+
+    @property
+    def query(self) -> dict[str, str | int]:
+        return {"per_page": 20}
+
+    def to_findings(
+        self, project: Project, ref: RepoRef, payloads: list[Any]
+    ) -> Iterable[Finding]:
+        for item in payloads:
+            if not isinstance(item, dict):
+                continue
+            sha = item.get("head_sha", "")
+            workflow = item.get("name", "workflow")
+            yield finding(
+                kind=KIND_CHECK,
+                subject_key=f"ci:{ref.slug}@{sha}:{workflow}",
+                project=project,
+                source_url=item.get("html_url"),
+                payload={
+                    # Shaped as a check, not as a GitHub run: the model is
+                    # "a check on a revision", and Actions is one producer.
+                    "revision": sha,
+                    "check": workflow,
+                    "status": item.get("status"),
+                    "conclusion": item.get("conclusion"),
+                    "branch": item.get("head_branch"),
+                    "event": item.get("event"),
+                    "run_number": item.get("run_number"),
+                    "updated_at": item.get("updated_at"),
+                    "repo": ref.slug,
+                },
+            )
+
+
+class GitHubReleaseCollector(_GitHubCollector):
+    """Releases, which is where an observed version comes from."""
+
+    endpoint = "/repos/{owner}/{repo}/releases"
+
+    @property
+    def name(self) -> str:
+        return "gh-releases"
+
+    def to_findings(
+        self, project: Project, ref: RepoRef, payloads: list[Any]
+    ) -> Iterable[Finding]:
+        for item in payloads:
+            if not isinstance(item, dict):
+                continue
+            tag = item.get("tag_name", "")
+            yield finding(
+                kind=KIND_RELEASE,
+                subject_key=f"release:{ref.slug}@{tag}",
+                project=project,
+                source_url=item.get("html_url"),
+                payload={
+                    "tag": tag,
+                    "name": item.get("name"),
+                    "draft": bool(item.get("draft", False)),
+                    "prerelease": bool(item.get("prerelease", False)),
+                    "published_at": item.get("published_at"),
+                    "repo": ref.slug,
+                    "source": "github release",
+                },
+            )
+
+
+def github_collectors(
+    config: VogtConfig, *, transport: Transport | None = None
+) -> list[Collector]:
+    """The GitHub collectors, or none at all when unconfigured.
+
+    An empty list is the ordinary case. It is what makes the forge-less test
+    layer real rather than mocked, and what makes "no GitHub" a supported
+    deployment rather than a degraded one.
+    """
+    from vogt.adapters.forge import token_file_for
+
+    client = GitHubClient.from_token_file(
+        token_file_for(config, "github.com"), transport=transport
+    )
+    if client is None:
+        return []
+    from vogt.adapters.github.notifications import GitHubNotificationCollector
+    from vogt.adapters.github.posture import GitHubPostureCollector
+
+    # Issues and PRs are the incremental `forge-issues`/`forge-prs` sync now
+    # (adapters/forge/sync.py); these four are the read-only surface still
+    # scraped per sweep, until Phase 4 moves them behind the provider too.
+    return [
+        GitHubActionsCollector(client),
+        GitHubReleaseCollector(client),
+        GitHubPostureCollector(client),
+        GitHubNotificationCollector(client),
+    ]
+
+
+__all__ = [
+    "KIND_CHECK",
+    "KIND_ISSUE",
+    "KIND_PULL_REQUEST",
+    "KIND_RELEASE",
+    "GitHubActionsCollector",
+    "GitHubReleaseCollector",
+    "GitHubUnavailable",
+    "github_collectors",
+]

@@ -1,0 +1,84 @@
+# The runner-policy gate.
+#
+# Inline rather than a call to the organisation's reusable workflow, and that
+# is the durable form: a *public* repository cannot call a reusable workflow
+# stored in a private one, which is the blocker the r4 stub recorded in
+# advance. Keeping the logic here means the audit survives going public
+# instead of stopping resolving on the day it matters.
+#
+# The rule itself is unchanged from r4: every job names a self-hosted runner,
+# and no job selects one dynamically. r20 considered splitting it — fork
+# validation on isolated GitHub-hosted workers, publication on the pool — and
+# rejected it. Where a job runs is not what makes an image generic, and the
+# exposure a public repository creates is fork-submitted code executing on a
+# tailnet-connected worker, which is closed at the gate by requiring approval
+# for fork pull request workflows rather than by relocating the pipeline.
+#
+# Reporting is not blocking: `runner-policy` must also be a required status
+# check on `main`, or this reports a red X that anyone can merge past.
+
+name: Runner policy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  runner-policy:
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: every job names a self-hosted runner
+        run: |
+          set -euo pipefail
+          bad=0
+          # Built from parts on purpose. The literal two-brace sequence is an
+          # Actions expression *anywhere* in a workflow file, including inside
+          # a `run:` body, and an unterminated one makes the whole workflow
+          # fail to start — a run with no jobs, no logs and a red X, which is
+          # how the first version of this gate was dead on arrival without
+          # anybody's dry run noticing.
+          expr_open='${'"{"
+          while IFS=: read -r file number line; do
+            case "$line" in
+              *self-hosted*) ;;
+              *)
+                echo "::error file=$file,line=$number::job does not name a self-hosted runner"
+                bad=1
+                ;;
+            esac
+            case "$line" in
+              *"$expr_open"*)
+                echo "::error file=$file,line=$number::dynamic runner selection is not allowed"
+                bad=1
+                ;;
+            esac
+          # Both extensions: a gate a `.yaml` file can walk past is not a gate.
+          done < <(grep -RnE '^[[:space:]]*runs-on:' .github/workflows \
+                     --include='*.yml' --include='*.yaml')
+          [ "$bad" -eq 0 ]
+
+      - name: every third-party action is pinned to an immutable commit
+        run: |
+          set -euo pipefail
+          bad=0
+          while IFS=: read -r file number line; do
+            target="$(printf '%s\n' "$line" | sed -E 's/^[[:space:]]*(-[[:space:]]*)?uses:[[:space:]]*([^[:space:]#]+).*/\2/')"
+            case "$target" in
+              ./*) continue ;;
+              *@*) ref="${target##*@}" ;;
+              *)
+                echo "::error file=$file,line=$number::third-party action has no immutable ref ($target)"
+                bad=1
+                continue
+                ;;
+            esac
+            if ! printf '%s\n' "$ref" | grep -Eq '^[0-9a-fA-F]{40}$'; then
+              echo "::error file=$file,line=$number::third-party action must use a full commit SHA (found $ref)"
+              bad=1
+            fi
+          done < <(grep -RnE '^[[:space:]]*(-[[:space:]]*)?uses:' .github/workflows \
+                     --include='*.yml' --include='*.yaml')
+          [ "$bad" -eq 0 ]

@@ -1,0 +1,485 @@
+import { untrack } from "solid-js";
+import { createStore, produce } from "solid-js/store";
+import { PLACES_STATE_KEY } from "./layout";
+
+export type Tab =
+  | { id: string; kind: "terminal"; sessionId: string; label: string }
+  | { id: string; kind: "editor"; path: string; label: string; dirty?: boolean }
+  | { id: string; kind: "git"; repo: string; label: string }
+  | { id: string; kind: "gui"; label: string }
+  | { id: string; kind: "history"; label: string }
+  | { id: string; kind: "tasks"; label: string; dirty?: boolean }
+  | { id: string; kind: "assistant"; label: string }
+  | { id: string; kind: "workitem"; ref: string; label: string };
+
+export interface TabsStateSnapshot {
+  tabs: Tab[];
+  /** Tab id (not session/path) currently focused, or null if none. */
+  active: string | null;
+}
+
+export interface RecentPlace {
+  path: string;
+  label: string;
+}
+
+interface PlacesStateSnapshot {
+  places: RecentPlace[];
+}
+
+const STORAGE_KEY = "vogt.tabs.v2";
+
+function cloneTab(tab: Tab): Tab {
+  return tab.kind === "editor" ? { ...tab, dirty: Boolean(tab.dirty) } : { ...tab };
+}
+
+function normalizeTab(value: unknown): Tab | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (typeof raw.id !== "string" || typeof raw.kind !== "string") return null;
+
+  switch (raw.kind) {
+    case "terminal":
+      if (typeof raw.sessionId !== "string" || typeof raw.label !== "string") return null;
+      return {
+        id: raw.id,
+        kind: "terminal",
+        sessionId: raw.sessionId,
+        label: raw.label,
+      };
+    case "editor":
+      if (typeof raw.path !== "string" || typeof raw.label !== "string") return null;
+      return {
+        id: raw.id,
+        kind: "editor",
+        path: raw.path,
+        label: raw.label,
+        dirty: Boolean(raw.dirty),
+      };
+    case "git":
+      if (typeof raw.repo !== "string" || typeof raw.label !== "string") return null;
+      return {
+        id: raw.id,
+        kind: "git",
+        repo: raw.repo,
+        label: raw.label,
+      };
+    case "workitem":
+      if (typeof raw.ref !== "string" || typeof raw.label !== "string") return null;
+      return {
+        id: raw.id,
+        kind: "workitem",
+        ref: raw.ref,
+        label: raw.label,
+      };
+    case "tasks":
+      if (typeof raw.label !== "string") return null;
+      return {
+        id: raw.id,
+        kind: "tasks",
+        label: raw.label,
+        dirty: Boolean(raw.dirty),
+      };
+    case "gui":
+    case "history":
+    case "assistant":
+      if (typeof raw.label !== "string") return null;
+      return {
+        id: raw.id,
+        kind: raw.kind,
+        label: raw.label,
+      };
+    default:
+      return null;
+  }
+}
+
+function normalizeState(value: unknown): TabsStateSnapshot {
+  if (!value || typeof value !== "object") return { tabs: [], active: null };
+  const raw = value as Record<string, unknown>;
+  const tabs = Array.isArray(raw.tabs)
+    ? raw.tabs.map((tab) => normalizeTab(tab)).filter((tab): tab is Tab => Boolean(tab))
+    : [];
+  const active = typeof raw.active === "string" ? raw.active : null;
+  return {
+    tabs: tabs.map((tab) =>
+      tab.kind === "editor" || tab.kind === "tasks"
+        ? { ...tab, dirty: false }
+        : tab,
+    ),
+    active: active && tabs.some((tab) => tab.id === active) ? active : tabs[0]?.id ?? null,
+  };
+}
+
+/**
+ * The surface a place belongs to, i.e. its path with any query stripped.
+ *
+ * A surface is one place however its filters vary: `/board?project=a` and
+ * `/board?project=b` are two views of the Board, not two places. Recents
+ * dedupe on this so filter and query variants of one surface stop stacking
+ * repeated, identically-labelled chips.
+ */
+export function placePath(pathWithQuery: string): string {
+  const query = pathWithQuery.indexOf("?");
+  return query === -1 ? pathWithQuery : pathWithQuery.slice(0, query);
+}
+
+/**
+ * Add a recent place, deduped by its surface path. The newest visit wins: its
+ * search and label replace any earlier entry for the same surface, so a chip
+ * always points at the last filter the reader had on that surface rather than
+ * the first, and the list never carries two chips that read the same.
+ */
+export function addPlace(places: RecentPlace[], path: string, label: string): void {
+  const surface = placePath(path);
+  const existing = places.findIndex((place) => placePath(place.path) === surface);
+  if (existing !== -1) places.splice(existing, 1);
+  places.push({ path, label });
+}
+
+/**
+ * The label a Recent-places chip carries for a full `path?search` place.
+ *
+ * A terminal route (`/t/:id`) is named by its live session rather than the
+ * opaque id in its URL, so a chip reads "my build" and not "/t/s2".
+ * The id is the fallback when the roster does not (yet) hold that session —
+ * which is honest about a deep link opened before the sessions list arrived.
+ */
+export function recentPlaceLabel(
+  pathWithQuery: string,
+  knownLabels: Record<string, string>,
+  sessionName: (id: string) => string | null | undefined,
+): string {
+  const path = placePath(pathWithQuery);
+  if (path.startsWith("/t/")) {
+    const id = decodeURIComponent(path.slice(3));
+    return sessionName(id) || id;
+  }
+  if (knownLabels[path]) return knownLabels[path];
+  if (path.startsWith("/w/")) return decodeURIComponent(path.slice(3));
+  return path === "/g" ? "Git" : path.slice(1) || "Vogt";
+}
+
+function readPlaces(): RecentPlace[] {
+  try {
+    const raw = localStorage.getItem(PLACES_STATE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Partial<PlacesStateSnapshot>;
+    if (!Array.isArray(parsed.places)) return [];
+    return parsed.places.filter(
+      (place): place is RecentPlace =>
+        Boolean(place) && typeof place.path === "string" && typeof place.label === "string",
+    ).slice(0, 12);
+  } catch {
+    return [];
+  }
+}
+
+function loadInitial(): TabsStateSnapshot {
+  try {
+    const current = localStorage.getItem(STORAGE_KEY);
+    const normalized = current
+      ? normalizeState(JSON.parse(current))
+      : { tabs: [], active: null };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+    return normalized;
+  } catch {
+    return { tabs: [], active: null };
+  }
+}
+
+const [store, setStore] = createStore<TabsStateSnapshot>(loadInitial());
+const [placesStore, setPlacesStore] = createStore<PlacesStateSnapshot>({
+  places: readPlaces(),
+});
+
+function persist() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  } catch {
+    /* quota / private mode — non-fatal */
+  }
+}
+
+export const tabsStore = store;
+export const recentPlacesStore = placesStore;
+
+function placePathname(path: string): string {
+  const q = path.indexOf("?");
+  return q >= 0 ? path.slice(0, q) : path;
+}
+
+/**
+ * The URL a rail/palette/bottom-bar link for a stable surface should point at.
+ *
+ * Opening a work item unmounts Board/Backlog; a bare `#/board` remounts them
+ * against an empty query, dropping the filter set the reader had applied
+ * Browser Back keeps the query, but the rail/palette/bottom-bar links
+ * do not. `rememberPlace` already records each surface's `path+search`, so the
+ * link carries the last query that surface wrote — falling back to the bare
+ * path when the surface has never been visited. Matching is by pathname, so a
+ * remembered `/board?kind=feature` is returned for a `/board` link, while a
+ * later bare `/board` (most recent, front of the list) wins over it.
+ */
+export function surfaceHref(places: RecentPlace[], path: string): string {
+  const match = places.find((place) => placePathname(place.path) === path);
+  return match ? match.path : path;
+}
+
+export function rememberPlace(path: string, label: string): void {
+  if (!path || path === "/") return;
+  const surface = placePath(path);
+  const current = untrack(() => placesStore.places);
+  // Deduped by surface, not by exact URL: two visits to the Board under
+  // different filters are the same place, and the latest one keeps its search.
+  const next = [
+    { path, label },
+    ...current.filter((place) => placePath(place.path) !== surface),
+  ].slice(0, 12);
+  setPlacesStore("places", next);
+  try {
+    localStorage.setItem(PLACES_STATE_KEY, JSON.stringify({ places: next }));
+  } catch {
+    /* recent navigation is presentation state */
+  }
+}
+
+export function openTerminalTab(sessionId: string, label: string): Tab {
+  const id = `term:${sessionId}`;
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "terminal", sessionId, label };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function openEditorTab(path: string): Tab {
+  const id = `edit:${path}`;
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const label = path.split("/").pop() ?? path;
+  const tab: Tab = { id, kind: "editor", path, label, dirty: false };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function closeTab(id: string) {
+  setStore(
+    produce((s) => {
+      const idx = s.tabs.findIndex((t) => t.id === id);
+      if (idx === -1) return;
+      s.tabs.splice(idx, 1);
+      if (s.active === id) {
+        s.active = s.tabs[idx]?.id ?? s.tabs[idx - 1]?.id ?? null;
+      }
+    }),
+  );
+  persist();
+}
+
+export function focusTab(id: string) {
+  if (store.tabs.some((t) => t.id === id)) {
+    setStore("active", id);
+    persist();
+  }
+}
+
+export function focusTabBySessionId(sessionId: string) {
+  const t = store.tabs.find(
+    (t) => t.kind === "terminal" && t.sessionId === sessionId,
+  );
+  if (t) focusTab(t.id);
+}
+
+export function focusTabByPath(path: string) {
+  const t = store.tabs.find(
+    (t) => t.kind === "editor" && t.path === path,
+  );
+  if (t) focusTab(t.id);
+}
+
+export function openGuiTab(): Tab {
+  const id = "gui";
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "gui", label: "GUI" };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function openGitTab(repo: string): Tab {
+  const id = `git:${repo}`;
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const label = `git: ${repo.split("/").pop() || repo || "(root)"}`;
+  const tab: Tab = { id, kind: "git", repo, label };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function openHistoryTab(): Tab {
+  const id = "history";
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "history", label: "History" };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function openTasksTab(): Tab {
+  const id = "tasks";
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "tasks", label: "Tasks" };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function openAssistantTab(): Tab {
+  const id = "assistant";
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "assistant", label: "Assistant" };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function renameTab(id: string, label: string) {
+  setStore(
+    produce((s) => {
+      const t = s.tabs.find((t) => t.id === id);
+      if (t) t.label = label;
+    }),
+  );
+  persist();
+}
+
+export function setEditorDirty(id: string, dirty: boolean) {
+  setStore(
+    produce((s) => {
+      const t = s.tabs.find((t) => t.id === id);
+      if (t && t.kind === "editor") t.dirty = dirty;
+    }),
+  );
+}
+
+export function setTasksDirty(dirty: boolean) {
+  setStore(
+    produce((state) => {
+      const tab = state.tabs.find((candidate) => candidate.id === "tasks");
+      if (tab?.kind === "tasks") tab.dirty = dirty;
+    }),
+  );
+}
+
+export function activeTab(): Tab | null {
+  return store.tabs.find((t) => t.id === store.active) ?? null;
+}
+
+export function snapshotTabs(): TabsStateSnapshot {
+  return {
+    tabs: store.tabs.map((tab) => cloneTab(tab)),
+    active: store.active,
+  };
+}
+
+export function replaceTabs(next: TabsStateSnapshot) {
+  const normalized = normalizeState(next);
+  setStore(
+    produce((state) => {
+      state.tabs = normalized.tabs.map((tab) => cloneTab(tab));
+      state.active = normalized.active;
+    }),
+  );
+  persist();
+}
+
+/** One work item, addressable so the tab survives a reload. */
+export function openWorkItemTab(ref: string): Tab {
+  const id = `workitem:${ref}`;
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "workitem", ref, label: ref };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}

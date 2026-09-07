@@ -1,0 +1,168 @@
+import groovy.json.JsonSlurper
+
+apply plugin: 'com.android.application'
+
+int semverVersionCode(String version) {
+    def match = (version ?: '').trim() =~ /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/
+    if (!match.matches()) {
+        throw new GradleException("Unsupported package.json version '${version}'. Expected semver like 0.1.0")
+    }
+
+    int major = match[0][1] as int
+    int minor = match[0][2] as int
+    int patch = match[0][3] as int
+    int code = (major * 1_000_000) + (minor * 1_000) + patch
+    if (code <= 0) {
+        throw new GradleException("Computed Android versionCode '${code}' is invalid for version '${version}'")
+    }
+    return code
+}
+
+int parseVersionCodeOverride(String raw, int fallback) {
+    if (raw == null || raw.trim().isEmpty()) {
+        return fallback
+    }
+
+    try {
+        int code = Integer.parseInt(raw.trim())
+        if (code <= 0) {
+            throw new GradleException("VOGT_ANDROID_VERSION_CODE must be > 0, got '${raw}'")
+        }
+        return code
+    } catch (NumberFormatException ignored) {
+        throw new GradleException("VOGT_ANDROID_VERSION_CODE must be an integer, got '${raw}'")
+    }
+}
+
+def mobilePackage = new JsonSlurper().parse(file('../../package.json'))
+def packageVersion = (mobilePackage.version ?: '0.1.0').toString().trim()
+def androidVersionName = (System.getenv('VOGT_ANDROID_VERSION_NAME') ?: packageVersion).trim()
+def androidVersionCode = parseVersionCodeOverride(
+    System.getenv('VOGT_ANDROID_VERSION_CODE'),
+    semverVersionCode(packageVersion),
+)
+// Distinct applicationId lets a dev build install side by side with prod on
+// one device. `namespace` (the Java/Kotlin source package, MainActivity.java
+// etc.) and the applicationId default move together: a rename took
+// the package to com.sprooty.vogt, and the id then moved again to
+// com.thedancingdeveloper.vogt so the app publishes under the owned
+// thedancingdeveloper.com domain (reverse-DNS the Play record binds to). The
+// env var and fallback match capacitor.config.ts — keep the two in sync.
+def androidApplicationId = (
+    System.getenv('VOGT_ANDROID_APP_ID') ?: 'com.thedancingdeveloper.vogt'
+).trim()
+
+def releaseKeystorePath = System.getenv('VOGT_ANDROID_KEYSTORE_PATH')
+def releaseKeystorePassword = System.getenv('VOGT_ANDROID_KEYSTORE_PASSWORD')
+def releaseKeyAlias = System.getenv('VOGT_ANDROID_KEY_ALIAS')
+def releaseKeyPassword = System.getenv('VOGT_ANDROID_KEY_PASSWORD')
+def hasReleaseSigning = [
+    releaseKeystorePath,
+    releaseKeystorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword,
+].every { it != null && !it.trim().isEmpty() }
+
+android {
+    namespace "com.thedancingdeveloper.vogt"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId androidApplicationId
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode androidVersionCode
+        versionName androidVersionName
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    if (hasReleaseSigning) {
+        signingConfigs {
+            release {
+                storeFile file(releaseKeystorePath)
+                storePassword releaseKeystorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+    buildTypes {
+        release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+            // R8 code shrinking + obfuscation. This was previously off:
+            // with an empty proguard-rules.pro, R8's optimizing pass merged
+            // BridgeActivity into MainActivity and the release build crashed at
+            // startup on a real device. The fix is the keep-rules now in
+            // proguard-rules.pro — they pin the bridge/plugin/JS-interface
+            // surface Capacitor resolves reflectively (which R8 cannot see) —
+            // not leaving R8 off. See that file for each rule and its reason.
+            minifyEnabled true
+            // Resource shrinking: drops unused resources from the
+            // release bundle. Valid only alongside minifyEnabled true. Safe
+            // mode is the default, and res/raw/keep.xml pins the visible
+            // branding (launcher icon + splash) as a documented safety net.
+            shrinkResources true
+            // proguard-android-optimize.txt, not proguard-android.txt: AGP 9.0
+            // removed the latter because it bundles -dontoptimize, which holds
+            // R8 back from the optimizations this whole change is meant to
+            // enable. Our keep rules pin the Capacitor bridge/plugin/JS
+            // surface, so the extra optimization has nothing to safely strip
+            // from it.
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    // Per-origin WebMessageListener for the clipboard/voice bridges.
+    implementation "androidx.webkit:webkit:$androidxWebkitVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    // Real org.json on the JVM unit-test classpath: android.jar's is a stub that
+    // throws, and MainActivity's bridge parses/builds JSON the tests exercise.
+    testImplementation "org.json:json:20240303"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+// The real google-services.json is operator-supplied and git-ignored so
+// a live Firebase key never lands in the public tree again. A sanitized
+// placeholder ships as `google-services.json.example`; when no real file is
+// present (a fresh checkout, CI), copy the placeholder in so the build still
+// assembles and the google-services plugin can validate applicationId against
+// the client entries. Drop in a real config to enable FCM.
+def servicesFile = file('google-services.json')
+if (!servicesFile.exists()) {
+    def servicesExample = file('google-services.json.example')
+    if (servicesExample.exists()) {
+        servicesFile.text = servicesExample.text
+        logger.lifecycle("google-services.json not found; using sanitized placeholder google-services.json.example. FCM needs a real operator-supplied file.")
+    }
+}
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.exists() && servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}

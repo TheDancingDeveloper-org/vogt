@@ -1,0 +1,158 @@
+[project]
+name = "vogt"
+version = "0.6.0"
+description = "A product development environment for the AI era"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "TheDancingDeveloper" }]
+keywords = ["backlog", "mcp", "agents", "project-management"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "pydantic>=2.7",
+  "pydantic-settings>=2.2",
+  "fastapi>=0.111",
+  "uvicorn>=0.52.1",
+  "cryptography>=50.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/TheDancingDeveloper-org/vogt"
+Source = "https://github.com/TheDancingDeveloper-org/vogt"
+
+[project.scripts]
+vogt = "vogt.adapters.cli.main:main"
+# The command an MCP client is configured to spawn. Same server as
+# `vogt mcp stdio`; a bare binary keeps client configs to one word.
+vogt-mcp = "vogt.adapters.mcp.stdio:main"
+# For agent products that can only spawn a local process but need to
+# reach a remote instance. Configured by VOGT_URL and VOGT_TOKEN_FILE.
+vogt-mcp-remote = "vogt.adapters.mcp.bridge:main"
+
+[dependency-groups]
+dev = [
+  "httpx>=0.27",
+  "mypy>=1.10",
+  "pytest>=8.2",
+  "pytest-cov>=5.0",
+  "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vogt"]
+
+[tool.hatch.build.targets.sdist]
+# The Python distribution is the independently supported core. Keep CI,
+# deployment, engine, PWA and mobile source out of the source archive so a
+# consumer cannot mistake a development checkout for the package boundary.
+only-include = ["src/vogt", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = [
+  "ANN", # flake8-annotations
+  "B",   # flake8-bugbear
+  "C4",  # flake8-comprehensions
+  "E",   # pycodestyle errors
+  "F",   # pyflakes
+  "I",   # isort
+  "N",   # pep8-naming
+  "PTH", # flake8-use-pathlib
+  "RUF", # ruff-specific
+  "SIM", # flake8-simplify
+  "UP",  # pyupgrade
+  "W",   # pycodestyle warnings
+]
+
+ignore = [
+  # The design documents and this code use en dashes in prose. Flagging them
+  # as "ambiguous unicode" would trade readable writing for a rule aimed at
+  # homoglyph attacks in identifiers, which is not what a docstring is.
+  "RUF002",
+  "RUF003",
+  # Vogt's error taxonomy reads as domain vocabulary at the call site
+  # (`raise Conflict(...)`, `except NotInitialized`), and every class already
+  # descends from VogtError. An `Error` suffix on each would add noise, not
+  # information.
+  "N818",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["vogt"]
+known-local-folder = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may assert on private helpers and pass loosely-typed fixtures.
+"tests/*" = ["ANN401"]
+# These four handle arbitrary JSON-shaped data by design: a digest over any
+# payload, a renderer over any result, argparse specs over any field
+# annotation, and settings overrides. `Any` is the honest annotation.
+"src/vogt/core/digest.py" = ["ANN401"]
+"src/vogt/adapters/cli/render.py" = ["ANN401"]
+"src/vogt/adapters/cli/args.py" = ["ANN401"]
+"src/vogt/config.py" = ["ANN401"]
+# JSON and TOML boundaries: a parsed document is `Any` and pretending
+# otherwise would be a cast, not a type.
+"src/vogt/adapters/github/client.py" = ["ANN401"]
+# The fixture-reset script speaks raw GitHub JSON, which is `Any` at the
+# boundary — the same reason the client above carries this ignore.
+"scripts/fixture_reset.py" = ["ANN401"]
+"src/vogt/adapters/forge/forgejo.py" = ["ANN401"]
+"src/vogt/adapters/github/collectors.py" = ["ANN401"]
+"src/vogt/collectors/dep_refs.py" = ["ANN401"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "tests", "scripts"]
+# `scripts/` holds standalone modules, not a package; this lets a test import
+# one by its bare name (`import load`) resolve to `scripts/load.py`, the same
+# way `pythonpath` below makes it importable at runtime.
+mypy_path = "scripts"
+warn_unreachable = true
+enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `scripts/` is not a package, so its standalone modules are imported by bare
+# name in the tests that pin their contract (`import load`); this puts it on
+# the import path, matching `mypy_path` above.
+pythonpath = ["scripts"]
+addopts = [
+  "--strict-markers",
+  "--strict-config",
+  "--cov=vogt",
+  "--cov-report=term-missing",
+  "--cov-fail-under=80",
+]
+markers = [
+  "live_forge: exercises the real GitHub forge adapter against the TheDancingDeveloper-org/vogt-fixture repository. Opt-in: SKIPPED unless selected with `-m live_forge` and a token is present. See docs/CONTRIBUTING.md.",
+  "estate: assertions true only of the maintainer's own estate; they read the estate deploy files or hard-code an estate value, and self-skip on a public clone. Deselect with `-m 'not estate'`.",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/vogt"]
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "\\.\\.\\.$",
+]

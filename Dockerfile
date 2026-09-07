@@ -1,0 +1,147 @@
+# syntax=docker/dockerfile:1
+#
+# The shipped image.
+#
+# Hardened by construction rather than by compose flags alone: it runs as an
+# unprivileged uid that exists in the image, owns nothing it does not need,
+# and writes only to the volume and to tmpfs. The compose file adds
+# `read_only`, `cap_drop: [ALL]` and `no-new-privileges`; this side makes
+# those settings survivable.
+
+# Pinned by digest, not by tag. `DEPLOYMENT.md` requires Vogt's own
+# published image to be digest-pinned in the ops repo; a floating base tag
+# would mean the thing that gets pinned is assembled from something that
+# is not. It is also the `update_automation_gap` this product reports on
+# other people's repositories — hard to justify raising for others
+# while leaving it here.
+#
+# The public default remains the upstream Docker Official Image, so anyone
+# can build from a clean checkout. CI overrides this with the project's GHCR
+# mirror after `mirror-base-images.yml` copies the same manifest there; that
+# avoids the shared Docker Hub pull limit without making the public path rely
+# on a private namespace. The build and runtime stages share one digest.
+ARG PYTHON_IMAGE=python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+FROM ${PYTHON_IMAGE} AS build
+
+# uv resolves and installs from the committed lockfile, so the image contains
+# exactly what CI tested.
+#
+# No `--mount=type=cache` on the two `uv sync` steps below, deliberately: a
+# cache mount is a BuildKit feature, and the legacy builder — which is what a
+# plain `docker compose up --build` still uses on some hosts — fails outright
+# on it. A public image that only builds on one builder is not a public image.
+# The cost is a slower cold rebuild, which CI absorbs and an operator pays
+# once.
+# Pin the upstream uv image as well as the Python base. Docker accepts a
+# tag-plus-digest reference here, so a rebuild cannot silently select a new
+# installer binary.
+COPY --from=ghcr.io/astral-sh/uv:0.9.18@sha256:5713fa8217f92b80223bc83aac7db36ec80a84437dbc0d04bbc659cae030d8c9 /uv /usr/local/bin/uv
+
+# The venv is built at the path it will be *used* at, not at `/src/.venv`
+# and copied. A venv is not relocatable: its console scripts carry an
+# absolute shebang, so a venv built at /src/.venv and copied to /opt gives
+# `exec /opt/vogt/.venv/bin/vogt: no such file or directory` — an error that
+# names the script while actually meaning its interpreter is missing.
+# The venv is built against an interpreter *inside* `/opt/vogt`, not against
+# the base image's system Python. That makes the directory relocatable: it can
+# be copied whole into another image and still run, because it carries its own
+# interpreter rather than pointing at one that happens to exist at
+# /usr/local/bin.
+#
+# That property is what lets the merged engine image derive its core from this
+# published artefact instead of building a second one from the same source
+# A venv built against the base's system Python cannot be copied into
+# an Ubuntu runtime — the console scripts' shebang names an interpreter that
+# is not there — which is precisely why the engine used to build its own.
+#
+# `UV_PYTHON=3.13` is pinned deliberately: left unset, uv fetches the newest
+# managed interpreter it can find — 3.14 at the time of writing — and the
+# image would ship a Python no CI job has ever run the suite against. The
+# version tracks the base tag and the test matrix, not whatever is newest.
+#
+# The cost is roughly 50 MB of bundled CPython. The gain is that "the private
+# image contains the published public core" becomes a fact verifiable by
+# digest rather than a claim about two builds of the same commit.
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON=3.13 \
+    UV_PYTHON_DOWNLOADS=automatic \
+    UV_PYTHON_INSTALL_DIR=/opt/vogt/python \
+    UV_PYTHON_PREFERENCE=only-managed \
+    UV_PROJECT_ENVIRONMENT=/opt/vogt/.venv
+
+WORKDIR /src
+
+# Dependencies first, so a source-only change does not re-resolve them.
+COPY pyproject.toml uv.lock README.md LICENSE ./
+RUN uv sync --locked --no-install-project --no-dev
+
+COPY src/ ./src/
+# `--no-editable` because uv.lock records the project as an editable source.
+# An editable install is a `.pth` file pointing back at /src, which does not
+# exist in the runtime stage — the venv would import every dependency and
+# then fail on `No module named 'vogt'`.
+RUN uv sync --locked --no-dev --no-editable
+
+
+FROM ${PYTHON_IMAGE} AS runtime
+
+LABEL org.opencontainers.image.title="vogt" \
+      org.opencontainers.image.description="A product development environment for the AI era" \
+      org.opencontainers.image.source="https://github.com/TheDancingDeveloper-org/vogt" \
+      org.opencontainers.image.licenses="AGPL-3.0-only"
+
+# Runnable as **any** uid, chosen at deploy time. Which uid is right is a
+# property of the host — of who owns the files being observed — so it is a
+# compose concern, and needing a release to change it would be a defect.
+#
+# The obstacle is Docker, not policy: a fresh named volume is seeded from the
+# ownership of this directory in the image, so a directory owned by a
+# specific uid silently breaks for every deployer who is not that uid — and
+# breaks on volume *recreation*, typically during a restore.
+#
+# Solved the usual way: the data directory is owned by group 0 and is
+# group-writable, so any uid running with gid 0 can write to it. Deployers
+# set `user: "<their-uid>:0"` and rebuild nothing. `USER 1000:0` below is a
+# default, not a requirement.
+#
+# A passwd entry at the default uid keeps `local:<os-user>` readable for the
+# common case; at any other uid the principal falls back to `$USER`, which
+# the compose file sets. Neither is load-bearing — provenance for anything
+# over the network comes from the token, never from the OS user.
+# `git` is a runtime dependency, not a build one. `project.import` shells out
+# to it to clone and to recognise an existing checkout, and the
+# `git-local` collector shells out to it to read branch, head and dirty state.
+# The first release of this image shipped without it, which left import unable
+# to run at all and the collector recording an observation it had never read
+# — so it is installed here, and the image's own smoke test
+# asks the built image for it rather than trusting this line.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 1000 vogt \
+    && useradd --uid 1000 --gid 0 --no-create-home --shell /usr/sbin/nologin vogt \
+    && mkdir -p /var/lib/vogt \
+    && chown root:0 /var/lib/vogt \
+    && chmod 0770 /var/lib/vogt
+
+# The whole of /opt/vogt, not just the venv: the interpreter lives alongside
+# it now and the two only work together.
+COPY --from=build --chown=root:root /opt/vogt /opt/vogt
+COPY --chmod=755 vogt-lifecycle.sh /usr/local/bin/vogt-lifecycle
+
+ENV PATH="/opt/vogt/.venv/bin:$PATH" \
+    VOGT_DATA_DIR=/var/lib/vogt \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+VOLUME ["/var/lib/vogt"]
+USER 1000:0
+
+# No default host or port anywhere, including here: those encode
+# exposure, and the compose file is what is allowed to know the answer for a
+# particular host. The image therefore has no CMD that would silently bind
+# something — `serve` refuses to start without being told where to listen.
+ENTRYPOINT ["/usr/local/bin/vogt-lifecycle"]
+CMD ["--help"]

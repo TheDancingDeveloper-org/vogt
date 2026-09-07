@@ -1,0 +1,103 @@
+"""Connection handling for the SQLite backend.
+
+Connections are opened per transaction and closed after it. That is slightly
+wasteful and completely thread-safe, which is the right trade while the same
+data directory is reachable from a CLI process, a server process and a stdio
+MCP process at the same time (`DEPLOYMENT.md`).
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+BUSY_TIMEOUT_MS = 5_000
+
+#: Durability of a commit, as a WAL-mode `synchronous` setting.
+#:
+#: `NORMAL` rather than SQLite's default `FULL`, which is the conventional
+#: pairing for WAL. Be clear about what it buys here, which is *not much*:
+#: measured on a deployed data volume, a write costs 28.7ms
+#: at `FULL` and 24.7ms at `NORMAL`, against 0.1ms with fsync off entirely.
+#:
+#: The reason the setting hardly matters is above this line — connections are
+#: opened per transaction and closed, and closing the last connection to a WAL
+#: database checkpoints it, which fsyncs whatever `synchronous` says about
+#: commits. The ~25ms is the checkpoint, not the commit. Fixing that means
+#: changing connection lifetime, not this pragma.
+#:
+#: What `NORMAL` does trade: a power loss or OS crash can lose the last few
+#: committed transactions. The database is never corrupted, and an application
+#: crash loses nothing, because the WAL is already handed to the kernel.
+#: `FULL` is available for anyone who wants the stronger guarantee.
+#:
+#: The test suite sets `off`, where nothing outlives the run. That is where
+#: this knob earns its keep today: it took the suite from 197s to 16s.
+DEFAULT_SYNCHRONOUS = "normal"
+
+
+def connect(
+    path: Path, *, create: bool, synchronous: str = DEFAULT_SYNCHRONOUS
+) -> sqlite3.Connection:
+    """Open a connection with Vogt's pragmas applied.
+
+    `isolation_level=None` puts the driver in autocommit mode so that this
+    package issues its own `BEGIN`/`COMMIT`. Transaction boundaries are a
+    correctness concern here and are not left to the driver.
+    """
+    if not create and not path.exists():
+        msg = f"no database at {path}"
+        raise FileNotFoundError(msg)
+    if create:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode = WAL")
+    # Validated against a fixed set rather than interpolated blindly: this
+    # lands in a PRAGMA, which takes no bound parameters.
+    if synchronous.lower() not in ("off", "normal", "full", "extra"):
+        msg = f"unknown synchronous setting: {synchronous!r}"
+        raise ValueError(msg)
+    conn.execute(f"PRAGMA synchronous = {synchronous.upper()}")
+    return conn
+
+
+def split_statements(script: str) -> list[str]:
+    """Split a migration script into individual statements.
+
+    Migrations are plain DDL: no triggers, no `BEGIN ... END` bodies, no
+    semicolons inside identifiers. `executescript` cannot be used because it
+    commits any open transaction first, and each migration must apply inside
+    one.
+    """
+    statements: list[str] = []
+    buffer: list[str] = []
+    in_string = False
+    index = 0
+    while index < len(script):
+        char = script[index]
+        if in_string:
+            buffer.append(char)
+            if char == "'":
+                in_string = False
+        elif char == "'":
+            in_string = True
+            buffer.append(char)
+        elif char == "-" and script[index : index + 2] == "--":
+            end = script.find("\n", index)
+            index = len(script) if end == -1 else end
+            continue
+        elif char == ";":
+            statement = "".join(buffer).strip()
+            if statement:
+                statements.append(statement)
+            buffer = []
+        else:
+            buffer.append(char)
+        index += 1
+    tail = "".join(buffer).strip()
+    if tail:
+        statements.append(tail)
+    return statements

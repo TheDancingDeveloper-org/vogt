@@ -1,0 +1,35 @@
+[package]
+name = "vogt-voice-tts"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+# piper-rs 0.1.2 was written against this runtime API; pinning it prevents
+# Cargo from selecting a newer pre-release with incompatible ndarray types.
+ort = "=2.0.0-rc.9"
+# piper-rs's ort dependency is a caret requirement; constrain the transitive
+# sys crate too, otherwise Cargo may unify it with a newer incompatible rc.
+ort-sys = "=2.0.0-rc.9"
+piper-rs = "=0.1.2"
+# Keep the legacy inference stack buildable with the workspace's Rust 1.80
+# MSRV. These are transitive build dependencies of ort-sys/bindgen; newer
+# releases moved to edition 2024.
+home = "=0.5.9"
+half = "=2.4.1"
+rustls-pki-types = "=1.12.0"
+zeroize = "=1.8.1"
+# Version floors that steer the shared voice/Cargo.lock past the vulnerable
+# transitive crates: ureq >=2.12 pulls rustls-webpki >=0.103.13
+# (clears GHSA-82j2-j2ch-gfr8 et al.) and url >=2.5 pulls idna >=1.0
+# (clears GHSA-h97m-ww89-6jmq). Kept on the ureq 2.x line so no source uses
+# the ureq 3.x API. Neither crate is referenced directly from tts/src.
+ureq = "2.12"
+url = "2.5"
+tempfile = "=3.23.0"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "time"] }
+thiserror = "2"

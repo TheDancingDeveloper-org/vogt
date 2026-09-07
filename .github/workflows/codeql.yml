@@ -1,0 +1,67 @@
+name: codeql
+
+# Repository-owned code scanning for all three implementation languages.
+# This starts as an independent check: once the self-hosted runner has
+# produced a receipt for every matrix entry it can be added to branch
+# protection without turning runner/tool-download uncertainty into a merge
+# outage.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: [self-hosted]
+    timeout-minutes: 45
+    concurrency:
+      # Newest-wins: an analysis of a superseded commit is fully covered by
+      # the analysis that replaces it — CodeQL scans the whole tree, so
+      # cancelling loses nothing on any event.
+      group: codeql-${{ github.ref }}-${{ matrix.language }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - python
+          - javascript-typescript
+          - rust
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # The Actions runtime bundles Node for action execution, but the
+      # JavaScript/TypeScript extractor starts `node` from PATH. The
+      # self-hosted base runner deliberately has no language runtimes.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: matrix.language == 'javascript-typescript'
+        with:
+          node-version: "22"
+
+      # Rust, Python, and JavaScript/TypeScript all support build-mode none in
+      # the current CodeQL bundle. That keeps this security analysis separate
+      # from the authoritative build/test jobs and avoids rebuilding the PWA
+      # or engine only to extract source a second time.
+      - uses: github/codeql-action/init@6f5948dfacef28e207b48d0905cf90c03365536d
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d
+        with:
+          category: /language:${{ matrix.language }}

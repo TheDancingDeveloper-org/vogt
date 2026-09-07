@@ -1,0 +1,618 @@
+"""The Solid PWA, held to the parity rule.
+
+The rule: the PWA shall consume only public APIs, and every URL
+in the shipped bundle shall resolve against the operation registry *and* the
+engine's API contract.
+
+Both halves are checked here, and both are checked against *source*, not
+intent — every path a front end names is a path the code serves. The engine half
+resolves against `app.rs`'s route table *and* against the wire contract in
+`docs/ENGINE.md` §5, and they are not the same check. The router is the
+stronger one: it is what answers requests, and a check against the description
+alone would pass while the product was broken. The document is the thing that
+rots, so it is checked too — and when the two disagree, the document is the one
+that is wrong.
+
+The contract once lived in its own `API_CONTRACT.md` before the engine's
+documents were consolidated into one. Only the path moved: the checks below
+read code spans out of the whole file, so the section's heading level is not
+load-bearing and neither is its position.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+from vogt.adapters.http.app import API_PREFIX
+from vogt.registry import default_registry
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+WEB_SRC = REPO_ROOT / "web" / "src"
+VOGT_CLIENT = WEB_SRC / "vogtApi.ts"
+ENGINE_APP = REPO_ROOT / "engine" / "server" / "src" / "app.rs"
+ENGINE_CONTRACT_DOC = REPO_ROOT / "docs" / "ENGINE.md"
+
+#: The front door's own mount. Paths under it are Vogt operations and are
+#: resolved by the registry half of this file; the engine has three catch-all
+#: routes for the prefix and nothing more specific to match against.
+FRONT_DOOR_PREFIX = "/api/vogt"
+
+pytestmark = pytest.mark.skipif(
+    not VOGT_CLIENT.is_file(),
+    reason="the merged tree carries the PWA; a core-only checkout does not",
+)
+
+
+def source(path: Path) -> str:
+    """A TypeScript file with its comments removed.
+
+    A comment explaining a rule contains the words the rule forbids, and this
+    file's own module comment names `/api/vogt/...` while forbidding
+    unregistered paths.
+    """
+    text = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+    kept: list[str] = []
+    for line in text.splitlines():
+        head = line.split("//")[0]
+        kept.append(line if head.count('"') % 2 or head.count("`") % 2 else head)
+    return "\n".join(kept)
+
+
+def client_routes() -> dict[str, str]:
+    block = re.search(
+        r"export const ROUTES = \{(.*?)\n\} as const;", source(VOGT_CLIENT), re.S
+    )
+    assert block, "the Vogt client's route table was not found"
+    entries = re.findall(r'"?([a-z][a-z._]*)"?:\s*"([^"]+)"', block.group(1))
+    assert entries, "the route table is empty, so this file proves nothing"
+    return dict(entries)
+
+
+# -- half one: every Vogt path is a registered operation --------------------
+
+
+def test_every_vogt_path_in_the_pwa_is_a_registered_operation() -> None:
+    registry = default_registry()
+    registered = {op.name: op for op in registry.for_transport("http")}
+
+    for name, path in client_routes().items():
+        assert name in registered, f"the PWA names {name}, which is not an operation"
+        assert registered[name].route.path == path, (
+            f"{name} is served at {registered[name].route.path}, "
+            f"but the PWA asks for {path}"
+        )
+
+
+def test_the_pwa_reaches_vogt_only_through_the_front_door() -> None:
+    """One prefix, one place. `/api` at this origin is the engine's own API."""
+    text = source(VOGT_CLIENT)
+    assert f'export const VOGT_PREFIX = "{FRONT_DOOR_PREFIX}"' in text
+    # The one outbound call site now goes through the shared transport
+    # (`fetchWithRetry`) rather than a bare `fetch`, so a dropped
+    # connection is retried and classified instead of leaking a raw TypeError.
+    # It is still a single site built from the route table above; a second one —
+    # bare `fetch` or a second `fetchWithRetry` — is how a path escapes it.
+    assert len(re.findall(r"\bfetchWithRetry\(", text)) == 1, (
+        "a second call site is how a path escapes the route table, and the "
+        "route table is what the check above reads"
+    )
+    assert not re.findall(r"\bfetch\(", text), (
+        "a bare fetch bypasses the shared transport's retry and classification"
+    )
+
+
+def test_every_vogt_write_the_pwa_offers_collects_a_reason() -> None:
+    """Every write carries a reason, through the surface most likely to erode it.
+
+    Vogt refuses a write without a reason, so a helper that did not take one
+    could only ever fail — but it could fail *at the user*, having already
+    opened a form. The requirement is that the view collects one, and the
+    smallest checkable proxy is that no exported write can be called without
+    it.
+    """
+    registry = default_registry()
+    mutating = {
+        name for name, _ in client_routes().items() if registry.get(name).mutating
+    }
+    assert mutating, "the PWA names no writes; this check would prove nothing"
+
+    text = source(VOGT_CLIENT)
+    for match in re.finditer(r'call<[^>]*>\(\s*"([a-z][a-z._]*)"', text):
+        name = match.group(1)
+        if name not in mutating:
+            continue
+        # The call site's enclosing declaration must mention a reason.
+        start = text.rfind("export const", 0, match.start())
+        declaration = text[start : match.end()]
+        assert "reason" in declaration, (
+            f"{name} is a write the PWA can make without a reason"
+        )
+
+
+def test_the_vogt_client_reaches_no_other_origin() -> None:
+    offenders = re.findall(r"""["'(](?:https?:)?//[^"')\s]+""", source(VOGT_CLIENT))
+    assert not offenders, f"the Vogt client reaches outside the origin: {offenders}"
+
+
+def test_all_pwa_dialogs_use_the_shared_accessible_foundation() -> None:
+    """One modal implementation and no browser-native decision surfaces."""
+    components = {path.name: source(path) for path in sorted(WEB_SRC.glob("*.tsx"))}
+    native = {
+        name: token
+        for name, text in components.items()
+        for token in ("window.confirm(", "window.alert(")
+        if token in text
+    }
+    assert not native, f"PWA components use browser-native dialogs: {native}"
+
+    owners = sorted(
+        name for name, text in components.items() if 'role="dialog"' in text
+    )
+    assert owners == ["Dialog.tsx"], (
+        "modal semantics must stay in Dialog.tsx so focus, Escape, stacking, "
+        f"and naming do not diverge; found dialog owners {owners}"
+    )
+
+
+def test_primary_surfaces_use_the_shared_header_grammar() -> None:
+    """A primary surface cannot quietly reintroduce an ad-hoc top section."""
+    foundation = source(WEB_SRC / "SurfaceHeader.tsx")
+    slots = re.findall(r'data-surface-header-slot="([a-z]+)"', foundation)
+    # "goto" is the phone's inline Go to… (WI-75): rendered only on a narrow
+    # client inside the shell, but it is part of the grammar the header owns.
+    assert slots == [
+        "title",
+        "goto",
+        "honesty",
+        "spacer",
+        "controls",
+        "action",
+        "detail",
+    ]
+
+    for name in ("Board", "Backlog", "Inbox", "Sessions"):
+        text = source(WEB_SRC / f"{name}.tsx")
+        assert 'from "./SurfaceHeader"' in text, (
+            f"{name} no longer imports the shared primary-surface header"
+        )
+        assert "<SurfaceHeader" in text, (
+            f"{name} no longer renders the shared primary-surface header"
+        )
+        assert "<header" not in text, (
+            f"{name} has reintroduced direct header markup beside the shared grammar"
+        )
+
+
+# -- half two: every engine path is a route the engine serves ---------------
+
+
+def engine_routes() -> set[str]:
+    declared = re.findall(r'\.route\(\s*"([^"]+)"', ENGINE_APP.read_text("utf-8"))
+    assert declared, "no routes found in the engine's router"
+    return {normalise(route) for route in declared}
+
+
+def documented_routes() -> set[str]:
+    """Every engine path the wire contract names, in a code span.
+
+    Prose is not read: a path only counts when the document set it in
+    backticks, which is what its route entries do and what a passing mention
+    in a sentence does not. Method prefixes are dropped because this compares
+    paths — the router half already proves the path exists, and a method the
+    document got wrong is not something a path check can see.
+    """
+    text = ENGINE_CONTRACT_DOC.read_text("utf-8")
+    declared = re.findall(r"`(?:[A-Z]+ )?(/(?:api|healthz|readyz|mcp)[^`\s?]*)", text)
+    assert declared, "no routes found in the engine's wire contract (ENGINE.md \u00a75)"
+    return {normalise(route) for route in declared}
+
+
+def normalise(path: str) -> str:
+    """Reduce a path to the part that can be compared.
+
+    Everything from the first `${` is interpolation — often a call such as
+    `${encodeURIComponent(id)}`, which no regexp over a literal will read
+    correctly — so the comparison uses the fixed head and the prefix rule
+    below resolves the rest. Path parameters collapse to `{}` for the same
+    reason, in either notation: the router writes `{id}` and the contract
+    document writes `:id`.
+    """
+    interpolated = path.find("${")
+    if interpolated != -1:
+        path = path[:interpolated]
+    path = re.sub(r"\{[^}]*\}", "{}", path)
+    path = re.sub(r"(?<=/):[A-Za-z_][A-Za-z0-9_]*", "{}", path)
+    return path.rstrip("/")
+
+
+def pwa_engine_paths() -> set[str]:
+    """Every engine URL literal in the bundle's sources, front door excluded.
+
+    Paths under `/api/vogt` are Vogt operations and belong to the registry
+    half above; the engine serves three catch-all routes for that prefix and
+    nothing more specific to compare against.
+    """
+    literals: set[str] = set()
+    for path in sorted(WEB_SRC.glob("*.ts")) + sorted(WEB_SRC.glob("*.tsx")):
+        literals |= set(
+            re.findall(r"""["'`](/api/[A-Za-z0-9/_.$\-{}]*)""", source(path))
+        )
+    return {
+        literal for literal in literals if not literal.startswith(FRONT_DOOR_PREFIX)
+    }
+
+
+def resolves(candidate: str, known: set[str]) -> bool:
+    """Does `candidate` name something in `known`?
+
+    A literal is often the head of a URL a template completes
+    (`/api/history/${id}/log`), so a known path the literal is a prefix of
+    resolves it. A literal that matches nothing in either direction is one
+    that is not there.
+    """
+    return candidate in known or any(path.startswith(candidate) for path in known)
+
+
+def test_every_engine_path_in_the_pwa_is_a_route_the_engine_serves() -> None:
+    routes = engine_routes()
+    unresolved = [
+        literal
+        for literal in sorted(pwa_engine_paths())
+        if not resolves(normalise(literal), routes)
+    ]
+    assert not unresolved, (
+        f"the PWA calls {unresolved}, which the engine's router does not serve"
+    )
+
+
+def test_every_engine_path_in_the_pwa_is_in_the_engine_s_api_contract() -> None:
+    """The second half of the parity rule, against the document rather than
+    the router.
+
+    The check above is the stronger one and stays: it reads what answers
+    requests. This one reads what *describes* what answers requests, which is
+    the half that rots — a route added to `app.rs` and never written down
+    leaves the document quietly describing a smaller product than the one
+    shipped, and every reader of it wrong.
+
+    A path missing from either side is a finding, and they are different
+    findings — one is a broken call, the other is a stale document — so the
+    failure says which side is short rather than making a reader diff two
+    files to find out.
+    """
+    routes = engine_routes()
+    documented = documented_routes()
+
+    disagreements: list[str] = []
+    for literal in sorted(pwa_engine_paths()):
+        candidate = normalise(literal)
+        missing_from = [
+            name
+            for name, known in (
+                ("the router", routes),
+                ("the wire contract", documented),
+            )
+            if not resolves(candidate, known)
+        ]
+        if missing_from:
+            short = " and ".join(missing_from)
+            disagreements.append(f"{literal} (missing from {short})")
+
+    assert not disagreements, (
+        "the PWA's engine paths do not resolve against both the router and the "
+        f"contract document: {disagreements}"
+    )
+
+
+def test_the_two_halves_do_not_share_a_prefix() -> None:
+    """The front door's mount must not shadow one of the engine's own routes.
+
+    `/api/vogt` sits in the same namespace as `/api/sessions` and the rest;
+    if the engine ever grew a `/api/vogt*` route of its own, the proxy would
+    stop being reachable and every Vogt surface would answer with something
+    plausible from the wrong half of the product.
+    """
+    own = {
+        route
+        for route in engine_routes()
+        if route.startswith(FRONT_DOOR_PREFIX) and "{}" not in route
+    }
+    assert own == {FRONT_DOOR_PREFIX}, (
+        f"the engine serves {sorted(own)} under the front door's own prefix"
+    )
+
+
+def test_the_api_prefix_matches_what_the_front_door_strips() -> None:
+    """`/api/vogt/backlog` reaches the core's `/api/backlog`, not `/backlog`."""
+    assert API_PREFIX == "/api"
+    assert f"{API_PREFIX}/vogt" == FRONT_DOOR_PREFIX
+
+
+# -- the palette reaches writes, and never performs one --------------------
+
+PALETTE = WEB_SRC / "CommandPalette.tsx"
+
+
+def test_the_command_palette_never_writes_to_vogt() -> None:
+    """The palette rule's second clause, reaching the keyboard.
+
+    The palette may name a mutating verb, but only by opening the view that
+    collects its reason. A palette entry cannot type a reason any more than a
+    button can — so an entry that called a write directly would be inventing
+    one, which is the failure r6 wrote its rule against.
+
+    Checked by import: the writes all live in `vogtApi.ts` and are named, so
+    a palette that imports one is a palette that can call it.
+    """
+    # Every write `vogtApi.ts` exports. `resolveDrift` and `importProject`
+    # were absent from this set while the palette named neither verb, so the
+    # guard held by luck rather than by construction; the palette now offers
+    # both — as *openers* — and an entry that called one instead would have
+    # slipped through the check written to prevent exactly that.
+    writes = {
+        "createWork",
+        "updateWork",
+        "transitionWork",
+        "commentWork",
+        "startSession",
+        "stopSession",
+        "resolveDrift",
+        "importProject",
+    }
+    text = source(PALETTE)
+    imported = set()
+    for block in re.findall(r"import \{([^}]*)\} from \"\./vogtApi\";", text):
+        imported |= {name.strip().removeprefix("type ") for name in block.split(",")}
+    offenders = sorted(imported & writes)
+    assert not offenders, (
+        f"the command palette imports {offenders}; a palette entry that writes "
+        "is one that invented the reason"
+    )
+
+
+def test_the_palette_reaches_every_vogt_surface() -> None:
+    """Every read surface, by name, from the keyboard."""
+    text = source(PALETTE)
+    for route in ("/board", "/backlog", "/projects", "/audit"):
+        assert route in text, f"the palette cannot reach {route}"
+
+
+# -- every surface has a designed absent state -----------------------------
+
+VOGT_SURFACES = ("Board", "Backlog", "WorkItemDetail", "Projects", "AuditBrowser")
+
+
+def test_every_vogt_surface_distinguishes_an_outage_from_emptiness() -> None:
+    """Designed absent states, checked at the one place it can be checked
+    without a browser.
+
+    The requirement is about what a person sees, and nothing here renders. So
+    this asserts the structural precondition instead: a surface that never
+    imports `VogtUnavailable` cannot tell "Vogt could not be asked" from
+    "Vogt says there is nothing", and will draw an empty board or an empty
+    audit log — which, on these surfaces above all, reads as a claim.
+
+    What it cannot check is whether the resulting copy is any good. That is
+    in the browser demo, and the demo needs a browser.
+    """
+    for name in VOGT_SURFACES:
+        path = WEB_SRC / f"{name}.tsx"
+        assert path.is_file(), f"{name}.tsx is missing"
+        text = source(path)
+        assert "VogtUnavailable" in text, (
+            f"{name} cannot distinguish an outage from an empty answer"
+        )
+        assert re.search(r"\.message\b", text), (
+            f"{name} never renders the server's own reason; a client-authored "
+            "'something went wrong' is the thing the absent-state rule is against"
+        )
+
+
+def test_no_vogt_surface_opens_its_own_door() -> None:
+    """One transport, one route table, one place the rule can be kept."""
+    for name in VOGT_SURFACES:
+        text = source(WEB_SRC / f"{name}.tsx")
+        assert not re.search(r"\bfetch\(", text), (
+            f"{name} calls fetch directly, so its URL is not in the route "
+            "table the registry check reads"
+        )
+
+
+def test_drift_is_resolved_one_proposal_at_a_time() -> None:
+    """One-at-a-time resolution, and the bulk-accept deferral, kept where they
+    erode.
+
+    Bulk accept is deferred *by name*: a drift acceptance is a declared-state
+    write carrying its own reason, and making that convenient in bulk is
+    exactly how r6's rule stops meaning anything. One call site is the
+    smallest checkable form of "one act, one proposal" — a loop over selected
+    ids would need a second, or a `.map` around this one.
+    """
+    text = source(WEB_SRC / "Projects.tsx")
+    calls = len(re.findall(r"\bresolveDrift\s*\(", text))
+    assert calls == 1, (
+        f"drift is resolved from {calls} places; it was written to have one, "
+        "and a second is how a bulk accept arrives"
+    )
+    assert not re.search(r"\bselectAll\b|\bselectedProposals\b", text), (
+        "a multi-select over drift proposals is a bulk accept with extra steps"
+    )
+
+
+# -- the surfaces are usable at phone widths -------------------------------
+
+STYLES = WEB_SRC / "styles.css"
+
+#: The width the engine's own tabs collapse at — the drawer goes off-canvas,
+#: the tab strip becomes a sheet, git and history stop being two columns. The
+#: Vogt surfaces join it rather than keeping a breakpoint of their own,
+#: because two narrow breakpoints is two things to keep true and the shell
+#: would visibly disagree with the surface inside it between them.
+NARROW_BREAKPOINT = "@media (max-width: 768px)"
+
+
+def narrow_blocks() -> str:
+    """Every phone-width rule in the stylesheet, concatenated.
+
+    Brace-counted rather than regexed to a closing `}`: these blocks contain
+    nested rules, and a non-greedy match would stop at the first one.
+    """
+    css = STYLES.read_text(encoding="utf-8")
+    out: list[str] = []
+    for match in re.finditer(re.escape(NARROW_BREAKPOINT) + r"\s*\{", css):
+        i = match.end()
+        depth = 1
+        while depth and i < len(css):
+            depth += {"{": 1, "}": -1}.get(css[i], 0)
+            i += 1
+        out.append(css[match.end() : i])
+    assert out, "the stylesheet has no phone-width rules at all"
+    return "\n".join(out)
+
+
+def test_the_board_is_a_list_below_the_narrow_breakpoint() -> None:
+    """The phone-width rule names this one explicitly, so it is asserted
+    explicitly.
+
+    The board is a CSS grid whose `grid-template-columns` is an *inline*
+    style computed from the workflow states, which no stylesheet can outrank.
+    What makes it a list is therefore `display: block` on the row — which
+    makes the inline property inert — plus hiding the column head row. Both
+    are load-bearing and neither is obvious, which is exactly the kind of
+    rule that gets "tidied" away.
+    """
+    narrow = narrow_blocks()
+    assert re.search(r"\.board-row\s*\{[^}]*display:\s*block", narrow), (
+        "the board still lays its rows out as grid tracks at phone width, so "
+        "it is columns and not a list"
+    )
+    assert re.search(r"\.board-headrow\s*\{[^}]*display:\s*none", narrow), (
+        "the column head row is still drawn, but a list has no columns for it to head"
+    )
+    assert "attr(data-state)" in narrow, (
+        "nothing carries the state name onto the cells, so a list of cards "
+        "no longer says which column each group is"
+    )
+
+
+def test_the_board_cells_carry_what_the_hidden_head_row_said() -> None:
+    """The other half of the rule above, in the file that has to supply it."""
+    text = source(WEB_SRC / "Board.tsx")
+    assert "data-state=" in text, (
+        "styles.css grows the list's headings out of data-state, and Board "
+        "no longer sets it"
+    )
+
+
+def test_the_windowed_surfaces_use_content_sizing_without_a_fixed_design_height() -> (
+    None
+):
+    """Windowing's one unguarded seam, and the only one no test in `web/` can see.
+
+    The backlog's list and the board's columns both window: they draw a slice
+    of a long list and place it by arithmetic, and that arithmetic is a row
+    height the *stylesheet* is responsible for producing. The two numbers live
+    in different files and nothing at runtime compares them. If they drift,
+    nothing throws — the surface scrolls, and the cards it draws are simply
+    not the cards under the scrollbar, by a margin that grows with how far
+    down the reader is.
+
+    The PWA's own tests cannot catch it: they run in a jsdom, which has no
+    layout, so a card is zero pixels tall there whatever this file says. So it
+    is checked as text, which is the only place the disagreement is visible.
+    """
+    board = source(WEB_SRC / "Board.tsx")
+    backlog = source(WEB_SRC / "Backlog.tsx")
+    css = STYLES.read_text(encoding="utf-8")
+    assert "MeasuredWindow" in board
+    assert "ResizeObserver" in board
+    assert "MeasuredWindow" in backlog or "ResizeObserver" in backlog
+    assert "--board-card-h" not in css
+    assert re.search(r"--vogt-row-h:\s*40px", css)
+
+
+def test_every_vogt_surface_has_a_phone_width_pass() -> None:
+    """The phone-width rule covers all five, not only the board.
+
+    A surface with no rule at the narrow breakpoint has not been considered
+    at phone width — which is not proof it is unusable, but it is the
+    strongest thing checkable without a browser, and the five were written
+    without one.
+    """
+    narrow = narrow_blocks()
+    prefixes = {
+        "Board": ".board-",
+        "Backlog": ".vogt-backlog",
+        "WorkItemDetail": ".wid-",
+        "Projects": ".vogt-projects",
+        "AuditBrowser": ".vab",
+    }
+    for surface, prefix in prefixes.items():
+        assert prefix in narrow, (
+            f"{surface} has no rule at {NARROW_BREAKPOINT}, so nobody has "
+            "looked at it on a phone"
+        )
+
+
+def test_the_vogt_surfaces_share_the_engine_s_narrow_breakpoint() -> None:
+    """One phone width for the whole shell.
+
+    The engine's tabs collapse at 768px. A Vogt surface that collapsed at its
+    own width would leave a band where the drawer is a slide-in sheet and the
+    board is still six columns wide.
+    """
+    css = STYLES.read_text(encoding="utf-8")
+    widths = set(re.findall(r"@media \(max-width:\s*(\d+)px\)", css))
+    assert "768" in widths, "the engine's own phone breakpoint has moved"
+    # 900 and 1024 are the intermediate steps that collapse a two-pane split
+    # before phone width; anything narrower than 768 would be a third phone
+    # breakpoint, which is the thing this guards.
+    narrower = {w for w in widths if int(w) < 768}
+    assert not narrower, (
+        f"a second phone breakpoint appeared at {sorted(narrower)}px; the "
+        "shell has one, and it is 768"
+    )
+
+
+def test_every_readiness_check_is_in_the_engines_contract() -> None:
+    """The contract said "five checks" while the code published seven.
+
+    It had been stale since `workspace_agreement` landed and got staler when
+    `backup_agreement` did — a document nobody could have caught out by
+    reading either file alone, which is what a cross-file guard is for. The
+    names are the interface: `scripts/smoke_merged_stack.sh` greps for two of
+    them by name, and `DEPLOYMENT.md` tells a deployer to.
+    """
+    api = (REPO_ROOT / "engine" / "server" / "src" / "api.rs").read_text("utf-8")
+    published = set(re.findall(r'ReadinessCheck \{\s*name: "([a-z_]+)"', api))
+    assert published, "the readiness checks are literals in `api.rs`"
+    documented = ENGINE_CONTRACT_DOC.read_text(encoding="utf-8")
+    missing = sorted(name for name in published if f"`{name}`" not in documented)
+    assert not missing, (
+        f"{missing} are published by /readyz and named nowhere in "
+        "ENGINE.md \u00a75; a check a deployer cannot look up is one they "
+        "cannot act on"
+    )
+
+
+def test_the_places_shell_reaches_primary_actions_without_a_drawer() -> None:
+    """Every Vogt surface is reachable from the drawer at any width.
+
+    Found by looking: the action row is a flex row inside a panel that is
+    `overflow: hidden`, and it had grown to ten buttons. At the default 260px
+    four fitted. The other six — Board, Backlog, Projects, Audit, GUI and the
+    settings gear — were laid out past the panel's edge, clipped, invisible
+    and unclickable, so the surfaces the merge exists to add could not be
+    opened from the GUI at all.
+
+    Asserted here rather than in jsdom because jsdom has no layout: it would
+    report every button at the same position and see nothing wrong. This is a
+    claim about the stylesheet, so the stylesheet is what it reads.
+    """
+    app = source(WEB_SRC / "App.tsx")
+    assert "places-rail" in app
+    assert "phone-bottom-nav" in app
+    assert "drawer-actions" not in STYLES.read_text(encoding="utf-8")

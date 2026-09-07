@@ -1,0 +1,732 @@
+"""The observed store on SQLite.
+
+Append-only evidence (`SCHEMA.md` §3). Two disciplines live here and must not
+be confused: `sweeps` and `observations` are immutable history that only
+retention may delete, while `latest_*` are projections rebuilt from that
+history and droppable at any time.
+
+Nothing in this module knows what a project *is*. Resolving a dependency
+reference to a registered project is a cross-store question, so the
+application layer answers it and hands the result down (`SCHEMA.md` §1).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sqlite3
+from contextlib import suppress
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from vogt.core.clock import Clock, from_iso, to_iso, utc_now
+from vogt.core.entities import DepRef, Observation, Sweep, SweepOutcome
+from vogt.core.ids import IdFactory, new_id
+from vogt.storage.interface import MigrationReport
+from vogt.storage.observed_types import (
+    AppendStats,
+    DepRefRow,
+    PendingObservation,
+    PruneReport,
+)
+from vogt.storage.sqlite.connection import DEFAULT_SYNCHRONOUS, connect
+from vogt.storage.sqlite.migrator import DEFAULT_STALE_AFTER, Migrator, table_exists
+
+MIGRATIONS_DIR = Path(__file__).parent / "migrations" / "observed"
+
+META_INSTANCE_ID = "instance_id"
+META_CREATED_AT = "created_at"
+
+#: A subject is "open" unless the source says otherwise. Kept as one string so
+#: the ranked-view filter and the `closed_upstream` count read the same rule:
+#: a null/absent state (a marker) or any state other than closed/merged is
+#: still outstanding. Mirrors `core.observed.lifecycle_of`.
+_OPEN_STATE_SQL = (
+    "lower(coalesce(json_extract(payload, '$.state'), '')) NOT IN ('closed', 'merged')"
+)
+_CLOSED_STATE_SQL = (
+    "lower(coalesce(json_extract(payload, '$.state'), '')) IN ('closed', 'merged')"
+)
+
+
+class SqliteObservedStore:
+    """Append-only evidence store."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        clock: Clock = utc_now,
+        id_factory: IdFactory = new_id,
+        lock_stale_after: timedelta = DEFAULT_STALE_AFTER,
+        synchronous: str = DEFAULT_SYNCHRONOUS,
+    ) -> None:
+        self._path = path
+        self._synchronous = synchronous
+        self._clock = clock
+        self._id_factory = id_factory
+        #: Once the evidence tables exist they never un-exist, so a `True`
+        #: probe is cached for the life of this store. A single
+        #: backlog render calls has_evidence_tables from freshness, _gather,
+        #: git signals, upstream, inbox and notifications; without this each
+        #: was a fresh connection + catalog probe.
+        self._has_evidence_cached = False
+        self._migrator = Migrator(
+            store="observed",
+            directory=MIGRATIONS_DIR,
+            holder=f"{socket.gethostname()}/{os.getpid()}",
+            stale_after=lock_stale_after,
+        )
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    # -- lifecycle ---------------------------------------------------------
+
+    def migrate(self) -> MigrationReport:
+        conn = connect(self._path, create=True, synchronous=self._synchronous)
+        try:
+            return self._migrator.migrate(conn, now=self._clock())
+        finally:
+            conn.close()
+
+    def schema_version(self) -> int:
+        if not self._path.exists():
+            return 0
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
+        try:
+            return self._migrator.applied_version(conn)
+        finally:
+            conn.close()
+
+    def bundled_schema_version(self) -> int:
+        """What this build expects. Touches no database."""
+        return self._migrator.bundled_version()
+
+    def is_initialized(self) -> bool:
+        if not self._path.exists():
+            return False
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (META_INSTANCE_ID,)
+            ).fetchone()
+            return row is not None
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            conn.close()
+
+    def bind_instance(self, instance_id: str) -> None:
+        """Stamp this store with the instance it belongs to.
+
+        The two stores are backed up and restored independently, so each
+        carries the instance id; a restore that pairs mismatched files is
+        then a detectable error rather than a silent one.
+        """
+        conn = connect(self._path, create=True, synchronous=self._synchronous)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                (META_INSTANCE_ID, instance_id),
+            )
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                (META_CREATED_AT, to_iso(self._clock())),
+            )
+            conn.execute("COMMIT")
+        except BaseException:
+            with suppress(sqlite3.OperationalError):  # pragma: no cover
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
+    def instance_id(self) -> str | None:
+        if not self._path.exists():
+            return None
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?", (META_INSTANCE_ID,)
+            ).fetchone()
+            return None if row is None else str(row["value"])
+        except sqlite3.OperationalError:  # pragma: no cover - unmigrated file
+            return None
+        finally:
+            conn.close()
+
+    # -- sweeps ------------------------------------------------------------
+
+    def begin_sweep(self, *, collector: str, scope: list[str], at: datetime) -> Sweep:
+        """Open a coverage record before any evidence is collected.
+
+        Written up front, and left `running` if the process dies, so a sweep
+        that never finished is visible as such rather than absent — which is
+        the difference between "we looked and found nothing" and "we crashed".
+        """
+        sweep = Sweep(
+            id=self._id_factory("swp"),
+            collector=collector,
+            scope=scope,
+            started_at=at,
+            outcome="running",
+        )
+        with self._write() as conn:
+            conn.execute(
+                "INSERT INTO sweeps (id, collector, scope, started_at, outcome, "
+                "stats) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    sweep.id,
+                    collector,
+                    json.dumps(scope),
+                    to_iso(at),
+                    "running",
+                    "{}",
+                ),
+            )
+        return sweep
+
+    def finish_sweep(
+        self,
+        sweep_id: str,
+        *,
+        outcome: SweepOutcome,
+        stats: dict[str, int],
+        at: datetime,
+        detail: str | None = None,
+    ) -> None:
+        with self._write() as conn:
+            conn.execute(
+                "UPDATE sweeps SET finished_at = ?, outcome = ?, stats = ?, "
+                "detail = ? WHERE id = ?",
+                (to_iso(at), outcome, json.dumps(stats), detail, sweep_id),
+            )
+
+    def append(
+        self, sweep_id: str, findings: list[PendingObservation], *, at: datetime
+    ) -> AppendStats:
+        """Append findings, skipping any whose subject has not changed.
+
+        Dedup is by (subject_key, content_digest) against the newest row for
+        that subject. Growth therefore tracks change, not polling frequency
+        — and a stable subject's newest row can be much older than
+        the history window, which retention has to respect.
+        """
+        new = 0
+        unchanged = 0
+        with self._write() as conn:
+            collector = _collector_of(conn, sweep_id)
+            for finding in findings:
+                current = conn.execute(
+                    "SELECT content_digest FROM observations WHERE subject_key = ? "
+                    "ORDER BY observed_at DESC, id DESC LIMIT 1",
+                    (finding.subject_key,),
+                ).fetchone()
+                if current is not None and str(current["content_digest"]) == (
+                    finding.content_digest
+                ):
+                    unchanged += 1
+                    continue
+                conn.execute(
+                    "INSERT INTO observations (id, sweep_id, collector, kind, "
+                    "project_id, subject_key, payload, content_digest, source_url, "
+                    "promoted, observed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self._id_factory("obs"),
+                        sweep_id,
+                        collector,
+                        finding.kind,
+                        finding.project_id,
+                        finding.subject_key,
+                        json.dumps(finding.payload, default=str, sort_keys=True),
+                        finding.content_digest,
+                        finding.source_url,
+                        int(finding.promoted),
+                        to_iso(at),
+                    ),
+                )
+                new += 1
+        return AppendStats(new=new, unchanged=unchanged)
+
+    def list_sweeps(
+        self, *, collector: str | None = None, limit: int = 50
+    ) -> list[Sweep]:
+        clause = "WHERE collector = ?" if collector else ""
+        params: tuple[object, ...] = (collector, limit) if collector else (limit,)
+        with self._read() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM sweeps {clause} "
+                "ORDER BY started_at DESC, id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [_row_to_sweep(row) for row in rows]
+
+    def coverage(self) -> dict[str, Sweep]:
+        """The newest *completed* sweep per collector.
+
+        Completed, because a running sweep says nothing about coverage yet,
+        and freshness computed from one would claim an answer is newer than
+        the evidence behind it.
+        """
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sweeps WHERE finished_at IS NOT NULL "
+                "ORDER BY collector, finished_at DESC, id DESC"
+            ).fetchall()
+        newest: dict[str, Sweep] = {}
+        for row in rows:
+            sweep = _row_to_sweep(row)
+            newest.setdefault(sweep.collector, sweep)
+        return newest
+
+    def coverage_by_project(self) -> dict[str, dict[str, datetime]]:
+        """Per collector, when each project was last swept by it.
+
+        Cumulative, which is what "what has looked at what, and how long ago"
+        promises and what `coverage()` above cannot answer: that returns the
+        newest sweep per collector, so its scope is whatever the last run
+        happened to be asked for. A `--project`-scoped sweep left every
+        collector reporting one project against eight registered.
+        """
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT * FROM sweeps WHERE finished_at IS NOT NULL "
+                "ORDER BY collector, finished_at ASC, id ASC"
+            ).fetchall()
+        seen: dict[str, dict[str, datetime]] = {}
+        for row in rows:
+            sweep = _row_to_sweep(row)
+            finished = sweep.finished_at or sweep.started_at
+            per_project = seen.setdefault(sweep.collector, {})
+            for project_id in sweep.scope:
+                # Ascending order, so a later sweep overwrites an earlier one.
+                per_project[project_id] = finished
+        return seen
+
+    def fail_sweeps(self, sweep_ids: list[str], *, detail: str) -> None:
+        """Overwrite finished sweep rows to `failed`.
+
+        Called when the projection rebuild that must follow every sweep
+        batch raises: each collector's row is already committed and
+        genuinely `ok` in isolation, but nothing downstream — no
+        `sweep.completed` event, no rebuilt projection — ever heard the
+        batch finish. Leaving those rows as they are would have `coverage`
+        report the batch fresh and fine from a run that never completed
+        (#44); this is the "record the sweep as failed" half of that fix.
+        """
+        if not sweep_ids:
+            return
+        placeholders = ", ".join("?" for _ in sweep_ids)
+        with self._write() as conn:
+            conn.execute(
+                f"UPDATE sweeps SET outcome = 'failed', detail = ? "
+                f"WHERE id IN ({placeholders})",
+                (detail, *sweep_ids),
+            )
+
+    # -- reads -------------------------------------------------------------
+
+    def list_observations(
+        self,
+        *,
+        kind: str | None = None,
+        project_id: str | None = None,
+        subject_key: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[Observation]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("kind", kind),
+            ("project_id", project_id),
+            ("subject_key", subject_key),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params += [limit, offset]
+        with self._read() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM observations {where} "
+                "ORDER BY observed_at DESC, id DESC LIMIT ? OFFSET ?",
+                tuple(params),
+            ).fetchall()
+        return [_row_to_observation(row) for row in rows]
+
+    def latest(
+        self,
+        *,
+        kinds: tuple[str, ...] = (),
+        project_id: str | None = None,
+        promoted_only: bool = False,
+        exclude_closed: bool = False,
+        limit: int = 1000,
+    ) -> list[Observation]:
+        """The newest observation per subject, filtered.
+
+        `exclude_closed` drops subjects the source says are `closed`/`merged`
+        in SQL rather than in Python, so the `limit` window can never fill
+        with closed rows and truncate the open ones behind them — the failure
+        that becomes possible once closures are permanent."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if kinds:
+            placeholders = ", ".join("?" for _ in kinds)
+            clauses.append(f"kind IN ({placeholders})")
+            params.extend(kinds)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        if promoted_only:
+            clauses.append("promoted = 1")
+        if exclude_closed:
+            clauses.append(_OPEN_STATE_SQL)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT subject_key, observation_id AS id, observation_id, collector, "
+                "kind, project_id, payload, content_digest, source_url, promoted, "
+                f"observed_at, '' AS sweep_id FROM latest_observations {where} "
+                "ORDER BY observed_at DESC, subject_key LIMIT ?",
+                tuple(params),
+            ).fetchall()
+        return [_row_to_observation(row) for row in rows]
+
+    def latest_by_subject(self, subject_key: str) -> Observation | None:
+        """Return the newest observation for one subject."""
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT subject_key, observation_id AS id, observation_id, "
+                "collector, kind, project_id, payload, content_digest, "
+                "source_url, promoted, observed_at, '' AS sweep_id "
+                "FROM latest_observations WHERE subject_key = ?",
+                (subject_key,),
+            ).fetchone()
+        return None if row is None else _row_to_observation(row)
+
+    def count_closed(
+        self, *, kinds: tuple[str, ...], project_id: str | None = None
+    ) -> int:
+        """How many latest subjects of these kinds read `closed`/`merged`."""
+        clauses: list[str] = [_CLOSED_STATE_SQL]
+        params: list[object] = []
+        if kinds:
+            placeholders = ", ".join("?" for _ in kinds)
+            clauses.append(f"kind IN ({placeholders})")
+            params.extend(kinds)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            params.append(project_id)
+        where = " AND ".join(clauses)
+        with self._read() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) AS n FROM latest_observations WHERE {where}",
+                tuple(params),
+            ).fetchone()
+        return int(row["n"])
+
+    # -- incremental sync state (D1) ---------------------------------------
+
+    def get_watermark(self, *, collector: str, project_id: str) -> str | None:
+        with self._read() as conn:
+            row = conn.execute(
+                "SELECT watermark FROM sync_state WHERE collector = ? "
+                "AND project_id = ?",
+                (collector, project_id),
+            ).fetchone()
+        if row is None or row["watermark"] is None:
+            return None
+        return str(row["watermark"])
+
+    def set_watermark(
+        self, *, collector: str, project_id: str, watermark: str | None, at: datetime
+    ) -> None:
+        with self._write() as conn:
+            conn.execute(
+                "INSERT INTO sync_state (collector, project_id, watermark, "
+                "updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT (collector, project_id) DO UPDATE SET "
+                "watermark = excluded.watermark, updated_at = excluded.updated_at",
+                (collector, project_id, watermark, to_iso(at)),
+            )
+
+    def touch_subjects(self, subject_keys: list[str], *, at: datetime) -> None:
+        if not subject_keys:
+            return
+        stamp = to_iso(at)
+        with self._write() as conn:
+            conn.executemany(
+                "INSERT INTO subject_seen (subject_key, last_confirmed_at) "
+                "VALUES (?, ?) ON CONFLICT (subject_key) DO UPDATE SET "
+                "last_confirmed_at = excluded.last_confirmed_at",
+                [(key, stamp) for key in subject_keys],
+            )
+
+    def last_confirmed(self, subject_keys: list[str]) -> dict[str, datetime]:
+        if not subject_keys:
+            return {}
+        placeholders = ", ".join("?" for _ in subject_keys)
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT subject_key, last_confirmed_at FROM subject_seen "
+                f"WHERE subject_key IN ({placeholders})",
+                tuple(subject_keys),
+            ).fetchall()
+        return {
+            str(row["subject_key"]): from_iso(str(row["last_confirmed_at"]))
+            for row in rows
+        }
+
+    def dep_refs(
+        self, *, from_project_id: str | None = None, to_project_id: str | None = None
+    ) -> list[DepRef]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if from_project_id is not None:
+            clauses.append("from_project_id = ?")
+            params.append(from_project_id)
+        if to_project_id is not None:
+            clauses.append("to_project_id = ?")
+            params.append(to_project_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._read() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM latest_dep_refs {where} ORDER BY subject_key",
+                tuple(params),
+            ).fetchall()
+        return [_row_to_dep_ref(row) for row in rows]
+
+    def counts(self) -> dict[str, int]:
+        with self._read() as conn:
+            return {
+                "sweeps": _count(conn, "sweeps"),
+                "observations": _count(conn, "observations"),
+                "subjects": _count(conn, "latest_observations"),
+                "dep_refs": _count(conn, "latest_dep_refs"),
+            }
+
+    # -- projections -------------------------------------------------------
+
+    def rebuild_latest(self) -> int:
+        """Rebuild `latest_observations` from history.
+
+        Transactional and total: the projection is dropped and recomputed
+        rather than patched, so it cannot drift from the evidence in ways
+        nobody notices. It is bounded by the retention horizon, which is why
+        retention always keeps the newest row per subject.
+        """
+        with self._write() as conn:
+            conn.execute("DELETE FROM latest_observations")
+            conn.execute(
+                "INSERT INTO latest_observations (subject_key, observation_id, "
+                "collector, kind, project_id, payload, content_digest, source_url, "
+                "promoted, observed_at) "
+                "SELECT o.subject_key, o.id, o.collector, o.kind, o.project_id, "
+                "o.payload, o.content_digest, o.source_url, o.promoted, o.observed_at "
+                "FROM observations o WHERE o.id = ("
+                "  SELECT id FROM observations x WHERE x.subject_key = o.subject_key "
+                "  ORDER BY x.observed_at DESC, x.id DESC LIMIT 1"
+                ")"
+            )
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM latest_observations"
+            ).fetchone()
+            return int(row["n"])
+
+    def replace_dep_refs(self, rows: list[DepRefRow]) -> int:
+        """Replace the dependency projection with resolved rows."""
+        with self._write() as conn:
+            conn.execute("DELETE FROM latest_dep_refs")
+            for row in rows:
+                conn.execute(
+                    "INSERT INTO latest_dep_refs (subject_key, from_project_id, "
+                    "ref_kind, raw_target, manifest, to_project_id, observed_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        row.subject_key,
+                        row.from_project_id,
+                        row.ref_kind,
+                        row.raw_target,
+                        row.manifest,
+                        row.to_project_id,
+                        to_iso(row.observed_at),
+                    ),
+                )
+        return len(rows)
+
+    # -- retention ---------------------------------------------------------
+
+    def prune(
+        self,
+        *,
+        before: datetime,
+        protected_observation_ids: frozenset[str] = frozenset(),
+    ) -> PruneReport:
+        """Prune history, in the documented precedence order.
+
+        A row survives if any rule protects it:
+
+        1. It is the newest observation for its subject. Digest dedup means a
+           stable subject's newest row can be older than the window, so age
+           alone must never prune it.
+        2. A drift proposal references it — passed in, because drift
+           lives in the other store. Evidence must never become unreachable
+           through retention.
+        3. Otherwise it is history, and the window applies.
+        """
+        with self._write() as conn:
+            newest = {
+                str(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM observations o WHERE o.id = ("
+                    "  SELECT id FROM observations x WHERE x.subject_key = "
+                    "  o.subject_key ORDER BY x.observed_at DESC, x.id DESC LIMIT 1"
+                    ")"
+                ).fetchall()
+            }
+            candidates = [
+                str(row["id"])
+                for row in conn.execute(
+                    "SELECT id FROM observations WHERE observed_at < ?",
+                    (to_iso(before),),
+                ).fetchall()
+            ]
+            doomed = [
+                candidate
+                for candidate in candidates
+                if candidate not in newest
+                and candidate not in protected_observation_ids
+            ]
+            for observation_id in doomed:
+                conn.execute("DELETE FROM observations WHERE id = ?", (observation_id,))
+            return PruneReport(
+                removed=len(doomed),
+                kept_latest=sum(1 for c in candidates if c in newest),
+                kept_referenced=sum(
+                    1
+                    for c in candidates
+                    if c not in newest and c in protected_observation_ids
+                ),
+            )
+
+    def has_evidence_tables(self) -> bool:
+        """Whether this store has been migrated to hold evidence yet."""
+        # The cheap file-exists stat runs every time so a store whose db is
+        # removed (retention's harsher cousin) still reports honestly; the
+        # cache only skips the expensive connection + catalog probe.
+        if not self._path.exists():
+            return False
+        if self._has_evidence_cached:
+            return True
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
+        try:
+            exists = table_exists(conn, "observations")
+        finally:
+            conn.close()
+        # Only cache the True answer: the table can still come into existence
+        # (first sweep/migration), but once it exists it never un-exists.
+        if exists:
+            self._has_evidence_cached = True
+        return exists
+
+    # -- connections -------------------------------------------------------
+
+    class _Ctx:
+        def __init__(self, conn: sqlite3.Connection, *, write: bool) -> None:
+            self._conn = conn
+            self._write = write
+
+        def __enter__(self) -> sqlite3.Connection:
+            if self._write:
+                self._conn.execute("BEGIN IMMEDIATE")
+            return self._conn
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            try:
+                if self._write:
+                    if exc_type is None:
+                        self._conn.execute("COMMIT")
+                    else:
+                        with suppress(sqlite3.OperationalError):
+                            self._conn.execute("ROLLBACK")
+            finally:
+                self._conn.close()
+
+    def _write(self) -> SqliteObservedStore._Ctx:
+        return self._Ctx(
+            connect(self._path, create=True, synchronous=self._synchronous), write=True
+        )
+
+    def _read(self) -> SqliteObservedStore._Ctx:
+        return self._Ctx(
+            connect(self._path, create=False, synchronous=self._synchronous),
+            write=False,
+        )
+
+
+# -- row mapping -----------------------------------------------------------
+
+
+def _row_to_sweep(row: sqlite3.Row) -> Sweep:
+    finished = row["finished_at"]
+    return Sweep(
+        id=str(row["id"]),
+        collector=str(row["collector"]),
+        scope=json.loads(str(row["scope"])),
+        started_at=from_iso(str(row["started_at"])),
+        finished_at=None if finished is None else from_iso(str(finished)),
+        outcome=row["outcome"],
+        stats=json.loads(str(row["stats"])),
+        detail=None if row["detail"] is None else str(row["detail"]),
+    )
+
+
+def _row_to_observation(row: sqlite3.Row) -> Observation:
+    return Observation(
+        id=str(row["id"]),
+        sweep_id=str(row["sweep_id"]),
+        collector=str(row["collector"]),
+        kind=str(row["kind"]),
+        project_id=None if row["project_id"] is None else str(row["project_id"]),
+        subject_key=str(row["subject_key"]),
+        payload=json.loads(str(row["payload"])),
+        content_digest=str(row["content_digest"]),
+        source_url=None if row["source_url"] is None else str(row["source_url"]),
+        promoted=bool(row["promoted"]),
+        observed_at=from_iso(str(row["observed_at"])),
+    )
+
+
+def _row_to_dep_ref(row: sqlite3.Row) -> DepRef:
+    return DepRef(
+        subject_key=str(row["subject_key"]),
+        from_project_id=str(row["from_project_id"]),
+        ref_kind=row["ref_kind"],
+        raw_target=str(row["raw_target"]),
+        manifest=None if row["manifest"] is None else str(row["manifest"]),
+        to_project_id=(
+            None if row["to_project_id"] is None else str(row["to_project_id"])
+        ),
+        observed_at=from_iso(str(row["observed_at"])),
+    )
+
+
+def _collector_of(conn: sqlite3.Connection, sweep_id: str) -> str:
+    row = conn.execute(
+        "SELECT collector FROM sweeps WHERE id = ?", (sweep_id,)
+    ).fetchone()
+    return "" if row is None else str(row["collector"])
+
+
+def _count(conn: sqlite3.Connection, table: str) -> int:
+    # `table` is never caller-supplied: every call site passes a literal.
+    row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
+    return int(row["n"])

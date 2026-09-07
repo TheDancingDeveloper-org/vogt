@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Vogt mobile app demo</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #e8edf4;
+        background: #080b10;
+      }
+      * { box-sizing: border-box; }
+      body {
+        min-height: 100vh;
+        min-height: 100dvh;
+        margin: 0;
+        background:
+          radial-gradient(circle at 18% 12%, rgba(76, 139, 245, .17), transparent 32rem),
+          radial-gradient(circle at 84% 72%, rgba(69, 208, 168, .10), transparent 28rem),
+          #080b10;
+      }
+      .showcase {
+        display: grid;
+        grid-template-columns: minmax(17rem, 30rem) auto;
+        min-height: 100dvh;
+        align-items: center;
+        justify-content: center;
+        gap: clamp(2rem, 6vw, 6rem);
+        padding: clamp(1.5rem, 4vw, 4rem);
+      }
+      .copy { align-self: center; }
+      .eyebrow {
+        margin: 0 0 .8rem;
+        color: #72a7ff;
+        font-size: .75rem;
+        font-weight: 750;
+        letter-spacing: .14em;
+        text-transform: uppercase;
+      }
+      h1 {
+        max-width: 11ch;
+        margin: 0;
+        color: #f6f8fb;
+        font-size: clamp(2.5rem, 6vw, 5rem);
+        line-height: .96;
+        letter-spacing: -.055em;
+      }
+      .lede {
+        max-width: 38rem;
+        margin: 1.4rem 0 0;
+        color: #a7b1c0;
+        font-size: clamp(1rem, 1.6vw, 1.2rem);
+        line-height: 1.65;
+      }
+      .truth {
+        display: flex;
+        gap: .7rem;
+        margin-top: 1.2rem;
+        padding: .9rem 1rem;
+        border: 1px solid #253044;
+        border-radius: .85rem;
+        background: rgba(17, 23, 33, .82);
+        color: #c3ccd8;
+        line-height: 1.45;
+      }
+      .truth::before { content: "✓"; color: #45d0a8; font-weight: 800; }
+      nav {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .6rem;
+        margin-top: 1.4rem;
+      }
+      nav a {
+        display: inline-flex;
+        min-height: 2.75rem;
+        align-items: center;
+        padding: .65rem .9rem;
+        border: 1px solid #2b3850;
+        border-radius: 999px;
+        color: #d9e5f7;
+        background: #111721;
+        text-decoration: none;
+      }
+      nav a:hover, nav a:focus-visible {
+        border-color: #72a7ff;
+        outline: none;
+        background: #17243a;
+      }
+      .note { margin: 1rem 0 0; color: #788496; font-size: .82rem; line-height: 1.45; }
+      .device {
+        position: relative;
+        width: min(414px, calc(100vw - 2rem));
+        padding: 11px;
+        border: 1px solid #38465c;
+        border-radius: 2.4rem;
+        background: linear-gradient(145deg, #222b38, #0d1118 42%);
+        box-shadow: 0 2.4rem 6rem rgba(0, 0, 0, .55), inset 0 0 0 1px rgba(255, 255, 255, .06);
+      }
+      .device::before {
+        position: absolute;
+        z-index: 2;
+        top: 17px;
+        left: 50%;
+        width: 5.5rem;
+        height: .34rem;
+        border-radius: 999px;
+        background: #05070a;
+        content: "";
+        transform: translateX(-50%);
+        pointer-events: none;
+      }
+      iframe {
+        display: block;
+        width: 390px;
+        max-width: 100%;
+        height: min(844px, calc(100dvh - 3rem));
+        min-height: 640px;
+        border: 0;
+        border-radius: 1.8rem;
+        background: #0d1117;
+      }
+      @media (max-width: 860px) {
+        .showcase { grid-template-columns: 1fr; justify-items: center; }
+        .copy { max-width: 42rem; text-align: center; }
+        h1 { max-width: none; }
+        .truth { text-align: left; }
+        nav { justify-content: center; }
+      }
+      @media (max-width: 480px) {
+        .showcase { display: block; padding: 0; }
+        .copy { padding: 1.1rem 1rem 1rem; }
+        .eyebrow { margin-bottom: .35rem; }
+        h1 { font-size: 2rem; }
+        .lede { margin-top: .65rem; font-size: .9rem; line-height: 1.45; }
+        .truth, .note { display: none; }
+        nav { margin-top: .8rem; gap: .35rem; }
+        nav a { min-height: 2.5rem; padding: .5rem .7rem; font-size: .8rem; }
+        .device { width: 100%; padding: 0; border: 0; border-radius: 0; box-shadow: none; }
+        .device::before { display: none; }
+        iframe { width: 100%; height: calc(100dvh - 12.5rem); min-height: 38rem; border-radius: 0; }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="showcase">
+      <section class="copy" aria-labelledby="mobile-demo-title">
+        <p class="eyebrow">Interactive implementation preview</p>
+        <h1 id="mobile-demo-title">Vogt in your hand.</h1>
+        <p class="lede">
+          Sessions, terminal paging and Assistant approvals at the same phone
+          viewport used by the Capacitor app. Choose a view and interact with
+          the real responsive PWA inside the device.
+        </p>
+        <div class="truth">
+          This is not a screenshot recreation. The frame loads the same Solid
+          application and demo transport as the desktop showcase.
+        </div>
+        <nav aria-label="Mobile demo views">
+          <a href="/index.html#/sessions" target="vogt-mobile">Sessions</a>
+          <a href="/index.html#/t/demo-server" target="vogt-mobile">Terminal pager</a>
+          <a href="/index.html#/assistant" target="vogt-mobile">Assistant</a>
+          <a href="/index.html#/inbox" target="vogt-mobile">Inbox</a>
+        </nav>
+        <p class="note">
+          Native-only push and microphone plumbing are outside a browser demo;
+          the WebView UI shown here is the implementation the Android shell loads.
+        </p>
+      </section>
+      <div class="device" aria-label="Phone frame">
+        <iframe
+          name="vogt-mobile"
+          src="/index.html#/sessions"
+          title="Interactive Vogt mobile application"
+          loading="eager"
+        ></iframe>
+      </div>
+    </main>
+  </body>
+</html>

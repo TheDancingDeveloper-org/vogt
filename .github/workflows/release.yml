@@ -1,0 +1,808 @@
+name: release
+
+# Tag-triggered only: a push to main can never publish. And
+# publishing is not deploying: this workflow produces a signed
+# image; a deployment moves only when its operator pins the published digest
+# (docs/DEPLOYMENT.md).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  # The core alone. Published and signed at every release because the stack
+  # image below copies `/opt/vogt` out of it by digest and the release
+  # manifest records the pair — it is the verifiable build input of the
+  # product, not the product. Nothing tells an operator to deploy it
+  # (DEPLOYMENT.md).
+  IMAGE: ghcr.io/thedancingdeveloper-org/vogt
+  # The product: core plus session engine, PWA and agent CLIs in one
+  # container. This is the one supported install of Vogt — the image
+  # `deploy/stack.compose.yml` runs and the docs point at. A development pod
+  # by design (writable home, sudo, sshd, the CLIs), published, versioned and
+  # signed.
+  STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+  # The first-party voice sidecar, published and signed from the release
+  # so the shipped stack has working speech out of the box. One image, no
+  # variants, versioned in lockstep with the stack and named by that version
+  # in `deploy/stack.compose.yml`.
+  VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
+  # NOTE: signed releases build cold and never import the plaintext LAN
+  # BuildKit layer cache — an unauthenticated LAN write to that cache
+  # must not become a signed, verified artifact. The ordinary per-commit cache
+  # stays in build.yml; releases are rare enough to pay the cold build.
+
+jobs:
+  validate-release:
+    name: the tag is on main
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          # The release tag and main can be far apart.  A shallow checkout
+          # cannot prove ancestry and would turn this guard into a guess.
+          fetch-depth: 0
+
+      - name: the tagged commit is contained by main
+        env:
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "::error::Release tag $GITHUB_REF_NAME ($TAG_SHA) is not reachable from origin/main. Tag a commit that is on main."
+            exit 1
+          fi
+
+  # Docker Hub is not on the critical path: both Dockerfiles build
+  # `FROM` this organisation's GHCR mirror of the library images. This job
+  # makes sure the mirror holds what this tag's Dockerfiles ask for before
+  # either image job starts — a release is cut from whatever commit the tag
+  # names, which may be older than the last scheduled mirror run and may
+  # carry a base digest that was never copied.
+  base-images:
+    name: the bases are in GHCR
+    needs: validate-release
+    uses: ./.github/workflows/mirror-base-images.yml
+    permissions:
+      contents: read
+      packages: write
+
+  # The version gate: the tag, the package, the PWA and mobile manifests, and
+  # the workflows all name one version. No wheel or sdist is built — nothing
+  # consumes one (no PyPI publish, no image built from it).
+  distribution:
+    name: the version matches the tag
+    needs: validate-release
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      # Exact pin: setup-uv stopped publishing major tags at v8, so
+      # `@v9` does not resolve. Renovate bumps this line.
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+
+      - run: uv sync --locked
+
+      - name: version matches the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(uv run --no-sync python -c 'import vogt; print(vogt.__version__)')"
+          if [ "$TAG" != "v$version" ]; then
+            echo "tag $TAG does not match vogt.__version__ ($version)"
+            exit 1
+          fi
+          uv run --no-sync python scripts/check_product_version.py "${TAG#v}"
+
+  image:
+    name: build, sign and publish the image
+    # The core Dockerfile starts FROM the organisation's GHCR mirror too.
+    # Keep the mirror job on the dependency edge: a release must not race the
+    # copy of a newly bumped base digest.
+    needs: [distribution, base-images]
+    # The merged image copies /opt/vogt out of this one by digest.
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    # `publish` is advertised only by the Docker-in-Docker workers.
+    runs-on: [self-hosted, publish]
+    permissions:
+      contents: read
+      packages: write
+      # Keyless signing: the workflow's own OIDC identity is the signer, so
+      # there is no key to store or rotate and the signature binds to this
+      # repository and this workflow.
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        # A signed release never imports the plaintext LAN layer cache,
+        # so the release builder needs neither host networking nor a
+        # trust-HTTP buildkitd entry for that registry: the default
+        # docker-container builder (HTTPS, bridge network) pulls the
+        # digest-pinned base from GHCR and pushes the signed image over HTTPS,
+        # and never reaches the LAN registry at all.
+
+      # No Docker Hub login, deliberately — and this is a trap worth naming,
+      # because the obvious "improvement" is to add one.
+      #
+      # A Docker Hub credential shared across an organisation's CI has its
+      # 200 pulls/hour split between every job that uses it, so it is empty
+      # exactly when CI is busy — which is when builds happen — while the
+      # anonymous per-IP allowance of a single self-hosted runner is barely
+      # touched. Authenticating trades a bucket this repository mostly
+      # controls for one it does not control at all.
+      #
+      # So this build does not reach Docker Hub at all. The bases are
+      # `ghcr.io/thedancingdeveloper-org/vogt-base/*`, copied there by
+      # `mirror-base-images.yml`, which the `base-images` job runs as a
+      # prerequisite so a Renovate digest bump is mirrored before anything
+      # builds from it. A Docker Hub login here would not help anything and
+      # would put a shared bucket on this repository's critical path.
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+          # Stated rather than inherited. `latest=auto` is metadata-action's
+          # default, and it is the behaviour a release requires — `latest` moves
+          # on a semver tag and on nothing else — but relying on a default
+          # means the rule lives in another project's source. `build.yml` says
+          # `latest=false` explicitly for the same reason; this is the other
+          # half of the same statement.
+          flavor: |
+            latest=auto
+
+      # Built and *run* before it is pushed. An image whose entrypoint does
+      # not exist — a venv built at one path and copied to another — builds
+      # green and signs valid, and every container exits 255 in a restart
+      # loop. A publish gate that only proves an image assembles proves the
+      # wrong thing.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: candidate
+        with:
+          context: .
+          load: true
+          tags: ${{ env.IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+          # No shared build cache for a release. Every published image
+          # here is cosign-signed and verified downstream, but the LAN cache
+          # registry is plaintext HTTP with no auth: anyone on the LAN — fork
+          # PR code on the same runner fleet included — can push poisoned cache
+          # manifests that BuildKit would import verbatim into a signed
+          # artifact, laundering an unauthenticated LAN write into signed
+          # provenance. Releases are rare enough to build cold from the
+          # digest-pinned base; the ordinary commit cache stays in build.yml.
+          build-args: |
+            PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+
+      - name: the image runs
+        env:
+          CANDIDATE: ${{ env.IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          # The entrypoint resolves and the interpreter behind it exists.
+          docker run --rm "$CANDIDATE" --version
+          # git is a runtime dependency: `project.import` and the `git-local`
+          # collector both shell out to it, and nothing else is red when it
+          # is missing.
+          docker run --rm --entrypoint git "$CANDIDATE" --version
+          # `serve` still refuses to invent a listen address.
+          if docker run --rm "$CANDIDATE" serve 2>/dev/null; then
+            echo "serve started without being told where to listen" >&2
+            exit 1
+          fi
+          echo "image runs, and still refuses to guess an address"
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: push
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+          # No shared build cache for a signed release.
+          build-args: |
+            PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: sign the image and attest its SBOM
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          # The digest, never a tag: a tag can be moved after signing, and a
+          # signature over a movable reference proves nothing.
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: report the build input
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "## Published (core — a build input, not the product)"
+            echo
+            echo '```'
+            echo "${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "The merged \`vogt-stack\` image below lifts its core from this"
+            echo "digest. Deployments pin the merged image, never this one"
+            echo "(DEPLOYMENT.md). Nothing has been deployed."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  voice-image:
+    name: build, sign and publish the voice sidecar
+    needs: [distribution, base-images]
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    runs-on: [self-hosted, publish]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        # A signed release builds cold from the digest-pinned mirror bases and
+        # never touches the plaintext LAN cache, so the default builder
+        # is right here too.
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        id: meta
+        with:
+          images: ${{ env.VOICE_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+          flavor: |
+            latest=auto
+
+      # Built and run before it is pushed: a full local round trip through the
+      # baked models, so a signed release cannot ship a sidecar that assembles
+      # but cannot speak. Same reasoning as the core image's run gate.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: candidate
+        with:
+          context: voice
+          file: voice/Dockerfile
+          load: true
+          tags: ${{ env.VOICE_IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+
+      - name: the sidecar transcribes and speaks
+        env:
+          CANDIDATE: ${{ env.VOICE_IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /usr/local/bin/vogt-voice "$CANDIDATE" --version
+          docker run -d --name voice-smoke "$CANDIDATE"
+          trap 'docker logs voice-smoke || true; docker rm -f voice-smoke >/dev/null 2>&1 || true' EXIT
+
+          ready=""
+          for _ in $(seq 1 60); do
+            if docker exec voice-smoke curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 2
+          done
+          [ -n "$ready" ] || { echo "voice sidecar never became healthy" >&2; exit 1; }
+
+          models="$(docker exec voice-smoke curl -fsS http://127.0.0.1:8000/v1/models)"
+          echo "$models" | grep -q '"whisper-1"'
+          echo "$models" | grep -q '"tts-1"'
+
+          docker exec voice-smoke sh -c 'curl -fsS -X POST http://127.0.0.1:8000/v1/audio/speech -H "content-type: application/json" -d "{\"model\":\"tts-1\",\"voice\":\"alloy\",\"input\":\"the quick brown fox\",\"response_format\":\"wav\"}" -o /tmp/out.wav'
+          docker exec voice-smoke sh -c 'test "$(wc -c < /tmp/out.wav)" -gt 1000'
+          docker exec voice-smoke sh -c 'head -c 4 /tmp/out.wav | grep -q RIFF'
+
+          transcript="$(docker exec voice-smoke curl -fsS -X POST http://127.0.0.1:8000/v1/audio/transcriptions -F model=whisper-1 -F file=@/tmp/out.wav)"
+          echo "transcript: $transcript"
+          echo "$transcript" | grep -qE '"text":"[^"]+"'
+          echo "voice sidecar speaks and transcribes with the baked models"
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: push
+        with:
+          context: voice
+          file: voice/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: true
+          sbom: true
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: sign the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${VOICE_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "## Published (voice sidecar)"
+            echo
+            echo '```'
+            echo "VOGT_VOICE_IMAGE=${VOICE_IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Bundled on by default in \`deploy/stack.compose.yml\`. Pin this"
+            echo "digest in a real deployment."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # The dev-pod toolchain base, built (or reused) before the merged image that
+  # is built `FROM` it. A release is always the `lean` variant — no Flutter;
+  # the agent CLIs are installed by the stack build below, not by the base.
+  # `needs: base-images` because the pod base builds `FROM` a mirrored Ubuntu
+  # the mirror job must have copied first.
+  pod-base:
+    name: the pod base is in GHCR
+    needs: base-images
+    uses: ./.github/workflows/pod-base.yml
+    with:
+      variant: lean
+    permissions:
+      contents: read
+      packages: write
+
+  stack-image:
+    name: build, sign and publish the merged image
+    needs: [distribution, base-images, pod-base, image]
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    runs-on: [self-hosted, publish]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+        # A signed release never imports the plaintext LAN layer cache,
+        # so the release builder needs neither host networking nor a
+        # trust-HTTP buildkitd entry for that registry: the default
+        # docker-container builder (HTTPS, bridge network) pulls the
+        # digest-pinned base from GHCR and pushes the signed image over HTTPS,
+        # and never reaches the LAN registry at all.
+
+      # No runner-side `pnpm build`: it would never reach the image
+      # (`engine/Dockerfile.dockerignore` excludes `web/dist`, and stage 1 of
+      # `engine/Dockerfile` builds the bundle the image embeds). The PWA is
+      # still built before the engine that embeds it — stage 1 before stage 2.
+
+      # No Docker Hub login, deliberately — see the core image job above for
+      # why a shared credential is the wrong remedy for a 429 at `FROM`. The
+      # bases come from the GHCR mirror the `base-images` job fills first.
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+        id: meta
+        with:
+          images: ${{ env.STACK_IMAGE }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha
+          # Stated rather than inherited. `latest=auto` is metadata-action's
+          # default, and it is the behaviour a release requires — `latest` moves
+          # on a semver tag and on nothing else — but relying on a default
+          # means the rule lives in another project's source. `build.yml` says
+          # `latest=false` explicitly for the same reason; this is the other
+          # half of the same statement.
+          flavor: |
+            latest=auto
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: candidate
+        with:
+          # The repository root: the Dockerfile reaches for `web/dist`,
+          # `pyproject.toml` and `src/` as well as the crates.
+          context: .
+          file: engine/Dockerfile
+          load: true
+          tags: ${{ env.STACK_IMAGE }}:smoke-test
+          labels: ${{ steps.meta.outputs.labels }}
+          # `#` inside a `|` block scalar is literal content, not a YAML
+          # comment, and build-push-action parses the input without a comment
+          # option — so a note in there reaches buildx as a build arg. It goes
+          # here instead, as it does in `build.yml`.
+          #
+          # The same shape `build.yml` publishes from `main`: the agent CLIs
+          # the product exists to run, baked in, so a release carries what a
+          # consumer needs to run a session.
+          build-args: |
+            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
+            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=${{ github.ref_name }}
+            INSTALL_AI_CLIENTS=true
+          # No shared build cache for a signed release.
+
+      - name: both halves run
+        env:
+          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint vogt "$CANDIDATE" --version
+          docker run --rm --entrypoint vogt-engine "$CANDIDATE" --help >/dev/null
+          docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
+          echo "both halves are present and start"
+
+          # `vogt-verify-agent-clis` above does NOT prove the CLIs are here. It
+          # is a *shadow* detector: `check_tool` returns 0 when the system path
+          # does not exist, `check_package` returns 0 unless the binary is
+          # executable, and `agent-versions.resolved` is written unconditionally
+          # — so it is green on a CLI-free image. It answers "is a persisted
+          # $HOME copy shadowing the image's?", not "is there an image copy?".
+          #
+          # The release carries the clients by decision, and a build arg that
+          # nothing executes is a default waiting to be forgotten: with
+          # INSTALL_AI_CLIENTS silently false, a stack runs without claude or
+          # codex and nothing is red. Running them is the only thing that
+          # distinguishes a release from a reversion to the CLI-free image.
+          # `flutter` is absent from the list on purpose — a release is the
+          # `lean` pod base.
+          for tool in claude codex; do
+            docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
+              || { echo "the release image is missing $tool" >&2; exit 1; }
+          done
+          echo "the release image carries the agent CLIs"
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        id: push
+        with:
+          context: .
+          file: engine/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Identical to the candidate's, so the pushed image is the layers the
+          # smoke test just ran rather than a rebuild that resembles them. The
+          # two lists drifting apart is how an image gets smoke-tested in one
+          # shape and published in another.
+          build-args: |
+            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
+            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
+            VOGT_SOURCE_REF=${{ github.ref_name }}
+            VOGT_SOURCE_SHA=${{ github.sha }}
+            VOGT_PRODUCT_VERSION=${{ github.ref_name }}
+            INSTALL_AI_CLIENTS=true
+          provenance: true
+          sbom: true
+          # No shared build cache for a signed release.
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: sign the image
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${STACK_IMAGE}@${DIGEST}"
+
+      - name: report what to pin
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "## Published (the product)"
+            echo
+            echo "In \`deploy/.env\` beside \`deploy/stack.compose.yml\`:"
+            echo
+            echo '```'
+            echo "VOGT_STACK_IMAGE=${STACK_IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Publishing is not deploying. See"
+            echo "\`docs/DEPLOYMENT.md\` §2 before the first one."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── The signed APK ───────────────────────────────────────────────
+  #
+  # A *release* job, not a per-push one, and that is the whole shape of the
+  # decision: `ci.yml` builds a debug APK on every push to prove the shell
+  # still assembles, and signing is what turns a build into something a person
+  # installs. The two acts were conflated in the pipeline this replaced.
+  #
+  # **Inert until the keystore secrets exist.** A signing key is an app
+  # identity: a new key is a different app, and Android refuses to upgrade an
+  # installed one with it. Until the four `VOGT_ANDROID_KEY*` secrets are set
+  # this job says which are missing and stops, rather than quietly shipping a
+  # debug-signed artifact under a release tag.
+  #
+  # `mobile/android/app/build.gradle` reads all four from the environment and
+  # only wires `signingConfigs.release` when every one is present, so nothing
+  # here needs a Gradle change.
+  #
+  # The Firebase config and the keystore both arrive as plain GitHub Actions
+  # secrets — no secret broker and no CLI — so the job runs on any self-hosted
+  # runner and a fork can supply its own.
+  android:
+    name: build and sign the Android shell
+    needs: distribution
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 11
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+
+      - id: keystore
+        name: is there a keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.VOGT_ANDROID_KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.VOGT_ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.VOGT_ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.VOGT_ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${KEYSTORE_B64:-}" ]      || missing="$missing VOGT_ANDROID_KEYSTORE_B64"
+          [ -n "${KEYSTORE_PASSWORD:-}" ] || missing="$missing VOGT_ANDROID_KEYSTORE_PASSWORD"
+          [ -n "${KEY_ALIAS:-}" ]         || missing="$missing VOGT_ANDROID_KEY_ALIAS"
+          [ -n "${KEY_PASSWORD:-}" ]      || missing="$missing VOGT_ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::No release keystore configured; missing:$missing. A new keystore is a different app identity and cannot upgrade an existing install."
+            exit 1
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: the release URL is named
+        env:
+          SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+        run: |
+          set -euo pipefail
+          # The shell wraps a remote URL and has no default, on purpose
+          # — an APK pointing at the wrong front door looks like a working app
+          # whose Vogt tabs are all in their outage state.
+          if [ -z "${SERVER_URL:-}" ]; then
+            echo "::error::VOGT_ANDROID_SERVER_URL is not set. A release APK must name the front door it wraps; there is deliberately no default."
+            exit 1
+          fi
+
+      - name: install the shell's dependencies
+        working-directory: mobile
+        run: pnpm install --frozen-lockfile
+
+      - name: write the production Firebase config
+        # The helper writes the secret without echoing it and verifies the
+        # config carries the production Android client before Gradle trusts it.
+        env:
+          VOGT_FIREBASE_JSON: ${{ secrets.VOGT_FIREBASE_PROD_JSON }}
+          VOGT_FIREBASE_OUTPUT: mobile/android/app/google-services.json
+          VOGT_ANDROID_EXPECTED_PACKAGE: com.thedancingdeveloper.vogt
+        run: bash scripts/write_firebase_config.sh
+
+      - name: capacitor sync
+        working-directory: mobile
+        env:
+          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+        run: npx cap sync android
+
+      - name: assemble and sign
+        working-directory: mobile/android
+        env:
+          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
+          VOGT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.VOGT_ANDROID_KEYSTORE_PASSWORD }}
+          VOGT_ANDROID_KEY_ALIAS: ${{ secrets.VOGT_ANDROID_KEY_ALIAS }}
+          VOGT_ANDROID_KEY_PASSWORD: ${{ secrets.VOGT_ANDROID_KEY_PASSWORD }}
+          KEYSTORE_B64: ${{ secrets.VOGT_ANDROID_KEYSTORE_B64 }}
+        run: |
+          set -euo pipefail
+          # Written under the runner's workspace and removed on the way out,
+          # signed or not: a keystore left on a shared self-hosted runner is a
+          # signing key anybody with a job on that runner can take.
+          umask 077
+          keystore="$RUNNER_TEMP/release.keystore"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$keystore"
+          trap 'rm -f "$keystore"' EXIT
+          export VOGT_ANDROID_KEYSTORE_PATH="$keystore"
+          ./gradlew assembleRelease --no-daemon
+
+      - name: the artifact is actually signed
+        working-directory: mobile/android
+        run: |
+          set -euo pipefail
+          apk="$(find app/build/outputs/apk/release -name '*.apk' | head -1)"
+          test -n "$apk"
+          # `apksigner` is in the SDK's build-tools. Verifying here rather than
+          # trusting the build: Gradle silently produces an *unsigned* release
+          # APK when the signing config is absent, which is the exact artefact
+          # this job exists to stop being published under a release tag.
+          verifier="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner | sort | tail -1)"
+          "$verifier" verify --print-certs "$apk"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: vogt-android-release-${{ github.ref_name }}
+          path: mobile/android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: remove Firebase config
+        if: always()
+        run: rm -f mobile/android/app/google-services.json
+
+  # The stack and its voice sidecar are one release pair. Both images
+  # take their version from the same tag via docker/metadata-action, so a
+  # mismatch here means a tagging change slipped one out of step — fail the
+  # release with a diagnosable message rather than publishing a pair a
+  # deployment cannot trust to be compatible.
+  release-pair:
+    name: the stack and voice images are a matching pair
+    needs: [validate-release, image, voice-image, stack-image]
+    runs-on: [self-hosted]
+    steps:
+      - name: versions agree with each other and the tag
+        env:
+          TAG: ${{ github.ref_name }}
+          CORE_VERSION: ${{ needs.image.outputs.version }}
+          STACK_VERSION: ${{ needs.stack-image.outputs.version }}
+          VOICE_VERSION: ${{ needs.voice-image.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected="${TAG#v}"
+          fail=""
+          for pair in "core:$CORE_VERSION" "stack:$STACK_VERSION" "voice:$VOICE_VERSION"; do
+            name="${pair%%:*}"; got="${pair#*:}"
+            if [ "$got" != "$expected" ]; then
+              echo "::error::${name} image published version '${got}', expected '${expected}' (tag ${TAG})" >&2
+              fail=1
+            fi
+          done
+          if [ -n "$fail" ]; then
+            echo "the stack and voice images are not a matching release pair — see the errors above" >&2
+            exit 1
+          fi
+          echo "core=stack=voice=${expected}: the release is a matching pair"
+
+  github-release:
+    name: create the durable GitHub Release
+    needs: [validate-release, distribution, image, voice-image, stack-image, android, release-pair]
+    runs-on: [self-hosted]
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131
+        with:
+          name: vogt-android-release-${{ github.ref_name }}
+          path: release-assets/android
+
+      - name: assemble release manifest and fail closed on missing assets
+        env:
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+          CORE_DIGEST: ${{ needs.image.outputs.digest }}
+          STACK_DIGEST: ${{ needs.stack-image.outputs.digest }}
+          VOICE_DIGEST: ${{ needs.voice-image.outputs.digest }}
+          CORE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt
+          STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
+          VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
+        run: |
+          set -euo pipefail
+          apk_count="$(find release-assets/android -type f -name '*.apk' | wc -l)"
+          [ "$apk_count" -ge 1 ] || { echo "signed APK is required" >&2; exit 1; }
+          # All three digests must be present: the stack and its voice sidecar
+          # are one release pair, so a manifest missing the voice half
+          # is not a complete release.
+          case "$CORE_DIGEST:$STACK_DIGEST:$VOICE_DIGEST" in
+            sha256:*:sha256:*:sha256:*) ;;
+            *) echo "release image digests are missing (core/stack/voice)" >&2; exit 1;;
+          esac
+          mkdir -p release-assets/final
+          find release-assets/android -type f -name '*.apk' -exec cp {} release-assets/final/ \;
+          jq -n \
+            --arg schema "vogt-release-manifest.v1" \
+            --arg tag "$TAG" \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg core "${CORE_IMAGE}@${CORE_DIGEST}" \
+            --arg stack "${STACK_IMAGE}@${STACK_DIGEST}" \
+            --arg voice "${VOICE_IMAGE}@${VOICE_DIGEST}" \
+            --arg guide "https://github.com/TheDancingDeveloper-org/vogt/blob/main/docs/DEPLOYMENT.md" \
+            '{schema: $schema, product: "Vogt", product_version: ($tag | ltrimstr("v")), source_tag: $tag, source_sha: $source_sha, images: {core: $core, merged_stack: $stack, voice: $voice}, provenance: {cosign: "keyless signature from .github/workflows/release.yml", sbom: "GitHub Actions SBOM attestation for the published image digests"}, deployment_guide: $guide, assets: {android: "signed APK"}}' \
+            > release-assets/final/vogt-release-manifest.json
+          jq empty release-assets/final/vogt-release-manifest.json
+          jq -r . release-assets/final/vogt-release-manifest.json > release-assets/release-notes.json
+
+      - name: install GitHub CLI
+        run: |
+          set -euo pipefail
+          command -v gh >/dev/null 2>&1 && exit 0
+          if command -v apt-get >/dev/null 2>&1; then
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update
+              apt-get install -y --no-install-recommends gh
+            else
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends gh
+            fi
+          elif command -v apk >/dev/null 2>&1; then
+            apk add --no-cache github-cli
+          else
+            echo "GitHub CLI is required on the release runner" >&2
+            exit 1
+          fi
+          command -v gh >/dev/null 2>&1
+
+      - name: create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          trap 'rm -f "$notes"' EXIT
+          {
+            echo 'Release metadata (machine-readable copy is attached as `vogt-release-manifest.json`):'
+            echo
+            echo '```json'
+            cat release-assets/release-notes.json
+            echo '```'
+            echo
+            echo "Publishing does not deploy production; deployment is a separate, operator-approved step."
+          } > "$notes"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" --notes-file "$notes"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
+              --title "Vogt ${TAG#v}" --generate-notes --notes-file "$notes"
+          fi
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" release-assets/final/* --clobber
