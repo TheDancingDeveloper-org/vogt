@@ -1,4 +1,4 @@
--- 0014_native_migration — retire-by-marker for migrated native items.
+-- 0014_native_migration — retire-by-marker for migrated native items (#183).
 --
 -- When `forge.link` or `forge.publish` succeeds on a project that still holds
 -- open native work items, each is published upstream as an issue and its
@@ -6,7 +6,7 @@
 -- native row is then *retired*, not deleted: `superseded_by` names the
 -- subject key that replaced it.
 --
--- Retire-by-marker over deletion, by decision: the row anchors the
+-- Retire-by-marker over deletion, by decision (#183): the row anchors the
 -- item's whole local history — comments, relations, the FR-B2 write-back
 -- ledger, audit rows keyed by its id — and deleting it would either orphan
 -- or destroy that history to satisfy a re-keying. A superseded row is

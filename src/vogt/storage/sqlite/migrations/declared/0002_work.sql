@@ -57,7 +57,7 @@ CREATE INDEX idx_work_items_kind ON work_items (kind);
 CREATE INDEX idx_work_items_assignee ON work_items (assignee_actor_id);
 CREATE INDEX idx_work_items_initiative ON work_items (initiative_id);
 
--- Typed, cross-project edges, aligned with GitHub issue relation
+-- Typed, cross-project edges (FR-W8), aligned with GitHub issue relation
 -- semantics so observed forge relations map losslessly at M5.
 CREATE TABLE work_relations (
     work_item_id TEXT NOT NULL REFERENCES work_items (id),
@@ -90,7 +90,7 @@ CREATE TABLE comments (
 
 CREATE INDEX idx_comments_work_item ON comments (work_item_id, created_at);
 
--- One state machine per work-item kind. Held as data rather than
+-- One state machine per work-item kind (FR-W2). Held as data rather than
 -- code so that changing a workflow is configuration, and so a rejected
 -- transition can name the rule it violated from the same source the
 -- transition was checked against.

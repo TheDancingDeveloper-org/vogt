@@ -1,7 +1,7 @@
 -- 0001_foundation — the M0 spine: instance metadata, identity, audit,
 -- events, and the project record the M0 demo registers.
 --
--- Portability note: AUTOINCREMENT on events.seq is SQLite's
+-- Portability note (NFR-S3): AUTOINCREMENT on events.seq is SQLite's
 -- spelling of a monotonic sequence that never reuses a value after a
 -- delete. Postgres spells the same guarantee GENERATED ALWAYS AS IDENTITY.
 -- Nothing above the storage interface knows which is in use.
@@ -43,7 +43,7 @@ CREATE TABLE projects (
     updated_at            TEXT NOT NULL
 );
 
--- Every declared write, explained. The CHECK is the last line of
+-- Every declared write, explained (FR-S1). The CHECK is the last line of
 -- defence for the rule that a reason may not be blank: an empty reason
 -- records that something happened while explaining nothing.
 CREATE TABLE audit (
@@ -63,7 +63,7 @@ CREATE INDEX idx_audit_actor ON audit (actor_id);
 CREATE INDEX idx_audit_at ON audit (at);
 CREATE INDEX idx_audit_entity ON audit (entity_kind, entity_id);
 
--- The single ordered notification feed. seq IS the /events cursor;
+-- The single ordered notification feed (FR-N1). seq IS the /events cursor;
 -- there is deliberately no second sequence anywhere, so no client ever
 -- merges orderings across the two stores.
 CREATE TABLE events (

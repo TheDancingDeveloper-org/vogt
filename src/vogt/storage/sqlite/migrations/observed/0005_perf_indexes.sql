@@ -1,4 +1,4 @@
--- Indexes for the observations list surface. The table is append-only
+-- Indexes for the observations list surface (#527). The table is append-only
 -- history that never shrinks, so a missing covering index means a full scan
 -- and top-N sort of everything per call.
 

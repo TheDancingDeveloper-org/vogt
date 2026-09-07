@@ -1,5 +1,5 @@
 -- 0007_sessions — the link from a work item or a project to a terminal the
--- engine is running for it.
+-- engine is running for it (FR-E4, FR-E8).
 --
 -- This table is the *declared* link and nothing more: Vogt started a session,
 -- for this project, for this item, attributed to this actor, with a reason a
@@ -10,7 +10,7 @@
 -- What is deliberately *not* here is the session's live state. Activity
 -- (`idle` / `running` / `waiting-for-input` / `errored`), scrollback position
 -- and exit code are the engine's to report over its own API and SSE stream
--- A column caching any of them would be stale the instant it was
+-- (FR-E2); a column caching any of them would be stale the instant it was
 -- written, and a stale copy of somebody else's running state is worse than no
 -- copy — it is a view that presents itself as current. `stopped_at` is the
 -- one exception and is not an exception at all: it records that *Vogt*
@@ -35,11 +35,11 @@ CREATE TABLE coding_sessions (
     engine_session_id TEXT NOT NULL UNIQUE,
     project_id        TEXT NOT NULL REFERENCES projects (id),
     work_item_id      TEXT REFERENCES work_items (id),
-    -- Whose writes the session's agent makes. Recorded here rather
+    -- Whose writes the session's agent makes (FR-S10). Recorded here rather
     -- than inferred from the audit log later: the per-session token is
     -- revoked at session end, and the attribution has to survive that.
     actor_id          TEXT NOT NULL REFERENCES actors (id),
-    -- The path the registry recorded, stored as it was used. Kept
+    -- The path the registry recorded, stored as it was used (FR-E3). Kept
     -- even though `projects.root_path` holds it today, because a project that
     -- later moves must not silently rewrite where a past session ran.
     cwd               TEXT NOT NULL,

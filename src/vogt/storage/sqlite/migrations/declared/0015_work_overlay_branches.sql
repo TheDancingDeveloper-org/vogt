@@ -1,12 +1,12 @@
--- 0015_work_overlay_branches — the branch a work item is worked on.
+-- 0015_work_overlay_branches — the branch a work item is worked on (#283).
 --
--- Additive and forward-only: Vogt REPORTS where work is in git,
+-- Additive and forward-only (#287, FR-B4): Vogt REPORTS where work is in git,
 -- it never drives git. The *declared* half of that binding lives here — the
 -- branch a session started from Vogt said it would use — recorded on the local
 -- overlay next to the vogt-only fields it already carries. The *observed* half
 -- stays in the evidence store (`git.branch` findings) and is never folded in:
--- declared and observed are compared, and where they disagree that is drift,
--- not a merge.
+-- declared and observed are compared, and where they disagree that is drift
+-- (FR-O2), not a merge.
 --
 -- A JSON array of branch names rather than a child table: the list is short,
 -- read whole every time an item is read, and written whole on every session

@@ -1,4 +1,4 @@
--- Indexes for hot list surfaces that had no covering index. Both
+-- Indexes for hot list surfaces that had no covering index (#527). Both
 -- tables are append-only and never shrink, so the missing indexes degraded
 -- linearly with all-time history.
 
