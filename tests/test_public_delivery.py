@@ -349,7 +349,8 @@ def test_the_stack_compose_wires_fcm_as_a_file_secret_never_inline() -> None:
 
     # The file mechanism is offered, defaulting off so an unpopulated deploy
     # still boots (an empty secret file is never read while the var is unset).
-    assert 'ENGINE_FCM_SERVICE_ACCOUNT_FILE: "${ENGINE_FCM_SERVICE_ACCOUNT_FILE:-}"' in stack, (
+    file_var = "ENGINE_FCM_SERVICE_ACCOUNT_FILE"
+    assert f'{file_var}: "${{{file_var}:-}}"' in stack, (
         "the stack must offer the FCM file-secret path, opt-in and off by default"
     )
 
