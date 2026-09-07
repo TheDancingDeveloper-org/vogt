@@ -12,6 +12,8 @@ import importlib.util
 import re
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INDEX = REPO_ROOT / "web" / "src" / "index.tsx"
 CHECK_BUNDLE = REPO_ROOT / "scripts" / "check_bundle.py"
@@ -25,6 +27,10 @@ def _startup_dynamic() -> tuple[str, ...]:
     return tuple(module.STARTUP_DYNAMIC)
 
 
+@pytest.mark.skipif(
+    not INDEX.is_file() or not CHECK_BUNDLE.is_file(),
+    reason="web/ or scripts/ tree absent (the core-only CI checkout)",
+)
 def test_startup_roots_match_index_tsx() -> None:
     source = INDEX.read_text(encoding="utf-8")
     # index.tsx's only top-level `import("./X")` calls are its startup Promise.all
