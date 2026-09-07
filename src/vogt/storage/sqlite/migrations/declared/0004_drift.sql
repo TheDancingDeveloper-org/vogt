@@ -1,12 +1,12 @@
 -- 0004_drift — machine-generated proposals, human- or agent-resolved.
 --
--- Drift never silently mutates declared data. It produces a
+-- Drift never silently mutates declared data (FR-R2). It produces a
 -- proposal: "issue #42 closed upstream → close WI-118?" Somebody accepts,
 -- rejects, or leaves it contested, and that resolution is an ordinary
 -- audited write.
 --
 -- `evidence_snapshot` is the self-contained copy taken at raise time
--- The observation's payload digest, its subject key, its
+-- (FR-R5): the observation's payload digest, its subject key, its
 -- observed-at, and enough of the payload to explain the proposal without the
 -- observed store. `evidence_observation_id` still points at the live row,
 -- and retention refuses to prune anything a proposal references. A proposal

@@ -3,7 +3,7 @@
 -- Two disciplines meet here. `sweeps` and `observations` are immutable
 -- history: collectors append, nothing updates, and the only delete path is
 -- retention (§5 of SCHEMA.md). `latest_*` are derived projections, rebuilt
--- transactionally at sweep completion and droppable at any time.
+-- transactionally at sweep completion and droppable at any time (NFR-I4).
 --
 -- Deviation from SCHEMA.md §3.2, recorded deliberately: that draft named
 -- five typed `latest_*` tables (forge items, CI runs, releases, markers,
@@ -32,9 +32,9 @@ CREATE INDEX idx_sweeps_collector ON sweeps (collector, started_at);
 
 -- One immutable evidence row. `subject_key` is the deterministic natural key
 -- (`gh:owner/repo#123`, `mark:slug/path#L42`, `depref:slug/Cargo.toml→...`);
--- same subject + same digest in a later sweep writes nothing, which
+-- same subject + same digest in a later sweep writes nothing (FR-O7), which
 -- is what keeps growth proportional to change rather than to how often we
--- look.
+-- look (NFR-S2).
 CREATE TABLE observations (
     id             TEXT PRIMARY KEY NOT NULL,
     sweep_id       TEXT NOT NULL REFERENCES sweeps (id),
@@ -57,7 +57,7 @@ CREATE INDEX idx_observations_project ON observations (project_id, kind);
 CREATE INDEX idx_observations_sweep ON observations (sweep_id);
 
 -- Newest observation per subject. Rebuilt from `observations`; never a
--- source of truth.
+-- source of truth (NFR-I4).
 CREATE TABLE latest_observations (
     subject_key    TEXT PRIMARY KEY NOT NULL,
     observation_id TEXT NOT NULL REFERENCES observations (id),

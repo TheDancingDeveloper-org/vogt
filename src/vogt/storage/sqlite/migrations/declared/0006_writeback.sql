@@ -1,6 +1,6 @@
 -- 0006_writeback — the per-project write-back policy, and its ledger.
 --
--- Governed per project, defaulting to `none`. A tool that can write
+-- FR-B1: governed per project, defaulting to `none`. A tool that can write
 -- to somebody's issue tracker should do so only where it has been told to,
 -- one repository at a time.
 --
@@ -14,7 +14,7 @@ ALTER TABLE projects ADD COLUMN write_back TEXT NOT NULL DEFAULT 'none'
     CHECK (write_back IN ('none', 'comment_only', 'full'));
 
 -- Every write-back action, recorded before it is attempted and updated with
--- what happened. Kept separate from `audit` because an audit row
+-- what happened (FR-B2). Kept separate from `audit` because an audit row
 -- describes a change to *our* declared data; this describes a change we made
 -- to somebody else's system, which can fail after we committed.
 --

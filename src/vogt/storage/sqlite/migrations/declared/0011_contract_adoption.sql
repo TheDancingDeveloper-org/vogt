@@ -1,5 +1,6 @@
 -- 0011_contract_adoption — the contract is something a project opts into,
 -- and a criterion it cannot meet is not a criterion it failed
+-- (FR-G16, FR-G19, r14).
 --
 -- Two columns' worth of change, and both are about the same asymmetry. A
 -- project Vogt created got the scaffold; a project Vogt was handed got a

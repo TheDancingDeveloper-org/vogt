@@ -1,4 +1,4 @@
--- 0005_tokens — scoped credentials bound to actors.
+-- 0005_tokens — scoped credentials bound to actors (FR-S3).
 --
 -- Only the hash is stored. A token is shown once, at issue time, and cannot
 -- be recovered afterwards — if the operator loses it, the answer is to
@@ -26,7 +26,7 @@ CREATE TABLE tokens (
 CREATE INDEX idx_tokens_actor ON tokens (actor_id);
 CREATE INDEX idx_tokens_live ON tokens (revoked_at);
 
--- Both allow and deny decisions are audited. A denial is the more
+-- Both allow and deny decisions are audited (FR-S5). A denial is the more
 -- interesting row: it is the one that tells you an agent tried something it
 -- could not do, which is exactly what you want to see.
 --

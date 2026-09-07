@@ -1,5 +1,5 @@
 -- 0010_session_model — which model a session was asked to run, and how hard
--- it was asked to think.
+-- it was asked to think (FR-T11, r16).
 --
 -- These are *declared* columns and belong here for the same reason `template`
 -- and `reason` do: they record what Vogt asked for. They are not a claim
