@@ -18,6 +18,7 @@ import pytest
 import load
 from load import (
     DatasetPlan,
+    DeployedPlan,
     LatencyRecorder,
     OperationStats,
     Regression,
@@ -29,10 +30,12 @@ from load import (
     build_soak_report,
     compare_to_baseline,
     current_rss_mb,
+    deployed_plan_from_scale,
     percentile,
     plan_from_args,
     plan_from_scale,
     relation_triples,
+    run_deployed,
     run_load,
     run_soak,
     soak_plan_from_scale,
@@ -418,6 +421,67 @@ def test_run_soak_drives_the_steady_mix_and_records_numbers(tmp_path: Path) -> N
     assert ops["work.create"]["count"] == 6
     assert ops["sweep"]["count"] == 2
     assert report["rss_mb"]["end"] > 0
+
+
+# -- deployed: the real HTTP shape under auth (#540) ------------------------
+
+
+@pytest.mark.parametrize(("requests", "concurrency"), [(0, 1), (1, 0), (-1, 1)])
+def test_deployed_plan_rejects_non_positive_knobs(
+    requests: int, concurrency: int
+) -> None:
+    base = DatasetPlan(
+        projects=1, work_items_per_project=1, relations=0, ranking_iterations=1
+    )
+    with pytest.raises(ValueError, match="must be >= 1"):
+        DeployedPlan(base=base, requests=requests, concurrency=concurrency)
+
+
+def test_deployed_plan_from_scale_sizes_the_base_and_carries_knobs() -> None:
+    plan = deployed_plan_from_scale(2, requests=50, concurrency=4)
+    assert plan.requests == 50
+    assert plan.concurrency == 4
+    # base sized by the scale knob, ranking trimmed like the soak seed.
+    assert plan.base.projects == plan_from_scale(2).projects
+    assert plan.base.ranking_iterations == 1
+    assert plan.to_dict()["base"]["projects"] == plan.base.projects
+
+
+def test_run_deployed_drives_the_http_surface_under_auth(tmp_path: Path) -> None:
+    """End-to-end: seed, stand the real server up with auth on, drive it.
+
+    Proves the deployed mode returns the recorded-numbers shape (`kind:
+    deployed`) with the hot read surfaces and the write path exercised over
+    real HTTP — the surfaces the in-process soak cannot reach — with no errors
+    at a tiny scale. Timings are not asserted; only that every request the mix
+    names succeeded through the authenticated front door.
+    """
+    base = DatasetPlan(
+        projects=1, work_items_per_project=3, relations=1, ranking_iterations=1
+    )
+    plan = DeployedPlan(base=base, requests=16, concurrency=2)
+    report = run_deployed(plan, data_dir=tmp_path / "instance", seed=0)
+
+    assert report["kind"] == "deployed"
+    assert report["schema_version"] == load.SOAK_REPORT_SCHEMA_VERSION
+    assert report["total_errors"] == 0, report["operations"]
+    assert report["error_rate"] == 0.0
+    assert report["throughput_ops_per_s"] > 0
+    assert report["plan"]["concurrency"] == 2
+    ops = report["operations"]
+    # every op in the mix reached the server and came back 2xx.
+    for name in (
+        "work.list",
+        "backlog",
+        "board.list",
+        "inbox.list",
+        "bugs",
+        "work.create",
+        "work.update",
+    ):
+        assert name in ops, f"{name} was not exercised over HTTP"
+    # the drift comparator reads this report the same way it reads a soak.
+    assert compare_to_baseline(report, report) == []
 
 
 def test_main_soak_mode_writes_and_checks_a_baseline(tmp_path: Path) -> None:

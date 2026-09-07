@@ -50,6 +50,37 @@ run against today.
 The K concurrent WebSocket attach clients from the issue still need the Rust
 engine and remain out of scope for this in-process generator.
 
+## `deployed_baseline.json` (#540)
+
+The soak above is blind to the top regressions the holistic review found: they
+only exist with **auth on, over HTTP, under concurrency**, none of which an
+in-process soak of one caller has. The deployed-shape mode fills that gap. It
+seeds a dataset, stands the **real server** up on a loopback port with
+`require_auth` on, mints a bearer token, and drives the hot read surfaces
+(`work.list`, `backlog`, `board.list`, `inbox.list`, `bugs`) and the write path
+(`work.create`, `work.update`) with a pool of concurrent HTTP clients — so the
+per-request auth write floor (#526) and event-loop serialization (#525) are in
+the numbers. It records the same throughput / p50 / p95 / p99 / RSS shape as the
+soak, and the same `compare_to_baseline` gate reads it the same way.
+
+```bash
+uv run python scripts/load.py --mode deployed --scale 5 \
+  --requests 2000 --concurrency 16 --seed 0 \
+  --produced-by "runner (self-hosted, uvicorn, require_auth)" \
+  --out bench/deployed_baseline.json
+```
+
+`.github/workflows/bench-deployed.yml` runs this nightly on the self-hosted
+runner and via `workflow_dispatch`, and fails on drift past the 2× rule.
+
+**The committed file is a dev-box starting point.** A deployed number is only
+comparable to another with the same `produced_by`, and the nightly gate runs on
+the self-hosted runner — so before the gate is authoritative, re-record the
+baseline **on the runner**: dispatch the workflow with `record: true`, download
+the `deployed-report` artifact, and commit it as `bench/deployed_baseline.json`.
+This is the same runner-authoritative handoff the soak's "authoritative run"
+note describes, now with a pipeline to do it.
+
 ## Drift check
 
 A later run compares itself to a baseline and fails on regression past the

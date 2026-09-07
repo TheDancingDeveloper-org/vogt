@@ -1,0 +1,87 @@
+# The deployed-shape benchmark drift gate (#540).
+#
+# `bench/soak_baseline.json` is recorded in-process — scale 1, no auth, no HTTP
+# — so it is structurally blind to the top perf regressions the holistic review
+# found: the per-request auth write floor (#526), event-loop serialization
+# (#525), and the read-path costs that only appear at scale. This job runs the
+# deployed-shape mode (real uvicorn, require_auth on, concurrent clients) and
+# fails if a hot surface's p95 or overall throughput drifts past 2x its
+# committed baseline.
+#
+# The baseline (`bench/deployed_baseline.json`) is machine-relative: a number is
+# only comparable to another taken the same way (its `produced_by`). The
+# committed file is a dev-box starting point; the authoritative gate wants a
+# baseline re-recorded ON this runner. Until then, re-record via `workflow_dispatch`
+# with `record: true`, download the artifact, and commit it. See bench/README.md.
+name: bench (deployed shape)
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: "Dataset scale knob (projects = 5 x scale)."
+        default: "5"
+      requests:
+        description: "Total timed HTTP requests."
+        default: "2000"
+      concurrency:
+        description: "Requests kept in flight at once."
+        default: "16"
+      record:
+        description: "Record a fresh baseline artifact instead of gating on drift."
+        type: boolean
+        default: false
+  schedule:
+    # Nightly, off-peak. The runner is shared, so this stays out of work hours.
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  deployed:
+    name: the deployed shape holds its baseline
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+
+      # The self-hosted image preinstalls no language runtime.
+      - name: install Python
+        run: uv python install 3.13
+
+      - run: uv sync --locked
+
+      - name: drive the deployed shape and gate on drift
+        env:
+          SCALE: ${{ github.event.inputs.scale || '5' }}
+          REQUESTS: ${{ github.event.inputs.requests || '2000' }}
+          CONCURRENCY: ${{ github.event.inputs.concurrency || '16' }}
+          RECORD: ${{ github.event.inputs.record || 'false' }}
+        run: |
+          set -euo pipefail
+          check=(--check-baseline bench/deployed_baseline.json)
+          if [ "$RECORD" = "true" ]; then
+            check=()
+          fi
+          uv run --no-sync python scripts/load.py \
+            --mode deployed \
+            --scale "$SCALE" \
+            --requests "$REQUESTS" \
+            --concurrency "$CONCURRENCY" \
+            --seed 0 \
+            --produced-by "runner (self-hosted, uvicorn, require_auth)" \
+            --out deployed_report.json \
+            "${check[@]}"
+
+      # The fresh numbers, kept whether the gate passed or failed — a drift
+      # failure is exactly when you want to read what moved, and a `record` run
+      # produces the file to commit as the new baseline.
+      - name: keep the report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: deployed-report
+          path: deployed_report.json
+          if-no-files-found: warn
