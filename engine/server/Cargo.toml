@@ -53,7 +53,13 @@ sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
 # Phase 6 — push notifications
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
 web-push = "0.11"
-jsonwebtoken = "10.4"
+# jsonwebtoken 10.x defers RSA/ECDSA signing to a process-level rustls
+# CryptoProvider unless a crypto backend feature is selected; with none, minting
+# the FCM service-account JWT panics at runtime ("Could not automatically
+# determine the process-level CryptoProvider"). `rust_crypto` links a
+# self-contained pure-Rust backend (rsa + sha2 for RS256), so no provider needs
+# installing. `use_pem` (default) stays on for EncodingKey::from_rsa_pem.
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 base64 = "0.22"
 sha2 = "0.10"
 ring = "0.17"
