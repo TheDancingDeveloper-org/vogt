@@ -29,7 +29,12 @@ import pytest
 
 from vogt.storage.sqlite.connection import connect
 from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
-from vogt.storage.sqlite.migrator import Migration, Migrator, checksum_of, load_migrations
+from vogt.storage.sqlite.migrator import (
+    Migration,
+    Migrator,
+    checksum_of,
+    load_migrations,
+)
 from vogt.storage.sqlite.observed import MIGRATIONS_DIR as OBSERVED_MIGRATIONS
 
 NOW = datetime(2026, 9, 8, 12, 0, 0, tzinfo=UTC)
