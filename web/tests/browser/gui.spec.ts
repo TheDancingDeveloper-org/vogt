@@ -5408,3 +5408,47 @@ test("A spoken reply whose TTS route is unconfigured shows the fallback notice w
   // than making the answer look failed.
   await expect(page.getByTestId("speech-status")).toHaveText(/Spoken replies are unavailable/);
 });
+
+for (const mouseTracking of [false, true]) {
+  test(`terminal swipe owns ${mouseTracking ? "reports wheels to a normal-buffer application" : "moves saved rows once"}`, async ({ page, context }) => {
+    test.skip(test.info().project.name !== "phone", "Touch input needs the phone context");
+    await installFixtures(page, {}, [liveSession]);
+    const input: string[] = [];
+    await page.routeWebSocket(/\/api\/sessions\/[^/]+\/attach$/, (socket) => {
+      socket.onMessage((message) => {
+        if (typeof message !== "string") input.push(Buffer.from(message).toString());
+      });
+      const output = Array.from({ length: 150 }, (_, i) => `ROW-${String(i).padStart(3, "0")}\r\n`).join("")
+        + (mouseTracking ? "\x1b[?1000h\x1b[?1006h" : "");
+      socket.send(JSON.stringify({ type: "snapshot-start", scrollback_bytes: output.length, scrollback_pos: output.length }));
+      socket.send(Buffer.from(output));
+      socket.send(JSON.stringify({ type: "snapshot-done" }));
+    });
+    await page.goto("/#/t/browser-session");
+    const rows = page.locator(".terminal-host .xterm-rows").first();
+    await expect(rows).toContainText("ROW-149");
+    const firstRow = () => rows.locator(":scope > div").first().textContent();
+    const before = await firstRow();
+    const height = (await rows.locator(":scope > div").first().boundingBox())!.height;
+    const box = await rows.boundingBox();
+    expect(box).toBeTruthy();
+    const client = await context.newCDPSession(page);
+    const x = box!.x + box!.width / 2;
+    const y = box!.y + 40;
+    await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y }] });
+    for (let dy = 4; dy <= 120; dy += 4) {
+      await client.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x, y: y + dy }] });
+    }
+    // Inspect while held so xterm's release inertia cannot hide duplicate scrolling.
+    if (mouseTracking) {
+      await expect.poll(() => input.join("")).toMatch(/\x1b\[<64;\d+;\d+M/);
+      expect(await firstRow()).toBe(before);
+    } else {
+      await expect.poll(async () => Number((await firstRow())?.match(/ROW-(\d+)/)?.[1])).toBe(Number(before?.match(/ROW-(\d+)/)?.[1]) - Math.floor(120 / height));
+    }
+    await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    const held = await firstRow();
+    await page.waitForTimeout(350);
+    expect(await firstRow()).toBe(held);
+  });
+}
