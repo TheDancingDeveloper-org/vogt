@@ -5186,3 +5186,225 @@ test("Assistant completes a voice-shaped turn through approval denial and TTS fa
   await expect.poll(() => denied).toBe(true);
   await expect(page.getByRole("region", { name: "Pending approval" })).toHaveCount(0);
 });
+
+// -- a voice turn, end to end, in a real browser --------------------
+//
+// The three native seams a spoken turn crosses — the microphone, the STT route
+// and the TTS route — are stubbed the way the rest of this file stubs backends:
+// `getUserMedia` and `MediaRecorder` are replaced with fakes so no audio
+// hardware is needed, the on-device recognizer and `speechSynthesis` are
+// removed so the deterministic *server* speech pipeline is the one under test,
+// and `/api/assistant/{stt,tts}` are answered per test. What runs for real is
+// the component's own capture -> transcribe -> repair -> send -> approve ->
+// speak flow, and the `{text, utterance}` contract it puts on the wire. The
+// spoken-out-loud validation is a device task, not this file's; the ergonomics
+// unit tests cover the same seams headless, and this is their browser twin.
+
+/** A 44-byte silent WAV, so a spoken reply's `<audio>` can decode and play. */
+function silentWav(): Buffer {
+  const b = Buffer.alloc(44);
+  b.write("RIFF", 0);
+  b.writeUInt32LE(36, 4);
+  b.write("WAVE", 8);
+  b.write("fmt ", 12);
+  b.writeUInt32LE(16, 16);
+  b.writeUInt16LE(1, 20); // PCM
+  b.writeUInt16LE(1, 22); // mono
+  b.writeUInt32LE(8000, 24);
+  b.writeUInt32LE(8000, 28);
+  b.writeUInt16LE(1, 32);
+  b.writeUInt16LE(8, 34);
+  b.write("data", 36);
+  b.writeUInt32LE(0, 40);
+  return b;
+}
+
+/**
+ * Steer the browser onto the deterministic server speech pipeline and stub the
+ * microphone. Removes the on-device Web Speech recognizer and `speechSynthesis`
+ * so STT and TTS both go through the engine routes, and replaces `getUserMedia`
+ * / `MediaRecorder` with fakes that release-to-send drives without hardware.
+ */
+async function primeVoiceEnv(page: Page, opts: { tts?: boolean } = {}): Promise<void> {
+  await page.addInitScript((ttsOn: boolean) => {
+    // Spoken replies on from the start, so a reply is voiced through TTS.
+    if (ttsOn) localStorage.setItem("vogt.assistant.tts", "1");
+    // Force the server pipeline: no on-device recognizer, no on-device synth.
+    // Chromium ships both; removing them is what makes the engine routes the
+    // path under test rather than the browser's own (non-deterministic) ones.
+    const w = window as unknown as {
+      webkitSpeechRecognition?: unknown;
+      SpeechRecognition?: unknown;
+      MediaRecorder?: unknown;
+    };
+    delete w.webkitSpeechRecognition;
+    delete w.SpeechRecognition;
+    // Make `"speechSynthesis" in window` false — the capability check the
+    // component reads before choosing the server TTS route. It is an accessor
+    // somewhere on the prototype chain (not always the immediate prototype), so
+    // walk the chain and remove it wherever it is an own property.
+    let obj: object | null = window;
+    while (obj) {
+      const holder = obj as { speechSynthesis?: unknown };
+      if (Object.getOwnPropertyDescriptor(obj, "speechSynthesis")) {
+        try {
+          delete holder.speechSynthesis;
+        } catch {
+          /* non-configurable — keep walking */
+        }
+      }
+      obj = Object.getPrototypeOf(obj) as object | null;
+    }
+    // A fake microphone: a stoppable track, and a recorder whose `stop()`
+    // flushes one chunk and fires `stop`, exactly the shape the component's
+    // `onstop` reads to post the audio and send what came back.
+    const track = { stop() {} };
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => ({ getTracks: () => [track] }) },
+    });
+    class FakeMediaRecorder {
+      state = "inactive";
+      mimeType = "audio/webm";
+      private listeners: Record<string, ((event: { data?: Blob }) => void)[]> = {};
+      addEventListener(type: string, cb: (event: { data?: Blob }) => void) {
+        (this.listeners[type] ??= []).push(cb);
+      }
+      start() {
+        this.state = "recording";
+      }
+      stop() {
+        this.state = "inactive";
+        for (const cb of this.listeners.dataavailable ?? []) {
+          cb({ data: new Blob(["audio"], { type: "audio/webm" }) });
+        }
+        for (const cb of this.listeners.stop ?? []) cb({});
+      }
+    }
+    w.MediaRecorder = FakeMediaRecorder;
+  }, opts.tts ?? false);
+}
+
+/**
+ * Open the assistant and let its deferred history hydration settle before
+ * interacting. Hydration runs at idle and sets the transcript from server
+ * history (empty here); a turn appended before it lands would be wiped by it,
+ * so wait for the history read and the empty-state it renders first.
+ */
+async function openVoiceAssistant(page: Page): Promise<void> {
+  await page.goto("/#/assistant");
+  await page.waitForResponse((r) => r.url().includes("/api/assistant/history"));
+  await expect(page.locator(".assistant-empty")).toBeVisible();
+}
+
+/** Hold-to-talk: press the mic, wait for the take to open, release to send. */
+async function speakTake(page: Page): Promise<void> {
+  const mic = page.getByTestId("mic");
+  await expect(mic).toBeVisible();
+  await mic.hover();
+  await page.mouse.down();
+  await expect(mic).toHaveAttribute("data-listening", "yes");
+  await page.mouse.up();
+}
+
+test("Assistant voice turn: capture, STT, the {text, utterance} contract, approval, and a spoken reply", async ({ page }) => {
+  await primeVoiceEnv(page, { tts: true });
+  await installFixtures(page, {
+    assistant_enabled: true,
+    assistant_stt_enabled: true,
+    assistant_tts_enabled: true,
+  });
+  // The engine's transcription of the take: the ref is heard as words, which
+  // the client's repair pass turns back into `WI-7` before it is sent.
+  await page.route("**/api/assistant/stt", async (route) =>
+    route.fulfill({ json: { text: "open issue seven" } }),
+  );
+  let sent: Record<string, unknown> | null = null;
+  await page.route("**/api/assistant/message", async (route) => {
+    sent = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+    await route.fulfill({ json: {
+      reply: "WI-7 is ready to close.",
+      pending_action: { kind: "vogt_write", id: "voice-action", operation: "work.transition", target: "WI-7", payload: "done", reason: "close on request" },
+      tool_trace: ["voice turn received"],
+    } });
+  });
+  let approved: boolean | null = null;
+  await page.route("**/api/assistant/actions/voice-action", async (route) => {
+    approved = JSON.parse(route.request().postData() ?? "{}").approve === true;
+    await route.fulfill({ json: { reply: "Done — WI-7 is closed.", pending_action: null, tool_trace: [] } });
+  });
+  const spoken: string[] = [];
+  await page.route("**/api/assistant/tts", async (route) => {
+    spoken.push(JSON.parse(route.request().postData() ?? "{}").text as string);
+    await route.fulfill({ contentType: "audio/wav", body: silentWav() });
+  });
+
+  await openVoiceAssistant(page);
+  await speakTake(page);
+
+  // The raw transcript was repaired to the domain's vocabulary and *both* forms
+  // crossed the wire: repaired `text`, raw `utterance`. This is the contract
+  // gap the issue names — voice provenance kept at the API boundary.
+  await expect(page.getByTestId("voice-repair")).toContainText("WI-7");
+  await expect.poll(() => sent).toEqual({ text: "open WI-7", utterance: "open issue seven" });
+  await expect(page.getByText("WI-7 is ready to close.")).toBeVisible();
+
+  // Spoken replies are on and the browser has no synthesis, so the reply was
+  // voiced through the server TTS route rather than silently dropped.
+  await expect.poll(() => spoken).toContain("WI-7 is ready to close.");
+
+  // The write waits for an on-screen approval; approving carries `approve:
+  // true` and clears the card. (The card is rendered by the Assistant on a
+  // narrow client and hosted by the Sessions shell on a wide one; the approval
+  // and its dismissal are the same on both, which is what this asserts.)
+  await expect(page.getByRole("region", { name: "Pending approval" })).toBeVisible();
+  await page.getByRole("button", { name: "Approve on screen" }).click();
+  await expect.poll(() => approved).toBe(true);
+  await expect(page.getByRole("region", { name: "Pending approval" })).toHaveCount(0);
+});
+
+test("A voice turn whose STT route is unconfigured retires the mic and shows an actionable notice", async ({ page }) => {
+  await primeVoiceEnv(page);
+  await installFixtures(page, { assistant_enabled: true, assistant_stt_enabled: true });
+  // Advertised at boot, but 404 at use — the unconfigured case reached on the
+  // first take rather than at mount.
+  await page.route("**/api/assistant/stt", async (route) =>
+    route.fulfill({ status: 404, body: "speech unavailable" }),
+  );
+  let sent = 0;
+  await page.route("**/api/assistant/message", async (route) => {
+    sent += 1;
+    await route.fulfill({ json: { reply: "ack", pending_action: null, tool_trace: [] } });
+  });
+
+  await openVoiceAssistant(page);
+  await speakTake(page);
+
+  // The take degrades cleanly: an actionable notice, the mic retired to its
+  // disabled form, and no empty turn sent.
+  await expect(page.getByTestId("speech-status")).toHaveText(/Voice input is unavailable/);
+  await expect(page.getByTestId("mic-unavailable")).toBeVisible();
+  expect(sent).toBe(0);
+});
+
+test("A spoken reply whose TTS route is unconfigured shows the fallback notice without failing the turn", async ({ page }) => {
+  await primeVoiceEnv(page, { tts: true });
+  await installFixtures(page, { assistant_enabled: true, assistant_tts_enabled: true });
+  await page.route("**/api/assistant/message", async (route) =>
+    route.fulfill({ json: { reply: "The backlog is clear.", pending_action: null, tool_trace: [] } }),
+  );
+  await page.route("**/api/assistant/tts", async (route) =>
+    route.fulfill({ status: 404, body: "speech unavailable" }),
+  );
+
+  await openVoiceAssistant(page);
+  await page.locator(".assistant-input").fill("anything on the backlog?");
+  await page.getByRole("button", { name: "Send" }).click();
+
+  // The text reply is a normal, successful turn — shown and unmarked...
+  await expect(page.getByText("The backlog is clear.")).toBeVisible();
+  await expect(page.locator(".assistant-row--failed")).toHaveCount(0);
+  // ...while the spoken half degrades with a visible, actionable notice rather
+  // than making the answer look failed.
+  await expect(page.getByTestId("speech-status")).toHaveText(/Spoken replies are unavailable/);
+});

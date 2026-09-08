@@ -776,6 +776,48 @@ references, or actions. `reply` is null when the turn paused on a pending
 action before the model produced any text, which is the state a client should
 render as "waiting for you", not as an empty answer.
 
+### Voice turn contract
+
+A spoken turn crosses the same `/api/assistant` routes a typed one does, plus
+the two speech seams. The whole contract, and where each half degrades:
+
+1. **Capture -> transcription.** The client records a push-to-talk take and
+   `POST`s the audio to `/api/assistant/stt` (or transcribes on-device inside
+   the APK). A **404** here means STT is unconfigured: the client retires the
+   microphone and falls back to typed input behind a visible notice, never an
+   error surfaced as a failure.
+2. **Repair.** The recognizer's best guess is run through the client's domain
+   repair pass (`WI-7`, project slugs) before it is sent. The repair is shown,
+   not applied silently, because a wrong repair is confidently wrong and is what
+   gets sent.
+3. **The turn.** `POST /api/assistant/message` carries **both** forms:
+   `{"text": repairedText, "utterance": rawRecognizedText}`. A typed turn omits
+   `utterance` entirely (`{"text": ...}`); only a voice turn sends it, so the
+   durable log at `/api/assistant/log` retains raw *and* repaired provenance
+   (the `utterance` and `request` entries). `profile` is added only when a
+   non-default provider is chosen.
+4. **Approval gate.** A reply may carry a `pending_action`; no effector runs
+   until an explicit on-screen `POST /api/assistant/actions/:id`
+   `{"approve": bool}`. This is identical to a typed turn — a voice turn does
+   not relax the gate, and there is no setting that lets the assistant act
+   without asking (see the threat model in §6).
+5. **Reply -> speech.** A spoken client voices the reply through on-device
+   synthesis, or `POST /api/assistant/tts` when it has none. A **404** (or any
+   synthesis failure) degrades this half behind a visible notice; the text
+   reply is still shown and is *not* treated as a failed turn.
+
+**Cancellation.** Aborting the in-flight `POST /api/assistant/message` (the Stop
+control) drops the connection, which the engine treats as a cancellation, and
+the composer keeps what was said. Leaving the surface mid-take abandons the
+captured audio rather than sending a half-spoken turn, and a queued or playing
+TTS clip is stopped the moment the speaker sends again or leaves.
+
+The web client's `assistant*Speech` unit tests exercise these seams headless,
+and `web/tests/browser/gui.spec.ts` drives the whole
+capture -> STT -> repair -> `{text, utterance}` -> approval -> TTS journey (and
+its STT/TTS-unavailable fallbacks) in a real browser with the microphone and
+speech routes stubbed.
+
 ### File APIs
 
 Every path is relative to `workspace_root` and resolved against it by
