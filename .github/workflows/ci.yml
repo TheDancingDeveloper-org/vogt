@@ -578,17 +578,7 @@ jobs:
       # which `cap sync` generates — the Gradle build cannot configure without
       # this having run first.
       #
-      # `VOGT_ANDROID_SERVER_URL` has no default (see the comment in
-      # `mobile/capacitor.config.ts`), so it has to be named here. It is an
-      # exposure value, so it is *not* hardcoded: the job reads the
-      # repo/environment variable `VOGT_ANDROID_SERVER_URL` and only falls back
-      # to loopback when that is unset. Unset, the artifact stays a build-proof
-      # that points at nothing (installing it shows the offline page). Set the
-      # variable to a real front door — e.g. `https://vogt.example.com` —
-      # and the same job publishes an APK that is actually installable and
-      # loads that Vogt. It stays debug-signed (below), so it is a sideload
-      # channel, not a store/release artifact; a signed release APK is still a
-      # separate, secret-gated job.
+      # The server is selected on-device; builds carry no deployment URL.
       #
       # `VOGT_ANDROID_APP_ID` is the non-production identity. Without it every
       # APK the product builds would carry the production
@@ -609,7 +599,6 @@ jobs:
       - name: capacitor sync
         working-directory: mobile
         env:
-          VOGT_ANDROID_SERVER_URL: ${{ vars.VOGT_ANDROID_SERVER_URL || 'http://127.0.0.1:8910' }}
           VOGT_ANDROID_APP_ID: "com.thedancingdeveloper.vogt.dev"
         run: npx cap sync android
 

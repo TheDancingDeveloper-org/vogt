@@ -88,17 +88,6 @@ jobs:
             } >> "$GITHUB_ENV"
           fi
 
-      - name: the release URL is named
-        env:
-          SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
-        run: |
-          set -euo pipefail
-          # The shell wraps a remote front door and has no default.
-          if [ -z "${SERVER_URL:-}" ]; then
-            echo "::error::VOGT_ANDROID_SERVER_URL is not set. A store build must name the front door it wraps."
-            exit 1
-          fi
-
       - name: install the shell's dependencies
         working-directory: mobile
         run: pnpm install --frozen-lockfile
@@ -125,14 +114,12 @@ jobs:
       - name: capacitor sync
         working-directory: mobile
         env:
-          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
           VOGT_ANDROID_APP_ID: com.thedancingdeveloper.vogt.dev
         run: npx cap sync android
 
       - name: bundle and sign the dev AAB
         working-directory: mobile/android
         env:
-          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
           VOGT_ANDROID_APP_ID: com.thedancingdeveloper.vogt.dev
         run: |
           set -euo pipefail
