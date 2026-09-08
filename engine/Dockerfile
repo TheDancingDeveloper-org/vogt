@@ -439,7 +439,14 @@ RUN chmod +x \
 # exposed here, because there is nothing to expose it to: the engine is the
 # only way in.
 EXPOSE 8910
-VOLUME ["/home/sprooty/Working"]
+# Do NOT declare a VOLUME for /home/sprooty/Working. The deployments mount a
+# named volume (`engine-home`) at the *parent* /home/sprooty; an anonymous
+# VOLUME at this child path shadows it, landing the work tree — the import root
+# and everything sessions edit — on a random anonymous volume that is orphaned
+# by `docker compose down` and cannot be shared into a session container by
+# name. Left as a normal directory, Working lives inside the named home volume,
+# which is what stack.compose.yml already documents. (/var/lib/vogt is fine to
+# VOLUME: the compose mounts `vogt-data` at that *exact* path, overriding it.)
 VOLUME ["/var/lib/vogt"]
 
 USER sprooty
