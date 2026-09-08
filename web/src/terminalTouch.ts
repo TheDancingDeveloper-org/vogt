@@ -44,6 +44,14 @@ export interface TerminalTouchMove {
   claim: boolean;
   /** Whole lines to emit as wheel events; sign follows wheel `deltaY`. */
   wheelLines: number;
+  /**
+   * Whole lines to move the normal-buffer scrollback directly, via
+   * `term.scrollLines`; sign follows xterm's `scrollLines` (negative = older).
+   * Non-zero only in the normal buffer. Desktop leaves this to xterm's own
+   * gesture scroller and ignores it; the Capacitor WebView, where that scroller
+   * is inert, applies it so a swipe actually moves the buffer (#592).
+   */
+  scrollLines: number;
 }
 
 export function beginTerminalTouch(x: number, y: number): TerminalTouchGesture {
@@ -70,28 +78,39 @@ export function moveTerminalTouch(
       // WebView never gets the one unprevented move it needs to take over.
       // `lastY` stays at the start so the distance travelled while the axis
       // was still open counts once it is fixed.
-      return { gesture, claim: leansVertical, wheelLines: 0 };
+      return { gesture, claim: leansVertical, wheelLines: 0, scrollLines: 0 };
     }
     axis = leansVertical ? "vertical" : "horizontal";
   }
 
   if (axis === "horizontal") {
-    return { gesture: { ...gesture, axis, lastY: y }, claim: false, wheelLines: 0 };
+    return {
+      gesture: { ...gesture, axis, lastY: y },
+      claim: false,
+      wheelLines: 0,
+      scrollLines: 0,
+    };
   }
 
+  // Accumulate the swipe's whole-line delta. Finger up (negative step) reads as
+  // scrolling toward newer output: positive, matching wheel `deltaY` and
+  // xterm's `scrollLines`. Fractional lines carry across moves so a slow drag
+  // still adds up. Where the lines go depends on the buffer.
   const step = y - gesture.lastY;
-  let lineRemainder = gesture.lineRemainder;
-  let wheelLines = 0;
-  if (buffer === "alternate") {
-    // Finger up (negative step) reads as wheel-down: positive deltaY.
-    lineRemainder += -step / Math.max(1, cellHeight);
-    const whole = Math.trunc(lineRemainder);
-    wheelLines = whole === 0 ? 0 : whole; // never -0
-    lineRemainder -= whole;
-  }
+  let lineRemainder = gesture.lineRemainder + -step / Math.max(1, cellHeight);
+  const whole = Math.trunc(lineRemainder);
+  const lines = whole === 0 ? 0 : whole; // never -0
+  lineRemainder -= whole;
+
+  // Alternate buffer: no scrollback, so a swipe means whatever a wheel means to
+  // the TUI. Normal buffer: move the scrollback — desktop via xterm's own
+  // gesture scroller (Terminal.tsx ignores `scrollLines` there), the Capacitor
+  // WebView via `scrollLines` because that scroller is inert on the device.
+  const alternate = buffer === "alternate";
   return {
     gesture: { ...gesture, axis, lastY: y, lineRemainder },
     claim: true,
-    wheelLines,
+    wheelLines: alternate ? lines : 0,
+    scrollLines: alternate ? 0 : lines,
   };
 }
