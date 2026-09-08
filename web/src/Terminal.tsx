@@ -122,6 +122,19 @@ function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
 }
 
 /**
+ * True inside the Capacitor native wrap (Android app), where xterm 6's own
+ * touch gesture scroller is inert and our handler must move the normal-buffer
+ * scrollback itself (#592). On the desktop web this is false and that scroller
+ * owns the swipe, so the two never double up. Matches the check used elsewhere
+ * (push.ts, clipboard.ts).
+ */
+function isNativeTouchPlatform(): boolean {
+  const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } })
+    .Capacitor;
+  return Boolean(cap?.isNativePlatform?.());
+}
+
+/**
  * One xterm.js Terminal attached to a single WS session.
  *
  * Reattach is cheap because the server replays the scrollback snapshot, but
@@ -465,6 +478,14 @@ const TerminalView: Component<Props> = (props) => {
       );
       gesture = move.gesture;
       if (move.claim && event.cancelable) event.preventDefault();
+      if (move.scrollLines !== 0 && isNativeTouchPlatform()) {
+        // Normal-buffer scrollback. On desktop xterm's own gesture scroller
+        // moves it and `scrollLines` is left at 0's job to xterm; inside the
+        // Capacitor WebView that scroller is inert (the swipe moved nothing —
+        // #592), so drive the buffer directly here. Guarded to the native
+        // platform so the two scrollers never double up where both work.
+        term.scrollLines(move.scrollLines);
+      }
       if (move.wheelLines !== 0) {
         // Dispatched at the screen so it bubbles through xterm's own wheel
         // listener on `.xterm`, which reports it to a mouse-tracking TUI or,

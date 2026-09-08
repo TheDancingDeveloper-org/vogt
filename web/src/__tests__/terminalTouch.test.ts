@@ -15,17 +15,24 @@ const CELL = 20;
 function swipe(
   steps: Array<[number, number]>,
   buffer: "normal" | "alternate" = "normal",
-): { claims: boolean[]; wheel: number[]; gesture: TerminalTouchGesture } {
+): {
+  claims: boolean[];
+  wheel: number[];
+  scroll: number[];
+  gesture: TerminalTouchGesture;
+} {
   let gesture = beginTerminalTouch(100, 300);
   const claims: boolean[] = [];
   const wheel: number[] = [];
+  const scroll: number[] = [];
   for (const [x, y] of steps) {
     const move = moveTerminalTouch(gesture, x, y, CELL, buffer);
     gesture = move.gesture;
     claims.push(move.claim);
     wheel.push(move.wheelLines);
+    scroll.push(move.scrollLines);
   }
-  return { claims, wheel, gesture };
+  return { claims, wheel, scroll, gesture };
 }
 
 describe("terminal touch arbitration", () => {
@@ -53,9 +60,31 @@ describe("terminal touch arbitration", () => {
     expect(claims).toEqual([true, true]);
   });
 
-  it("emits no wheel in the normal buffer — xterm's own scroller owns it", () => {
+  it("emits no wheel in the normal buffer — scrollback moves, not a TUI", () => {
     const { wheel } = swipe([[100, 280], [100, 200], [100, 100]], "normal");
     expect(wheel).toEqual([0, 0, 0]);
+  });
+
+  it("moves the normal buffer as whole scroll lines, finger-down = older", () => {
+    // Drag the finger DOWN 100px at 20px cells: five lines toward history
+    // (negative, matching xterm's scrollLines). Terminal.tsx applies this on
+    // the native platform where xterm's own scroller is inert (#592).
+    const { scroll } = swipe([[100, 310], [100, 400]], "normal");
+    expect(scroll).toEqual([0, -5]);
+    // Finger up scrolls back toward newer output (positive).
+    const up = swipe([[100, 290], [100, 200]], "normal");
+    expect(up.scroll).toEqual([0, 5]);
+  });
+
+  it("keeps scrollLines and wheelLines on separate buffers", () => {
+    // Normal: scrollLines carries the swipe, wheelLines stays 0.
+    const normal = swipe([[100, 290], [100, 200]], "normal");
+    expect(normal.wheel).toEqual([0, 0]);
+    expect(normal.scroll).toEqual([0, 5]);
+    // Alternate: the mirror — wheelLines carries it, scrollLines stays 0.
+    const alt = swipe([[100, 290], [100, 200]], "alternate");
+    expect(alt.wheel).toEqual([0, 5]);
+    expect(alt.scroll).toEqual([0, 0]);
   });
 
   it("turns an alternate-buffer swipe into whole wheel lines, finger-up = wheel-down", () => {
