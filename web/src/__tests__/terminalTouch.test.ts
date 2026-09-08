@@ -114,3 +114,9 @@ describe("terminal touch arbitration", () => {
     expect(Number.isFinite(gesture.lineRemainder)).toBe(true);
   });
 });
+
+it("routes a normal-buffer mouse-tracking application's swipe to wheel input", () => {
+  const move = moveTerminalTouch(beginTerminalTouch(100, 100), 100, 160, CELL, "normal", true);
+  expect(move.wheelLines).toBe(-3);
+  expect(move.scrollLines).toBe(0);
+});

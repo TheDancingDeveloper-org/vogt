@@ -1,26 +1,9 @@
 /**
- * Arbitrating a one-finger touch over a terminal.
- *
- * Three things want a vertical swipe over `.terminal-host`: the browser (a
- * native pan, which xterm 6 gives nothing to scroll), xterm's own gesture
- * scroller (a document-level listener with inertia, which moves the normal
- * buffer's scrollback) and, above both, the session pager on the phone
- * stage, which wants only horizontal moves. This module decides, per move,
- * two things the DOM handler in `Terminal.tsx` then acts on:
- *
- * - `claim`: call `preventDefault()` on this `touchmove`. Decided from the
- *   very first vertical-leaning move, not after an intent threshold — an
- *   Android WebView that sees one unprevented vertical move commits to a
- *   native pan and cancels the touch for everyone, so the
- *   threshold that made emulation look fine was the thing that broke the
- *   device. A horizontal-leaning move is left alone for the pager.
- * - `wheelLines`: whole lines to turn into synthetic wheel events. Only in
- *   the **alternate** buffer, where there is no scrollback for xterm's gesture
- *   to move and "back-scroll" means whatever a mouse wheel would mean to the
- *   TUI in charge — xterm turns a wheel there into a mouse report or, with
- *   DECSET 1007, into arrow keys. In the normal buffer this is 0: xterm's own
- *   scroller owns the swipe, and a second scroller doubling it is what the
- *   old handler was.
+ * One-finger terminal touch arbitration. Claim vertical movement immediately,
+ * leave horizontal movement to the pager, and accumulate whole lines. The DOM
+ * handler owns scrolling on both browser and native platforms and suppresses
+ * xterm's competing synthetic gesture scroller. Mouse-tracking applications
+ * receive wheels in either buffer; plain normal buffers move saved rows.
  */
 
 /** Movement before the swipe's axis is fixed; below it the lean still claims. */
@@ -44,13 +27,7 @@ export interface TerminalTouchMove {
   claim: boolean;
   /** Whole lines to emit as wheel events; sign follows wheel `deltaY`. */
   wheelLines: number;
-  /**
-   * Whole lines to move the normal-buffer scrollback directly, via
-   * `term.scrollLines`; sign follows xterm's `scrollLines` (negative = older).
-   * Non-zero only in the normal buffer. Desktop leaves this to xterm's own
-   * gesture scroller and ignores it; the Capacitor WebView, where that scroller
-   * is inert, applies it so a swipe actually moves the buffer (#592).
-   */
+  /** Whole lines to move plain normal-buffer history; negative = older. */
   scrollLines: number;
 }
 
@@ -64,6 +41,7 @@ export function moveTerminalTouch(
   y: number,
   cellHeight: number,
   buffer: TerminalBufferType,
+  mouseTracking = false,
 ): TerminalTouchMove {
   const dx = x - gesture.startX;
   const dy = y - gesture.startY;
@@ -102,15 +80,11 @@ export function moveTerminalTouch(
   const lines = whole === 0 ? 0 : whole; // never -0
   lineRemainder -= whole;
 
-  // Alternate buffer: no scrollback, so a swipe means whatever a wheel means to
-  // the TUI. Normal buffer: move the scrollback — desktop via xterm's own
-  // gesture scroller (Terminal.tsx ignores `scrollLines` there), the Capacitor
-  // WebView via `scrollLines` because that scroller is inert on the device.
-  const alternate = buffer === "alternate";
+  const applicationWheel = buffer === "alternate" || mouseTracking;
   return {
     gesture: { ...gesture, axis, lastY: y, lineRemainder },
     claim: true,
-    wheelLines: alternate ? lines : 0,
-    scrollLines: alternate ? 0 : lines,
+    wheelLines: applicationWheel ? lines : 0,
+    scrollLines: applicationWheel ? 0 : lines,
   };
 }
