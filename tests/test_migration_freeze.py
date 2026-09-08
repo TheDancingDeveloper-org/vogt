@@ -63,9 +63,7 @@ def test_shipped_migrations_are_frozen() -> None:
 
     added = sorted(set(live) - set(FROZEN))
     removed = sorted(set(FROZEN) - set(live))
-    changed = sorted(
-        mid for mid in set(live) & set(FROZEN) if live[mid] != FROZEN[mid]
-    )
+    changed = sorted(mid for mid in set(live) & set(FROZEN) if live[mid] != FROZEN[mid])
 
     assert not changed, (
         "A shipped migration was edited after release, which breaks every "
