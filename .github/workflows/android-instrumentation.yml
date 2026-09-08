@@ -66,7 +66,6 @@ jobs:
       - name: capacitor sync
         working-directory: mobile
         env:
-          VOGT_ANDROID_SERVER_URL: ${{ vars.VOGT_ANDROID_SERVER_URL || 'http://127.0.0.1:8910' }}
           VOGT_ANDROID_APP_ID: "com.thedancingdeveloper.vogt.dev"
         run: npx cap sync android
 

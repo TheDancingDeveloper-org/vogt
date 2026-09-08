@@ -2,19 +2,9 @@ import type { CapacitorConfig } from "@capacitor/cli";
 
 // Vogt — Capacitor Android wrap.
 //
-// The WebView loads a deployed Vogt front door directly, so UI updates ship
-// without rebuilding the APK; `mobile/web/` holds a one-file fallback page
-// used when the server is unreachable on first load (Capacitor requires a
-// webDir even when server.url is set). The APK needs a rebuild only for
-// native plumbing — Capacitor plugins, manifest changes, FCM config.
-//
-// ── Why the URL has no default ─────────────────────────────────────────────
-//
-// A default hostname is an exposure value, and exposure values
-// carry no defaults: nothing in this tree knows where your Vogt lives, and an
-// APK that guesses wrong is one that silently talks to the wrong deployment.
-// So the build asks. An unset variable is a failed build with a sentence
-// explaining what to set.
+// The native server chooser supplies the front door at runtime. No deployment
+// address is compiled into the shell. UI and APIs come from that same origin.
+// `web/` is the bundled fallback when no server is selected.
 //
 // ── Names ──────────────────────────────────────────────────────────────────
 //
@@ -35,19 +25,6 @@ import type { CapacitorConfig } from "@capacitor/cli";
 // `namespace` in the same change, and this file and that one must keep the same
 // fallback id — tests/test_mobile_identity.py asserts it.
 
-// Deliberately not defaulted.
-const SERVER_URL = process.env.VOGT_ANDROID_SERVER_URL;
-
-if (!SERVER_URL) {
-  throw new Error(
-    "VOGT_ANDROID_SERVER_URL is not set, so there is no way to know which " +
-      "Vogt this APK should load. Set it to the URL of a front door running " +
-      "the merged stack — the value that deployment gave VOGT_PUBLIC_URL, " +
-      "e.g. https://vogt.example.com. It is deliberately not " +
-      "defaulted: see the comment in mobile/capacitor.config.ts.",
-  );
-}
-
 const config: CapacitorConfig = {
   appId: process.env.VOGT_ANDROID_APP_ID || "com.thedancingdeveloper.vogt",
   appName: process.env.VOGT_ANDROID_APP_NAME || "Vogt",
@@ -61,22 +38,8 @@ const config: CapacitorConfig = {
     zoomEnabled: false,
   },
   server: {
-    url: SERVER_URL,
-    // Derived, not decided. The merged stack has no TLS of its own — the
-    // engine is the front door and it speaks plain HTTP over WireGuard — so a
-    // tailnet deployment is reached at `http://`, and Android blocks
-    // cleartext unless it is allowed. Hardcoding `false` here made an
-    // `http://` URL fail at runtime with a network error rather than at build
-    // time with a reason; deriving it means the flag always matches the URL
-    // it was set for.
-    //
-    // SECURITY: an APK built against an `http://` URL submits the
-    // bearer token in cleartext over ANY network the device is on, not only
-    // over WireGuard. `http://` is acceptable ONLY for a tailnet front door
-    // reachable exclusively over the tailnet (the traffic is encrypted by
-    // WireGuard, not TLS). Never build an `http://` APK pointed at a host
-    // reachable off-tailnet — use `https://` there.
-    cleartext: SERVER_URL.startsWith("http://"),
+    // Users may explicitly select an HTTP front door on a private network.
+    cleartext: true,
     androidScheme: "https",
   },
   plugins: {

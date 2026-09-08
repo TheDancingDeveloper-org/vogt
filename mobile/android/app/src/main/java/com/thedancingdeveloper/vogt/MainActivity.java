@@ -23,6 +23,7 @@ import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import com.getcapacitor.BridgeActivity;
+import com.getcapacitor.CapConfig;
 
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -37,6 +38,30 @@ public class MainActivity extends BridgeActivity {
     private static final String JS_VOICE_BRIDGE = "AndroidVoice";
     /** DOM event the PWA listens for when the notification ended the call. */
     private static final String VOICE_ENDED_EVENT = "vogt:voice-service-ended";
+
+    @Override
+    @SuppressWarnings("deprecation")
+    protected void load() {
+        // Preserve every packaged plugin setting, changing only the chosen origin.
+        String server = ServerAddress.normalize(getSharedPreferences("server", MODE_PRIVATE)
+            .getString("origin", ""));
+        if (server == null) {
+            startActivity(new Intent(this, ServerActivity.class));
+            finish();
+            return;
+        }
+        try (java.io.InputStream stream = getAssets().open("capacitor.config.json")) {
+            JSONObject settings = new JSONObject(new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+            JSONObject serverConfig = settings.optJSONObject("server");
+            if (serverConfig == null) serverConfig = new JSONObject();
+            serverConfig.put("url", server);
+            settings.put("server", serverConfig);
+            config = new CapConfig(getAssets(), settings);
+        } catch (java.io.IOException | JSONException error) {
+            throw new IllegalStateException("Could not load shell configuration", error);
+        }
+        super.load();
+    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {

@@ -600,19 +600,6 @@ jobs:
           fi
           echo "configured=true" >> "$GITHUB_OUTPUT"
 
-      - name: the release URL is named
-        env:
-          SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
-        run: |
-          set -euo pipefail
-          # The shell wraps a remote URL and has no default, on purpose
-          # — an APK pointing at the wrong front door looks like a working app
-          # whose Vogt tabs are all in their outage state.
-          if [ -z "${SERVER_URL:-}" ]; then
-            echo "::error::VOGT_ANDROID_SERVER_URL is not set. A release APK must name the front door it wraps; there is deliberately no default."
-            exit 1
-          fi
-
       - name: install the shell's dependencies
         working-directory: mobile
         run: pnpm install --frozen-lockfile
@@ -628,14 +615,11 @@ jobs:
 
       - name: capacitor sync
         working-directory: mobile
-        env:
-          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
         run: npx cap sync android
 
       - name: assemble and sign
         working-directory: mobile/android
         env:
-          VOGT_ANDROID_SERVER_URL: ${{ secrets.VOGT_ANDROID_SERVER_URL }}
           VOGT_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.VOGT_ANDROID_KEYSTORE_PASSWORD }}
           VOGT_ANDROID_KEY_ALIAS: ${{ secrets.VOGT_ANDROID_KEY_ALIAS }}
           VOGT_ANDROID_KEY_PASSWORD: ${{ secrets.VOGT_ANDROID_KEY_PASSWORD }}
