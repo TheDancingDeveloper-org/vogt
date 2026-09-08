@@ -1,4 +1,5 @@
 import { Component, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Capacitor } from "@capacitor/core";
 import { listSessions } from "./vogtApi";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -129,9 +130,11 @@ function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
  * (push.ts, clipboard.ts).
  */
 function isNativeTouchPlatform(): boolean {
-  const cap = (window as unknown as { Capacitor?: { isNativePlatform?: () => boolean } })
-    .Capacitor;
-  return Boolean(cap?.isNativePlatform?.());
+  // Use Capacitor's imported runtime singleton rather than probing the global.
+  // The global is not guaranteed to be installed when the WebView has loaded
+  // a remote front door, which silently disabled native scrollback in shipped
+  // builds even though the Capacitor bridge was present.
+  return Capacitor.isNativePlatform();
 }
 
 /**
