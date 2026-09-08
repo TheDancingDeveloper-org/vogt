@@ -1,5 +1,4 @@
 import { Component, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
-import { Capacitor } from "@capacitor/core";
 import { listSessions } from "./vogtApi";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -120,21 +119,6 @@ function configureTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
   textarea.setAttribute("enterkeyhint", "enter");
   textarea.spellcheck = true;
   textarea.setAttribute("spellcheck", "true");
-}
-
-/**
- * True inside the Capacitor native wrap (Android app), where xterm 6's own
- * touch gesture scroller is inert and our handler must move the normal-buffer
- * scrollback itself (#592). On the desktop web this is false and that scroller
- * owns the swipe, so the two never double up. Matches the check used elsewhere
- * (push.ts, clipboard.ts).
- */
-function isNativeTouchPlatform(): boolean {
-  // Use Capacitor's imported runtime singleton rather than probing the global.
-  // The global is not guaranteed to be installed when the WebView has loaded
-  // a remote front door, which silently disabled native scrollback in shipped
-  // builds even though the Capacitor bridge was present.
-  return Capacitor.isNativePlatform();
 }
 
 /**
@@ -451,11 +435,11 @@ const TerminalView: Component<Props> = (props) => {
   const installTouchGestures = () => {
     if (!hostRef) return () => {};
 
-    // Arbitration lives in `terminalTouch.ts`: claim vertical moves
-    // from the browser at once, leave horizontal ones to the phone pager,
-    // and in the alternate buffer turn the swipe into what a mouse wheel
-    // would be. The normal buffer's scrollback is xterm's own gesture
-    // scroller's to move — one scroller, not two.
+    // Own vertical touch on every platform. Suppress xterm's synthetic gesture
+    // changes (including release inertia) before they reach its scrollbar;
+    // raw touches still bubble to the session pager and taps still reach xterm.
+    const suppressXtermScroll = (event: Event) => event.stopImmediatePropagation();
+    hostRef.addEventListener("-xterm-gesturechange", suppressXtermScroll, true);
     let gesture: TerminalTouchGesture | null = null;
 
     const onTouchStart = (event: TouchEvent) => {
@@ -478,17 +462,11 @@ const TerminalView: Component<Props> = (props) => {
         touch.clientY,
         estimateCellHeight(),
         term.buffer.active.type === "alternate" ? "alternate" : "normal",
+        term.modes.mouseTrackingMode !== "none",
       );
       gesture = move.gesture;
       if (move.claim && event.cancelable) event.preventDefault();
-      if (move.scrollLines !== 0 && isNativeTouchPlatform()) {
-        // Normal-buffer scrollback. On desktop xterm's own gesture scroller
-        // moves it and `scrollLines` is left at 0's job to xterm; inside the
-        // Capacitor WebView that scroller is inert (the swipe moved nothing —
-        // #592), so drive the buffer directly here. Guarded to the native
-        // platform so the two scrollers never double up where both work.
-        term.scrollLines(move.scrollLines);
-      }
+      if (move.scrollLines !== 0) term.scrollLines(move.scrollLines);
       if (move.wheelLines !== 0) {
         // Dispatched at the screen so it bubbles through xterm's own wheel
         // listener on `.xterm`, which reports it to a mouse-tracking TUI or,
@@ -513,17 +491,20 @@ const TerminalView: Component<Props> = (props) => {
       gesture = touch ? beginTerminalTouch(touch.clientX, touch.clientY) : null;
     };
 
+    const onTouchCancel = () => { gesture = null; };
+
     const listenerOptions: AddEventListenerOptions = { passive: false };
     hostRef.addEventListener("touchstart", onTouchStart, listenerOptions);
     hostRef.addEventListener("touchmove", onTouchMove, listenerOptions);
     hostRef.addEventListener("touchend", onTouchEnd, listenerOptions);
-    hostRef.addEventListener("touchcancel", onTouchEnd, listenerOptions);
+    hostRef.addEventListener("touchcancel", onTouchCancel, listenerOptions);
 
     return () => {
+      hostRef?.removeEventListener("-xterm-gesturechange", suppressXtermScroll, true);
       hostRef?.removeEventListener("touchstart", onTouchStart);
       hostRef?.removeEventListener("touchmove", onTouchMove);
       hostRef?.removeEventListener("touchend", onTouchEnd);
-      hostRef?.removeEventListener("touchcancel", onTouchEnd);
+      hostRef?.removeEventListener("touchcancel", onTouchCancel);
     };
   };
 
