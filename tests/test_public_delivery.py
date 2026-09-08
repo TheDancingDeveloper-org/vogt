@@ -22,6 +22,7 @@ STACK_COMPOSE = REPO_ROOT / "deploy" / "stack.compose.yml"
 PUBLIC_DEPLOY_FILES = (ENGINE_OVERLAY, STACK_COMPOSE)
 PUBLIC_ENV = REPO_ROOT / "deploy" / ".env.example"
 DOCKERFILE = REPO_ROOT / "Dockerfile"
+ENGINE_DOCKERFILE = REPO_ROOT / "engine" / "Dockerfile"
 
 
 def test_public_delivery_defaults_to_the_current_product_release() -> None:
@@ -200,6 +201,22 @@ def test_public_dockerfile_has_no_private_base_or_integration() -> None:
     assert "engine" not in text
     assert "web" not in text
     assert "mobile" not in text
+
+
+def test_the_stack_image_does_not_anon_volume_the_work_tree() -> None:
+    """The work tree must live on the named home volume, not a shadow of it.
+
+    The deployments mount `engine-home` at the parent `/home/sprooty`. An
+    anonymous `VOLUME /home/sprooty/Working` at the child path shadows that,
+    landing the import root — and everything a session edits — on a random
+    anonymous volume that `docker compose down` orphans and no session container
+    can mount by name. `/var/lib/vogt` may be VOLUME'd because the compose mounts
+    `vogt-data` at that *exact* path, overriding it.
+    """
+    text = ENGINE_DOCKERFILE.read_text(encoding="utf-8")
+    assert not re.search(
+        r'^\s*VOLUME\s+\[?\s*"?/home/sprooty/Working', text, re.MULTILINE
+    ), "engine/Dockerfile must not declare an anonymous VOLUME at /home/sprooty/Working"
 
 
 def test_public_dockerignore_excludes_private_toolchains() -> None:
