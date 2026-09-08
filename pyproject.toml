@@ -100,6 +100,9 @@ known-local-folder = ["tests"]
 [tool.ruff.lint.per-file-ignores]
 # Tests may assert on private helpers and pass loosely-typed fixtures.
 "tests/*" = ["ANN401"]
+# A frozen table of 64-character migration checksums: the id + hash literals
+# necessarily exceed the line length.
+"tests/test_migration_freeze.py" = ["E501"]
 # These four handle arbitrary JSON-shaped data by design: a digest over any
 # payload, a renderer over any result, argparse specs over any field
 # annotation, and settings overrides. `Any` is the honest annotation.
