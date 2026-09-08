@@ -1,17 +1,33 @@
 name: android-instrumentation
 
-# Voice foreground-service lifecycle instrumentation on an emulator:
-# service start/stop, the notification "End conversation" action signalling the
-# PWA, a mic-less start degrading without a crash, and background/foreground
-# survival — `VoiceServiceLifecycleTest`, run via connectedDebugAndroidTest.
+# Voice foreground-service lifecycle instrumentation on an emulator, run via
+# connectedDebugAndroidTest (the whole androidTest suite — the job selects no
+# class filter, so new test classes are picked up automatically):
+#   - VoiceServiceLifecycleTest: service start/stop, the notification "End
+#     conversation" action signalling the PWA, a mic-less start degrading
+#     without a crash, and background/foreground survival.
+#   - VoiceServicePermissionDenialTest: a notification (FCM/POST_NOTIFICATIONS)
+#     denial, and a both-mic-and-notification denial, degrading without a crash.
+#   - VoiceServiceProcessReclaimTest: clean re-registration after a simulated
+#     reclaim with no stale/duplicate held service (the native half of
+#     process-reclaim recovery; a true low-memory kill stays manual).
+#   - VoiceServiceScreenOffTest: the held foreground service outlives the
+#     Activity being backgrounded (the deterministic screen-off proxy; genuine
+#     screen-off/Doze/30-min battery + live-FCM survival stays a device task).
+# Shared helpers live in VoiceServiceTestSupport.
+#
+# Play internal-track / pre-launch is a manual Play Console gate, not an
+# emulator test — see docs/mobile-release-validation.md for that checklist.
 #
 # Manual (workflow_dispatch) only, deliberately. reactivecircus/android-emulator-runner
 # boots a KVM emulator, so the self-hosted runner must expose /dev/kvm. Until
 # a KVM-capable runner is registered to this repository it stays off the
 # required `ci` set (it would hang a runner that has no emulator) and is run by
 # an operator; once one is, add `push`/`pull_request` triggers path-filtered to
-# `mobile/**` to make this a per-change gate. The four tests pass on an API 34
-# x86_64 emulator.
+# `mobile/**` to make this a per-change gate. VoiceServiceLifecycleTest's four
+# tests pass on an API 34 x86_64 emulator; the permission-denial, process-reclaim
+# and screen-off classes added since are wired into the same connected run and
+# await a KVM-capable runner to validate on-device.
 #
 # The job names a self-hosted runner and every action is pinned to a
 # full commit SHA (the runner-policy gate checks both).
