@@ -256,6 +256,35 @@ migration, and operations touching the changed tables fail. Rolling back
 across a schema change means restoring the backup from step 1. Revert the
 sidecar together with the stack so the two stay a pair.
 
+### Upgrades and rollback: the forward-only limit
+
+Migrations are **forward-only**. There is no down-migration, by design: the
+migrator records `sha256` of every applied migration and verifies it on every
+boot, so a schema only ever moves ahead. This bounds what a rollback can do.
+
+- **A data volume the newer build has migrated cannot be served by the older
+  image.** Once the upgrade applies migration `N`, the store carries an id the
+  old build has never heard of. The old build's migrator refuses it —
+  *"migration `N` is applied in the database but absent from this build … the
+  database is ahead of the code"* — and stops there rather than running against
+  a schema it does not understand.
+- **So a same-image rollback only works when no migration ran.** If the upgrade
+  applied nothing (the schema numbers already matched), reverting the two
+  digest lines (§6) and `up -d` is the whole rollback. Check the upgrade's
+  `/readyz` and `init` log: equal applied/bundled schema numbers, no new
+  migration.
+- **Across a schema change, roll back by restoring the backup from step 1**,
+  then pin the *prior release's* stack **and** voice digests. Data written after
+  the backup and before the rollback is lost — that is the cost of crossing a
+  forward-only migration in reverse, and the reason step 1 is a backup, not a
+  suggestion.
+
+That an *existing* volume survives the forward direction cleanly — pending
+migrations apply in order, already-applied ones stay byte-frozen, and the
+recorded checksums still verify on the next boot — is covered by
+`tests/test_upgrade_data_volume.py`, which upgrades a database built at the
+oldest shipped migration set through the current migrator with its data intact.
+
 **A second instance on the same host** is supported: give it its own Compose
 project name, `--env-file`, port, public URL and core token file. The named
 volumes are project-scoped, so a distinct `-p` already separates the data;
