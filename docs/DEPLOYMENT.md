@@ -417,7 +417,9 @@ The workflow then creates a GitHub Release carrying
 `vogt-release-manifest.json` (the source SHA and all three digests) and the
 signed Android APK of the mobile shell; the shell is a remote WebView onto a
 deployed stack, so a server or PWA release reaches installed phones without a
-new APK.
+new APK. The shell's lifecycle/connectivity/voice validation — the emulator
+instrumentation suite and the device / Play pre-launch checklists — is in
+[`mobile-release-validation.md`](mobile-release-validation.md).
 
 Publishing is not deploying: a release changes nothing you run until you pin
 its digests (§6).
