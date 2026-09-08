@@ -213,6 +213,8 @@ def test_the_stack_image_does_not_anon_volume_the_work_tree() -> None:
     can mount by name. `/var/lib/vogt` may be VOLUME'd because the compose mounts
     `vogt-data` at that *exact* path, overriding it.
     """
+    if not ENGINE_DOCKERFILE.exists():
+        pytest.skip("engine/ is not present in the core-only checkout")
     text = ENGINE_DOCKERFILE.read_text(encoding="utf-8")
     assert not re.search(
         r'^\s*VOLUME\s+\[?\s*"?/home/sprooty/Working', text, re.MULTILINE
