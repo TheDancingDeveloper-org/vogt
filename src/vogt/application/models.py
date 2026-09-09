@@ -564,15 +564,36 @@ class SessionSummary(Result):
     moment of asking and are never stored: a cached activity state would be
     a claim about a running process, which is the one thing this product
     refuses to invent.
+
+    A session the engine holds but Vogt never linked is reported too, so the
+    surface answers "what is running here", not only "what did Vogt start".
+    Such a session has no declared half: `linked` is false, and `project`,
+    `work_item`, `actor` and `reason` are null because there is nothing
+    audited to name. `id` and `engine_session_id` then carry the engine's id
+    (the only handle there is), and `started_at` is the engine's own creation
+    time — never a fabricated one.
     """
 
+    linked: bool = Field(
+        default=True,
+        description=(
+            "True when Vogt declared this session; false for one the engine "
+            "holds but Vogt never linked (project/work_item/actor/reason null)."
+        ),
+    )
     id: str
     engine_session_id: str
     project: str | None = None
     work_item: str | None = Field(
         default=None, description="Work item ref, e.g. WI-7, when opened for one."
     )
-    actor: str = Field(description="Actor the session's writes are attributed to.")
+    actor: str | None = Field(
+        default=None,
+        description=(
+            "Actor the session's writes are attributed to. Null for an "
+            "unlinked engine session, which declares no actor."
+        ),
+    )
     cwd: str
     template: str | None = None
     model: str | None = Field(
@@ -585,8 +606,21 @@ class SessionSummary(Result):
     effort: str | None = Field(
         default=None, description="The reasoning effort it was started with."
     )
-    reason: str
-    started_at: datetime
+    reason: str | None = Field(
+        default=None,
+        description=(
+            "Why Vogt started the session. Null for an unlinked engine "
+            "session, which declares no reason."
+        ),
+    )
+    started_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the session started: Vogt's record for a linked session, "
+            "the engine's creation time for an unlinked one, null only when "
+            "neither is known."
+        ),
+    )
     stopped_at: datetime | None = None
     activity: str | None = Field(
         default=None,

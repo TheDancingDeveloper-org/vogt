@@ -232,11 +232,20 @@ def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:
 
 
 def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListResult:
-    """Vogt's session links, enriched with what the engine says right now.
+    """Vogt's session links, enriched with what the engine says right now,
+    plus any live session the engine holds that Vogt never linked.
 
     The links are returned whether or not the engine answers. Its absence
     costs the liveness columns and nothing else, and the reason it
     could not be asked is reported rather than rendered as "not running".
+
+    A session started outside Vogt — or one whose link Vogt lost — is still
+    running, and an agent asking "what sessions are here" must be able to see
+    it: reporting only Vogt's own links is why one session could not see
+    another. Such unlinked sessions are appended (with `linked=False` and null
+    declared fields) after the declared page. They carry no project or work
+    item, so a `project`/`work_item` filter excludes them; and because they
+    have no stable page position, they are appended only on the first page.
     """
     live: dict[str, EngineSession] = {}
     detail: str | None = None
@@ -266,18 +275,28 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
             limit=params.limit,
             offset=params.offset,
         )
-        return SessionListResult(
-            sessions=[
-                _summarize(
-                    view,
-                    session,
-                    engine_session=live.get(session.engine_session_id),
-                    engine_asked=detail is None,
-                )
-                for session in sessions
-            ],
-            engine=detail,
-        )
+        summaries = [
+            _summarize(
+                view,
+                session,
+                engine_session=live.get(session.engine_session_id),
+                engine_asked=detail is None,
+            )
+            for session in sessions
+        ]
+
+        # Append live engine sessions Vogt never linked. A project/work-item
+        # filter is a filter on the declared half, which these do not have, so
+        # they surface only when neither filter is set; and they are appended
+        # only on the first page, having no stable position to paginate by.
+        unfiltered = project_id is None and work_item_id is None
+        if unfiltered and params.offset == 0:
+            for engine_session in live.values():
+                if view.session_by_engine_id(engine_session.id) is None:
+                    summaries.append(_summarize_engine_only(engine_session))
+            summaries = summaries[: params.limit]
+
+        return SessionListResult(sessions=summaries, engine=detail)
 
 
 # -- session history ------------------------------------------------
@@ -644,6 +663,48 @@ def _summarize(
         activity=None if engine_session is None else engine_session.activity,
         alive=(engine_session is not None) if engine_asked else None,
     )
+
+
+def _summarize_engine_only(engine_session: EngineSession) -> SessionSummary:
+    """A session the engine is running but Vogt never linked.
+
+    Vogt has no declared row for it, so every audited field is null: it is
+    not Vogt's to name a project, work item, actor or reason for something it
+    did not start. What can be reported truthfully is reported — the engine's
+    id, where it runs, its live activity, and the engine's own start time.
+    """
+    return SessionSummary(
+        linked=False,
+        id=engine_session.id,
+        engine_session_id=engine_session.id,
+        project=None,
+        work_item=None,
+        actor=None,
+        cwd=engine_session.cwd,
+        template=None,
+        model=None,
+        effort=None,
+        reason=None,
+        started_at=_parse_engine_timestamp(engine_session.created_at),
+        stopped_at=None,
+        activity=engine_session.activity,
+        # It is in the live listing, so the engine has it and was asked.
+        alive=True,
+    )
+
+
+def _parse_engine_timestamp(value: str | None) -> datetime | None:
+    """The engine's RFC3339 string as a datetime, or None if unreadable.
+
+    Better to drop the field than to guess: an unlinked session with no
+    trustworthy start time reports none rather than a fabricated one.
+    """
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 __all__ = [
