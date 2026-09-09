@@ -16,6 +16,7 @@ import { resetFileTreeState } from "../fileTreeState";
 import { invalidate } from "../swr";
 import { clearTaxonomyCache } from "../taxonomyCache";
 import { invalidateAssistantSnapshot } from "../assistantCache";
+import { resetDormancyForTest } from "../terminalDormancy";
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
@@ -72,4 +73,5 @@ afterEach(() => {
   resetFileTreeState();
   invalidateAssistantSnapshot();
   clearTaxonomyCache();
+  resetDormancyForTest();
 });

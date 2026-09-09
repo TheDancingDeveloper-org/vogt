@@ -477,6 +477,14 @@ listeners and large editor surfaces do not run in the background. Editor text
 and view position are retained while switching tools, and any dirty editor
 also activates the browser/PWA exit confirmation until it is saved.
 
+A terminal you switch away from stays **dormant**: its connection is held open
+and output keeps arriving in the background, so switching back shows what ran
+while away with nothing to re-stream — the unfocused half of a split behaves the
+same and keeps its screen. Only a handful of terminals stay dormant at once; the
+rest, and any terminal a phone's OS suspends, show **Suspended** and reattach
+the moment you return to them, replaying a bounded tail of recent output rather
+than the whole history.
+
 **Saving is guarded against clobbering.** The editor remembers the version it
 last read; a save that would overwrite a file changed on disk since then is
 refused and shown inline as **File changed on disk** with **Overwrite** and

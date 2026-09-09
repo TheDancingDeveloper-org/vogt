@@ -26,12 +26,18 @@ import {
 import {
   createReplayQueue,
   prepareReplayTail,
+  REPLAY_TAIL_MAX_BYTES,
   scheduleReplay,
   shouldDeferCacheReplay,
   snapshotStartPosition,
   type ReplayHandle,
   type ReplayTail,
 } from "./terminalReplay";
+import {
+  acquireDormant,
+  planDormantResume,
+  releaseDormant,
+} from "./terminalDormancy";
 
 // Cap on the scrollback the serialized cache persists. A 5000-line scrollback
 // full of wide chars and colour serializes large; 2000 lines keeps the cache
@@ -173,6 +179,11 @@ const TerminalView: Component<Props> = (props) => {
   let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
   const [hiddenParked, setHiddenParked] = createSignal(false);
   let socketParked = false;
+  // F4: a dormant pane keeps its socket OPEN but stops writing to xterm,
+  // buffering output into the ring. `dormantAtPosition` is the stream position
+  // when it went dormant, so the return path knows how much to catch up.
+  let dormant = false;
+  let dormantAtPosition: number | undefined;
   let pingId = 0;
   let destroyed = false;
   let sessionGone = false;
@@ -1109,6 +1120,12 @@ const TerminalView: Component<Props> = (props) => {
       watchdog.noteOutput(Date.now());
       outputPosition = (outputPosition ?? 0) + buf.byteLength;
       appendToCache(buf);
+      if (dormant) {
+        // F4: buffer only — the socket stays open but xterm is frozen until this
+        // pane is activated, when the buffered delta is written in one go.
+        scheduleCachePersist();
+        return;
+      }
       if (inSnapshot) {
         // Snapshot and immediately-following live frames share one ordered
         // queue until the snapshot parser has drained.
@@ -1153,6 +1170,9 @@ const TerminalView: Component<Props> = (props) => {
   function parkSocket() {
     if (socketParked) return;
     socketParked = true;
+    dormant = false;
+    dormantAtPosition = undefined;
+    releaseDormant(props.sessionId);
     // A parked pane is no longer foreground; release the pre-warm gate.
     exitForegroundReplay();
     persistCache();
@@ -1169,10 +1189,92 @@ const TerminalView: Component<Props> = (props) => {
     ws = null;
   }
 
-  function resumeSocket() {
-    if (!socketParked) return;
-    socketParked = false;
+  // F4: keep the socket open but stop rendering; output buffers into the ring.
+  // No "Suspended" banner — the pane keeps its last screen (e.g. the unfocused
+  // half of a split). The watchdog is paused (it gates on isParked); a socket
+  // that dies while dormant is detected on return and reconnected.
+  function goDormant() {
+    if (dormant) return;
+    dormant = true;
+    dormantAtPosition = outputPosition;
+    exitForegroundReplay();
+    replay?.cancel();
+    clearCountdown();
+    setReconnectView(null);
+    setStatusText(null);
+    persistCache();
+  }
+
+  // Evicted from the dormant budget by a more-recently-active pane: fall back to
+  // parking (close the socket). Deferred a microtask so it never runs re-entrant
+  // inside another pane's reactive effect.
+  function evictFromDormant() {
+    queueMicrotask(() => {
+      if (!dormant || destroyed) return;
+      parkSocket();
+    });
+  }
+
+  // Return from dormant with the socket still alive: write what buffered while
+  // away in one synchronous step, so live frames that follow render in order.
+  function resumeFromDormant() {
+    releaseDormant(props.sessionId);
+    const start = dormantAtPosition;
+    dormantAtPosition = undefined;
+    setStatusText(null);
+    const buffered = cachedBytes();
+    const end = outputPosition ?? buffered.byteLength;
+    const since = start !== undefined ? end - start : 0;
+    // Flip synchronously BEFORE any xterm write: subsequent live frames now
+    // render, queued after the catch-up write, so the buffer never gaps.
+    dormant = false;
+    const plan = planDormantResume(since, buffered.byteLength, REPLAY_TAIL_MAX_BYTES);
+    if (plan.kind === "delta") {
+      term?.write(buffered.subarray(buffered.byteLength - plan.bytes));
+      term?.scrollToBottom();
+    } else if (plan.kind === "reset-tail") {
+      term?.reset();
+      term?.write(prepareReplayTail(buffered, end).data);
+      term?.scrollToBottom();
+    }
+    sendResize();
+  }
+
+  // The pane became inactive: keep its socket open (dormant) if the per-document
+  // budget allows and it is safely past its snapshot, otherwise park it.
+  function suspend() {
+    if (destroyed || dormant || socketParked) return;
+    const canDormant =
+      !!ws &&
+      ws.readyState === WebSocket.OPEN &&
+      !inSnapshot &&
+      acquireDormant(props.sessionId, Date.now(), evictFromDormant);
+    if (canDormant) goDormant();
+    else parkSocket();
+  }
+
+  // The pane became active: resume a live dormant socket in place, else
+  // (re)connect from a parked state. The initial connect is NOT driven here —
+  // it comes from the cache-load path in onMount — so an already-active pane and
+  // a fresh mount both no-op.
+  function activate() {
     if (destroyed || !readyToConnect() || isParked()) return;
+    if (dormant) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        resumeFromDormant();
+        return;
+      }
+      // The socket died while dormant (e.g. a mobile OS reclaimed it); fall
+      // through to a fresh reconnect.
+      dormant = false;
+      dormantAtPosition = undefined;
+      releaseDormant(props.sessionId);
+    } else if (!socketParked) {
+      // Active already, or the initial mount (the cache-load path connects): the
+      // transition effect has nothing to do.
+      return;
+    }
+    socketParked = false;
     // Resuming to the foreground: hold the pre-warm gate through this attach.
     enterForegroundReplay();
     // A tab parked on reload deferred its cache restore (F3); run it now, before
@@ -1193,12 +1295,13 @@ const TerminalView: Component<Props> = (props) => {
 
   createEffect(() => {
     if (!readyToConnect()) return;
-    if (isParked()) parkSocket();
-    else resumeSocket();
+    if (isParked()) suspend();
+    else activate();
   });
 
   onCleanup(() => {
     destroyed = true;
+    releaseDormant(props.sessionId);
     exitForegroundReplay();
     replay?.cancel();
     pendingInput = [];

@@ -680,6 +680,15 @@ because some tools send keystrokes as text. Snapshot chunks are capped at
 64 KiB each. Close codes a client should recognize: `4408` no auth frame
 within five seconds, `4401` bad or missing auth frame, `4404` no such session.
 
+**Client note — dormant sockets.** The web client keeps a bounded number of
+*inactive* terminal panes attached (a socket held open, output buffered but not
+rendered) so switching back to one needs no reattach and no re-stream. Each such
+pane is a live broadcast subscriber on its session, so a browser can hold
+several open attach sockets at once; the per-session broadcast fan-out and the
+in-band lag resync already bound the cost, and the client caps how many panes
+stay dormant. A socket a mobile OS reclaims while dormant simply reattaches
+(bounded) when the reader returns to that pane.
+
 ### Events and status
 
 - `GET /api/events` -> `text/event-stream` of `ServerEvent`, one JSON object
