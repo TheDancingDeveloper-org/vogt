@@ -64,18 +64,29 @@ install_vogt_codex() {
 
 install_vogt_claude() {
     command -v claude >/dev/null 2>&1 || return 0
-    if rg -q '"vogt"' \
-        "$HOME/.claude.json" \
-        "$HOME/.claude/.mcp.json" \
-        "$PWD/.mcp.json" 2>/dev/null; then
-        return 0
+    # Reconcile the COMMAND, not mere name-presence. A name-only guard pins
+    # whatever launcher path was stored when the client was first registered, so
+    # a renamed or relocated wrapper (e.g. an older `mydevenv2-*` path carried
+    # into a new image) leaves a stale `command` that Claude fails to spawn
+    # (`ENOENT`), and re-running never heals it. Mirror the codex branch:
+    # replace the registration unless its command already is the current wrapper.
+    if claude mcp get vogt >/dev/null 2>&1; then
+        if claude mcp get vogt 2>/dev/null | grep -qF "$VOGT_WRAPPER"; then
+            return 0
+        fi
+        # No --scope: remove wherever the stale entry lives.
+        claude mcp remove vogt >/dev/null 2>&1 || return 0
     fi
     claude mcp add --scope user vogt -- "$VOGT_WRAPPER" >/dev/null
 }
 
 install_vogt_opencode() {
     command -v opencode >/dev/null 2>&1 || return 0
-    if rg -q '"vogt"' \
+    # Reconcile the COMMAND, not mere name-presence (same stale-launcher bug as
+    # the claude branch). opencode has no `mcp remove`, but `mcp add` upserts,
+    # so re-adding overwrites a stale command with the current wrapper. Skip only
+    # when the current wrapper is already the registered command.
+    if rg -qF "$VOGT_WRAPPER" \
         "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.json" \
         "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/opencode.jsonc" \
         "$PWD/opencode.json" \
