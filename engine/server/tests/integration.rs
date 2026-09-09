@@ -3306,10 +3306,12 @@ async fn cold_attach_tail_hint_caps_the_snapshot() {
 }
 
 #[tokio::test]
-async fn warm_attach_is_not_narrowed_by_a_tail_hint() {
-    // The tail cap is a cold-attach affordance. A warm reattach carries
-    // `resume_from`; even if a tail hint is also present it must be ignored and
-    // the resume delta returned in full (`reset: false`).
+async fn warm_attach_over_budget_is_a_bounded_reset() {
+    // F1 (WI-125) inverts the old `warm_attach_is_not_narrowed_by_a_tail_hint`.
+    // The tail hint is now the replay budget on *every* path. A warm reattach
+    // whose delta exceeds the budget no longer floods the whole ring: it is
+    // capped to a ground-state tail and reset:true, because the client's xterm
+    // cannot keep more than its scrollback anyway.
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
@@ -3332,8 +3334,8 @@ async fn warm_attach_is_not_narrowed_by_a_tail_hint() {
     const TAIL: usize = 512;
     fill_scrollback(&base, &id, 4 * TAIL).await;
 
-    // resume_from = 0 resolves to the whole retained ring as a delta. With a
-    // tail hint also set, the warm path must still return it untrimmed.
+    // resume_from = 0 resolves to the whole retained ring as a delta — far more
+    // than the 512-byte budget — so F1 caps it to a bounded reset.
     let mut warm = ws_attach_with_auth(
         &base,
         &id,
@@ -3345,11 +3347,96 @@ async fn warm_attach_is_not_narrowed_by_a_tail_hint() {
         }),
     )
     .await;
-    let (reset, len, _head) = read_snapshot(&mut warm).await;
-    assert!(!reset, "a warm resume from 0 is a delta, not a reset");
+    let (reset, len, head) = read_snapshot(&mut warm).await;
     assert!(
-        len > TAIL,
-        "warm reattach must ignore the tail hint; got {len} <= {TAIL}"
+        reset,
+        "an over-budget delta is a bounded reset, not an append"
+    );
+    assert!(
+        len > 0 && len <= TAIL,
+        "the over-budget delta must be capped to the tail budget ({TAIL}); got {len}"
+    );
+    assert_ground_state_aligned(&head);
+    warm.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
+#[tokio::test]
+async fn warm_attach_within_budget_stays_a_byte_exact_delta() {
+    // The companion to the bounded-reset case: a warm reattach whose delta fits
+    // the budget is still sent byte-for-byte with reset:false, so an ordinary
+    // switch-away/switch-back appends without clearing the terminal.
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "warm-small",
+            "command": ["/bin/sh", "-c", "stty -echo; exec /bin/cat"]
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Prime the ring, record the cursor, then produce a small delta.
+    let mut ws = ws_attach(&base, &id).await;
+    read_snapshot(&mut ws).await;
+    ws.send(Message::Binary(b"before-cursor\n".to_vec().into()))
+        .await
+        .unwrap();
+    let _ = collect_binary_until(&mut ws, b"before-cursor", Duration::from_secs(2)).await;
+    let cursor = {
+        let detail: Value = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        detail["scrollback_pos"].as_u64().unwrap()
+    };
+    ws.send(Message::Binary(b"after-cursor\n".to_vec().into()))
+        .await
+        .unwrap();
+    let _ = collect_binary_until(&mut ws, b"after-cursor", Duration::from_secs(2)).await;
+    ws.close(None).await.ok();
+
+    // A generous budget the tiny delta fits inside: the resume stays a delta.
+    let mut warm = ws_attach_with_auth(
+        &base,
+        &id,
+        json!({
+            "type": "auth",
+            "token": TEST_TOKEN,
+            "resume_from": cursor,
+            "snapshot_tail_bytes": 1024 * 1024,
+        }),
+    )
+    .await;
+    let (reset, delta) = read_snapshot_payload(&mut warm).await;
+    assert!(!reset, "a delta within budget must not reset the terminal");
+    assert!(
+        delta
+            .windows(b"after-cursor".len())
+            .any(|w| w == b"after-cursor"),
+        "the delta must carry the post-cursor output"
+    );
+    assert!(
+        !delta
+            .windows(b"before-cursor".len())
+            .any(|w| w == b"before-cursor"),
+        "the delta must exclude pre-cursor output (byte-exact from the cursor)"
     );
     warm.close(None).await.ok();
     kill_session(&client, &base, &id).await;
@@ -3588,17 +3675,15 @@ fn assert_seq_spine_contiguous(bytes: &[u8]) {
 }
 
 #[tokio::test]
-async fn large_stale_warm_reattach_today_floods_the_whole_ring() {
-    // H1(a). Ring 64 KiB. A load session pushes far past capacity, so a cursor
-    // recorded early has aged out of the ring by the time we reattach with it.
-    // Today `snapshot_for_attach` answers that stale warm reattach with the
-    // FULL untrimmed ring and reset:true — the flood that is 4x worse than a
-    // cold attach. This test pins that behaviour.
-    //
-    // WHEN F1 (WI-125) LANDS: invert the size assertion to `len <= TAIL_BUDGET`
-    // (the aged-out path returns a bounded tail, still reset:true).
+async fn large_stale_warm_reattach_is_a_bounded_reset() {
+    // H1(a) / F1. Ring 64 KiB. A load session pushes far past capacity, so a
+    // cursor recorded early has aged out of the ring by the time we reattach
+    // with it. Before F1 `snapshot_for_attach` answered that stale warm
+    // reattach with the FULL untrimmed ring (the flood, 4x worse than a cold
+    // attach). F1 (WI-125) bounds it: a ground-state-aligned tail of at most
+    // the budget, still reset:true.
     const CAP: usize = 64 * 1024;
-    const TAIL_BUDGET: usize = 8 * 1024; // the future F1 budget, well under CAP
+    const TAIL_BUDGET: usize = 8 * 1024; // the F1 budget, well under CAP
     let (base, _h) = boot_with(CAP).await;
     let client = reqwest::Client::builder()
         .default_headers(auth())
@@ -3625,15 +3710,9 @@ async fn large_stale_warm_reattach_today_floods_the_whole_ring() {
     .await;
     let (reset, len, head) = read_snapshot(&mut warm).await;
     assert!(reset, "a cursor aged out of the ring forces a full reset");
-    // BEFORE F1: the whole ring is replayed, ignoring the tail hint.
     assert!(
-        len > TAIL_BUDGET,
-        "today a stale warm reattach floods the whole ring; got {len} <= budget \
-         {TAIL_BUDGET}. When F1 lands, invert this to `len <= TAIL_BUDGET`."
-    );
-    assert!(
-        len <= CAP + CAP / 16,
-        "the flood is still bounded by the ring capacity; got {len}"
+        len > 0 && len <= TAIL_BUDGET,
+        "F1 bounds the aged-out reattach to the tail budget ({TAIL_BUDGET}); got {len}"
     );
     assert_ground_state_aligned(&head);
     warm.close(None).await.ok();
@@ -3642,10 +3721,9 @@ async fn large_stale_warm_reattach_today_floods_the_whole_ring() {
 
 #[tokio::test]
 async fn four_mib_ring_stale_reattach_is_ground_state_aligned_and_bounded() {
-    // H1(b). The dimensions prod runs: a 4 MiB ring with ~6.5 MiB pushed. The
-    // stale warm reattach today returns the full ring (reset:true), aligned to
-    // the terminal's ground state. F1 flips the size to the tail budget; the
-    // alignment assertion holds either way.
+    // H1(b) / F1. The dimensions prod runs: a 4 MiB ring with ~6.5 MiB pushed.
+    // The stale warm reattach is bounded to the tail budget and reset:true,
+    // aligned to the terminal's ground state — not the whole 4 MiB ring.
     const CAP: usize = 4 * 1024 * 1024;
     const TAIL_BUDGET: usize = 1024 * 1024;
     let (base, _h) = boot_with(CAP).await;
@@ -3672,15 +3750,9 @@ async fn four_mib_ring_stale_reattach_is_ground_state_aligned_and_bounded() {
     .await;
     let (reset, len, head) = read_snapshot(&mut warm).await;
     assert!(reset, "position 1 has long since aged out of a 4 MiB ring");
-    // BEFORE F1: the 4 MiB ring is replayed whole. Invert to `<= TAIL_BUDGET`.
     assert!(
-        len > TAIL_BUDGET,
-        "today the 4 MiB ring is replayed whole; got {len}. Invert to \
-         `len <= TAIL_BUDGET` when F1 lands."
-    );
-    assert!(
-        len <= CAP + CAP / 16,
-        "bounded by the ring capacity; got {len}"
+        len > 0 && len <= TAIL_BUDGET,
+        "F1 bounds the aged-out 4 MiB reattach to the tail budget ({TAIL_BUDGET}); got {len}"
     );
     assert_ground_state_aligned(&head);
     warm.close(None).await.ok();

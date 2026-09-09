@@ -11,6 +11,29 @@ export const REPLAY_TAIL_MAX_BYTES = 1 * 1024 * 1024;
 /** Keep each xterm parser turn bounded and aligned with the server frame size. */
 export const REPLAY_SLICE_BYTES = 64 * 1024;
 
+/**
+ * The absolute output position at the START of a snapshot payload: the byte
+ * offset the first snapshot byte sits at. The server reports the position at
+ * the END of the snapshot (`scrollback_pos`) and the payload's byte length
+ * (`scrollback_bytes`); the start is their difference, clamped at zero.
+ *
+ * This is the cursor a client adopts when a `snapshot-start` arrives, and it is
+ * what makes F1's bounded reset safe. When a `reset:true` snapshot follows a
+ * `resume_from` — the cursor aged out of the ring, or the delta exceeded the
+ * budget — the server sends a ground-state tail whose start is
+ * `scrollback_pos - scrollback_bytes`, well after the client's now-stale
+ * cursor. The client discards that stale cursor and re-anchors here, so once it
+ * has replayed the `scrollback_bytes` of the tail its position is exactly
+ * `scrollback_pos` again and the live stream resumes with no gap and no
+ * duplicate.
+ */
+export function snapshotStartPosition(
+  scrollbackPos: number,
+  scrollbackBytes: number,
+): number {
+  return Math.max(0, scrollbackPos - scrollbackBytes);
+}
+
 export interface ReplayTail {
   /** The ground-state-safe tail to send to xterm. */
   data: Uint8Array;

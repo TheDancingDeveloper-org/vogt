@@ -25,6 +25,7 @@ import {
   createReplayQueue,
   prepareReplayTail,
   scheduleReplay,
+  snapshotStartPosition,
   type ReplayHandle,
 } from "./terminalReplay";
 import { beginForegroundReplay } from "./terminalPrewarm";
@@ -965,9 +966,13 @@ const TerminalView: Component<Props> = (props) => {
             }
             if (typeof ctrl.scrollback_pos === "number") {
               snapshotEndPosition = ctrl.scrollback_pos;
-              outputPosition = Math.max(
-                0,
-                ctrl.scrollback_pos - (ctrl.scrollback_bytes ?? 0),
+              // Re-anchor to the start of the payload we are about to replay.
+              // On a reset:true that followed a resume_from (F1's aged-out or
+              // over-budget path) this discards the now-stale cursor; the live
+              // stream after snapshot-done resumes at scrollback_pos with no gap.
+              outputPosition = snapshotStartPosition(
+                ctrl.scrollback_pos,
+                ctrl.scrollback_bytes ?? 0,
               );
             }
             inSnapshot = true;
