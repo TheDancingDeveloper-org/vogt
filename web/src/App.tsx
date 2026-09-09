@@ -12,6 +12,7 @@ import {
   untrack,
 } from "solid-js";
 import { useLocation, useNavigate, useParams } from "@solidjs/router";
+import { Capacitor } from "@capacitor/core";
 import type { TerminalActions } from "./Terminal";
 import type { AgentTaskDraftGuard } from "./AgentTasks";
 import Board from "./Board";
@@ -218,6 +219,7 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
   const [showToken, setShowToken] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(props.error);
+  const native = Capacitor.isNativePlatform();
 
   const submit = async (event: SubmitEvent) => {
     event.preventDefault();
@@ -267,17 +269,19 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
             autofocus
           />
         </label>
-        <label>
-          Backend URL
-          <input
-            type="url"
-            value={base()}
-            onInput={(event) => setBaseDraft(event.currentTarget.value)}
-            placeholder="https://your-vogt.example (blank = this site)"
-            autocomplete="url"
-            spellcheck={false}
-          />
-        </label>
+        <Show when={!native}>
+          <label>
+            Backend URL
+            <input
+              type="url"
+              value={base()}
+              onInput={(event) => setBaseDraft(event.currentTarget.value)}
+              placeholder="https://your-vogt.example (blank = this site)"
+              autocomplete="url"
+              spellcheck={false}
+            />
+          </label>
+        </Show>
         <label class="login-checkbox">
           <input
             type="checkbox"
