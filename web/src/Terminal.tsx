@@ -1025,7 +1025,14 @@ const TerminalView: Component<Props> = (props) => {
             ws?.close();
             scheduleReconnect(100);
           } else if (ctrl.type === "pong") {
-            if (watchdog.notePong(ctrl.id, ctrl.pos, outputPosition ?? 0) === "recycle") {
+            if (
+              watchdog.notePong(
+                ctrl.id,
+                ctrl.pos,
+                outputPosition ?? 0,
+                Date.now(),
+              ) === "recycle"
+            ) {
               recycleSocket("server output is ahead of the rendered cursor");
             }
           }

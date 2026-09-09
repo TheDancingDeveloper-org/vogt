@@ -635,7 +635,7 @@ Client text control frames:
 
 ```json
 {"type":"resize","cols":120,"rows":40}
-{"type":"ping"}
+{"type":"ping","id":1}
 ```
 
 Server text control frames:
@@ -643,8 +643,17 @@ Server text control frames:
 ```json
 {"type":"snapshot-start","session_id":"uuid","scrollback_bytes":0,"scrollback_pos":0,"reset":true}
 {"type":"snapshot-done"}
+{"type":"pong","id":1,"pos":123}
 {"type":"lag","note":"client too slow; reattach"}
 ```
+
+A `pong` echoes the `ping.id` and carries `pos`: the absolute byte offset the
+server has **actually streamed to that socket**, not `total_written`. The pong
+is formed and sent by the same outbound task that streams output, after
+flushing anything already queued, so it is ordered on the wire after those
+chunks and its `pos` can never exceed what the client has received. A client
+uses it purely as a liveness probe — a `pos` ahead of what it has rendered is a
+suspect to confirm with a second probe, not an immediate reconnect.
 
 `snapshot_tail_bytes` is the replay **budget**, and it bounds every reply — a
 client's terminal keeps only a fixed scrollback, so the server never ships more

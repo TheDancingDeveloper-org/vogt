@@ -3878,6 +3878,94 @@ async fn lagging_subscriber_recovers_in_band_bounded_and_without_duplicates() {
 }
 
 #[tokio::test]
+async fn pong_never_reports_the_server_ahead_of_this_socket() {
+    // F2 (WI-126). Under load the liveness pong must carry the position actually
+    // streamed to THIS socket, never `total_written` (which includes queued but
+    // unsent output). Before the fix the inbound task answered with
+    // scrollback_position() and the pong could be delivered ahead of the chunks
+    // it referenced, so the client saw the server "ahead" and recycled the
+    // socket. Now the outbound task answers with sent_pos after flushing, so the
+    // pong's pos is never greater than what this socket has received.
+    let (base, _h) = boot_with(4 * 1024 * 1024).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id = create_command_session(&client, &base, "pong", load_session_command(50_000)).await;
+
+    let mut ws = ws_attach(&base, &id).await;
+
+    // Drain the initial snapshot, recording the absolute position it ended at.
+    let mut snap_end: u64 = 0;
+    let mut in_snapshot = false;
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("snapshot frame arrives")
+            .unwrap()
+            .unwrap();
+        match m {
+            Message::Text(s) => {
+                let v: Value = serde_json::from_str(&s).unwrap();
+                match v["type"].as_str() {
+                    Some("snapshot-start") => {
+                        in_snapshot = true;
+                        snap_end = v["scrollback_pos"].as_u64().unwrap();
+                    }
+                    Some("snapshot-done") => break,
+                    _ => {}
+                }
+            }
+            Message::Binary(_) if in_snapshot => {}
+            _ => {}
+        }
+    }
+
+    // Probe while output is still flowing.
+    ws.send(Message::Text(
+        json!({ "type": "ping", "id": 1 }).to_string().into(),
+    ))
+    .await
+    .unwrap();
+
+    // Count live bytes received on this socket until the pong arrives. The pong
+    // is ordered after any flushed chunks, so by the time we read it we have
+    // received every byte up to its position.
+    let mut live: u64 = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let m = tokio::time::timeout(remaining, ws.next())
+            .await
+            .expect("a pong should arrive within the deadline")
+            .unwrap()
+            .unwrap();
+        match m {
+            Message::Binary(b) => live += b.len() as u64,
+            Message::Text(s) => {
+                let v: Value = serde_json::from_str(&s).unwrap();
+                if v["type"] == "pong" {
+                    assert_eq!(v["id"].as_u64(), Some(1));
+                    let pos = v["pos"].as_u64().unwrap();
+                    let received = snap_end + live;
+                    assert!(
+                        pos <= received,
+                        "pong pos {pos} is ahead of what this socket received \
+                         ({received} = snap_end {snap_end} + live {live})"
+                    );
+                    break;
+                }
+                // A resync snapshot-start would only add to `received`; keep going.
+            }
+            _ => {}
+        }
+    }
+
+    ws.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
+#[tokio::test]
 async fn ws_attach_echoes_input_and_replays_on_reattach() {
     let (base, _h) = boot().await;
     let client = reqwest::Client::builder()

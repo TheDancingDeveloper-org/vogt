@@ -99,6 +99,47 @@ fn coalesce(snap_pos: u64, chunks: &[OutputChunk]) -> (Vec<u8>, u64) {
     (out, end)
 }
 
+/// Send whatever broadcast chunks are already queued for this socket, without
+/// blocking, advancing `sent_pos` past them. Used before answering a liveness
+/// probe so the pong's position reflects output the client has actually been
+/// sent. A `Lagged`/`Closed` on the non-blocking drain is left for the main
+/// `rx.recv()` loop to handle (resync or teardown); flushing what was already
+/// pulled is still correct and gap-free.
+async fn flush_available<S>(
+    sink: &mut S,
+    rx: &mut tokio::sync::broadcast::Receiver<OutputChunk>,
+    snap_pos: u64,
+    sent_pos: &mut u64,
+) -> Result<(), ()>
+where
+    S: SinkExt<Message> + Unpin,
+{
+    let mut drained: Vec<OutputChunk> = Vec::new();
+    let mut queued = 0usize;
+    while queued < OUTBOUND_COALESCE_CAP {
+        match rx.try_recv() {
+            Ok(next) => {
+                queued += next.data.len();
+                drained.push(next);
+            }
+            Err(_) => break,
+        }
+    }
+    if drained.is_empty() {
+        return Ok(());
+    }
+    let (frame, end) = coalesce(snap_pos, &drained);
+    if end > *sent_pos {
+        *sent_pos = end;
+    }
+    if !frame.is_empty() {
+        sink.send(Message::Binary(frame.into()))
+            .await
+            .map_err(|_| ())?;
+    }
+    Ok(())
+}
+
 /// Re-synchronise a lagging client in-band, on the same socket, instead of
 /// dropping it and forcing a reconnect + replay (a cascade under load).
 ///
@@ -315,7 +356,11 @@ async fn handle_socket(
     };
 
     let (mut sink, mut stream) = socket.split();
-    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<ServerControl>();
+    // Carries liveness-probe ids from the inbound task to the outbound task.
+    // The pong is *formed* by the outbound task with the position it has
+    // actually streamed, not by the inbound task with `total_written` — see the
+    // ping branch of the outbound select (WI-126).
+    let (ping_tx, mut ping_rx) = mpsc::unbounded_channel::<u64>();
 
     // Subscribe BEFORE snapshotting so no broadcast chunks are missed in the gap.
     let mut rx = session.subscribe();
@@ -386,10 +431,11 @@ async fn handle_socket(
                             let _ = writer_session.resize(cols, rows);
                         }
                         Ok(ClientControl::Ping { id }) => {
-                            let _ = control_tx.send(ServerControl::Pong {
-                                id,
-                                pos: writer_session.scrollback_position(),
-                            });
+                            // Hand the probe to the outbound task; it answers
+                            // with the position it has actually sent this
+                            // socket, after flushing queued output, so the pong
+                            // can never report the server ahead of the client.
+                            let _ = ping_tx.send(id);
                         }
                         Ok(ClientControl::Auth { .. }) => {
                             // Already authenticated; ignore further auth frames.
@@ -427,9 +473,23 @@ async fn handle_socket(
 
         loop {
             tokio::select! {
-                Some(control) = control_rx.recv() => {
+                Some(ping_id) = ping_rx.recv() => {
+                    // Flush anything already queued for this socket, then answer
+                    // the probe with `sent_pos` — the byte offset actually
+                    // written here. Because the pong is ordered AFTER those
+                    // chunks on the wire and carries only what has been sent, it
+                    // can never report the server ahead of what the client has
+                    // received, so a bursty session no longer trips a spurious
+                    // recycle (WI-126).
+                    if flush_available(&mut sink, &mut rx, snap_pos, &mut sent_pos)
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let pong = ServerControl::Pong { id: ping_id, pos: sent_pos };
                     if sink
-                        .send(Message::Text(serde_json::to_string(&control).unwrap().into()))
+                        .send(Message::Text(serde_json::to_string(&pong).unwrap().into()))
                         .await
                         .is_err()
                     {
