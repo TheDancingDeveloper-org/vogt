@@ -82,6 +82,21 @@ async fn boot() -> (String, tokio::task::JoinHandle<()>) {
     boot_with_config(test_config()).await
 }
 
+/// Boot with a chosen scrollback ring size, leaving every other test-config
+/// default in place. The suite default stays 64 KiB (`test_config`); the
+/// large-session resume tests use this to size the ring around the flood they
+/// are exercising (a tiny ring an early cursor ages out of, or the 4 MiB ring
+/// prod runs). A per-session `scrollback_bytes` override on session-create also
+/// works, but sizing the whole engine keeps each test's intent in one place.
+#[allow(dead_code)] // used by the large-session resume tests
+async fn boot_with(scrollback_bytes: usize) -> (String, tokio::task::JoinHandle<()>) {
+    boot_with_config(Config {
+        scrollback_bytes,
+        ..test_config()
+    })
+    .await
+}
+
 async fn boot_with_config(cfg: Config) -> (String, tokio::task::JoinHandle<()>) {
     let (base, _state, handle) = boot_with_state(cfg).await;
     (base, handle)
@@ -3128,18 +3143,29 @@ async fn ws_attach_with_auth(
 }
 
 /// Read one snapshot sequence (`snapshot-start` → binary frames →
-/// `snapshot-done`) and report whether it was a reset and how many snapshot
-/// bytes were streamed.
+/// `snapshot-done`) and report whether it was a reset, how many snapshot bytes
+/// were streamed, and the leading bytes of the payload.
+///
+/// The leading bytes let a caller assert the ground-state alignment invariant
+/// the ring guarantees: a snapshot never begins on a UTF-8 continuation byte,
+/// and never in the tail of a chopped escape sequence. Up to
+/// [`SNAPSHOT_HEAD_BYTES`] are captured — enough to recognise a `\x1b[` CSI
+/// introducer at the start (a *complete* sequence, not a fragment) versus a
+/// bare `[`/`m`/digit left over from a mid-sequence cut.
+const SNAPSHOT_HEAD_BYTES: usize = 64;
+
+#[allow(dead_code)] // `first_bytes` is only read by the large-session tests.
 async fn read_snapshot(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-) -> (bool, usize) {
+) -> (bool, usize, Vec<u8>) {
     let mut reset = false;
     let mut started = false;
     let mut total = 0usize;
+    let mut first_bytes: Vec<u8> = Vec::new();
     loop {
-        let m = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        let m = tokio::time::timeout(Duration::from_secs(5), ws.next())
             .await
             .expect("snapshot frame arrives")
             .unwrap()
@@ -3156,11 +3182,40 @@ async fn read_snapshot(
                     _ => {}
                 }
             }
-            Message::Binary(b) if started => total += b.len(),
+            Message::Binary(b) if started => {
+                if first_bytes.len() < SNAPSHOT_HEAD_BYTES {
+                    let take = (SNAPSHOT_HEAD_BYTES - first_bytes.len()).min(b.len());
+                    first_bytes.extend_from_slice(&b[..take]);
+                }
+                total += b.len();
+            }
             _ => {}
         }
     }
-    (reset, total)
+    (reset, total, first_bytes)
+}
+
+/// A snapshot begins in the terminal's ground state: its first byte is never a
+/// UTF-8 continuation byte, and if it opens an escape it is a whole CSI/OSC
+/// introducer (`\x1b` followed by `[` or `]`), never the tail of one chopped by
+/// an overflow cut (which would begin with a bare `[`, a digit, or `m`).
+fn assert_ground_state_aligned(first_bytes: &[u8]) {
+    if first_bytes.is_empty() {
+        return;
+    }
+    let b0 = first_bytes[0];
+    assert!(
+        (b0 & 0xC0) != 0x80,
+        "snapshot must not begin on a UTF-8 continuation byte; got {b0:#04x}"
+    );
+    if b0 == 0x1b {
+        assert!(
+            matches!(first_bytes.get(1), Some(b'[') | Some(b']')),
+            "a leading ESC must introduce a complete CSI/OSC sequence, not a \
+             fragment; got {:?}",
+            &first_bytes[..first_bytes.len().min(4)]
+        );
+    }
 }
 
 /// Drive more than `at_least` bytes of output into a `cat` session's ring, as
@@ -3240,7 +3295,7 @@ async fn cold_attach_tail_hint_caps_the_snapshot() {
         json!({ "type": "auth", "token": TEST_TOKEN, "snapshot_tail_bytes": TAIL }),
     )
     .await;
-    let (reset, len) = read_snapshot(&mut cold).await;
+    let (reset, len, _head) = read_snapshot(&mut cold).await;
     assert!(reset, "a cold attach is always a full reset");
     assert!(
         len > 0 && len <= TAIL,
@@ -3290,13 +3345,463 @@ async fn warm_attach_is_not_narrowed_by_a_tail_hint() {
         }),
     )
     .await;
-    let (reset, len) = read_snapshot(&mut warm).await;
+    let (reset, len, _head) = read_snapshot(&mut warm).await;
     assert!(!reset, "a warm resume from 0 is a delta, not a reset");
     assert!(
         len > TAIL,
         "warm reattach must ignore the tail hint; got {len} <= {TAIL}"
     );
     warm.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
+// ---- large-session resume harness (WI-122 / H1) ----
+//
+// These tests drive real bytes through the PTY reader, the 1024-slot broadcast
+// channel and the outbound coalesce path via a load-generating session, then
+// exercise resume across a ring the cursor has aged out of, and the in-band
+// lag recovery. Two of them pin *today's* flood behaviour with a comment
+// pointing at the F1 (WI-125) inversion; the ground-state-alignment,
+// byte-exact-delta and no-duplicate assertions hold across that change.
+
+/// A load-generating session command: a bash loop emitting `count` coloured,
+/// sequence-numbered lines — a monotonic `SEQNNNNNNNN` spine so a replay can be
+/// checked for gaps and duplicates — with a periodic cursor-home frame so the
+/// stream carries real CSI sequences, not just plain text. After the burst it
+/// idles (`sleep`) so the ring is stable while a test reattaches; every caller
+/// reaps it with `kill_session`. Each line is ~65 bytes.
+fn load_session_command(count: u32) -> Vec<String> {
+    vec![
+        "/bin/bash".into(),
+        "-c".into(),
+        format!(
+            "i=0; while [ \"$i\" -lt {count} ]; do \
+                 printf '\\033[3%dmSEQ%08d the quick brown fox jumps over the lazy dog\\033[0m\\n' \
+                     \"$((i % 8))\" \"$i\"; \
+                 i=$((i + 1)); \
+                 if [ \"$((i % 64))\" -eq 0 ]; then printf '\\033[H'; fi; \
+             done; \
+             exec sleep 3600"
+        ),
+    ]
+}
+
+/// Create a session running `command`, returning its id.
+async fn create_command_session(
+    client: &reqwest::Client,
+    base: &str,
+    name: &str,
+    command: Vec<String>,
+) -> String {
+    client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": name, "command": command }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Poll `GET /api/sessions/:id` until `scrollback_pos` reaches `target`,
+/// returning the observed position. Fails on a deadline so a session that never
+/// produces enough fails rather than hanging.
+async fn poll_scrollback_at_least(
+    client: &reqwest::Client,
+    base: &str,
+    id: &str,
+    target: u64,
+) -> u64 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    loop {
+        let detail: SessionDetail = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let pos = detail.scrollback_pos;
+        if pos >= target {
+            return pos;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {id} produced only {pos} bytes, wanted >= {target}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Wait until `scrollback_pos` stops advancing (two equal reads 80 ms apart),
+/// so a test that compares two reattaches resolves both cursors against the
+/// same, stable ring. Returns the settled position.
+async fn wait_until_scrollback_stable(client: &reqwest::Client, base: &str, id: &str) -> u64 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut last = u64::MAX;
+    loop {
+        let detail: SessionDetail = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let pos = detail.scrollback_pos;
+        if pos == last {
+            return pos;
+        }
+        last = pos;
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {id} never stopped producing (last {pos})"
+        );
+        tokio::time::sleep(Duration::from_millis(80)).await;
+    }
+}
+
+/// Read one whole snapshot sequence, returning `(reset, full_payload)`. Unlike
+/// [`read_snapshot`] this keeps every byte, so a caller can compare two deltas
+/// for byte-exactness.
+async fn read_snapshot_payload(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> (bool, Vec<u8>) {
+    let mut reset = false;
+    let mut started = false;
+    let mut payload = Vec::new();
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("snapshot frame arrives")
+            .unwrap()
+            .unwrap();
+        match m {
+            Message::Text(s) => {
+                let v: Value = serde_json::from_str(&s).unwrap();
+                match v["type"].as_str() {
+                    Some("snapshot-start") => {
+                        started = true;
+                        reset = v["reset"].as_bool().unwrap_or(true);
+                    }
+                    Some("snapshot-done") => break,
+                    _ => {}
+                }
+            }
+            Message::Binary(b) if started => payload.extend_from_slice(&b),
+            _ => {}
+        }
+    }
+    (reset, payload)
+}
+
+/// One delivered snapshot/resync sequence: whether it reset the terminal and
+/// the payload bytes that followed it.
+struct SnapSegment {
+    reset: bool,
+    bytes: Vec<u8>,
+}
+
+/// Drain frames, grouping the payload after each `snapshot-start` into its own
+/// segment, until no frame arrives for `idle`. Returns the initial snapshot,
+/// the live bytes that followed it, and any in-band resync the server sent —
+/// each `snapshot-start` opens a new segment, so a resync is a fresh segment.
+async fn read_segments_until_idle(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    idle: Duration,
+) -> Vec<SnapSegment> {
+    let mut segs: Vec<SnapSegment> = Vec::new();
+    loop {
+        match tokio::time::timeout(idle, ws.next()).await {
+            Err(_) | Ok(None) | Ok(Some(Err(_))) => break,
+            Ok(Some(Ok(m))) => match m {
+                Message::Text(s) => {
+                    let v: Value = serde_json::from_str(&s).unwrap();
+                    if v["type"] == "snapshot-start" {
+                        segs.push(SnapSegment {
+                            reset: v["reset"].as_bool().unwrap_or(true),
+                            bytes: Vec::new(),
+                        });
+                    }
+                }
+                Message::Binary(b) => {
+                    if let Some(seg) = segs.last_mut() {
+                        seg.bytes.extend_from_slice(&b);
+                    }
+                }
+                _ => {}
+            },
+        }
+    }
+    segs
+}
+
+/// Extract, in order, every complete `SEQ%08d` marker in `bytes`. The producer
+/// emits each sequence number exactly once and monotonically, so this is the
+/// spine used to detect gaps and duplicates in a replay.
+fn seq_numbers(bytes: &[u8]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 11 <= bytes.len() {
+        if &bytes[i..i + 3] == b"SEQ" && bytes[i + 3..i + 11].iter().all(u8::is_ascii_digit) {
+            let n: u32 = std::str::from_utf8(&bytes[i + 3..i + 11])
+                .unwrap()
+                .parse()
+                .unwrap();
+            out.push(n);
+            i += 11;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Assert a run of `SEQ` markers is contiguous: strictly increasing by exactly
+/// one, no gap and no duplicate. Used on a delta that resumed from a retained
+/// cursor, where every intervening line must be present exactly once.
+fn assert_seq_spine_contiguous(bytes: &[u8]) {
+    let seqs = seq_numbers(bytes);
+    assert!(
+        seqs.len() > 10,
+        "expected a run of SEQ markers in the delta, saw {}",
+        seqs.len()
+    );
+    for w in seqs.windows(2) {
+        assert_eq!(
+            w[1],
+            w[0] + 1,
+            "SEQ spine is not contiguous ({} then {}): a gap or duplicate in the delta",
+            w[0],
+            w[1]
+        );
+    }
+}
+
+#[tokio::test]
+async fn large_stale_warm_reattach_today_floods_the_whole_ring() {
+    // H1(a). Ring 64 KiB. A load session pushes far past capacity, so a cursor
+    // recorded early has aged out of the ring by the time we reattach with it.
+    // Today `snapshot_for_attach` answers that stale warm reattach with the
+    // FULL untrimmed ring and reset:true — the flood that is 4x worse than a
+    // cold attach. This test pins that behaviour.
+    //
+    // WHEN F1 (WI-125) LANDS: invert the size assertion to `len <= TAIL_BUDGET`
+    // (the aged-out path returns a bounded tail, still reset:true).
+    const CAP: usize = 64 * 1024;
+    const TAIL_BUDGET: usize = 8 * 1024; // the future F1 budget, well under CAP
+    let (base, _h) = boot_with(CAP).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id = create_command_session(&client, &base, "flood", load_session_command(20_000)).await;
+
+    // Record an early cursor, then wait until the ring has advanced several
+    // capacities past it so it is unambiguously aged out.
+    let early = poll_scrollback_at_least(&client, &base, &id, CAP as u64 / 2).await;
+    let _ = poll_scrollback_at_least(&client, &base, &id, early + 4 * CAP as u64).await;
+
+    let mut warm = ws_attach_with_auth(
+        &base,
+        &id,
+        json!({
+            "type": "auth",
+            "token": TEST_TOKEN,
+            "resume_from": early,
+            "snapshot_tail_bytes": TAIL_BUDGET,
+        }),
+    )
+    .await;
+    let (reset, len, head) = read_snapshot(&mut warm).await;
+    assert!(reset, "a cursor aged out of the ring forces a full reset");
+    // BEFORE F1: the whole ring is replayed, ignoring the tail hint.
+    assert!(
+        len > TAIL_BUDGET,
+        "today a stale warm reattach floods the whole ring; got {len} <= budget \
+         {TAIL_BUDGET}. When F1 lands, invert this to `len <= TAIL_BUDGET`."
+    );
+    assert!(
+        len <= CAP + CAP / 16,
+        "the flood is still bounded by the ring capacity; got {len}"
+    );
+    assert_ground_state_aligned(&head);
+    warm.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
+#[tokio::test]
+async fn four_mib_ring_stale_reattach_is_ground_state_aligned_and_bounded() {
+    // H1(b). The dimensions prod runs: a 4 MiB ring with ~6.5 MiB pushed. The
+    // stale warm reattach today returns the full ring (reset:true), aligned to
+    // the terminal's ground state. F1 flips the size to the tail budget; the
+    // alignment assertion holds either way.
+    const CAP: usize = 4 * 1024 * 1024;
+    const TAIL_BUDGET: usize = 1024 * 1024;
+    let (base, _h) = boot_with(CAP).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id =
+        create_command_session(&client, &base, "flood-4m", load_session_command(100_000)).await;
+
+    // Push well past the ring, then reattach from position 1 (long aged out).
+    let _ = poll_scrollback_at_least(&client, &base, &id, CAP as u64 + CAP as u64 / 2).await;
+    let mut warm = ws_attach_with_auth(
+        &base,
+        &id,
+        json!({
+            "type": "auth",
+            "token": TEST_TOKEN,
+            "resume_from": 1,
+            "snapshot_tail_bytes": TAIL_BUDGET,
+        }),
+    )
+    .await;
+    let (reset, len, head) = read_snapshot(&mut warm).await;
+    assert!(reset, "position 1 has long since aged out of a 4 MiB ring");
+    // BEFORE F1: the 4 MiB ring is replayed whole. Invert to `<= TAIL_BUDGET`.
+    assert!(
+        len > TAIL_BUDGET,
+        "today the 4 MiB ring is replayed whole; got {len}. Invert to \
+         `len <= TAIL_BUDGET` when F1 lands."
+    );
+    assert!(
+        len <= CAP + CAP / 16,
+        "bounded by the ring capacity; got {len}"
+    );
+    assert_ground_state_aligned(&head);
+    warm.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
+#[tokio::test]
+async fn retained_cursor_deltas_are_byte_exact_under_load() {
+    // H1(b) — byte-exactness half. Two warm reattaches from retained cursors
+    // Ca < Cb into the same idle 4 MiB ring: the later delta must equal the
+    // earlier delta with its first (Cb-Ca) bytes removed, and its SEQ spine
+    // must be contiguous. Proves `snapshot_since` is byte-exact against bytes
+    // that really flowed through the PTY reader and broadcast path, with no gap
+    // or duplicate at the resume boundary. This assertion survives F1.
+    const CAP: usize = 4 * 1024 * 1024;
+    let (base, _h) = boot_with(CAP).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id = create_command_session(&client, &base, "delta", load_session_command(80_000)).await;
+    // Let it settle so both cursors resolve against the same stable ring.
+    let _ = poll_scrollback_at_least(&client, &base, &id, CAP as u64 + 256 * 1024).await;
+    let total = wait_until_scrollback_stable(&client, &base, &id).await;
+
+    // Both cursors sit inside the retained 4 MiB window.
+    let ca = total - 2 * 1024 * 1024;
+    let cb = ca + 512 * 1024;
+
+    let mut a = ws_attach_with_token_and_cursor(&base, &id, TEST_TOKEN, Some(ca)).await;
+    let (reset_a, delta_a) = read_snapshot_payload(&mut a).await;
+    let mut b = ws_attach_with_token_and_cursor(&base, &id, TEST_TOKEN, Some(cb)).await;
+    let (reset_b, delta_b) = read_snapshot_payload(&mut b).await;
+
+    assert!(!reset_a && !reset_b, "retained cursors resume as deltas");
+    let skip = (cb - ca) as usize;
+    assert!(
+        delta_a.len() >= skip && delta_a.len() == skip + delta_b.len(),
+        "delta lengths inconsistent: |A|={} skip={} |B|={}",
+        delta_a.len(),
+        skip,
+        delta_b.len()
+    );
+    assert_eq!(
+        &delta_a[skip..],
+        &delta_b[..],
+        "the later delta must equal the earlier delta past the (Cb-Ca) boundary"
+    );
+    assert_seq_spine_contiguous(&delta_b);
+
+    a.close(None).await.ok();
+    b.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
+
+#[tokio::test]
+async fn lagging_subscriber_recovers_in_band_bounded_and_without_duplicates() {
+    // H1(c) — lag recovery. A client stops reading while a load session floods
+    // far past the 1024-slot broadcast channel, so the server must recover the
+    // socket in-band (`send_resync`) rather than drop it. The ring is sized
+    // above the ~8 MiB broadcast overflow so the resync stays a reset:false
+    // delta. Assert: a resync segment appears, every segment's payload is
+    // bounded by the ring, and the SEQ spine across the whole delivered stream
+    // is strictly increasing — no duplicate and no reordering across the
+    // resync boundary.
+    const CAP: usize = 12 * 1024 * 1024;
+    let (base, _h) = boot_with(CAP).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // ~11.7 MiB of output, comfortably past the broadcast channel capacity.
+    let id = create_command_session(&client, &base, "lag", load_session_command(180_000)).await;
+
+    let mut ws = ws_attach(&base, &id).await;
+    // Do not read at all: the initial snapshot and the live stream both queue
+    // in the socket buffer, the outbound task blocks on a full socket, and the
+    // broadcast channel overflows behind it.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Resume and drain everything, including the in-band resync.
+    let segs = read_segments_until_idle(&mut ws, Duration::from_millis(1500)).await;
+
+    assert!(
+        segs.len() >= 2,
+        "expected an in-band resync segment after the flood; saw {} segment(s)",
+        segs.len()
+    );
+    assert!(
+        segs[0].reset,
+        "the initial cold attach is always a full reset snapshot"
+    );
+    for s in &segs {
+        assert!(
+            s.bytes.len() <= CAP + CAP / 16,
+            "a resync/snapshot payload must be bounded by the ring; got {}",
+            s.bytes.len()
+        );
+    }
+    // The resync snapshots from the client's last sent position, so it never
+    // re-sends bytes already delivered: the spine is strictly increasing.
+    let mut all = Vec::new();
+    for s in &segs {
+        all.extend(seq_numbers(&s.bytes));
+    }
+    assert!(
+        all.len() > 100,
+        "expected a long SEQ spine across the delivered stream, saw {}",
+        all.len()
+    );
+    for w in all.windows(2) {
+        assert!(
+            w[1] > w[0],
+            "SEQ spine went backward or duplicated across a resync: {} then {}",
+            w[0],
+            w[1]
+        );
+    }
+
+    ws.close(None).await.ok();
     kill_session(&client, &base, &id).await;
 }
 
