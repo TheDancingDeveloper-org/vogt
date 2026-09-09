@@ -10,11 +10,42 @@
 // and required for the tests, and one file that means two things depending on
 // who loaded it is how a build starts differing from what was tested.
 
+import { gunzipSync } from "node:zlib";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+
 import { defineConfig } from "vitest/config";
 import solid from "vite-plugin-solid";
 
+// Import a gzip fixture as a decoded `Uint8Array` from a browser-typed test:
+// `import bytes from "./x.bin.gz?gzbytes"`. The gunzip happens here in Node
+// (this config is not part of the app's browser-only tsconfig), so the tests
+// need no `@types/node` and stay free of Node built-ins. The bytes are emitted
+// as base64 and decoded with `atob` (a DOM global jsdom provides).
+function gzFixtureBytes() {
+  const SUFFIX = "?gzbytes";
+  return {
+    name: "gz-fixture-bytes",
+    resolveId(id: string, importer: string | undefined) {
+      if (!id.endsWith(SUFFIX)) return null;
+      const file = id.slice(0, -SUFFIX.length);
+      const base = importer ? dirname(importer) : process.cwd();
+      return resolve(base, file) + SUFFIX;
+    },
+    load(id: string) {
+      if (!id.endsWith(SUFFIX)) return null;
+      const file = id.slice(0, -SUFFIX.length);
+      const base64 = gunzipSync(readFileSync(file)).toString("base64");
+      return (
+        `export default Uint8Array.from(atob(${JSON.stringify(base64)}), ` +
+        `(c) => c.charCodeAt(0));`
+      );
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [solid()],
+  plugins: [solid(), gzFixtureBytes()],
   resolve: {
     // Solid ships two builds. `browser` is the one with a real DOM renderer,
     // and `development` is the one that keeps the reactive graph's dev
