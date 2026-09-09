@@ -1429,13 +1429,15 @@ export function openAttach(id: string, resumeFrom?: number): RuntimeSocket {
       ws.send(JSON.stringify({
         type: "auth",
         token: tok,
-        // Cold attach (no cached cursor): bound the server's full snapshot to
-        // the same tail budget the cache-restore path already enforces, so a
-        // first open never ships and replays the whole scrollback ring.
-        // A warm reattach sends its cursor instead and its delta is untouched.
-        ...(resumeFrom === undefined
-          ? { snapshot_tail_bytes: REPLAY_TAIL_MAX_BYTES }
-          : { resume_from: resumeFrom }),
+        // The tail budget is sent on EVERY attach, warm or cold (F1). It bounds
+        // the server's reply on all three paths: a cold snapshot, a warm delta
+        // whose cursor aged out of the ring, and a warm delta that is simply
+        // larger than the budget — all capped to a ground-state tail the same
+        // size the cache-restore path enforces, so no attach ever ships and
+        // replays the whole scrollback ring. A warm delta that fits the budget
+        // is still returned byte-exact (reset:false).
+        snapshot_tail_bytes: REPLAY_TAIL_MAX_BYTES,
+        ...(resumeFrom === undefined ? {} : { resume_from: resumeFrom }),
       }));
     },
     { once: true },
