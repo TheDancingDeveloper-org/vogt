@@ -64,7 +64,11 @@ class EngineSession:
     positions, continuity badges and more, none of which Vogt stores or
     reasons about. What Vogt needs is an identity, where it is running, and
     whether it is alive — the rest stays the engine's business, and reading
-    only these four fields is what keeps that true.
+    only these fields is what keeps that true.
+
+    `created_at` is the exception that earns its place: for a session the
+    engine holds but Vogt never linked, it is the only honest start time
+    there is, so `list_sessions` reads it rather than inventing one.
     """
 
     id: str
@@ -73,6 +77,7 @@ class EngineSession:
     cwd: str
     exit_code: int | None = None
     activity_changed_at: str | None = None
+    created_at: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineSession:
@@ -83,6 +88,7 @@ class EngineSession:
             cwd=str(payload.get("cwd", "")),
             exit_code=payload.get("exit_code"),
             activity_changed_at=_optional_str(payload.get("activity_changed_at")),
+            created_at=_optional_str(payload.get("created_at")),
         )
 
 
