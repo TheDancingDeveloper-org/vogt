@@ -62,6 +62,9 @@ class StandInEngine:
         self.sent: list[dict[str, Any]] = []
         self.killed: list[str] = []
         self.alive: dict[str, str] = {}
+        #: Sessions the engine holds that Vogt never started — keyed by id,
+        #: value is the activity. Listed by GET /api/sessions like any other.
+        self.unlinked: dict[str, str] = {}
         self.counter = 0
         #: When set, the history log endpoint 404s — the engine has no log for
         #: that id (history off, or the id is unknown).
@@ -98,8 +101,14 @@ class StandInEngine:
         if method == "GET" and url.endswith("/api/sessions"):
             return 200, json.dumps(
                 [
-                    {"id": key, "name": key, "activity": state, "cwd": ROOT}
-                    for key, state in self.alive.items()
+                    {
+                        "id": key,
+                        "name": key,
+                        "activity": state,
+                        "cwd": ROOT,
+                        "created_at": "2026-01-03T00:00:00Z",
+                    }
+                    for key, state in {**self.alive, **self.unlinked}.items()
                 ]
             ).encode()
         # Session history. Canned rows; tests assert both the mapping
@@ -384,6 +393,83 @@ def test_a_stopped_session_leaves_the_list(wired: AppContext) -> None:
 def test_stopping_an_unknown_session_is_a_not_found(wired: AppContext) -> None:
     with pytest.raises(NotFound):
         stop_session(wired, StopSessionParams(id="ses_nope", reason=WHY))
+
+
+# -- sessions the engine holds that Vogt never linked --------------
+#
+# A session started outside Vogt, or one whose link Vogt lost, is still a
+# running terminal. An agent asking "what is running here" must see it — that
+# it does not is why one session could not see another. It is reported with
+# its declared half null and `linked` false, never dressed up as a Vogt link.
+
+
+def test_an_unlinked_live_session_is_reported(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    engine.unlinked["eng-foreign"] = "running"
+
+    listed = list_sessions(wired, ListSessionsParams()).sessions
+    foreign = [row for row in listed if row.id == "eng-foreign"]
+    assert len(foreign) == 1, "a live session Vogt never started must still show"
+    row = foreign[0]
+    assert row.linked is False
+    assert row.engine_session_id == "eng-foreign"
+    assert row.activity == "running" and row.alive is True
+    # Null declared half: Vogt will not name what it did not start.
+    assert row.project is None
+    assert row.work_item is None
+    assert row.actor is None
+    assert row.reason is None
+    # The one honest start time there is: the engine's own.
+    assert row.started_at is not None and row.started_at.year == 2026
+
+
+def test_linked_and_unlinked_sessions_appear_together(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    engine.unlinked["eng-foreign"] = "idle"
+
+    listed = list_sessions(wired, ListSessionsParams()).sessions
+    by_linked = {row.linked: row for row in listed}
+    assert by_linked[True].id == result.session.id
+    assert by_linked[True].work_item == "WI-1"
+    assert by_linked[False].id == "eng-foreign"
+
+
+def test_a_project_filter_excludes_unlinked_sessions(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The declared filters filter the declared half, which these lack."""
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    engine.unlinked["eng-foreign"] = "running"
+
+    listed = list_sessions(wired, ListSessionsParams(project="vogt")).sessions
+    assert all(row.linked for row in listed)
+    assert "eng-foreign" not in {row.id for row in listed}
+
+
+def test_unlinked_sessions_are_not_repeated_across_pages(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    engine.unlinked["eng-foreign"] = "running"
+
+    first = list_sessions(wired, ListSessionsParams(limit=50, offset=0)).sessions
+    later = list_sessions(wired, ListSessionsParams(limit=50, offset=50)).sessions
+    assert "eng-foreign" in {row.id for row in first}
+    assert "eng-foreign" not in {row.id for row in later}
+
+
+def test_a_dead_engine_hides_no_unlinked_sessions(wired: AppContext) -> None:
+    """With the engine unreachable there is nothing to enumerate, and the
+    declared links still list — the unlinked pass simply has no input."""
+    dead = dataclasses.replace(
+        wired,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=DeadEngine()),
+    )
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    listed = list_sessions(dead, ListSessionsParams()).sessions
+    assert all(row.linked for row in listed)
 
 
 # -- an absent engine costs sessions and nothing else --------------
