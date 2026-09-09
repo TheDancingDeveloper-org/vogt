@@ -212,7 +212,9 @@ export function warmAttachOnce(
               return;
             }
             const data = concatChunks(chunks, bytes);
-            void saveTerminalCache(sessionId, endPosition, data).finally(() =>
+            // Pre-warm has no xterm to serialize; it caches raw bytes, restored
+            // via the ground-state-aligned raw path (F5).
+            void saveTerminalCache(sessionId, endPosition, { data }).finally(() =>
               finish(true),
             );
           }

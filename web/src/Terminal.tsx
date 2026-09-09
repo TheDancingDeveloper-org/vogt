@@ -4,6 +4,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { SearchAddon, type ISearchResultChangeEvent } from "@xterm/addon-search";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
 import type { RuntimeSocket } from "./runtimeTransport";
@@ -20,6 +21,7 @@ import {
   loadTerminalCache,
   MAX_TERMINAL_CACHE_BYTES,
   saveTerminalCache,
+  type TerminalCacheEntry,
 } from "./terminalCache";
 import {
   createReplayQueue,
@@ -30,6 +32,12 @@ import {
   type ReplayHandle,
   type ReplayTail,
 } from "./terminalReplay";
+
+// Cap on the scrollback the serialized cache persists. A 5000-line scrollback
+// full of wide chars and colour serializes large; 2000 lines keeps the cache
+// entry and the one-write restore bounded while still filling the viewport and
+// a deep scroll on reload (WI-129).
+const SERIALIZE_MAX_SCROLLBACK = 2000;
 import { beginForegroundReplay } from "./terminalPrewarm";
 import {
   clampTerminalFontSize,
@@ -138,16 +146,17 @@ const TerminalView: Component<Props> = (props) => {
   let ws: RuntimeSocket | null = null;
   let fit: FitAddon | null = null;
   let search: SearchAddon | null = null;
+  let serializeAddon: SerializeAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
   let inSnapshot = true;
   let outputPosition: number | undefined;
   let snapshotEndPosition: number | undefined;
   let cacheChunks: Uint8Array[] = [];
   let cacheBytes = 0;
-  // A parked pane's cached tail, prepared but not yet replayed. Kept in memory
-  // on reload and replayed lazily on first activation (F3), so retained tabs do
-  // not time-slice the shared replay parser with the active pane.
-  let deferredCacheReplay: ReplayTail | null = null;
+  // A parked pane's cache entry, loaded but not yet restored. Kept in memory on
+  // reload and restored lazily on first activation (F3), so retained tabs do not
+  // time-slice the shared replay parser with the active pane.
+  let deferredCache: TerminalCacheEntry | null = null;
   let cacheTimer: ReturnType<typeof setTimeout> | null = null;
   // The outputPosition at the last successful persist, so an unchanged ring is
   // not re-copied and re-written to IndexedDB.
@@ -322,6 +331,19 @@ const TerminalView: Component<Props> = (props) => {
     return combined;
   };
 
+  // Serialize the live terminal's screen + a capped scrollback, so a reload
+  // restores it in one write instead of re-parsing raw bytes (F5). Returns null
+  // when serialization is unavailable or throws, so persistCache can fall back
+  // to the raw ring.
+  const trySerialize = (): string | null => {
+    if (!serializeAddon) return null;
+    try {
+      return serializeAddon.serialize({ scrollback: SERIALIZE_MAX_SCROLLBACK });
+    } catch {
+      return null;
+    }
+  };
+
   const persistCache = () => {
     if (outputPosition === undefined) return;
     // Skip the write when nothing new has arrived since the last persist
@@ -329,7 +351,12 @@ const TerminalView: Component<Props> = (props) => {
     // value means the ring is identical and copying+writing it is wasted work.
     if (outputPosition === lastPersistedPosition) return;
     lastPersistedPosition = outputPosition;
-    void saveTerminalCache(props.sessionId, outputPosition, cachedBytes());
+    const serialized = trySerialize();
+    void saveTerminalCache(
+      props.sessionId,
+      outputPosition,
+      serialized !== null ? { serialized } : { data: cachedBytes() },
+    );
   };
 
   const scheduleCachePersist = () => {
@@ -547,6 +574,8 @@ const TerminalView: Component<Props> = (props) => {
     fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon());
+    serializeAddon = new SerializeAddon();
+    term.loadAddon(serializeAddon);
     search = new SearchAddon();
     term.loadAddon(search);
     search.onDidChangeResults((info) => props.onSearchResults?.(info));
@@ -814,31 +843,23 @@ const TerminalView: Component<Props> = (props) => {
       if (destroyed) return;
       // A live pane's initial load holds the pre-warm gate until snapshot-done.
       enterForegroundReplay();
-      if (!cached || cached.data.byteLength === 0) {
+      if (!cached) {
         setReadyToConnect(true);
         if (!isParked()) connect();
         return;
       }
-      const bytes = new Uint8Array(cached.data);
-      const prepared = prepareReplayTail(bytes, cached.outputPosition);
-      cacheChunks = [bytes];
-      cacheBytes = bytes.byteLength;
       // Adopt the cache's position now so a warm reattach resumes from it even
-      // if the visible replay is deferred (or later cancelled by a re-park).
-      outputPosition = prepared.outputPosition;
+      // if the visible restore is deferred (or later cancelled by a re-park).
+      outputPosition = cached.outputPosition;
       if (shouldDeferCacheReplay(isParked(), true)) {
-        // Parked on reload: keep the tail in memory and replay it on the first
+        // Parked on reload: keep the entry in memory and restore it on the first
         // activation, not into the shared FIFO with the active pane (F3).
-        deferredCacheReplay = prepared;
+        deferredCache = cached;
         setReadyToConnect(true);
         return;
       }
-      setStatusText("Restoring terminal...");
-      replay = replayCacheTail(prepared);
-      void replay.done.then(() => {
+      restoreCache(cached, () => {
         if (destroyed) return;
-        outputPosition = prepared.outputPosition;
-        term?.scrollToBottom();
         setReadyToConnect(true);
         if (!isParked()) connect();
       });
@@ -915,6 +936,49 @@ const TerminalView: Component<Props> = (props) => {
         droppedLines: prepared.droppedLines,
       },
     );
+  }
+
+  /**
+   * Restore a cached terminal, then run `onDone`. A serialized entry (F5) is a
+   * single `term.write` of the screen + capped scrollback — no raw re-parse. A
+   * raw entry (pre-warm, fallback, or a pre-F5 cache) re-parses a ground-state
+   * tail through the shared replay queue, exactly as before F5.
+   */
+  function restoreCache(cached: TerminalCacheEntry, onDone: () => void): void {
+    setStatusText("Restoring terminal...");
+    if (typeof cached.serialized === "string") {
+      term?.reset();
+      cacheChunks = [];
+      cacheBytes = 0;
+      outputPosition = cached.outputPosition;
+      const restored = cached.serialized;
+      if (!term) {
+        onDone();
+        return;
+      }
+      term.write(restored, () => {
+        if (destroyed) return;
+        term?.scrollToBottom();
+        onDone();
+      });
+      return;
+    }
+    if (cached.data) {
+      const bytes = new Uint8Array(cached.data);
+      const prepared = prepareReplayTail(bytes, cached.outputPosition);
+      cacheChunks = [bytes];
+      cacheBytes = bytes.byteLength;
+      outputPosition = prepared.outputPosition;
+      replay = replayCacheTail(prepared);
+      void replay.done.then(() => {
+        if (destroyed) return;
+        outputPosition = prepared.outputPosition;
+        term?.scrollToBottom();
+        onDone();
+      });
+      return;
+    }
+    onDone();
   }
 
   function connect() {
@@ -1111,18 +1175,14 @@ const TerminalView: Component<Props> = (props) => {
     if (destroyed || !readyToConnect() || isParked()) return;
     // Resuming to the foreground: hold the pre-warm gate through this attach.
     enterForegroundReplay();
-    // A tab parked on reload deferred its cache replay (F3); run it now, before
-    // attaching, so the restored scrollback is on screen when the delta arrives.
-    const pending = deferredCacheReplay;
+    // A tab parked on reload deferred its cache restore (F3); run it now, before
+    // attaching, so the restored screen is up when the delta arrives.
+    const pending = deferredCache;
     if (pending) {
-      deferredCacheReplay = null;
-      setStatusText("Restoring terminal...");
+      deferredCache = null;
       replay?.cancel();
-      replay = replayCacheTail(pending);
-      void replay.done.then(() => {
+      restoreCache(pending, () => {
         if (destroyed || isParked()) return;
-        outputPosition = pending.outputPosition;
-        term?.scrollToBottom();
         connect();
       });
       return;
