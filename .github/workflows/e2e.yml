@@ -177,10 +177,12 @@ jobs:
             engine bash /tmp/e2e/scripts/e2e_stack_smoke.sh http://localhost:8910
 
       # The live Playwright project, in-network. A Playwright
-      # container on the compose network runs the SAME gui.spec.ts specs against
+      # container on the compose network runs the `live`-project specs against
       # http://engine:8910 with the real API (no installFixtures), so mock/truth
-      # drift fails a test. The runner cannot reach the stack over host loopback,
-      # so this runs via `docker compose run` on the network like the smoke walk.
+      # drift fails a test. This includes gui.spec.ts and terminalReplay.spec.ts
+      # (H3, WI-124: the terminal-attach-budget symptoms against a real load
+      # session). The runner cannot reach the stack over host loopback, so this
+      # runs via `docker compose run` on the network like the smoke walk.
       #
       # First landing is advisory (continue-on-error): the in-network smoke walk
       # above is the hard end-to-end gate, and this project is being brought up
