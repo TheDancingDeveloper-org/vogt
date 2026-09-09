@@ -14,12 +14,10 @@
   timezone: "Etc/UTC",
   schedule: ["before 5am on monday"],
 
-  // Work lands on `dev` and is promoted to `main` by fast-forward (see
-  // docs/DEPLOYMENT.md on releases), so a dependency PR merged into `main`
-  // directly would put `main` ahead of `dev` and break the next promotion.
-  // Renovate therefore targets `dev` — which matters most for the automerged
-  // agent CLI pins below, where nobody is watching the merge happen.
-  baseBranches: ["dev"],
+  // Main-only branch model (WI-47): feature work lands on `main` directly,
+  // so Renovate targets `main`. This matters most for the automerged agent CLI
+  // pins below, where nobody is watching the merge happen.
+  baseBranches: ["main"],
   labels: ["dependencies"],
   semanticCommits: "disabled",
 
