@@ -96,6 +96,14 @@ export type ServerEvent =
       seq: number;
     };
 
+// The bearer token is persisted in localStorage on purpose. This is a PWA that
+// authenticates every API call with a bearer token and must survive reloads and
+// relaunches; the API is not on a cookie-bearing origin, so an httpOnly cookie
+// is not an option, and holding the token only in memory would sign the operator
+// out on every refresh. The token is deployment-scoped and reachable only from
+// the app's own origin. CodeQL flags this as clear-text storage of a secret
+// (js/clear-text-storage-of-sensitive-data); that alert is knowingly accepted —
+// the trade-off is deliberate, not an oversight.
 const TOKEN_KEY = "vogt.token";
 const BASE_KEY = "vogt.base";
 const AUTH_CHANNEL_NAME = "vogt.auth";

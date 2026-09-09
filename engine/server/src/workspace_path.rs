@@ -19,6 +19,15 @@
 //!
 //! The canonical workspace root is assumed to already be canonical; the config
 //! loader canonicalises it once at startup.
+//!
+//! CodeQL note: `rust/path-injection` flags the call sites that pass a
+//! client-supplied string into these functions, because its default model does
+//! not recognise this module as a barrier. Every filesystem-touching handler
+//! (`files.rs`, `history*.rs`, and the rest) routes through `resolve_*` here, so
+//! those alerts are false positives — the containment check below is the
+//! barrier the query cannot see. Path builders elsewhere are safe for a
+//! different reason: they interpolate a typed `Uuid` (which cannot hold a
+//! separator or `..`) or a server-config path, never a raw request string.
 
 use std::path::{Component, Path, PathBuf};
 
