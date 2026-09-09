@@ -12,6 +12,23 @@ export const REPLAY_TAIL_MAX_BYTES = 1 * 1024 * 1024;
 export const REPLAY_SLICE_BYTES = 64 * 1024;
 
 /**
+ * On reload, should a pane defer its cached-scrollback replay?
+ *
+ * A parked pane — a retained tab that is not the active one, or the unfocused
+ * half of a split — must NOT replay its cache into the shared replay FIFO on
+ * reload: N retained tabs replaying at once time-slice the single parser N ways
+ * and starve the pane the user is actually looking at. A parked pane keeps its
+ * cache in memory and replays lazily on first activation (`resumeSocket`)
+ * instead. An active pane with a cache replays immediately.
+ */
+export function shouldDeferCacheReplay(
+  parked: boolean,
+  hasCachedBytes: boolean,
+): boolean {
+  return parked && hasCachedBytes;
+}
+
+/**
  * The absolute output position at the START of a snapshot payload: the byte
  * offset the first snapshot byte sits at. The server reports the position at
  * the END of the snapshot (`scrollback_pos`) and the payload's byte length

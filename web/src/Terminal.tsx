@@ -25,8 +25,10 @@ import {
   createReplayQueue,
   prepareReplayTail,
   scheduleReplay,
+  shouldDeferCacheReplay,
   snapshotStartPosition,
   type ReplayHandle,
+  type ReplayTail,
 } from "./terminalReplay";
 import { beginForegroundReplay } from "./terminalPrewarm";
 import {
@@ -142,6 +144,10 @@ const TerminalView: Component<Props> = (props) => {
   let snapshotEndPosition: number | undefined;
   let cacheChunks: Uint8Array[] = [];
   let cacheBytes = 0;
+  // A parked pane's cached tail, prepared but not yet replayed. Kept in memory
+  // on reload and replayed lazily on first activation (F3), so retained tabs do
+  // not time-slice the shared replay parser with the active pane.
+  let deferredCacheReplay: ReplayTail | null = null;
   let cacheTimer: ReturnType<typeof setTimeout> | null = null;
   // The outputPosition at the last successful persist, so an unchanged ring is
   // not re-copied and re-written to IndexedDB.
@@ -817,23 +823,18 @@ const TerminalView: Component<Props> = (props) => {
       const prepared = prepareReplayTail(bytes, cached.outputPosition);
       cacheChunks = [bytes];
       cacheBytes = bytes.byteLength;
+      // Adopt the cache's position now so a warm reattach resumes from it even
+      // if the visible replay is deferred (or later cancelled by a re-park).
+      outputPosition = prepared.outputPosition;
+      if (shouldDeferCacheReplay(isParked(), true)) {
+        // Parked on reload: keep the tail in memory and replay it on the first
+        // activation, not into the shared FIFO with the active pane (F3).
+        deferredCacheReplay = prepared;
+        setReadyToConnect(true);
+        return;
+      }
       setStatusText("Restoring terminal...");
-      replay = scheduleReplay(
-        props.sessionId,
-        [prepared.data],
-        (chunk, done) => {
-          if (!term) {
-            done();
-            return;
-          }
-          term.write(chunk, done);
-        },
-        {
-          kind: "cache",
-          droppedBytes: prepared.droppedBytes,
-          droppedLines: prepared.droppedLines,
-        },
-      );
+      replay = replayCacheTail(prepared);
       void replay.done.then(() => {
         if (destroyed) return;
         outputPosition = prepared.outputPosition;
@@ -894,6 +895,26 @@ const TerminalView: Component<Props> = (props) => {
     if (reconnectTimer !== null) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     clearCountdown();
     connect();
+  }
+
+  /** Replay a prepared cache tail into xterm through the shared replay queue. */
+  function replayCacheTail(prepared: ReplayTail): ReplayHandle {
+    return scheduleReplay(
+      props.sessionId,
+      [prepared.data],
+      (chunk, done) => {
+        if (!term) {
+          done();
+          return;
+        }
+        term.write(chunk, done);
+      },
+      {
+        kind: "cache",
+        droppedBytes: prepared.droppedBytes,
+        droppedLines: prepared.droppedLines,
+      },
+    );
   }
 
   function connect() {
@@ -1083,6 +1104,22 @@ const TerminalView: Component<Props> = (props) => {
     if (destroyed || !readyToConnect() || isParked()) return;
     // Resuming to the foreground: hold the pre-warm gate through this attach.
     enterForegroundReplay();
+    // A tab parked on reload deferred its cache replay (F3); run it now, before
+    // attaching, so the restored scrollback is on screen when the delta arrives.
+    const pending = deferredCacheReplay;
+    if (pending) {
+      deferredCacheReplay = null;
+      setStatusText("Restoring terminal...");
+      replay?.cancel();
+      replay = replayCacheTail(pending);
+      void replay.done.then(() => {
+        if (destroyed || isParked()) return;
+        outputPosition = pending.outputPosition;
+        term?.scrollToBottom();
+        connect();
+      });
+      return;
+    }
     setStatusText("Loading terminal...");
     connect();
   }
