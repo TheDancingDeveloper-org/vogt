@@ -1397,6 +1397,12 @@ entry (§3). A deployment with only the shared `vogt_core_token` gets Vogt
 *reads* in the assistant and a named refusal on writes; pairing a token is
 how it opts that token in.
 
+The assistant's core client accepts an HTTP(S) `vogt_core_url` with a host
+and no embedded username or password. An invalid URL leaves its Vogt tools
+unavailable. It does not follow HTTP redirects: configure the final core
+address directly. Redirect responses are reported as core HTTP failures.
+The destination is operator configuration, not a tool-call argument.
+
 #### Server-side speech
 
 STT/TTS are configured **independently of the chat profile** above — chat may

@@ -235,11 +235,12 @@ impl VogtTools {
     /// Build the client, or don't — `None` when no core is configured, which
     /// is what makes the Vogt tools absent rather than broken.
     pub fn from_config(cfg: &Config) -> Option<Self> {
-        let base = cfg
-            .vogt_core_url
-            .as_ref()?
-            .trim_end_matches('/')
-            .to_string();
+        Self::from_base(cfg.vogt_core_url.as_deref()?, cfg.vogt_core_token.clone())
+    }
+
+    fn from_base(base: &str, fallback_token: Option<String>) -> Option<Self> {
+        let base = base.trim_end_matches('/');
+        validate_core_url(base)?;
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(2))
             // Unlike the `/mcp` passthrough in `vogt_core.rs`, these requests
@@ -247,27 +248,22 @@ impl VogtTools {
             // streams, so an overall deadline is right: a core that stops
             // answering must not hold a conversational turn open.
             .timeout(Duration::from_secs(20))
+            // The core address is deployment configuration. Never follow a
+            // redirect supplied by that endpoint to an arbitrary destination.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .ok()?;
         Some(Self {
             client,
             mcp_url: format!("{base}/mcp"),
-            fallback_token: cfg.vogt_core_token.clone(),
+            fallback_token,
             cache: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
     #[cfg(test)]
     pub fn for_test(base_url: &str, fallback_token: Option<&str>) -> Self {
-        Self {
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("test client"),
-            mcp_url: format!("{}/mcp", base_url.trim_end_matches('/')),
-            fallback_token: fallback_token.map(str::to_owned),
-            cache: tokio::sync::Mutex::new(HashMap::new()),
-        }
+        Self::from_base(base_url, fallback_token.map(str::to_owned)).expect("test client")
     }
 
     /// The credential a *read* acts with: the caller's pairing, else the
@@ -576,6 +572,21 @@ fn digest(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// Accept only an explicit HTTP(S) URL with a host. Redirects are disabled
+/// separately on the client, so the configured destination remains the only
+/// destination this integration can contact.
+fn validate_core_url(base: &str) -> Option<()> {
+    let url = reqwest::Url::parse(base).ok()?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return None;
+    }
+    Some(())
 }
 
 fn rpc_error(payload: &Value, method: &str) -> String {
@@ -962,5 +973,51 @@ mod tests {
         let tools = VogtTools::for_test("http://127.0.0.1:1", None);
         let caller = Caller::test("phone", Some("phone-core-token"));
         assert!(tools.tools_for(&caller).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn core_redirects_are_not_followed() {
+        use axum::{http::StatusCode, routing::post, Router};
+
+        let destination = stub::start(stub::full_tool_list()).await;
+        for status in [
+            StatusCode::MOVED_PERMANENTLY,
+            StatusCode::FOUND,
+            StatusCode::SEE_OTHER,
+            StatusCode::TEMPORARY_REDIRECT,
+            StatusCode::PERMANENT_REDIRECT,
+        ] {
+            let location = format!("{}/mcp", destination.base_url);
+            let app = Router::new().route(
+                "/mcp",
+                post(move || async move { (status, [("location", location)]) }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let tools = VogtTools::for_test(&base, None);
+            let result = tools
+                .call("caller-core-token", "work_get", &json!({}))
+                .await;
+            server.abort();
+
+            assert_eq!(
+                result.unwrap_err(),
+                format!("vogt-core answered HTTP {status}")
+            );
+            assert!(
+                destination.calls().is_empty(),
+                "redirect must not send an RPC"
+            );
+        }
+    }
+
+    #[test]
+    fn core_url_validation_rejects_non_http_and_embedded_credentials() {
+        assert!(validate_core_url("http://127.0.0.1:8000").is_some());
+        assert!(validate_core_url("https://core.example.test").is_some());
+        assert!(validate_core_url("file:///etc/passwd").is_none());
+        assert!(validate_core_url("http://user:pass@127.0.0.1:8000").is_none());
+        assert!(validate_core_url("not a url").is_none());
     }
 }
