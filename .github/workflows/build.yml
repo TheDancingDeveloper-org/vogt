@@ -416,7 +416,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.6.1
+            VOGT_PRODUCT_VERSION=0.6.2
           cache-from: |
             type=registry,ref=${{ env.CACHE_IMAGE }}:stack-main
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
@@ -532,7 +532,7 @@ jobs:
           build-args: |
             VOGT_SOURCE_REF=main
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.6.1
+            VOGT_PRODUCT_VERSION=0.6.2
           provenance: true
           sbom: true
           cache-from: |
@@ -666,7 +666,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.6.1
+            VOGT_PRODUCT_VERSION=0.6.2
             INSTALL_AI_CLIENTS=true
           # Layer cache on the operator's registry, its own tag so the
           # stack and core streams cannot evict each other.
@@ -716,7 +716,7 @@ jobs:
             CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
             VOGT_SOURCE_REF=${{ github.ref_name }}
             VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=0.6.1
+            VOGT_PRODUCT_VERSION=0.6.2
             INSTALL_AI_CLIENTS=true
           provenance: true
           sbom: true
