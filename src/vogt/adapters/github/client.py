@@ -277,13 +277,22 @@ def repo_of(repo_url: str | None) -> tuple[str, str] | None:
     if not repo_url:
         return None
     candidate = repo_url.strip().removeprefix("git+")
+    # Fold the scp-like `git@github.com:owner/repo` form into a path before the
+    # scheme strip, then drop any leading scheme so a bare `github.com/owner/repo`
+    # parses the same as an explicit `https://` URL.
+    candidate = candidate.replace("git@github.com:", "github.com/")
     for prefix in ("https://", "http://", "ssh://"):
         candidate = candidate.removeprefix(prefix)
-    candidate = candidate.replace("git@github.com:", "github.com/")
-    candidate = candidate.removesuffix(".git").strip("/")
-    if not candidate.startswith("github.com/"):
+    # Check the host structurally rather than by substring: `urlparse` isolates
+    # the true hostname, so look-alikes like `github.com.evil.com/o/r` or
+    # `github.com@evil.com/o/r` resolve to their real host and are rejected. A
+    # query or fragment carries injection metacharacters into no legitimate repo
+    # URL, so their presence is itself disqualifying.
+    parsed = urllib.parse.urlparse("https://" + candidate)
+    if parsed.hostname != "github.com" or parsed.query or parsed.fragment:
         return None
-    parts = candidate[len("github.com/") :].split("/")
+    path = parsed.path.removesuffix(".git").strip("/")
+    parts = path.split("/")
     if len(parts) < 2 or not parts[0] or not parts[1]:
         return None
     if not _VALID_NAME.fullmatch(parts[0]) or not _VALID_NAME.fullmatch(parts[1]):

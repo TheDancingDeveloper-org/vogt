@@ -60,7 +60,9 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none
-          queries: security-extended
+          # Query suite and path scope (test exclusions) live in the config
+          # file so they are described once, with rationale, rather than inline.
+          config-file: ./.github/codeql/codeql-config.yml
 
       - uses: github/codeql-action/analyze@6f5948dfacef28e207b48d0905cf90c03365536d
         with:
