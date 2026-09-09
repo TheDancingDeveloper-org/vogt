@@ -702,8 +702,12 @@ a `09:00` is 09:00 UTC, not the reader's local morning.
 
 The PWA works in a phone browser as it is. The optional Android shell
 (`mobile/`) is a Capacitor wrapper whose WebView loads your instance's PWA, so
-UI changes ship without a new APK; only native plumbing needs one. It is built
-from source, not published.
+UI changes ship without a new APK; only native plumbing needs one. On first
+launch it shows a **Connect to Vogt** screen and asks for your server's URL —
+the shell carries no baked-in address — then loads that front door; enter an
+`http://` server only on a trusted private network (a VPN), since it sends your
+token without TLS. Return to the chooser at any time with the Android Back
+button to point the app at a different server.
 
 - **Push** arrives for the things worth an interruption and nothing else by
   default: a session entering `waiting-for-input` or `errored`, new drift, and

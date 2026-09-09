@@ -415,9 +415,9 @@ both agent CLIs, the sidecar must synthesise and transcribe with its baked
 models — and the three versions must agree before the release is accepted.
 The workflow then creates a GitHub Release carrying
 `vogt-release-manifest.json` (the source SHA and all three digests) and the
-signed Android APK of the mobile shell; the shell is a remote WebView onto a
-deployed stack, so a server or PWA release reaches installed phones without a
-new APK. The shell's lifecycle/connectivity/voice validation — the emulator
+signed Android APK of the mobile shell; the shell is a remote WebView onto
+whichever deployed stack the user picks on-device at first launch, so a server
+or PWA release reaches installed phones without a new APK. The shell's lifecycle/connectivity/voice validation — the emulator
 instrumentation suite and the device / Play pre-launch checklists — is in
 [`mobile-release-validation.md`](mobile-release-validation.md).
 
