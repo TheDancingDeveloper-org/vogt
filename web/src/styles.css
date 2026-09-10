@@ -11172,6 +11172,32 @@ a.vogt-projects-tag:hover {
 .assistant-mic[data-muted="yes"] {
   opacity: 0.55;
 }
+/* The mute control that stands in the mic's slot during a conversation. A
+   labelled pill on purpose: the bare mic glyph read as "send". */
+.assistant-mute {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border, currentColor);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 13px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.assistant-mute svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+.assistant-mute[aria-pressed="true"] {
+  border-color: var(--activity-errored);
+  color: var(--activity-errored);
+}
 .assistant-stop {
   border-color: var(--activity-waiting);
   color: var(--activity-waiting);

@@ -18,7 +18,7 @@ use crate::{
     assistant_api,
     assistant_log::AssistantLog,
     assistant_speech::{self, AssistantSpeech},
-    auth,
+    auth, client_diag,
     config::Config,
     events::EventBus,
     files, git,
@@ -274,6 +274,8 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         // capability; they 404 per half when unconfigured.
         .route("/api/assistant/stt", post(assistant_speech::stt))
         .route("/api/assistant/tts", post(assistant_speech::tts))
+        // The PWA's own diagnostics, onto this log stream (client_diag.rs).
+        .route("/api/client-log", post(client_diag::ingest))
         .route("/api/events", get(api::events_stream))
         .route("/api/auth/check", get(api::auth_check))
         .route("/api/status", get(api::operational_status))

@@ -182,6 +182,11 @@ export class VoiceConversation {
   // `onend` (which the host forwards as `recognizerStopped`); a synchronous one
   // would otherwise re-enter the turn end we are already in — a double send.
   private closingMic = false;
+  // True from `openMic` until `micReady`: a mute that lands in that window must
+  // not tear down a recogniser that is not up yet, and an unmute in it must
+  // not open a second one. (Muting while arming used to strand the session:
+  // the mic was closed mid-startup and unmute never reopened it.)
+  private micOpening = false;
 
   constructor(
     private readonly ports: VoicePorts,
@@ -214,6 +219,7 @@ export class VoiceConversation {
   /** The recogniser is live and capturing (host confirms `openMic` succeeded). */
   micReady(): void {
     if (this.state !== "arming") return;
+    this.micOpening = false;
     if (this.endRequestedWhileArming) {
       const reason = this.endRequestedWhileArming;
       this.endRequestedWhileArming = null;
@@ -224,6 +230,14 @@ export class VoiceConversation {
       return;
     }
     this.text = "";
+    if (this.muted) {
+      // Muted while the mic was coming up: it is up now, so close it, and sit
+      // muted in `listening` — unmute re-arms from there.
+      this.closeMic();
+      this.enter("listening");
+      this.armIdle();
+      return;
+    }
     this.enter("listening");
     // The turn's hard ceiling, and the session idle clock, both start now.
     this.armMaxTurn();
@@ -319,15 +333,24 @@ export class VoiceConversation {
     if (this.muted) {
       this.clearSilence();
       this.clearMaxTurn();
-      this.closeMic();
+      // While arming the recogniser is not up yet; `micReady` will close it.
+      if (this.state !== "arming") this.closeMic();
       // The idle clock keeps running while muted: a muted session left forever
       // still ends.
       this.emit();
       return;
     }
-    // Unmuted: if we were in a capture phase, start a fresh turn.
+    // Unmuted: in a capture phase, start a fresh turn. While arming, either a
+    // mic is already on its way up (let `micReady` land) or `arm` skipped
+    // opening one because we were muted then — open it now, exactly once.
     if (this.state === "listening" || this.state === "endpointing") {
       this.arm();
+    } else if (this.state === "arming") {
+      if (!this.micOpening) {
+        this.micOpening = true;
+        this.ports.openMic();
+      }
+      this.emit();
     } else {
       this.emit();
     }
@@ -364,6 +387,7 @@ export class VoiceConversation {
     this.enter("arming");
     this.armIdle();
     if (this.muted) return; // a muted session sits armed until unmuted
+    this.micOpening = true;
     this.ports.openMic();
   }
 

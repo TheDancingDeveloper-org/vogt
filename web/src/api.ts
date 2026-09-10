@@ -1090,6 +1090,22 @@ export const api = {
   },
   sessionInput: (id: string, text: string, submit = false) =>
     req<OkResponse>("POST", `/api/sessions/${id}/input`, { text, submit }),
+  /**
+   * Client diagnostics: a small batch of structured events for the engine's
+   * log stream (see `diag.ts`). `keepalive` so a flush on page hide survives
+   * the page; the engine answers 204 and stores nothing.
+   */
+  clientLog: async (
+    events: { t: number; event: string; fields: Record<string, unknown> }[],
+  ): Promise<void> => {
+    const res = await runtimeTransport().request(`${getBase()}/api/client-log`, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ events }),
+      keepalive: true,
+    });
+    if (!res.ok) throw refused(res.status, await res.text());
+  },
 
   getBase: () => getBase(),
   getToken: () => getToken(),
