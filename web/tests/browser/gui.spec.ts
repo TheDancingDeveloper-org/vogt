@@ -5516,6 +5516,116 @@ test("Assistant hands-free conversation: sends on silence, speaks the reply, and
     .toBeGreaterThanOrEqual(2);
 });
 
+/**
+ * Barge-in (v2): `interrupt_response` on, a reply that keeps playing (the fake
+ * synth does not auto-end), and a fake echo-cancelled capture that always reads
+ * loud — so the onset detector fires ~500 ms into the reply. The reply is then
+ * halted (synth `cancel`) and the mic re-opens to catch the interruption, with
+ * no `speechFinished` needed.
+ */
+async function primeBargeInEnv(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    localStorage.setItem("vogt.assistant.tts", "1");
+    localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "80");
+    localStorage.setItem("vogt.assistant.voice.interrupt_response", "1");
+    localStorage.setItem("vogt.assistant.voice.vad_onset_ms", "400");
+    const state = { starts: 0, cancels: 0, current: null as unknown };
+    class FakeRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = "";
+      onresult: ((e: unknown) => void) | null = null;
+      onend: (() => void) | null = null;
+      onerror: ((e: unknown) => void) | null = null;
+      start() {
+        state.starts += 1;
+        state.current = this;
+      }
+      stop() {
+        this.onend?.();
+      }
+      abort() {
+        this.onend?.();
+      }
+    }
+    const w = window as unknown as Record<string, unknown>;
+    w.webkitSpeechRecognition = FakeRecognition;
+    delete w.SpeechRecognition;
+    class FakeUtterance {
+      text: string;
+      onend: (() => void) | null = null;
+      constructor(text: string) {
+        this.text = text;
+      }
+    }
+    w.SpeechSynthesisUtterance = FakeUtterance;
+    Object.defineProperty(window, "speechSynthesis", {
+      configurable: true,
+      // The reply keeps "playing": no onend, so only barge-in can end it.
+      value: { speak: () => {}, cancel: () => (state.cancels += 1) },
+    });
+    // A fake echo-cancelled capture that always reads loud, so the onset
+    // detector crosses its threshold and fires.
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+    });
+    class FakeAnalyser {
+      fftSize = 1024;
+      getFloatTimeDomainData(buf: Float32Array) {
+        buf.fill(0.3); // well above the VAD threshold
+      }
+    }
+    class FakeAudioContext {
+      createMediaStreamSource() {
+        return { connect() {} };
+      }
+      createAnalyser() {
+        return new FakeAnalyser();
+      }
+      close() {
+        return Promise.resolve();
+      }
+    }
+    w.AudioContext = FakeAudioContext;
+    w.__vogtVoice = { state };
+  });
+}
+
+test("Assistant hands-free barge-in: the speaker cuts in, the reply is halted, and the mic re-opens", async ({ page }) => {
+  await primeBargeInEnv(page);
+  await installFixtures(page, { assistant_enabled: true });
+  await page.route("**/api/assistant/message", async (route) =>
+    route.fulfill({
+      json: { reply: "This is a long spoken reply you can talk over.", pending_action: null, tool_trace: [] },
+    }),
+  );
+
+  await openVoiceAssistant(page);
+  await page.getByTestId("assistant-conversation").click();
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { starts: number } } }).__vogtVoice.state.starts))
+    .toBeGreaterThanOrEqual(1);
+
+  // One turn, so a reply starts playing (and keeps playing — the fake synth
+  // never ends on its own).
+  await page.evaluate(() => {
+    const r = (window as unknown as { __vogtVoice: { state: { current: { onresult?: (e: unknown) => void } } } }).__vogtVoice.state.current;
+    r.onresult?.({ results: { length: 1, 0: { length: 1, 0: { transcript: "tell me a long story" } } } });
+  });
+  await expect(page.getByText("This is a long spoken reply you can talk over.")).toBeVisible();
+
+  // ~400 ms of "loud" capture during playback fires the onset: the reply is
+  // cancelled and the mic re-opens (a second recognizer start) with no
+  // speechFinished — the speaker talked over it.
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { cancels: number } } }).__vogtVoice.state.cancels))
+    .toBeGreaterThanOrEqual(1);
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { starts: number } } }).__vogtVoice.state.starts))
+    .toBeGreaterThanOrEqual(2);
+});
+
 for (const mouseTracking of [false, true]) {
   test(`terminal swipe owns ${mouseTracking ? "reports wheels to a normal-buffer application" : "moves saved rows once"}`, async ({ page, context }) => {
     test.skip(test.info().project.name !== "phone", "Touch input needs the phone context");

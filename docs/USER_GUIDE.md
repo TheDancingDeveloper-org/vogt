@@ -471,9 +471,13 @@ for approval / Muted / Ended; in a conversation the microphone button mutes and
 unmutes with a tap (or **M** on the desktop), and a pending write still waits for
 an on-screen approval — the announcement says so and never offers a spoken yes.
 The conversation ends when you turn it off, leave the surface, mute-and-forget it
-past the idle timeout, or hear nothing for a few turns. Turn timing is tunable
-per device through `vogt.assistant.voice.*` browser settings (silence window,
-idle timeout); the defaults suit a phone.
+past the idle timeout, or hear nothing for a few turns. By default the microphone
+is closed while a reply is spoken and re-opens when it finishes; setting
+`vogt.assistant.voice.interrupt_response` on lets you **talk over a reply** — the
+device stops speaking and listens the moment you start (off by default, because
+imperfect echo cancellation can cut a reply short by mistake). Turn timing is
+tunable per device through the `vogt.assistant.voice.*` browser settings (silence
+window, idle timeout, barge-in); the defaults suit a phone.
 
 An approved write is audited to **your** actor, using the core token paired with
 the token that pressed approve. There is no shared "assistant" actor to fall
