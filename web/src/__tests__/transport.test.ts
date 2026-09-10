@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { fetchWithRetry, TransportError } from "../transport";
+import { _resetConnectionHealth, isCircuitOpen } from "../connectionHealth";
 
 function netError(): TypeError {
   // What a browser throws when the stream is reset before a response — the raw
@@ -17,6 +18,8 @@ function okResponse(): Response {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  // The breaker is process-wide global state; keep each case independent.
+  _resetConnectionHealth();
 });
 
 describe("fetchWithRetry (dropped-connection retry)", () => {
@@ -163,5 +166,60 @@ describe("fetchWithRetry (dropped-connection retry)", () => {
     await expect(promise).rejects.toBeTruthy();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     vi.useRealTimers();
+  });
+});
+
+describe("fetchWithRetry (circuit breaker for a sustained outage, #681)", () => {
+  it("stops retrying once a run of wire failures opens the breaker", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(netError());
+    vi.stubGlobal("fetch", fetchMock);
+
+    // Four consecutive wire failures cross the threshold and open the breaker.
+    for (let i = 0; i < 4; i += 1) {
+      await expect(
+        fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 }),
+      ).rejects.toBeInstanceOf(TransportError);
+    }
+    expect(isCircuitOpen()).toBe(true);
+    // 4 calls x 3 attempts each, all while the breaker was still closed.
+    expect(fetchMock).toHaveBeenCalledTimes(12);
+
+    // A further GET now fires ONCE, not three times — the storm is capped.
+    fetchMock.mockClear();
+    await expect(
+      fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 }),
+    ).rejects.toBeInstanceOf(TransportError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes the breaker the moment a request succeeds, restoring retries", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(netError());
+    vi.stubGlobal("fetch", fetchMock);
+    for (let i = 0; i < 4; i += 1) {
+      await fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 }).catch(() => {});
+    }
+    expect(isCircuitOpen()).toBe(true);
+
+    // One good answer proves the wire is live again and reopens the floodgates.
+    fetchMock.mockResolvedValueOnce(okResponse());
+    const res = await fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 });
+    expect(res.status).toBe(200);
+    expect(isCircuitOpen()).toBe(false);
+
+    // Retries are back for the next isolated blip.
+    fetchMock.mockClear();
+    fetchMock.mockRejectedValue(netError());
+    await fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 }).catch(() => {});
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("treats a 5xx answer as connectivity, so an erroring server never opens the breaker", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response("x", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    for (let i = 0; i < 6; i += 1) {
+      await fetchWithRetry("/x", { method: "GET" }, { backoffMs: 0 });
+    }
+    // The server answered every time; the wire was never the problem.
+    expect(isCircuitOpen()).toBe(false);
   });
 });

@@ -53,6 +53,7 @@ import {
 } from "./vogtApi";
 import { taxonomy } from "./taxonomyCache";
 import { openWorkItemTab } from "./tabs";
+import { isCircuitOpen } from "./connectionHealth";
 import {
   ViewAgeBadge,
   createLoadStamp,
@@ -673,6 +674,9 @@ const Backlog: Component<Props> = (props) => {
       // A hidden tab is not a view anybody is being misled by, and it
       // reconciles the moment it comes back to the front.
       if (typeof document !== "undefined" && document.hidden) return;
+      // Skip the poll while the transport breaker is open: the connection is
+      // known-dead and the event stream is the one probing it (#681).
+      if (isCircuitOpen()) return;
       refresh();
     }, seconds * 1000);
     onCleanup(() => window.clearInterval(timer));
