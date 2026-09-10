@@ -5200,11 +5200,16 @@ test("Assistant completes a voice-shaped turn through approval denial and TTS fa
 // spoken-out-loud validation is a device task, not this file's; the ergonomics
 // unit tests cover the same seams headless, and this is their browser twin.
 
-/** A 44-byte silent WAV, so a spoken reply's `<audio>` can decode and play. */
+/**
+ * A short silent WAV (0.1 s of 8 kHz 8-bit mono zeros) so a spoken reply can be
+ * decoded and played. Real samples, not an empty data chunk: playback now
+ * goes through Web Audio's `decodeAudioData`, which rejects a zero-sample file.
+ */
 function silentWav(): Buffer {
-  const b = Buffer.alloc(44);
+  const samples = 800;
+  const b = Buffer.alloc(44 + samples);
   b.write("RIFF", 0);
-  b.writeUInt32LE(36, 4);
+  b.writeUInt32LE(36 + samples, 4);
   b.write("WAVE", 8);
   b.write("fmt ", 12);
   b.writeUInt32LE(16, 16);
@@ -5215,7 +5220,8 @@ function silentWav(): Buffer {
   b.writeUInt16LE(1, 32);
   b.writeUInt16LE(8, 34);
   b.write("data", 36);
-  b.writeUInt32LE(0, 40);
+  b.writeUInt32LE(samples, 40);
+  b.fill(0x80, 44); // 8-bit PCM silence is 0x80
   return b;
 }
 
