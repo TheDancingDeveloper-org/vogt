@@ -308,3 +308,38 @@ def test_the_android_shell_does_not_zoom_the_page() -> None:
     assert config.count("zoomEnabled: false") == 2, (
         "both the top-level and the android block must turn page zoom off"
     )
+
+
+#: The label under the icon and the icon itself are build inputs alongside
+#: the id, read by the same two files: `build.gradle` generates the string
+#: resources from ``VOGT_ANDROID_APP_NAME`` (resValue) and picks the launcher
+#: set from ``VOGT_ANDROID_APP_ICON``; `capacitor.config.ts` reads the name
+#: for ``appName``.
+APP_NAME_VAR = "VOGT_ANDROID_APP_NAME"
+APP_ICON_VAR = "VOGT_ANDROID_APP_ICON"
+DEV_WORKFLOW = WORKFLOWS / "release-mobile-dev.yml"
+
+
+def test_the_dev_app_is_telling_apart_on_the_home_screen() -> None:
+    """Two apps with the same name and icon are the same app to a person.
+
+    The dev record must build under its own label and launcher icon, or the
+    operator cannot tell which one is open — the failure reported from a
+    device carrying both. Asserted on the workflow because that is where the
+    dev stream is defined, and on the build files because both must read the
+    variable for the label to reach the manifest and the Capacitor config.
+    """
+    gradle = GRADLE.read_text(encoding="utf-8")
+    capacitor = CAPACITOR.read_text(encoding="utf-8")
+    assert APP_NAME_VAR in gradle and APP_NAME_VAR in capacitor
+    assert APP_ICON_VAR in gradle
+    workflow = DEV_WORKFLOW.read_text(encoding="utf-8")
+    names = set(re.findall(rf"{APP_NAME_VAR}:\s*\"?([^\"\n]+?)\"?\s*$", workflow, re.M))
+    assert names and names != {"Vogt"}, "the dev workflow builds under the prod label"
+    assert re.search(rf"{APP_ICON_VAR}:\s*dev\s*$", workflow, re.M), (
+        "the dev workflow builds with the prod launcher icon"
+    )
+    # The generated strings must not also be declared statically, or aapt
+    # rejects the duplicate — and a static copy would silently win a merge.
+    strings = (MOBILE / "android/app/src/main/res/values/strings.xml").read_text(encoding="utf-8")
+    assert 'name="app_name"' not in strings and 'name="title_activity_main"' not in strings

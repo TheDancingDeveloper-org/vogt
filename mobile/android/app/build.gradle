@@ -51,6 +51,25 @@ def androidVersionCode = parseVersionCodeOverride(
 def androidApplicationId = (
     System.getenv('VOGT_ANDROID_APP_ID') ?: 'com.thedancingdeveloper.vogt'
 ).trim()
+// Label and launcher icon are build inputs too, so a dev build is telling
+// apart from prod on the home screen and not only by its applicationId.
+// VOGT_ANDROID_APP_NAME is the same variable capacitor.config.ts reads for
+// `appName`; the string resources are generated here (resValue) rather than
+// kept in strings.xml so the two can never disagree. VOGT_ANDROID_APP_ICON
+// picks the launcher icon set: `default` (the shipped icon) or `dev` (amber
+// variant, res/mipmap-*/ic_launcher_dev*). Anything else fails the build.
+def androidAppName = (System.getenv('VOGT_ANDROID_APP_NAME') ?: 'Vogt').trim()
+if (androidAppName.isEmpty()) {
+    throw new GradleException("VOGT_ANDROID_APP_NAME must not be blank")
+}
+def androidAppIcon = (System.getenv('VOGT_ANDROID_APP_ICON') ?: 'default').trim()
+def androidLauncherIcons = [
+    'default': ['@mipmap/ic_launcher', '@mipmap/ic_launcher_round'],
+    'dev': ['@mipmap/ic_launcher_dev', '@mipmap/ic_launcher_dev_round'],
+]
+if (!androidLauncherIcons.containsKey(androidAppIcon)) {
+    throw new GradleException("VOGT_ANDROID_APP_ICON must be one of ${androidLauncherIcons.keySet()}, got '${androidAppIcon}'")
+}
 
 def releaseKeystorePath = System.getenv('VOGT_ANDROID_KEYSTORE_PATH')
 def releaseKeystorePassword = System.getenv('VOGT_ANDROID_KEYSTORE_PASSWORD')
@@ -66,12 +85,22 @@ def hasReleaseSigning = [
 android {
     namespace "com.thedancingdeveloper.vogt"
     compileSdk rootProject.ext.compileSdkVersion
+    buildFeatures {
+        // Off by default since AGP 9; the label strings above are resValues.
+        resValues true
+    }
     defaultConfig {
         applicationId androidApplicationId
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
         versionCode androidVersionCode
         versionName androidVersionName
+        resValue "string", "app_name", androidAppName
+        resValue "string", "title_activity_main", androidAppName
+        manifestPlaceholders = [
+            appIcon: androidLauncherIcons[androidAppIcon][0],
+            appRoundIcon: androidLauncherIcons[androidAppIcon][1],
+        ]
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
