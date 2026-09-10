@@ -212,6 +212,42 @@ describe("the hands-free conversation loop", () => {
     expect(vc.getState()).toBe("listening");
   });
 
+  it("does not strand the session when muted while the mic is still arming", () => {
+    // Mute lands between openMic and micReady. The recogniser must not be torn
+    // down mid-startup; once it is up it is closed, and unmute re-arms exactly
+    // one mic — the case that used to leave a muted-looking session with no
+    // capture and no way back.
+    const clock = makeClock();
+    const { ports, events, count } = makePorts();
+    const vc = new VoiceConversation(ports, cfg(), clock.scheduler);
+    vc.begin(); // arming, one openMic
+    vc.toggleMute(); // during arming
+    expect(vc.isMuted()).toBe(true);
+    expect(events).not.toContain("closeMic"); // nothing to close yet
+    vc.micReady(); // mic is up now → closed, session sits muted in listening
+    expect(events).toContain("closeMic");
+    expect(vc.getState()).toBe("listening");
+    vc.partial("ignored while muted");
+    clock.advance(5000);
+    expect(count("sendTurn")).toBe(0);
+    vc.toggleMute(); // unmute → a fresh turn, one mic
+    expect(vc.getState()).toBe("arming");
+    expect(count("openMic")).toBe(2);
+  });
+
+  it("unmuting during arming opens the mic once, never twice", () => {
+    const clock = makeClock();
+    const { ports, count } = makePorts();
+    const vc = new VoiceConversation(ports, cfg(), clock.scheduler);
+    vc.begin(); // openMic #1 in flight
+    vc.toggleMute();
+    vc.toggleMute(); // unmute while that mic is still coming up
+    expect(count("openMic")).toBe(1); // not a second start on a live plugin
+    vc.micReady();
+    expect(vc.getState()).toBe("listening");
+    expect(vc.isMuted()).toBe(false);
+  });
+
   it("keeps the session alive when muted, and captures nothing until unmuted", () => {
     const { clock, vc, events, count } = live({ silence_duration_ms: 1000 });
     vc.toggleMute();

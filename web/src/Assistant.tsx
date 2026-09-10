@@ -57,6 +57,7 @@ import {
   type VoiceState,
 } from "./voiceTurn";
 import { startBargeInDetection } from "./voiceVad";
+import { diag, diagBoot } from "./diag";
 
 const TTS_PREF_KEY = "vogt.assistant.tts";
 
@@ -390,7 +391,17 @@ export default function Assistant(props: AssistantProps) {
   // opening a second mic during playback for nothing.
   let bargeInEnabled = false;
 
-  const haltSpeech = () => {
+  // `reason` names the caller: an in-flight reply that vanishes is otherwise
+  // indistinguishable from one that never played, and the diagnostic line that
+  // says *who* halted it is the whole point.
+  const haltSpeech = (reason: string) => {
+    if (speechController !== null || currentAudio !== null) {
+      diag("speech.halt", {
+        reason,
+        inFlight: speechController !== null,
+        playing: currentAudio !== null && !currentAudio.paused,
+      });
+    }
     speechController?.abort();
     speechController = null;
     stopSpeaking();
@@ -414,6 +425,12 @@ export default function Assistant(props: AssistantProps) {
   // when there is nothing to play, or no mouth to play it). The hands-free loop
   // passes it to re-open the mic; a plain spoken reply passes nothing.
   const speak = (text: string, onDone?: () => void) => {
+    diag("speak.path", {
+      len: text.length,
+      synthInWindow: "speechSynthesis" in window,
+      serverTts: serverTtsEnabled(),
+      hasDone: Boolean(onDone),
+    });
     if ("speechSynthesis" in window) {
       speakSentences(text, onDone);
       return;
@@ -430,25 +447,58 @@ export default function Assistant(props: AssistantProps) {
       onDone?.();
       return;
     }
-    haltSpeech();
+    haltSpeech("speak-restart");
     const controller = new AbortController();
     speechController = controller;
+    const started = Date.now();
+    diag("tts.fetch", { len: text.length });
     try {
       const blob = await api.assistantTts(text, controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        diag("tts.aborted", { at: "fetch", ms: Date.now() - started });
+        return;
+      }
       setSpeechStatus("");
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
+      // What the WebView was handed, and whether it claims to play it — the
+      // two facts a "no audio" report needs before anything else.
+      diag("tts.blob", {
+        type: blob.type,
+        size: blob.size,
+        ms: Date.now() - started,
+        // Guarded: a test DOM has no media decoder and no `canPlayType`.
+        canPlay:
+          typeof audio.canPlayType === "function"
+            ? audio.canPlayType(blob.type || "audio/wav")
+            : null,
+      });
       const release = () => URL.revokeObjectURL(url);
       audio.addEventListener("ended", release, { once: true });
+      audio.addEventListener("playing", () => diag("tts.playing", { duration: audio.duration }), { once: true });
+      audio.addEventListener("ended", () => diag("tts.ended", { at: audio.currentTime }), { once: true });
+      audio.addEventListener("error", () => {
+        const err = audio.error;
+        diag("tts.media-error", { code: err?.code ?? null, message: err?.message ?? "" });
+      }, { once: true });
       // The reply is over: re-open the mic. Fired on the natural end only, so a
       // reply cut short by the next turn (abort) does not race a new take open.
       if (onDone) audio.addEventListener("ended", onDone, { once: true });
       controller.signal.addEventListener("abort", release, { once: true });
       currentAudio = audio;
       await audio.play();
+      diag("tts.play.ok", { muted: audio.muted, volume: audio.volume, paused: audio.paused });
     } catch (e) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) {
+        diag("tts.aborted", { at: "play", ms: Date.now() - started });
+        return;
+      }
+      const err = e as { name?: string; message?: string; status?: number };
+      diag("tts.play.rejected", {
+        name: err?.name ?? "",
+        message: err?.message ?? String(e),
+        status: err?.status ?? null,
+      });
       setSpeechStatus("Spoken replies are unavailable. Read the reply below.");
       onDone?.();
       if (e instanceof ApiError && e.status === 404) {
@@ -542,7 +592,7 @@ export default function Assistant(props: AssistantProps) {
     if (!ttsOn()) return;
     setTtsOn(false);
     localStorage.setItem(TTS_PREF_KEY, "0");
-    haltSpeech();
+    haltSpeech("notification-end");
   };
 
   const applyConfig = (cfg: PublicConfig | null | undefined) => {
@@ -593,6 +643,7 @@ export default function Assistant(props: AssistantProps) {
   };
 
   onMount(async () => {
+    diagBoot();
     voiceEndedCleanup = onVoiceServiceEnded(endFromNotification);
     // Speak-the-push: an FCM message that arrives while a voice
     // conversation is active is spoken as well as shown. Outside an active
@@ -633,7 +684,7 @@ export default function Assistant(props: AssistantProps) {
       text: draft(),
       profile: profile(),
     });
-    haltSpeech();
+    haltSpeech("unmount");
     clearSilence();
     transcriptionController?.abort();
     inFlight()?.abort();
@@ -673,6 +724,12 @@ export default function Assistant(props: AssistantProps) {
 
   const applyReply = (reply: AssistantReply) => {
     recordReply(reply);
+    diag("turn.reply", {
+      replyLen: (reply.reply ?? "").length,
+      pending: Boolean(reply.pending_action),
+      conversation: Boolean(conversation?.isActive()),
+      ttsOn: ttsOn(),
+    });
     // In a hands-free conversation the machine owns speech: it speaks the reply
     // (or the pending-action announcement) and re-opens the mic when playback
     // ends. Feeding it here routes both `send` and `resolve` through the loop.
@@ -695,7 +752,7 @@ export default function Assistant(props: AssistantProps) {
     if (!trimmed || busy()) return;
     setDraft("");
     setBusy(true);
-    haltSpeech();
+    haltSpeech("send");
     // The optimistic bubble is held by reference so the outcome can find it
     // again: a success leaves it be, a failure marks it, and a Stop removes
     // it. Kept off `failed` so it renders as an ordinary in-flight turn.
@@ -793,7 +850,7 @@ export default function Assistant(props: AssistantProps) {
       );
       if (!ok) return;
     }
-    haltSpeech();
+    haltSpeech("reset");
     try {
       await api.assistantReset();
       setTranscript([]);
@@ -808,7 +865,7 @@ export default function Assistant(props: AssistantProps) {
     const next = !ttsOn();
     setTtsOn(next);
     localStorage.setItem(TTS_PREF_KEY, next ? "1" : "0");
-    if (!next) haltSpeech();
+    if (!next) haltSpeech("tts-off");
     else {
       // Prime the synth inside a user gesture — Android WebView requires it.
       window.speechSynthesis?.speak(new SpeechSynthesisUtterance(""));
@@ -970,7 +1027,7 @@ export default function Assistant(props: AssistantProps) {
     const Ctor = webSpeechCtor();
     if (!Ctor) return;
     try {
-      haltSpeech();
+      haltSpeech("take-start");
       const recognition = new Ctor();
       recognition.continuous = true;
       recognition.interimResults = true;
@@ -1010,7 +1067,7 @@ export default function Assistant(props: AssistantProps) {
   // is what ends the recording and triggers the transcription-and-send.
   const startListeningServer = async () => {
     try {
-      haltSpeech();
+      haltSpeech("take-start");
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const recorder = new MediaRecorder(stream);
       serverChunks = [];
@@ -1088,7 +1145,7 @@ export default function Assistant(props: AssistantProps) {
         props.onError("microphone permission denied");
         return;
       }
-      haltSpeech();
+      haltSpeech("take-start");
       // Commit to the take, then wire and start with no teardown in between: a
       // release that lands mid-startup is deferred by `stopListening` (which
       // sees `nativeStarting`) rather than run against a half-built recognizer,
@@ -1249,7 +1306,7 @@ export default function Assistant(props: AssistantProps) {
     setVoiceState("idle");
     setVoiceMuted(false);
     void closeConversationMic();
-    haltSpeech();
+    haltSpeech("conversation-end");
     if (userInitiated) machine?.end("user");
     setSpeechStatus(
       reason === "idle"
@@ -1264,7 +1321,7 @@ export default function Assistant(props: AssistantProps) {
 
   const conversationPorts: VoicePorts = {
     openMic: () => {
-      haltSpeech();
+      haltSpeech("mic-open");
       if (sttBackend === "web") openConversationMicWeb();
       else void openConversationMicNative();
     },
@@ -1277,10 +1334,11 @@ export default function Assistant(props: AssistantProps) {
       void send(repairedText, text);
     },
     speak: (text) => speak(text, () => conversation?.speechFinished()),
-    stopSpeaking: () => haltSpeech(),
+    stopSpeaking: () => haltSpeech("machine-stop"),
     onChange: (state, muted) => {
       setVoiceState(state);
       setVoiceMuted(muted);
+      diag("voice.state", { state, muted });
     },
     onEnded: (reason) => endConversation(false, reason),
   };
@@ -1768,17 +1826,22 @@ export default function Assistant(props: AssistantProps) {
             </Show>
           }
         >
-          {/* Conversation is on: the mic is a mute toggle, live-labelled. */}
+          {/*
+            Conversation is on: the control in the mic's slot is a MUTE toggle,
+            and it must not look like the push-to-talk mic. The first cut reused
+            the mic glyph here; it read as "send", invited a tap mid-turn, and
+            that tap muted capture and re-armed the mic — two conflicting events
+            from one honest mistake. So it carries its word.
+          */}
           <button
             type="button"
-            class="assistant-mic"
+            class="assistant-mute"
             data-testid="mic-mute"
             data-muted={voiceMuted() ? "yes" : "no"}
             aria-pressed={voiceMuted()}
-            title={voiceMuted() ? "Muted — tap to unmute (or press M)" : "Tap to mute (or press M)"}
+            title={voiceMuted() ? "Muted — tap to unmute (or press M)" : "Mute the conversation (or press M)"}
             aria-label={voiceMuted() ? "Unmute conversation" : "Mute conversation"}
             onClick={() => conversation?.toggleMute()}
-            style={{ "touch-action": "none", ...(voiceMuted() ? { opacity: 0.55 } : {}) }}
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <rect x="9" y="3" width="6" height="11" rx="3" />
@@ -1787,6 +1850,7 @@ export default function Assistant(props: AssistantProps) {
                 <path d="M4 4 20 20" />
               </Show>
             </svg>
+            <span>{voiceMuted() ? "Unmute" : "Mute"}</span>
           </button>
         </Show>
         {/*
