@@ -186,6 +186,39 @@ describe("the hands-free conversation loop", () => {
     expect(vc.getState()).toBe("arming"); // re-opened for a fresh turn
   });
 
+  it("does not double-send when our own closeMic synchronously stops the recognizer", () => {
+    // Web Speech `stop()` fires `onend`, which the host forwards as
+    // `recognizerStopped`. A synchronous one lands mid-endpoint, before the
+    // turn has left `listening` — the exact shape that used to schedule a
+    // second endpoint and send the turn twice.
+    const clock = makeClock();
+    const events: string[] = [];
+    let vc!: VoiceConversation;
+    const ports: VoicePorts = {
+      openMic: () => events.push("openMic"),
+      closeMic: () => {
+        events.push("closeMic");
+        vc.recognizerStopped(); // the induced, synchronous stop
+      },
+      sendTurn: (t) => events.push(`sendTurn:${t}`),
+      speak: () => {},
+      stopSpeaking: () => {},
+      onChange: () => {},
+      onEnded: () => {},
+    };
+    vc = new VoiceConversation(
+      ports,
+      cfg({ silence_duration_ms: 0, final_result_grace_ms: 0 }),
+      clock.scheduler,
+    );
+    vc.begin();
+    vc.micReady();
+    vc.partial("what is on top");
+    clock.advance(0); // silence → endpoint → sending → closeMic (induces stop)
+    clock.advance(1000); // let any stray grace timer fire
+    expect(events.filter((e) => e.startsWith("sendTurn:")).length).toBe(1);
+  });
+
   it("stops a playing reply and closes the mic when the session ends", () => {
     const { vc, events } = live();
     vc.end("user");

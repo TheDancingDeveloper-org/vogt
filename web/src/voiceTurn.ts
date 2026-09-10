@@ -178,6 +178,10 @@ export class VoiceConversation {
   // `micReady`, never against a recogniser that is not up yet (the WI-173 race,
   // at the loop's altitude).
   private endRequestedWhileArming: EndReason | null = null;
+  // True while we are closing the mic ourselves. Web Speech's `stop()` fires
+  // `onend` (which the host forwards as `recognizerStopped`); a synchronous one
+  // would otherwise re-enter the turn end we are already in — a double send.
+  private closingMic = false;
 
   constructor(
     private readonly ports: VoicePorts,
@@ -251,6 +255,8 @@ export class VoiceConversation {
   /** The recogniser stopped on its own — the fallback turn end. Waits out the
    *  grace so the final result (one more partial after `stopped`) is included. */
   recognizerStopped(): void {
+    // Not a real end if we are the ones closing the mic (turn already ending).
+    if (this.closingMic) return;
     if (this.muted) return;
     if (this.state !== "listening" && this.state !== "endpointing") return;
     this.enter("endpointing");
@@ -299,7 +305,7 @@ export class VoiceConversation {
     if (this.muted) {
       this.clearSilence();
       this.clearMaxTurn();
-      this.ports.closeMic();
+      this.closeMic();
       // The idle clock keeps running while muted: a muted session left forever
       // still ends.
       this.emit();
@@ -330,7 +336,7 @@ export class VoiceConversation {
       return;
     }
     this.clearAll();
-    this.ports.closeMic();
+    this.closeMic();
     this.ports.stopSpeaking();
     this.state = "ended";
     this.ports.onChange(this.state, this.muted);
@@ -354,8 +360,10 @@ export class VoiceConversation {
     const heard = this.text.trim();
     if (heard) {
       this.emptyTurns = 0;
-      this.ports.closeMic();
+      // Enter `sending` first, then close: an induced stop reads as sending, not
+      // as another turn to end.
       this.enter("sending");
+      this.closeMic();
       this.ports.sendTurn(heard);
       return;
     }
@@ -366,7 +374,7 @@ export class VoiceConversation {
       return;
     }
     // Try again: a fresh turn on the same open session.
-    this.ports.closeMic();
+    this.closeMic();
     this.arm();
   }
 
@@ -383,6 +391,17 @@ export class VoiceConversation {
 
   private emit(): void {
     this.ports.onChange(this.state, this.muted);
+  }
+
+  /** Close the mic, fenced so a synchronous `onend` → `recognizerStopped` from
+   *  our own stop cannot re-enter the turn end. */
+  private closeMic(): void {
+    this.closingMic = true;
+    try {
+      this.ports.closeMic();
+    } finally {
+      this.closingMic = false;
+    }
   }
 
   private armSilence(): void {
