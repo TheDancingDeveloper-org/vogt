@@ -17,6 +17,7 @@ vi.mock("@capacitor/core", () => ({
 }));
 
 import Assistant from "../Assistant";
+import { resetAudioForTests } from "../audioPlayback";
 
 /** A stand-in for `MediaRecorder`, firing its data+stop the way `stop()` does. */
 class FakeMediaRecorder {
@@ -227,6 +228,63 @@ describe("the server-side speech pipeline", () => {
     expect(calls("/api/assistant/stt")).toHaveLength(0);
     expect(calls("/api/assistant/message")).toHaveLength(0);
     expect(errors).toEqual([]);
+  });
+
+  it("plays a spoken reply through Web Audio when an AudioContext exists (the WebView case)", async () => {
+    // The Android WebView refuses `<audio src="blob:…">` ("Media load rejected
+    // by URL safety check"), which the diagnostics caught on a perfectly typed
+    // wav. So where Web Audio exists it is the path: the clip is decoded and
+    // played through a buffer source, and no <audio> element is touched.
+    installMediaGlobals();
+    class FakeSource {
+      buffer: unknown = null;
+      onended: (() => void) | null = null;
+      connect = vi.fn();
+      start = vi.fn();
+      stop = vi.fn();
+    }
+    let lastSource: FakeSource | null = null;
+    class FakeAudioContext {
+      state = "running";
+      destination = {};
+      resume = vi.fn(async () => {});
+      decodeAudioData = vi.fn(async () => ({ duration: 1.5 }));
+      createBufferSource() {
+        lastSource = new FakeSource();
+        return lastSource;
+      }
+    }
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    // jsdom's Blob may lack arrayBuffer(); the module reads the clip through it.
+    if (typeof Blob.prototype.arrayBuffer !== "function") {
+      Blob.prototype.arrayBuffer = function () {
+        return new Promise<ArrayBuffer>((resolve) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result as ArrayBuffer);
+          r.readAsArrayBuffer(this);
+        });
+      };
+    }
+    resetAudioForTests();
+    localStorage.setItem("vogt.assistant.tts", "1");
+    fakeVogt({}, engine());
+    const errors: string[] = [];
+    const { container } = render(() => <Assistant onError={(m) => errors.push(m)} />);
+    await settle();
+
+    const input = container.querySelector(".assistant-input") as HTMLTextAreaElement;
+    fireEvent.input(input, { target: { value: "show me the backlog" } });
+    fireEvent.submit(container.querySelector("form") as HTMLFormElement);
+    await settle();
+    await settle();
+
+    expect(calls("/api/assistant/tts")).toHaveLength(1);
+    // Cast: TS narrows `lastSource` to null (it is set inside a class method).
+    expect((lastSource as FakeSource | null)?.start).toHaveBeenCalledTimes(1);
+    expect(FakeAudio.instances).toHaveLength(0);
+    expect(errors).toEqual([]);
+    vi.stubGlobal("AudioContext", undefined);
+    resetAudioForTests();
   });
 
   it("plays a spoken reply through the server TTS route when the browser cannot synthesize", async () => {

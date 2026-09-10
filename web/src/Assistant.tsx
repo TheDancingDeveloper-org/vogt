@@ -58,6 +58,7 @@ import {
 } from "./voiceTurn";
 import { startBargeInDetection } from "./voiceVad";
 import { diag, diagBoot } from "./diag";
+import { audioContextAvailable, playAudioBlob, primeAudio, type Playback } from "./audioPlayback";
 
 const TTS_PREF_KEY = "vogt.assistant.tts";
 
@@ -372,7 +373,10 @@ export default function Assistant(props: AssistantProps) {
   // The server-TTS clip currently playing, if any, so it can be stopped the
   // moment the speaker sends again or leaves. On-device synthesis is
   // stopped through `speechSynthesis.cancel()`; this is its `<audio>` twin.
-  let currentAudio: HTMLAudioElement | null = null;
+  // Whatever is playing the current server-TTS clip: a Web Audio source (the
+  // path the Android WebView can hear — see audioPlayback.ts) or, where there
+  // is no AudioContext, an `<audio>` element wrapped to the same shape.
+  let currentPlayback: Playback | null = null;
   // Native (Android) voice-conversation plumbing. Both stay undefined
   // on the desktop PWA, where their registrars are no-ops. Cleaned up on leave.
   let voiceEndedCleanup: (() => void) | undefined;
@@ -395,24 +399,20 @@ export default function Assistant(props: AssistantProps) {
   // indistinguishable from one that never played, and the diagnostic line that
   // says *who* halted it is the whole point.
   const haltSpeech = (reason: string) => {
-    if (speechController !== null || currentAudio !== null) {
+    if (speechController !== null || currentPlayback !== null) {
       diag("speech.halt", {
         reason,
         inFlight: speechController !== null,
-        playing: currentAudio !== null && !currentAudio.paused,
+        playing: currentPlayback?.playing() ?? false,
       });
     }
     speechController?.abort();
     speechController = null;
     stopSpeaking();
-    if (currentAudio) {
-      try {
-        currentAudio.pause();
-      } catch {
-        /* already stopped */
-      }
-      currentAudio = null;
-    }
+    // A halted clip never reports "ended" — the loop must not re-open the mic
+    // on top of whatever halted it.
+    currentPlayback?.stop();
+    currentPlayback = null;
   };
 
   /**
@@ -459,35 +459,57 @@ export default function Assistant(props: AssistantProps) {
         return;
       }
       setSpeechStatus("");
+      // What the client was handed — the first two facts a "no audio" report
+      // needs. (Diagnostics found the WebView rejecting a perfectly typed
+      // clip at the `blob:` URL, which is why Web Audio is the primary path.)
+      diag("tts.blob", { type: blob.type, size: blob.size, ms: Date.now() - started });
+      if (audioContextAvailable()) {
+        const playback = await playAudioBlob(blob, {
+          signal: controller.signal,
+          onPlaying: (duration) => diag("tts.playing", { via: "webaudio", duration }),
+          onEnded: () => {
+            diag("tts.ended", { via: "webaudio" });
+            // The reply is over: re-open the mic. Natural end only — a clip cut
+            // short by the next turn never reports itself finished.
+            onDone?.();
+          },
+        });
+        if (controller.signal.aborted) {
+          playback.stop();
+          diag("tts.aborted", { at: "play", ms: Date.now() - started });
+          return;
+        }
+        currentPlayback = playback;
+        diag("tts.play.ok", { via: "webaudio", duration: playback.duration });
+        return;
+      }
+      // No AudioContext at all (an old browser): the element path. Kept as a
+      // fallback only — it is the one the Android WebView refuses.
       const url = URL.createObjectURL(blob);
       const audio = new Audio(url);
-      // What the WebView was handed, and whether it claims to play it — the
-      // two facts a "no audio" report needs before anything else.
-      diag("tts.blob", {
-        type: blob.type,
-        size: blob.size,
-        ms: Date.now() - started,
-        // Guarded: a test DOM has no media decoder and no `canPlayType`.
-        canPlay:
-          typeof audio.canPlayType === "function"
-            ? audio.canPlayType(blob.type || "audio/wav")
-            : null,
-      });
       const release = () => URL.revokeObjectURL(url);
       audio.addEventListener("ended", release, { once: true });
-      audio.addEventListener("playing", () => diag("tts.playing", { duration: audio.duration }), { once: true });
-      audio.addEventListener("ended", () => diag("tts.ended", { at: audio.currentTime }), { once: true });
+      audio.addEventListener("playing", () => diag("tts.playing", { via: "element", duration: audio.duration }), { once: true });
+      audio.addEventListener("ended", () => diag("tts.ended", { via: "element" }), { once: true });
       audio.addEventListener("error", () => {
         const err = audio.error;
         diag("tts.media-error", { code: err?.code ?? null, message: err?.message ?? "" });
       }, { once: true });
-      // The reply is over: re-open the mic. Fired on the natural end only, so a
-      // reply cut short by the next turn (abort) does not race a new take open.
       if (onDone) audio.addEventListener("ended", onDone, { once: true });
       controller.signal.addEventListener("abort", release, { once: true });
-      currentAudio = audio;
+      currentPlayback = {
+        duration: Number.isFinite(audio.duration) ? audio.duration : 0,
+        playing: () => !audio.paused && !audio.ended,
+        stop: () => {
+          try {
+            audio.pause();
+          } catch {
+            /* already stopped */
+          }
+        },
+      };
       await audio.play();
-      diag("tts.play.ok", { muted: audio.muted, volume: audio.volume, paused: audio.paused });
+      diag("tts.play.ok", { via: "element", muted: audio.muted, volume: audio.volume });
     } catch (e) {
       if (controller.signal.aborted) {
         diag("tts.aborted", { at: "play", ms: Date.now() - started });
@@ -869,6 +891,8 @@ export default function Assistant(props: AssistantProps) {
     else {
       // Prime the synth inside a user gesture — Android WebView requires it.
       window.speechSynthesis?.speak(new SpeechSynthesisUtterance(""));
+      // And the Web Audio context, for the same reason (autoplay policy).
+      primeAudio();
     }
   };
 
@@ -1357,6 +1381,7 @@ export default function Assistant(props: AssistantProps) {
     }
     // Prime the synth inside the user gesture — the Android WebView requires it.
     window.speechSynthesis?.speak(new SpeechSynthesisUtterance(""));
+    primeAudio();
     const cfg = readVoiceConfig();
     bargeInEnabled = cfg.interrupt_response;
     conversation = new VoiceConversation(conversationPorts, cfg);
@@ -1785,6 +1810,8 @@ export default function Assistant(props: AssistantProps) {
               // that stays open because of it is not.
               e.currentTarget.setPointerCapture?.(e.pointerId);
               held = true;
+              // A press is a user gesture: let the reply's audio start later.
+              primeAudio();
               void startListening();
             }}
             onPointerUp={() => {
