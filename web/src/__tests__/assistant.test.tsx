@@ -68,6 +68,10 @@ async function mountAssistant(engine: Record<string, unknown> = {}) {
 describe("the assistant's microphone", () => {
   beforeEach(() => {
     for (const fn of Object.values(recognition)) fn.mockClear();
+    // A clean silence window for every take, so one test's tuning cannot leak
+    // into the next. The values are read fresh at take time.
+    localStorage.removeItem("vogt.assistant.voice.silence_duration_ms");
+    localStorage.removeItem("vogt.assistant.voice.final_result_grace_ms");
   });
 
   it("opens only while the button is held", async () => {
@@ -174,6 +178,68 @@ describe("the assistant's microphone", () => {
     expect(
       assistantRequests().filter((url) => url.includes("message")),
     ).toHaveLength(0);
+  });
+
+  it("keeps the take open when the release lands before the recognizer is up (tap-to-talk), and sends on silence", async () => {
+    // The WI-173 race, from the outside: pressing and releasing in the same
+    // tick leaves the release ahead of the plugin's `start()`. The old code
+    // treated it as a stop and tore down a recognizer that was not up yet, so
+    // the take was orphaned and nothing was ever sent. It must instead run on,
+    // ended by silence — the tap the design has always promised.
+    localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "0");
+    const { mic } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+    // The recognizer came up despite the early release, and is still listening.
+    expect(recognition.start).toHaveBeenCalledTimes(1);
+    expect(mic.dataset.listening).toBe("yes");
+    // The words arrive, then quiet — the silence timer (0ms here) sends once.
+    listenerFor("partialResults")?.({ matches: ["open the backlog"] });
+    await settle();
+    expect(
+      assistantRequests().filter((url) => url.includes("message")),
+    ).toHaveLength(1);
+  });
+
+  it("does not tear down a recognizer that is still starting when the button is released", async () => {
+    // The other interleaving: the release lands after the take is committed but
+    // before `start()` resolved. Hold `start()` open to sit in exactly that
+    // window. Removing the listeners or stopping here is what stripped the pair
+    // the same startup had just added.
+    let resolveStart: () => void = () => {};
+    recognition.start.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (resolveStart = () => resolve())),
+    );
+    const { mic } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle(); // suspended at the held start()
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+    // The release was deferred: only the pre-wire clear ran, and nothing was
+    // stopped. The recognizer is still listening.
+    expect(recognition.removeAllListeners).toHaveBeenCalledTimes(1);
+    expect(recognition.stop).not.toHaveBeenCalled();
+    expect(mic.dataset.listening).toBe("yes");
+    resolveStart();
+    await settle();
+  });
+
+  it("sends the final result that lands just after the recognizer stops, not the last interim guess", async () => {
+    // The plugin emits `listeningState: stopped` before the final, best result
+    // — delivered as one more `partialResults`. A grace window after `stopped`
+    // is what lets the final transcript be the one that gets sent.
+    localStorage.setItem("vogt.assistant.voice.final_result_grace_ms", "0");
+    const { mic } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    listenerFor("partialResults")?.({ matches: ["what is on"] });
+    listenerFor("listeningState")?.({ status: "stopped" });
+    listenerFor("partialResults")?.({ matches: ["what is on top"] });
+    await settle();
+    const bodies = assistantMessageBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.text).toBe("what is on top");
   });
 });
 
