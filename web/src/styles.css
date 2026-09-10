@@ -11113,6 +11113,65 @@ a.vogt-projects-tag:hover {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* Hands-free conversation (WI-174): the head toggle, the live status chip, and
+   the mic's muted state. */
+.assistant-convo[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.assistant-convo:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.assistant-voice-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--fg-muted, var(--fg));
+  opacity: 0.9;
+  margin: 2px 0;
+}
+.assistant-voice-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--activity-running);
+  flex: none;
+}
+.assistant-voice-status[data-state="listening"] .assistant-voice-dot,
+.assistant-voice-status[data-state="arming"] .assistant-voice-dot,
+.assistant-voice-status[data-state="endpointing"] .assistant-voice-dot {
+  animation: assistant-voice-pulse 1.4s ease-in-out infinite;
+}
+.assistant-voice-status[data-state="speaking"] .assistant-voice-dot {
+  background: var(--accent);
+}
+.assistant-voice-status[data-state="sending"] .assistant-voice-dot,
+.assistant-voice-status[data-state="paused_for_approval"] .assistant-voice-dot {
+  background: var(--activity-waiting);
+}
+.assistant-voice-status[data-muted="yes"] .assistant-voice-dot {
+  background: var(--activity-errored);
+  animation: none;
+}
+@keyframes assistant-voice-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .assistant-voice-status .assistant-voice-dot {
+    animation: none !important;
+  }
+}
+.assistant-mic[data-muted="yes"] {
+  opacity: 0.55;
+}
 .assistant-stop {
   border-color: var(--activity-waiting);
   color: var(--activity-waiting);
