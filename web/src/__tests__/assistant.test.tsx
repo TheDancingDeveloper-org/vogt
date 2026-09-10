@@ -442,6 +442,103 @@ describe("what the recognizer heard, repaired before it is sent", () => {
   });
 });
 
+// -- Hands-free conversation (WI-174) --------------------------
+//
+// The loop itself is proven in `voiceTurn.test.ts` off a fake clock; these
+// prove the *wiring* — that the surface offers it only when it can run, that
+// turning it on opens the recognizer, and that a spoken reply re-opens the mic
+// for the next turn without a touch. The half a device demo cannot show: that
+// the mic came back on its own.
+
+/** A speech-synth stub whose last utterance fires `onend`, so the hands-free
+ *  loop's "reply finished → re-open the mic" actually advances under test. */
+function captureConversationSpeech(): { spoken: () => string[] } {
+  const spoken: string[] = [];
+  class Utterance {
+    text: string;
+    onend: (() => void) | null = null;
+    constructor(text: string) {
+      this.text = text;
+    }
+  }
+  vi.stubGlobal("SpeechSynthesisUtterance", Utterance);
+  vi.stubGlobal("speechSynthesis", {
+    speak: (u: { text: string; onend?: (() => void) | null }) => {
+      spoken.push(u.text);
+      if (u.onend) queueMicrotask(() => u.onend?.());
+    },
+    cancel: () => {},
+  });
+  return { spoken: () => spoken.filter((t) => t.trim()) };
+}
+
+describe("hands-free conversation", () => {
+  beforeEach(() => {
+    for (const fn of Object.values(recognition)) fn.mockClear();
+    localStorage.removeItem("vogt.assistant.voice.silence_duration_ms");
+  });
+
+  it("is disabled, with a reason, when there is nothing to speak with", async () => {
+    // No on-device synthesis, no server TTS: hands-free has no mouth, so the
+    // control is present (discoverable) but disabled and says why.
+    vi.unstubAllGlobals(); // drop any speechSynthesis a prior test stubbed
+    const { container } = await mountAssistant();
+    const convo = container.querySelector(
+      '[data-testid="assistant-conversation"]',
+    ) as HTMLButtonElement;
+    expect(convo).toBeTruthy();
+    expect(convo.disabled).toBe(true);
+    expect(convo.getAttribute("title")).toContain("spoken replies");
+  });
+
+  it("opens the recognizer when turned on, and shows a live status", async () => {
+    captureConversationSpeech();
+    const { container } = await mountAssistant();
+    const convo = container.querySelector(
+      '[data-testid="assistant-conversation"]',
+    ) as HTMLButtonElement;
+    expect(convo.disabled).toBe(false);
+    fireEvent.click(convo);
+    await settle();
+    expect(convo.getAttribute("aria-pressed")).toBe("true");
+    expect(recognition.start).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[data-testid="voice-status"]')).toBeTruthy();
+  });
+
+  it("runs a whole turn hands-free: sends on silence, speaks the reply, re-opens the mic", async () => {
+    const speech = captureConversationSpeech();
+    localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "0");
+    const { container } = await mountAssistant({
+      "POST /api/assistant/message": {
+        body: {
+          reply: "On top is the forge adapter.",
+          pending_action: null,
+          tool_trace: [],
+        },
+      },
+    });
+    fireEvent.click(
+      container.querySelector('[data-testid="assistant-conversation"]')!,
+    );
+    await settle();
+    expect(recognition.start).toHaveBeenCalledTimes(1); // mic open for turn one
+
+    // Speak, then go quiet: the silence timer (0ms) ends the turn and sends.
+    listenerFor("partialResults")?.({ matches: ["what is on top"] });
+    await settle();
+    expect(
+      assistantRequests().filter((url) => url.includes("message")),
+    ).toHaveLength(1);
+
+    // The reply is spoken through the loop, and its end re-opens the mic — the
+    // whole point of hands-free, and the part no microphone can show you.
+    await settle();
+    expect(speech.spoken()).toContain("On top is the forge adapter.");
+    await settle();
+    expect(recognition.start).toHaveBeenCalledTimes(2); // turn two, no touch
+  });
+});
+
 // -- Provider profiles ----------------------------------------
 
 describe("choosing which backend answers", () => {

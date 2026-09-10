@@ -49,6 +49,13 @@ import {
   startVoiceService,
   stopVoiceService,
 } from "./voiceService";
+import {
+  readVoiceConfig,
+  VoiceConversation,
+  voiceStatusLabel,
+  type VoicePorts,
+  type VoiceState,
+} from "./voiceTurn";
 
 const TTS_PREF_KEY = "vogt.assistant.tts";
 
@@ -213,8 +220,11 @@ interface AssistantProps {
   confirmAction?: (title: string, body?: string) => Promise<boolean>;
 }
 
-function speakSentences(text: string) {
-  if (!("speechSynthesis" in window) || !text.trim()) return;
+function speakSentences(text: string, onDone?: () => void) {
+  if (!("speechSynthesis" in window) || !text.trim()) {
+    onDone?.();
+    return;
+  }
   // Sentence-level chunks keep the synth responsive and interruptible.
   //
   // Split only where a terminator is followed by space or line end, so an
@@ -222,12 +232,21 @@ function speakSentences(text: string) {
   // into "work." and "transition on WI-7", which a screen reader renders as
   // two sentences and a speaker reads with a pause in the middle of the one
   // word that says what is about to happen.
-  const sentences = text.split(/(?<=[.!?])\s+|\n+/).filter((part) => part.trim());
-  for (const sentence of sentences) {
-    const trimmed = sentence.trim();
-    if (!trimmed) continue;
-    window.speechSynthesis.speak(new SpeechSynthesisUtterance(trimmed));
+  const sentences = text
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!sentences.length) {
+    onDone?.();
+    return;
   }
+  sentences.forEach((sentence, index) => {
+    const utterance = new SpeechSynthesisUtterance(sentence);
+    // The hands-free loop re-opens the mic when the reply finishes, so the
+    // last chunk carries the "done" — half-duplex has no capture until then.
+    if (index === sentences.length - 1 && onDone) utterance.onend = () => onDone();
+    window.speechSynthesis.speak(utterance);
+  });
 }
 
 function stopSpeaking() {
@@ -293,6 +312,12 @@ export default function Assistant(props: AssistantProps) {
   const [reasonBusy, setReasonBusy] = createSignal(false);
   const [draft, setDraft] = createSignal(restored.text);
   const [ttsOn, setTtsOn] = createSignal(localStorage.getItem(TTS_PREF_KEY) === "1");
+  // Hands-free conversation mode (WI-174). Session-only — it opens the mic, so
+  // it never auto-resumes on mount. `voiceState`/`voiceMuted` mirror the pure
+  // machine for the status chip.
+  const [conversationOn, setConversationOn] = createSignal(false);
+  const [voiceState, setVoiceState] = createSignal<VoiceState>("idle");
+  const [voiceMuted, setVoiceMuted] = createSignal(false);
   const [listening, setListening] = createSignal(false);
   const [sttAvailable, setSttAvailable] = createSignal(false);
   // Whether the server-side speech pipeline is configured. Read from
@@ -355,6 +380,9 @@ export default function Assistant(props: AssistantProps) {
   let speechController: AbortController | null = null;
   let transcriptionController: AbortController | null = null;
   const [speechStatus, setSpeechStatus] = createSignal("");
+  // The hands-free loop, created lazily when Conversation is turned on. Declared
+  // here because `applyReply` and `send` feed it their outcomes.
+  let conversation: VoiceConversation | null = null;
 
   const haltSpeech = () => {
     speechController?.abort();
@@ -376,17 +404,26 @@ export default function Assistant(props: AssistantProps) {
    * none. A server route that 404s (unconfigured) degrades this half silently
    * — a spoken reply that cannot be spoken is still shown in the transcript.
    */
-  const speak = (text: string) => {
+  // `onDone`, when given, fires once the reply has finished playing (or at once
+  // when there is nothing to play, or no mouth to play it). The hands-free loop
+  // passes it to re-open the mic; a plain spoken reply passes nothing.
+  const speak = (text: string, onDone?: () => void) => {
     if ("speechSynthesis" in window) {
-      speakSentences(text);
+      speakSentences(text, onDone);
       return;
     }
-    if (serverTtsEnabled()) void playServerTts(text);
-    else setSpeechStatus("Spoken replies are unavailable. Read the reply below.");
+    if (serverTtsEnabled()) void playServerTts(text, onDone);
+    else {
+      setSpeechStatus("Spoken replies are unavailable. Read the reply below.");
+      onDone?.();
+    }
   };
 
-  const playServerTts = async (text: string) => {
-    if (!text.trim()) return;
+  const playServerTts = async (text: string, onDone?: () => void) => {
+    if (!text.trim()) {
+      onDone?.();
+      return;
+    }
     haltSpeech();
     const controller = new AbortController();
     speechController = controller;
@@ -398,12 +435,16 @@ export default function Assistant(props: AssistantProps) {
       const audio = new Audio(url);
       const release = () => URL.revokeObjectURL(url);
       audio.addEventListener("ended", release, { once: true });
+      // The reply is over: re-open the mic. Fired on the natural end only, so a
+      // reply cut short by the next turn (abort) does not race a new take open.
+      if (onDone) audio.addEventListener("ended", onDone, { once: true });
       controller.signal.addEventListener("abort", release, { once: true });
       currentAudio = audio;
       await audio.play();
     } catch (e) {
       if (controller.signal.aborted) return;
       setSpeechStatus("Spoken replies are unavailable. Read the reply below.");
+      onDone?.();
       if (e instanceof ApiError && e.status === 404) {
         setServerTtsEnabled(false);
       } else {
@@ -595,12 +636,19 @@ export default function Assistant(props: AssistantProps) {
     stopVoiceService();
     voiceEndedCleanup?.();
     pushSpeakerCleanup?.();
+    // Leaving ends a hands-free conversation: stop the machine and close its
+    // recognizer, so nothing keeps listening after the surface is gone.
+    conversation?.end("user");
+    conversation = null;
+    void closeConversationMic();
     // Abandoned, not sent: leaving the surface mid-sentence must not put
     // half an utterance into the conversation on the way out.
     if (listening()) void abandonTake();
   });
 
-  const applyReply = (reply: AssistantReply) => {
+  /** Put a reply into the transcript and set its pending action — the visible
+   *  record, with no speech. Speaking is decided by the caller. */
+  const recordReply = (reply: AssistantReply) => {
     if (reply.reply !== null && reply.reply !== undefined) {
       setTranscript((cur) => [
         ...cur,
@@ -613,12 +661,27 @@ export default function Assistant(props: AssistantProps) {
           actions: reply.actions,
         },
       ]);
-      if (ttsOn()) speak(reply.reply);
     }
     setPendingAction(reply.pending_action ?? null);
-    if (reply.pending_action && ttsOn()) {
-      speak(announce(reply.pending_action));
+  };
+
+  const applyReply = (reply: AssistantReply) => {
+    recordReply(reply);
+    // In a hands-free conversation the machine owns speech: it speaks the reply
+    // (or the pending-action announcement) and re-opens the mic when playback
+    // ends. Feeding it here routes both `send` and `resolve` through the loop.
+    if (conversation?.isActive()) {
+      const spoken = reply.pending_action
+        ? announce(reply.pending_action)
+        : (reply.reply ?? "");
+      conversation.replied({
+        text: spoken.trim() ? spoken : null,
+        hasPendingAction: Boolean(reply.pending_action),
+      });
+      return;
     }
+    if (reply.reply !== null && reply.reply !== undefined && ttsOn()) speak(reply.reply);
+    if (reply.pending_action && ttsOn()) speak(announce(reply.pending_action));
   };
 
   const send = async (text: string, utterance?: string) => {
@@ -656,6 +719,10 @@ export default function Assistant(props: AssistantProps) {
         );
         props.onError(`assistant: ${String(e)}`);
       }
+      // A hands-free turn that did not land must not leave the loop stuck in
+      // "sending": re-open the mic (the mode stays; the failed bubble carries
+      // the Retry). A no-op outside a conversation.
+      conversation?.sendFailed();
     } finally {
       setBusy(false);
       setInFlight(null);
@@ -1058,6 +1125,200 @@ export default function Assistant(props: AssistantProps) {
     nativeStarting = false;
   };
 
+  // -- hands-free conversation mode (WI-174) --------------------------------
+  //
+  // The pure loop in `voiceTurn.ts` decides *when*; these functions are its
+  // ports — capture that forwards the recognizer's events to the machine
+  // (rather than the tap path's send-on-stop), and playback that tells the
+  // machine when a reply has finished so it can re-open the mic. Kept separate
+  // from the tap path above so push/tap-to-talk is untouched.
+  let convWebRecognition: WebSpeechRecognition | null = null;
+
+  const ttsCapable = () => "speechSynthesis" in window || serverTtsEnabled();
+  /** Whether hands-free can run here: an event-driven recognizer (v1 excludes
+   *  the server-STT path, which has no partials/endpoint of its own) and a way
+   *  to speak. */
+  const conversationSupported = () =>
+    sttAvailable() &&
+    (sttBackend === "native" || sttBackend === "web") &&
+    ttsCapable();
+  const conversationDisabledReason = () => {
+    if (!sttAvailable() || (sttBackend !== "native" && sttBackend !== "web")) {
+      return "Hands-free needs a live voice recognizer (the app, or a browser with voice input).";
+    }
+    if (!ttsCapable()) return "Hands-free needs spoken replies, which aren't available here.";
+    return "";
+  };
+
+  const openConversationMicNative = async () => {
+    try {
+      const { SpeechRecognition } = await import(
+        "@capacitor-community/speech-recognition"
+      );
+      const perm = await SpeechRecognition.requestPermissions();
+      if (perm.speechRecognition !== "granted") {
+        conversation?.end("no_backend");
+        return;
+      }
+      await SpeechRecognition.removeAllListeners();
+      await SpeechRecognition.addListener("partialResults", (data) => {
+        const best = data.matches?.[0];
+        if (best) conversation?.partial(best);
+      });
+      await SpeechRecognition.addListener("listeningState", (data) => {
+        if (data.status === "stopped") conversation?.recognizerStopped();
+      });
+      await SpeechRecognition.start({ partialResults: true, popup: false });
+      conversation?.micReady();
+    } catch (e) {
+      props.onError(`speech recognition: ${String(e)}`);
+      conversation?.end("no_backend");
+    }
+  };
+
+  const openConversationMicWeb = () => {
+    const Ctor = webSpeechCtor();
+    if (!Ctor) {
+      conversation?.end("no_backend");
+      return;
+    }
+    try {
+      const recognition = new Ctor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = navigator.language || "en-US";
+      recognition.onresult = (event) => {
+        let heard = "";
+        for (let i = 0; i < event.results.length; i += 1) {
+          heard += event.results[i]?.[0]?.transcript ?? "";
+        }
+        if (heard.trim()) conversation?.partial(heard.trim());
+      };
+      recognition.onend = () => conversation?.recognizerStopped();
+      recognition.onerror = (event) => {
+        // `no-speech`/`aborted` are ordinary turn ends, handled by the machine's
+        // own silence timer; anything else means the recognizer is gone.
+        if (event.error !== "no-speech" && event.error !== "aborted") {
+          conversation?.end("no_backend");
+        }
+      };
+      convWebRecognition = recognition;
+      recognition.start();
+      conversation?.micReady();
+    } catch (e) {
+      props.onError(`speech recognition: ${String(e)}`);
+      conversation?.end("no_backend");
+    }
+  };
+
+  const closeConversationMic = async () => {
+    if (convWebRecognition) {
+      const recognition = convWebRecognition;
+      convWebRecognition = null;
+      try {
+        recognition.stop();
+      } catch {
+        /* already stopped */
+      }
+    }
+    if (sttBackend === "native") {
+      try {
+        const { SpeechRecognition } = await import(
+          "@capacitor-community/speech-recognition"
+        );
+        await SpeechRecognition.stop();
+        await SpeechRecognition.removeAllListeners();
+      } catch {
+        /* plugin gone mid-flight — nothing to stop */
+      }
+    }
+  };
+
+  /** Tear the conversation down. `userInitiated` when the toggle/leave did it,
+   *  as opposed to the machine ending itself (idle, empty turns, backend gone).*/
+  const endConversation = (userInitiated: boolean, reason?: string) => {
+    const machine = conversation;
+    conversation = null;
+    setConversationOn(false);
+    setVoiceState("idle");
+    setVoiceMuted(false);
+    void closeConversationMic();
+    haltSpeech();
+    if (userInitiated) machine?.end("user");
+    setSpeechStatus(
+      reason === "idle"
+        ? "Conversation ended — no speech for a while."
+        : reason === "empty_turns"
+          ? "Conversation ended — heard nothing."
+          : reason === "no_backend"
+            ? "Conversation ended — voice is unavailable here."
+            : "",
+    );
+  };
+
+  const conversationPorts: VoicePorts = {
+    openMic: () => {
+      haltSpeech();
+      if (sttBackend === "web") openConversationMicWeb();
+      else void openConversationMicNative();
+    },
+    closeMic: () => void closeConversationMic(),
+    sendTurn: (text) => {
+      // The same repair pass the tap path uses: a work-item ref the recognizer
+      // mangled is the subject of the sentence.
+      const { text: repairedText, repairs } = repairUtterance(text, slugs());
+      setRepaired(repairs.length ? describeRepairs(repairs) : "");
+      void send(repairedText, text);
+    },
+    speak: (text) => speak(text, () => conversation?.speechFinished()),
+    stopSpeaking: () => haltSpeech(),
+    onChange: (state, muted) => {
+      setVoiceState(state);
+      setVoiceMuted(muted);
+    },
+    onEnded: (reason) => endConversation(false, reason),
+  };
+
+  const toggleConversation = () => {
+    if (conversationOn()) {
+      endConversation(true);
+      return;
+    }
+    if (!conversationSupported()) return;
+    setSpeechStatus("");
+    // Hands-free needs a mouth: turning it on turns spoken replies on.
+    if (!ttsOn()) {
+      setTtsOn(true);
+      localStorage.setItem(TTS_PREF_KEY, "1");
+    }
+    // Prime the synth inside the user gesture — the Android WebView requires it.
+    window.speechSynthesis?.speak(new SpeechSynthesisUtterance(""));
+    conversation = new VoiceConversation(conversationPorts, readVoiceConfig());
+    setConversationOn(true);
+    conversation.begin();
+  };
+
+  // Desktop shortcut: `M` mutes/unmutes an active conversation, unless the
+  // caret is in a text field (where `m` is just a letter).
+  createEffect(() => {
+    if (!conversationOn()) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.key === "m" || e.key === "M") && !e.repeat) {
+        const target = e.target as HTMLElement | null;
+        const typing =
+          target &&
+          (target.tagName === "TEXTAREA" ||
+            target.tagName === "INPUT" ||
+            target.isContentEditable);
+        if (typing) return;
+        e.preventDefault();
+        conversation?.toggleMute();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
   return (
     <div class="assistant">
       <div class="assistant-head">
@@ -1116,6 +1377,40 @@ export default function Assistant(props: AssistantProps) {
               fallback={<path d="m16 9 5 6m0-6-5 6" />}
             >
               <path d="M15 9.5a4 4 0 0 1 0 5M18 7a7 7 0 0 1 0 10" />
+            </Show>
+          </svg>
+        </button>
+        {/*
+          Hands-free conversation: speak, go quiet, the turn sends, the reply is
+          spoken, the mic re-opens — no touch between turns. Shown always, so the
+          feature is discoverable, but disabled with its reason when the device
+          has no live recognizer or no way to speak.
+        */}
+        <button
+          type="button"
+          class="assistant-toggle assistant-convo"
+          data-testid="assistant-conversation"
+          aria-pressed={conversationOn()}
+          disabled={!conversationOn() && !conversationSupported()}
+          aria-label={
+            conversationOn()
+              ? "Hands-free conversation on"
+              : "Start hands-free conversation"
+          }
+          title={
+            conversationOn()
+              ? "End hands-free conversation"
+              : conversationSupported()
+                ? "Hands-free: speak, and it listens between turns"
+                : conversationDisabledReason()
+          }
+          onClick={toggleConversation}
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <rect x="9" y="2.5" width="6" height="11" rx="3" />
+            <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+            <Show when={conversationOn()}>
+              <circle cx="19" cy="5" r="2.2" />
             </Show>
           </svg>
         </button>
@@ -1313,6 +1608,19 @@ export default function Assistant(props: AssistantProps) {
         is wrong, this line is the only thing that says why the answer is
         about the wrong item.
       */}
+      <Show when={conversationOn()}>
+        <div
+          class="assistant-voice-status"
+          role="status"
+          aria-live="polite"
+          data-testid="voice-status"
+          data-state={voiceState()}
+          data-muted={voiceMuted() ? "yes" : "no"}
+        >
+          <span class="assistant-voice-dot" aria-hidden="true" />
+          {voiceStatusLabel(voiceState(), voiceMuted())}
+        </div>
+      </Show>
       <Show when={speechStatus()}>
         <p role="status" data-testid="speech-status">{speechStatus()}</p>
       </Show>
@@ -1354,10 +1662,17 @@ export default function Assistant(props: AssistantProps) {
           The mic is shown even when it cannot be used, with the reason in its
           title, rather than hidden — a control that vanishes leaves the reader
           wondering whether voice exists at all.
+
+          In a hands-free conversation the mic is not held: a tap mutes and
+          unmutes, and the button renders the live mute state. The push/tap-to-
+          talk control below is for the rest of the time.
         */}
         <Show
-          when={sttAvailable()}
+          when={conversationOn()}
           fallback={
+            <Show
+              when={sttAvailable()}
+              fallback={
             <button
               type="button"
               class="assistant-mic assistant-mic--off"
@@ -1429,6 +1744,29 @@ export default function Assistant(props: AssistantProps) {
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <rect x="9" y="3" width="6" height="11" rx="3" />
               <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+            </svg>
+          </button>
+            </Show>
+          }
+        >
+          {/* Conversation is on: the mic is a mute toggle, live-labelled. */}
+          <button
+            type="button"
+            class="assistant-mic"
+            data-testid="mic-mute"
+            data-muted={voiceMuted() ? "yes" : "no"}
+            aria-pressed={voiceMuted()}
+            title={voiceMuted() ? "Muted — tap to unmute (or press M)" : "Tap to mute (or press M)"}
+            aria-label={voiceMuted() ? "Unmute conversation" : "Mute conversation"}
+            onClick={() => conversation?.toggleMute()}
+            style={{ "touch-action": "none", ...(voiceMuted() ? { opacity: 0.55 } : {}) }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <rect x="9" y="3" width="6" height="11" rx="3" />
+              <path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" />
+              <Show when={voiceMuted()}>
+                <path d="M4 4 20 20" />
+              </Show>
             </svg>
           </button>
         </Show>
