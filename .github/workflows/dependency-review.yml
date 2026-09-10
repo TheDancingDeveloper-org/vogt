@@ -1,0 +1,40 @@
+# Dependency review — the workflow that was missing.
+#
+# `main`'s branch protection has required the status check **`dependency
+# review`** for some time, but no workflow produced it. A required context that
+# nothing posts is never satisfied, so *every* pull request to `main` sat at
+# BLOCKED regardless of its own green checks (`enforce_admins` is on, so not
+# even an admin merge cleared it). This restores the intended supply-chain gate
+# rather than removing the requirement: the job below is named exactly
+# `dependency review`, so the check it posts matches the required context.
+#
+# The action reviews only the dependencies a PR actually changes (base..head),
+# so a PR that touches no manifests passes at once. Public repo, so the
+# dependency graph the action reads is available without GitHub Advanced
+# Security. Self-hosted runner and fully-pinned actions, per `runner-policy`.
+
+name: dependency review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    # This name is load-bearing: it is the required status-check context on
+    # `main`. Do not rename it without updating branch protection in lockstep.
+    name: dependency review
+    runs-on: [self-hosted]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: review changed dependencies
+        uses: actions/dependency-review-action@3b139cfc5fae8b618d3eae3675e383bb1769c019
+        with:
+          # A real gate, not a rubber stamp, but scoped to what a PR introduces:
+          # fail on a newly added high/critical-severity dependency. Licence
+          # policy is left to Dependabot/CodeQL; this is the vulnerability gate.
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
