@@ -9,6 +9,7 @@ import {
   activityClass,
   activityLabel,
   attentionRank,
+  holdRailOrder,
   sessionStateWord,
   sortSessionsForRail,
   sortSessionsByAttention,
@@ -88,5 +89,29 @@ describe("attention order", () => {
     ];
     expect(sortSessionsForRail(rows, new Set(["idle-old"])).map((row) => row.id))
       .toEqual(["idle-old", "waiting", "idle-new"]);
+  });
+});
+
+describe("holdRailOrder (frozen rail while a menu is open)", () => {
+  it("keeps the previous order even when the fresh sort would reshuffle", () => {
+    const previous = [session({ id: "a" }), session({ id: "b" }), session({ id: "c" })];
+    // A newly-active "c" would jump to the front of a fresh attention sort.
+    const current = [session({ id: "c" }), session({ id: "a" }), session({ id: "b" })];
+    expect(holdRailOrder(previous, current).map((s) => s.id)).toEqual(["a", "b", "c"]);
+  });
+
+  it("adopts the fresh object for each id so row data still updates", () => {
+    const previous = [session({ id: "a", name: "old" })];
+    const current = [session({ id: "a", name: "new" })];
+    const held = holdRailOrder(previous, current);
+    expect(held[0]).toBe(current[0]);
+    expect(held[0]?.name).toBe("new");
+  });
+
+  it("drops a session that vanished and appends one that appeared", () => {
+    const previous = [session({ id: "a" }), session({ id: "b" })];
+    const current = [session({ id: "b" }), session({ id: "c" })];
+    // "a" gone, "b" holds its spot, brand-new "c" lands at the end.
+    expect(holdRailOrder(previous, current).map((s) => s.id)).toEqual(["b", "c"]);
   });
 });

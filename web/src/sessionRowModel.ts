@@ -97,3 +97,40 @@ export function sortSessionsForRail(
     (left, right) => Number(bookmarked.has(right.id)) - Number(bookmarked.has(left.id)),
   );
 }
+
+/**
+ * Keep `previous`'s row ORDER while adopting `current`'s membership and data.
+ *
+ * The rail re-sorts by attention/recency on every activity change (see
+ * `sortSessionsForRail`). That is right when the user is only reading the list,
+ * but wrong the instant they are acting on a row: a reshuffle slides the row —
+ * and its open action menu — out from under the pointer, so the next click
+ * (e.g. Rename) lands on whatever session took its place. Holding the order
+ * steady during that interaction is what keeps the action on the session the
+ * user aimed at.
+ *
+ * Order comes from `previous`; the object for each id and the set of live ids
+ * come from `current`, so a row that vanished is dropped and one that appeared
+ * is appended (kept truthful without reshuffling what is already shown). The
+ * returned objects are `current`'s, so each row still shows fresh data even
+ * when the underlying list was rebuilt with new references.
+ */
+export function holdRailOrder(
+  previous: readonly SessionSummary[],
+  current: readonly SessionSummary[],
+): SessionSummary[] {
+  const byId = new Map(current.map((s) => [s.id, s]));
+  const held: SessionSummary[] = [];
+  const seen = new Set<string>();
+  for (const prev of previous) {
+    const fresh = byId.get(prev.id);
+    if (fresh && !seen.has(prev.id)) {
+      held.push(fresh);
+      seen.add(prev.id);
+    }
+  }
+  for (const s of current) {
+    if (!seen.has(s.id)) held.push(s);
+  }
+  return held;
+}

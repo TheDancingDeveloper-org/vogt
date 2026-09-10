@@ -116,6 +116,7 @@ import { startPrewarm } from "./terminalPrewarm";
 import {
   activityClass,
   activityLabel,
+  holdRailOrder,
   sessionActivityAge,
   sessionStateWord,
   sortSessionsForRail,
@@ -377,13 +378,23 @@ const App: Component = () => {
         : "loading",
   });
   const railNow = createNow(30_000);
-  const railSessions = createMemo(() => {
+  const [openMenuId, setOpenMenuId] = createSignal<string | null>(null);
+  // While a row's action menu is open, hold the rail order steady: an
+  // attention/recency reshuffle mid-interaction slides the row (and its menu)
+  // under the pointer, so a click meant for one session's Rename lands on the
+  // one that took its place (#686). `createMemo`'s previous value is the order
+  // already on screen; `holdRailOrder` keeps it while still refreshing each
+  // row by id. When no menu is open the rail sorts normally.
+  const railSessions = createMemo<SessionSummary[]>((prev) => {
     const sessions = sessionsStore.order
       .map((id) => sessionsStore.sessions[id])
       .filter((s): s is SessionSummary => Boolean(s));
-    return sortSessionsForRail(sessions, new Set(bookmarks()));
-  });
-  const [openMenuId, setOpenMenuId] = createSignal<string | null>(null);
+    const sorted = sortSessionsForRail(sessions, new Set(bookmarks()));
+    if (openMenuId() !== null && prev.length > 0) {
+      return holdRailOrder(prev, sorted);
+    }
+    return sorted;
+  }, []);
   const waitingSessionList = () =>
     sessionsStore.ready
       ? sessionsStore.order
