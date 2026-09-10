@@ -1782,9 +1782,36 @@ become instructions.
   space or enter, since a control only pointers can work is one some people
   cannot use. `RECORD_AUDIO` is declared in the manifest; the plugin prompts
   at first use.
-- **TTS** — Web Speech `speechSynthesis`, sentence-chunked, toggle persisted
-  in localStorage. The synth is primed on the toggle gesture because the
-  Android WebView requires a user gesture before the first utterance.
+  A quick tap (as opposed to a hold) opens a **tap-to-talk** take that ends
+  itself: JS owns the silence detection (the dictation-mode end-of-speech is
+  late and untunable), and a grace after the recognizer's own stop includes the
+  final result rather than the last interim guess. A release that lands before
+  the recognizer has finished starting is honoured as a tap, not a stop that
+  would orphan a recognizer that is not up yet.
+- **TTS** — Web Speech `speechSynthesis` when the browser has it (the desktop
+  PWA), sentence-chunked, toggle persisted in localStorage. The synth is primed
+  on the toggle gesture because the Android WebView requires a user gesture
+  before the first utterance. The **Android WebView has no `speechSynthesis`**,
+  so the APK speaks through the server route `POST /api/assistant/tts` — and
+  only when a TTS backend is configured. The engine defaults its speech
+  base-URL lists to empty on purpose, so `assistant_tts_enabled` reads false
+  rather than advertising a mouth that cannot speak (`config.rs`).
+- **Hands-free conversation** — a client-only loop (`web/src/voiceTurn.ts`, a
+  pure state machine) that keeps listening between turns: speak → silence →
+  send → speak the reply → re-open the mic, no touch between turns. States
+  `idle → arming → listening → endpointing → sending → speaking → listening`,
+  plus `paused_for_approval` (a pending write is announced, the mic closed
+  until the on-screen approve/deny — voice still never approves) and a `muted`
+  flag that keeps the session alive. v1 is half-duplex (mic closed while a
+  reply plays; barge-in is v2). Turn detection is client-owned on every
+  backend, tuned by localStorage in the OpenAI Realtime vocabulary so a
+  Realtime-shaped backend adopts it unrenamed:
+  `vogt.assistant.voice.silence_duration_ms` (1000),
+  `final_result_grace_ms` (300), `max_turn_ms` (30000),
+  `idle_timeout_ms` (60000), `max_empty_turns` (3),
+  `interrupt_response` (false in v1). Requires an event-driven recognizer
+  (native plugin or Web Speech) and a TTS path; the server-STT path is excluded
+  in v1 and the control is disabled with its reason.
 
 There is no setting that lets the assistant type without asking. The
 convenience it would buy a trusted single-user setup is outweighed by what it

@@ -457,7 +457,23 @@ and **Approve on screen** can be pressed.
 and an approval is a tap. Push-to-talk is *held*, not toggled — press to open
 the microphone, release to send — because a take auto-sends, and a toggle left
 on in a room with other people does not merely listen. The button is holdable
-from the keyboard as well as by pointer.
+from the keyboard as well as by pointer. A quick tap (rather than a hold) also
+works: it opens the microphone and sends once you go quiet.
+
+**Hands-free conversation.** The head control beside Spoken replies starts a
+hands-free conversation: speak, go quiet, and the turn sends on its own; the
+reply is spoken and the microphone re-opens for the next turn, with no touch
+between them. Turning it on turns Spoken replies on — the mode needs a voice to
+answer with — and it is offered only where the device can both listen and speak
+(the app, or a browser with voice input and speech synthesis), disabled with the
+reason otherwise. A status line reads Listening… / Sending / Speaking / Paused
+for approval / Muted / Ended; in a conversation the microphone button mutes and
+unmutes with a tap (or **M** on the desktop), and a pending write still waits for
+an on-screen approval — the announcement says so and never offers a spoken yes.
+The conversation ends when you turn it off, leave the surface, mute-and-forget it
+past the idle timeout, or hear nothing for a few turns. Turn timing is tunable
+per device through `vogt.assistant.voice.*` browser settings (silence window,
+idle timeout); the defaults suit a phone.
 
 An approved write is audited to **your** actor, using the core token paired with
 the token that pressed approve. There is no shared "assistant" actor to fall
