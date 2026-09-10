@@ -58,7 +58,7 @@ import {
 } from "./voiceTurn";
 import { startBargeInDetection } from "./voiceVad";
 import { diag, diagBoot } from "./diag";
-import { audioContextAvailable, playAudioBlob, primeAudio, type Playback } from "./audioPlayback";
+import { audioContextAvailable, playAudioBlob, primeAudio, suspendAudio, type Playback } from "./audioPlayback";
 
 const TTS_PREF_KEY = "vogt.assistant.tts";
 
@@ -410,9 +410,11 @@ export default function Assistant(props: AssistantProps) {
     speechController = null;
     stopSpeaking();
     // A halted clip never reports "ended" — the loop must not re-open the mic
-    // on top of whatever halted it.
+    // on top of whatever halted it. And release the output stream: the mic
+    // that usually follows a halt must not start behind our own playback.
     currentPlayback?.stop();
     currentPlayback = null;
+    suspendAudio();
   };
 
   /**
@@ -469,6 +471,11 @@ export default function Assistant(props: AssistantProps) {
           onPlaying: (duration) => diag("tts.playing", { via: "webaudio", duration }),
           onEnded: () => {
             diag("tts.ended", { via: "webaudio" });
+            // Release the output stream before the mic re-opens behind it, and
+            // let go of the finished request.
+            suspendAudio();
+            if (speechController === controller) speechController = null;
+            currentPlayback = null;
             // The reply is over: re-open the mic. Natural end only — a clip cut
             // short by the next turn never reports itself finished.
             onDone?.();
@@ -1248,16 +1255,27 @@ export default function Assistant(props: AssistantProps) {
         return;
       }
       await SpeechRecognition.removeAllListeners();
+      let partials = 0;
       await SpeechRecognition.addListener("partialResults", (data) => {
         const best = data.matches?.[0];
-        if (best) conversation?.partial(best);
+        if (!best) return;
+        partials += 1;
+        // The first and then every fifth: proof the mic is alive, cheaply.
+        if (partials === 1 || partials % 5 === 0) diag("rec.partial", { n: partials, len: best.length });
+        conversation?.partial(best);
       });
       await SpeechRecognition.addListener("listeningState", (data) => {
-        if (data.status === "stopped") conversation?.recognizerStopped();
+        diag("rec.state", { status: data.status });
+        if (data.status === "started") conversation?.recognizerStarted();
+        else if (data.status === "stopped") conversation?.recognizerStopped();
       });
       await SpeechRecognition.start({ partialResults: true, popup: false });
+      // Note: with partialResults the plugin resolves start() at once and can
+      // never report a native start failure — hence the loop's watchdog.
+      diag("rec.start", { ok: true });
       conversation?.micReady();
     } catch (e) {
+      diag("rec.start", { ok: false, error: String(e) });
       props.onError(`speech recognition: ${String(e)}`);
       conversation?.end("no_backend");
     }
@@ -1365,6 +1383,7 @@ export default function Assistant(props: AssistantProps) {
       diag("voice.state", { state, muted });
     },
     onEnded: (reason) => endConversation(false, reason),
+    onRecognizerRestart: (attempt) => diag("rec.watchdog-restart", { attempt }),
   };
 
   const toggleConversation = () => {
