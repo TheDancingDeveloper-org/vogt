@@ -341,5 +341,7 @@ def test_the_dev_app_is_telling_apart_on_the_home_screen() -> None:
     )
     # The generated strings must not also be declared statically, or aapt
     # rejects the duplicate — and a static copy would silently win a merge.
-    strings = (MOBILE / "android/app/src/main/res/values/strings.xml").read_text(encoding="utf-8")
-    assert 'name="app_name"' not in strings and 'name="title_activity_main"' not in strings
+    strings_xml = MOBILE / "android/app/src/main/res/values/strings.xml"
+    strings = strings_xml.read_text(encoding="utf-8")
+    assert 'name="app_name"' not in strings
+    assert 'name="title_activity_main"' not in strings
