@@ -1,4 +1,4 @@
-import { Component, Show, For, createEffect, createSignal, onMount } from "solid-js";
+import { Component, Show, For, createEffect, createSignal, on, onMount } from "solid-js";
 import ViewportReadout from "./ViewportReadout";
 import {
   api,
@@ -394,8 +394,14 @@ const Settings: Component<Props> = (props) => {
     }
   });
 
-  createEffect(() => {
-    if (!props.open) return;
+  // Re-initialise from storage when the modal opens — and only then. `on`
+  // pins the dependency to `props.open`: without it the effect also tracked
+  // every signal `validateAuth()` reads synchronously (`token()`, `base()`
+  // via its default parameters), so each keystroke in the token field
+  // re-ran the effect, which reset the field to the stored token and fired
+  // another validation — the token could never be cleared or replaced.
+  createEffect(on(() => props.open, (open) => {
+    if (!open) return;
     setT(getToken());
     setB(getBase());
     setShowToken(false);
@@ -419,7 +425,7 @@ const Settings: Component<Props> = (props) => {
     void refreshAgentClis();
     void refreshBrowserStorage();
     if (getToken()) void validateAuth();
-  });
+  }));
 
   const formatDate = (value: string) => {
     try {
