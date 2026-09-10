@@ -11,7 +11,7 @@ import { setToken } from "../api";
 // Every request the modal makes at open resolves 200 with a minimal JSON
 // body; only the auth checks are counted, since Settings also refreshes
 // operational status, agent CLIs and storage when it opens.
-const fetchMock = vi.fn(async () =>
+const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () =>
   new Response(JSON.stringify({ version: "0.0.0" }), {
     status: 200,
     headers: { "Content-Type": "application/json" },
