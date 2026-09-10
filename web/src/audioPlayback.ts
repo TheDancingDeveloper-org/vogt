@@ -120,6 +120,18 @@ export async function playAudioBlob(blob: Blob, opts: PlayOptions = {}): Promise
   };
 }
 
+/**
+ * Release the output stream. Called when a reply ends or is halted, *before*
+ * the microphone re-opens: Android is touchy about starting speech capture
+ * while the app still holds an active playback stream — the recogniser can
+ * come up silently dead. The next `playAudioBlob` resumes the context.
+ */
+export function suspendAudio(): void {
+  if (context !== null && context.state === "running") {
+    void context.suspend().catch(() => {});
+  }
+}
+
 /** Test seam: forget the shared context. */
 export function resetAudioForTests(): void {
   context = null;

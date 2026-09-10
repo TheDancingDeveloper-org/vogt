@@ -7,7 +7,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { audioContextAvailable, playAudioBlob, primeAudio, resetAudioForTests } from "../audioPlayback";
+import { audioContextAvailable, playAudioBlob, primeAudio, resetAudioForTests, suspendAudio } from "../audioPlayback";
 
 class FakeSource {
   buffer: unknown = null;
@@ -31,6 +31,9 @@ class FakeAudioContext {
   destination = {};
   resume = vi.fn(async () => {
     this.state = "running";
+  });
+  suspend = vi.fn(async () => {
+    this.state = "suspended";
   });
   decodeAudioData = vi.fn(async (buf: ArrayBuffer) => ({ duration: buf.byteLength / 1000 }));
   createBufferSource() {
@@ -98,6 +101,19 @@ describe("Web Audio playback", () => {
     primeAudio();
     expect(FakeAudioContext.instances).toHaveLength(1);
     expect(FakeAudioContext.instances[0]!.resume).toHaveBeenCalled();
+  });
+
+  it("releases the output stream on request, once", async () => {
+    // Called when a reply ends or is halted, before the mic re-opens behind
+    // it. A second call on an already-suspended context is a no-op.
+    await playAudioBlob(new Blob([new Uint8Array(10)]));
+    const ctx = FakeAudioContext.instances[0]!;
+    expect(ctx.state).toBe("running");
+    suspendAudio();
+    expect(ctx.suspend).toHaveBeenCalledTimes(1);
+    suspendAudio();
+    expect(ctx.suspend).toHaveBeenCalledTimes(1);
+    expect(() => suspendAudio()).not.toThrow();
   });
 
   it("is honest when there is no AudioContext at all", () => {

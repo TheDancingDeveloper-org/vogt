@@ -64,6 +64,7 @@ function makePorts() {
     stopSpeaking: () => events.push("stopSpeaking"),
     onChange: (s) => states.push(s),
     onEnded: (r) => events.push(`ended:${r}`),
+    onRecognizerRestart: (n) => events.push(`restart:${n}`),
   };
   const count = (prefix: string) =>
     events.filter((e) => e === prefix || e.startsWith(`${prefix}:`)).length;
@@ -71,7 +72,9 @@ function makePorts() {
 }
 
 function cfg(over: Partial<VoiceConfig> = {}): VoiceConfig {
-  return { ...VOICE_CONFIG_DEFAULTS, ...over };
+  // The older cases assume an immediate re-open and no watchdog; the cases
+  // for those two features set them explicitly.
+  return { ...VOICE_CONFIG_DEFAULTS, reopen_delay_ms: 0, mic_watchdog_ms: 100_000, ...over };
 }
 
 /** Begin and reach `listening` — the common preamble. */
@@ -246,6 +249,88 @@ describe("the hands-free conversation loop", () => {
     vc.micReady();
     expect(vc.getState()).toBe("listening");
     expect(vc.isMuted()).toBe(false);
+  });
+
+  it("waits the settle time before re-opening the mic behind a reply", () => {
+    // Android can bring a recogniser up silently dead if capture starts the
+    // instant the app's own playback stream closes. So a re-open behind a
+    // reply waits `reopen_delay_ms` — and the chip may say Listening… a beat
+    // early; that is fine.
+    const { vc, clock, count } = live({ silence_duration_ms: 100, reopen_delay_ms: 400 });
+    vc.partial("hello");
+    clock.advance(100);
+    vc.replied({ text: "a reply", hasPendingAction: false });
+    const before = count("openMic");
+    vc.speechFinished();
+    expect(vc.getState()).toBe("arming");
+    clock.advance(399);
+    expect(count("openMic")).toBe(before);
+    clock.advance(1);
+    expect(count("openMic")).toBe(before + 1);
+  });
+
+  it("a mute during the settle wait cancels the re-open; unmute opens exactly once", () => {
+    const { vc, clock, count } = live({ silence_duration_ms: 100, reopen_delay_ms: 400 });
+    vc.partial("hello");
+    clock.advance(100);
+    vc.replied({ text: "a reply", hasPendingAction: false });
+    vc.speechFinished(); // arming, re-open pending
+    const before = count("openMic");
+    vc.toggleMute();
+    clock.advance(1000);
+    expect(count("openMic")).toBe(before); // never opened while muted
+    vc.toggleMute();
+    expect(count("openMic")).toBe(before + 1);
+  });
+
+  it("ending during the settle wait tears down at once — no mic in flight to protect", () => {
+    const { vc, clock, events, count } = live({ silence_duration_ms: 100, reopen_delay_ms: 400 });
+    vc.partial("hello");
+    clock.advance(100);
+    vc.replied({ text: "a reply", hasPendingAction: false });
+    vc.speechFinished(); // arming, re-open pending
+    const before = count("openMic");
+    vc.end("user");
+    expect(vc.getState()).toBe("ended");
+    expect(events).toContain("ended:user");
+    clock.advance(1000);
+    expect(count("openMic")).toBe(before); // the pending re-open was cancelled
+  });
+
+  it("restarts a silently dead mic when the watchdog fires, bounded by max_mic_restarts", () => {
+    // The plugin resolves start() at once and cannot report a native failure,
+    // so a mic that reports nothing at all is restarted — a couple of times —
+    // then max_turn / idle take over as before.
+    const { vc, clock, events, count } = live({
+      mic_watchdog_ms: 1000,
+      max_mic_restarts: 2,
+      max_turn_ms: 100_000,
+    });
+    expect(count("openMic")).toBe(1);
+    clock.advance(1000); // nothing arrived
+    expect(events).toContain("restart:1");
+    expect(count("closeMic")).toBe(1);
+    expect(count("openMic")).toBe(2);
+    vc.micReady();
+    clock.advance(1000);
+    expect(events).toContain("restart:2");
+    expect(count("openMic")).toBe(3);
+    vc.micReady();
+    clock.advance(1000);
+    expect(count("openMic")).toBe(3); // capped
+    expect(vc.getState()).toBe("listening");
+  });
+
+  it("disarms the watchdog as soon as the mic proves alive", () => {
+    const a = live({ mic_watchdog_ms: 1000, silence_duration_ms: 5000, max_turn_ms: 100_000 });
+    a.vc.recognizerStarted(); // speech began: alive
+    a.clock.advance(1000);
+    expect(a.count("openMic")).toBe(1);
+
+    const b = live({ mic_watchdog_ms: 1000, silence_duration_ms: 5000, max_turn_ms: 100_000 });
+    b.vc.partial("hi"); // something arrived: alive
+    b.clock.advance(1000);
+    expect(b.count("openMic")).toBe(1);
   });
 
   it("keeps the session alive when muted, and captures nothing until unmuted", () => {

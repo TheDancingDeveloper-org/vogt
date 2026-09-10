@@ -68,6 +68,18 @@ export interface VoiceConfig {
    *  (no echo-safe capture on the WebView path); the machine is built so it can
    *  turn on in v2 without a transition change. */
   interrupt_response: boolean;
+  /** Settle time between a reply ending and the mic re-opening. Android is
+   *  touchy about starting speech capture the instant the app's own playback
+   *  stream closes; a short gap avoids a recogniser that comes up silently
+   *  dead (the plugin cannot report that: its start call has already resolved). */
+  reopen_delay_ms: number;
+  /** A freshly opened mic that reports nothing at all — no partial, no
+   *  speech start, no stop — for this long is treated as silently dead and
+   *  restarted. A quiet speaker just gets a fresh recogniser; a dead one gets
+   *  a working one. */
+  mic_watchdog_ms: number;
+  /** Most watchdog restarts per turn before deferring to max_turn / idle. */
+  max_mic_restarts: number;
 }
 
 export const VOICE_CONFIG_DEFAULTS: VoiceConfig = {
@@ -77,6 +89,9 @@ export const VOICE_CONFIG_DEFAULTS: VoiceConfig = {
   idle_timeout_ms: 60_000,
   max_empty_turns: 3,
   interrupt_response: false,
+  reopen_delay_ms: 400,
+  mic_watchdog_ms: 8000,
+  max_mic_restarts: 2,
 };
 
 const VOICE_CFG_PREFIX = "vogt.assistant.voice.";
@@ -112,6 +127,9 @@ export function readVoiceConfig(
     idle_timeout_ms: num("idle_timeout_ms", VOICE_CONFIG_DEFAULTS.idle_timeout_ms),
     max_empty_turns: num("max_empty_turns", VOICE_CONFIG_DEFAULTS.max_empty_turns),
     interrupt_response: bool("interrupt_response", VOICE_CONFIG_DEFAULTS.interrupt_response),
+    reopen_delay_ms: num("reopen_delay_ms", VOICE_CONFIG_DEFAULTS.reopen_delay_ms),
+    mic_watchdog_ms: num("mic_watchdog_ms", VOICE_CONFIG_DEFAULTS.mic_watchdog_ms),
+    max_mic_restarts: num("max_mic_restarts", VOICE_CONFIG_DEFAULTS.max_mic_restarts),
   };
 }
 
@@ -147,6 +165,9 @@ export interface VoicePorts {
   onChange(state: VoiceState, muted: boolean): void;
   /** The conversation ended; `reason` is why. The host turns the toggle off. */
   onEnded(reason: EndReason): void;
+  /** The watchdog restarted a silently dead recogniser (attempt n). Optional;
+   *  for diagnostics. */
+  onRecognizerRestart?(attempt: number): void;
 }
 
 /** A tiny timer seam so tests drive time deterministically. Real one below. */
@@ -187,6 +208,10 @@ export class VoiceConversation {
   // not open a second one. (Muting while arming used to strand the session:
   // the mic was closed mid-startup and unmute never reopened it.)
   private micOpening = false;
+  // The settle wait before a re-open, and the dead-mic watchdog for a turn.
+  private reopenTimer: number | null = null;
+  private watchdogTimer: number | null = null;
+  private micRestarts = 0;
 
   constructor(
     private readonly ports: VoicePorts,
@@ -212,8 +237,9 @@ export class VoiceConversation {
     if (this.isActive()) return;
     this.muted = false;
     this.emptyTurns = 0;
+    this.micRestarts = 0;
     this.endRequestedWhileArming = null;
-    this.arm();
+    this.arm(0);
   }
 
   /** The recogniser is live and capturing (host confirms `openMic` succeeded). */
@@ -239,9 +265,17 @@ export class VoiceConversation {
       return;
     }
     this.enter("listening");
-    // The turn's hard ceiling, and the session idle clock, both start now.
+    // The turn's hard ceiling, and the session idle clock, both start now —
+    // and the watchdog that catches a recogniser that came up dead.
     this.armMaxTurn();
     this.armIdle();
+    this.armWatchdog();
+  }
+
+  /** The recogniser heard speech begin (`listeningState: started`): it is
+   *  alive, so the dead-mic watchdog stands down for this turn. */
+  recognizerStarted(): void {
+    if (this.state === "listening" || this.state === "endpointing") this.clearWatchdog();
   }
 
   /** A partial transcript arrived. Captures the best text and rearms the turn's
@@ -258,6 +292,7 @@ export class VoiceConversation {
       this.armMaxTurn();
     }
     if (text.trim()) this.text = text.trim();
+    this.clearWatchdog(); // something is arriving: the mic is alive
     // In the grace window after the recogniser's own stop, a late partial is
     // the final (best) result: capture it and let the grace timer fire. Do not
     // rearm the long silence window — the turn has already ended.
@@ -273,6 +308,7 @@ export class VoiceConversation {
     if (this.closingMic) return;
     if (this.muted) return;
     if (this.state !== "listening" && this.state !== "endpointing") return;
+    this.clearWatchdog();
     this.enter("endpointing");
     this.clearSilence();
     this.silenceTimer = this.clock.set(() => this.endpoint(), this.cfg.final_result_grace_ms);
@@ -333,7 +369,10 @@ export class VoiceConversation {
     if (this.muted) {
       this.clearSilence();
       this.clearMaxTurn();
-      // While arming the recogniser is not up yet; `micReady` will close it.
+      // While arming the recogniser is not up yet; `micReady` will close it —
+      // and a re-open still waiting its settle time must not happen at all.
+      this.clearReopen();
+      this.clearWatchdog();
       if (this.state !== "arming") this.closeMic();
       // The idle clock keeps running while muted: a muted session left forever
       // still ends.
@@ -344,12 +383,9 @@ export class VoiceConversation {
     // mic is already on its way up (let `micReady` land) or `arm` skipped
     // opening one because we were muted then — open it now, exactly once.
     if (this.state === "listening" || this.state === "endpointing") {
-      this.arm();
+      this.arm(0); // unmute: a fresh turn, at once — nothing just played
     } else if (this.state === "arming") {
-      if (!this.micOpening) {
-        this.micOpening = true;
-        this.ports.openMic();
-      }
+      if (!this.micOpening) this.openMicNow();
       this.emit();
     } else {
       this.emit();
@@ -366,9 +402,11 @@ export class VoiceConversation {
       }
       return;
     }
-    if (this.state === "arming") {
+    if (this.state === "arming" && this.micOpening) {
       // The mic is still coming up; remember the end and apply it at micReady,
-      // rather than closing a recogniser that is not up yet.
+      // rather than closing a recogniser that is not up yet. (Arming with no
+      // mic in flight — a settle wait, or muted — has nothing to protect and
+      // ends at once below.)
       this.endRequestedWhileArming = reason;
       return;
     }
@@ -382,13 +420,38 @@ export class VoiceConversation {
 
   // -- internal transitions ----------------------------------------------
 
-  /** Open the mic for a turn (or wait, if muted). */
-  private arm(): void {
+  /** Open the mic for a turn (or wait, if muted) — after `delayMs` of settle
+   *  time when re-opening behind the app's own playback. */
+  private arm(delayMs: number): void {
     this.enter("arming");
     this.armIdle();
+    this.clearReopen();
     if (this.muted) return; // a muted session sits armed until unmuted
+    if (delayMs > 0) {
+      this.reopenTimer = this.clock.set(() => {
+        this.reopenTimer = null;
+        this.openMicNow();
+      }, delayMs);
+      return;
+    }
+    this.openMicNow();
+  }
+
+  private openMicNow(): void {
+    if (this.muted || this.state !== "arming") return;
     this.micOpening = true;
     this.ports.openMic();
+  }
+
+  /** The watchdog fired: nothing at all arrived from a mic the host said was
+   *  open. Restart it (bounded), then defer to max_turn / idle. */
+  private onWatchdog(): void {
+    if (this.state !== "listening" || this.muted) return;
+    if (this.micRestarts >= this.cfg.max_mic_restarts) return;
+    this.micRestarts += 1;
+    this.ports.onRecognizerRestart?.(this.micRestarts);
+    this.closeMic();
+    this.arm(this.cfg.reopen_delay_ms);
   }
 
   /** The turn ended: send what was heard, or count an empty turn. */
@@ -413,13 +476,14 @@ export class VoiceConversation {
     }
     // Try again: a fresh turn on the same open session.
     this.closeMic();
-    this.arm();
+    this.arm(this.cfg.reopen_delay_ms);
   }
 
   /** Reopen the mic after a reply (or a no-op reply / failed send). */
   private resumeListening(): void {
     this.text = "";
-    this.arm();
+    this.micRestarts = 0;
+    this.arm(this.cfg.reopen_delay_ms);
   }
 
   private enter(state: VoiceState): void {
@@ -472,10 +536,31 @@ export class VoiceConversation {
       this.idleTimer = null;
     }
   }
+  private armWatchdog(): void {
+    this.clearWatchdog();
+    this.watchdogTimer = this.clock.set(() => {
+      this.watchdogTimer = null;
+      this.onWatchdog();
+    }, this.cfg.mic_watchdog_ms);
+  }
+  private clearWatchdog(): void {
+    if (this.watchdogTimer !== null) {
+      this.clock.clear(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+  }
+  private clearReopen(): void {
+    if (this.reopenTimer !== null) {
+      this.clock.clear(this.reopenTimer);
+      this.reopenTimer = null;
+    }
+  }
   private clearAll(): void {
     this.clearSilence();
     this.clearMaxTurn();
     this.clearIdle();
+    this.clearWatchdog();
+    this.clearReopen();
   }
 }
 

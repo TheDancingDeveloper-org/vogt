@@ -476,6 +476,7 @@ describe("hands-free conversation", () => {
   beforeEach(() => {
     for (const fn of Object.values(recognition)) fn.mockClear();
     localStorage.removeItem("vogt.assistant.voice.silence_duration_ms");
+    localStorage.removeItem("vogt.assistant.voice.reopen_delay_ms");
   });
 
   it("is disabled, with a reason, when there is nothing to speak with", async () => {
@@ -508,6 +509,7 @@ describe("hands-free conversation", () => {
   it("runs a whole turn hands-free: sends on silence, speaks the reply, re-opens the mic", async () => {
     const speech = captureConversationSpeech();
     localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "0");
+    localStorage.setItem("vogt.assistant.voice.reopen_delay_ms", "0"); // re-open at once under settle()
     const { container } = await mountAssistant({
       "POST /api/assistant/message": {
         body: {

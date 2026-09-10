@@ -1814,7 +1814,10 @@ become instructions.
   adopts it unrenamed: `vogt.assistant.voice.silence_duration_ms` (1000),
   `final_result_grace_ms` (300), `max_turn_ms` (30000),
   `idle_timeout_ms` (60000), `max_empty_turns` (3),
-  `interrupt_response` (false). Requires an event-driven recognizer
+  `interrupt_response` (false), `reopen_delay_ms` (400 — settle time before
+  the mic re-opens behind the app's own playback; Android can otherwise bring
+  the recognizer up silently dead), `mic_watchdog_ms` (8000 — a freshly opened
+  mic that reports nothing is restarted), `max_mic_restarts` (2). Requires an event-driven recognizer
   (native plugin or Web Speech) and a TTS path; the server-STT path is excluded
   and the control is disabled with its reason.
 - **Barge-in** (opt-in, `interrupt_response=1`) — the speaker can talk over a
