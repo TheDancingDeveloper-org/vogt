@@ -5409,6 +5409,113 @@ test("A spoken reply whose TTS route is unconfigured shows the fallback notice w
   await expect(page.getByTestId("speech-status")).toHaveText(/Spoken replies are unavailable/);
 });
 
+/**
+ * Steer the browser onto a *controllable* on-device recognizer and synthesis,
+ * so a hands-free conversation can be driven turn by turn. `__vogtVoice.say`
+ * emits a partial into the live recognizer; the fake synth captures the spoken
+ * text and fires the utterance's `onend`, which is what re-opens the mic. A
+ * short silence window ends a turn promptly without a wall-clock wait.
+ */
+async function primeConversationEnv(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    localStorage.setItem("vogt.assistant.tts", "1");
+    localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "80");
+    const state: { starts: number; spoken: string[]; current: unknown } = {
+      starts: 0,
+      spoken: [],
+      current: null,
+    };
+    class FakeRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = "";
+      onresult: ((e: unknown) => void) | null = null;
+      onend: (() => void) | null = null;
+      onerror: ((e: unknown) => void) | null = null;
+      start() {
+        state.starts += 1;
+        state.current = this;
+      }
+      stop() {
+        this.onend?.();
+      }
+      abort() {
+        this.onend?.();
+      }
+    }
+    const w = window as unknown as {
+      webkitSpeechRecognition?: unknown;
+      SpeechRecognition?: unknown;
+      SpeechSynthesisUtterance?: unknown;
+      __vogtVoice?: unknown;
+    };
+    w.webkitSpeechRecognition = FakeRecognition;
+    delete w.SpeechRecognition;
+    class FakeUtterance {
+      text: string;
+      onend: (() => void) | null = null;
+      constructor(text: string) {
+        this.text = text;
+      }
+    }
+    w.SpeechSynthesisUtterance = FakeUtterance;
+    Object.defineProperty(window, "speechSynthesis", {
+      configurable: true,
+      value: {
+        speak: (u: { text?: string; onend?: (() => void) | null }) => {
+          if (u?.text) state.spoken.push(u.text);
+          if (u?.onend) setTimeout(() => u.onend?.(), 0);
+        },
+        cancel: () => {},
+      },
+    });
+    w.__vogtVoice = {
+      state,
+      say(text: string) {
+        const r = state.current as { onresult?: (e: unknown) => void } | null;
+        r?.onresult?.({ results: { length: 1, 0: { length: 1, 0: { transcript: text } } } });
+      },
+    };
+  });
+}
+
+test("Assistant hands-free conversation: sends on silence, speaks the reply, and re-opens the mic with no touch", async ({ page }) => {
+  await primeConversationEnv(page);
+  await installFixtures(page, { assistant_enabled: true });
+  const sent: string[] = [];
+  await page.route("**/api/assistant/message", async (route) => {
+    sent.push(JSON.parse(route.request().postData() ?? "{}").text as string);
+    await route.fulfill({
+      json: { reply: "On top is the forge adapter.", pending_action: null, tool_trace: [] },
+    });
+  });
+
+  await openVoiceAssistant(page);
+
+  // Turn hands-free on: the mic opens itself, and the status chip goes live.
+  await page.getByTestId("assistant-conversation").click();
+  await expect(page.getByTestId("assistant-conversation")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByTestId("voice-status")).toBeVisible();
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { starts: number } } }).__vogtVoice.state.starts))
+    .toBeGreaterThanOrEqual(1);
+
+  // Speak, then go quiet: the silence window ends the turn and sends it — no
+  // button pressed. The transcript that crossed the wire is what was heard.
+  await page.evaluate(() => (window as unknown as { __vogtVoice: { say(t: string): void } }).__vogtVoice.say("what is on top"));
+  await expect.poll(() => sent).toContain("what is on top");
+  await expect(page.getByText("On top is the forge adapter.")).toBeVisible();
+
+  // The reply is spoken and, when it finishes, the mic re-opens for the next
+  // turn on its own — the half a device demo cannot show you.
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { spoken: string[] } } }).__vogtVoice.state.spoken))
+    .toContain("On top is the forge adapter.");
+  await expect
+    .poll(() => page.evaluate(() => (window as unknown as { __vogtVoice: { state: { starts: number } } }).__vogtVoice.state.starts))
+    .toBeGreaterThanOrEqual(2);
+});
+
 for (const mouseTracking of [false, true]) {
   test(`terminal swipe owns ${mouseTracking ? "reports wheels to a normal-buffer application" : "moves saved rows once"}`, async ({ page, context }) => {
     test.skip(test.info().project.name !== "phone", "Touch input needs the phone context");
