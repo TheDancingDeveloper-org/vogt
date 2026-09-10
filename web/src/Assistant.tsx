@@ -1,9 +1,17 @@
 // Conversational assistant tab: transcript + composer, optional voice.
 //
-// Voice support is progressive: TTS uses Web Speech `speechSynthesis`
-// (available in browsers and the Android WebView); STT uses the
-// @capacitor-community/speech-recognition native plugin and therefore only
-// appears inside the Capacitor APK. Everything degrades to typed input.
+// Voice support is progressive and chosen by capability, not by platform name:
+//  - TTS uses the browser's Web Speech `speechSynthesis` when it exists (the
+//    desktop PWA). The Android WebView has *no* `speechSynthesis`, so the APK
+//    speaks through the server route `POST /api/assistant/tts` instead — and
+//    only when a TTS backend is configured. With none, the reply is shown, not
+//    spoken: the engine defaults its speech base-URL lists to empty on purpose,
+//    so `assistant_tts_enabled` reads false rather than advertising a mouth
+//    that cannot speak (see `engine/server/src/config.rs`).
+//  - STT prefers the @capacitor-community/speech-recognition native plugin
+//    (APK only), then the browser's Web Speech recognizer, then the server
+//    pipeline (MediaRecorder → `POST /api/assistant/stt`) for a client with
+//    neither. Everything degrades to typed input.
 import {
   createEffect,
   createSignal,
@@ -43,6 +51,23 @@ import {
 } from "./voiceService";
 
 const TTS_PREF_KEY = "vogt.assistant.tts";
+
+/** Voice-turn tuning lives under one localStorage namespace, so any deployment
+ *  can tune a take's silence window without a rebuild — and the hands-free
+ *  conversation mode (WI-174) reads the same keys. Generic defaults, no vendor
+ *  or estate specifics; a missing or malformed value falls back rather than
+ *  throwing (private windows and locked-down browsers make reads fail). */
+const VOICE_CFG_PREFIX = "vogt.assistant.voice.";
+function voiceMs(key: string, fallback: number): number {
+  try {
+    const raw = localStorage.getItem(VOICE_CFG_PREFIX + key);
+    if (raw === null) return fallback;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : fallback;
+  } catch {
+    return fallback;
+  }
+}
 
 /** How long the server holds a pending action before it expires. The
  *  card counts down against this so an approval you can no longer make stops
@@ -562,6 +587,7 @@ export default function Assistant(props: AssistantProps) {
       profile: profile(),
     });
     haltSpeech();
+    clearSilence();
     transcriptionController?.abort();
     inFlight()?.abort();
     // Leaving the surface ends the conversation, so release the held service
@@ -735,6 +761,47 @@ export default function Assistant(props: AssistantProps) {
   let serverChunks: Blob[] = [];
   let abandonServer = false;
 
+  // Tap-to-talk, and the startup race it fixes (WI-173). A press opens the
+  // take; a release that lands *after* the native recognizer is up ends it
+  // (push-to-talk), and a release that lands *before* `start()` resolved is not
+  // a stop at all — the recognizer is not listening yet, so tearing it down
+  // there is what orphaned it and stripped the very listeners that same startup
+  // had just added. Such a release is deferred and the take runs on, ended by
+  // silence instead: the tap-to-talk the design has always promised.
+  let held = false; // the mic button is physically down right now
+  let nativeStarting = false; // committed to a native take, `start()` not yet resolved
+  // The JS-owned silence detector. The Android recognizer's own end-of-speech
+  // is late and untunable in dictation mode, so a tap's turn ends here: a timer
+  // rearmed on every partial result, firing once the transcript stops changing.
+  let silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearSilence = () => {
+    if (silenceTimer !== null) {
+      clearTimeout(silenceTimer);
+      silenceTimer = null;
+    }
+  };
+  // Rearm the silence timer for a tap. Skipped while the button is held: a hold
+  // *is* the take's length, so a mid-sentence pause must not end it.
+  const armSilence = () => {
+    if (held) return;
+    clearSilence();
+    silenceTimer = setTimeout(() => {
+      silenceTimer = null;
+      void stopListening();
+    }, voiceMs("silence_duration_ms", 1000));
+  };
+  // The recognizer stopped on its own (usually the speaker went quiet). End the
+  // take, but after a short grace, because the plugin fires `listeningState:
+  // stopped` *before* the final, best result — delivered as one last
+  // `partialResults`. Ending immediately would send the last interim guess.
+  const endTakeAfterFinal = () => {
+    clearSilence();
+    silenceTimer = setTimeout(() => {
+      silenceTimer = null;
+      void stopListening();
+    }, voiceMs("final_result_grace_ms", 300));
+  };
+
   const closeRecognizer = async () => {
     setListening(false);
     if (sttBackend === "web") {
@@ -774,7 +841,12 @@ export default function Assistant(props: AssistantProps) {
   /** End the take and send what was said. */
   const stopListening = async () => {
     if (!takeOpen) return;
+    // A release during native startup is not a stop: the recognizer is not up
+    // yet, so tearing it down here is what orphaned it. Leave the take open and
+    // let silence (or the recognizer's own stop) end it — tap-to-talk.
+    if (nativeStarting) return;
     takeOpen = false;
+    clearSilence();
     await closeRecognizer();
     // The server pipeline sends from the recorder's `onstop` once the audio has
     // been transcribed, not from the draft — there is nothing in the composer
@@ -802,6 +874,7 @@ export default function Assistant(props: AssistantProps) {
   /** End the take and send nothing — for leaving the surface mid-sentence. */
   const abandonTake = async () => {
     takeOpen = false;
+    clearSilence();
     // Tell the server recorder's `onstop` to drop the audio rather than post it.
     abandonServer = true;
     await closeRecognizer();
@@ -943,27 +1016,46 @@ export default function Assistant(props: AssistantProps) {
         return;
       }
       haltSpeech();
+      // Commit to the take, then wire and start with no teardown in between: a
+      // release that lands mid-startup is deferred by `stopListening` (which
+      // sees `nativeStarting`) rather than run against a half-built recognizer,
+      // and `removeAllListeners` only ever runs *before* our listeners — so it
+      // cannot strip the pair this same startup just added.
       takeOpen = true;
+      nativeStarting = true;
       setListening(true);
       await SpeechRecognition.removeAllListeners();
       await SpeechRecognition.addListener("partialResults", (data) => {
         const best = data.matches?.[0];
-        if (best) setDraft(best);
+        if (best) {
+          setDraft(best);
+          // Each new partial resets the silence clock: a tap ends its turn a
+          // beat after the transcript stops changing.
+          armSilence();
+        }
       });
       await SpeechRecognition.addListener("listeningState", (data) => {
-        // The other end of the take: the recognizer gave up before the
-        // button was released, usually because the speaker went quiet. Same
-        // path, so what was said is sent once and only once.
-        if (data.status === "stopped") void stopListening();
+        // The other end of the take: the recognizer gave up before the button
+        // was released, usually because the speaker went quiet. Ended through
+        // the one `stopListening`, after a grace for the final result, so what
+        // was said is sent once and only once.
+        if (data.status === "stopped") endTakeAfterFinal();
       });
       await SpeechRecognition.start({
         partialResults: true,
         popup: false,
       });
     } catch (e) {
+      nativeStarting = false;
+      takeOpen = false;
       setListening(false);
       props.onError(`speech recognition: ${String(e)}`);
+      return;
     }
+    // Startup is done: a release that arrives from here on ends the take at once
+    // (push-to-talk), and any release that already landed was deferred and now
+    // leaves the take running until silence — the tap.
+    nativeStarting = false;
   };
 
   return (
@@ -1300,11 +1392,21 @@ export default function Assistant(props: AssistantProps) {
               // finger that slides while speaking is ordinary; a microphone
               // that stays open because of it is not.
               e.currentTarget.setPointerCapture?.(e.pointerId);
+              held = true;
               void startListening();
             }}
-            onPointerUp={() => void stopListening()}
-            onPointerCancel={() => void stopListening()}
-            onLostPointerCapture={() => void stopListening()}
+            onPointerUp={() => {
+              held = false;
+              void stopListening();
+            }}
+            onPointerCancel={() => {
+              held = false;
+              void stopListening();
+            }}
+            onLostPointerCapture={() => {
+              held = false;
+              void stopListening();
+            }}
             onKeyDown={(e) => {
               // Hold-to-talk is a pointer idiom, and a button that only
               // answers to pointers is a button some people cannot use. Space
@@ -1312,12 +1414,14 @@ export default function Assistant(props: AssistantProps) {
               // auto-repeat from restarting the recognizer every 30ms.
               if ((e.key === " " || e.key === "Enter") && !e.repeat) {
                 e.preventDefault();
+                held = true;
                 void startListening();
               }
             }}
             onKeyUp={(e) => {
               if (e.key === " " || e.key === "Enter") {
                 e.preventDefault();
+                held = false;
                 void stopListening();
               }
             }}
