@@ -2,6 +2,7 @@ import { createSignal } from "solid-js";
 import { createStore, produce } from "solid-js/store";
 import type { ActivityState, SessionSummary, ServerEvent } from "./api";
 import { api, subscribeEvents } from "./api";
+import { recordTransportSuccess } from "./connectionHealth";
 import { getStoragePrefs } from "./storagePrefs";
 import { noteForeground, onWake, reconcile, type Wake } from "./wakeCoordinator";
 
@@ -225,6 +226,11 @@ function noteStreamAlive(): void {
   reconnectAttempts = 0;
   markAnswered();
   armStaleTimer();
+  // The stream is the one reader that keeps probing while the transport breaker
+  // is open (its own bounded reconnect backoff is the probe cadence). A live
+  // stream means the connection has been replaced, so close the breaker and let
+  // the paused pollers resume (#681).
+  recordTransportSuccess();
 }
 
 function nextReconnectDelay(): number {

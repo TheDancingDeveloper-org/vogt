@@ -27,6 +27,11 @@
 //     keep what it has, tell the reader — and every foreground surface
 //     already has that handling for a `TransportError`.
 
+import {
+  isCircuitOpen,
+  recordTransportFailure,
+  recordTransportSuccess,
+} from "./connectionHealth";
 import { runtimeTransport } from "./runtimeTransport";
 
 /** A transport-level failure: the request never reached a responding server. */
@@ -111,7 +116,12 @@ export async function fetchWithRetry(
   opts: RetryOptions = {},
 ): Promise<Response> {
   const method = (init.method ?? "GET").toUpperCase();
-  const attempts = RETRYABLE_METHODS.has(method) ? (opts.retries ?? 2) + 1 : 1;
+  // A blip keeps its retries; a sustained outage does not. Once the breaker is
+  // open the wire is known-dead, and firing this method's 150/300ms retry burst
+  // only feeds the storm the breaker exists to stop (#681) — so drop to a single
+  // attempt and let the caller (or a paused poller) back off.
+  const retryable = RETRYABLE_METHODS.has(method) && !isCircuitOpen();
+  const attempts = retryable ? (opts.retries ?? 2) + 1 : 1;
   const backoffMs = opts.backoffMs ?? 150;
   const callerSignal = init.signal ?? undefined;
 
@@ -144,20 +154,29 @@ export async function fetchWithRetry(
         ...init,
         ...(attemptSignal ? { signal: attemptSignal } : {}),
       });
-      if (!attemptController) return await request;
-      // Native fetch rejects when the signal is aborted. The race also makes
-      // the contract hold for embedded/demo transports and test doubles that
-      // forget to observe AbortSignal themselves.
-      const aborted = new Promise<Response>((_, reject) => {
-        const rejectOnAbort = () =>
-          reject(
-            attemptSignal?.reason ??
-              new DOMException("The operation was aborted.", "AbortError"),
-          );
-        if (attemptSignal?.aborted) rejectOnAbort();
-        else attemptSignal?.addEventListener("abort", rejectOnAbort, { once: true });
-      });
-      return await Promise.race([request, aborted]);
+      let res: Response;
+      if (!attemptController) {
+        res = await request;
+      } else {
+        // Native fetch rejects when the signal is aborted. The race also makes
+        // the contract hold for embedded/demo transports and test doubles that
+        // forget to observe AbortSignal themselves.
+        const aborted = new Promise<Response>((_, reject) => {
+          const rejectOnAbort = () =>
+            reject(
+              attemptSignal?.reason ??
+                new DOMException("The operation was aborted.", "AbortError"),
+            );
+          if (attemptSignal?.aborted) rejectOnAbort();
+          else attemptSignal?.addEventListener("abort", rejectOnAbort, { once: true });
+        });
+        res = await Promise.race([request, aborted]);
+      }
+      // The server answered (any status — a 5xx still proves the wire is live),
+      // so the connection is healthy: close the breaker if a prior storm had
+      // opened it, and resume the paused pollers.
+      recordTransportSuccess();
+      return res;
     } catch (err) {
       if (isAbort(err, callerSignal, attemptSignal)) throw err;
       lastError = err;
@@ -179,5 +198,8 @@ export async function fetchWithRetry(
       }
     }
   }
+  // Exhausted (or a terminal deadline): a wire-level failure. Feed the breaker
+  // so a run of these opens the circuit and quiets the storm.
+  recordTransportFailure();
   throw new TransportError(lastError);
 }

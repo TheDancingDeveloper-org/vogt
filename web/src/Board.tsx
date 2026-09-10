@@ -95,6 +95,7 @@ import { useLocation, useNavigate, useSearchParams } from "@solidjs/router";
 import { ApiError } from "./api";
 import { openWorkItemTab } from "./tabs";
 import { ViewAgeBadge, createViewAge, honestyToneClass, onVogtLive } from "./viewAge";
+import { isCircuitOpen } from "./connectionHealth";
 import { renderMarkdown } from "./markdown";
 import { MeasuredWindow } from "./measuredWindow";
 import SurfaceHeader from "./SurfaceHeader";
@@ -1445,6 +1446,9 @@ const Board: Component<Props> = (props) => {
       // A hidden tab is not a view anybody is being misled by, and the
       // visibility handler below reconciles the moment it comes back.
       if (typeof document !== "undefined" && document.hidden) return;
+      // A dead connection is not hammered on the poll cadence: the transport
+      // breaker is open, so skip until the event stream has replaced it (#681).
+      if (isCircuitOpen()) return;
       if (pending()) return; // never race a write the user is composing
       void loadItems(true);
     }, seconds * 1000);
