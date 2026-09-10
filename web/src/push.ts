@@ -9,6 +9,7 @@
 // endpoint — see mobile/ when scaffolded.
 
 import { api, getBase, getToken } from "./api";
+import { diag } from "./diag";
 import { Capacitor } from "@capacitor/core";
 import { isDemoMode, runtimeTransport } from "./runtimeTransport";
 
@@ -448,12 +449,20 @@ export async function subscribeNativeFcm(label?: string): Promise<{ id: string }
       registrationHandle = handle;
     }),
     PushNotifications.addListener("registrationError", (err) =>
-      settle(() => rejectToken(new Error(`FCM registration error: ${JSON.stringify(err)}`))),
+      settle(() => {
+        // The native detail (a Java exception, often with a stack) goes to the
+        // client log where it can be read; the person gets one plain line.
+        diag("push.registrationError", { detail: JSON.stringify(err) });
+        rejectToken(new Error("push registration failed on this device (details in the client log)"));
+      }),
     ).then((handle) => {
       errorHandle = handle;
     }),
   ]).catch((err: unknown) => {
-    settle(() => rejectToken(new Error(`FCM listener error: ${JSON.stringify(err)}`)));
+    settle(() => {
+      diag("push.listenerError", { detail: JSON.stringify(err) });
+      rejectToken(new Error("push setup failed on this device (details in the client log)"));
+    });
     throw err;
   });
   timer = setTimeout(

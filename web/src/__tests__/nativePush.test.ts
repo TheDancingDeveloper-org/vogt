@@ -95,7 +95,7 @@ describe("native FCM registration", () => {
       active.set(listener.event, listener.callback);
       listener.resolve(handle());
     }
-    await expect(result).rejects.toThrow("FCM registration error");
+    await expect(result).rejects.toThrow("push registration failed");
     expect(push.register).toHaveBeenCalledTimes(1);
   });
 });
