@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Pre-API-26 fallback for the dev launcher icon (minSdk 23): the adaptive
+     layers flattened into one drawable. -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/ic_launcher_dev_background" />
+        </shape>
+    </item>
+    <item android:drawable="@drawable/ic_launcher_dev_foreground" />
+</layer-list>

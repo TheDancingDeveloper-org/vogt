@@ -18,4 +18,4 @@
   gains a dynamic reference is kept rather than stripped.
 -->
 <resources xmlns:tools="http://schemas.android.com/tools"
-    tools:keep="@mipmap/ic_launcher,@mipmap/ic_launcher_round,@drawable/splash,@color/ic_launcher_background" />
+    tools:keep="@mipmap/ic_launcher,@mipmap/ic_launcher_round,@mipmap/ic_launcher_dev,@mipmap/ic_launcher_dev_round,@drawable/splash,@color/ic_launcher_background,@color/ic_launcher_dev_background" />

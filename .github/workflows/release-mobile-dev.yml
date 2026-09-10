@@ -20,7 +20,7 @@ on:
   workflow_dispatch:
     inputs:
       version_name:
-        description: Informational only — the AAB version comes from the product version in build.gradle
+        description: Informational only — the AAB versionName is <product version>-dev.<run number>, computed in the job
         required: false
         type: string
 
@@ -111,16 +111,37 @@ jobs:
           fi
           python3 -c 'import json,sys; d=json.load(open("mobile/android/app/google-services.json")); pkgs={c.get("client_info",{}).get("android_client_info",{}).get("package_name") for c in d.get("client",[])}; sys.exit(0 if "com.thedancingdeveloper.vogt.dev" in pkgs else "Firebase config has no Android client for com.thedancingdeveloper.vogt.dev")'
 
+      # The dev app is a separate Play record, so its versionCode only has to
+      # climb among dev uploads: product semver code × 10000 + run number
+      # (0.6.2 → 60020000+N). Play refuses a re-upload of a code it has
+      # already seen, and the product version alone moves too rarely for a
+      # dev channel that republishes between releases.
+      - name: dev version code
+        working-directory: mobile
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          IFS=. read -r major minor patch <<<"${version%%-*}"
+          code=$(( (major * 1000000 + minor * 1000 + patch) * 10000 + GITHUB_RUN_NUMBER ))
+          {
+            echo "VOGT_ANDROID_VERSION_CODE=$code"
+            echo "VOGT_ANDROID_VERSION_NAME=${version}-dev.${GITHUB_RUN_NUMBER}"
+          } >> "$GITHUB_ENV"
+          echo "::notice::dev AAB versionCode=$code versionName=${version}-dev.${GITHUB_RUN_NUMBER}"
+
       - name: capacitor sync
         working-directory: mobile
         env:
           VOGT_ANDROID_APP_ID: com.thedancingdeveloper.vogt.dev
+          VOGT_ANDROID_APP_NAME: Vogt Dev
         run: npx cap sync android
 
       - name: bundle and sign the dev AAB
         working-directory: mobile/android
         env:
           VOGT_ANDROID_APP_ID: com.thedancingdeveloper.vogt.dev
+          VOGT_ANDROID_APP_NAME: Vogt Dev
+          VOGT_ANDROID_APP_ICON: dev
         run: |
           set -euo pipefail
           # keystore path + creds come from $GITHUB_ENV (set by the resolve step).

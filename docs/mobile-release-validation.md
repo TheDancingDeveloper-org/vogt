@@ -56,6 +56,25 @@ for the version being shipped.
       (The deterministic native half — clean re-registration, no stale service —
       is covered by `VoiceServiceProcessReclaimTest`.)
 
+### Dev app identity (side-by-side with prod)
+
+The dev shell is a separate Play record and a separate app on the device, so
+it must be telling apart on the home screen, not only by package name. Three
+build inputs carry its identity; `release-mobile-dev.yml` sets all three and
+`release.yml` sets none (prod takes the defaults):
+
+| Variable | Read by | Default | Dev workflow |
+|---|---|---|---|
+| `VOGT_ANDROID_APP_ID` | `build.gradle`, `capacitor.config.ts` | `com.thedancingdeveloper.vogt` | `com.thedancingdeveloper.vogt.dev` |
+| `VOGT_ANDROID_APP_NAME` | `build.gradle` (generates `app_name`), `capacitor.config.ts` | `Vogt` | `Vogt Dev` |
+| `VOGT_ANDROID_APP_ICON` | `build.gradle` (manifest `icon`/`roundIcon`) | `default` | `dev` (amber launcher set, `res/mipmap-*/ic_launcher_dev*`) |
+
+The dev AAB's `versionCode` is `<product semver code> × 10000 + <run number>`
+and its `versionName` is `<product version>-dev.<run number>`, computed in the
+workflow, so a dev re-upload between product releases is never refused for a
+version code Play has already seen. `tests/test_mobile_identity.py` holds
+the three inputs and the workflow to this.
+
 ### Play internal-track / pre-launch report
 
 The Play Console pre-launch report and internal-track validation are an external
