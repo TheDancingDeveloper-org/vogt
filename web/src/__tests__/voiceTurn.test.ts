@@ -172,6 +172,46 @@ describe("the hands-free conversation loop", () => {
     expect(vc.getState()).toBe("arming");
   });
 
+  it("ignores barge-in while a reply plays when interrupt_response is off (the default)", () => {
+    const { vc, clock, count } = live({ silence_duration_ms: 100 });
+    vc.partial("hello");
+    clock.advance(100);
+    vc.replied({ text: "a long spoken reply", hasPendingAction: false });
+    expect(vc.getState()).toBe("speaking");
+    const opensBefore = count("openMic");
+    vc.speechDetected();
+    expect(vc.getState()).toBe("speaking"); // half-duplex: no interruption
+    expect(count("openMic")).toBe(opensBefore);
+  });
+
+  it("barges in when interrupt_response is on: halts the reply and re-opens the mic", () => {
+    const { vc, clock, events, count } = live({
+      silence_duration_ms: 100,
+      interrupt_response: true,
+    });
+    vc.partial("hello");
+    clock.advance(100);
+    vc.replied({ text: "a long spoken reply", hasPendingAction: false });
+    expect(vc.getState()).toBe("speaking");
+    const opensBefore = count("openMic");
+    vc.speechDetected();
+    expect(events).toContain("stopSpeaking");
+    expect(vc.getState()).toBe("arming"); // re-opened to capture the interruption
+    expect(count("openMic")).toBe(opensBefore + 1);
+    // The halted reply's own speechFinished now arrives, and is ignored — we
+    // have already left `speaking`.
+    vc.speechFinished();
+    expect(vc.getState()).toBe("arming");
+  });
+
+  it("does not barge in outside playback, even with interrupt_response on", () => {
+    const { vc } = live({ interrupt_response: true });
+    // In `listening`, a stray VAD onset must not disturb the turn.
+    expect(vc.getState()).toBe("listening");
+    vc.speechDetected();
+    expect(vc.getState()).toBe("listening");
+  });
+
   it("keeps the session alive when muted, and captures nothing until unmuted", () => {
     const { clock, vc, events, count } = live({ silence_duration_ms: 1000 });
     vc.toggleMute();

@@ -56,6 +56,7 @@ import {
   type VoicePorts,
   type VoiceState,
 } from "./voiceTurn";
+import { startBargeInDetection } from "./voiceVad";
 
 const TTS_PREF_KEY = "vogt.assistant.tts";
 
@@ -383,6 +384,11 @@ export default function Assistant(props: AssistantProps) {
   // The hands-free loop, created lazily when Conversation is turned on. Declared
   // here because `applyReply` and `send` feed it their outcomes.
   let conversation: VoiceConversation | null = null;
+  // Whether barge-in (v2) is enabled for this session — read once when the
+  // conversation begins. Gates the echo-cancelled detection capture below; the
+  // machine ignores `speechDetected` when it is off, so this is only to avoid
+  // opening a second mic during playback for nothing.
+  let bargeInEnabled = false;
 
   const haltSpeech = () => {
     speechController?.abort();
@@ -1293,10 +1299,23 @@ export default function Assistant(props: AssistantProps) {
     }
     // Prime the synth inside the user gesture — the Android WebView requires it.
     window.speechSynthesis?.speak(new SpeechSynthesisUtterance(""));
-    conversation = new VoiceConversation(conversationPorts, readVoiceConfig());
+    const cfg = readVoiceConfig();
+    bargeInEnabled = cfg.interrupt_response;
+    conversation = new VoiceConversation(conversationPorts, cfg);
     setConversationOn(true);
     conversation.begin();
   };
+
+  // Barge-in (v2): while a reply is playing and interrupt_response is on, run an
+  // echo-cancelled capture that lets the speaker cut in. An onset halts the
+  // reply and re-opens the mic (the machine's `speechDetected`). The capture is
+  // open only during `speaking`, and torn down the moment that ends — so the
+  // second microphone is never held longer than the reply it listens over.
+  createEffect(() => {
+    if (!conversationOn() || !bargeInEnabled || voiceState() !== "speaking") return;
+    const stop = startBargeInDetection(() => conversation?.speechDetected());
+    onCleanup(stop);
+  });
 
   // Desktop shortcut: `M` mutes/unmutes an active conversation, unless the
   // caret is in a text field (where `m` is just a letter).

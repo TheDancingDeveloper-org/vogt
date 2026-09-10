@@ -1802,16 +1802,24 @@ become instructions.
   `idle → arming → listening → endpointing → sending → speaking → listening`,
   plus `paused_for_approval` (a pending write is announced, the mic closed
   until the on-screen approve/deny — voice still never approves) and a `muted`
-  flag that keeps the session alive. v1 is half-duplex (mic closed while a
-  reply plays; barge-in is v2). Turn detection is client-owned on every
-  backend, tuned by localStorage in the OpenAI Realtime vocabulary so a
-  Realtime-shaped backend adopts it unrenamed:
-  `vogt.assistant.voice.silence_duration_ms` (1000),
+  flag that keeps the session alive. Default is half-duplex (mic closed while a
+  reply plays). Turn detection is client-owned on every backend, tuned by
+  localStorage in the OpenAI Realtime vocabulary so a Realtime-shaped backend
+  adopts it unrenamed: `vogt.assistant.voice.silence_duration_ms` (1000),
   `final_result_grace_ms` (300), `max_turn_ms` (30000),
   `idle_timeout_ms` (60000), `max_empty_turns` (3),
-  `interrupt_response` (false in v1). Requires an event-driven recognizer
+  `interrupt_response` (false). Requires an event-driven recognizer
   (native plugin or Web Speech) and a TTS path; the server-STT path is excluded
-  in v1 and the control is disabled with its reason.
+  and the control is disabled with its reason.
+- **Barge-in** (opt-in, `interrupt_response=1`) — the speaker can talk over a
+  playing reply: while a reply plays, an echo-cancelled `getUserMedia` capture
+  runs a leaky-accumulator onset detector (`voiceVad.ts`, `vad_threshold` 0.045,
+  `vad_onset_ms` 500), and a sustained onset halts the reply (`stopSpeaking`) and
+  re-opens the mic to catch the interruption. The onset logic is a pure module,
+  unit-tested off frame energies; the capture is a thin Web Audio shell that a
+  stronger model (e.g. a WASM Silero VAD) can replace behind the same seam. Off
+  by default because the WebView's AEC residual is imperfect and a false trigger
+  cuts a reply short; half-duplex is the safe default.
 
 There is no setting that lets the assistant type without asking. The
 convenience it would buy a trusted single-user setup is outweighed by what it

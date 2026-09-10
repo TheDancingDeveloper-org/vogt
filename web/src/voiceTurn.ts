@@ -290,6 +290,20 @@ export class VoiceConversation {
     this.resumeListening();
   }
 
+  /** Barge-in (v2): the speaker started talking over a playing reply. Only
+   *  honoured when `interrupt_response` is on and a reply is actually playing —
+   *  the host runs an echo-cancelled VAD during `speaking` and calls this on a
+   *  confident onset. Halts the reply and re-opens the mic at once, so the
+   *  interrupting words are captured as the next turn. A no-op otherwise, so a
+   *  false onset outside playback cannot disturb the loop. The reply's own
+   *  `speechFinished` that follows the halt is ignored (we have left `speaking`). */
+  speechDetected(): void {
+    if (!this.cfg.interrupt_response) return;
+    if (this.state !== "speaking") return;
+    this.ports.stopSpeaking();
+    this.resumeListening();
+  }
+
   /** The turn's send failed. The mode stays (the surface shows the failed
    *  bubble + Retry); the loop re-opens the mic for another turn. */
   sendFailed(): void {
