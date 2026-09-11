@@ -604,6 +604,13 @@ class EngineClient:
                 "is missing, wrong, or lacks the `sessions` capability"
             )
             raise EngineUnavailable(msg)
+        if status == 400:
+            # The engine refused what Vogt sent it — a cwd outside the
+            # workspace, an effort with no agent CLI to take it — and its
+            # refusal names the reason. That sentence is the caller's to
+            # act on; "answered 400" would leave them guessing at it.
+            said = _engine_error_text(response.decode("utf-8", errors="replace"))
+            raise InvalidRequest(said or f"the {self.label} refused {method} {path}")
         if status >= 400:
             msg = f"the {self.label} answered {status} for {method} {path}"
             raise EngineUnavailable(msg)
