@@ -80,6 +80,35 @@ of scope unless you can show real impact.
 
 ## CI and self-hosted runners
 
+### Automated dependency and code scanning
+
+GitHub dependency graph and Dependabot security updates are enabled for every
+manifest Vogt ships (`.github/dependabot.yml`). Pull requests run the
+`dependency review` workflow, which blocks a change introducing a high or
+critical severity dependency advisory. CodeQL scans Python, TypeScript,
+JavaScript, and Rust on pull requests, pushes to `main`, and weekly.
+
+The scheduled `security alert triage` workflow reads open Dependabot and
+CodeQL alerts and creates one labelled `security` issue per alert. The issue
+contains the alert number as a stable marker, so reruns update the queue
+without creating duplicates. Maintainers record remediation or disposition in
+that issue before closing it.
+
+After enabling these workflows, configure repository Settings → Rules → Rulesets
+(or branch protection for `main`) with these required checks:
+
+- `ci`
+- `dependency review`
+- `analyze (python)`
+- `analyze (javascript-typescript)`
+- `analyze (rust)`
+- `runner-policy`
+
+Also enable **Dependency graph**, **Dependabot alerts**, and **Dependabot
+security updates** under Settings → Advanced Security. These are repository
+settings and therefore cannot be represented in tracked files; verify them
+after a repository transfer or visibility change.
+
 This is a public repository, and `pull_request`-triggered jobs run on the
 project's self-hosted runner pool (`ci.yml`, `codeql.yml`,
 `runner-policy.yml`, `docs.yml`, `mirror-base-images.yml`). Those jobs run
