@@ -41,7 +41,7 @@ sidecar, released as a pair and run by one Compose file,
   on by default (`COMPOSE_PROFILES=voice`).
 
 The engine is not optional: it is the only way in. The core image,
-`ghcr.io/thedancingdeveloper-org/vogt:0.6.2`, is also published at every
+`ghcr.io/thedancingdeveloper-org/vogt:0.7.0`, is also published at every
 release because the stack image is built from it by digest and the release
 manifest records both — it is a build input, not a deployment target.
 `deploy/vogt.compose.yml` and `deploy/engine.overlay.yml` run a core and an
@@ -105,8 +105,8 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. Loopback until you mean to expose it. |
 | `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one (§4). |
-| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.6.2` | The image to run. Pin a digest (§6). |
-| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.6.2` | The sidecar. Pin the same release as the stack. |
+| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.0` | The image to run. Pin a digest (§6). |
+| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.0` | The sidecar. Pin the same release as the stack. |
 | `COMPOSE_PROFILES` | no | `voice` | Clear it to run without the sidecar; the voice controls stay present but inert. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted core token acts as. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | What it may do. Everything in the pod can read the file, so this is the blast radius. |
@@ -301,9 +301,9 @@ a deployment are separate acts, and the digest line is what moves one.
 Resolve the digests of a release:
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.6.2 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.0 \
   | grep -m 1 Digest
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.6.2 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.0 \
   | grep -m 1 Digest
 ```
 

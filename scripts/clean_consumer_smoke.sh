@@ -4,7 +4,7 @@
 # credential, no knowledge of the maintainer estate.
 #
 #     scripts/clean_consumer_smoke.sh
-#     VOGT_STACK_IMAGE=…/vogt-stack:0.6.2 VOGT_VOICE_IMAGE=…/vogt-voice:0.6.2 \
+#     VOGT_STACK_IMAGE=…/vogt-stack:0.7.0 VOGT_VOICE_IMAGE=…/vogt-voice:0.7.0 \
 #         scripts/clean_consumer_smoke.sh
 #
 # It differs from `e2e_stack_smoke.sh` (which walks a *running* stack somebody

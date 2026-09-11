@@ -17,7 +17,7 @@
 # it is validating; the default is a real published digest so the file builds
 # as-is. Resolve the current one with:
 #
-#   docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.6.2
+#   docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.0
 #
 ARG STACK_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:31cda6daa29442d37d128d1bb10959ddf5cc7128a3e443ecde3f6ef1ea0616b0
 FROM ${STACK_IMAGE}
