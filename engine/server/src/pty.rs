@@ -130,13 +130,25 @@ impl Session {
     /// Snapshot only output newer than a client cursor. The boolean tells the
     /// client whether its existing terminal state must be reset.
     ///
-    /// `tail_bytes` caps a **cold** attach only: a fresh client with no
-    /// cache sends no `resume_from`, and without a cap the full snapshot is the
-    /// entire scrollback ring. When present it bounds that full snapshot to at
-    /// most that many trailing bytes. A warm reattach (`resume_from` present)
-    /// ignores it entirely, so its `reset: false` delta stays byte-for-byte
-    /// unchanged; the returned position (`total_written`) is unaffected by
-    /// trimming the front, so the live stream still resumes with no gap.
+    /// `tail_bytes` is the replay **budget**, and it now bounds *every* path,
+    /// not just a cold attach (F1, WI-125). A client's xterm keeps only a fixed
+    /// scrollback (5000 lines); shipping more than the budget is wasted parse
+    /// on the client's single message thread, and on a stale reattach it is
+    /// parsed *above* a screen the client already has out of date. So:
+    ///
+    /// - Cold attach (no `resume_from`): bound the full snapshot to the budget.
+    /// - Warm reattach whose cursor is still retained and whose delta fits the
+    ///   budget: the delta is sent byte-for-byte with `reset: false`, so a
+    ///   switch-away/switch-back that produced little still appends cleanly.
+    /// - Warm reattach whose cursor aged out of the ring, **or** whose delta
+    ///   exceeds the budget: a ground-state-aligned tail of at most the budget,
+    ///   with `reset: true`. Never the whole untrimmed ring — that was the
+    ///   4 MiB flood, 4x worse than a cold attach.
+    ///
+    /// The returned position is always `total_written`, unaffected by trimming
+    /// the front, so the live stream resumes with no gap. When `tail_bytes` is
+    /// `None` (the in-band resync path, which carries its own cursor) nothing
+    /// is bounded and a retained delta stays byte-exact.
     pub fn snapshot_for_attach(
         &self,
         resume_from: Option<u64>,
@@ -146,12 +158,25 @@ impl Session {
         let pos = sb.total_written();
         if let Some(cursor) = resume_from {
             if let Some(delta) = sb.snapshot_since(cursor) {
-                return (delta, pos, false);
+                // A retained delta within budget is byte-exact and appends
+                // (reset:false). An oversized delta is capped to a bounded tail
+                // and reset:true — the client's xterm cannot keep more than its
+                // scrollback anyway, so an over-budget delta would only waste
+                // parse above an already-stale screen.
+                match tail_bytes {
+                    Some(limit) if delta.len() > limit => {
+                        return (sb.snapshot_tail(limit), pos, true);
+                    }
+                    _ => return (delta, pos, false),
+                }
             }
-            // Cursor aged out of the ring: a full reset snapshot, untrimmed —
-            // the tail cap is a cold-attach affordance and a warm reattach is
-            // never quietly narrowed.
-            return (sb.snapshot(), pos, true);
+            // Cursor aged out of the ring: a bounded, ground-state-aligned tail
+            // and a reset — never the whole untrimmed ring.
+            let snapshot = match tail_bytes {
+                Some(limit) => sb.snapshot_tail(limit),
+                None => sb.snapshot(),
+            };
+            return (snapshot, pos, true);
         }
         // Cold attach: bound the snapshot to the client's tail hint so first
         // open never ships the whole ring buffer.

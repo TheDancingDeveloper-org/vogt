@@ -71,7 +71,7 @@ describe("attach auth frame", () => {
     expect(frame.resume_from).toBeUndefined();
   });
 
-  it("omits the tail hint and sends the cursor on a warm reattach", () => {
+  it("carries both the cursor and the tail budget on a warm reattach (F1)", () => {
     installRuntimeTransport(networkless);
     setBase("http://engine.test");
     setToken("test-token-1234567890abcdef");
@@ -79,7 +79,9 @@ describe("attach auth frame", () => {
     const frame = firstSent();
     expect(frame.type).toBe("auth");
     expect(frame.resume_from).toBe(4096);
-    // The tail cap is a cold-attach affordance; a warm reattach must not narrow.
-    expect(frame.snapshot_tail_bytes).toBeUndefined();
+    // F1: the tail budget is sent on every attach. A retained delta within
+    // budget is still returned byte-exact (reset:false); an aged-out or
+    // over-budget delta is capped to a bounded reset instead of the whole ring.
+    expect(frame.snapshot_tail_bytes).toBe(REPLAY_TAIL_MAX_BYTES);
   });
 });

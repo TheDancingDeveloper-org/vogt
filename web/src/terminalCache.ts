@@ -5,12 +5,33 @@ const MAX_CACHED_SESSIONS = 8;
 
 export const MAX_TERMINAL_CACHE_BYTES = 4 * 1024 * 1024;
 
+/**
+ * A cached terminal, in one of two shapes (F5, WI-129):
+ *
+ * - `serialized`: a live pane persists its xterm screen + capped scrollback via
+ *   `@xterm/addon-serialize`. On reload it restores in a single `term.write`,
+ *   with no raw-byte re-parse — the fast path.
+ * - `data`: raw scrollback bytes. Written by the headless pre-warm path
+ *   (`terminalPrewarm`), which has no xterm to serialize, and by a live pane as
+ *   a fallback when serialization is unavailable. Restored by re-parsing a
+ *   ground-state-aligned tail (the pre-F5 path), which also reads any entry a
+ *   pre-F5 client left behind — so the format change needs no DB version bump
+ *   or migration.
+ *
+ * Exactly one of `serialized` / `data` is present.
+ */
 export interface TerminalCacheEntry {
   sessionId: string;
   outputPosition: number;
-  data: ArrayBuffer;
   updatedAt: number;
+  serialized?: string;
+  data?: ArrayBuffer;
 }
+
+/** What a caller hands `saveTerminalCache`: a serialized screen or raw bytes. */
+export type TerminalCachePayload =
+  | { serialized: string }
+  | { data: Uint8Array };
 
 /**
  * The client cache is a byte-oriented ring (see `appendToCache` in
@@ -73,22 +94,30 @@ export async function loadTerminalCache(
       >,
     );
     db.close();
+    if (!result || !Number.isSafeInteger(result.outputPosition)) return null;
+
+    // Serialized fast path: a live pane's screen, restored in one write.
+    if (typeof result.serialized === "string") {
+      return result.serialized.length > 0 ? result : null;
+    }
+    // Raw path (pre-warm entries, live-pane fallback, pre-F5 entries). Detect
+    // the ArrayBuffer realm-safely (`instanceof` misses a cross-realm buffer, as
+    // a structured clone can produce).
     if (
-      !result ||
-      !(result.data instanceof ArrayBuffer) ||
-      !Number.isSafeInteger(result.outputPosition) ||
-      result.outputPosition < result.data.byteLength
+      result.data != null &&
+      Object.prototype.toString.call(result.data) === "[object ArrayBuffer]" &&
+      result.outputPosition >= result.data.byteLength
     ) {
-      return null;
+      // Drop any partial leading escape sequence / UTF-8 char left by the ring
+      // trim so the tail replays from a terminal ground state.
+      const bytes = new Uint8Array(result.data);
+      const start = groundStateReplayStart(bytes, result.outputPosition);
+      if (start > 0) {
+        result.data = bytes.slice(start).buffer;
+      }
+      return result;
     }
-    // Drop any partial leading escape sequence / UTF-8 char left by the ring
-    // trim so the tail replays from a terminal ground state.
-    const bytes = new Uint8Array(result.data);
-    const start = groundStateReplayStart(bytes, result.outputPosition);
-    if (start > 0) {
-      result.data = bytes.slice(start).buffer;
-    }
-    return result;
+    return null;
   } catch {
     return null;
   }
@@ -97,7 +126,7 @@ export async function loadTerminalCache(
 export async function saveTerminalCache(
   sessionId: string,
   outputPosition: number,
-  data: Uint8Array,
+  payload: TerminalCachePayload,
 ): Promise<void> {
   if (typeof indexedDB === "undefined" || !Number.isSafeInteger(outputPosition)) {
     return;
@@ -106,12 +135,11 @@ export async function saveTerminalCache(
     const db = await openCache();
     const tx = db.transaction(STORE_NAME, "readwrite");
     const store = tx.objectStore(STORE_NAME);
-    store.put({
-      sessionId,
-      outputPosition,
-      data: data.slice().buffer,
-      updatedAt: Date.now(),
-    } satisfies TerminalCacheEntry);
+    const stored: TerminalCacheEntry =
+      "serialized" in payload
+        ? { sessionId, outputPosition, serialized: payload.serialized, updatedAt: Date.now() }
+        : { sessionId, outputPosition, data: payload.data.slice().buffer, updatedAt: Date.now() };
+    store.put(stored);
 
     const entries = await requestResult(
       store.index("updatedAt").getAllKeys() as IDBRequest<IDBValidKey[]>,

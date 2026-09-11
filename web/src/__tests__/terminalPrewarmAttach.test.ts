@@ -98,12 +98,13 @@ describe("warmAttachOnce", () => {
 
     await expect(promise).resolves.toBe(true);
     expect(saveTerminalCache).toHaveBeenCalledTimes(1);
-    const [id, outputPosition, data] = saveTerminalCache.mock.calls[0]!;
+    const [id, outputPosition, cachePayload] = saveTerminalCache.mock.calls[0]!;
     expect(id).toBe("11111111-1111-1111-1111-111111111111");
     // outputPosition is the absolute stream end, so a later open sends it as
     // resume_from and gets a delta instead of a cold snapshot.
     expect(outputPosition).toBe(1000);
-    expect(data.byteLength).toBe(payload.byteLength);
+    // Pre-warm has no xterm to serialize, so it caches raw bytes (F5).
+    expect(cachePayload.data.byteLength).toBe(payload.byteLength);
     expect(socket.closed).toBe(true);
   });
 

@@ -623,8 +623,9 @@ token can list sessions and read a scrollback snapshot over
 
 The attach sequence is ordered:
 
-1. client sends auth control frame, optionally with its last applied cursor:
-   `{"type":"auth","token":"...","resume_from":123}`
+1. client sends auth control frame, optionally with its last applied cursor
+   and always with its replay budget:
+   `{"type":"auth","token":"...","resume_from":123,"snapshot_tail_bytes":1048576}`
 2. server sends `snapshot-start`
 3. server sends zero or more binary scrollback chunks
 4. server sends `snapshot-done`
@@ -634,7 +635,7 @@ Client text control frames:
 
 ```json
 {"type":"resize","cols":120,"rows":40}
-{"type":"ping"}
+{"type":"ping","id":1}
 ```
 
 Server text control frames:
@@ -642,12 +643,37 @@ Server text control frames:
 ```json
 {"type":"snapshot-start","session_id":"uuid","scrollback_bytes":0,"scrollback_pos":0,"reset":true}
 {"type":"snapshot-done"}
+{"type":"pong","id":1,"pos":123}
 {"type":"lag","note":"client too slow; reattach"}
 ```
 
-When `resume_from` is still retained, `snapshot-start.reset` is false and the
-binary snapshot contains only newer bytes. Otherwise the server returns a full
-snapshot with `reset` true.
+A `pong` echoes the `ping.id` and carries `pos`: the absolute byte offset the
+server has **actually streamed to that socket**, not `total_written`. The pong
+is formed and sent by the same outbound task that streams output, after
+flushing anything already queued, so it is ordered on the wire after those
+chunks and its `pos` can never exceed what the client has received. A client
+uses it purely as a liveness probe — a `pos` ahead of what it has rendered is a
+suspect to confirm with a second probe, not an immediate reconnect.
+
+`snapshot_tail_bytes` is the replay **budget**, and it bounds every reply — a
+client's terminal keeps only a fixed scrollback, so the server never ships more
+than the client can hold:
+
+- **Cold attach** (no `resume_from`): a ground-state-aligned tail of at most the
+  budget, `reset` true.
+- **Warm reattach whose cursor is retained and whose delta fits the budget:**
+  `reset` false and the binary snapshot contains only the newer bytes,
+  byte-for-byte — an ordinary switch-away/switch-back appends without a clear.
+- **Warm reattach whose cursor aged out of the ring, or whose delta exceeds the
+  budget:** a ground-state-aligned tail of at most the budget, `reset` true.
+  `reset: true` may therefore follow a `resume_from`. The client discards its
+  stale cursor and re-anchors to `scrollback_pos - scrollback_bytes` (the start
+  of the tail), so after replaying the tail its position is `scrollback_pos`
+  again and live traffic resumes with no gap.
+
+The returned `scrollback_pos` is always the absolute end position, unaffected by
+trimming the front. Omitting `snapshot_tail_bytes` (the in-band lag resync,
+which carries its own cursor) leaves a retained delta unbounded and byte-exact.
 
 A text frame that does not parse as a control message is treated as raw input,
 because some tools send keystrokes as text. Snapshot chunks are capped at
