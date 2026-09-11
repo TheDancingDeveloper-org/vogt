@@ -37,6 +37,7 @@ import { writeClipboardText } from "./clipboard";
 import { describeRepairs, repairUtterance } from "./voiceRepair";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { pendingAction, setPendingAction } from "./pendingAction";
+import { getPreferServerStt, sttVocabularyPrompt } from "./sttPref";
 import { isConnected, sessionsError, sessionsStore } from "./store";
 import {
   deferAssistantHydration,
@@ -633,6 +634,14 @@ export default function Assistant(props: AssistantProps) {
 
   const configureSpeechInput = async () => {
     if (sttBackend || sttAvailable()) return;
+    // A device whose on-device recognizer keeps mangling the vocabulary can
+    // opt to transcribe on the server instead, where the names bias the
+    // decode. Honoured only when the deployment actually offers server STT.
+    if (getPreferServerStt() && serverSttEnabled() && mediaRecorderAvailable()) {
+      sttBackend = "server";
+      setSttAvailable(true);
+      return;
+    }
     if (Capacitor.isPluginAvailable("SpeechRecognition")) {
       try {
         const { SpeechRecognition } = await import(
@@ -1133,7 +1142,11 @@ export default function Assistant(props: AssistantProps) {
     const controller = new AbortController();
     transcriptionController = controller;
     try {
-      const { text: heard } = await api.assistantStt(blob, controller.signal);
+      const { text: heard } = await api.assistantStt(
+        blob,
+        controller.signal,
+        sttVocabularyPrompt(slugs()),
+      );
       if (controller.signal.aborted || !heard.trim()) return;
       setSpeechStatus("");
       const { text: repairedText, repairs } = repairUtterance(heard, slugs());
