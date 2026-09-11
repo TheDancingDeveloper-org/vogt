@@ -2634,15 +2634,18 @@ class StartSessionParams(Params):
         description=(
             "Model id for the agent CLI this template runs, e.g. "
             "'gpt-5.6' or 'claude-sonnet-4-5'. Omitted means the CLI's own "
-            "default. A template that cannot be told which model to use "
-            "refuses rather than ignoring this."
+            "default. Requires `template`: a plain shell has no model. A "
+            "template that cannot be told which model to use refuses rather "
+            "than ignoring this."
         ),
     )
     effort: str | None = Field(
         default=None,
         description=(
             "Reasoning effort for the agent CLI, e.g. 'low' / 'medium' / "
-            "'high'. Omitted means the CLI's own default."
+            "'high'. Omitted means the CLI's own default. Requires "
+            "`template`: a plain shell has no effort to set, so do not "
+            "volunteer one for a terminal that runs no agent."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")

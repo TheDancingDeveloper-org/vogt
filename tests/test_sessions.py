@@ -69,6 +69,9 @@ class StandInEngine:
         #: When set, the history log endpoint 404s — the engine has no log for
         #: that id (history off, or the id is unknown).
         self.log_missing = False
+        #: When set, POST /api/sessions is refused with this reason (400),
+        #: the way the engine refuses an effort with no agent CLI to take it.
+        self.refuse_start: str | None = None
 
     def __call__(
         self,
@@ -81,6 +84,8 @@ class StandInEngine:
         self.sent.append({"url": url, "method": method, "body": payload})
 
         if method == "POST" and url.endswith("/api/sessions"):
+            if self.refuse_start is not None:
+                return 400, json.dumps({"error": self.refuse_start}).encode()
             self.counter += 1
             engine_id = f"eng-{self.counter}"
             self.alive[engine_id] = "running"
@@ -245,6 +250,33 @@ def test_a_session_needs_exactly_one_subject(wired: AppContext) -> None:
         start_session(
             wired, StartSessionParams(work_item="WI-1", project="vogt", reason=WHY)
         )
+
+
+def test_the_engines_refusal_to_start_reaches_the_caller_verbatim(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """A 400 from the engine is its reason, not "answered 400".
+
+    Vogt passes `model` and `effort` through and lets the engine refuse by
+    name — an effort with no agent CLI to take it, a cwd outside the
+    workspace. Flattening that into "engine unavailable" left the assistant
+    reporting "the session engine returned a 400 error" to a person who
+    had only asked for a terminal; the sentence names what to change.
+    """
+    engine.refuse_start = (
+        "a session with no command runs the default shell, which has no model "
+        "to choose; start it with an agent template (Claude Code, Codex or "
+        "OpenCode) to name a model"
+    )
+    with pytest.raises(InvalidRequest, match="start it with an agent template"):
+        start_session(
+            wired, StartSessionParams(project="vogt", effort="low", reason=WHY)
+        )
+    # Nothing was recorded for a session that never started.
+    with wired.declared.read() as view:
+        assert not [
+            r for r in view.list_audit(limit=20) if r.operation == "session.start"
+        ]
 
 
 def test_a_blank_reason_is_refused_before_the_engine_starts(
