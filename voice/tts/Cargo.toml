@@ -20,7 +20,7 @@ piper-rs = "=0.1.2"
 # MSRV. These are transitive build dependencies of ort-sys/bindgen; newer
 # releases moved to edition 2024.
 home = "=0.5.9"
-half = "=2.4.1"
+half = "=2.7.1"
 rustls-pki-types = "=1.12.0"
 zeroize = "=1.8.1"
 # Version floors that steer the shared voice/Cargo.lock past the vulnerable
