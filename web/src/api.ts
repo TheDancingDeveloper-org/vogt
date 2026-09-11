@@ -1058,11 +1058,19 @@ export const api = {
    * when the route is unconfigured, which the caller reads as "fall back"
    * — audio is proxied, never stored.
    */
-  assistantStt: async (audio: Blob, signal?: AbortSignal): Promise<{ text: string }> => {
+  assistantStt: async (
+    audio: Blob,
+    signal?: AbortSignal,
+    prompt?: string,
+  ): Promise<{ text: string }> => {
     const form = new FormData();
     // The engine forwards the first file-bearing field regardless of name; the
     // filename's extension hints the provider at the container.
     form.append("file", audio, "take.webm");
+    // An optional vocabulary bias — project and session names the transcriber
+    // has never heard — forwarded to the backend as `prompt`. Omitted when
+    // empty so the request is byte-for-byte the old one.
+    if (prompt && prompt.trim()) form.append("prompt", prompt.trim());
     const res = await runtimeTransport().request(`${getBase()}/api/assistant/stt`, {
       method: "POST",
       headers: authHeaders(),

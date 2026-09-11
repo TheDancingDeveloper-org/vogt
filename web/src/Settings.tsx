@@ -16,6 +16,7 @@ import {
   type PushSubscriptionEntry,
 } from "./api";
 import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
+import { getPreferServerStt, setPreferServerStt } from "./sttPref";
 import TemplateEditor from "./TemplateEditor";
 import Dialog from "./Dialog";
 import { THEMES, getThemeName, setThemeName } from "./terminalThemes";
@@ -167,6 +168,7 @@ const Settings: Component<Props> = (props) => {
   >("idle");
   const [authCheckMsg, setAuthCheckMsg] = createSignal<string | null>(null);
   const [layoutMode, setL] = createSignal<LayoutMode>(getLayoutMode());
+  const [preferServerStt, setPreferServerSttSig] = createSignal(getPreferServerStt());
   const [pushOn, setPushOn] = createSignal(false);
   const [pushPerm, setPushPerm] = createSignal<PushPermissionState>("default");
   const [pushBusy, setPushBusy] = createSignal(false);
@@ -408,6 +410,7 @@ const Settings: Component<Props> = (props) => {
     setAuthCheck("idle");
     setAuthCheckMsg(null);
     setL(getLayoutMode());
+    setPreferServerSttSig(getPreferServerStt());
     setAppThemeSel(getAppThemeSelection());
     setTerminalTheme(getThemeName());
     setStoragePrefsState(getStoragePrefs());
@@ -907,6 +910,24 @@ const Settings: Component<Props> = (props) => {
               spellcheck={false}
             />
           </label>
+          <Show when={props.publicConfig?.assistant_stt_enabled}>
+            <label
+              class="settings-show-token"
+              title="Send captured audio to the server transcriber, which is given this deployment's project and session names as a hint. Helps when the on-device recognizer mishears them."
+            >
+              <input
+                type="checkbox"
+                checked={preferServerStt()}
+                onChange={(e) => {
+                  const on = e.currentTarget.checked;
+                  setPreferServerStt(on);
+                  setPreferServerSttSig(on);
+                }}
+              />
+              Transcribe voice on the server (better with project names; takes
+              effect next launch)
+            </label>
+          </Show>
           <div style={{ display: "flex", "flex-direction": "column", gap: "6px" }}>
             <button
               type="button"

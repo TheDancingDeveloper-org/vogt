@@ -479,6 +479,13 @@ imperfect echo cancellation can cut a reply short by mistake). Turn timing is
 tunable per device through the `vogt.assistant.voice.*` browser settings (silence
 window, idle timeout, barge-in); the defaults suit a phone.
 
+When the deployment offers server-side transcription, Settings shows
+**Transcribe voice on the server**. On by default a phone uses its own
+recognizer, which is fast but has never heard your project names; turning this
+on sends captured audio to the server transcriber instead, handed those names
+as a hint, so "check komodo on Node B" is far likelier to come through as the
+words you said. It takes effect the next time the app launches.
+
 An approved write is audited to **your** actor, using the core token paired with
 the token that pressed approve. There is no shared "assistant" actor to fall
 back to; an unpaired approver is refused by name.

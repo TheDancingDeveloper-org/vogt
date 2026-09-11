@@ -178,11 +178,25 @@ pub async fn stt(
     // Take the first file-bearing field. A voice client sends one audio blob;
     // we do not care what it named the field, only that it carried bytes.
     let mut audio: Option<(Vec<u8>, String, String)> = None;
+    // An optional `prompt` text field: the domain vocabulary the client
+    // biases the transcriber with (project slugs, session names, the words a
+    // recognizer mangles). Whisper-family backends take it as `prompt`; a
+    // backend that ignores the field is no worse off. Not read as audio, and
+    // not required — a client that sends none transcribes as before.
+    let mut prompt: Option<String> = None;
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| ApiError::BadRequest(format!("reading upload: {e}")))?
     {
+        if field.name() == Some("prompt") {
+            let text = field
+                .text()
+                .await
+                .map_err(|e| ApiError::BadRequest(format!("reading prompt: {e}")))?;
+            prompt = clamp_stt_prompt(&text);
+            continue;
+        }
         let file_name = field
             .file_name()
             .map(str::to_owned)
@@ -195,9 +209,10 @@ pub async fn stt(
             .bytes()
             .await
             .map_err(|e| ApiError::BadRequest(format!("reading upload bytes: {e}")))?;
-        if !bytes.is_empty() {
+        // First file-bearing field wins; keep scanning so a `prompt` sent
+        // after the audio is still read rather than dropped on an early break.
+        if audio.is_none() && !bytes.is_empty() {
             audio = Some((bytes.to_vec(), file_name, content_type));
-            break;
         }
     }
     let (bytes, file_name, content_type) =
@@ -216,9 +231,12 @@ pub async fn stt(
                     .mime_str("application/octet-stream")
                     .expect("octet-stream is a valid mime")
             });
-        let form = reqwest::multipart::Form::new()
+        let mut form = reqwest::multipart::Form::new()
             .text("model", backend.model.clone())
             .part("file", part);
+        if let Some(prompt) = &prompt {
+            form = form.text("prompt", prompt.clone());
+        }
 
         let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
         let mut request = speech
@@ -328,6 +346,21 @@ pub async fn tts(State(state): State<Arc<AppState>>, Json(req): Json<TtsReq>) ->
     Err(ApiError::NotFound)
 }
 
+/// The largest vocabulary prompt forwarded to a transcription backend. A
+/// prompt is a bias, not a document; a long one crowds the audio's own tokens
+/// and some backends reject an oversized one outright.
+const MAX_STT_PROMPT_BYTES: usize = 2048;
+
+/// A client-supplied STT bias prompt, trimmed and bounded, or nothing when it
+/// is empty — an empty `prompt` field is the same as sending none.
+fn clamp_stt_prompt(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(truncate(trimmed, MAX_STT_PROMPT_BYTES))
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -338,5 +371,31 @@ fn truncate(s: &str, max: usize) -> String {
             end -= 1;
         }
         format!("{}…", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_prompt_is_trimmed_and_empty_becomes_none() {
+        assert_eq!(clamp_stt_prompt("   "), None);
+        assert_eq!(clamp_stt_prompt(""), None);
+        assert_eq!(
+            clamp_stt_prompt("  projects: komodo, vogt  ").as_deref(),
+            Some("projects: komodo, vogt")
+        );
+    }
+
+    #[test]
+    fn a_long_prompt_is_bounded() {
+        let long = "komodo ".repeat(1000);
+        let clamped = clamp_stt_prompt(&long).expect("non-empty");
+        // `truncate` keeps up to the byte budget then marks the cut with a
+        // single-char ellipsis, so the bound is the budget plus that marker.
+        assert!(clamped.len() <= MAX_STT_PROMPT_BYTES + "…".len());
+        assert!(clamped.len() < long.len());
+        assert!(clamped.ends_with('…'));
     }
 }

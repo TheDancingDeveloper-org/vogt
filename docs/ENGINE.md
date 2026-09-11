@@ -746,12 +746,16 @@ provisioned. Mutating routes require the `assistant` token capability. See
   accepts an optional `utterance` (the raw recognised text before the repair
   pass) so a repaired turn logs both forms.
 - `POST /api/assistant/reset` -> `OkResponse`
-- `POST /api/assistant/stt` (multipart audio, field `file`) -> `{"text": string}`
-  — server-side transcription. Proxies to `/audio/transcriptions` on an
-  ordered, independently-configured base-URL list (voicemode semantics: local
-  first, cloud fallback). **404** when unconfigured or every entry fails, so the
-  client falls back. Scope-gated on `assistant` (a POST under
-  `/api/assistant`). Audio is proxied, never stored.
+- `POST /api/assistant/stt` (multipart audio, field `file`, optional text
+  field `prompt`) -> `{"text": string}` — server-side transcription. Proxies to
+  `/audio/transcriptions` on an ordered, independently-configured base-URL list
+  (voicemode semantics: local first, cloud fallback). A `prompt` field is
+  forwarded to the backend as its bias prompt (trimmed and bounded to 2 KiB) —
+  the mobile client sends the deployment's project and session names there, so
+  a transcriber that has never heard `komodo` is told to expect it; a backend
+  that ignores the field is no worse off. **404** when unconfigured or every
+  entry fails, so the client falls back. Scope-gated on `assistant` (a POST
+  under `/api/assistant`). Audio and prompt are proxied, never stored.
 - `POST /api/assistant/tts` `{"text": "..."}` -> an audio stream (`audio/*`) —
   server-side synthesis. Proxies `{model, input, voice}` to `/audio/speech` on
   the same kind of ordered list. **404** when unconfigured/all-failed. Audio is
