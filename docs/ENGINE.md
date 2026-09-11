@@ -1308,6 +1308,18 @@ operations. It is designed to be driven by voice from the mobile app
 (on-device STT in, `speechSynthesis` out) or by typed messages from any
 browser.
 
+Because a dictated turn reaches the model as whatever the on-device recognizer
+wrote down — and that recognizer has never heard of the deployment's project
+slugs or session names — the assistant is told its input is dictated and given
+a `<vocabulary>` note each voice turn: the project slugs the core knows and the
+current session names. It reads a garbled sentence against that vocabulary and
+the conversation so far, acts on the clearly-likeliest reading or asks one
+short question that states it, and never demands the sentence be repeated word
+for word. The note is offered only on turns that carry a recognized utterance
+(typed turns were not misheard), the project slugs are fetched from the core
+once and cached briefly, and the names are wrapped in `<vocabulary>` as
+untrusted data like every other cored-derived string.
+
 ### Architecture
 
 - `engine/server/src/assistant.rs` — runtime: in-memory conversation, OpenAI-compatible
