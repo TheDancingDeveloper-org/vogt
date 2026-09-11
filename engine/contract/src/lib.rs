@@ -26,6 +26,16 @@ pub struct SessionSpec {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    /// A session template to expand into `command` (and env), by name or by
+    /// tag, resolved against the engine's configured `session_templates`.
+    /// The engine owns the mapping because the command a template runs — a
+    /// `vogt-agent-auth run -- claude` wrapper, say — is that deployment's
+    /// configuration, not the caller's to spell out. Ignored when `command`
+    /// is given; an unknown name is refused. vogt-core sends the name it was
+    /// asked for (`claude`) and lets the engine turn it into the protected
+    /// command the deployment configured for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
