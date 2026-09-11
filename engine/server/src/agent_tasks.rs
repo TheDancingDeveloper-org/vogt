@@ -1461,6 +1461,7 @@ impl AgentTaskRegistry {
         let session = self.sessions.create(SessionSpec {
             name: session_name.clone(),
             command: Some(command),
+            template: None,
             cwd: task.cwd.clone(),
             env: Some(env),
             // A task run has already written its own prompt file above, with

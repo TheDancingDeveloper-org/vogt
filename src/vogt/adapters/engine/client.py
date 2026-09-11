@@ -356,7 +356,8 @@ class EngineClient:
         self,
         *,
         name: str,
-        command: list[str] | None,
+        command: list[str] | None = None,
+        template: str | None = None,
         cwd: str,
         env: dict[str, str] | None = None,
         prompt: str | None = None,
@@ -374,6 +375,12 @@ class EngineClient:
         spec: dict[str, Any] = {"name": name, "cwd": cwd}
         if command:
             spec["command"] = command
+        if template:
+            # A template *name*, not a command: the engine expands it against
+            # its own `session_templates`, because the command a template runs
+            # (a `vogt-agent-auth run -- claude` wrapper, say) is that
+            # deployment's configuration and not Vogt's to spell out.
+            spec["template"] = template
         if prompt:
             # The engine writes this to a file on its own state directory and
             # tells the child where it is. Vogt sends the text rather

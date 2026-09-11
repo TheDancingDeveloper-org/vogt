@@ -2172,6 +2172,7 @@ mod tests {
             .create(SessionSpec {
                 name: "cat".into(),
                 command: Some(vec!["cat".into()]),
+                template: None,
                 cwd: None,
                 env: None,
                 prompt: None,

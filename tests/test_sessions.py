@@ -243,6 +243,53 @@ def test_a_session_can_be_opened_on_a_project(
     assert engine.last_spec["cwd"] == ROOT
 
 
+def test_a_task_is_folded_into_the_session_brief(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """A spoken request carries the doing part; the brief must too.
+
+    Without this the agent opens on the project brief, which says in as many
+    words that there is no task, and waits — the person then types what they
+    already said out loud.
+    """
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            task="check how many containers need an update",
+            reason=WHY,
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "## Task" in brief
+    assert "check how many containers need an update" in brief
+    # The project context is still there, under the task.
+    assert brief.index("# vogt") < brief.index("## Task")
+
+
+def test_no_task_leaves_the_brief_untouched(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "## Task" not in engine.last_spec["prompt"]
+
+
+def test_a_template_is_sent_by_name_for_the_engine_to_expand(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The engine owns the command a template runs; Vogt sends the name.
+
+    Sending `claude` (not `["claude"]`) is what lets the engine expand it to
+    the deployment's protected wrapper rather than an unwrapped binary.
+    """
+    start_session(
+        wired,
+        StartSessionParams(project="vogt", template="claude", reason=WHY),
+    )
+    assert engine.last_spec.get("template") == "claude"
+    assert "command" not in engine.last_spec
+
+
 def test_a_session_needs_exactly_one_subject(wired: AppContext) -> None:
     with pytest.raises(InvalidRequest):
         start_session(wired, StartSessionParams(reason=WHY))

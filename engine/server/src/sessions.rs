@@ -16,6 +16,41 @@ use crate::{
     workspace_path,
 };
 
+/// A configured session template matched by name (case-insensitive) or,
+/// failing that, by tag — so a caller can say `claude` and reach the template
+/// tagged `claude`. When a tag matches more than one template an `agent`-tagged
+/// one wins, then the alphabetically-first name, so the choice is deterministic
+/// rather than list-order-dependent. An unknown name is refused with the
+/// configured names, never quietly started as a shell.
+fn resolve_template_in<'a>(
+    templates: &'a [crate::config::SessionTemplate],
+    name: &str,
+) -> Result<&'a crate::config::SessionTemplate> {
+    if let Some(t) = templates.iter().find(|t| t.name.eq_ignore_ascii_case(name)) {
+        return Ok(t);
+    }
+    let mut by_tag: Vec<&crate::config::SessionTemplate> = templates
+        .iter()
+        .filter(|t| t.tags.iter().any(|tag| tag.eq_ignore_ascii_case(name)))
+        .collect();
+    by_tag.sort_by(|a, b| {
+        let a_agent = a.tags.iter().any(|g| g.eq_ignore_ascii_case("agent"));
+        let b_agent = b.tags.iter().any(|g| g.eq_ignore_ascii_case("agent"));
+        b_agent.cmp(&a_agent).then_with(|| a.name.cmp(&b.name))
+    });
+    if let Some(t) = by_tag.first() {
+        return Ok(t);
+    }
+    let known = templates
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(ApiError::BadRequest(format!(
+        "unknown session template {name:?}; configured: {known}"
+    )))
+}
+
 pub struct SessionRegistry {
     cfg: Arc<Config>,
     bus: EventBus,
@@ -47,6 +82,31 @@ impl SessionRegistry {
 
     pub fn create(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
         spec.name = normalize_session_name(&spec.name)?;
+        // Expand a template name into a command before anything downstream
+        // reads `command`. Only when the caller gave no explicit command —
+        // the GUI copies a template's command into the spec itself and sends
+        // that, so it never takes this path. vogt-core sends the bare name
+        // ("claude") and the deployment's config is where that becomes
+        // `vogt-agent-auth run -- claude`, keeping the wrapper out of the
+        // core and out of shipped code.
+        if spec.command.is_none() {
+            if let Some(name) = spec
+                .template
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+            {
+                let template = self.resolve_template(name)?;
+                spec.command = template.command.clone();
+                if !template.env.is_empty() {
+                    let mut env = template.env.clone();
+                    if let Some(existing) = spec.env.take() {
+                        env.extend(existing);
+                    }
+                    spec.env = Some(env);
+                }
+            }
+        }
         // Resolve client-supplied cwd against workspace_root. Reject anything
         // that escapes the workspace via `..` so a stray API call can't spawn
         // a shell with cwd=/etc.
@@ -222,6 +282,16 @@ impl SessionRegistry {
         out
     }
 
+    /// A configured session template matched by name (case-insensitive) or,
+    /// failing that, by tag — so a caller can say `claude` and reach the
+    /// template tagged `claude`. When a tag matches more than one template an
+    /// `agent`-tagged one wins, then the alphabetically-first name, so the
+    /// choice is deterministic rather than list-order-dependent. An unknown
+    /// name is refused with the configured names, never started as a shell.
+    fn resolve_template(&self, name: &str) -> Result<&crate::config::SessionTemplate> {
+        resolve_template_in(&self.cfg.session_templates, name)
+    }
+
     pub fn rename(&self, id: Uuid, new_name: String) -> Result<()> {
         let s = self.get(id)?;
         let new_name = normalize_session_name(&new_name)?;
@@ -297,5 +367,85 @@ mod tests {
         let long = "a".repeat(257);
         let err = normalize_session_name(&long).unwrap_err();
         assert!(err.to_string().contains("at most 256 bytes"));
+    }
+    #[test]
+    fn a_template_resolves_by_name_then_by_tag() {
+        use crate::config::SessionTemplate;
+        let templates = SessionTemplate::default_templates();
+        // Exact name, case-insensitive.
+        assert_eq!(
+            super::resolve_template_in(&templates, "claude code (protected)")
+                .unwrap()
+                .name,
+            "Claude Code (protected)"
+        );
+        // By tag: `claude` reaches the protected Claude template, whose
+        // command is the deployment's wrapper — the whole point.
+        let claude = super::resolve_template_in(&templates, "claude").unwrap();
+        assert_eq!(claude.name, "Claude Code (protected)");
+        assert!(claude
+            .command
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|arg| arg == "claude"));
+        // A plain shell is still reachable by name.
+        assert_eq!(
+            super::resolve_template_in(&templates, "Shell")
+                .unwrap()
+                .name,
+            "Shell"
+        );
+    }
+
+    #[test]
+    fn an_unknown_template_is_refused_with_the_configured_names() {
+        use crate::config::SessionTemplate;
+        let templates = SessionTemplate::default_templates();
+        let err = super::resolve_template_in(&templates, "kardashian").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown session template"), "{msg}");
+        assert!(msg.contains("Claude Code (protected)"), "{msg}");
+    }
+
+    #[test]
+    fn the_agent_tag_wins_when_a_tag_is_ambiguous() {
+        use crate::config::SessionTemplate;
+        // Two templates share a tag; the agent one must win deterministically.
+        let templates = vec![
+            SessionTemplate {
+                name: "Zeta Shell".into(),
+                description: String::new(),
+                command: Some(vec!["bash".into()]),
+                cwd: None,
+                env: vec![],
+                default_name: None,
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["claude".into()],
+            },
+            SessionTemplate {
+                name: "Alpha Agent".into(),
+                description: String::new(),
+                command: Some(vec![
+                    "vogt-agent-auth".into(),
+                    "run".into(),
+                    "--".into(),
+                    "claude".into(),
+                ]),
+                cwd: None,
+                env: vec![],
+                default_name: None,
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["agent".into(), "claude".into()],
+            },
+        ];
+        assert_eq!(
+            super::resolve_template_in(&templates, "claude")
+                .unwrap()
+                .name,
+            "Alpha Agent"
+        );
     }
 }

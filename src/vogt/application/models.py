@@ -2622,8 +2622,22 @@ class StartSessionParams(Params):
     template: str | None = Field(
         default=None,
         description=(
-            "Named session template to run, e.g. an agent CLI. Omitted means "
-            "the engine's default shell."
+            "Session template to run, by name or by tag — the engine expands "
+            "it against the deployment's templates. Use this to run an agent "
+            "rather than a plain shell: `claude` (or `codex`, `opencode`) "
+            "starts that agent under the deployment's protected wrapper, so "
+            "a request to *do* something in a session names one here. "
+            "Omitted means a plain shell, which does nothing until typed into."
+        ),
+    )
+    task: str | None = Field(
+        default=None,
+        description=(
+            "What the session's agent should do, in the user's words. Folded "
+            "into the brief the agent opens with, so 'start a session on X "
+            "and check its containers' opens an agent already asked to check "
+            "them rather than an idle shell. Pair it with `template` (an "
+            "agent, not a plain shell) when the task is something to carry out."
         ),
     )
     name: str | None = Field(

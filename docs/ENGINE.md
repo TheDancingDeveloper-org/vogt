@@ -552,7 +552,18 @@ is absent, empty, or all whitespace writes no file and sets no variable.
 that escapes via `..` is `400` rather than a shell in `/etc`. `name` is trimmed
 and must be non-empty and at most 256 bytes, on creation and on rename alike;
 outside that it is `400`, never truncated. Names need not be unique —
-duplicates are confusing, not invalid. The remaining `SessionSpec` fields —
+duplicates are confusing, not invalid. `SessionSpec` also carries an optional `template` — a session template *name*
+or *tag* the engine expands into `command` (and env) against its configured
+`session_templates`, when no explicit `command` is given (the GUI copies a
+template's command into the spec itself, so it never uses this). A name matches
+case-insensitively; failing that a tag matches, and an `agent`-tagged template
+wins an ambiguous tag so `template: "claude"` reaches the deployment's
+protected `["vogt-agent-auth", "run", "--", "claude"]` rather than a bare
+binary. An unknown name is `400` listing the configured templates, never
+silently a shell. This is where vogt-core sends the bare agent name it was
+asked for and lets the deployment decide what protected command it runs.
+
+The remaining `SessionSpec` fields —
 `command`, `env`, `cols`, `rows`, `scrollback_bytes` — each fall back to the
 server's configured default when omitted.
 

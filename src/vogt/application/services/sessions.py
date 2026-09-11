@@ -94,7 +94,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         template=params.template,
         cwd=subject.cwd,
         env=_session_env(ctx, session_id, credential.secret),
-        brief=subject.brief,
+        brief=_brief_with_task(subject.brief, params.task),
         model=params.model,
         effort=params.effort,
     )
@@ -558,6 +558,23 @@ def _existing(ctx: AppContext, session_id: str) -> CodingSession:
     return session
 
 
+def _brief_with_task(brief: str, task: str | None) -> str:
+    """Fold an explicit task into the session's brief.
+
+    The brief is context — the project, or the work item and why it ranks —
+    and by itself it asks the agent to do nothing (a project brief says so
+    in as many words). A spoken "start a session on komodo and check the
+    containers" carries the *doing* part separately; without it the agent
+    opens and waits, and the person has to type what they just said.
+    Appended rather than replacing so the agent keeps the context under
+    the task.
+    """
+    task = (task or "").strip()
+    if not task:
+        return brief
+    return f"{brief.rstrip()}\n\n## Task\n\n{task}\n"
+
+
 def _start_on_engine(
     engine: EngineClient,
     *,
@@ -572,10 +589,14 @@ def _start_on_engine(
     return engine.create_session(
         prompt=brief,
         name=name,
-        # A template names a command the *engine* knows; Vogt passes the name
-        # through rather than resolving it, because the command a template
-        # runs is that pod's configuration and not the estate's.
-        command=None if template is None else [template],
+        # A template names a command the *engine* knows; Vogt sends the
+        # name and the engine expands it against its own `session_templates`,
+        # because the command a template runs — a `vogt-agent-auth run --
+        # claude` wrapper, say — is that pod's configuration and not the
+        # estate's. Sending the bare name is what lets "start an agent on
+        # this" reach the deployment's protected agent template rather than
+        # an unwrapped binary.
+        template=template,
         cwd=cwd,
         env=env,
         # Passed through for the same reason: *how* a model id
