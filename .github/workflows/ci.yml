@@ -178,7 +178,7 @@ jobs:
       # Pinned to an exact version, not `@v9`: from v8 onwards setup-uv stopped
       # publishing major and minor tags, so `@v9` does not resolve. Renovate
       # bumps this line.
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
 
       # The self-hosted image preinstalls no language runtime.
       - name: install matrix Python
@@ -228,7 +228,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
 
       - name: install Python
         run: uv python install 3.13
@@ -381,7 +381,7 @@ jobs:
           VOGT_SOURCE_SHA: ${{ github.sha }}
         run: pnpm build
 
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d
 
       - name: normal and demo packaging share one PWA artifact
         run: |
