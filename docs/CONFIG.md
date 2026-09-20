@@ -39,6 +39,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `bootstrap_core_token_file` | `VOGT_BOOTSTRAP_CORE_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `bootstrap_core_token_actor` | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | string | `agent:vogt-engine` | behaviour |
 | `bootstrap_core_token_scopes` | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | string | `read,work.write,project.write` | behaviour |
+| `agent_session_scopes` | `VOGT_AGENT_SESSION_SCOPES` | string | `read,work.write,project.write,writeback` | behaviour |
 | `install_bootstrap_enabled` | `VOGT_INSTALL_BOOTSTRAP_ENABLED` | boolean | `True` | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
@@ -157,6 +158,10 @@ Identity the adopted core token is bound to, created if absent. Audit rows name 
 ### `bootstrap_core_token_scopes`
 
 Scopes for the adopted core token. Everything in the pod runs as one uid and can read the token file, so this scope *is* that pod's blast radius — narrow it to what the front door actually needs. `admin` is deliberately not the default.
+
+### `agent_session_scopes`
+
+Scopes every agent session's own token holds — one deployment decision for what a session may do, applied the same however the session was launched. Comma-separated, parsed with the same rules as any token's scopes. The default is everything except `admin`, which gates only token minting, actor creation and instance ops (init/migrate/backup/restore/serve) that no session needs. Scopes are instance-wide and everything in the pod shares one uid, so a narrower set here is more a rule to explain than a boundary it enforces (FR-S10) — narrow it only if this instance truly wants to. `admin` is accepted if an operator writes it: that is consent, not a mistake to guard against. Per-session attribution is unchanged — each session still mints its own actor-bound token; only the scope set is shared.
 
 ### `install_bootstrap_enabled`
 
