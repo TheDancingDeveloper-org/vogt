@@ -182,15 +182,18 @@ def test_the_m10_demo(
     #    token the session gave it, through the tool surface a real client
     #    calls.
     agent, caller = _as_session(estate, session_token)
-    assert caller.grant.scopes == frozenset({"read", "work.write"}), (
-        "a session may read and record work, and nothing else"
-    )
+    assert caller.grant.scopes == frozenset(
+        {"read", "work.write", "project.write", "writeback"}
+    ), "a session holds the deployment scope set — everything except admin"
     with pytest.raises(Forbidden):
+        # Still not an admin: a session may register projects and record work,
+        # but it cannot mint tokens or run instance ops (agent_session_scopes
+        # excludes `admin`).
         authorize(
             agent,
             caller,
-            operation="project.register",
-            scope="project.write",
+            operation="token.issue",
+            scope="admin",
             mutating=True,
             transport="mcp",
         )
