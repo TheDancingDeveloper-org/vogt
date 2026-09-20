@@ -194,6 +194,19 @@ test("canonical demo compositions stay visually stable at target widths", async 
   await expect(page).toHaveScreenshot("demo-inbox-768.png", { animations: "disabled" });
 
   await page.setViewportSize({ width: 390, height: 844 });
+  // Start this composition from a clean terminal cache. Earlier tests in this
+  // file open the demo-server / demo-logs sessions, which persist a scrollback
+  // cache to IndexedDB; inherited here, the two parked split panes take F3's
+  // deferred-cache path (restore on activation, not now) and render blank until
+  // clicked — a test-order artifact, not the fresh-load composition this shot
+  // means to pin. Clearing it lets the panes attach and render (WI-170).
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        const request = indexedDB.deleteDatabase("vogt-terminal-cache");
+        request.onsuccess = request.onerror = request.onblocked = () => resolve();
+      }),
+  );
   await page.goto("/#/t/demo-agent");
   await expect(page.locator('[data-tab-id="term:demo-agent"] .terminal-pane')).toHaveCount(3);
   await page.waitForTimeout(250);
