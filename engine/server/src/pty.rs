@@ -410,6 +410,23 @@ pub(crate) fn identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
         .collect()
 }
 
+/// Is the child command's program the configured agent-auth helper? A session
+/// launched with an explicit `spec.command` reaches the helper on its own when
+/// the "(protected)" templates run `agent-auth run -- <cli>` — and agent
+/// frameworks, subagents and worktree sessions launch it the same way. Such a
+/// child needs the broker manifest re-granted just like the engine-chosen
+/// `<helper> shell` path; without it the child starts with the
+/// `ENGINE_AGENT_AUTH_*` variables already stripped by [`is_secret_env`], brokers
+/// nothing, and `agent-auth.sh` unsets `VOGT_HTTP_TOKEN` — a session with no
+/// Vogt/git/gh credentials. The templates name the helper either by its full
+/// configured path or by just its basename on `PATH`, so accept both (#727).
+fn is_agent_auth_helper_command(argv0: &str, helper: &Path) -> bool {
+    Path::new(argv0) == helper
+        || helper
+            .file_name()
+            .is_some_and(|base| Path::new(argv0) == Path::new(base))
+}
+
 /// Spawn a PTY-backed session running `spec.command` (or the default shell if
 /// `None`). Starts the reader thread, the exit waiter, and the activity watcher.
 ///
@@ -441,6 +458,14 @@ pub fn spawn(
     let mut spawning_agent_auth_helper = false;
     let mut cmd = match spec.command.as_ref() {
         Some(argv) if !argv.is_empty() => {
+            // A command-launched session whose program IS the agent-auth helper
+            // (the "(protected)" templates run `agent-auth run -- <cli>`, and
+            // subagents/frameworks/worktree sessions do the same) must broker the
+            // same token set as the engine-chosen `shell` path — see
+            // is_agent_auth_helper_command (#727). Otherwise the manifest is
+            // stripped and the child ends up with no VOGT_HTTP_TOKEN.
+            spawning_agent_auth_helper =
+                is_agent_auth_helper_command(&argv[0], defaults.agent_auth_helper);
             let mut c = CommandBuilder::new(&argv[0]);
             for a in &argv[1..] {
                 c.arg(a);
@@ -1027,5 +1052,37 @@ mod secret_env_tests {
         ] {
             assert!(!is_secret_env(key), "{key} should not be filtered");
         }
+    }
+
+    #[test]
+    fn command_launched_helper_is_recognised_by_path_or_basename() {
+        use super::is_agent_auth_helper_command;
+        use std::path::Path;
+        let helper = Path::new("/usr/local/bin/vogt-agent-auth");
+        // The engine-chosen path names the helper in full; the "(protected)"
+        // templates (`agent-auth run -- <cli>`) name it by its basename on PATH.
+        // Both are the helper and must broker the same token set (#727).
+        assert!(is_agent_auth_helper_command(
+            "/usr/local/bin/vogt-agent-auth",
+            helper
+        ));
+        assert!(is_agent_auth_helper_command("vogt-agent-auth", helper));
+    }
+
+    #[test]
+    fn a_plain_command_is_not_the_helper() {
+        use super::is_agent_auth_helper_command;
+        use std::path::Path;
+        let helper = Path::new("/usr/local/bin/vogt-agent-auth");
+        // A bare shell or any CLI launched directly — not via the helper — must
+        // NOT be re-granted the broker manifest.
+        assert!(!is_agent_auth_helper_command("bash", helper));
+        assert!(!is_agent_auth_helper_command("/bin/bash", helper));
+        // A same-named binary at a different absolute path is not the configured
+        // helper either.
+        assert!(!is_agent_auth_helper_command(
+            "/opt/other/vogt-agent-auth",
+            helper
+        ));
     }
 }
