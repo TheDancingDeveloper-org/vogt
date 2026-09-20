@@ -120,6 +120,14 @@
 # default policy: behaviour
 # agent_session_scopes = "read,work.write,project.write,writeback"
 
+# Path to a file holding the brokered agent token adopted at `init` — the session-side mirror of `bootstrap_core_token_file` (#199). It lets the pod-wide token an engine default shell or a command-launched session brokers be a deploy-time secret instead of something minted by a running core (an `admin` op plus an Infisical rotation plus an engine restart). Its scopes are `agent_session_scopes` — the same knob as `session.start` — so widening what sessions may do is 'change the secret, redeploy'. Idempotent: a boot that finds the secret already present changes nothing. Unset, the mint-then-configure path is unchanged.
+# default policy: behaviour
+# bootstrap_agent_token_file = null
+
+# Identity the adopted agent token is bound to, created if absent. Audit rows name it, so it should say this stack's sessions acted — not a person, and not something shared with another instance.
+# default policy: behaviour
+# bootstrap_agent_token_actor = "agent:vogt-sessions"
+
 # Whether the unauthenticated first-run install bootstrap (`POST /api/install/bootstrap`) may mint the first admin token while the token store is empty. It is safe on the loopback topology `serve` defaults to — only parties who could already mint a token over loopback reach it — but a fronted deployment proxies it through the public front door, so on every fresh deploy or store reset there is a window where any internet caller can take the instance. A deployment that provisions its first credential another way (`bootstrap_core_token_file`, or an operator-adopted token) never needs the HTTP bootstrap: set this `false` to refuse it outright and close that window. When disabled the status route reports the mode closed.
 # default policy: behaviour
 # install_bootstrap_enabled = true

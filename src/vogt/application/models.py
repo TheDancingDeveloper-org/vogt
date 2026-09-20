@@ -195,6 +195,8 @@ class InitResult(Result):
     #: one nobody can confirm happened — and "did the token take?" is the
     #: question a first deploy actually asks.
     bootstrap_core_token: str = "not_configured"
+    #: The same, for `bootstrap_agent_token_file` — the brokered session token.
+    bootstrap_agent_token: str = "not_configured"
 
 
 class MigrateParams(Params):
