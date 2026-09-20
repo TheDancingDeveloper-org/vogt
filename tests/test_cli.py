@@ -53,6 +53,42 @@ def test_status_before_init_explains_itself(context: AppContext) -> None:
     assert "vogt init" in result.stderr
 
 
+def test_not_initialized_without_remote_gives_no_remote_hint(
+    context: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("VOGT_CORE_URL", raising=False)
+    result = run(["status"], context=context)
+    assert result.exit_code == EXIT_ERROR
+    assert "not_initialized" in result.stderr
+    assert "VOGT_CORE_URL" not in result.stderr
+
+
+def test_not_initialized_in_pod_names_the_remote_path(
+    context: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A session wired to a remote core: the local-store CLI still fails
+    # not_initialized, but the error must point at the HTTP path, not only at
+    # `vogt init` (#729).
+    monkeypatch.setenv("VOGT_CORE_URL", "http://vogt:8000/")
+    monkeypatch.setenv("VOGT_HTTP_TOKEN", "bearer-xyz")
+    result = run(["status"], context=context)
+    assert result.exit_code == EXIT_ERROR
+    assert "not_initialized" in result.stderr
+    # The remote is named, the trailing slash is normalised, and the /api path
+    # and bearer scheme are discoverable.
+    assert "http://vogt:8000/api/projects" in result.stderr
+    assert "Authorization: Bearer $VOGT_HTTP_TOKEN" in result.stderr
+
+
+def test_not_initialized_remote_without_token_flags_the_missing_bearer(
+    context: AppContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VOGT_CORE_URL", "http://vogt:8000")
+    monkeypatch.delenv("VOGT_HTTP_TOKEN", raising=False)
+    result = run(["status"], context=context)
+    assert "VOGT_HTTP_TOKEN" in result.stderr
+
+
 def test_no_command_prints_help(monkeypatch: pytest.MonkeyPatch) -> None:
     # Python 3.13+ argparse colourises help output, wrapping "usage: vogt" in
     # ANSI SGR codes so the plain substring check misses. The project targets
