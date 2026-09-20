@@ -56,7 +56,7 @@ from vogt.application.services._brief import (
 )
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_write
-from vogt.core.auth import Scope, issue
+from vogt.core.auth import Scope, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
 from vogt.errors import Conflict, InvalidRequest, NotFound, VogtError
@@ -67,11 +67,14 @@ SESSION_STOP = "session.stop"
 SESSION_STARTED_EVENT = "session.started"
 SESSION_STOPPED_EVENT = "session.stopped"
 
-#: What a session's own token may do. Read, so an agent can ask what it is
-#: working on; `work.write`, so it can record what it did. Not `project.write`
-#: and not `admin`: a terminal opened on one bug has no business registering
-#: projects or issuing further tokens.
-SESSION_SCOPES: tuple[Scope, ...] = ("read", "work.write")
+
+#: What a session's own token may do is one deployment decision, set by
+#: `agent_session_scopes` (env `VOGT_AGENT_SESSION_SCOPES`) and applied to every
+#: session however it was launched — the default is everything except `admin`.
+#: Per-session *attribution* is unchanged: each `session.start` still mints its
+#: own actor-bound token; only the scope set is deployment-chosen (FR-S10).
+def _session_scopes(ctx: AppContext) -> tuple[Scope, ...]:
+    return parse_scopes(ctx.config.agent_session_scopes)
 
 
 def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
@@ -86,7 +89,8 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
     actor_ref = f"agent:session:{session_id}"
-    credential = issue(SESSION_SCOPES)
+    session_scopes = _session_scopes(ctx)
+    credential = issue(session_scopes)
 
     started = _start_on_engine(
         engine,
@@ -116,7 +120,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 actor_id=holder.id,
                 actor_identity_ref=holder.identity_ref,
                 name=f"session {session_id}",
-                scopes=list(SESSION_SCOPES),
+                scopes=list(session_scopes),
                 created_at=now,
                 expires_at=None,
             ),

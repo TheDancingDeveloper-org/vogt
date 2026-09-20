@@ -386,8 +386,28 @@ def test_the_session_carries_its_own_token(
         stored = view.token_by_hash(hash_token(env["VOGT_HTTP_TOKEN"]))
     assert stored is not None, "the token the session was given must authenticate"
     assert stored.actor_identity_ref == result.session.actor
-    assert set(stored.scopes) == {"read", "work.write"}, (
-        "a terminal opened on one bug may read and record work, and nothing else"
+    assert set(stored.scopes) == {"read", "work.write", "project.write", "writeback"}, (
+        "a session token holds the deployment-chosen scope set — the default is "
+        "everything except admin (agent_session_scopes)"
+    )
+
+
+def test_session_scopes_follow_the_deployment_setting(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """agent_session_scopes is the one knob; the session token holds exactly it."""
+    narrowed = dataclasses.replace(
+        wired,
+        config=wired.config.model_copy(update={"agent_session_scopes": "read"}),
+    )
+    result = start_session(narrowed, StartSessionParams(work_item="WI-1", reason=WHY))
+    env = engine.env_of_last_start()
+    with narrowed.declared.read() as view:
+        stored = view.token_by_hash(hash_token(env["VOGT_HTTP_TOKEN"]))
+    assert stored is not None
+    assert set(stored.scopes) == {"read"}
+    assert stored.actor_identity_ref == result.session.actor, (
+        "only the scope set is shared — attribution stays per-session"
     )
 
 

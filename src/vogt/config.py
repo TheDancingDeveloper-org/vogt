@@ -450,6 +450,25 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    agent_session_scopes: str = Field(
+        default="read,work.write,project.write,writeback",
+        description=(
+            "Scopes every agent session's own token holds — one deployment "
+            "decision for what a session may do, applied the same however the "
+            "session was launched. Comma-separated, parsed with the same rules "
+            "as any token's scopes. The default is everything except `admin`, "
+            "which gates only token minting, actor creation and instance ops "
+            "(init/migrate/backup/restore/serve) that no session needs. Scopes "
+            "are instance-wide and everything in the pod shares one uid, so a "
+            "narrower set here is more a rule to explain than a boundary it "
+            "enforces (FR-S10) — narrow it only if this instance truly wants to. "
+            "`admin` is accepted if an operator writes it: that is consent, not "
+            "a mistake to guard against. Per-session attribution is unchanged — "
+            "each session still mints its own actor-bound token; only the scope "
+            "set is shared."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     install_bootstrap_enabled: bool = Field(
         default=True,
         description=(
