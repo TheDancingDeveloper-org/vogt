@@ -92,6 +92,9 @@ terminates TLS in front of it, and read [SECURITY.md](SECURITY.md) first.
   proxy, backups, upgrades, releases.
 - [User guide](docs/USER_GUIDE.md) — daily use of the web app, CLI, REST and
   the agent surfaces.
+- [API, MCP & permissions](docs/API.md) — the access surfaces (core HTTP API
+  with OpenAPI/Swagger, MCP, the engine front door), which token each accepts,
+  and the scope model.
 - [Agent guide](docs/AGENT_GUIDE.md) — for an agent working through Vogt.
 - [Configuration reference](docs/CONFIG.md) — every setting, generated from
   the schema.
