@@ -16,6 +16,7 @@ vi.mock("@xterm/xterm", () => {
     cols = 80;
     rows = 24;
     textarea = document.createElement("textarea");
+    parser = { registerOscHandler: () => disposable };
     loadAddon() {}
     onTitleChange(cb: (title: string) => void) {
       titleCbs.push(cb);

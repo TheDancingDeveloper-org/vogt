@@ -9,6 +9,7 @@ import "@xterm/xterm/css/xterm.css";
 import { openAttach } from "./api";
 import type { RuntimeSocket } from "./runtimeTransport";
 import { readClipboardText, writeClipboardText } from "./clipboard";
+import { decodeOsc52 } from "./terminalClipboard";
 import { terminalContextMenuAction } from "./terminalContextMenu";
 import { sessionsStore } from "./store";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
@@ -592,6 +593,18 @@ const TerminalView: Component<Props> = (props) => {
       if (trimmed) props.onTitle?.(trimmed);
     });
     term.onBell(() => props.onBell?.());
+    // OSC 52 clipboard writes: a program (Claude Code, tmux, vim's +clipboard)
+    // copies by emitting `ESC ]52;c;<base64>`. xterm parses but ignores it
+    // unless a handler is registered, so without this the program's copy is
+    // silently dropped. Route the decoded text through the same clipboard path
+    // as the manual copy shortcuts (`writeClipboardText` owns the non-secure
+    // origin execCommand fallback and the Android bridge). Write only — an OSC
+    // 52 *read* would let a program read the user's clipboard (see decodeOsc52).
+    term.parser.registerOscHandler(52, (data) => {
+      const text = decodeOsc52(data);
+      if (text !== null) void writeClipboardText(text);
+      return true;
+    });
     term.open(hostRef);
     configureTerminalTextarea(term.textarea);
     fitAndResize();
