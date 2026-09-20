@@ -176,6 +176,12 @@ const TerminalView: Component<Props> = (props) => {
   let pingId = 0;
   let destroyed = false;
   let sessionGone = false;
+  // Render-then-park gate (WI-170). A pane parked before its first attach still
+  // runs one attach+snapshot so its scrollback is rendered, then parks — set on
+  // the first snapshot-done (or short-circuited for a deferred-cache pane, which
+  // restores lazily on activation). connect()'s park guard and parkSocket() both
+  // consult it, so a parked-on-mount pane is never left blank.
+  let initialAttachDone = false;
   let wakeCleanup: (() => void) | null = null;
   let viewportHandler: (() => void) | null = null;
   let fontSizeHandler: ((event: Event) => void) | null = null;
@@ -845,7 +851,12 @@ const TerminalView: Component<Props> = (props) => {
       enterForegroundReplay();
       if (!cached) {
         setReadyToConnect(true);
-        if (!isParked()) connect();
+        // Render the initial snapshot even when parked-on-mount, then park
+        // (WI-170 render-then-park): connect()'s initial-attach guard lets this
+        // first attach through regardless of parked, and parkSocket() defers the
+        // actual park until snapshot-done. Without this a parked-on-mount pane
+        // (e.g. an inactive split) never attaches and renders blank.
+        connect();
         return;
       }
       // Adopt the cache's position now so a warm reattach resumes from it even
@@ -853,8 +864,13 @@ const TerminalView: Component<Props> = (props) => {
       outputPosition = cached.outputPosition;
       if (shouldDeferCacheReplay(isParked(), true)) {
         // Parked on reload: keep the entry in memory and restore it on the first
-        // activation, not into the shared FIFO with the active pane (F3).
+        // activation, not into the shared FIFO with the active pane (F3). There
+        // is no initial server attach to await, so mark it done (WI-170) — the
+        // cache is this pane's rendered content, and parkSocket() should park
+        // immediately rather than wait for a snapshot-done that never comes until
+        // activation.
         deferredCache = cached;
+        initialAttachDone = true;
         setReadyToConnect(true);
         return;
       }
@@ -982,7 +998,10 @@ const TerminalView: Component<Props> = (props) => {
   }
 
   function connect() {
-    if (isParked()) return;
+    // Allow the very first attach even while parked so the snapshot renders
+    // (WI-170 render-then-park); block re-attaches once that initial attach is
+    // done and the pane is parked, exactly as before.
+    if (isParked() && initialAttachDone) return;
     if (isSessionGone()) { markSessionGone(); return; }
     replay?.cancel();
     inSnapshot = true;
@@ -1080,6 +1099,14 @@ const TerminalView: Component<Props> = (props) => {
               // click.
               scheduleFit();
               persistCache();
+              // Render-then-park (WI-170): the first attach has now rendered its
+              // snapshot. Mark it done, and if this pane is parked — it attached
+              // only to render (e.g. an inactive split parked-on-mount) — park
+              // the socket now. parkSocket keeps the rendered buffer, so the
+              // retained scrollback stays on screen under the "Suspended"
+              // overlay, matching main.
+              initialAttachDone = true;
+              if (isParked()) parkSocket();
             });
           } else if (ctrl.type === "lag") {
             term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
@@ -1152,6 +1179,14 @@ const TerminalView: Component<Props> = (props) => {
 
   function parkSocket() {
     if (socketParked) return;
+    // Render-then-park (WI-170): a pane parked before its first attach has
+    // finished must still render its initial snapshot once, so its retained
+    // scrollback is on screen under the "Suspended" overlay (matching main's
+    // favorable race). Defer the park until the initial attach reports
+    // snapshot-done, which sets initialAttachDone and re-invokes parkSocket. The
+    // initial connect is kicked by the cache-load path, so nothing needs to
+    // start it here.
+    if (!initialAttachDone) return;
     socketParked = true;
     // A parked pane is no longer foreground; release the pre-warm gate.
     exitForegroundReplay();
