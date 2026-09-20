@@ -469,6 +469,31 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    bootstrap_agent_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file holding the brokered agent token adopted at `init` — "
+            "the session-side mirror of `bootstrap_core_token_file` (#199). It "
+            "lets the pod-wide token an engine default shell or a command-launched "
+            "session brokers be a deploy-time secret instead of something minted "
+            "by a running core (an `admin` op plus an Infisical rotation plus an "
+            "engine restart). Its scopes are `agent_session_scopes` — the same "
+            "knob as `session.start` — so widening what sessions may do is "
+            "'change the secret, redeploy'. Idempotent: a boot that finds the "
+            "secret already present changes nothing. Unset, the mint-then-"
+            "configure path is unchanged."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    bootstrap_agent_token_actor: str = Field(
+        default="agent:vogt-sessions",
+        description=(
+            "Identity the adopted agent token is bound to, created if absent. "
+            "Audit rows name it, so it should say this stack's sessions acted — "
+            "not a person, and not something shared with another instance."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     install_bootstrap_enabled: bool = Field(
         default=True,
         description=(

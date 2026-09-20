@@ -383,6 +383,104 @@ def adopt_bootstrap_core_token(ctx: AppContext) -> str:
     return "adopted"
 
 
+def adopt_bootstrap_agent_token(ctx: AppContext) -> str:
+    """Adopt the operator-supplied brokered agent token named by configuration.
+
+    The session-side mirror of `adopt_bootstrap_core_token` (#199/#726): the
+    pod-wide token an engine default shell or a command-launched session brokers
+    becomes a deploy-time secret, so widening what sessions may do is "change the
+    secret, redeploy" rather than an `admin` mint plus an Infisical rotation plus
+    an engine restart. Its scopes are `agent_session_scopes` — the *same* one
+    knob `session.start` uses — so both token paths share a single scope decision.
+
+    Same contract as the core adoption, deliberately identical so an operator has
+    one shape to learn: `"not_configured"` when the file is unset/unreadable/empty
+    (the instance boots regardless), `"already_present"` when the secret's hash is
+    already stored (idempotent across the restarts `init` runs on), `"adopted"` on
+    a fresh write; a malformed scope or a too-short secret raises and startup
+    fails, so a deployment cannot believe it supplied a credential and silently
+    not have.
+    """
+    configured = ctx.config.bootstrap_agent_token_file
+    if configured is None:
+        return "not_configured"
+    try:
+        secret = Path(configured).read_text(encoding="utf-8").strip()
+    except OSError:
+        return "not_configured"
+    if not secret:
+        return "not_configured"
+
+    try:
+        scopes = parse_scopes(ctx.config.agent_session_scopes)
+        credential = adopt(secret, scopes)
+    except ValueError as exc:
+        raise InvalidRequest(str(exc)) from exc
+
+    with ctx.declared.read() as view:
+        if view.token_by_hash(credential.token_hash) is not None:
+            return "already_present"
+
+    identity_ref = ctx.config.bootstrap_agent_token_actor
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[TokenResult]:
+        del actor
+        # Re-checked inside the transaction: two containers of one stack can
+        # call `init` at the same moment, and the read above is not a lock.
+        existing = txn.token_by_hash(credential.token_hash)
+        if existing is not None:
+            return WriteOutcome(
+                result=TokenResult(token=existing),
+                entity_kind="token",
+                entity_id=existing.id,
+                payload={"adopted": False, "reason": "already present"},
+                event_kind=TOKEN_ADOPTED_EVENT,
+                summary={"actor": existing.actor_identity_ref},
+            )
+        holder = txn.actor_by_identity(identity_ref)
+        if holder is None:
+            holder = Actor(
+                id=ctx.id_factory("act"),
+                kind="agent",
+                display_name=identity_ref,
+                identity_ref=identity_ref,
+                disabled=False,
+                created_at=ctx.clock(),
+            )
+            txn.insert_actor(holder)
+        token = Token(
+            id=ctx.id_factory("tok"),
+            actor_id=holder.id,
+            actor_identity_ref=holder.identity_ref,
+            name="bootstrap agent token",
+            scopes=list(scopes),
+            created_at=ctx.clock(),
+            expires_at=None,
+        )
+        txn.insert_token(token, token_hash=credential.token_hash)
+        return WriteOutcome(
+            result=TokenResult(token=token),
+            entity_kind="token",
+            entity_id=token.id,
+            payload={
+                "actor": holder.identity_ref,
+                "scopes": list(scopes),
+                "name": token.name,
+                "source": "operator-supplied",
+            },
+            event_kind=TOKEN_ADOPTED_EVENT,
+            summary={"actor": holder.identity_ref, "scopes": list(scopes)},
+        )
+
+    audited_write(
+        ctx,
+        operation=TOKEN_ADOPT,
+        reason="adopting the operator-supplied agent token at init",
+        body=body,
+    )
+    return "adopted"
+
+
 def list_tokens(ctx: AppContext, params: ListTokensParams) -> TokenListResult:
     with ctx.declared.read() as view:
         return TokenListResult(
