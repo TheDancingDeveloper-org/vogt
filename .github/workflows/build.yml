@@ -155,7 +155,7 @@ jobs:
       # builds from it. A Docker Hub login here would not help anything and
       # would put a shared bucket on this repository's critical path.
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -275,7 +275,7 @@ jobs:
             [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
               http = true
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -388,7 +388,7 @@ jobs:
             [registry."${{ vars.VOGT_BUILDKIT_CACHE_REGISTRY }}"]
               http = true
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -631,7 +631,7 @@ jobs:
       # at `FROM`; the bases come from the GHCR mirror the `base-images` job
       # fills first.
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
