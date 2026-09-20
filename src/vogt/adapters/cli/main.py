@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import sys
 from collections.abc import Sequence
 from contextlib import redirect_stderr, redirect_stdout
@@ -23,7 +24,7 @@ from vogt.adapters.cli.args import add_model_arguments, collect_params
 from vogt.adapters.cli.render import to_json, to_text
 from vogt.application.context import AppContext, build_context
 from vogt.config import load_config
-from vogt.errors import VogtError
+from vogt.errors import NotInitialized, VogtError
 from vogt.registry import OperationRegistry, default_registry
 from vogt.registry.operation import Operation
 
@@ -92,6 +93,34 @@ def build_parser(registry: OperationRegistry) -> argparse.ArgumentParser:
     return parser
 
 
+def _remote_instance_hint() -> str:
+    """Point an in-pod operator at the remote instance the session is wired to.
+
+    A session wired to a remote core carries `VOGT_CORE_URL` (+ `VOGT_HTTP_TOKEN`)
+    but the `vogt` CLI still defaults to a *local* store, so a command fails with
+    "not_initialized: … run vogt init". In a pod that reads as "init a local
+    store here" — the wrong move, and it can leave a stray store behind. When a
+    remote is configured, name the HTTP path the operations actually work over
+    instead of leaving the operator with only the local-init suggestion (#729).
+    """
+    core_url = os.environ.get("VOGT_CORE_URL")
+    if not core_url:
+        return ""
+    core_url = core_url.rstrip("/")
+    token_note = (
+        ""
+        if os.environ.get("VOGT_HTTP_TOKEN")
+        else " (also set VOGT_HTTP_TOKEN — the remote call needs the bearer)"
+    )
+    projects_url = f"{core_url}/api/projects"
+    return (
+        f"hint: VOGT_CORE_URL is set ({core_url}) but the `vogt` CLI uses a local "
+        f"store, not that remote instance. Reach it over HTTP{token_note}, e.g.:\n"
+        f'  curl -sS -H "Authorization: Bearer $VOGT_HTTP_TOKEN" {projects_url}\n'
+        "Run `vogt init` only if you really want a separate local instance here.\n"
+    )
+
+
 def run(
     argv: Sequence[str] | None = None,
     *,
@@ -135,10 +164,13 @@ def run(
             stderr=f"error: invalid arguments for {operation.name}:\n{exc}\n",
         )
     except VogtError as exc:
+        stderr = f"error: {exc.code}: {exc}\n"
+        if isinstance(exc, NotInitialized):
+            stderr += _remote_instance_hint()
         return CliResult(
             exit_code=EXIT_ERROR,
             stdout="",
-            stderr=f"error: {exc.code}: {exc}\n",
+            stderr=stderr,
         )
 
     rendered = to_json(result) if namespace.json else to_text(result)
