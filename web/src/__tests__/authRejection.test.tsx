@@ -276,6 +276,61 @@ describe("#195 — a token refused after boot returns the reader to the login sc
     expect(getToken()).toBe("");
   });
 
+  it("keeps a remembered session at boot when the engine is unreachable", async () => {
+    // The installed-app bug: on a cold open the network is often not up yet, so
+    // the mount-time credential probe lost its race and threw — and the boot
+    // path used to read every non-401 throw as "signed out", demanding a token
+    // on every launch even though one was remembered. Offline is not a refusal;
+    // the boot probe must obey the same rule the mid-session path already does.
+    setToken("live-token");
+    setBase("http://engine.test");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+
+    const history = createMemoryHistory();
+    history.set({ value: "/board" });
+    const { container } = render(() => (
+      <MemoryRouter history={history}>
+        <Route path={[...APP_ROUTES]} component={App} />
+      </MemoryRouter>
+    ));
+
+    // The shell resolves to authenticated-but-offline: the "Checking your
+    // session…" splash clears and the gate never appears.
+    await waitFor(() =>
+      expect(container.querySelector(".login-loading")).toBeNull(),
+    );
+    expect(loginShown(container)).toBe(false);
+    // The remembered credential is untouched — nothing here cleared it.
+    expect(getToken()).toBe("live-token");
+    expect(getBase()).toBe("http://engine.test");
+  });
+
+  it("still presents the gate at boot when the stored token is refused (401)", async () => {
+    // The one boot failure that *is* about the credential must still reach the
+    // login screen — the fix above must not swallow a real refusal.
+    setToken("stale-token");
+    setBase("http://engine.test");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("the presented token is not valid", { status: 401 })),
+    );
+
+    const history = createMemoryHistory();
+    history.set({ value: "/board" });
+    const { container } = render(() => (
+      <MemoryRouter history={history}>
+        <Route path={[...APP_ROUTES]} component={App} />
+      </MemoryRouter>
+    ));
+
+    await waitFor(() => expect(loginShown(container)).toBe(true));
+  });
+
   it("offers a sign-out control that clears both token and base", async () => {
     // The wrong-but-not-401 case the issue names: a token pointed at the wrong
     // base fails every read without ever being refused, and before this there
