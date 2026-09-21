@@ -58,6 +58,13 @@ export default defineConfig({
           url: `http://127.0.0.1:${port}`,
           reuseExistingServer: !process.env.CI,
           timeout: 30_000,
+          // Force the Vite server down after the run. On the self-hosted CI
+          // runners the default process-group SIGTERM did not reach Vite (PID
+          // namespace / not the group leader), so Playwright hung *after every
+          // test had passed*, waiting on a server that never exited — the whole
+          // job wedged for 90+ min (see #737). SIGTERM then SIGKILL after 5s
+          // guarantees teardown. Locally the server already exits promptly.
+          gracefulShutdown: { signal: "SIGTERM", timeout: 5_000 },
         },
       }),
 });
