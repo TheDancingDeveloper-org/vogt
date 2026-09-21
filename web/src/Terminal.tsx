@@ -55,6 +55,7 @@ import {
   ReconnectTracker,
 } from "./terminalReconnect";
 import { applyStickyMods } from "./terminalModifiers";
+import { isBehindLiveTail } from "./terminalScrollState";
 import {
   beginTerminalTouch,
   moveTerminalTouch,
@@ -206,6 +207,21 @@ const TerminalView: Component<Props> = (props) => {
   const isCoarsePointer =
     window.matchMedia?.("(pointer: coarse)").matches ?? false;
   const [showCopyChip, setShowCopyChip] = createSignal(false);
+  // Jump-to-bottom affordance: a long-running session that scrolled far up its
+  // scrollback (or has a program still writing while the reader is up there) is
+  // hard to catch up to by dragging, especially on a phone. The chip appears
+  // only while the viewport is behind the newest line and snaps back to the
+  // live tail. `atBottom` is recomputed from xterm's own buffer position.
+  const [showJumpToBottom, setShowJumpToBottom] = createSignal(false);
+  const refreshJumpToBottom = () => {
+    if (!term) return;
+    setShowJumpToBottom(isBehindLiveTail(term.buffer.active));
+  };
+  const jumpToBottom = () => {
+    term?.scrollToBottom();
+    setShowJumpToBottom(false);
+    term?.focus();
+  };
   let runCopyChip: () => void = () => {};
   let pasteResolve: ((v: string | null) => void) | null = null;
 
@@ -608,6 +624,14 @@ const TerminalView: Component<Props> = (props) => {
     term.open(hostRef);
     configureTerminalTextarea(term.textarea);
     fitAndResize();
+
+    // Track whether the viewport is behind the live tail, so the jump-to-bottom
+    // chip appears exactly when it is useful. `onScroll` covers the reader
+    // dragging up; `onRender` covers new output arriving while they are up there
+    // (which grows `baseY` without moving the viewport, so `onScroll` alone
+    // would miss it). Both handlers are disposed with the terminal.
+    term.onScroll(() => refreshJumpToBottom());
+    term.onRender(() => refreshJumpToBottom());
 
     // Wire input: user keystrokes → PTY stdin.
     term.onData((data) => dispatchInput(data));
@@ -1360,6 +1384,22 @@ const TerminalView: Component<Props> = (props) => {
             }}
           >
             Copy
+          </button>
+        </Show>
+        <Show when={showJumpToBottom()}>
+          <button
+            type="button"
+            class="terminal-jump-to-bottom"
+            aria-label="Jump to latest output"
+            title="Jump to latest output"
+            onPointerDown={(event) => {
+              // Take the tap before xterm's pointer handling; a plain onClick
+              // can be eaten by an in-progress selection/scroll gesture.
+              event.preventDefault();
+              jumpToBottom();
+            }}
+          >
+            <span aria-hidden="true">↓</span>
           </button>
         </Show>
       </div>
