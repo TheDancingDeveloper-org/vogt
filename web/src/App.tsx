@@ -664,8 +664,27 @@ const App: Component = () => {
           setAuthState("unauthenticated");
           return;
         }
-        setAuthError(`Could not validate your session: ${error instanceof Error ? error.message : String(error)}`);
-        setAuthState("unauthenticated");
+        // Not a 401: the engine is unreachable or the probe flaked — a cold
+        // start whose network is not up yet, a VPN still connecting, an HTTP/3
+        // hiccup on the tailnet. The stored token is valid as far as anyone
+        // knows, so keep the session rather than collapse "offline" into
+        // "signed out" — the same rule `endSession` follows mid-session, where
+        // only a real 401 returns to the gate. Signing the reader out here is
+        // what made the installed app demand a token on every cold open: the
+        // first probe lost the race to the network and the remembered session
+        // was thrown away. Enter the shell authenticated instead; the event
+        // stream reconnects on its own, panels render their own offline state,
+        // and a genuine 401 from any later read still routes through
+        // `endSession`. The only deliberate way back to the gate is Sign out.
+        setAuthError(null);
+        setAuthState("authenticated");
+        await refreshSessions().catch(() => {
+          /* engine still away; the stream's reconnect will catch up */
+        });
+        startEventStream();
+        noteForeground("boot");
+        startPrewarm();
+        void placeMetrics.refresh();
       }
     })();
   });
