@@ -52,8 +52,8 @@ function flattenSymbols(
 
 async function loadCommandService() {
   const [{ StandaloneServices }, { ICommandService }] = await Promise.all([
-    import("monaco-editor/esm/vs/editor/standalone/browser/standaloneServices.js"),
-    import("monaco-editor/esm/vs/platform/commands/common/commands.js"),
+    import("monaco-editor/editor/standalone/browser/standaloneServices.js"),
+    import("monaco-editor/platform/commands/common/commands.js"),
   ]);
   return StandaloneServices.get(ICommandService) as {
     executeCommand(id: string, ...args: unknown[]): Promise<unknown>;
