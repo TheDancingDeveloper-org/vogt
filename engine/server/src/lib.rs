@@ -12,6 +12,7 @@ pub mod assistant_speech;
 pub mod auth;
 pub mod client_diag;
 pub mod config;
+pub mod core_auth;
 pub mod error;
 pub mod events;
 pub mod files;

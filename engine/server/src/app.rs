@@ -20,6 +20,7 @@ use crate::{
     assistant_speech::{self, AssistantSpeech},
     auth, client_diag,
     config::Config,
+    core_auth::CoreIdentityCache,
     events::EventBus,
     files, git,
     gui::GuiRegistry,
@@ -71,6 +72,9 @@ pub struct AppState {
     /// it always has. The Vogt routes then answer 503 with a named reason
     /// and every session keeps working.
     pub vogt_core: Option<Arc<VogtCore>>,
+    /// What the core said each bearer is, remembered briefly. The bearer
+    /// gate and the WebSocket handshake both read it (`core_auth`).
+    pub core_identities: Arc<CoreIdentityCache>,
     /// The runtime-pinned agent CLIs: where they live and the one
     /// installer that may move them. Always present; an image without the
     /// installer reports `installer_present: false` and refuses the POST.
@@ -170,15 +174,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     match cfg.vogt_core_url.as_deref() {
         Some(url) => tracing::info!(
             url = %url,
-            // Whether a fallback exists, and how many front-door tokens reach
-            // the core as an actor of their own. Counts, never values.
-            fallback_token = cfg.vogt_core_token.is_some(),
-            paired_tokens = cfg
-                .extra_tokens
-                .iter()
-                .filter(|t| t.vogt_core_token.is_some())
-                .count(),
-            "vogt-core front door enabled"
+            // Presence only, never values: whether the two halves share a
+            // stack secret, and whether a static break-glass token is set.
+            stack_secret = cfg.vogt_core_token.is_some(),
+            break_glass_token = cfg.token.is_some(),
+            "vogt-core front door enabled: credentials are checked by the core"
         ),
         // Logged at info, not warn: an engine with no core is a supported
         // deployment, not a misconfiguration.
@@ -201,6 +201,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         assistant_speech,
         assistant_log,
         vogt_core,
+        core_identities: Arc::new(CoreIdentityCache::default()),
         agent_clis: Arc::new(agent_clis::AgentCliRuntime::new(agent_clis_paths)),
     });
 
@@ -339,9 +340,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             get(history_api::get_session).delete(history_api::delete_session),
         )
         // Vogt's operations, reached through the front door. They
-        // carry the same bearer gate as every other API route here: the
-        // engine's token namespace is the public one, and the core token this
-        // proxy injects never leaves the process.
+        // carry the same bearer gate as every other API route here, and the
+        // proxy presents the caller's own credential to the core, so the
+        // core sees exactly who acted.
         // Three routes for two shapes: a wildcard segment needs at least one
         // character, so `/api/vogt/` matches neither `/api/vogt` nor
         // `/api/vogt/{*path}` and would fall through to the PWA's catch-all.
@@ -373,9 +374,13 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // `vogt_core::INSTALL_PATHS` because the PWA's source-scan test reads
     // this router's route strings; a test below pins the two against the
     // constant so they cannot drift.
+    // The password login is open for the same reason: a browser that holds
+    // no session yet is exactly its caller. The core checks the password,
+    // throttles and audits; the door only carries the request.
     let vogt_open_routes = vogt_open_routes
         .route("/api/install/status", get(vogt_core::install))
         .route("/api/install/bootstrap", post(vogt_core::install))
+        .route("/api/auth/login", post(vogt_core::login))
         .route("/mcp", any(vogt_core::mcp))
         .route("/mcp/", any(vogt_core::mcp))
         .route("/mcp/{*path}", any(vogt_core::mcp));
