@@ -283,9 +283,10 @@ def test_the_engine_overlay_builds_the_engine_and_fronts_the_core() -> None:
     assert "CODEX_VERSION:" in overlay
     assert 'VOGT_CORE_URL: "http://vogt:8000"' in overlay
     assert "VOGT_CORE_TOKEN_FILE:" in overlay
-    # The engine's own token is the one required operator value (>=16 chars),
-    # exactly as the base requires only VOGT_PUBLIC_URL.
-    assert re.search(r"ENGINE_TOKEN:\s*\"\$\{ENGINE_TOKEN:\?", overlay)
+    # The break-glass token is optional: people sign in with a password and
+    # the core checks every other credential, so an unset value must not stop
+    # the stack.
+    assert re.search(r"ENGINE_TOKEN:\s*\"\$\{ENGINE_TOKEN:-\}\"", overlay)
 
 
 @pytest.mark.parametrize("path", PUBLIC_DEPLOY_FILES, ids=lambda p: p.name)
@@ -333,8 +334,9 @@ def test_the_stack_compose_runs_the_published_aio_and_its_own_core() -> None:
     assert 'VOGT_FRONTED: "true"' in stack
     assert "VOGT_CORE_TOKEN_FILE:" in stack
     assert "VOGT_BOOTSTRAP_CORE_TOKEN_FILE:" in stack
-    # The engine's own token is the one required operator value (>=16 chars).
-    assert re.search(r"ENGINE_TOKEN:\s*\"\$\{ENGINE_TOKEN:\?", stack)
+    # The break-glass token is optional; the stack secret file is what links
+    # the two halves.
+    assert re.search(r"ENGINE_TOKEN:\s*\"\$\{ENGINE_TOKEN:-\}\"", stack)
     # One published port, and it is the engine's. Publishing 8000 would put the
     # core on the network beside the door that exists to be the only way in.
     published = re.findall(r"^      - \"\$\{ENGINE_BIND.*$", stack, re.MULTILINE)

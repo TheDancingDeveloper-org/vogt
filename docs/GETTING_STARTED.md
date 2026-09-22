@@ -42,12 +42,12 @@ cp deploy/stack.env.example deploy/.env
 openssl rand -hex 32 > deploy/vogt-core-token
 ```
 
-Edit `deploy/.env` before starting. `ENGINE_TOKEN` is required — it is the
-bearer token you will paste into the browser and hand to agents, at least 16
-characters, and the stack refuses to invent one for you. Change `ENGINE_PORT`
-if 8910 is already in use. The token file you just created is read by both
-halves inside the container, which is what lets the engine talk to the core
-on the first boot without a second deploy.
+Edit `deploy/.env` before starting if you need to: change `ENGINE_PORT` if
+8910 is already in use. Nothing in it is a human credential — you will choose
+a password in the browser — and `ENGINE_TOKEN`, an optional break-glass token
+for the engine, can stay empty. The file you just created is the **stack
+secret**, read by both halves inside the container, which is what lets the
+two talk to each other on the first boot without a second deploy.
 
 **Start it.** There is no `--build`: the stack image already carries the
 core, the engine and the PWA, and the voice sidecar is pulled beside it.
@@ -81,7 +81,8 @@ the status.
 
 Open `http://localhost:8910/` in a browser. The engine serves the PWA — the
 board, backlog, terminals, agent tasks, and the voice assistant — at the
-root. Open **Settings (⚙)**, paste the `ENGINE_TOKEN` you set, and save.
+root. A fresh instance greets you with the first-run wizard: give your name,
+a username (suggested from the name) and a password, and it signs you in.
 [`docs/USER_GUIDE.md`](USER_GUIDE.md) is the tour.
 
 Stop or inspect the instance with:
@@ -158,19 +159,28 @@ and issue a scoped token from a trusted local process.
 **First run (install mode).** A freshly initialised instance holds no tokens
 at all, and while that is true the server is in *install mode*: `GET
 /api/install/status` answers `{"install_mode": true}` and an unauthenticated
-`POST /api/install/bootstrap` names the first operator and returns the first
-token. This is what the browser first-run wizard rides, and it doubles as the
-headless bootstrap for scripted installs:
+`POST /api/install/bootstrap` names the first operator. Given a `password`
+(at least 8 characters) it creates that person's login with the `admin`
+scope and returns a **session** — an expiring core token — which is what the
+browser first-run wizard rides; `username` is derived from the display name
+(`ada-lovelace`) when omitted, and a username without a password is refused
+with `400`. Without a password it is the headless bootstrap for scripted
+installs and returns an `admin` API token instead:
 
 ```console
 curl -s http://127.0.0.1:8000/api/install/bootstrap \
   -H 'Content-Type: application/json' \
   -d '{"display_name": "Ada Lovelace"}'
+
+# or, to come out of it with a login rather than a long-lived token:
+curl -s http://127.0.0.1:8000/api/install/bootstrap \
+  -H 'Content-Type: application/json' \
+  -d '{"display_name": "Ada Lovelace", "username": "ada", "password": "correct horse battery"}'
 ```
 
-The answer carries the secret exactly once and an `admin`-scoped token bound
-to the actor it just created (`human:ada-lovelace`); the write is audited to
-that actor. The moment any token exists — this one, or one issued any other
+Either answer carries the secret exactly once and a token bound to the actor
+it just created (`human:ada-lovelace`), and the write is audited to that
+actor. The moment any token exists — this one, or one issued any other
 way — install mode closes itself and the bootstrap refuses with
 `install_closed`. Revoking every token does not reopen it: a lockout is fixed
 from a trusted local process, below. The self-closing door is safe because
@@ -205,13 +215,30 @@ docker compose -f deploy/stack.compose.yml exec vogt \
 ```
 
 This is the token for a CLI, an MCP client, or a script talking to the core
-directly. The browser uses the engine's own `ENGINE_TOKEN` instead — the
-engine is the front door, and it presents its own core credential behind the
-scenes.
+directly — an agent's credential. The secret is shown once. Store it in a
+file with restrictive permissions and send it as `Authorization: Bearer ...`;
+never put it in a URL or command-line argument.
 
-The secret is shown once. Store it in a file with restrictive permissions and
-send it as `Authorization: Bearer ...`; never put it in a URL or command-line
-argument.
+**People sign in with a password.** The browser does not hold an API token:
+it holds the session a username-and-password login mints, which the engine
+accepts on its own routes by asking the core who it is and forwards to the
+core on every Vogt call. The first operator's login comes from the wizard
+(or the bootstrap above); every other one is created by an admin, with the
+password read from a file, from stdin, or from a hidden prompt on a
+terminal — never from the command line:
+
+```console
+uv run vogt user create --username ada --display-name "Ada Lovelace" \
+  --password-file ~/.vogt-password --reason "give Ada a login"
+```
+
+A login's scopes default to `read,work.write,project.write`; `--scopes`
+changes them, and `--actor` attaches the login to an existing human actor
+instead of creating `human:ada`. `vogt user passwd` replaces a password (and
+revokes the person's sessions unless told not to), `vogt user remove` takes
+a login away and leaves the actor and its history, `vogt auth whoami` says
+who any credential is, and `vogt auth logout` revokes the one a call arrived
+with.
 
 ## First project and first work item
 

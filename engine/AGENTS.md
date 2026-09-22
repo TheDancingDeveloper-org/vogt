@@ -42,7 +42,7 @@ Before changing files here:
 | Image | built from `engine/Dockerfile` with the repository root as context; `engine/Dockerfile.pod` is the toolchain base it starts from (`docs/ENGINE.md` §3) |
 | Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port; `/api/vogt` and `/mcp` proxied to the core) |
 | DB / state | No database. Sessions in-memory; agent tasks, push subscriptions and the assistant log persisted under `state_dir` (JSON and SQLite). |
-| Secrets used at runtime | `ENGINE_TOKEN` (primary API bearer), optional `ENGINE_EXTRA_TOKENS_JSON` (scoped JSON token list), optional `ENGINE_FCM_SERVICE_ACCOUNT_JSON` for native FCM, optional `ENGINE_ASSISTANT_API_KEY` and the speech keys (`docs/ENGINE.md` §6), optional `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` for the front door. VAPID keys are generated and persisted under `state_dir`. |
+| Secrets used at runtime | `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — the **stack secret** the core adopted at `init`: the engine recognises it as the core's own identity (`vogt-core`), follows the core's event feed with it, and lends it to the break-glass token; optional `ENGINE_TOKEN`, a static **break-glass** bearer with full capability and no actor of its own; optional `ENGINE_FCM_SERVICE_ACCOUNT_JSON` for native FCM; optional `ENGINE_ASSISTANT_API_KEY` and the speech keys (`docs/ENGINE.md` §6). The engine holds no token table: every other bearer is a core token it resolves by asking the core (`engine/server/src/core_auth.rs`). VAPID keys are generated and persisted under `state_dir`. |
 
 ## 2. Architecture
 
@@ -78,7 +78,9 @@ Each line below starts from the repository root; the subshells are so they all
 still do.
 
 ```bash
-# Run server (mint a token first, >=16 chars)
+# Run server. With no core to check credentials against, a break-glass token
+# (>=16 chars) is the only way in and the engine refuses to boot without one;
+# with VOGT_CORE_URL set it is optional.
 export ENGINE_TOKEN="$(openssl rand -hex 24)"
 (cd engine && cargo run -p vogt-engine-server -- --bind 127.0.0.1:8910)
 
@@ -181,7 +183,7 @@ deployment's own choice.
 
 ## 7. Rules for AI agents
 
-- API auth is bearer-token based, but tokens are no longer implicitly equivalent: the primary token has full access, while optional entries from `ENGINE_EXTRA_TOKENS_JSON` can be scoped to `sessions`, `filesystem-write`, `git-write`, `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, `assistant` and `vogt-write`. Public routes remain `/healthz`, `/readyz`, `/api/push/public-key`, and `/api/config`. Do not add new public routes without thinking about CSRF; the PWA stores the token in `localStorage` and sends it via `Authorization:` header. WebSocket currently falls back to a `?token=` query param.
+- API auth is bearer-token based and the core is the identity authority. A bearer is resolved in order: the optional static break-glass `ENGINE_TOKEN` (all eleven capabilities), the stack secret (`vogt-core`: `sessions` and `agent-clis-write`), and otherwise a core token the engine asks the core about (`GET /api/auth/whoami`, cached by digest — 15 s positive, 3 s refusal, an outage never cached; `auth.logout` through `/api/vogt` evicts). Capabilities derive from core scopes (`auth::capabilities_for_scopes`): `admin` → all eleven (`sessions`, `filesystem-write`, `git-write`, `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, `history`, `assistant`, `vogt-write`, `agent-clis-write`); `work.write` or `project.write` → everything but `gui-control` and `agent-clis-write`; `read` alone → `push-write`; `writeback` → nothing. Do not add an engine-side token store or a per-token capability list. A core that cannot be reached is a `503`, never a `401`. Public routes remain `/healthz`, `/readyz`, `/api/push/public-key`, `/api/config`, and the pass-throughs `/api/auth/login`, `/api/install/*` and `/mcp`, which the core gates itself. Do not add new public routes without thinking about CSRF; the PWA stores its session in `localStorage` and sends it via `Authorization:` header. WebSocket authenticates with a first text frame through the same resolver and falls back to a `?token=` query param only when `ENGINE_WS_QUERY_TOKEN=true`.
 - WebSocket attach protocol is ordered: `snapshot-start` text frame -> <=64 KiB binary scrollback chunks -> `snapshot-done` text -> live binary. Client text frames must be JSON (`{"type":"resize"|"ping"|...}`); binary frames are written verbatim to PTY stdin. Lag causes the server to send `{"type":"lag",...}` and close; the client should reattach.
 - `workspace_root` is the boundary for all file APIs. Path-traversal is strict-component-checked, binary detection runs, and reads cap at 5 MiB. Do not introduce a file endpoint that bypasses these checks.
 - Activity state machine drives push delivery: `idle` / `running` / `waiting-for-input` / `errored`. Push fires on entry to `waiting-for-input`. The heuristic is regex on stripped output tail; adjust with care because false positives become phone notifications.

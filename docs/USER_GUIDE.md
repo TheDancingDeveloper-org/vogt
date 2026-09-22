@@ -33,14 +33,13 @@ stack running yet, [`GETTING_STARTED.md`](GETTING_STARTED.md) brings it up, and
 [`ENGINE.md`](ENGINE.md) §3 covers the engine's own configuration.
 
 **First run.** A brand-new instance — one whose core holds no tokens at all —
-greets you with a setup wizard instead of the sign-in gate: name yourself and
-it mints your first token, shows it exactly once alongside the CLI and MCP
-equivalents, and offers to sign you straight in. That door closes itself the
-moment any token exists (`GETTING_STARTED.md` covers the mechanism and the
-headless equivalent). If your deployment's front door uses its own token
-namespace (`ENGINE.md` §3), the wizard says so and hands you to the ordinary
-sign-in below; the minted token remains your credential for the CLI, REST and
-MCP surfaces.
+greets you with a setup wizard instead of the sign-in gate: name yourself,
+choose a username (suggested from your name) and a password, confirm it, and
+the wizard creates your login with the `admin` scope and signs you straight
+in. Nothing is shown once and nothing needs copying down; the wizard's
+terminal-and-agent hint says how to mint API tokens for those (`vogt token
+issue`). That door closes itself the moment any token exists
+(`GETTING_STARTED.md` covers the mechanism and the headless equivalent).
 
 Your first sign-in then lands on **Setup** (`#/setup`), which walks the two
 remaining steps with a visible pass or fail on each: linking your own forge
@@ -55,23 +54,34 @@ audited like any other.
 1. Open your instance's address in a browser. The engine serves the GUI at
    `/` and proxies the core's API behind it, so work surfaces and terminals
    share one origin.
-2. Open **Settings (⚙)** and paste your bearer token.
-3. **Save & reload.**
+2. Enter your **username** and **password** at the sign-in gate.
+3. You are in. **Sign in with a token** is one disclosure away for an API
+   token or the operator's break-glass token.
 
-The token is an **engine token** — the primary token the operator set in the
-engine's config, or an entry in its `extra_tokens` list (`ENGINE.md` §3). What
-it can do is exactly what its capabilities list says: reading needs only a
-valid token, and each kind of write needs its own capability (`sessions`,
-`filesystem-write`, `git-write`, `gui-control`, `agent-tasks-write`,
-`push-write`, `history-write`, `assistant`, `vogt-write`). A token that
-authenticates but lacks the capability gets a `403` — which means *this
+Signing in mints a **session**: a core token bound to your own actor,
+carrying the scopes on your login, which the browser keeps for you and which
+expires after the instance's `session_ttl_days` (30 by default). Everything
+you do — on the work surfaces, in the terminals, through the assistant — is
+done with that one credential. The engine holds no token list of its own: it
+asks the core who your session belongs to and derives what you may do here
+from your scopes, and every Vogt write made through the GUI is forwarded
+with your own session, so it is audited to you and never to a shared
+identity. With `work.write` or `project.write` you can open terminals, edit
+files, run agent tasks and use the assistant; with `read` alone you can look
+and subscribe to notifications; `admin` can do everything, including
+launching GUI processes and repinning the agent CLIs. A `403` means *this
 credential will never work for this route*, as against a `401`'s *try a
-different one*.
+different one*; a `503` means the core could not be asked, which is an
+outage rather than a wrong password, and the gate says so.
 
-Vogt writes made through the GUI are performed with the **core token** the
-operator paired with your engine token, so they are audited to your actor, not
-to a shared one. Core tokens are issued with `vogt token issue` (see
-`GETTING_STARTED.md`); the CLI, REST and MCP surfaces use them directly.
+**Sign out** (in Settings) revokes the session at the core and then clears
+the browser, so a signed-out device stops working everywhere rather than
+merely forgetting. Your password is changed by an admin with `vogt user
+passwd`, which also ends your other sessions.
+
+API tokens are for agents, scripts and MCP clients. They are issued with
+`vogt token issue` (see `GETTING_STARTED.md`), and the CLI, REST and MCP
+surfaces — and this gate's token form — use them directly.
 
 Settings is a routed modal. Whether it is opened from the desktop rail, the
 phone bottom bar's **More** sheet, or the command palette, closing it returns
@@ -79,9 +89,9 @@ to the route that invoked it,
 including filters in the query string; a direct `#/settings` link falls back
 to Sessions. Browser Back closes a routed Settings view without adding a loop.
 
-Settings stores device-local **named auth profiles**, so you can keep a
-read-only token and an interactive one side by side and switch between them
-rather than leaving an admin token in a browser.
+Settings still stores device-local **named auth profiles** for token
+sign-ins — an advanced arrangement for someone who holds several API tokens
+and switches between them. A password login needs none of it.
 
 Settings → **Theme** carries two pickers. **App Theme** recolours the whole
 shell and takes effect immediately: choose **System** to follow your device's
@@ -486,9 +496,11 @@ on sends captured audio to the server transcriber instead, handed those names
 as a hint, so "check komodo on Node B" is far likelier to come through as the
 words you said. It takes effect the next time the app launches.
 
-An approved write is audited to **your** actor, using the core token paired with
-the token that pressed approve. There is no shared "assistant" actor to fall
-back to; an unpaired approver is refused by name.
+An approved write is audited to **your** actor, made with the credential that
+pressed approve — your own session or token, forwarded to the core. There is
+no shared "assistant" actor to fall back to; the only caller with nothing to
+write as is the break-glass token on a front door with no stack secret, and
+it is refused by name.
 
 ### 2.6 Terminals
 
@@ -911,9 +923,10 @@ answer is.
 **Copy/paste does not work.** The clipboard API needs HTTPS and a permission
 grant. Right-click always works as a fallback; on mobile, use the paste modal.
 
-**A session will not start.** Check the token in Settings, and check that it
-carries the `sessions` capability — a read-only token can list and read
-sessions and cannot attach, because attaching writes to a PTY.
+**A session will not start.** Check that you are signed in, and that your
+login or token carries `work.write` or `project.write` — `read` alone can
+list sessions and read a scrollback and cannot start or attach to one,
+because attaching writes to a PTY.
 
 **A Vogt surface says the core is unavailable.** That is a real outage of a
 real thing, not an unconfigured feature. `/readyz`'s `vogt_core` check is the
@@ -1001,8 +1014,9 @@ criterion your project cannot meet at all — a Cargo workspace has no root
 `src/` — is declared with `contract inapplicable` and a reason, and stops
 being counted as a failure while staying on the report.
 
-The same operations are REST routes under `/api/` — send the core token as
-`Authorization: Bearer …`; `GET /openapi.json` lists them. For an agent,
+The same operations are REST routes under `/api/` — send a core token, an
+API token or your own session, as `Authorization: Bearer …`;
+`GET /openapi.json` lists them. For an agent,
 `vogt-mcp` speaks MCP over stdio against the same data directory
 (`VOGT_DATA_DIR`), and `vogt-mcp-remote` bridges stdio to a remote instance's
 `/mcp` using `VOGT_URL` and `VOGT_TOKEN_FILE`. An agent's tool list is exactly
