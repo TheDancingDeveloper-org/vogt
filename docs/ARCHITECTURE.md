@@ -77,9 +77,10 @@ vogt-stack container
     ├── /                 the Solid PWA, embedded in the binary
     ├── /api/...          sessions, terminals, files, git, agent tasks, push,
     │                     assistant, history
-    ├── /api/vogt/...     proxied to the core's /api, core token injected
+    ├── /api/vogt/...     proxied to the core's /api, caller's bearer forwarded
     ├── /mcp              proxied to the core, caller's token forwarded
-    ├── /api/install/...  proxied untouched; the core self-gates
+    ├── /api/install/..., /api/auth/login
+    │                     proxied untouched; the core self-gates
     └── /healthz, /readyz
   vogt serve   (Python; the core, loopback only, :8000 inside the container)
     ├── /api/...          REST (FastAPI; OpenAPI at /openapi.json)
@@ -102,7 +103,10 @@ vogt-voice container   (Rust; STT + TTS on the Compose network, reached by
   `codex` agent CLIs the sessions run.
 - **The PWA** (`web/`) is compiled into the engine binary. It calls the
   engine's APIs directly and reaches the core through `/api/vogt`, holding
-  one credential — the engine's bearer token — and never a core token.
+  one credential: a core **session** minted by a username-and-password login
+  (`POST /api/auth/login`), or a pasted API token. The engine accepts it on
+  its own routes by asking the core who it is, and forwards it untouched on
+  `/api/vogt`, so the core's audit names the person who acted.
 - **The voice sidecar** (`voice/`) speaks the OpenAI-compatible audio
   contract the engine uses, with a baked-in Whisper model and Piper voice, so
   a fresh stack transcribes the microphone and speaks replies with no
@@ -119,10 +123,19 @@ fetches the assistant's Vogt tools from the core's own MCP `tools/list`. The
 core calls the engine only for sessions — the `session.*` operations
 (`vogt.adapters.engine.client`) and the `session-outcomes` collector. The
 engine calls the voice sidecar; the PWA and the mobile shell call only the
-engine. The core token is a file both halves read (`VOGT_CORE_TOKEN_FILE`):
-the engine presents it on `/api/vogt`, and the core adopts it at `init` as the
-actor and scopes named by `VOGT_BOOTSTRAP_CORE_TOKEN_*`. That is the whole
-first-boot bootstrap.
+engine. The two halves share exactly one credential, the **stack secret**: a
+file both read (`VOGT_CORE_TOKEN_FILE` for the engine,
+`VOGT_BOOTSTRAP_CORE_TOKEN_FILE` for the core). The core adopts it at `init`
+as the actor and scopes named by `VOGT_BOOTSTRAP_CORE_TOKEN_*`, revoking any
+earlier adoption of a different value in the same transaction, and calls the
+engine with it to start sessions; the engine recognises it as the core's own
+identity, follows the core's event feed with it, and lends it to the optional
+break-glass `ENGINE_TOKEN`, which has no actor of its own. That is the whole
+first-boot bootstrap. The engine keeps no token table: every other bearer it
+sees is a core token — an API token from `token.issue` or a session from a
+password login — and it resolves each by asking the core's `auth.whoami`,
+caching the answer for seconds. People are created by the first-run wizard or
+`vogt user create`; agents get API tokens from `vogt token issue`.
 
 ---
 
@@ -192,7 +205,7 @@ contract, the assistant's threat model and the task scheduler are in
 Every capability of the core is one entry in
 `src/vogt/registry/operations.py`: a name, a summary, a scope, a `mutating`
 flag, a pydantic parameter model, a result model, a handler in the
-application layer, an HTTP route and a CLI binding. The registry holds 89
+application layer, an HTTP route and a CLI binding. The registry holds 95
 operations. From that one definition the **CLI** (`vogt <verb>`) is
 generated; the **REST** routes under `/api` are generated with their schemas
 in the OpenAPI document at `/openapi.json`; and the **MCP** tool list is
@@ -216,17 +229,39 @@ does not exist: `LOCAL_ONLY` (`init`, `migrate`, `serve`, `backup`,
 directory, and none is mounted under `/api` or offered over MCP) and
 `HTTP_ONLY`, which is empty.
 
-Two routes sit beside the registry rather than in it: the unauthenticated
-health probes, and the first-run install surface (`GET /api/install/status`,
-`POST /api/install/bootstrap`) — the one unauthenticated write, which mints
-the first `admin` token only while the token store holds no rows at all and
-refuses with `install_closed` forever after.
+Three routes sit beside the registry rather than in it: the unauthenticated
+health probes; the first-run install surface (`GET /api/install/status`,
+`POST /api/install/bootstrap`), which names the first operator only while the
+token store holds no rows at all and refuses with `install_closed` forever
+after — given a `password` it creates that person's `admin` login and returns
+an expiring session, which is what the browser wizard rides, and without one
+it returns an `admin` API token shown once, the headless shape; and
+`POST /api/auth/login`, the password login, which is unauthenticated by
+construction and mints a session bound to the person's own actor. Both are
+mounted beside the registry because neither has a principal to authorise.
 
 **Identity is never an argument.** The principal is derived from
 authentication — a token bound to an actor, or `local:<os-user>` on the
 unauthenticated loopback path, which is granted `admin` because the caller
-already has the data directory. `reason` is the only caller-supplied audit
-field, and it is required.
+already has the data directory. A token is one of three kinds
+(`tokens.kind`): `api`, minted by `token.issue` or adopted at `init`;
+`session`, minted by a password login and expiring after `session_ttl_days`;
+or `agent`, a coding session's own token. Authentication treats every kind
+identically. `reason` is the only caller-supplied audit field, and it is
+required.
+
+**People sign in with a password; agents hold tokens.** A human's login lives
+in `password_credentials` — a username, a scrypt hash and the scopes every
+session they open will carry — created by `user.create` (`vogt user create`,
+admin), rotated by `user.set_password` (which revokes their live sessions by
+default) and taken away by `user.remove`, which leaves the actor and its audit
+history in place; `user.list` never returns a hash. A login is throttled
+after five failures on one username within a minute, and a wrong password
+and an unknown username get the same answer. `auth.whoami` (`read`) tells any
+caller who authentication decided they are and their effective scopes;
+`auth.logout` revokes the token the call arrived with. Passwords never cross
+the CLI's argument vector: `--password-file` and `--password-stdin` are the
+only forms, with a hidden prompt on a terminal.
 
 **Scopes** are `read`, `work.write`, `project.write`, `writeback` and
 `admin`. `admin` implies everything; `work.write` and `project.write` each
@@ -489,7 +524,9 @@ Both server transports share one dispatcher (`adapters/mcp/surface.py`), and
 unsupported protocol versions are refused with the supported list named.
 
 **Tokens.** A core token is minted by `token.issue` (`vogt token issue`),
-bound to an actor and a scope set, and revocable by `token.revoke`. Writes
+bound to an actor and a scope set, and revocable by `token.revoke`. A
+browser's session, minted by a password login, is a core token too and works
+on `/mcp` as well, until it expires or `auth.logout` revokes it. Writes
 are double-gated: the server must run with writes enabled and the principal
 must hold the scope, checked at both `tools/list` and `tools/call`. Ungranted
 tools are absent from the list rather than present and refusing, so an

@@ -89,12 +89,13 @@ services:
       # an exposure decision: `ENGINE_BIND` in `.env` decides exposure, on the
       # host side of the port mapping above.
       ENGINE_BIND: "0.0.0.0:8910"
-      # The engine's own bearer token (at least 16 characters), required for
-      # every API and WebSocket call. Keep the value in `deploy/.env` (a file
-      # git ignores) rather than your shell; for stricter secret hygiene the
-      # engine can also read `token` from a mounted TOML config named by
-      # `ENGINE_CONFIG` — see `docs/ENGINE.md` §3.
-      ENGINE_TOKEN: "${ENGINE_TOKEN:?Set ENGINE_TOKEN in deploy/.env — the engine bearer token, at least 16 characters}"
+      # Optional: a static break-glass token (at least 16 characters). People
+      # sign in with a username and password and the core checks every other
+      # credential, so this is for CI and for an operator locked out of every
+      # login. Keep the value in `deploy/.env` (a file git ignores) rather
+      # than your shell; the engine can also read `token` from a mounted TOML
+      # config named by `ENGINE_CONFIG` — see `docs/ENGINE.md` §3.
+      ENGINE_TOKEN: "${ENGINE_TOKEN:-}"
       # The address clients reach the front door at. Optional to start, but the
       # engine cannot advertise an address it is not told, so set it once the
       # engine is reachable at a stable URL.

@@ -174,8 +174,8 @@ step_token() {
             pass "the provided front-door token reaches the core"
         else
             fail "the provided token did not reach the core via /api/vogt/status"
-            fail "  — a 503 naming vogt_core_token means it has no paired core"
-            fail "  token; a 401 means the engine does not know it"
+            fail "  — a 503 naming vogt_core_token means the break-glass token has no"
+            fail "  stack secret to borrow; a 401 means neither the engine nor the core knows it"
         fi
         return
     fi

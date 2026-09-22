@@ -59,13 +59,21 @@ Rules:
 | `migrations` | forward-only migration ledger | `id, applied_at, checksum` |
 | `migration_lock` | single-writer migration guard | |
 | `actors` | humans **and** agents | `id, kind(human\|agent), display_name, identity_ref, disabled` |
-| `tokens` | API credentials bound to actors | `id, actor_id, scopes, token_hash, expires_at, revoked_at` |
+| `tokens` | credentials bound to actors: API tokens, the sessions a password login mints, and coding-session tokens | `id, actor_id, kind(api\|session\|agent), scopes, token_hash, expires_at, revoked_at` |
+| `password_credentials` | a human's login — the username, a scrypt hash, and the scopes every session it mints carries | `actor_id` (PK, → `actors`), `username` (unique), `password_hash, scopes, created_at, updated_at` |
 | `forge_accounts` | an actor's own forge identity, so upstream writes are attributed to them rather than to the instance token | `actor_id, host, login, scopes, encrypted_token, created_at, updated_at`, PK `(actor_id, host)` |
 | `auth_decisions` | every allow **and** deny, at both `tools/list` and invocation | `id, at, actor_id, operation, decision(allow\|deny), reason_code, transport` |
 | `audit` | every declared write | `id, txn_id, revision, actor_id, operation, entity_kind, entity_id, reason, payload_digest, at` |
 
 Authorization decisions are their own table rather than audit rows: a denial
 changes nothing, so it has no entity and no revision to hang from.
+
+`tokens.kind` exists for listing and revoking "every browser session this
+person holds"; authentication reads none of it — a session is checked exactly
+like any other token. `password_credentials` keeps `username` as its own
+column rather than reusing the actor's `identity_ref`, because a login name
+is something a person might change and an audit identity is not; its hash is
+read and written by the storage layer alone and never appears on a model.
 
 `forge_accounts` stores its token **encrypted** where `tokens` stores only a
 hash, and the inversion is deliberate. A Vogt-issued token never needs
