@@ -26,9 +26,10 @@ const bootstrapResult = {
     display_name: "Ada Lovelace",
     kind: "human",
   },
-  token: { id: "tok-1", name: "first-run browser token", scopes: ["admin"] },
+  token: { id: "tok-1", name: "first-run browser token", scopes: ["admin"], kind: "session" },
   secret: "vogt_first-run-secret",
-  warning: "This is the only time the secret is shown.",
+  warning: "This is a browser session.",
+  username: "ada-lovelace",
 };
 
 beforeEach(() => {
@@ -74,7 +75,23 @@ describe("installApi", () => {
 });
 
 describe("#292 — the identity step", () => {
-  it("claims the instance and shows the secret exactly once, with equivalents", async () => {
+  /** Fill the identity form the way an operator would. */
+  async function claim(name = "Ada Lovelace", password = "correct horse battery") {
+    await fireEvent.input(screen.getByPlaceholderText("Ada Lovelace"), {
+      target: { value: name },
+    });
+    await fireEvent.input(screen.getByLabelText("Password"), {
+      target: { value: password },
+    });
+    await fireEvent.input(screen.getByLabelText("Confirm password"), {
+      target: { value: password },
+    });
+    await fireEvent.click(
+      screen.getByRole("button", { name: "Claim instance & create my login" }),
+    );
+  }
+
+  it("claims the instance with a password and says how to sign in from now on", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, bootstrapResult));
     render(() => (
       <SetupWizard onSignIn={() => {}} onAuthenticated={async () => {}} />
@@ -88,32 +105,62 @@ describe("#292 — the identity step", () => {
     await fireEvent.input(screen.getByPlaceholderText("Ada Lovelace"), {
       target: { value: "Ada Lovelace" },
     });
-    await fireEvent.click(
-      screen.getByRole("button", { name: "Claim instance & mint my token" }),
+    // The username is suggested from the name, and stays editable.
+    expect((screen.getByLabelText("Username") as HTMLInputElement).value).toBe(
+      "ada-lovelace",
     );
+    await claim();
 
     await waitFor(() =>
-      expect(screen.getByTestId("setup-secret")).toHaveTextContent(
-        "vogt_first-run-secret",
-      ),
+      expect(screen.getByTestId("setup-username")).toHaveTextContent("ada-lovelace"),
     );
     expect(screen.getByText("human:ada-lovelace")).toBeInTheDocument();
+    // Nothing is shown once: the password is the durable credential, and the
+    // session secret is never displayed.
+    expect(screen.queryByText("vogt_first-run-secret")).toBeNull();
     // The CLI and MCP equivalents are one disclosure away, not hidden.
     expect(
       screen.getByText("Use it from a terminal or an agent"),
     ).toBeInTheDocument();
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toBe("/api/install/bootstrap");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      display_name: "Ada Lovelace",
+      username: "ada-lovelace",
+      password: "correct horse battery",
+    });
   });
 
-  it("refuses an empty name without calling the server", async () => {
+  it("refuses an empty name, a short password and a mismatch without calling the server", async () => {
     render(() => (
       <SetupWizard onSignIn={() => {}} onAuthenticated={async () => {}} />
     ));
     await fireEvent.click(
-      screen.getByRole("button", { name: "Claim instance & mint my token" }),
+      screen.getByRole("button", { name: "Claim instance & create my login" }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Your name is required",
     );
+    await fireEvent.input(screen.getByPlaceholderText("Ada Lovelace"), {
+      target: { value: "Ada" },
+    });
+    await fireEvent.input(screen.getByLabelText("Password"), {
+      target: { value: "short" },
+    });
+    await fireEvent.click(
+      screen.getByRole("button", { name: "Claim instance & create my login" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("at least 8");
+    await fireEvent.input(screen.getByLabelText("Password"), {
+      target: { value: "correct horse battery" },
+    });
+    await fireEvent.input(screen.getByLabelText("Confirm password"), {
+      target: { value: "correct horse battery staple" },
+    });
+    await fireEvent.click(
+      screen.getByRole("button", { name: "Claim instance & create my login" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent("do not match");
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -126,29 +173,19 @@ describe("#292 — the identity step", () => {
     render(() => (
       <SetupWizard onSignIn={() => {}} onAuthenticated={async () => {}} />
     ));
-    await fireEvent.input(screen.getByPlaceholderText("Ada Lovelace"), {
-      target: { value: "Eve" },
-    });
-    await fireEvent.click(
-      screen.getByRole("button", { name: "Claim instance & mint my token" }),
-    );
+    await claim("Eve");
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "install mode is closed",
     );
   });
 
-  it("hands the minted secret to the ordinary sign-in path on continue", async () => {
+  it("hands the minted session to the ordinary sign-in path on continue", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, bootstrapResult));
     const onAuthenticated = vi.fn(async () => {});
     render(() => (
       <SetupWizard onSignIn={() => {}} onAuthenticated={onAuthenticated} />
     ));
-    await fireEvent.input(screen.getByPlaceholderText("Ada Lovelace"), {
-      target: { value: "Ada Lovelace" },
-    });
-    await fireEvent.click(
-      screen.getByRole("button", { name: "Claim instance & mint my token" }),
-    );
+    await claim();
     await fireEvent.click(
       await screen.findByRole("button", { name: "Continue to Vogt" }),
     );
@@ -157,7 +194,7 @@ describe("#292 — the identity step", () => {
     );
   });
 
-  it("explains a front door that refuses the core token, and offers sign-in", async () => {
+  it("explains a front door that refuses the session, and offers sign-in", async () => {
     fetchMock.mockResolvedValue(jsonResponse(200, bootstrapResult));
     const onSignIn = vi.fn();
     render(() => (
@@ -168,27 +205,18 @@ describe("#292 — the identity step", () => {
         }}
       />
     ));
-    await fireEvent.input(screen.getByPlaceholderText("Ada Lovelace"), {
-      target: { value: "Ada Lovelace" },
-    });
-    await fireEvent.click(
-      screen.getByRole("button", { name: "Claim instance & mint my token" }),
-    );
+    await claim();
     await fireEvent.click(
       await screen.findByRole("button", { name: "Continue to Vogt" }),
     );
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "token namespace",
-    );
-    // The secret stays visible: the reader has guidance and their credential.
-    expect(screen.getByTestId("setup-secret")).toHaveTextContent(
-      "vogt_first-run-secret",
+      "username and password",
     );
     await fireEvent.click(screen.getByRole("button", { name: "Go to sign-in" }));
     expect(onSignIn).toHaveBeenCalled();
   });
 
-  it("offers the ordinary gate to a reader who already holds a token", async () => {
+  it("offers the ordinary gate to a reader who already holds a login", async () => {
     const onSignIn = vi.fn();
     render(() => (
       <SetupWizard onSignIn={onSignIn} onAuthenticated={async () => {}} />

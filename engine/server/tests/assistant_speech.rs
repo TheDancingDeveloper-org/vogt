@@ -107,9 +107,8 @@ async fn dead_url() -> String {
 fn test_config() -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: TEST_TOKEN.to_string(),
+        token: Some(TEST_TOKEN.to_string()),
         token_mutating_request_limit_per_minute: 600,
-        extra_tokens: vec![],
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
         default_cwd: std::env::temp_dir(),

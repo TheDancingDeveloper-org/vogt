@@ -7,7 +7,6 @@ import {
   getToken,
   setBase,
   setToken,
-  signOut,
   validateCredentials,
   type AgentCliReport,
   type OperationalStatus,
@@ -15,6 +14,7 @@ import {
   type PushPreferences,
   type PushSubscriptionEntry,
 } from "./api";
+import { signOutAndRevoke } from "./session";
 import { getLayoutMode, setLayoutMode, type LayoutMode } from "./layout";
 import { getPreferServerStt, setPreferServerStt } from "./sttPref";
 import TemplateEditor from "./TemplateEditor";
@@ -553,7 +553,7 @@ const Settings: Component<Props> = (props) => {
     if (
       !(await confirmDestructive(
         "Sign out of Vogt?",
-        "Clears the saved token and base URL from this browser and returns to the login screen.",
+        "Ends this session at the server, clears it from this browser, and returns to the sign-in screen.",
       ))
     ) {
       return;
@@ -566,7 +566,7 @@ const Settings: Component<Props> = (props) => {
     // Closed first: `signOut` returns the shell to the login screen in the
     // same tick, which unmounts this modal underneath the call.
     props.onClose();
-    signOut();
+    void signOutAndRevoke();
   };
 
   const updateStoragePref = (key: keyof StoragePrefs, value: number) => {

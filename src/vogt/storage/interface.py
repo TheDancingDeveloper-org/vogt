@@ -28,6 +28,7 @@ from vogt.core.entities import (
     Initiative,
     Label,
     Observation,
+    PasswordCredential,
     Project,
     RelationKind,
     Suppression,
@@ -319,6 +320,26 @@ class ReadView(Protocol):
         self, *, decision: str | None = None, limit: int = 100
     ) -> list[AuthDecision]: ...
 
+    # -- password credentials (human logins) -------------------------------
+
+    def password_credential_by_username(
+        self, username: str
+    ) -> PasswordCredential | None:
+        """One login by its handle, without the hash."""
+        ...
+
+    def password_credential_for_actor(
+        self, actor_id: str
+    ) -> PasswordCredential | None: ...
+
+    def password_hash(self, actor_id: str) -> str | None:
+        """The stored hash for one login, or `None` when the actor has no
+        password. The single accessor that returns it, so every read of the
+        hash is greppable — the same rule `forge_account_secret` follows."""
+        ...
+
+    def list_password_credentials(self) -> list[PasswordCredential]: ...
+
     # -- forge accounts (per-actor PATs) -----------------------------------
 
     def forge_account(self, *, actor_id: str, host: str) -> ForgeAccount | None:
@@ -529,6 +550,31 @@ class WriteTxn(ReadView, Protocol):
     def insert_token(self, token: Token, *, token_hash: str) -> None: ...
 
     def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool: ...
+
+    def reinstate_token(self, token_id: str) -> bool:
+        """Clear a token's revocation. True when a revoked row was reinstated.
+
+        Exists for exactly one caller: a bootstrap secret rotated *back* to a
+        value this store already holds as a revoked row. `token_hash` is
+        unique, so the row cannot be re-inserted; it is brought back instead."""
+        ...
+
+    def upsert_password_credential(
+        self,
+        *,
+        actor_id: str,
+        username: str,
+        password_hash: str,
+        scopes: list[str],
+        at: datetime,
+    ) -> None:
+        """Create or replace an actor's login. A re-set keeps `created_at`
+        and refreshes the hash, the scopes and `updated_at`."""
+        ...
+
+    def delete_password_credential(self, actor_id: str) -> bool:
+        """Remove an actor's login. True when a row was removed."""
+        ...
 
     def upsert_forge_account(
         self,

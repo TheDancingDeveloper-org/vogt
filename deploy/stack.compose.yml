@@ -1,7 +1,7 @@
 # The all-in-one Vogt stack: core, engine and PWA in one container.
 #
-#   cp deploy/stack.env.example deploy/.env      # then fill in ENGINE_TOKEN
-#   openssl rand -hex 32 > deploy/vogt-core-token
+#   cp deploy/stack.env.example deploy/.env
+#   openssl rand -hex 32 > deploy/vogt-core-token   # the stack secret
 #   docker compose -f deploy/stack.compose.yml up -d --wait
 #
 # There is no `--build`: the published image already carries all three.
@@ -69,10 +69,12 @@ services:
       # exposure decision: `ENGINE_BIND` in `.env` decides exposure, on the
       # host side of the port mapping.
       ENGINE_BIND: "0.0.0.0:8910"
-      # The engine's bearer token (at least 16 characters), required for every
-      # API and WebSocket call. Keep it in `deploy/.env` (git-ignored) rather
-      # than your shell.
-      ENGINE_TOKEN: "${ENGINE_TOKEN:?Set ENGINE_TOKEN in deploy/.env — the engine bearer token, at least 16 characters}"
+      # Optional: a static break-glass token (at least 16 characters). People
+      # sign in with a username and password — the core checks every other
+      # credential — so most deployments leave this unset. Set it for CI, or
+      # for an operator locked out of every login. Keep it in `deploy/.env`
+      # (git-ignored) rather than your shell.
+      ENGINE_TOKEN: "${ENGINE_TOKEN:-}"
       # The address clients reach the front door at. The engine cannot
       # advertise an address it is not told, so set it once the stack is
       # reachable at a stable URL.

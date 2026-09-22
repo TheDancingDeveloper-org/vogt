@@ -24,6 +24,7 @@ from __future__ import annotations
 import itertools
 import json
 import subprocess
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from vogt.adapters.cli.args import is_secret_field
 from vogt.adapters.cli.main import EXIT_OK, build_parser, run
 from vogt.adapters.engine import EngineClient
 from vogt.adapters.git import (
@@ -438,6 +440,30 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("auth.decisions", {}),
+    ("auth.whoami", {}),
+    # A password login for a human: created, listed, re-set, removed — on
+    # all three surfaces. The password itself is a secret the CLI reads from
+    # a file rather than argv; the harness supplies it the way each
+    # transport takes it.
+    (
+        "user.create",
+        {
+            "username": "ada",
+            "password": "correct horse battery",
+            "display_name": "Ada",
+            "scopes": "read,work.write",
+            "reason": WHY,
+        },
+    ),
+    ("user.list", {}),
+    (
+        "user.set_password",
+        {"username": "ada", "password": "a different passphrase", "reason": WHY},
+    ),
+    ("user.remove", {"username": "ada", "reason": WHY}),
+    # Logging out on a surface with no token behind it is an honest "nothing
+    # to revoke" rather than an error, so all three agree.
+    ("auth.logout", {"reason": WHY}),
     # -- the forge module's tail --------------------------------------------
     # The account stayed linked through every write-through step above; the
     # unlink here proves removal on all three surfaces and returns writes to
@@ -883,7 +909,13 @@ def _argv_for(operation: Operation[Any, Any], params: dict[str, Any]) -> list[st
     argv = [*operation.cli.path]
     for key, value in params.items():
         flag = f"--{key.replace('_', '-')}"
-        if isinstance(value, bool):
+        if is_secret_field(key):
+            # The CLI refuses a secret in argv; it takes a file instead. The
+            # harness writes one the way an operator would.
+            secret_file = Path(tempfile.mkdtemp()) / key
+            secret_file.write_text(str(value), encoding="utf-8")
+            argv += [f"{flag}-file", str(secret_file)]
+        elif isinstance(value, bool):
             argv.append(flag if value else f"--no-{key.replace('_', '-')}")
         elif isinstance(value, list):
             for entry in value:

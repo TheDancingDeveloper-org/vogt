@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 from vogt.core.clock import Clock, from_iso, to_iso, utc_now
 from vogt.core.entities import (
@@ -30,6 +31,7 @@ from vogt.core.entities import (
     InboxTriage,
     Initiative,
     Label,
+    PasswordCredential,
     Project,
     Relation,
     RelationKind,
@@ -831,6 +833,41 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_auth_decision(row) for row in rows]
 
+    # -- password credentials ---------------------------------------------
+
+    _PASSWORD_SELECT = (
+        "SELECT p.actor_id, p.username, p.scopes, p.created_at, p.updated_at, "
+        "a.identity_ref AS actor_identity_ref FROM password_credentials p "
+        "JOIN actors a ON a.id = p.actor_id"
+    )
+
+    def password_credential_by_username(
+        self, username: str
+    ) -> PasswordCredential | None:
+        row = self._conn.execute(
+            f"{self._PASSWORD_SELECT} WHERE p.username = ?", (username,)
+        ).fetchone()
+        return None if row is None else _row_to_password_credential(row)
+
+    def password_credential_for_actor(self, actor_id: str) -> PasswordCredential | None:
+        row = self._conn.execute(
+            f"{self._PASSWORD_SELECT} WHERE p.actor_id = ?", (actor_id,)
+        ).fetchone()
+        return None if row is None else _row_to_password_credential(row)
+
+    def password_hash(self, actor_id: str) -> str | None:
+        row = self._conn.execute(
+            "SELECT password_hash FROM password_credentials WHERE actor_id = ?",
+            (actor_id,),
+        ).fetchone()
+        return None if row is None else str(row["password_hash"])
+
+    def list_password_credentials(self) -> list[PasswordCredential]:
+        rows = self._conn.execute(
+            f"{self._PASSWORD_SELECT} ORDER BY p.username"
+        ).fetchall()
+        return [_row_to_password_credential(row) for row in rows]
+
     # -- forge accounts (per-actor PATs) -----------------------------------
 
     def forge_account(self, *, actor_id: str, host: str) -> ForgeAccount | None:
@@ -1491,14 +1528,15 @@ class SqliteWriteTxn(SqliteReadView):
 
     def insert_token(self, token: Token, *, token_hash: str) -> None:
         self._conn.execute(
-            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, "
-            "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, "
+            "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 token.id,
                 token.actor_id,
                 token.name,
                 token_hash,
                 json.dumps(token.scopes),
+                token.kind,
                 to_iso(token.created_at),
                 None if token.expires_at is None else to_iso(token.expires_at),
             ),
@@ -1509,6 +1547,39 @@ class SqliteWriteTxn(SqliteReadView):
             "UPDATE tokens SET revoked_at = ?, revoked_reason = ? "
             "WHERE id = ? AND revoked_at IS NULL",
             (to_iso(at), reason, token_id),
+        )
+        return cursor.rowcount > 0
+
+    def reinstate_token(self, token_id: str) -> bool:
+        cursor = self._conn.execute(
+            "UPDATE tokens SET revoked_at = NULL, revoked_reason = NULL "
+            "WHERE id = ? AND revoked_at IS NOT NULL",
+            (token_id,),
+        )
+        return cursor.rowcount > 0
+
+    def upsert_password_credential(
+        self,
+        *,
+        actor_id: str,
+        username: str,
+        password_hash: str,
+        scopes: list[str],
+        at: datetime,
+    ) -> None:
+        stamp = to_iso(at)
+        self._conn.execute(
+            "INSERT INTO password_credentials (actor_id, username, password_hash, "
+            "scopes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (actor_id) DO UPDATE SET username = excluded.username, "
+            "password_hash = excluded.password_hash, scopes = excluded.scopes, "
+            "updated_at = excluded.updated_at",
+            (actor_id, username, password_hash, json.dumps(scopes), stamp, stamp),
+        )
+
+    def delete_password_credential(self, actor_id: str) -> bool:
+        cursor = self._conn.execute(
+            "DELETE FROM password_credentials WHERE actor_id = ?", (actor_id,)
         )
         return cursor.rowcount > 0
 
@@ -2135,6 +2206,29 @@ def _row_to_forge_account(row: sqlite3.Row) -> ForgeAccount:
     )
 
 
+def _token_kind(raw: str) -> Literal["api", "session", "agent"]:
+    if raw == "session":
+        return "session"
+    if raw == "agent":
+        return "agent"
+    return "api"
+
+
+def _row_to_password_credential(row: sqlite3.Row) -> PasswordCredential:
+    return PasswordCredential(
+        actor_id=str(row["actor_id"]),
+        actor_identity_ref=(
+            None
+            if row["actor_identity_ref"] is None
+            else str(row["actor_identity_ref"])
+        ),
+        username=str(row["username"]),
+        scopes=json.loads(str(row["scopes"])),
+        created_at=from_iso(str(row["created_at"])),
+        updated_at=from_iso(str(row["updated_at"])),
+    )
+
+
 def _row_to_token(row: sqlite3.Row) -> Token:
     def _at(column: str) -> datetime | None:
         value = row[column]
@@ -2150,6 +2244,7 @@ def _row_to_token(row: sqlite3.Row) -> Token:
         ),
         name=str(row["name"]),
         scopes=json.loads(str(row["scopes"])),
+        kind=_token_kind(str(row["kind"])),
         created_at=from_iso(str(row["created_at"])),
         expires_at=_at("expires_at"),
         last_used_at=_at("last_used_at"),

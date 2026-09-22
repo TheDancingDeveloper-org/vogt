@@ -21,26 +21,34 @@ use axum::{
 };
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use vogt_engine_server::{
-    app::router,
-    auth::{ScopedTokenConfig, TokenCapability},
-    vogt_core::PROXIED_READS_IN_FLIGHT,
-    Config,
-};
+use vogt_engine_server::{app::router, vogt_core::PROXIED_READS_IN_FLIGHT, Config};
 
+/// The optional static break-glass token. Full capability here, no actor
+/// of its own at the core: its Vogt calls borrow the stack secret.
 const TEST_TOKEN: &str = "test-token-1234567890abcdef";
+/// The stack secret: the one credential both halves share.
 const CORE_TOKEN: &str = "core-token-abcdef1234567890";
+/// Core tokens the stand-in core recognises, each bound to an actor with a
+/// scope set — what the front door learns from `whoami` and nothing else.
 const READ_ONLY_TOKEN: &str = "read-only-token-0987654321fedcba";
-/// Holds one capability, and not the ones the refusals below are about — so a
-/// rejection means "not granted this", never "not a token I know".
+/// Holds `read` only, so a refusal below is about a missing capability and
+/// not about being unknown.
 const HISTORY_ONLY_TOKEN: &str = "history-only-token-13579086420abc";
+/// Two people, so the door has two actors to tell apart rather than one to
+/// confirm.
+const ADA_SESSION: &str = "adas-session-token-1234567890";
+const GRACE_SESSION: &str = "graces-session-token-0987654321";
 
-/// Two more front-door tokens, each with a core token of its own, so the
-/// mapping has two actors to tell apart rather than one to confirm.
-const PAIRED_TOKEN: &str = "paired-front-door-token-1234567890";
-const PAIRED_CORE_TOKEN: &str = "core-token-for-the-paired-actor";
-const OTHER_PAIRED_TOKEN: &str = "other-paired-front-door-token-0987654321";
-const OTHER_PAIRED_CORE_TOKEN: &str = "core-token-for-the-other-actor";
+/// Who the stand-in core says each bearer is: `(identity_ref, scopes)`.
+fn known_identity(bearer: &str) -> Option<(&'static str, &'static [&'static str])> {
+    match bearer {
+        READ_ONLY_TOKEN => Some(("agent:reader", &["read"])),
+        HISTORY_ONLY_TOKEN => Some(("agent:history-only", &["read"])),
+        ADA_SESSION => Some(("human:ada", &["read", "work.write"])),
+        GRACE_SESSION => Some(("human:grace", &["read", "work.write", "project.write"])),
+        _ => None,
+    }
+}
 
 /// What the stand-in core saw. One request's worth is all these tests need.
 #[derive(Debug, Clone, Default)]
@@ -88,6 +96,33 @@ async fn core_handler(
             .map(str::to_owned),
     });
     match uri.path() {
+        // Who a bearer is. The core is the only party that can say, and the
+        // door asks it exactly this way.
+        "/api/auth/whoami" => {
+            let bearer = headers
+                .get(header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or_default();
+            match known_identity(bearer) {
+                Some((identity_ref, scopes)) => (
+                    AxumStatus::OK,
+                    Json(json!({
+                        "identity_ref": identity_ref,
+                        "kind": if identity_ref.starts_with("human:") { "human" } else { "agent" },
+                        "display_name": identity_ref,
+                        "scopes": scopes,
+                        "token": null,
+                    })),
+                )
+                    .into_response(),
+                None => (
+                    AxumStatus::UNAUTHORIZED,
+                    Json(json!({"error": {"code": "unauthenticated", "message": "the presented token is not valid"}})),
+                )
+                    .into_response(),
+            }
+        }
         // A read the core takes its time over, for the in-flight cap.
         "/api/slow" => {
             tokio::time::sleep(Duration::from_millis(400)).await;
@@ -124,45 +159,8 @@ async fn stand_in_core() -> (String, Log) {
 fn base_config() -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: TEST_TOKEN.to_string(),
+        token: Some(TEST_TOKEN.to_string()),
         token_mutating_request_limit_per_minute: 600,
-        extra_tokens: vec![
-            ScopedTokenConfig {
-                name: "history-only".to_string(),
-                token: HISTORY_ONLY_TOKEN.to_string(),
-                capabilities: vec![TokenCapability::HistoryWrite],
-                mutating_requests_per_minute: 600,
-                vogt_core_token_file: None,
-                vogt_core_token: None,
-            },
-            ScopedTokenConfig {
-                name: "read-only".to_string(),
-                token: READ_ONLY_TOKEN.to_string(),
-                // Every capability except the one the write path needs, so a
-                // refusal here is about `vogt-write` and not about being unknown.
-                capabilities: vec![TokenCapability::Sessions],
-                mutating_requests_per_minute: 600,
-                // No pairing: this one exercises the fallback.
-                vogt_core_token_file: None,
-                vogt_core_token: None,
-            },
-            ScopedTokenConfig {
-                name: "paired".to_string(),
-                token: PAIRED_TOKEN.to_string(),
-                capabilities: vec![TokenCapability::VogtWrite],
-                mutating_requests_per_minute: 600,
-                vogt_core_token_file: None,
-                vogt_core_token: Some(PAIRED_CORE_TOKEN.to_string()),
-            },
-            ScopedTokenConfig {
-                name: "other-paired".to_string(),
-                token: OTHER_PAIRED_TOKEN.to_string(),
-                capabilities: vec![TokenCapability::VogtWrite],
-                mutating_requests_per_minute: 600,
-                vogt_core_token_file: None,
-                vogt_core_token: Some(OTHER_PAIRED_CORE_TOKEN.to_string()),
-            },
-        ],
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
         default_cwd: std::env::temp_dir(),
@@ -239,7 +237,7 @@ fn proxied(log: &Log) -> Vec<Seen> {
     log.lock()
         .unwrap()
         .iter()
-        .filter(|seen| seen.path != "/api/events")
+        .filter(|seen| seen.path != "/api/events" && seen.path != "/api/auth/whoami")
         .cloned()
         .collect()
 }
@@ -281,7 +279,7 @@ async fn a_vogt_read_reaches_the_core_under_its_own_prefix() {
 }
 
 #[tokio::test]
-async fn the_core_is_handed_the_core_token_not_the_callers() {
+async fn the_break_glass_token_is_lent_the_stack_secret() {
     let (base, log) = front_door().await;
     client()
         .get(format!("{base}/api/vogt/status"))
@@ -297,8 +295,8 @@ async fn the_core_is_handed_the_core_token_not_the_callers() {
     );
     assert!(
         !seen.authorization.unwrap().contains(TEST_TOKEN),
-        "the front-door token must not reach the core: it would only be refused, \
-         and the point of the swap is that the core sees a real actor"
+        "the static token must not reach the core: it has no actor there, so the \
+         door lends it the stack secret's"
     );
 }
 
@@ -335,6 +333,8 @@ async fn an_unauthenticated_caller_never_reaches_the_core() {
 #[tokio::test]
 async fn a_write_needs_the_vogt_write_capability() {
     let (base, log) = front_door().await;
+    // `read` alone earns no `vogt-write`; the refusal is the door's, and the
+    // core never hears about the attempt.
     let refused = client()
         .post(format!("{base}/api/vogt/work"))
         .headers(bearer(READ_ONLY_TOKEN))
@@ -347,7 +347,7 @@ async fn a_write_needs_the_vogt_write_capability() {
 
     let allowed = client()
         .post(format!("{base}/api/vogt/work"))
-        .headers(bearer(TEST_TOKEN))
+        .headers(bearer(ADA_SESSION))
         .json(&json!({"kind": "bug", "title": "x", "reason": "test"}))
         .send()
         .await
@@ -370,11 +370,11 @@ async fn a_read_needs_no_capability_beyond_a_valid_token() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
-// -- each front-door token is its own actor at the core -------------
+// -- every caller is its own actor at the core -------------------------
 
-/// A front door whose only core token is the one paired with each front-door
-/// token: no deployment-wide fallback to fall back to.
-async fn front_door_without_a_fallback() -> (String, Log) {
+/// A front door with a core behind it and no stack secret: every credential
+/// is one the core resolves, and the break-glass token has nothing to lend.
+async fn front_door_without_a_stack_secret() -> (String, Log) {
     let (core_url, log) = stand_in_core().await;
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url);
@@ -382,13 +382,13 @@ async fn front_door_without_a_fallback() -> (String, Log) {
     (boot(cfg).await, log)
 }
 
-/// The whole point of the mapping: the core can tell the two callers apart,
-/// because it is handed two different credentials rather than one shared one.
+/// The whole point: the core can tell the two callers apart, because each
+/// is handed on as itself rather than swapped for one shared credential.
 #[tokio::test]
-async fn two_front_door_tokens_reach_the_core_as_two_actors() {
+async fn two_callers_reach_the_core_as_two_actors() {
     let (base, log) = front_door().await;
 
-    for token in [PAIRED_TOKEN, OTHER_PAIRED_TOKEN] {
+    for token in [ADA_SESSION, GRACE_SESSION] {
         let res = client()
             .get(format!("{base}/api/vogt/status"))
             .headers(bearer(token))
@@ -398,8 +398,7 @@ async fn two_front_door_tokens_reach_the_core_as_two_actors() {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
-    let seen = log.lock().unwrap().clone();
-    let credentials: Vec<Option<String>> = seen
+    let credentials: Vec<Option<String>> = proxied(&log)
         .iter()
         .rev()
         .take(2)
@@ -409,68 +408,40 @@ async fn two_front_door_tokens_reach_the_core_as_two_actors() {
     assert_eq!(
         credentials,
         vec![
-            Some(format!("Bearer {PAIRED_CORE_TOKEN}")),
-            Some(format!("Bearer {OTHER_PAIRED_CORE_TOKEN}")),
+            Some(format!("Bearer {ADA_SESSION}")),
+            Some(format!("Bearer {GRACE_SESSION}")),
         ],
-        "each front-door token must reach the core as the actor it is paired \
-         with — one shared credential is what pairings replace"
-    );
-    for credential in credentials.into_iter().flatten() {
-        assert!(
-            !credential.contains(PAIRED_TOKEN) && !credential.contains(OTHER_PAIRED_TOKEN),
-            "a front-door token still must not reach the core: {credential}"
-        );
-    }
-}
-
-/// The original deployment shape — one configured core token, no pairings — keeps working.
-#[tokio::test]
-async fn a_token_with_no_pairing_of_its_own_uses_the_configured_fallback() {
-    let (base, log) = front_door().await;
-    let res = client()
-        .get(format!("{base}/api/vogt/backlog"))
-        .headers(bearer(READ_ONLY_TOKEN))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(res.status(), StatusCode::OK);
-
-    let seen = log.lock().unwrap().last().cloned().unwrap();
-    assert_eq!(
-        seen.authorization.as_deref(),
-        Some(format!("Bearer {CORE_TOKEN}").as_str()),
-        "an unpaired token falls back to the single configured core token, so a \
-         deployment that has not provisioned pairings is unaffected"
+        "each caller must reach the core as the credential the core resolved, \
+         never as the stack secret"
     );
 }
 
-/// A pairing is enough on its own: no deployment-wide token is required for a
-/// front door whose every token brings its own actor.
+/// A core-resolved caller needs no stack secret beside it.
 #[tokio::test]
-async fn a_pairing_needs_no_fallback_beside_it() {
-    let (base, log) = front_door_without_a_fallback().await;
+async fn a_core_resolved_caller_needs_no_stack_secret() {
+    let (base, log) = front_door_without_a_stack_secret().await;
     let res = client()
         .get(format!("{base}/api/vogt/status"))
-        .headers(bearer(PAIRED_TOKEN))
+        .headers(bearer(ADA_SESSION))
         .send()
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
     assert_eq!(
-        log.lock().unwrap().last().unwrap().authorization.as_deref(),
-        Some(format!("Bearer {PAIRED_CORE_TOKEN}").as_str())
+        proxied(&log).last().unwrap().authorization.as_deref(),
+        Some(format!("Bearer {ADA_SESSION}").as_str())
     );
 }
 
-/// Nothing to inject means nothing is forwarded. Sending the request on
-/// without a credential would return the core's 401 and read as the caller's
-/// mistake; the refusal names the pairing that was never provisioned.
+/// The break-glass token on a door with nothing to lend it: nothing is
+/// forwarded, and the refusal names what is missing rather than returning
+/// the core's 401 as if the caller had got something wrong.
 #[tokio::test]
-async fn no_pairing_and_no_fallback_is_refused_by_name() {
-    let (base, log) = front_door_without_a_fallback().await;
+async fn the_break_glass_token_with_no_stack_secret_is_refused_by_name() {
+    let (base, log) = front_door_without_a_stack_secret().await;
     let res = client()
         .get(format!("{base}/api/vogt/status"))
-        .headers(bearer(READ_ONLY_TOKEN))
+        .headers(bearer(TEST_TOKEN))
         .send()
         .await
         .unwrap();
@@ -479,20 +450,184 @@ async fn no_pairing_and_no_fallback_is_refused_by_name() {
     let body: Value = res.json().await.unwrap();
     let message = body["error"]["message"].as_str().unwrap_or_default();
     assert!(
-        message.contains("read-only"),
-        "the refusal names the front-door token that has no pairing: {message:?}"
+        message.contains("primary"),
+        "the refusal names the credential that has nothing to present: {message:?}"
     );
     assert!(
         message.contains("vogt_core_token"),
         "and names the setting that would fix it: {message:?}"
     );
     assert!(
-        !message.contains(READ_ONLY_TOKEN),
+        !message.contains(TEST_TOKEN),
         "the token's *name* is not its value: {message:?}"
     );
     assert!(
-        log.lock().unwrap().is_empty(),
-        "an unauthenticated request must never be forwarded to the core"
+        proxied(&log).is_empty(),
+        "a request with nothing to present must never be forwarded to the core"
+    );
+}
+
+/// A bearer the core does not know is refused at the door with a 401, and
+/// nothing but the whoami question ever reaches the core.
+#[tokio::test]
+async fn an_unknown_bearer_is_refused_and_never_proxied() {
+    let (base, log) = front_door().await;
+    let res = client()
+        .get(format!("{base}/api/vogt/status"))
+        .headers(bearer("nobody-knows-this-token-1234567890"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+    let body: Value = res.json().await.unwrap();
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("not valid"));
+    assert!(proxied(&log).is_empty());
+    let asked: Vec<String> = log.lock().unwrap().iter().map(|s| s.path.clone()).collect();
+    assert!(asked
+        .iter()
+        .all(|p| p == "/api/auth/whoami" || p == "/api/events"));
+}
+
+/// The door asks the core once per credential per TTL, not once per request.
+#[tokio::test]
+async fn an_identity_is_resolved_once_and_then_remembered() {
+    let (base, log) = front_door().await;
+    for _ in 0..3 {
+        let res = client()
+            .get(format!("{base}/api/vogt/status"))
+            .headers(bearer(ADA_SESSION))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+    let whoamis = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.path == "/api/auth/whoami")
+        .count();
+    assert_eq!(whoamis, 1, "three requests, one whoami");
+}
+
+/// A logout drops the caller from the door's cache, so the credential the
+/// core just revoked is refused here on the very next request.
+#[tokio::test]
+async fn a_logout_forgets_the_caller_at_once() {
+    let (base, log) = front_door().await;
+    let ok = client()
+        .get(format!("{base}/api/vogt/status"))
+        .headers(bearer(ADA_SESSION))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    let out = client()
+        .post(format!("{base}/api/vogt/auth/logout"))
+        .headers(bearer(ADA_SESSION))
+        .json(&json!({"reason": "bye"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(out.status(), StatusCode::OK);
+    let whoamis_before = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.path == "/api/auth/whoami")
+        .count();
+    client()
+        .get(format!("{base}/api/vogt/status"))
+        .headers(bearer(ADA_SESSION))
+        .send()
+        .await
+        .unwrap();
+    let whoamis_after = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|s| s.path == "/api/auth/whoami")
+        .count();
+    assert_eq!(
+        whoamis_after,
+        whoamis_before + 1,
+        "after a logout the door must ask the core again rather than trust its cache"
+    );
+}
+
+/// A core that cannot be asked is an outage, not a wrong password: a 503,
+/// never a 401 that would sign a browser out over a restart.
+#[tokio::test]
+async fn a_core_outage_is_503_not_401() {
+    let mut cfg = base_config();
+    cfg.vogt_core_url = Some("http://127.0.0.1:1".to_string());
+    cfg.vogt_core_token = Some(CORE_TOKEN.to_string());
+    let base = boot(cfg).await;
+    let res = client()
+        .get(format!("{base}/api/sessions"))
+        .headers(bearer(ADA_SESSION))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body: Value = res.json().await.unwrap();
+    assert!(body["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("vogt-core is unavailable"));
+    // The static credentials never depend on the core.
+    let res = client()
+        .get(format!("{base}/api/sessions"))
+        .headers(bearer(TEST_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+}
+
+/// The stack secret is the core's own identity here: it may start sessions,
+/// and nothing a person would do.
+#[tokio::test]
+async fn the_stack_secret_is_the_cores_identity_on_this_door() {
+    let (base, _log) = front_door().await;
+    let res = client()
+        .get(format!("{base}/api/sessions"))
+        .headers(bearer(CORE_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let refused = client()
+        .post(format!("{base}/api/gui/launch"))
+        .headers(bearer(CORE_TOKEN))
+        .json(&json!({"command": ["true"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+}
+
+/// The password login is open and forwarded untouched: the core checks the
+/// password, and no credential of the door's is attached.
+#[tokio::test]
+async fn a_login_needs_no_token_and_is_not_given_one() {
+    let (base, log) = front_door().await;
+    let res = client()
+        .post(format!("{base}/api/auth/login"))
+        .json(&json!({"username": "ada", "password": "correct horse battery"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let seen = log.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(seen.path, "/api/auth/login");
+    assert_eq!(seen.method, "POST");
+    assert_eq!(
+        seen.authorization, None,
+        "nothing of the door's is attached"
     );
 }
 
@@ -521,16 +656,15 @@ async fn mcp_forwards_the_callers_credential_unchanged() {
     );
 }
 
-/// The actor mapping is a property of `/api/vogt` alone. Even when the caller
-/// presents a front-door token that *has* a pairing, `/mcp` forwards what it
-/// was given: swapping in the paired token here would replace whichever actor
-/// the MCP client actually is with the browser's.
+/// `/mcp` forwards what it was given even when the door could have resolved
+/// the caller itself: the core decides what that credential is worth, and a
+/// second opinion here would only ever disagree by being wrong.
 #[tokio::test]
-async fn mcp_ignores_the_pairing_even_when_the_caller_has_one() {
+async fn mcp_forwards_a_known_callers_credential_unchanged_too() {
     let (base, log) = front_door().await;
     client()
         .post(format!("{base}/mcp"))
-        .headers(bearer(PAIRED_TOKEN))
+        .headers(bearer(ADA_SESSION))
         .json(&json!({"jsonrpc": "2.0", "method": "tools/list", "id": 1}))
         .send()
         .await
@@ -539,7 +673,7 @@ async fn mcp_ignores_the_pairing_even_when_the_caller_has_one() {
     let seen = log.lock().unwrap().last().cloned().unwrap();
     assert_eq!(
         seen.authorization.as_deref(),
-        Some(format!("Bearer {PAIRED_TOKEN}").as_str()),
+        Some(format!("Bearer {ADA_SESSION}").as_str()),
         "/mcp is a pass-through; the core decides what that credential is worth"
     );
 }
@@ -549,7 +683,7 @@ async fn mcp_ignores_the_pairing_even_when_the_caller_has_one() {
 /// to `/api/vogt`.
 #[tokio::test]
 async fn mcp_works_with_no_core_token_configured_at_all() {
-    let (base, log) = front_door_without_a_fallback().await;
+    let (base, log) = front_door_without_a_stack_secret().await;
     let res = client()
         .post(format!("{base}/mcp"))
         .headers(bearer("an-agents-own-core-token"))
@@ -890,10 +1024,6 @@ async fn no_core_token_means_no_follower_and_no_401_every_five_seconds() {
     let mut cfg = base_config();
     cfg.vogt_core_url = Some(core_url);
     cfg.vogt_core_token = None;
-    for token in &mut cfg.extra_tokens {
-        token.vogt_core_token = None;
-        token.vogt_core_token_file = None;
-    }
     let (router, _state) = vogt_engine_server::app::router(cfg).await;
     drop(router);
 

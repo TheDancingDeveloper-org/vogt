@@ -22,9 +22,8 @@ const TEST_TOKEN: &str = "test-token-1234567890abcdef";
 fn test_config() -> Config {
     Config {
         bind: "127.0.0.1:0".parse().unwrap(),
-        token: TEST_TOKEN.to_string(),
+        token: Some(TEST_TOKEN.to_string()),
         token_mutating_request_limit_per_minute: 600,
-        extra_tokens: vec![],
         scrollback_bytes: 64 * 1024,
         default_shell: "/bin/bash".to_string(),
         default_cwd: std::env::temp_dir(),
@@ -154,6 +153,55 @@ async fn wait_for_run_count(
     })
     .await
     .expect("the task should reach the expected run count")
+}
+
+/// A stand-in vogt-core that answers `GET /api/auth/whoami` for the bearers
+/// it is told about and 401 for everything else. The front door holds no
+/// token table of its own, so a test that needs a caller with *less* than
+/// full capability gives the core an identity to resolve.
+async fn stand_in_core_knowing(
+    identities: Vec<(&'static str, &'static str, Vec<&'static str>)>,
+) -> String {
+    use axum::{extract::State, http::HeaderMap, response::IntoResponse, routing::any, Router};
+    type Known = Arc<Vec<(&'static str, &'static str, Vec<&'static str>)>>;
+    async fn handler(
+        State(known): State<Known>,
+        headers: HeaderMap,
+        uri: axum::http::Uri,
+    ) -> axum::response::Response {
+        if uri.path() == "/api/auth/whoami" {
+            let bearer = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.strip_prefix("Bearer "))
+                .unwrap_or_default();
+            return match known.iter().find(|(token, _, _)| *token == bearer) {
+                Some((_, identity_ref, scopes)) => (
+                    StatusCode::OK,
+                    axum::Json(json!({
+                        "identity_ref": identity_ref,
+                        "kind": "human",
+                        "display_name": identity_ref,
+                        "scopes": scopes,
+                    })),
+                )
+                    .into_response(),
+                None => {
+                    (StatusCode::UNAUTHORIZED, axum::Json(json!({"error": "no"}))).into_response()
+                }
+            };
+        }
+        (StatusCode::OK, axum::Json(json!({"seen": uri.path()}))).into_response()
+    }
+    let app = Router::new()
+        .route("/{*path}", any(handler))
+        .with_state(Arc::new(identities));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://{addr}")
 }
 
 fn auth() -> reqwest::header::HeaderMap {
@@ -5755,21 +5803,19 @@ async fn server_speech_routes_404_when_unconfigured() {
 /// addition to the unit test in `auth.rs`.
 #[tokio::test]
 async fn server_speech_routes_require_the_assistant_capability() {
-    use vogt_engine_server::auth::{ScopedTokenConfig, TokenCapability};
-
+    // A caller the core resolves with `read` only: may not drive the
+    // assistant. The front door learns that from the core's scopes.
+    let core = stand_in_core_knowing(vec![(
+        "reader-token-1234567890abcdef",
+        "human:reader",
+        vec!["read"],
+    )])
+    .await;
     let mut cfg = test_config();
-    // A token that may do sessions but not assistant.
-    cfg.extra_tokens = vec![ScopedTokenConfig {
-        name: "no-assistant".into(),
-        token: "no-assistant-token-1234567890".into(),
-        capabilities: vec![TokenCapability::Sessions],
-        mutating_requests_per_minute: 600,
-        vogt_core_token_file: None,
-        vogt_core_token: None,
-    }];
+    cfg.vogt_core_url = Some(core);
     let (base, _h) = boot_with_config(cfg).await;
     let client = reqwest::Client::builder()
-        .default_headers(auth_for("no-assistant-token-1234567890"))
+        .default_headers(auth_for("reader-token-1234567890abcdef"))
         .build()
         .unwrap();
 
@@ -7186,14 +7232,15 @@ esac
         let (tmp, paths) = sandbox();
         let mut cfg = test_config();
         cfg.agent_clis = paths;
-        cfg.extra_tokens = vec![vogt_engine_server::auth::ScopedTokenConfig {
-            name: "sessions-only".into(),
-            token: "sessions-only-token-1234567890".into(),
-            capabilities: vec![vogt_engine_server::auth::TokenCapability::Sessions],
-            mutating_requests_per_minute: 600,
-            vogt_core_token_file: None,
-            vogt_core_token: None,
-        }];
+        // A caller the core resolves as a writer: sessions, files, git — but
+        // not the operator grant that moves a CLI pin.
+        let core = stand_in_core_knowing(vec![(
+            "sessions-only-token-1234567890",
+            "human:writer",
+            vec!["read", "work.write"],
+        )])
+        .await;
+        cfg.vogt_core_url = Some(core);
         let (base, handle) = boot_with_config(cfg).await;
         (tmp, base, handle)
     }

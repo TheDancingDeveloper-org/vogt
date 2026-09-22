@@ -9,9 +9,12 @@ mechanical half of "nothing is CLI-only, nothing is missing from the CLI"
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
 
@@ -81,11 +84,40 @@ def spec_for(name: str, field: FieldInfo) -> ArgSpec:
     )
 
 
+#: Fields that hold a secret a person chooses. They never become a plain
+#: flag: a password on the command line is a password in every process
+#: listing and shell history. Each gets `--<name>-file PATH` and
+#: `--<name>-stdin` instead, and a terminal falls back to a hidden prompt.
+SECRET_FIELDS = frozenset({"password"})
+
+
+def is_secret_field(name: str) -> bool:
+    return name in SECRET_FIELDS or name.endswith("_password")
+
+
 def add_model_arguments(
     parser: argparse.ArgumentParser, model: type[BaseModel]
 ) -> None:
     """Add one flag per field of `model` to `parser`."""
     for name, field in model.model_fields.items():
+        if is_secret_field(name):
+            flag = name.replace("_", "-")
+            group = parser.add_mutually_exclusive_group()
+            group.add_argument(
+                f"--{flag}-file",
+                dest=f"{name}__file",
+                type=Path,
+                default=None,
+                help=f"Read the {flag} from this file (never pass it in argv).",
+            )
+            group.add_argument(
+                f"--{flag}-stdin",
+                dest=f"{name}__stdin",
+                action="store_true",
+                default=False,
+                help=f"Read the {flag} from standard input.",
+            )
+            continue
         spec = spec_for(name, field)
         if spec.is_bool:
             # A field already phrased as a negative — `no_auth` — has no
@@ -133,8 +165,31 @@ def collect_params(
     default rather than overwrite it with `None`.
     """
     values: dict[str, Any] = {}
-    for name in model.model_fields:
+    for name, field in model.model_fields.items():
+        if is_secret_field(name):
+            secret = _collect_secret(namespace, name, required=field.is_required())
+            if secret is not None:
+                values[name] = secret
+            continue
         value = getattr(namespace, name, None)
         if value is not None:
             values[name] = value
     return values
+
+
+def _collect_secret(
+    namespace: argparse.Namespace, name: str, *, required: bool
+) -> str | None:
+    """A secret from its file, from stdin, or from a hidden prompt."""
+    path: Path | None = getattr(namespace, f"{name}__file", None)
+    if path is not None:
+        return path.read_text(encoding="utf-8").rstrip("\r\n")
+    if getattr(namespace, f"{name}__stdin", False):
+        return sys.stdin.readline().rstrip("\r\n")
+    if not required:
+        return None
+    flag = name.replace("_", "-")
+    if not sys.stdin.isatty():
+        msg = f"--{flag}-file or --{flag}-stdin is required when not on a terminal"
+        raise SystemExit(msg)
+    return getpass.getpass(f"{flag}: ")

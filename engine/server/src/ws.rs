@@ -243,8 +243,8 @@ async fn close_with(socket: &mut WebSocket, code: CloseCode, reason: &'static st
         .await;
 }
 
-fn token_ok(state: &AppState, candidate: &str) -> bool {
-    auth::ws_token_allows_session_access(state, candidate)
+async fn token_ok(state: &AppState, candidate: &str) -> bool {
+    auth::ws_token_allows_session_access(state, candidate).await
 }
 
 /// What a successful attach handshake tells the snapshot: where to resume from
@@ -270,7 +270,7 @@ async fn authenticate(
     // in: a token there lands in proxy/access logs and browser history.
     if let Some(tok) = legacy_token {
         if state.config.ws_query_token_allowed {
-            if token_ok(state, tok) {
+            if token_ok(state, tok).await {
                 tracing::warn!(
                     target: "vogt::audit",
                     "WS attach authenticated via the deprecated ?token= query \
@@ -325,7 +325,7 @@ async fn authenticate(
             token,
             resume_from,
             snapshot_tail_bytes,
-        } if token_ok(state, &token) => Some(AttachAuth {
+        } if token_ok(state, &token).await => Some(AttachAuth {
             resume_from,
             snapshot_tail_bytes,
         }),
