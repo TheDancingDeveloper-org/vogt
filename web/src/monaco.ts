@@ -1,7 +1,7 @@
 // Keep the editor core separate from the language contributions. Importing the
 // package root also registers every bundled language service, even though most
 // files opened in Vogt only need a tokenizer.
-type MonacoNs = typeof import("monaco-editor/esm/vs/editor/editor.api");
+type MonacoNs = typeof import("monaco-editor/editor/editor.api.js");
 import { activeMonacoTheme, APP_THEME_CHANGE_EVENT } from "./appThemes";
 
 export type MonacoNamespace = MonacoNs;
@@ -17,12 +17,12 @@ type WorkerConstructor = new () => Worker;
 type WorkerLoader = () => Promise<{ default: WorkerConstructor }>;
 
 const workerLoaders: Record<string, WorkerLoader> = {
-  editor: () => import("monaco-editor/esm/vs/editor/editor.worker?worker"),
-  json: () => import("monaco-editor/esm/vs/language/json/json.worker?worker"),
-  css: () => import("monaco-editor/esm/vs/language/css/css.worker?worker"),
-  html: () => import("monaco-editor/esm/vs/language/html/html.worker?worker"),
+  editor: () => import("monaco-editor/editor/editor.worker.js?worker"),
+  json: () => import("monaco-editor/language/json/json.worker.js?worker"),
+  css: () => import("monaco-editor/language/css/css.worker.js?worker"),
+  html: () => import("monaco-editor/language/html/html.worker.js?worker"),
   typescript: () =>
-    import("monaco-editor/esm/vs/language/typescript/ts.worker?worker"),
+    import("monaco-editor/language/typescript/ts.worker.js?worker"),
 };
 const workerConstructors = new Map<string, Promise<WorkerConstructor>>();
 
@@ -51,7 +51,7 @@ export function loadMonaco(): Promise<MonacoNs> {
       (self as unknown as { MonacoEnvironment?: object }).MonacoEnvironment ??= {
         getWorker,
       };
-      const editor = await import("monaco-editor/esm/vs/editor/editor.api");
+      const editor = await import("monaco-editor/editor/editor.api.js");
       performance.mark("monaco:core");
       return editor;
     })();
@@ -67,25 +67,25 @@ type LanguageLoader = () => Promise<unknown>;
 // remain plain text and do not load a contribution.
 const languageLoaders: Partial<Record<string, LanguageLoader>> = {
   typescript: () =>
-    import("monaco-editor/esm/vs/language/typescript/monaco.contribution"),
+    import("monaco-editor/language/typescript/monaco.contribution.js"),
   javascript: () =>
-    import("monaco-editor/esm/vs/language/typescript/monaco.contribution"),
-  json: () => import("monaco-editor/esm/vs/language/json/monaco.contribution"),
-  css: () => import("monaco-editor/esm/vs/language/css/monaco.contribution"),
-  scss: () => import("monaco-editor/esm/vs/language/css/monaco.contribution"),
-  less: () => import("monaco-editor/esm/vs/language/css/monaco.contribution"),
-  html: () => import("monaco-editor/esm/vs/language/html/monaco.contribution"),
-  rust: () => import("monaco-editor/esm/vs/basic-languages/rust/rust.contribution"),
-  python: () => import("monaco-editor/esm/vs/basic-languages/python/python.contribution"),
-  go: () => import("monaco-editor/esm/vs/basic-languages/go/go.contribution"),
+    import("monaco-editor/language/typescript/monaco.contribution.js"),
+  json: () => import("monaco-editor/language/json/monaco.contribution.js"),
+  css: () => import("monaco-editor/language/css/monaco.contribution.js"),
+  scss: () => import("monaco-editor/language/css/monaco.contribution.js"),
+  less: () => import("monaco-editor/language/css/monaco.contribution.js"),
+  html: () => import("monaco-editor/language/html/monaco.contribution.js"),
+  rust: () => import("monaco-editor/languages/definitions/rust/register.js"),
+  python: () => import("monaco-editor/languages/definitions/python/register.js"),
+  go: () => import("monaco-editor/languages/definitions/go/register.js"),
   markdown: () =>
-    import("monaco-editor/esm/vs/basic-languages/markdown/markdown.contribution"),
-  yaml: () => import("monaco-editor/esm/vs/basic-languages/yaml/yaml.contribution"),
-  ini: () => import("monaco-editor/esm/vs/basic-languages/ini/ini.contribution"),
-  shell: () => import("monaco-editor/esm/vs/basic-languages/shell/shell.contribution"),
-  sql: () => import("monaco-editor/esm/vs/basic-languages/sql/sql.contribution"),
+    import("monaco-editor/languages/definitions/markdown/register.js"),
+  yaml: () => import("monaco-editor/languages/definitions/yaml/register.js"),
+  ini: () => import("monaco-editor/languages/definitions/ini/register.js"),
+  shell: () => import("monaco-editor/languages/definitions/shell/register.js"),
+  sql: () => import("monaco-editor/languages/definitions/sql/register.js"),
   dockerfile: () =>
-    import("monaco-editor/esm/vs/basic-languages/dockerfile/dockerfile.contribution"),
+    import("monaco-editor/languages/definitions/dockerfile/register.js"),
 };
 const languagePromises = new Map<string, Promise<void>>();
 
