@@ -5133,9 +5133,8 @@ mod tests {
     fn test_config(state_dir: std::path::PathBuf) -> crate::config::Config {
         crate::config::Config {
             bind: "127.0.0.1:0".parse().unwrap(),
-            token: "test-token-1234567890".into(),
+            token: Some("test-token-1234567890".into()),
             token_mutating_request_limit_per_minute: 600,
-            extra_tokens: vec![],
             scrollback_bytes: 64 * 1024,
             default_shell: "/bin/bash".into(),
             default_cwd: std::env::temp_dir(),
