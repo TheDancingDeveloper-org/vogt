@@ -45,7 +45,9 @@ import {
 import { isBookmarked, toggleBookmark, bookmarks } from "./bookmarks";
 import { api as apiModule, ApiError, getBase, validateCredentials } from "./api";
 import type { PublicConfig, SessionTemplate } from "./api";
-import { clearStoredAuth, signOut, subscribeAuthRejected, subscribeAuthState } from "./api";
+import { clearStoredAuth, subscribeAuthRejected, subscribeAuthState } from "./api";
+import { signOutAndRevoke } from "./session";
+import { loginWithPassword } from "./authApi";
 import type { AuthRejection } from "./api";
 import {
   createSession,
@@ -211,21 +213,71 @@ interface LoginScreenProps {
   initialToken: string;
   initialBase: string;
   error: string | null;
+  /** The token path: validate, store, enter the shell. */
   onAuthenticated: (token: string, base: string) => Promise<void>;
+  /** The password path: log in for a session, then the same as above. */
+  onLogin: (username: string, password: string, base: string) => Promise<void>;
 }
 
+/**
+ * The gate. A person signs in with a username and password and receives a
+ * session — a bearer the core minted for them, expiring on its own. The
+ * token field is one disclosure away for the other kind of caller: an agent
+ * or a script holding an API token from `vogt token issue`, or an operator
+ * with the break-glass engine token.
+ */
 const LoginScreen: Component<LoginScreenProps> = (props) => {
+  const [mode, setMode] = createSignal<"password" | "token">(
+    props.initialToken ? "token" : "password",
+  );
+  const [username, setUsername] = createSignal("");
+  const [password, setPassword] = createSignal("");
   const [token, setTokenDraft] = createSignal(props.initialToken);
   const [base, setBaseDraft] = createSignal(props.initialBase);
-  const [showToken, setShowToken] = createSignal(false);
+  const [showSecret, setShowSecret] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal<string | null>(props.error);
   const native = Capacitor.isNativePlatform();
 
+  const describe = (value: unknown): string => {
+    if (value instanceof ApiError) {
+      if (value.status === 401) {
+        return mode() === "password"
+          ? "That username or password was not accepted (401). Check them and try again."
+          : "That token was rejected (401). Check the current Vogt token and try again.";
+      }
+      if (value.status === 429) {
+        return "Too many failed sign-ins for that username. Wait a minute and try again.";
+      }
+      if (value.status === 503) {
+        return "Vogt is up but its core is unavailable, so sign-in cannot be checked right now. Try again shortly.";
+      }
+      return `The server rejected the sign-in (HTTP ${value.status}).`;
+    }
+    return `Could not reach Vogt: ${value instanceof Error ? value.message : String(value)}`;
+  };
+
   const submit = async (event: SubmitEvent) => {
     event.preventDefault();
-    const candidateToken = token().trim();
     const candidateBase = base().trim().replace(/\/+$/, "");
+    if (mode() === "password") {
+      const candidateUser = username().trim();
+      if (!candidateUser || !password()) {
+        setError("A username and password are required to continue.");
+        return;
+      }
+      setBusy(true);
+      setError(null);
+      try {
+        await props.onLogin(candidateUser, password(), candidateBase);
+      } catch (value) {
+        setError(describe(value));
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    const candidateToken = token().trim();
     if (!candidateToken) {
       setError("A bearer token is required to continue.");
       return;
@@ -235,13 +287,7 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
     try {
       await props.onAuthenticated(candidateToken, candidateBase);
     } catch (value) {
-      setError(
-        value instanceof ApiError && value.status === 401
-          ? "That token was rejected (401). Check the current Vogt token and try again."
-          : value instanceof ApiError
-            ? `The server rejected the login (HTTP ${value.status}).`
-            : `Could not reach Vogt: ${value instanceof Error ? value.message : String(value)}`,
-      );
+      setError(describe(value));
     } finally {
       setBusy(false);
     }
@@ -252,24 +298,64 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
       <form class="login-card" onSubmit={submit}>
         <div class="login-eyebrow">Vogt</div>
         <h1>Sign in to Vogt</h1>
-        <p class="login-copy">
-          Enter a valid bearer token to continue. The workspace stays locked until
-          the server confirms your credentials.
-        </p>
-        <label>
-          Bearer token
-          <input
-            type={showToken() ? "text" : "password"}
-            value={token()}
-            onInput={(event) => {
-              setTokenDraft(event.currentTarget.value);
-              setError(null);
-            }}
-            autocomplete="off"
-            spellcheck={false}
-            autofocus
-          />
-        </label>
+        <Show
+          when={mode() === "password"}
+          fallback={
+            <>
+              <p class="login-copy">
+                Paste an API token from <code>vogt token issue</code>, or the
+                deployment's engine token. The workspace stays locked until the
+                server confirms it.
+              </p>
+              <label>
+                Bearer token
+                <input
+                  type={showSecret() ? "text" : "password"}
+                  value={token()}
+                  onInput={(event) => {
+                    setTokenDraft(event.currentTarget.value);
+                    setError(null);
+                  }}
+                  autocomplete="off"
+                  spellcheck={false}
+                  autofocus
+                />
+              </label>
+            </>
+          }
+        >
+          <p class="login-copy">
+            Sign in with your Vogt username and password. The workspace stays
+            locked until the server confirms who you are.
+          </p>
+          <label>
+            Username
+            <input
+              type="text"
+              value={username()}
+              onInput={(event) => {
+                setUsername(event.currentTarget.value);
+                setError(null);
+              }}
+              autocomplete="username"
+              autocapitalize="none"
+              spellcheck={false}
+              autofocus
+            />
+          </label>
+          <label>
+            Password
+            <input
+              type={showSecret() ? "text" : "password"}
+              value={password()}
+              onInput={(event) => {
+                setPassword(event.currentTarget.value);
+                setError(null);
+              }}
+              autocomplete="current-password"
+            />
+          </label>
+        </Show>
         <Show when={!native}>
           <label>
             Backend URL
@@ -286,10 +372,10 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
         <label class="login-checkbox">
           <input
             type="checkbox"
-            checked={showToken()}
-            onChange={(event) => setShowToken(event.currentTarget.checked)}
+            checked={showSecret()}
+            onChange={(event) => setShowSecret(event.currentTarget.checked)}
           />
-          Show token
+          {mode() === "password" ? "Show password" : "Show token"}
         </label>
         <Show when={error()}>
           <div class="login-error" role="alert">{error()}</div>
@@ -298,7 +384,39 @@ const LoginScreen: Component<LoginScreenProps> = (props) => {
           {busy() ? "Signing in…" : "Sign in"}
         </button>
         <p class="login-help">
-          Your token is stored only in this browser profile and is sent over the
+          <Show
+            when={mode() === "password"}
+            fallback={
+              <>
+                Have a username and password?{" "}
+                <button
+                  type="button"
+                  class="setup-link"
+                  onClick={() => {
+                    setMode("password");
+                    setError(null);
+                  }}
+                >
+                  Sign in with a password
+                </button>
+              </>
+            }
+          >
+            Using an API token or the engine token?{" "}
+            <button
+              type="button"
+              class="setup-link"
+              onClick={() => {
+                setMode("token");
+                setError(null);
+              }}
+            >
+              Sign in with a token
+            </button>
+          </Show>
+        </p>
+        <p class="login-help">
+          Your session is stored only in this browser profile and is sent over the
           configured HTTPS connection.
         </p>
       </form>
@@ -612,8 +730,8 @@ const App: Component = () => {
     clearStoredAuth();
     setAuthError(
       rejection.status === 401
-        ? "That token was rejected (401). Sign in with the current Vogt token to continue."
-        : "You are signed out. Enter a token to continue.",
+        ? "Your session was rejected (401). Sign in again to continue."
+        : "You are signed out. Sign in to continue.",
     );
     setAuthState("unauthenticated");
   };
@@ -660,7 +778,7 @@ const App: Component = () => {
         void placeMetrics.refresh();
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
-          setAuthError("Your saved token was rejected. Sign in with the current token to continue.");
+          setAuthError("Your saved session was rejected. Sign in again to continue.");
           setAuthState("unauthenticated");
           return;
         }
@@ -688,6 +806,16 @@ const App: Component = () => {
       }
     })();
   });
+
+  /**
+   * The password path. The core mints a session for the person and the
+   * rest is the token path: the session bearer is validated against the
+   * front door and stored exactly where a pasted token would live.
+   */
+  const login = async (username: string, password: string, base: string) => {
+    const session = await loginWithPassword(username, password, base);
+    await authenticate(session.secret, base);
+  };
 
   const authenticate = async (token: string, base: string) => {
     await validateCredentials(token, base);
@@ -1350,6 +1478,7 @@ const App: Component = () => {
                 initialBase={getBase()}
                 error={authError()}
                 onAuthenticated={authenticate}
+                onLogin={login}
               />
             }
           >
@@ -1629,7 +1758,7 @@ const App: Component = () => {
                 leaves the reader with panels full of errors and, before this,
                 nothing to press. Goes out through `api.ts` so the transition
                 is the same one a 401 takes. */}
-            <button type="button" onClick={() => signOut()}>Sign out</button>
+            <button type="button" onClick={() => void signOutAndRevoke()}>Sign out</button>
             <span class={`rail-connection ${isConnected() ? "connected" : "offline"}`}>
               <span class="rail-connection-dot" aria-hidden="true" />
               {isConnected() ? "Connected" : "Offline"}
@@ -2049,7 +2178,7 @@ const App: Component = () => {
                     onClick={() => {
                       setMoreSheetOpen(false);
                       if (item.id === "settings") openSettings();
-                      else void signOut();
+                      else void signOutAndRevoke();
                     }}
                   >
                     {item.label}

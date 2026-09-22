@@ -63,6 +63,7 @@ export const ROUTES = {
   "label.list": "/labels",
   "initiative.list": "/initiatives",
   "actor.list": "/actors",
+  "auth.logout": "/auth/logout",
   "drift.list": "/drift",
   "drift.resolve": "/drift/resolve",
   deps: "/deps",
@@ -1058,3 +1059,12 @@ export const startSession = (
 
 export const stopSession = (id: string, reason: string) =>
   call<{ session: SessionSummary }>("session.stop", { id, reason }, "POST");
+
+/**
+ * Revoke the session this browser holds, at the core. The local half — the
+ * stored credential and the return to the gate — is `signOut` in `api.ts`;
+ * `session.ts` runs the two in order.
+ */
+export function logout(reason: string): Promise<{ revoked: boolean }> {
+  return call<{ revoked: boolean }>("auth.logout", { reason }, "POST");
+}

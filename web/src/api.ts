@@ -1293,6 +1293,8 @@ export interface AuthCheck {
   version: string;
   product_version?: string;
   storage: { state_dir: string; workspace_root: string };
+  /** Who the front door decided the caller is; absent on older engines. */
+  identity?: { name: string; scopes: string[]; capabilities: string[] };
 }
 
 export interface GuiProc {

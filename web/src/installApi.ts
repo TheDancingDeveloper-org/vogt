@@ -25,10 +25,18 @@ export interface InstallStatus {
 
 export interface InstallBootstrapResult {
   actor: { id: string; identity_ref: string; display_name: string; kind: string };
-  token: { id: string; name: string; scopes: string[] };
-  /** Shown once. Not stored server-side, not recoverable. */
+  token: { id: string; name: string; scopes: string[]; kind?: string };
+  /** The session bearer when a password was set; otherwise an admin API
+   *  token shown once and not recoverable. */
   secret: string;
   warning: string;
+  /** The login name created, when the bootstrap set a password. */
+  username?: string | null;
+}
+
+export interface BootstrapLogin {
+  username: string;
+  password: string;
 }
 
 /**
@@ -54,15 +62,23 @@ export async function fetchInstallStatus(): Promise<InstallStatus | null> {
   }
 }
 
-/** Name the first operator and mint the first token — the core allows this
- * exactly once, and refuses with `install_closed` ever after. */
+/** Name the first operator and mint the first credential — the core allows
+ * this exactly once, and refuses with `install_closed` ever after. With a
+ * `login`, the operator gets a password and the returned secret is a
+ * browser session; without one, an admin API token shown once. */
 export async function bootstrapInstall(
   displayName: string,
+  login?: BootstrapLogin,
 ): Promise<InstallBootstrapResult> {
+  const body: Record<string, string> = { display_name: displayName };
+  if (login) {
+    body.username = login.username;
+    body.password = login.password;
+  }
   const res = await fetchWithRetry(`${getBase()}/api/install/bootstrap`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ display_name: displayName }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     let message = `the server answered ${res.status}`;
