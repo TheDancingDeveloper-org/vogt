@@ -61,10 +61,11 @@ list and explain work but not move it.
 
 Ask your operator for a token scoped to the work you will actually do; do not ask
 for more. (If you are driving Vogt *through the engine's* browser or agent-task
-surfaces, those carry a separate capability list — `sessions`, `vogt-write`,
-`agent-tasks-write`, and so on — and the engine performs each Vogt write with the
-**core token paired to yours**, so it is audited to your actor, never a shared
-one. [`USER_GUIDE.md`](USER_GUIDE.md) §1 has that table.)
+surfaces, the same token works there: the engine asks the core who it is and
+derives its capabilities — `sessions`, `vogt-write`, `agent-tasks-write`, and so
+on — from these scopes, and every Vogt write it forwards carries **your own
+bearer**, so it is audited to your actor, never a shared one.
+[`API.md`](API.md) has that derivation.)
 
 ### The `reason` rule — every write carries one
 

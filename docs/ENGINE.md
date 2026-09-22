@@ -161,20 +161,14 @@ to broker.
 ### 3.2 From source
 
 ```bash
-# 1. Mint a token (>=16 chars)
+# 1. Choose how callers are authenticated. Fronting a core (VOGT_CORE_URL),
+#    credentials are the core's — password-login sessions and API tokens, §5 —
+#    and nothing is needed here. Standing alone there is no core to ask, so a
+#    static break-glass token (>=16 chars) is the only way in and the engine
+#    refuses to boot without one.
 export ENGINE_TOKEN="$(openssl rand -hex 24)"
-
-# Optional: scoped tokens and a write-rate cap for the primary token.
-# Capability names: sessions, filesystem-write, git-write, gui-control,
-# agent-tasks-write, push-write, history-write, history, assistant, vogt-write
-# (`sessions` also gates reading a session's detail/scrollback; `history` gates
-# reading archived session history — both reads, gated because they expose
-# other callers' output.)
+# Optional: the per-identity write-rate cap (600 a minute by default).
 export ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE=600
-export ENGINE_EXTRA_TOKENS_JSON='[
-  {"name": "readonly", "token": "replace-with-another-16+-char-secret",
-   "capabilities": []}
-]'
 
 # 2. Run — from engine/, which is the Cargo workspace root
 cd engine
@@ -193,7 +187,9 @@ CLI flags > env > config file:
 
 ```toml
 bind = "0.0.0.0:8910"
-token = "..."                  # or ENGINE_TOKEN
+token = "..."                  # or ENGINE_TOKEN; optional break-glass credential
+vogt_core_url = "http://127.0.0.1:8000"                 # or VOGT_CORE_URL
+vogt_core_token_file = "/run/secrets/vogt_core_token"   # or VOGT_CORE_TOKEN(_FILE); the stack secret
 scrollback_bytes = 4194304
 default_shell = "/bin/bash"
 default_cwd   = "/srv/workspace"
@@ -209,25 +205,28 @@ allowed_origins = [
 auto_agent_auth = false
 agent_auth_helper = "/usr/local/bin/vogt-agent-auth"
 token_mutating_request_limit_per_minute = 600
-
-[[extra_tokens]]
-name = "readonly"
-token = "replace-with-another-16+-char-secret"
-capabilities = []
-mutating_requests_per_minute = 60
 ```
 
-`capabilities = []` means "authenticated read-only token". Recommended token
-policy: keep the primary token as the admin/recovery credential, use a scoped
-interactive token for normal browser use, a scoped read-only token for passive
-viewers, and a separate `gui-control` token if a browser regularly launches GUI
-processes. The PWA's Settings modal stores device-local named auth profiles, so
-the primary token need never sit in a browser's `localStorage`.
+The engine keeps no token table. `token` is the optional static
+**break-glass** credential: full capability, no actor of its own, and its
+Vogt calls are attributed to the stack secret's actor. Every other bearer is
+a **core token** — a person's session from a password login, or an agent's
+API token — which the engine resolves by asking the core (§5, "Core rules"),
+so a deployment whose people all have a login leaves `token` unset and every
+credential is checked in one place. The PWA's Settings modal still stores
+device-local named auth profiles for token sign-ins; a password login needs
+none of that.
 
 To run the engine as the front door for a core, set `VOGT_CORE_URL` to the
-core's address and `VOGT_CORE_TOKEN` (or `VOGT_CORE_TOKEN_FILE`) to a core
-token; per-front-door-token pairings go on `extra_tokens` entries as
-`vogt_core_token_file`. The assistant is configured in §6.
+core's address and `VOGT_CORE_TOKEN` (or `VOGT_CORE_TOKEN_FILE`) to the
+**stack secret** — the file the core also reads as
+`VOGT_BOOTSTRAP_CORE_TOKEN_FILE` and adopts at `init`. The engine recognises
+that value as the core's own identity when the core calls in to start a
+session, follows the core's event feed with it, and lends it to the
+break-glass token; it is never presented on behalf of anybody else. With
+neither `VOGT_CORE_URL` nor `ENGINE_TOKEN` set the engine refuses to start,
+because there would be no way to authenticate anybody. The assistant is
+configured in §6.
 
 Which values the *core* reads is [`CONFIG.md`](CONFIG.md), which is generated
 from `src/vogt/config.py` and does not describe this process.
@@ -247,7 +246,7 @@ For UI work, run the server and the Vite dev server in parallel — Vite proxies
 cd engine
 ENGINE_TOKEN=$(openssl rand -hex 24) cargo run -p vogt-engine-server -- --bind 127.0.0.1:8910
 # terminal 2
-cd web && pnpm dev   # -> http://127.0.0.1:5173, paste the token into Settings
+cd web && pnpm dev   # -> http://127.0.0.1:5173; "Sign in with a token" under the password form
 ```
 
 ### 3.4 Tests
@@ -368,30 +367,55 @@ section that documents it.
 
 ### Core rules
 
-- All `/api/*` HTTP routes require bearer auth except `/api/config` and
-  `/api/push/public-key`.
+- All `/api/*` HTTP routes require bearer auth except `/api/config`,
+  `/api/push/public-key`, and the pass-throughs the core gates itself —
+  `POST /api/auth/login` and `/api/install/*` (as `/mcp` is, outside `/api`).
 - `GET /healthz` and `GET /readyz` are public.
-- Auth is `Authorization: Bearer <token>`, compared in constant time against
-  the primary token and every entry in `extra_tokens`.
-- **A valid token is enough for most routes.** Some also require a named
-  capability, and those say so; where nothing is said, any valid token will
-  do. The capabilities are `sessions`, `filesystem-write`, `git-write`,
+- Auth is `Authorization: Bearer <token>`. The engine holds no token table.
+  A bearer is resolved in order of cost (`authorize` in
+  `engine/server/src/auth.rs`): the optional static break-glass
+  `ENGINE_TOKEN`, constant-time; the stack secret (`vogt_core_token`),
+  constant-time — the core's own identity when it calls this engine; and
+  otherwise a **core token**, which the core is asked about
+  (`GET /api/auth/whoami` with the bearer forwarded,
+  `engine/server/src/core_auth.rs`). That answer is cached by the SHA-256
+  digest of the bearer — 15 s for an identity, 3 s for a refusal, never for
+  an outage — and a successful `POST /api/vogt/auth/logout` evicts its entry,
+  so a signed-out session stops opening engine routes at once rather than at
+  the TTL. There is no fourth kind of credential.
+- **A resolved bearer is enough for most routes.** Some also require a named
+  capability, and those say so; where nothing is said, any resolved bearer
+  will do. The capabilities are `sessions`, `filesystem-write`, `git-write`,
   `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, `history`,
-  `assistant`, `vogt-write` and `agent-clis-write`; the primary token holds all
-  eleven, and a scoped token holds what its `extra_tokens` entry lists. The mapping lives in
-  `required_capability` in `engine/server/src/auth.rs` and is keyed on method
-  *and* path, so `GET /api/sessions` needs no capability while
-  `POST /api/sessions` needs `sessions`.
-- A token that authenticates but lacks the capability gets `403`, not `401`.
-  The distinction is worth acting on: `401` means try a different credential,
-  `403` means this credential will never work for this route.
+  `assistant`, `vogt-write` and `agent-clis-write` (`sessions` also gates
+  reading a session's detail and scrollback; `history` gates reading archived
+  session history — both reads, gated because they expose other callers'
+  output). They derive from core scopes (`capabilities_for_scopes`): `admin`
+  holds all eleven; `work.write` or `project.write` holds everything except
+  `gui-control` and `agent-clis-write`; `read` alone holds `push-write`, so a
+  viewer can subscribe to notifications; `writeback` adds nothing. The
+  break-glass token holds all eleven, and the stack secret holds `sessions`
+  and `agent-clis-write` — what the core needs to start sessions here. The
+  capability-to-route mapping lives in `required_capability` in
+  `engine/server/src/auth.rs` and is keyed on method *and* path, so
+  `GET /api/sessions` needs no capability while `POST /api/sessions` needs
+  `sessions`.
+- A bearer that resolves but lacks the capability gets `403`, not `401`; a
+  bearer nobody recognises gets `401`; and a bearer the core could not be
+  asked about gets **`503`** with `Retry-After`, never `401` — telling a
+  browser its credential is wrong because the core is restarting is exactly
+  the collapse of "offline" into "unauthorized" the PWA guards against. The
+  distinction is worth acting on: `401` means try a different credential,
+  `403` means this credential will never work for this route, `503` means
+  wait.
 - **`gui-control` and `agent-tasks-write` are arbitrary code execution**, equal
   in power to `sessions`: `gui/launch` runs any argv and an agent task runs a
   caller-supplied `command` in a PTY, both as the pod user (which holds
   `NOPASSWD:ALL` sudo). Grant them only where you would grant a shell; do not
   read them as narrower than they are.
-- Every mutating request (POST/PUT/PATCH/DELETE) is rate limited per token —
-  600 per minute by default, `mutating_requests_per_minute` per scoped token.
+- Every mutating request (POST/PUT/PATCH/DELETE) is rate limited per
+  identity — 600 per minute by default
+  (`token_mutating_request_limit_per_minute`), keyed by the resolved name.
   Over the limit is `429` with `Retry-After` in whole seconds.
 - **Every** response carries `X-Request-Id`, gated or not, adopted from the
   request when it sent a usable identifier and minted otherwise. One
@@ -411,7 +435,11 @@ section that documents it.
   malformed or out-of-bounds input, `401` no or wrong token, `403` capability
   denied, `404` not found (also: feature not provisioned, see below), `409`
   conflict, `429` rate limited, `500` something the engine owns is broken,
-  `502` an optional upstream did not answer.
+  `502` an optional upstream did not answer, `503` the core could not be
+  asked about a credential. The gate's refusals use the same shape:
+  `unauthorized: no bearer token`, `unauthorized: the bearer token is not
+  valid here`, `forbidden: this credential lacks the <X> capability`, and
+  `vogt-core is unavailable, so this credential cannot be checked: <detail>`.
 - A feature that is not provisioned answers `404` rather than `501` or `503`:
   the assistant with no API key. The feature is invisible rather than
   advertised-but-broken. The Vogt front
@@ -452,11 +480,20 @@ section that documents it.
   `GUI_STREAM_VERIFIED=1` are all present. The latter is an operator
   attestation set only after a launched process has rendered through the
   configured stream.
-- `GET /api/auth/check` -> `{ok, version?, product_version?, storage?}` — a
-  cheap authenticated credential probe. It deliberately does not perform the
+- `GET /api/auth/check` -> `{ok, version?, product_version?, storage?,
+  identity: {name, scopes, capabilities}}` — a cheap authenticated credential
+  probe. `identity.name` is the core actor's `identity_ref` (`human:ada`,
+  `agent:session:…`), or `primary` / `vogt-core` for the two static
+  credentials, whose `scopes` are empty. It deliberately does not perform the
   operational checks reported by `/api/status`, so Settings can distinguish a
-  valid token from a temporarily unavailable engine without starting a full
-  status read.
+  valid credential from a temporarily unavailable engine without starting a
+  full status read.
+- `POST /api/auth/login` `{username, password, session_name?}` ->
+  `{actor, token, secret}` — the password login, forwarded untouched to the
+  core. Open because a browser that holds no session yet is exactly its
+  caller; the core owns the credential check, the per-username throttle
+  (`429 login_throttled` after five failures in a minute) and the audit row.
+  See "The Vogt front door" below.
 - `GET /api/push/public-key` -> `{vapid_public_key, fcm_enabled}` — needed to
   call `PushManager.subscribe`, so it must be reachable before a token exists.
 
@@ -627,10 +664,12 @@ and access logs. `?token=` is refused unless `ENGINE_WS_QUERY_TOKEN=true`: it
 exists only to keep a client that has not been redeployed working, every use
 is logged, and it *does* land in those logs.
 
-The token must carry the `sessions` capability — the same one a write needs.
-Attaching is a write: the socket's binary frames go to PTY stdin. A read-only
-token can list sessions and read a scrollback snapshot over
-`GET /api/sessions/:id`, and cannot attach.
+The first frame's token goes through the same resolver as the HTTP gate and
+must carry the `sessions` capability — for a core-resolved caller, a login or
+token with `work.write`, `project.write` or `admin`. Attaching is a write:
+the socket's binary frames go to PTY stdin. A `read`-only credential can list
+sessions and read a scrollback snapshot over `GET /api/sessions/:id`, and
+cannot attach.
 
 The attach sequence is ordered:
 
@@ -801,7 +840,7 @@ and a client must not render one as the other:
 
 Both await approval at `POST /api/assistant/actions/:id`, one at a time. The
 identity on *that* request is the credential a Vogt write is made with: the
-approving user's paired core token, never a shared one. `GET /api/config`
+approving user's own bearer, forwarded to the core, never a shared one. `GET /api/config`
 advertises `assistant_enabled` and `assistant_model` (presence only, never the
 key).
 
@@ -1153,7 +1192,7 @@ follower: that task polls vogt-core's `events.list` cursor and
 republishes each change onto the server's own bus as `vogt-changed`, and the
 drift watcher subscribes to that bus the way the session watcher subscribes to
 activity. So it is silent whenever the follower is — no core configured, no
-core token configured, or the core unreachable.
+stack secret configured, or the core unreachable.
 
 It fires only on `drift.raised`, a named kind rather than a `drift.` prefix,
 because "and for nothing else by default" has to survive the core growing new
@@ -1228,8 +1267,9 @@ is the implementation and argues the decisions.
 
 | Front door | vogt-core | Auth |
 |---|---|---|
-| `/api/vogt`, `/api/vogt/*` | `/api/*` | front-door token, core token injected |
+| `/api/vogt`, `/api/vogt/*` | `/api/*` | inside the gate; the caller's own bearer forwarded (a break-glass token is swapped for the stack secret) |
 | `/mcp`, `/mcp/*` | `/mcp` | the client's own core token, forwarded untouched |
+| `POST /api/auth/login` | the same path | none — forwarded untouched, the core self-gates |
 | `GET /api/install/status`, `POST /api/install/bootstrap` | the same paths | none — forwarded untouched, the core self-gates |
 
 Each family is three routes rather than two because a wildcard segment needs at
@@ -1238,37 +1278,48 @@ least one character: `/api/vogt/` matches neither `/api/vogt` nor
 PWA's catch-all.
 
 **`/api/vogt/*` — any method.** Inside the bearer gate, so it carries the same
-token as every other `/api/*` route, and any method other than GET requires the
-`vogt-write` capability. What reaches the core is a *different* credential: the
-caller's `Authorization` header is dropped and the core token paired with the
-front-door token that authenticated this request is injected in its place.
-A deployment with one shared `vogt_core_token` and no per-token
-pairings keeps working — that fallback is deliberate, not a leftover — but then
-the core's audit names one proxy identity instead of an actor per front-door
-holder. A request with neither a pairing nor a fallback is refused here with a
-`503` naming the token, rather than forwarded to collect the core's `401`,
-because the caller did nothing wrong.
+credential as every other `/api/*` route, and any method other than GET
+requires the `vogt-write` capability. What reaches the core is the **caller's
+own bearer**: the session or API token the core just resolved for the gate is
+forwarded exactly as it was sent, so the core's audit names the person or
+agent who acted and never a proxy identity. Nothing is injected and nothing
+is paired. The one substitution is the break-glass `ENGINE_TOKEN`, which the
+core has never heard of and which is lent the stack secret, so its Vogt calls
+are attributed to the stack secret's actor (`VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR`).
+A break-glass request on a door with no stack secret configured is refused
+here with a `503` naming `primary` and `vogt_core_token`, rather than
+forwarded to collect the core's `401`, because the caller did nothing wrong.
+A successful `POST /api/vogt/auth/logout` also evicts the bearer from the
+identity cache, so the revoked session is refused by the next engine request
+rather than served until the cache expires.
 
-The engine's `vogt-write` gate is about which front-door holders may reach the
-write plane at all. It is not a substitute for the core's own rules: a reason on
-every write, and the scopes carried by the injected token, are still enforced
-there.
+The engine's `vogt-write` gate is about which callers may reach the write
+plane at all. It is not a substitute for the core's own rules: a reason on
+every write, and the scopes carried by the forwarded credential, are still
+enforced there — and because the engine's capabilities derive from those same
+scopes, the two gates cannot disagree about who may write.
+
+**`/api/auth/login` — the password login.** Outside the bearer gate, because
+a browser that holds no session yet is exactly the caller it exists for, and
+forwarded untouched: the core owns the credential check, the per-username
+throttle and the audit row, and a login attributed to the stack secret would
+put the wrong name on the session it mints.
 
 **`/api/install/*` — the first-run wizard's two routes.** Outside the
 bearer gate, because a browser that holds no token yet is exactly the caller
 they exist for. The core is the sole authority: its bootstrap answers only
 while its token store holds no tokens at all and refuses with `install_closed`
 afterwards, so the door adds no gate of its own. Nothing is injected — a
-bootstrap attributed to the deployment's shared pairing would put the wrong
-name on the first operator — and the caller's own `Authorization`, if any,
-survives the hop untouched, exactly as on `/mcp`.
+bootstrap attributed to the stack secret would put the wrong name on the
+first operator — and the caller's own `Authorization`, if any, survives the
+hop untouched, exactly as on `/mcp`.
 
 **`/mcp` — any method.** Deliberately outside the bearer gate. The credential
-on an MCP request is already a *core* token, minted by `vogt token issue` and
-bound to an actor, and it is forwarded untouched. Re-checking it against the
-engine's unrelated token list would refuse every legitimate agent, and
-rewriting it would replace a real actor with a shared one and make the core's
-audit log worse. Responses stream: `/mcp` is streamable HTTP and its replies
+on an MCP request is already a *core* token — an agent's API token, or a
+person's session — bound to an actor, and it is forwarded untouched. The
+core judges it afresh on the other side of the hop, so resolving it here
+first would buy nothing, and rewriting it would replace a real actor with a
+shared one and make the core's audit log worse. Responses stream: `/mcp` is streamable HTTP and its replies
 are long-lived SSE, so there is no overall request timeout on the hop — only a
 two-second connect timeout, which is what protects against a core that is not
 listening.
@@ -1331,7 +1382,7 @@ are given beside each route above.
   `engine/contract/src/lib.rs` and the handler modules are the exact shapes;
   this file names them and describes the behaviour a client cannot infer from
   a struct.
-- **Configuration.** Which tokens exist, which capabilities they hold, and
+- **Configuration.** The two static credentials, the core they front, and
   every value named above as a default: §3 above and
   `engine/server/src/config.rs`. `docs/CONFIG.md` is the *core's* configuration
   and does not describe this process.
@@ -1444,11 +1495,10 @@ Every setting, with the TOML key for a `--config` file and its default
 | `assistant_speech_attempt_timeout_ms` | `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS` | `30000` | per-attempt bound on one speech upstream, not on the whole request |
 
 The Vogt half of the assistant needs no key of its own: it uses
-`vogt_core_url` — the same core the front door proxies — and the
-`vogt_core_token_file` pairing on each front-door token's `extra_tokens`
-entry (§3). A deployment with only the shared `vogt_core_token` gets Vogt
-*reads* in the assistant and a named refusal on writes; pairing a token is
-how it opts that token in.
+`vogt_core_url` — the same core the front door proxies — and the caller's
+own bearer, which the gate already resolved (§6.5). A person signed in with a
+password, or an agent with an API token, gets the Vogt tools their scopes
+allow; the break-glass token gets them through the stack secret it borrows.
 
 The assistant's core client accepts an HTTP(S) `vogt_core_url` with a host
 and no embedded username or password. An invalid URL leaves its Vogt tools
@@ -1635,25 +1685,31 @@ and would then drift silently as the registry changed.
 
 The assistant runs server-side but is always *called* by an authenticated
 user. `require_bearer` leaves an `AuthorizedIdentity` in the request
-extensions carrying the front-door token's name and the vogt-core token paired
-with it; `assistant_api.rs` turns that into a `Caller` and hands it to
-the runtime. There is no other credential in reach of the tool loop.
+extensions carrying the caller's name and the credential `/api/vogt` would
+present for them — their own bearer, or the stack secret for the break-glass
+token; `assistant_api.rs` turns that into a `Caller` and hands it to the
+runtime. There is no other credential in reach of the tool loop.
 
-| | Credential | If the caller has no pairing |
-|---|---|---|
-| Read | the caller's pairing, else the deployment-wide `vogt_core_token` | falls back, because a read attributes nothing |
-| Write | the **approving** caller's pairing, and nothing else | refused, with the token's name and what to configure |
+| | Credential |
+|---|---|
+| Read | the caller's own bearer (for the break-glass token, the stack secret) |
+| Write | the **approving** caller's own bearer, and nothing else |
 
-The asymmetry is the whole rule. A write filed under a shared token names
-the wrong actor in an audit row somebody reads months later, and a wrong answer
-there is worse than a refusal a user can act on. The credential is taken from
-the request that *approved* the action, not from the one that sent the message
+Reads and writes use the same credential, and it is always the caller's, so
+every write is audited to the person or agent who approved it. There is no
+deployment-wide fallback: the only caller with nothing to act as is the
+break-glass token on a door with no stack secret, and it is refused by name
+with what to configure. A write filed under a shared token names the wrong
+actor in an audit row somebody reads months later, and a wrong answer there
+is worse than a refusal a user can act on. The credential is taken from the
+request that *approved* the action, not from the one that sent the message
 that proposed it — when those differ, the rule is about the second.
 
 Front-door capabilities gate reaching the assistant at all (`assistant` on
-every mutating assistant route). What a given write is *allowed* to do in Vogt
-is enforced at the core against the approver's own core token, which
-is the same check any other client of the core gets.
+every mutating assistant route, held by `work.write`, `project.write` and
+`admin`). What a given write is *allowed* to do in Vogt is enforced at the
+core against the approver's own scopes, which is the same check any other
+client of the core gets.
 
 
 #### 6.5.1 Voice capability matrix
@@ -1666,11 +1722,11 @@ assistant tools; use the appropriate CLI or product setup surface. It is an
 assistant policy classification, not a new registry authorization scope.
 
 Availability also requires the operation in the core's credential-filtered
-MCP list and its optional integrations to be configured. Writes use only the
-approver's paired core identity and retain the core's scope checks and audited
-write/action path. Reads retain the existing deployment-token fallback; personal
-forge reads therefore describe that credential's account when unpaired. No new
-credential scopes are granted. Linked work writes and initiative publication
+MCP list and its optional integrations to be configured. Reads and writes
+alike use the caller's own credential — for a write, the approver's — and
+retain the core's scope checks and audited write/action path; there is no
+deployment-wide fallback, so a personal forge read describes the caller's own
+account. No new credential scopes are granted. Linked work writes and initiative publication
 can affect the forge; the same approval gate and core writeback policy apply.
 
 <!-- voice-capabilities:start -->
@@ -1744,6 +1800,12 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |
 | `auth.decisions` | Operator-only | Unavailable: Admin security diagnostics. |
+| `auth.whoami` | Operator-only | Unavailable: The caller's own identity check; a diagnostic, not a task. |
+| `auth.logout` | Operator-only | Unavailable: Ends the caller's session; never something a voice turn may do. |
+| `user.create` | Operator-only | Unavailable: Admin identity provisioning; a password must never enter model context. |
+| `user.list` | Operator-only | Unavailable: Admin login inventory. |
+| `user.set_password` | Operator-only | Unavailable: A password must never enter model context. |
+| `user.remove` | Operator-only | Unavailable: Admin identity removal. |
 | `backup` | Operator-only | Unavailable: Local backup destination; no remote MCP tool. |
 | `restore` | Operator-only | Unavailable: Replaces instance stores; no remote MCP tool. |
 | `export` | Operator-only | Unavailable: Writes a host filesystem destination, despite its registry read classification. |
@@ -1823,11 +1885,12 @@ become instructions.
   `POST /api/assistant/reset` or a restart clears it). Don't provision the
   assistant against a provider you wouldn't show your terminals *and your
   work tracker* to.
-- **Token scoping:** mutating assistant routes require the `assistant`
-  capability. A token holding it transitively gains type-into-any-session
-  that approval and should only be set where the token boundary is already
-  trusted. It does **not** transitively gain Vogt write power: that needs a
-  paired core token whose own scopes the core enforces.
+- **Scoping:** mutating assistant routes require the `assistant` capability,
+  which `work.write`, `project.write` and `admin` hold and `read` alone does
+  not. A caller holding it transitively gains type-into-any-session through
+  approval, which is why a viewer's login is kept out. It does **not** gain
+  Vogt write power beyond its own: every Vogt write is made with the
+  approver's own credential, and the core enforces that credential's scopes.
 
 ### Voice
 
@@ -2051,7 +2114,7 @@ service behind it is not there, and exactly which setting turns it on.
 |---|---|---|---|
 | **Assistant provider** (any OpenAI-compatible chat endpoint) | the assistant's tool-use loop | `ENGINE_ASSISTANT_API_KEY` + `ENGINE_ASSISTANT_BASE_URL` (+ `_MODEL`, profiles) — §6 | The assistant routes answer 404 and the PWA hides its tab. A key with no `_BASE_URL` is a *startup error*, not a silent default. |
 | **Speech provider** (OpenAI-compatible audio endpoints) | server-side STT/TTS for the assistant | `ENGINE_ASSISTANT_STT_BASE_URLS` / `ENGINE_ASSISTANT_TTS_BASE_URLS` (+ `_MODEL`, `_VOICE`, `_API_KEY`) — §6 | Each half answers 404 independently; the client falls back to on-device speech or typing. In the shipped stack both are on by default, pointed at the bundled `voice` sidecar (`COMPOSE_PROFILES=voice`; [DEPLOYMENT.md](DEPLOYMENT.md) §5.2). |
-| **Vogt core** | the front door, the assistant's Vogt tools, the event follower | `VOGT_CORE_URL` + `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — §3, §5 | The engine is bootable alone: sessions work, `/readyz` stays ready, the Vogt routes answer `503` with a named reason. |
+| **Vogt core** | the front door, credential checks, the assistant's Vogt tools, the event follower | `VOGT_CORE_URL` + the stack secret, `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — §3, §5 | The engine is bootable alone with a break-glass `ENGINE_TOKEN` (with neither it refuses to start): sessions work, `/readyz` stays ready, the Vogt routes answer `503` with a named reason. |
 | **FCM** (native push) | push to the Android shell | `ENGINE_FCM_SERVICE_ACCOUNT_FILE` (a path to the Firebase service-account JSON; `ENGINE_FCM_SERVICE_ACCOUNT_JSON`, the document inline, is also accepted but carries a private key in the environment and is warned about) | The FCM transport is disabled; browser web-push still works for any subscription. VAPID keys are generated and persisted under `state_dir`. |
 | **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason. |
 | **Agent CLIs** (`codex`, `claude`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published image), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. |
@@ -2085,7 +2148,7 @@ secret in **any** project directly — no per-secret manifest line, no
 fetch/store broker round-trip. The breadcrumb flips to
 `AGENT_AUTH_MODE=identity` (from `brokered`) so tooling can branch;
 `AGENT_AUTH_GRANTED` is unchanged. Everything else the strip withholds stays
-withheld: the engine's own `ENGINE_TOKEN`, the scoped token set and the
+withheld: the engine's own `ENGINE_TOKEN`, the stack secret and the
 assistant/STT/TTS keys never reach a session in either mode. The trade-off is
 explicit: passthrough removes the containment the manifest was meant to
 provide, in exchange for dropping its friction (every new secret otherwise

@@ -25,8 +25,9 @@ sidecar, released as a pair and run by one Compose file,
   vogt-engine  (:8910, published)
     ├── /               the PWA
     ├── /api/...        sessions, terminals, files, git, agent tasks, push
-    ├── /api/vogt/...   proxied to the core, with the core token injected
+    ├── /api/vogt/...   proxied to the core, the caller's bearer forwarded
     ├── /mcp            proxied to the core
+    ├── /api/auth/login, /api/install/...   proxied untouched; the core self-gates
     └── /healthz, /readyz
   vogt serve   (:8000, loopback inside the container, never published)
     ├── /api/...        REST (OpenAPI at /openapi.json)
@@ -63,32 +64,43 @@ this implies.
 git clone https://github.com/TheDancingDeveloper-org/vogt
 cd vogt
 cp deploy/stack.env.example deploy/.env
-$EDITOR deploy/.env                    # at minimum: ENGINE_TOKEN
+$EDITOR deploy/.env                    # optional: port, bind, a break-glass token
 openssl rand -hex 32 > deploy/vogt-core-token
 docker compose -f deploy/stack.compose.yml up -d --wait
 curl -fsS http://127.0.0.1:8910/readyz
 ```
 
-There is no `--build`: the image already carries everything. Two secrets are
-involved, and they are different shapes on purpose:
+There is no `--build`: the image already carries everything. One secret is
+required and one is optional, and they are different shapes on purpose:
 
-- **`ENGINE_TOKEN`** (in `deploy/.env`) is the engine's bearer token, at
-  least 16 characters — what the browser and agents present. The stack refuses
-  to start without it rather than inventing one.
-- **`deploy/vogt-core-token`** is the core token, a *file* mounted as a
-  Compose secret that both halves read: the engine presents it on
-  `/api/vogt`, and the core adopts it at `init` as the actor and scopes named
-  in `.env`. That is the whole first-boot bootstrap. Left empty, `/api/vogt`
-  answers 401 until you mint a token by hand.
+- **`deploy/vogt-core-token`** is the **stack secret**, a *file* mounted as
+  a Compose secret that both halves read and nobody else ever holds. The
+  core adopts it at `init` as the actor and scopes named in `.env` and calls
+  the engine with it to start sessions; the engine recognises it as the
+  core's own identity, follows the core's event feed with it, and lends it
+  to the break-glass token below. That is the whole first-boot bootstrap.
+  Put a new value in the file and the next boot adopts it and revokes the
+  old one. Left empty, the two halves have no credential for each other —
+  the core cannot start sessions and the engine cannot follow events — while
+  people can still sign in.
+- **`ENGINE_TOKEN`** (in `deploy/.env`) is optional: a static **break-glass**
+  credential for the engine, at least 16 characters, with full capability
+  and no actor of its own — its Vogt calls are attributed to the stack
+  secret's actor. Nothing a person or an agent presents day to day is set
+  here: people sign in with a password and agents hold API tokens, both
+  checked by the core. Set it only for a way in that does not depend on
+  the core; leave it empty and every credential is a core token.
 
 `up -d --wait` blocks until the health checks pass: the engine's `/readyz`,
 and with voice on, the sidecar's `/health` (which reports `starting` until
 its models load). `/readyz` reports the core's state but deliberately stays
 ready when the core is absent — restarting the container would not revive a
 core and would kill every live terminal — so read its body, not just the
-status. Then open `http://localhost:8910/`, open **Settings**, paste
-`ENGINE_TOKEN`, and save. [`USER_GUIDE.md`](USER_GUIDE.md) is the tour from
-there.
+status. Then open `http://localhost:8910/`: the first-run wizard asks for
+your name, a username and a password, creates your `admin` login and signs
+you in. Later people are added with `vogt user create` and agents get API
+tokens from `vogt token issue`, both run inside the container (§3).
+[`USER_GUIDE.md`](USER_GUIDE.md) is the tour from there.
 
 Three named volumes — `vogt-data`, `engine-home` and `engine-agent-clis`
 (§5) — survive `down`; do not add `--volumes` unless you mean to erase the
@@ -101,14 +113,14 @@ Everything an operator chooses lives in `deploy/.env`, read by
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `ENGINE_TOKEN` | yes | — | The engine's bearer token, ≥16 characters. |
+| `ENGINE_TOKEN` | no | — | An optional static break-glass token for the engine, ≥16 characters: full capability, no actor of its own. Unset, every credential is a core token checked by the core. |
 | `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. Loopback until you mean to expose it. |
 | `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one (§4). |
 | `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.1` | The image to run. Pin a digest (§6). |
 | `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.1` | The sidecar. Pin the same release as the stack. |
 | `COMPOSE_PROFILES` | no | `voice` | Clear it to run without the sidecar; the voice controls stay present but inert. |
-| `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted core token acts as. |
+| `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted stack secret acts as — and therefore whom a break-glass token's Vogt calls are attributed to. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | What it may do. Everything in the pod can read the file, so this is the blast radius. |
 | `VOGT_HOOKS_REQUIRED` | no | `false` | Whether a missing lifecycle hook bundle is fatal. |
 | `ENGINE_FCM_SERVICE_ACCOUNT_FILE` | no | — | Set to `/run/secrets/fcm_service_account` after placing `deploy/fcm-service-account.json` to enable native push. Web push needs nothing. |
@@ -135,9 +147,29 @@ assistant tab is separate and off until `ENGINE_ASSISTANT_API_KEY` and
 `ENGINE_ASSISTANT_BASE_URL` are both set; a key with no base URL is a startup
 error, not a silent default provider.
 
-**Tokens for clients.** The core authenticates every request. A token is
-bound to an actor, carries scopes (`read`, `work.write`, `project.write`,
-`admin`, `writeback`), and is minted from the container that owns the data:
+**Credentials for people and agents.** The core authenticates every request
+and is the only identity authority; the engine holds no token table and asks
+the core who a bearer is. **People sign in with a username and password.**
+The first operator chooses theirs in the browser wizard; every later person
+is created from the container that owns the data:
+
+```console
+docker compose -f deploy/stack.compose.yml exec vogt \
+  vogt user create --username ada --display-name "Ada Lovelace" \
+  --scopes read,work.write,project.write --reason "Ada joins the team"
+```
+
+That prompts for the password on the terminal; `--password-file PATH` and
+`--password-stdin` are the non-interactive forms, and a password is never
+accepted as an argument. Signing in mints a **session** — a core token bound
+to the person's own actor that expires after the core's `session_ttl_days`
+(`VOGT_SESSION_TTL_DAYS`, 30 by default; [`CONFIG.md`](CONFIG.md)) and is
+revoked by signing out. `vogt user passwd` replaces a password and ends the
+person's sessions; `vogt user remove` takes the login away and keeps the
+actor and its audit history; `vogt user list` never shows a hash.
+**Agents, scripts and MCP clients hold API tokens.** A token is bound to an
+actor, carries scopes (`read`, `work.write`, `project.write`, `admin`,
+`writeback`), and is minted the same way:
 
 ```console
 docker compose -f deploy/stack.compose.yml exec vogt \
@@ -286,7 +318,7 @@ recorded checksums still verify on the next boot — is covered by
 oldest shipped migration set through the current migrator with its data intact.
 
 **A second instance on the same host** is supported: give it its own Compose
-project name, `--env-file`, port, public URL and core token file. The named
+project name, `--env-file`, port, public URL and stack secret file. The named
 volumes are project-scoped, so a distinct `-p` already separates the data;
 [`CUSTOMISATION.md`](CUSTOMISATION.md#running-a-second-instance-on-the-same-host)
 has the details.

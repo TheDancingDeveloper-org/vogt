@@ -155,8 +155,8 @@ What you must still change per instance:
 - `ENGINE_PORT` — the bind fails otherwise, which at least tells you.
 - `ENGINE_PUBLIC_URL` — each instance has its own address, and this one is
   never inferred.
-- The core token file, if you keep it beside the Compose file — give each
-  instance its own.
+- The stack secret file (`vogt-core-token`), if you keep it beside the
+  Compose file — give each instance its own.
 - Any host path an overlay of yours bind-mounts. Two instances writing one
   workspace is not an error, it is just wrong.
 - Any explicit `name:` you have put on a volume or network in your own
@@ -279,17 +279,20 @@ container.
 
 ### Giving the front door its core token in one deploy
 
-A fronted deployment needs a token the front door presents to the core, so
-audit rows name the actor who acted rather than "the proxy". The core is what
-validates it — which, without a bootstrap path, would mean it could only be
-*minted* by a running core, making a first deploy: start up, watch
-`/api/vogt` answer 401, exec into the core, mint a token, paste it into your
-configuration, deploy again.
-The second deploy is not free either: it restarts the pod and takes every
-open terminal session with it.
+A fronted deployment needs one credential the two halves share — the **stack
+secret**. The core calls the engine with it to start sessions; the engine
+recognises it as the core's own identity, follows the core's event feed with
+it, and lends it to the optional break-glass `ENGINE_TOKEN`, which has no
+actor of its own. (People and agents never hold it: a browser holds a
+session from a password login and an agent holds an API token, and the
+engine forwards those to the core as they are.) The core is what validates
+it — which, without a bootstrap path, would mean it could only be *minted*
+by a running core, making a first deploy: start up, watch sessions refuse to
+start, exec into the core, mint a token, paste it into your configuration,
+deploy again. The second deploy is not free either: it restarts the pod and
+takes every open terminal session with it.
 
-Choose the value instead, exactly as you already choose the engine's session
-token:
+Choose the value instead, exactly as you would choose a break-glass token:
 
 ```bash
 openssl rand -hex 32 > core-token
@@ -320,8 +323,9 @@ services:
 
 Adoption is idempotent: `init` runs on every container start, and a boot that
 finds the secret already present writes nothing. Rotating means putting a new
-value in the file — the old token stays valid until you revoke it, so the two
-acts are separate on purpose.
+value in the file: the next boot adopts it and, in the same transaction,
+revokes every earlier bootstrap token on that actor, so a changed secret
+leaves no live token behind.
 
 Two ways this refuses rather than degrades, both deliberate. A secret shorter
 than 24 characters is rejected, so a placeholder never becomes a working
@@ -464,7 +468,7 @@ complete, supported product.
 | **GitHub** | `github_token_file` | "GitHub was not collected", never "there are no GitHub subjects" |
 | **MCP** | running `vogt-mcp`, or `/mcp` on a running server | Agents cannot connect; nothing else changes |
 | **Remote MCP** | `vogt-mcp-remote` with `VOGT_URL` and `VOGT_TOKEN_FILE` | As above |
-| **Session engine, for a core run alone** | `engine_url`, `engine_token_file`, `engine_state_dir` | Only the Local Python path runs a core without the engine; there, `session.*` operations report that no engine is configured and nothing else is affected. The published stack wires these itself |
+| **Session engine, for a core run alone** | `engine_url`, `engine_state_dir`; `engine_token_file` only when the core should call the engine with something other than the stack secret it shares with it | Only the Local Python path runs a core without the engine; there, `session.*` operations report that no engine is configured and nothing else is affected. The published stack wires these itself |
 | **Engine integrations** (voice assistant provider, push, GUI stream, external MCP servers) | the session engine's own `ENGINE_*` configuration | Documented in [`DEPLOYMENT.md`](DEPLOYMENT.md) and [`ENGINE.md`](ENGINE.md) — each is absent by default and says so. Speech is the exception: the stack turns it on through the bundled sidecar |
 
 Tokens are always given as a *file path*, never as a value in the

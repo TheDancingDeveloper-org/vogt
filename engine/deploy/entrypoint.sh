@@ -8,7 +8,8 @@
 #   3. Exec the engine. PID 1's child = the engine, so signals propagate.
 #
 # Configurable via env (compose passes these through):
-#   ENGINE_TOKEN              required
+#   ENGINE_TOKEN              optional break-glass token; credentials are
+#                                otherwise checked by vogt-core
 #   ENGINE_BIND               default 0.0.0.0:8910
 #   START_SWAY                   "1" → spawn sway in background with WAYLAND_DISPLAY=wayland-1
 #   GUI_STREAM_URL               passed through to the server; web UI iframes it
