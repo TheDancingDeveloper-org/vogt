@@ -142,15 +142,21 @@ impl TranscriptionBackend for WhisperTranscriber {
             state.full(params, &samples).map_err(|error| {
                 TranscriptionError::Provider(format!("Whisper inference: {error}"))
             })?;
-            let count = state.full_n_segments().map_err(|error| {
-                TranscriptionError::Provider(format!("read Whisper segments: {error}"))
-            })?;
+            // whisper-rs 0.16: `full_n_segments` returns the count directly (no
+            // longer a Result), and a segment's text is read through
+            // `get_segment(..).to_str()` — `full_get_segment_text` was removed.
+            let count = state.full_n_segments();
             let mut text = String::new();
             for index in 0..count {
-                let segment = state.full_get_segment_text(index).map_err(|error| {
+                let segment = state.get_segment(index).ok_or_else(|| {
+                    TranscriptionError::Provider(format!(
+                        "Whisper segment {index} of {count} was out of bounds"
+                    ))
+                })?;
+                let piece = segment.to_str().map_err(|error| {
                     TranscriptionError::Provider(format!("read Whisper transcript: {error}"))
                 })?;
-                text.push_str(&segment);
+                text.push_str(piece);
             }
             let text = text.trim().to_string();
             if text.is_empty() {
