@@ -15,6 +15,7 @@ from vogt.adapters.github.client import Transport
 from vogt.application.identity import PublicIdentity, identity_from_config
 from vogt.config import VogtConfig, load_config
 from vogt.core.clock import Clock, utc_now
+from vogt.core.entities import Token
 from vogt.core.ids import IdFactory, new_id
 from vogt.core.principal import Principal, local_principal
 from vogt.storage.interface import DeclaredStore, ObservedStore
@@ -32,6 +33,11 @@ class AppContext:
     principal: Principal
     clock: Clock
     id_factory: IdFactory
+    #: The token that authenticated this request, secret-free, or `None` on
+    #: the local surface. Only `auth.logout` and `auth.whoami` read it: the
+    #: principal is still the identity, and nothing else may branch on which
+    #: credential carried it.
+    token: Token | None = None
     #: How `project.import` obtains a checkout. Injectable for the
     #: same reason the clock is: a use-case that shells out to `git` over the
     #: network is one the test suite could otherwise only run by having a
@@ -75,6 +81,7 @@ def build_context(
     engine: EngineClient | None = None,
     public_identity: PublicIdentity | None = None,
     forge_transport: Transport | None = None,
+    token: Token | None = None,
 ) -> AppContext:
     """Build a context over the SQLite backend.
 
@@ -104,6 +111,7 @@ def build_context(
             synchronous=resolved_config.sqlite_synchronous,
         ),
         principal=principal if principal is not None else local_principal(),
+        token=token,
         clock=clock,
         id_factory=id_factory,
         cloner=cloner,
@@ -114,7 +122,12 @@ def build_context(
         # exercise by running that process.
         engine=engine
         or EngineClient.from_config(
-            resolved_config.engine_url, resolved_config.engine_token_file
+            resolved_config.engine_url,
+            # One stack secret for both directions: the engine recognises
+            # the core token it was given as the core's own identity, so a
+            # deployment that set no distinct engine credential still has one.
+            resolved_config.engine_token_file
+            or resolved_config.bootstrap_core_token_file,
         ),
         public_identity=(
             public_identity

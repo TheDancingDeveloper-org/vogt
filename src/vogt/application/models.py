@@ -38,6 +38,7 @@ from vogt.core.entities import (
     LifecycleState,
     Name,
     Observation,
+    PasswordCredential,
     Priority,
     Project,
     Reason,
@@ -1932,6 +1933,22 @@ class InstallBootstrapParams(Params):
         default="first-run browser token",
         description="What the issued token is for.",
     )
+    username: Name | None = Field(
+        default=None,
+        description=(
+            "A login name for the first operator. Given with `password`, the "
+            "bootstrap creates a password login and the token it returns is a "
+            "browser session rather than a long-lived API token. Derived from "
+            "the display name when a password is given without one."
+        ),
+    )
+    password: str | None = Field(
+        default=None,
+        description=(
+            "The first operator's password, at least 8 characters. Omit for "
+            "the headless bootstrap, which returns an admin API token instead."
+        ),
+    )
 
 
 class InstallBootstrapResult(Result):
@@ -1941,6 +1958,123 @@ class InstallBootstrapResult(Result):
         description="Shown once. Not stored, not recoverable — rotate if lost."
     )
     warning: str
+    username: str | None = Field(
+        default=None,
+        description="The login name created, when the bootstrap set a password.",
+    )
+
+
+class LoginParams(Params):
+    """Sign in with a username and password. Unauthenticated by construction."""
+
+    username: Name
+    password: str = Field(min_length=1)
+    session_name: Name = Field(
+        default="browser session",
+        description="What the session is for, e.g. the device it lives on.",
+    )
+
+
+class LoginResult(Result):
+    actor: Actor
+    token: Token
+    secret: str = Field(
+        description=("The session bearer, shown once. Expires; revoked by auth.logout.")
+    )
+
+
+class LogoutParams(Params):
+    reason: Reason
+
+
+class LogoutResult(Result):
+    revoked: bool = Field(
+        description=(
+            "Whether a session token was revoked. False on a surface with no "
+            "token behind it (the local CLI, a loopback listener)."
+        )
+    )
+    token: Token | None = None
+
+
+class WhoamiParams(Params):
+    pass
+
+
+class WhoamiResult(Result):
+    """Who the caller is, as authentication decided it."""
+
+    identity_ref: str
+    kind: Literal["human", "agent"]
+    display_name: str
+    scopes: list[str] = Field(
+        description="The effective scope set, implications applied."
+    )
+    token: Token | None = Field(
+        default=None,
+        description=(
+            "The token that authenticated the call; absent on the local surface."
+        ),
+    )
+
+
+class CreateUserParams(Params):
+    username: Name = Field(
+        description="Login name: lower-case letters, digits, '.', '-', '_'."
+    )
+    password: str = Field(min_length=1, description="At least 8 characters.")
+    display_name: Name | None = Field(
+        default=None, description="Defaults to the username."
+    )
+    actor: Name | None = Field(
+        default=None,
+        description=(
+            "An existing human actor's identity_ref to attach the login to. "
+            "Omitted, a new actor human:<username> is created."
+        ),
+    )
+    scopes: Name = Field(
+        default="read,work.write,project.write",
+        description=(
+            "Comma-separated scopes every session this user logs in to holds."
+        ),
+    )
+    reason: Reason
+
+
+class UserResult(Result):
+    user: PasswordCredential
+
+
+class UserListParams(Params):
+    pass
+
+
+class UserListResult(Result):
+    users: list[PasswordCredential]
+
+
+class SetPasswordParams(Params):
+    username: Name
+    password: str = Field(min_length=1, description="At least 8 characters.")
+    scopes: Name | None = Field(
+        default=None, description="Replace the login's scopes as well."
+    )
+    revoke_sessions: bool = Field(
+        default=True,
+        description="Also revoke every live session this user holds.",
+    )
+    reason: Reason
+
+
+class RemoveUserParams(Params):
+    username: Name
+    reason: Reason
+
+
+class RemoveUserResult(Result):
+    username: str
+    sessions_revoked: int
 
 
 class AuthDecisionListParams(Params):
