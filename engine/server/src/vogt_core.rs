@@ -6,24 +6,21 @@
 //!
 //! | Front door | vogt-core | Auth |
 //! |---|---|---|
-//! | `/api/vogt/*` | `/api/*` | front-door token, core token injected |
+//! | `/api/vogt/*` | `/api/*` | the caller's own core credential, forwarded |
 //! | `/mcp` | `/mcp` | the client's own core token, forwarded untouched |
+//! | `/api/auth/login`, `/api/install/*` | the same | none — the core self-gates |
 //! | `/version`, `/connection-info`, `/health/{ready,live}` | the same | none — these are the probes |
 //!
 //! Three decisions a future reader will ask about:
 //!
-//! **Why inject on `/api/vogt` but pass through on `/mcp`.** A browser holds a
-//! front-door token: the engine's token namespace is the public one,
-//! and the core token it maps to stays server-side. An MCP client holds a
-//! *core* token already — that is how agents reach Vogt today, minted by
-//! `vogt token issue` and bound to an actor — so rewriting its credential
-//! would replace a real actor with a shared one and make the audit log worse.
-//! Which core token gets injected is now the caller's own: each front-door
-//! token may be paired with one (`vogt_core_token_file` on its `extra_tokens`
-//! entry), and the proxy injects the pairing belonging to the token that
-//! authenticated *this* request, so the core's audit names a real actor per
-//! front-door holder rather than one shared proxy identity. Per-session
-//! actor tokens land with the session work.
+//! **Why the core sees the caller's own credential.** The core is the only
+//! identity authority: a browser holds a session minted by a password login,
+//! an agent holds an API token, and both are core tokens bound to an actor.
+//! The bearer gate (`auth`) asks the core whose bearer it is, and `/api/vogt`
+//! presents that same bearer, so the core's audit names the person or agent
+//! who acted and never a shared proxy identity. The one exception is the
+//! optional break-glass `ENGINE_TOKEN`, which has no actor of its own and is
+//! lent the stack secret's — the one credential the two halves share.
 //!
 //! **Why the body is streamed rather than buffered.** `/mcp` is streamable
 //! HTTP: a response is an SSE stream that stays open. Reading it to completion
@@ -49,6 +46,7 @@ use serde_json::json;
 use crate::app::AppState;
 use crate::auth::AuthorizedIdentity;
 use crate::config::Config;
+use crate::core_auth::{CoreIdentity, ResolveError};
 use crate::events::ServerEvent;
 use crate::observability::{RequestId, REQUEST_ID_HEADER};
 
@@ -79,6 +77,14 @@ pub const MCP_PREFIX: &str = "/mcp";
 /// The core's own prefixes, which the ones above map onto.
 const CORE_API_PREFIX: &str = "/api";
 const CORE_READY_PATH: &str = "/health/ready";
+/// Under the core's `/api`: who a bearer is, as the core decides it.
+const CORE_WHOAMI_PATH: &str = "/auth/whoami";
+/// The password login, under the core's `/api`. Open on this door for the
+/// reason the install surface is: it exists for a caller with no credential.
+pub const LOGIN_PATH: &str = "/api/auth/login";
+/// The one core route whose success must also drop the caller from this
+/// door's identity cache, so a revoked session stops here as well as there.
+const CORE_LOGOUT_PATH: &str = "/api/auth/logout";
 
 /// Vogt's unauthenticated probes. Served here, at the same paths, by
 /// the process that publishes the port — which is this one. Before this they
@@ -119,14 +125,9 @@ const HOP_BY_HOP: [&str; 8] = [
 pub struct VogtCore {
     client: reqwest::Client,
     base: String,
-    /// The core token to inject when the calling front-door token has no
-    /// pairing of its own. This is the single configured `vogt_core_token`,
-    /// and keeping it is a decision rather than an oversight: a deployment
-    /// that provisioned one shared core token and no per-token pairings — the
-    /// shape the first merged release shipped and the one `deploy/vogt-stack.compose.yml` still
-    /// describes — keeps working across this change without editing its
-    /// config. Pairings are how a deployment opts in to named actors, one
-    /// token at a time.
+    /// The stack secret. Not injected for anybody: `/api/vogt` presents each
+    /// caller's own credential. It is what this engine's own reads use — the
+    /// event feed it follows — and what the break-glass token is lent.
     fallback_token: Option<String>,
     /// The address this door is published at, stated to the core on every
     /// forwarded request. `None` when nobody has configured one, in
@@ -202,6 +203,41 @@ impl VogtCore {
             }
             Err(e) => (false, format!("unreachable: {}", terse(&e))),
         }
+    }
+
+    /// Ask the core whose bearer this is.
+    ///
+    /// `Ok(identity)` when the core recognises it; `Err(Rejected)` when the
+    /// core answered 401 or 403 — it is not a credential here; and
+    /// `Err(Unavailable)` for everything else, because a core that is down
+    /// says nothing about the credential and must not be reported as if it
+    /// had. The bearer is forwarded exactly as the caller sent it: this is
+    /// the one request where the credential *is* the question.
+    pub async fn whoami(&self, bearer: &str) -> std::result::Result<CoreIdentity, ResolveError> {
+        let url = format!("{}{CORE_API_PREFIX}{CORE_WHOAMI_PATH}", self.base);
+        let response = self
+            .client
+            .get(&url)
+            .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
+            .timeout(Duration::from_secs(5))
+            .send()
+            .await
+            .map_err(|e| ResolveError::Unavailable(terse(&e).to_string()))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(ResolveError::Rejected);
+        }
+        if !status.is_success() {
+            return Err(ResolveError::Unavailable(format!(
+                "the core answered {status} to whoami"
+            )));
+        }
+        response.json::<CoreIdentity>().await.map_err(|e| {
+            ResolveError::Unavailable(format!(
+                "the core's whoami answer did not parse: {}",
+                terse(&e)
+            ))
+        })
     }
 
     /// One page of the core's `events.list` feed, on the engine's own behalf.
@@ -399,27 +435,25 @@ pub async fn api(State(state): State<Arc<AppState>>, request: Request) -> Respon
     }
 
     let identity = request.extensions().get::<AuthorizedIdentity>().cloned();
-    // The caller's own pairing first, the deployment-wide token second. The
-    // fallback is what keeps a first-release deployment — one configured
-    // `vogt_core_token`, no pairings — working unchanged; it is deliberate,
-    // not a leftover.
+    // The caller's own credential — the bearer the core resolved to them —
+    // or, for the break-glass token, the stack secret it borrows. There is
+    // no third source: the core sees exactly who acted, or nobody does.
     let injected = identity
         .as_ref()
-        .and_then(|caller| caller.vogt_core_token.clone())
-        .or_else(|| core.fallback_token.clone());
+        .and_then(|caller| caller.core_bearer.clone());
 
     let Some(injected) = injected else {
-        // Neither, so there is nothing to inject. Forwarding anyway would send
-        // an unauthenticated request to the core and return its 401 as if the
-        // caller had got something wrong, so say what is actually missing.
+        // Nothing to present. Forwarding anyway would send an unauthenticated
+        // request to the core and return its 401 as if the caller had got
+        // something wrong, so say what is actually missing.
         return unavailable(&match identity.as_ref() {
             Some(caller) => format!(
-                "front-door token \"{}\" has no paired vogt-core token, and no fallback \
-                 vogt_core_token is configured for this front door",
-                caller.token_name
+                "\"{}\" carries no vogt-core credential, and no stack secret \
+                 (vogt_core_token) is configured for this front door to lend it",
+                caller.name
             ),
-            None => "this request carries no front-door identity, and no fallback \
-                     vogt_core_token is configured for this front door"
+            None => "this request carries no identity, and no stack secret \
+                     (vogt_core_token) is configured for this front door"
                 .to_string(),
         });
     };
@@ -432,7 +466,30 @@ pub async fn api(State(state): State<Arc<AppState>>, request: Request) -> Respon
         return busy();
     };
     let path = map_prefix(request.uri(), API_PREFIX, CORE_API_PREFIX);
-    core.forward(&path, Some(&injected), request).await
+    let is_logout = path == CORE_LOGOUT_PATH;
+    let response = core.forward(&path, Some(&injected), request).await;
+    if is_logout && response.status().is_success() {
+        // The core has revoked the credential; forget what it resolved to,
+        // so the next request with it is refused here rather than served
+        // from the cache until the TTL.
+        state.core_identities.evict(&injected);
+    }
+    response
+}
+
+/// The password login, passed through untouched.
+///
+/// Same trust story as the install surface: the core owns the credential
+/// check, the throttle and the audit row, and a browser that holds no
+/// session yet is exactly the caller this route exists for. Nothing is
+/// injected — a login attributed to the stack secret would put the wrong
+/// name on the session it mints.
+pub async fn login(State(state): State<Arc<AppState>>, request: Request) -> Response {
+    let Some(core) = state.vogt_core.as_ref() else {
+        return not_configured();
+    };
+    let path = request.uri().path().to_string();
+    core.forward(&path, None, request).await
 }
 
 /// `/mcp` → the core's `/mcp`, credential untouched.

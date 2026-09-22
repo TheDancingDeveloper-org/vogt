@@ -2032,9 +2032,8 @@ mod tests {
     fn test_config_for_profiles() -> Config {
         Config {
             bind: "127.0.0.1:0".parse().unwrap(),
-            token: "test-token-1234567890".into(),
+            token: Some("test-token-1234567890".into()),
             token_mutating_request_limit_per_minute: 600,
-            extra_tokens: vec![],
             scrollback_bytes: 64 * 1024,
             default_shell: "/bin/bash".into(),
             default_cwd: std::env::temp_dir(),
@@ -2132,15 +2131,23 @@ mod tests {
         sessions: Arc<SessionRegistry>,
         script: Vec<Value>,
         core_base_url: &str,
-        fallback_token: Option<&str>,
+        _fallback_token: Option<&str>,
     ) -> AssistantRuntime {
         AssistantRuntime {
-            vogt: Some(VogtTools::for_test(core_base_url, fallback_token)),
+            vogt: Some(VogtTools::for_test(core_base_url)),
             ..runtime_with_script(sessions, script)
         }
     }
 
-    /// A caller with no Vogt pairing: the assistant as it shipped without a core.
+    /// The break-glass token on a door with a stack secret to lend it: it
+    /// may read, and its writes are attributed to nobody in particular —
+    /// which is why the approval gate refuses them below.
+    fn reading_caller() -> Caller {
+        Caller::test("primary", Some("shared-core-token"))
+    }
+
+    /// A caller with no Vogt credential at all: the assistant as it shipped
+    /// without a core.
     fn terminal_caller() -> Caller {
         Caller::test("primary", None)
     }
@@ -2903,8 +2910,8 @@ mod tests {
     #[tokio::test]
     async fn every_voice_write_requires_approval_and_the_approvers_credential() {
         for operation in vogt_tools::CURATED_WRITES {
-            // Approval, denial, and an unpaired approver with a shared read
-            // fallback all take the same path for every operation.
+            // Approval, denial, and an approver with no credential of their
+            // own all take the same path for every operation.
             for (approve, paired) in [(true, true), (false, true), (true, false)] {
                 let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
                 let mcp_name = operation.replace('.', "_");
@@ -2918,10 +2925,10 @@ mod tests {
                         final_reply("result"),
                     ],
                     &core.base_url,
-                    Some("shared-core-token"),
+                    None,
                 );
                 let out = rt
-                    .handle_message(terminal_caller(), "change it".into(), None, None)
+                    .handle_message(reading_caller(), "change it".into(), None, None)
                     .await
                     .unwrap();
                 let action = out.pending_action.expect(operation);
@@ -3074,12 +3081,13 @@ mod tests {
                 final_reply("filed it"),
             ],
             &core.base_url,
-            // A shared fallback exists, and must not be what the write uses.
-            Some("shared-core-token"),
+            None,
         );
 
+        // The sender reads with the stack secret the break-glass token was
+        // lent; that credential must not be what the write uses.
         let out = rt
-            .handle_message(terminal_caller(), "file that bug".into(), None, None)
+            .handle_message(reading_caller(), "file that bug".into(), None, None)
             .await
             .unwrap();
         assert!(out.reply.is_none());
@@ -3207,16 +3215,17 @@ mod tests {
                 final_reply("I couldn't record that"),
             ],
             &core.base_url,
-            Some("shared-core-token"),
+            None,
         );
-        // Reads work for this caller — the fallback is enough to attribute
-        // nothing — so the tools were offered…
+        // Reads work for a caller with something to read with, so the tools
+        // were offered…
         let out = rt
-            .handle_message(terminal_caller(), "comment on WI-7".into(), None, None)
+            .handle_message(reading_caller(), "comment on WI-7".into(), None, None)
             .await
             .unwrap();
         let action = out.pending_action.expect("a pending action");
-        // …but approving as the same unpaired caller must not write.
+        // …but approving as a caller with no credential of their own must
+        // not write.
         let out = rt
             .resolve_action(terminal_caller(), action.id(), true)
             .await
@@ -3230,7 +3239,7 @@ mod tests {
         assert!(convo.messages.iter().any(|m| {
             m.get("content")
                 .and_then(Value::as_str)
-                .is_some_and(|c| c.contains("no paired vogt-core token"))
+                .is_some_and(|c| c.contains("no actor to be audited to"))
         }));
     }
 

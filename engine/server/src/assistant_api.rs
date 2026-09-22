@@ -8,8 +8,8 @@
 //! here is what lets a Vogt write be made with the approving user's own core
 //! token rather than a shared one. It is `Option` because the type
 //! system cannot know these routes sit behind the gate — a request without an
-//! identity gets a caller with no pairing, which can read nothing privileged
-//! and write nothing at all.
+//! identity gets a caller with no credential, which can read nothing
+//! privileged and write nothing at all.
 
 use std::sync::Arc;
 

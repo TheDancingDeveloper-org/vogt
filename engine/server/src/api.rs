@@ -145,11 +145,26 @@ pub struct AuthCheckResponse {
     pub version: &'static str,
     pub product_version: &'static str,
     pub storage: ServerStorageStatus,
+    /// Who the gate decided the caller is, and what they may do here.
+    pub identity: AuthCheckIdentity,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthCheckIdentity {
+    /// `primary`, `vogt-core`, or the core actor's `identity_ref`.
+    pub name: String,
+    /// The core scopes behind the grant; empty for a static credential.
+    pub scopes: Vec<String>,
+    pub capabilities: Vec<crate::auth::TokenCapability>,
 }
 
 /// Cheap authenticated identity check. Keep this handler limited to values
 /// already held in memory: `/api/status` owns the operational scans.
-pub async fn auth_check(State(state): State<Arc<AppState>>) -> Json<AuthCheckResponse> {
+pub async fn auth_check(
+    State(state): State<Arc<AppState>>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
+) -> Json<AuthCheckResponse> {
+    let identity = identity.map(|axum::Extension(id)| id);
     Json(AuthCheckResponse {
         ok: true,
         version: crate::product::VERSION,
@@ -157,6 +172,17 @@ pub async fn auth_check(State(state): State<Arc<AppState>>) -> Json<AuthCheckRes
         storage: ServerStorageStatus {
             state_dir: state.config.state_dir.display().to_string(),
             workspace_root: state.config.workspace_root.display().to_string(),
+        },
+        identity: AuthCheckIdentity {
+            name: identity
+                .as_ref()
+                .map(|id| id.name.clone())
+                .unwrap_or_else(|| "unidentified".to_string()),
+            scopes: identity
+                .as_ref()
+                .map(|id| id.scopes.clone())
+                .unwrap_or_default(),
+            capabilities: identity.map(|id| id.capabilities).unwrap_or_default(),
         },
     })
 }

@@ -2,7 +2,6 @@ use std::{net::SocketAddr, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-use crate::auth::ScopedTokenConfig;
 use crate::error::{ApiError, Result};
 
 const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
@@ -190,13 +189,12 @@ impl SessionTemplate {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
-    pub token: String,
+    /// The optional static break-glass token (`ENGINE_TOKEN`). Full
+    /// capability, no actor of its own: its Vogt calls are attributed to the
+    /// stack secret's actor. A deployment whose people all have a password
+    /// login leaves it unset, and then every credential is a core token.
+    pub token: Option<String>,
     pub token_mutating_request_limit_per_minute: u32,
-    /// The front door's scoped tokens. Each may name the vogt-core token it is
-    /// paired with; by the time `load` returns, any
-    /// `vogt_core_token_file` on an entry has been read into its
-    /// `vogt_core_token`.
-    pub extra_tokens: Vec<ScopedTokenConfig>,
     pub scrollback_bytes: usize,
     pub default_shell: String,
     pub default_cwd: std::path::PathBuf,
@@ -396,11 +394,12 @@ pub struct Config {
     /// pretending the core is empty. The engine itself keeps
     /// serving — sessions do not depend on the core.
     pub vogt_core_url: Option<String>,
-    /// The core token the front door injects on `/api/vogt` for the primary
-    /// token, and for any extra token with no pairing of its own.
-    /// Server-side only: a browser holds a *front-door* token, never this one.
-    /// The per-token pairings live on `extra_tokens`; this is what the proxy
-    /// falls back to.
+    /// The stack secret: the one credential the two halves share. The core
+    /// adopted it at `init` as its own front-door actor, so this engine
+    /// recognises it as `vogt-core` when the core calls in to start a
+    /// session, presents it on the event feed it follows, and lends it to
+    /// the break-glass `token` for `/api/vogt`. Server-side only: a browser
+    /// holds a session minted by a password login, never this.
     pub vogt_core_token: Option<String>,
     /// Where the runtime-pinned agent CLIs live and how they are moved:
     /// the root, the installer, the image's tool table and resolved pins. Read
@@ -414,7 +413,6 @@ struct FileConfig {
     bind: Option<String>,
     token: Option<String>,
     token_mutating_request_limit_per_minute: Option<u32>,
-    extra_tokens: Option<Vec<ScopedTokenConfig>>,
     scrollback_bytes: Option<usize>,
     default_shell: Option<String>,
     default_cwd: Option<String>,
@@ -488,6 +486,10 @@ pub fn load(
         .parse()
         .map_err(|e| ApiError::Config(format!("invalid bind {bind_str:?}: {e}")))?;
 
+    // Optional: a front door with a core behind it authenticates every
+    // bearer against the core, and needs no static token at all. One that
+    // is set is the break-glass credential, and is held to the same floor a
+    // core token is.
     let token = cli_token
         .or_else(|| {
             engine_env("ENGINE_TOKEN")
@@ -495,25 +497,19 @@ pub fn load(
                 .filter(|s| !s.trim().is_empty())
         })
         .or(from_file.token)
-        .ok_or_else(|| {
-            ApiError::Config("token required (ENGINE_TOKEN env or config.token)".into())
-        })?;
-    if token.len() < 16 {
-        return Err(ApiError::Config(
-            "token must be at least 16 characters".into(),
-        ));
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(value) = token.as_deref() {
+        if value.len() < 16 {
+            return Err(ApiError::Config(
+                "token must be at least 16 characters".into(),
+            ));
+        }
     }
     let token_mutating_request_limit_per_minute =
         parse_u32_env("ENGINE_MUTATING_REQUEST_LIMIT_PER_MINUTE")?
             .or(from_file.token_mutating_request_limit_per_minute)
             .unwrap_or(DEFAULT_MUTATING_REQUEST_LIMIT_PER_MINUTE);
-
-    let mut extra_tokens = from_file.extra_tokens.unwrap_or_default();
-    if let Some(env_tokens) = parse_extra_tokens_env("ENGINE_EXTRA_TOKENS_JSON")? {
-        extra_tokens.extend(env_tokens);
-    }
-    validate_extra_tokens(&token, &extra_tokens)?;
-    resolve_paired_core_tokens(&mut extra_tokens)?;
 
     // Profiles from the file, then from the environment, then validated as one
     // list — a container that adds OpenRouter with a variable and a file that
@@ -680,11 +676,31 @@ pub fn load(
         },
     };
 
+    // Nothing could authenticate on a door with neither a core to ask nor
+    // a static token to compare: refuse to boot rather than refuse every
+    // request.
+    let vogt_core_url_configured = from_file
+        .vogt_core_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+        || std::env::var("VOGT_CORE_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .is_some();
+    if token.is_none() && !vogt_core_url_configured {
+        return Err(ApiError::Config(
+            "no way to authenticate anybody: set VOGT_CORE_URL (credentials are checked \
+             by vogt-core) or ENGINE_TOKEN (a static break-glass token)"
+                .into(),
+        ));
+    }
+
     Ok(Config {
         bind,
         token,
         token_mutating_request_limit_per_minute,
-        extra_tokens,
         scrollback_bytes: parse_usize_env("ENGINE_SCROLLBACK_BYTES")?
             .or(from_file.scrollback_bytes)
             .unwrap_or(DEFAULT_SCROLLBACK_BYTES),
@@ -1034,22 +1050,6 @@ fn parse_u64_env(name: &str) -> Result<Option<u64>> {
     }
 }
 
-fn parse_extra_tokens_env(name: &str) -> Result<Option<Vec<ScopedTokenConfig>>> {
-    match engine_env(name) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                return Ok(None);
-            }
-            let parsed = serde_json::from_str::<Vec<ScopedTokenConfig>>(trimmed)
-                .map_err(|e| ApiError::Config(format!("parsing {name}: {e}")))?;
-            Ok(Some(parsed))
-        }
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
-    }
-}
-
 fn parse_assistant_profiles_env(name: &str) -> Result<Option<Vec<AssistantProfile>>> {
     match engine_env(name) {
         Ok(raw) => {
@@ -1178,67 +1178,6 @@ fn parse_url_list(file: Option<Vec<String>>, env: Option<String>, default: &[&st
     default.iter().map(|s| s.to_string()).collect()
 }
 
-fn validate_extra_tokens(primary_token: &str, extra_tokens: &[ScopedTokenConfig]) -> Result<()> {
-    for token in extra_tokens {
-        if token.name.trim().is_empty() {
-            return Err(ApiError::Config(
-                "extra token name must not be empty".into(),
-            ));
-        }
-        if token.token.len() < 16 {
-            return Err(ApiError::Config(format!(
-                "extra token {} must be at least 16 characters",
-                token.name
-            )));
-        }
-        if token.token == primary_token {
-            return Err(ApiError::Config(format!(
-                "extra token {} must not duplicate the primary token",
-                token.name
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Turn each front-door token's `vogt_core_token_file` into the value the
-/// proxy will inject for it.
-///
-/// Read here, once, rather than per request: a credential that changes under a
-/// running process would make two requests from the same caller reach the core
-/// as two different actors, and the loader is where every other secret in this
-/// config is already resolved.
-///
-/// An unreadable or empty file is a boot failure, not a downgrade. The
-/// alternative — treating it as "no pairing" — silently falls back to the
-/// shared core token, which is precisely the actor confusion this mapping
-/// exists to end, and it would do so without anyone noticing.
-fn resolve_paired_core_tokens(extra_tokens: &mut [ScopedTokenConfig]) -> Result<()> {
-    for entry in extra_tokens.iter_mut() {
-        let Some(path) = entry.vogt_core_token_file.as_deref().map(str::trim) else {
-            continue;
-        };
-        if path.is_empty() {
-            continue;
-        }
-        let raw = std::fs::read_to_string(path).map_err(|e| {
-            ApiError::Config(format!(
-                "reading vogt_core_token_file for extra token {} ({path}): {e}",
-                entry.name
-            ))
-        })?;
-        let value = raw.trim().to_string();
-        if value.is_empty() {
-            return Err(ApiError::Config(format!(
-                "vogt_core_token_file for extra token {} ({path}) is empty",
-                entry.name
-            )));
-        }
-        entry.vogt_core_token = Some(value);
-    }
-    Ok(())
-}
-
 fn parse_allowed_origins(file: Option<Vec<String>>, env: Option<String>) -> Vec<String> {
     if let Some(list) = file {
         return list
@@ -1296,17 +1235,6 @@ mod tests {
         assert!(err.to_string().contains(NAME));
     }
 
-    fn scoped(name: &str) -> ScopedTokenConfig {
-        ScopedTokenConfig {
-            name: name.to_string(),
-            token: "1234567890abcdef".to_string(),
-            capabilities: vec![],
-            mutating_requests_per_minute: 600,
-            vogt_core_token_file: None,
-            vogt_core_token: None,
-        }
-    }
-
     #[test]
     fn the_deployment_wide_core_token_can_be_a_file_in_the_config() {
         // The recommended form is a brokered file, and until this existed the
@@ -1343,62 +1271,6 @@ mod tests {
     fn a_missing_core_token_file_fails_the_boot() {
         let err = read_token_path(Some("/nonexistent/core-token")).unwrap_err();
         assert!(err.to_string().contains("vogt_core_token_file"));
-    }
-
-    #[test]
-    fn a_paired_core_token_file_is_read_and_wins_over_a_value() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("paired-core-token");
-        std::fs::write(&path, "  brokered-core-token\n").unwrap();
-
-        let mut tokens = vec![scoped("agent"), scoped("browser")];
-        tokens[0].vogt_core_token_file = Some(path.display().to_string());
-        tokens[0].vogt_core_token = Some("the-value-someone-also-left".into());
-        tokens[1].vogt_core_token = Some("config-file-core-token".into());
-
-        resolve_paired_core_tokens(&mut tokens).unwrap();
-
-        assert_eq!(
-            tokens[0].vogt_core_token.as_deref(),
-            Some("brokered-core-token")
-        );
-        assert_eq!(
-            tokens[1].vogt_core_token.as_deref(),
-            Some("config-file-core-token"),
-            "an entry with no file keeps the value it was configured with"
-        );
-    }
-
-    #[test]
-    fn an_empty_paired_core_token_file_fails_the_boot() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty-token");
-        std::fs::write(&path, "\n").unwrap();
-
-        let mut tokens = vec![scoped("agent")];
-        tokens[0].vogt_core_token_file = Some(path.display().to_string());
-
-        let err = resolve_paired_core_tokens(&mut tokens).unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("agent"), "{message}");
-        assert!(
-            message.contains("empty"),
-            "a silent fallback to the shared token is the failure this refuses: {message}"
-        );
-    }
-
-    #[test]
-    fn parses_extra_tokens_env_json() {
-        const NAME: &str = "ENGINE_TEST_EXTRA_TOKENS_JSON";
-        std::env::set_var(
-            NAME,
-            r#"[{"name":"readonly","token":"1234567890abcdef","capabilities":["sessions"]}]"#,
-        );
-        let parsed = parse_extra_tokens_env(NAME).unwrap().unwrap();
-        std::env::remove_var(NAME);
-
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].name, "readonly");
     }
 
     // -- Assistant provider profiles --------------------------------
@@ -1623,7 +1495,10 @@ mod prefix_tests {
             std::env::set_var("ENGINE_BIND", "127.0.0.1:9001");
         }
         let cfg = load(Some(&cfg_path), None, None).unwrap();
-        assert_eq!(cfg.token, "engine-primary-token-0123456789");
+        assert_eq!(
+            cfg.token.as_deref(),
+            Some("engine-primary-token-0123456789")
+        );
         assert_eq!(cfg.bind.port(), 9001);
 
         // A `--token` flag still beats the environment entirely.
@@ -1633,7 +1508,7 @@ mod prefix_tests {
             Some("cli-flag-token-0123456789".to_string()),
         )
         .unwrap();
-        assert_eq!(cfg.token, "cli-flag-token-0123456789");
+        assert_eq!(cfg.token.as_deref(), Some("cli-flag-token-0123456789"));
 
         clear();
     }

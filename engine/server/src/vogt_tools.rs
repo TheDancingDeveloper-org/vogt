@@ -19,14 +19,13 @@
 //! read.
 //!
 //! **Why the caller's own core token and not a shared one.** A Vogt write is
-//! audited to the actor its token is bound to. Injecting a shared
-//! token would file every assistant-initiated write under one identity, which
-//! is exactly the misattribution to forbid. So a *write* uses the pairing belonging to
-//! the front-door token that authenticated the approval — no pairing, no
-//! write, said in as many words rather than quietly downgraded. *Reads* fall
-//! back to the deployment-wide `vogt_core_token` when a caller has no pairing,
-//! because a read attributes nothing and a deployment with only the shared token should still
-//! get an assistant that can answer questions.
+//! audited to the actor its token is bound to. Injecting a shared token
+//! would file every assistant-initiated write under one identity, which is
+//! exactly the misattribution to forbid. So every call — read or write —
+//! is made with the credential the core resolved the caller from: their
+//! session, or their API token. The one caller with none is the break-glass
+//! `ENGINE_TOKEN` on a door with no stack secret, and it is told so in as
+//! many words rather than quietly downgraded.
 //!
 //! **Why the tool list is cached per credential.** `tools/list` is scope
 //! filtered at the core: two tokens can legitimately see two
@@ -164,11 +163,13 @@ const TARGET_KEYS: &[&str] = &[
 /// does this write use" has exactly one answer: this caller's.
 #[derive(Debug, Clone)]
 pub struct Caller {
-    /// The configured name of the front-door token that authenticated the
-    /// request. Used in refusals and audit lines, never as a credential.
+    /// Who authenticated the request — the core actor's `identity_ref`, or
+    /// `primary` / `vogt-core` for the two static credentials. Used in
+    /// refusals and audit lines, never as a credential.
     pub token_name: String,
-    /// The vogt-core token paired with that front-door token, if it
-    /// has one.
+    /// The credential this caller's Vogt calls are made with: their own
+    /// bearer, which the core resolved to them, or the stack secret for the
+    /// break-glass token.
     pub core_token: Option<String>,
 }
 
@@ -177,12 +178,12 @@ impl Caller {
     ///
     /// `None` means the request reached a handler without an identity, which
     /// on a gated route cannot happen — but the type says it can, so this
-    /// says what it would mean: a caller with no pairing and no name.
+    /// says what it would mean: a caller with no credential and no name.
     pub fn from_identity(identity: Option<AuthorizedIdentity>) -> Self {
         match identity {
             Some(identity) => Self {
-                token_name: identity.token_name,
-                core_token: identity.vogt_core_token,
+                token_name: identity.name,
+                core_token: identity.core_bearer,
             },
             None => Self {
                 token_name: "unidentified".to_string(),
@@ -225,9 +226,6 @@ struct Cached {
 pub struct VogtTools {
     client: reqwest::Client,
     mcp_url: String,
-    /// The deployment-wide core token, used for *reads* by a caller with no
-    /// pairing of its own. Deliberately not reachable from the write path.
-    fallback_token: Option<String>,
     cache: tokio::sync::Mutex<HashMap<String, Cached>>,
 }
 
@@ -235,10 +233,10 @@ impl VogtTools {
     /// Build the client, or don't — `None` when no core is configured, which
     /// is what makes the Vogt tools absent rather than broken.
     pub fn from_config(cfg: &Config) -> Option<Self> {
-        Self::from_base(cfg.vogt_core_url.as_deref()?, cfg.vogt_core_token.clone())
+        Self::from_base(cfg.vogt_core_url.as_deref()?)
     }
 
-    fn from_base(base: &str, fallback_token: Option<String>) -> Option<Self> {
+    fn from_base(base: &str) -> Option<Self> {
         let base = base.trim_end_matches('/');
         validate_core_url(base)?;
         let client = reqwest::Client::builder()
@@ -256,37 +254,32 @@ impl VogtTools {
         Some(Self {
             client,
             mcp_url: format!("{base}/mcp"),
-            fallback_token,
             cache: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
     #[cfg(test)]
-    pub fn for_test(base_url: &str, fallback_token: Option<&str>) -> Self {
-        Self::from_base(base_url, fallback_token.map(str::to_owned)).expect("test client")
+    pub fn for_test(base_url: &str) -> Self {
+        Self::from_base(base_url).expect("test client")
     }
 
-    /// The credential a *read* acts with: the caller's pairing, else the
-    /// deployment-wide token, else nothing at all.
+    /// The credential a *read* acts with: the caller's own, or nothing.
     pub fn read_token(&self, caller: &Caller) -> Option<String> {
-        caller
-            .core_token
-            .clone()
-            .or_else(|| self.fallback_token.clone())
+        caller.core_token.clone()
     }
 
     /// The credential a *write* acts with, or the reason there isn't one.
     ///
-    /// No fallback here, and that asymmetry is the whole of attribution: a write
-    /// filed under a shared token names the wrong actor in an audit row
-    /// somebody will read later, and a wrong answer there is worse than a
-    /// refusal a user can act on.
+    /// The same credential as a read: the caller's own, which the core
+    /// resolved to an actor, so every write is audited to the person or
+    /// agent who approved it. The only caller with none is the break-glass
+    /// token on a door with no stack secret, and the refusal says so.
     pub fn write_token(&self, caller: &Caller) -> Result<String, String> {
         caller.core_token.clone().ok_or_else(|| {
             format!(
-                "front-door token \"{}\" has no paired vogt-core token, so this write has no \
-                 actor to be audited to. Pair it with `vogt_core_token_file` on its extra_tokens \
-                 entry; the assistant will not write under a shared identity.",
+                "\"{}\" carries no vogt-core credential, so this write has no actor to be \
+                 audited to. Sign in with a Vogt login or an API token; the assistant will \
+                 not write under a shared identity.",
                 caller.token_name
             )
         })
@@ -951,23 +944,22 @@ mod tests {
     }
 
     #[test]
-    fn a_write_has_no_fallback_credential() {
-        let tools = VogtTools::for_test("http://127.0.0.1:1", Some("shared-core-token"));
-        let unpaired = Caller::test("primary", None);
-        // Reads may use the deployment-wide token…
-        assert_eq!(
-            tools.read_token(&unpaired).as_deref(),
-            Some("shared-core-token")
-        );
-        // …writes may not, and say why.
-        let refusal = tools.write_token(&unpaired).unwrap_err();
+    fn a_caller_acts_with_its_own_credential_or_not_at_all() {
+        let tools = VogtTools::for_test("http://127.0.0.1:1");
+        let bare = Caller::test("primary", None);
+        assert_eq!(tools.read_token(&bare), None);
+        let refusal = tools.write_token(&bare).unwrap_err();
         assert!(refusal.contains("primary"));
-        assert!(refusal.contains("no paired vogt-core token"));
+        assert!(refusal.contains("no actor"));
 
-        let paired = Caller::test("phone", Some("phone-core-token"));
+        let person = Caller::test("human:ada", Some("adas-session-token"));
         assert_eq!(
-            tools.write_token(&paired).unwrap(),
-            "phone-core-token".to_string()
+            tools.read_token(&person).as_deref(),
+            Some("adas-session-token")
+        );
+        assert_eq!(
+            tools.write_token(&person).unwrap(),
+            "adas-session-token".to_string()
         );
     }
 
@@ -1008,7 +1000,7 @@ mod tests {
     #[tokio::test]
     async fn tool_list_is_fetched_once_and_cached_per_credential() {
         let core = stub::start(stub::full_tool_list()).await;
-        let tools = VogtTools::for_test(&core.base_url, None);
+        let tools = VogtTools::for_test(&core.base_url);
         let caller = Caller::test("phone", Some("phone-core-token"));
 
         let first = tools.tools_for(&caller).await;
@@ -1043,7 +1035,7 @@ mod tests {
     async fn an_unreachable_core_means_absent_tools_not_a_failed_turn() {
         // Port 1 on loopback: nothing listens, and the connect refusal is
         // immediate.
-        let tools = VogtTools::for_test("http://127.0.0.1:1", None);
+        let tools = VogtTools::for_test("http://127.0.0.1:1");
         let caller = Caller::test("phone", Some("phone-core-token"));
         assert!(tools.tools_for(&caller).await.is_empty());
     }
@@ -1068,7 +1060,7 @@ mod tests {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-            let tools = VogtTools::for_test(&base, None);
+            let tools = VogtTools::for_test(&base);
             let result = tools
                 .call("caller-core-token", "work_get", &json!({}))
                 .await;
