@@ -199,7 +199,7 @@ describe("#195 — a token refused after boot returns the reader to the login sc
 
     await waitFor(() => expect(loginShown(shell.container)).toBe(true));
     expect(shell.container.querySelector(".login-error")?.textContent).toContain(
-      "That token was rejected (401)",
+      "Your session was rejected (401)",
     );
   });
 

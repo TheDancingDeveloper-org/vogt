@@ -34,12 +34,12 @@ import {
 } from "./commandPaletteRecent";
 import {
   api,
-  signOut,
   type AgentTask,
   type FileSearchResult,
   type SessionSummary,
   type SessionTemplate,
 } from "./api";
+import { signOutAndRevoke } from "./session";
 import {
   focusEditorRange,
   hasRegisteredEditor,
@@ -1095,7 +1095,7 @@ const CommandPalette: Component<Props> = (props) => {
         icon: "out",
         action: () => {
           props.onClose();
-          signOut();
+          void signOutAndRevoke();
         },
         category: "Account",
       },
