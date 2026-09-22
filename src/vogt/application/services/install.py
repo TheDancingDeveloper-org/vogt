@@ -29,6 +29,7 @@ not v1.
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import timedelta
 
 from vogt.application.context import AppContext
 from vogt.application.models import (
@@ -37,7 +38,7 @@ from vogt.application.models import (
     InstallStatusResult,
 )
 from vogt.application.writes import WriteOutcome, audited_write
-from vogt.core.auth import Scope, issue
+from vogt.core.auth import Scope, hash_password, issue, normalise_username
 from vogt.core.entities import Actor, Token
 from vogt.core.ids import slugify
 from vogt.core.principal import Principal
@@ -107,6 +108,33 @@ def install_bootstrap(
     )
     credential = issue(BOOTSTRAP_SCOPES)
 
+    # With a password, the bootstrap creates a *login* and the token it hands
+    # back is a browser session — expiring, revocable by `auth.logout` — so
+    # the operator's durable credential is the password and not a secret they
+    # were shown once. Without one, the headless shape is unchanged: an admin
+    # API token, shown once.
+    username: str | None = None
+    password_hash: str | None = None
+    if params.password is not None:
+        try:
+            username = normalise_username(
+                params.username
+                if params.username is not None
+                else identity_ref.removeprefix("human:")
+            )
+            password_hash = hash_password(params.password)
+        except ValueError as exc:
+            raise InvalidRequest(str(exc)) from exc
+    elif params.username is not None:
+        msg = "a username needs a password to go with it"
+        raise InvalidRequest(msg)
+    now = ctx.clock()
+    expires_at = (
+        None
+        if password_hash is None
+        else now + timedelta(days=ctx.config.session_ttl_days)
+    )
+
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[InstallBootstrapResult]:
         if not install_mode_active(txn):
             msg = (
@@ -115,14 +143,23 @@ def install_bootstrap(
                 "with `vogt token issue`."
             )
             raise InstallClosed(msg)
+        if username is not None and password_hash is not None:
+            txn.upsert_password_credential(
+                actor_id=actor.id,
+                username=username,
+                password_hash=password_hash,
+                scopes=list(BOOTSTRAP_SCOPES),
+                at=now,
+            )
         token = Token(
             id=ctx.id_factory("tok"),
             actor_id=actor.id,
             actor_identity_ref=actor.identity_ref,
             name=params.token_name,
             scopes=list(BOOTSTRAP_SCOPES),
-            created_at=ctx.clock(),
-            expires_at=None,
+            kind="api" if password_hash is None else "session",
+            created_at=now,
+            expires_at=expires_at,
         )
         txn.insert_token(token, token_hash=credential.token_hash)
         return WriteOutcome(
@@ -134,7 +171,12 @@ def install_bootstrap(
                     "This is the only time the secret is shown. It is not "
                     "stored and cannot be recovered — losing it means "
                     "issuing another over the loopback surface."
+                    if password_hash is None
+                    else "This is a browser session; sign in again with your "
+                    "password when it expires. API tokens for agents come "
+                    "from `vogt token issue`."
                 ),
+                username=username,
             ),
             entity_kind="token",
             entity_id=token.id,
@@ -144,6 +186,8 @@ def install_bootstrap(
                 "actor": actor.identity_ref,
                 "scopes": list(BOOTSTRAP_SCOPES),
                 "name": token.name,
+                "kind": token.kind,
+                "username": username,
                 "source": "first-run install bootstrap",
             },
             event_kind=INSTALL_BOOTSTRAPPED_EVENT,

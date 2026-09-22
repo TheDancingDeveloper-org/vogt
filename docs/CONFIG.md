@@ -42,6 +42,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `agent_session_scopes` | `VOGT_AGENT_SESSION_SCOPES` | string | `read,work.write,project.write,writeback` | behaviour |
 | `bootstrap_agent_token_file` | `VOGT_BOOTSTRAP_AGENT_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `bootstrap_agent_token_actor` | `VOGT_BOOTSTRAP_AGENT_TOKEN_ACTOR` | string | `agent:vogt-sessions` | behaviour |
+| `session_ttl_days` | `VOGT_SESSION_TTL_DAYS` | integer | `30` | behaviour |
 | `install_bootstrap_enabled` | `VOGT_INSTALL_BOOTSTRAP_ENABLED` | boolean | `True` | behaviour |
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
@@ -147,7 +148,7 @@ The session engine's state directory, when this process can read it — the merg
 
 ### `engine_token_file`
 
-Path to a file containing the engine token Vogt calls it with. The token needs only the engine's `sessions` capability: Vogt starts and stops terminals, and has no business writing that pod's files. A file rather than an environment variable, for the same reason as `github_token_file` — a token in the environment is a token in every `docker inspect`.
+Path to a file containing the credential Vogt calls the engine with. Unset, `bootstrap_core_token_file` is used: the one stack secret both halves share is recognised by the engine as the core's own identity, so a deployment needs no second token for this direction. Set it only to give the core a distinct engine credential. A file rather than an environment variable, for the same reason as `github_token_file` — a token in the environment is a token in every `docker inspect`.
 
 ### `bootstrap_core_token_file`
 
@@ -172,6 +173,10 @@ Path to a file holding the brokered agent token adopted at `init` — the sessio
 ### `bootstrap_agent_token_actor`
 
 Identity the adopted agent token is bound to, created if absent. Audit rows name it, so it should say this stack's sessions acted — not a person, and not something shared with another instance.
+
+### `session_ttl_days`
+
+How long a session minted by a password login (`auth.login`) stays valid. A session is a token like any other — revocable by `auth.logout` or `token.revoke` — with this expiry attached, so a browser or phone that is lost stops working on its own.
 
 ### `install_bootstrap_enabled`
 

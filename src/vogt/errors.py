@@ -64,6 +64,19 @@ class InstallClosed(Conflict):
     code = "install_closed"
 
 
+class LoginThrottled(VogtError):
+    """A password login was refused before the password was checked.
+
+    The username has failed too often too recently. Deliberately a
+    distinct status from a wrong password: a client that can tell the
+    two apart backs off instead of retrying, and a person is told to wait
+    rather than to re-check what they typed.
+    """
+
+    code = "login_throttled"
+    http_status = 429
+
+
 class InvalidCursor(InvalidRequest):
     """A paging cursor does not belong to the requested Inbox query."""
 

@@ -4,13 +4,15 @@ Every other test of the front door uses a stand-in core that approves
 everything, so the core's second gate is asserted on its own and never
 *behind* the first — which is the arrangement that actually ships. That was
 the recorded gap, and it is the one worth closing by hand: the claim is that a
-browser holding a front-door token writes to Vogt as the actor that token is
-paired with, and both halves of that sentence live in different processes
-written in different languages.
+caller presenting a core credential to the front door — a session minted by a
+password login, or an API token — writes to Vogt as *that* actor, and both
+halves of that sentence live in different processes written in different
+languages.
 
 So this boots both. `vogt serve` on loopback with a real database, the engine
-binary in front of it with two paired tokens, and the assertions read the
-audit log afterwards through Vogt's own CLI. Nothing here is stood in for.
+binary in front of it holding nothing but the stack secret and a break-glass
+token, and the assertions read the audit log afterwards through Vogt's own
+CLI. Nothing here is stood in for.
 
 Skipped when the engine binary is absent, which is every core-only checkout
 and the `core` job in CI. Build it with `cargo build` in `engine/`.
@@ -23,7 +25,7 @@ import os
 import socket
 import subprocess
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -52,9 +54,11 @@ def free_port() -> int:
         return int(s.getsockname()[1])
 
 
-def vogt(*args: str, data_dir: Path) -> subprocess.CompletedProcess[str]:
+def vogt(
+    *args: str, data_dir: Path, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run the Vogt CLI against a specific instance."""
-    env = {**os.environ, "VOGT_DATA_DIR": str(data_dir)}
+    env = {**os.environ, "VOGT_DATA_DIR": str(data_dir), **(env or {})}
     return subprocess.run(
         ["uv", "run", "vogt", *args],
         cwd=REPO_ROOT,
@@ -91,13 +95,32 @@ def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
     root = tmp_path_factory.mktemp("front-door")
     data_dir = root / "vogt"
     data_dir.mkdir()
-    vogt("init", data_dir=data_dir)
+    # The one secret both halves share. The core adopts it at init as its
+    # front-door actor; the engine recognises it as the core's identity and
+    # lends it to the break-glass token.
+    stack_secret = root / "stack-secret"
+    stack_secret.write_text(STACK_SECRET, encoding="utf-8")
+    vogt(
+        "init",
+        data_dir=data_dir,
+        env={"VOGT_BOOTSTRAP_CORE_TOKEN_FILE": str(stack_secret)},
+    )
 
     # Two actors, two core tokens. Two, because one proves nothing: a single
     # actor's writes would be attributed correctly by a proxy that hard-coded
-    # it, and the claim is that the *pairing* decides.
+    # it, and the claim is that the *credential* decides.
     secrets: dict[str, str] = {}
-    for actor in ("alpha", "beta"):
+    for actor, scopes in (
+        ("alpha", "read,work.write"),
+        ("beta", "read,work.write"),
+        # Deliberately weaker: read only. The front door derives no write
+        # capability from it, so the door's own gate is what refuses it.
+        ("reader", "read"),
+        # Clears the front door — `project.write` earns `vogt-write` there —
+        # but the core refuses a work write from it. That is the core's gate
+        # standing behind the door.
+        ("projector", "read,project.write"),
+    ):
         vogt(
             "actor",
             "create",
@@ -120,46 +143,31 @@ def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
             "--name",
             actor,
             "--scopes",
-            "read,work.write",
+            scopes,
             "--reason",
             "front door test",
             data_dir=data_dir,
         )
         secrets[actor] = json.loads(issued.stdout)["secret"]
 
-    # A third, deliberately weaker: read only. This is the core's own gate,
-    # and the point of having it is that the front door cannot substitute for
-    # it — a caller can hold `vogt-write` at the front door and still be
-    # refused by the core, which is the core gate standing behind the door.
+    # A person, with a password: the shape a browser signs in with.
+    password_file = root / "ada-password"
+    password_file.write_text(ADA_PASSWORD, encoding="utf-8")
     vogt(
-        "actor",
+        "user",
         "create",
-        "--identity-ref",
-        "agent:reader",
-        "--kind",
-        "agent",
+        "--username",
+        "ada",
         "--display-name",
-        "reader",
+        "Ada",
+        "--scopes",
+        "read,work.write",
+        "--password-file",
+        str(password_file),
         "--reason",
         "front door test",
         data_dir=data_dir,
     )
-    secrets["reader"] = json.loads(
-        vogt(
-            "--json",
-            "token",
-            "issue",
-            "--actor",
-            "agent:reader",
-            "--name",
-            "reader",
-            "--scopes",
-            "read",
-            "--reason",
-            "front door test",
-            data_dir=data_dir,
-        ).stdout
-    )["secret"]
 
     vogt(
         "project",
@@ -193,48 +201,15 @@ def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
     )
     core_url = f"http://127.0.0.1:{core_port}"
 
-    # Each front-door token names the file holding the core token it is paired
-    # with — a file rather than a value, because the two sit beside each other
-    # in a config and one of them is a browser's.
-    paired = {}
-    for actor in ("alpha", "beta", "reader"):
-        path = root / f"{actor}.core-token"
-        path.write_text(secrets[actor], encoding="utf-8")
-        paired[actor] = path
-
     config = root / "engine.toml"
     config.write_text(
         "\n".join(
             [
-                'token = "front-door-primary-token-000000"',
+                f'token = "{BREAK_GLASS}"',
                 f'workspace_root = "{root}"',
                 f'state_dir = "{root / "engine-state"}"',
                 f'vogt_core_url = "{core_url}"',
-                *[
-                    line
-                    for actor in ("alpha", "beta")
-                    for line in (
-                        "[[extra_tokens]]",
-                        f'name = "{actor}"',
-                        f'token = "front-door-{actor}-token-000000"',
-                        'capabilities = ["vogt-write"]',
-                        f'vogt_core_token_file = "{paired[actor]}"',
-                    )
-                ],
-                # Holds the front door's write capability and is paired with a
-                # core token that has only `read`.
-                "[[extra_tokens]]",
-                'name = "reader"',
-                'token = "front-door-reader-token-000000"',
-                'capabilities = ["vogt-write"]',
-                f'vogt_core_token_file = "{paired["reader"]}"',
-                # Holds no capability at all, paired with a core token that
-                # could write. The front door must refuse it on its own.
-                "[[extra_tokens]]",
-                'name = "ungranted"',
-                'token = "front-door-ungranted-token-0000"',
-                "capabilities = []",
-                f'vogt_core_token_file = "{paired["alpha"]}"',
+                f'vogt_core_token_file = "{stack_secret}"',
             ]
         )
         + "\n",
@@ -251,7 +226,7 @@ def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
             f"127.0.0.1:{engine_port}",
         ],
         cwd=REPO_ROOT / "engine",
-        env={**os.environ, "ENGINE_TOKEN": "front-door-primary-token-000000"},
+        env={**os.environ, "ENGINE_TOKEN": BREAK_GLASS},
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -261,7 +236,12 @@ def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
     try:
         wait_for(f"{core_url}/health/ready", core, "vogt-core")
         wait_for(f"{base}/healthz", engine, "the engine")
-        yield {"base": base, "core": core_url, "data_dir": str(data_dir)}
+        yield {
+            "base": base,
+            "core": core_url,
+            "data_dir": str(data_dir),
+            **{f"token:{actor}": secret for actor, secret in secrets.items()},
+        }
     finally:
         for process in (engine, core):
             process.terminate()
@@ -271,18 +251,22 @@ def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
                 process.kill()
 
 
-def post(base: str, path: str, token: str, body: dict[str, object]) -> tuple[int, str]:
+STACK_SECRET = "stack-secret-shared-by-both-halves-0000"
+BREAK_GLASS = "front-door-primary-token-000000"
+ADA_PASSWORD = "correct horse battery staple"
+
+
+def post(
+    base: str, path: str, token: str | None, body: Mapping[str, object]
+) -> tuple[int, str]:
     import urllib.error
     import urllib.request
 
+    headers = {"Content-Type": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
-        f"{base}{path}",
-        data=json.dumps(body).encode(),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+        f"{base}{path}", data=json.dumps(body).encode(), headers=headers, method="POST"
     )
     try:
         with urllib.request.urlopen(request, timeout=10) as answer:
@@ -291,101 +275,119 @@ def post(base: str, path: str, token: str, body: dict[str, object]) -> tuple[int
         return refusal.code, refusal.read().decode()
 
 
-def test_a_write_through_the_front_door_is_audited_as_the_paired_actor(
-    pair: dict[str, str],
-) -> None:
-    """The front door's whole claim, and the only test that runs it end to end.
+def get(base: str, path: str, token: str) -> tuple[int, str]:
+    import urllib.error
+    import urllib.request
 
-    A browser holds a *front-door* token and never a core one. What lands in
-    the audit log has to be the actor that token is paired with — not the
-    pod's shared identity, which is the failure this pairing exists against:
-    every session's work filed under one name, silently, with the writes all
-    succeeding.
+    request = urllib.request.Request(
+        f"{base}{path}", headers={"Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as answer:
+            return answer.status, answer.read().decode()
+    except urllib.error.HTTPError as refusal:
+        return refusal.code, refusal.read().decode()
 
-    The write exercised is `label.create`, not `work.create`. Since the
-    upstream-truth pivot a work write refuses an unlinked
-    project, and the fixture's `alpha` is registered but not forge-linked; a
-    label is an instance-wide `work.write` that does not gate on a project, so
-    it drives the same audited write path through both processes without
-    dragging a forge provider and credential into a test whose subject is the
-    actor that survives the hop, not linking.
-    """
-    for actor in ("alpha", "beta"):
-        status, body = post(
-            pair["base"],
-            "/api/vogt/labels",
-            f"front-door-{actor}-token-000000",
-            {
-                "name": f"{actor}-was-here",
-                "reason": "front door test",
-            },
-        )
-        assert status == 200, f"{actor}: {status} {body}"
 
+def audit_by_actor(data_dir: str, operation: str) -> dict[str, dict[str, object]]:
     trail = json.loads(
         vogt(
             "--json",
             "audit",
             "list",
             "--operation",
-            "label.create",
+            operation,
             "--limit",
-            "10",
-            data_dir=Path(pair["data_dir"]),
+            "20",
+            data_dir=Path(data_dir),
         ).stdout
     )["records"]
-    by_actor = {record["actor_identity_ref"]: record for record in trail}
+    return {record["actor_identity_ref"]: record for record in trail}
+
+
+def test_a_write_through_the_front_door_is_audited_as_the_caller(
+    pair: dict[str, str],
+) -> None:
+    """The front door's whole claim, and the only test that runs it end to end.
+
+    A caller presents a *core* credential to the front door. What lands in
+    the audit log has to be that credential's actor — not the pod's shared
+    identity, which is the failure the old pairing existed against and the
+    drift it suffered from: every session's work filed under one name,
+    silently, with the writes all succeeding.
+
+    The write exercised is `label.create`, not `work.create`. Since the
+    upstream-truth pivot a work write refuses an unlinked project, and the
+    fixture's `alpha` is registered but not forge-linked; a label is an
+    instance-wide `work.write` that does not gate on a project, so it drives
+    the same audited write path through both processes without dragging a
+    forge provider and credential into a test whose subject is the actor that
+    survives the hop.
+    """
+    for actor in ("alpha", "beta"):
+        status, body = post(
+            pair["base"],
+            "/api/vogt/labels",
+            pair[f"token:{actor}"],
+            {"name": f"{actor}-was-here", "reason": "front door test"},
+        )
+        assert status == 200, f"{actor}: {status} {body}"
+
+    by_actor = audit_by_actor(pair["data_dir"], "label.create")
     assert "agent:alpha" in by_actor and "agent:beta" in by_actor, (
-        "each write is attributed to the actor its front-door token is paired "
-        f"with; the log says {sorted(by_actor)}"
+        "each write is attributed to the actor whose credential was presented; "
+        f"the log says {sorted(by_actor)}"
     )
     assert by_actor["agent:alpha"]["reason"] == "front door test"
+
+
+def test_the_break_glass_token_writes_as_the_stack_secrets_actor(
+    pair: dict[str, str],
+) -> None:
+    """The one shared identity left, and it is named: the static engine token
+    has no actor of its own, so the door lends it the stack secret's."""
+    status, body = post(
+        pair["base"],
+        "/api/vogt/labels",
+        BREAK_GLASS,
+        {"name": "break-glass-was-here", "reason": "front door test"},
+    )
+    assert status == 200, f"{status} {body}"
+    by_actor = audit_by_actor(pair["data_dir"], "label.create")
+    assert "agent:vogt-engine" in by_actor, sorted(by_actor)
 
 
 def test_the_front_doors_gate_and_the_cores_gate_both_stand(
     pair: dict[str, str],
 ) -> None:
-    """The core gate behind the front door: two gates, and neither substitutes
-    for the other.
+    """Two gates, and neither substitutes for the other.
 
-    Asserted together because separately they are both already covered and
-    the arrangement is what ships. A token with no capability is refused by
-    the front door *before* the core is asked — even though the core token it
-    is paired with could write. A token that clears the front door is still
-    refused by the core when its own scopes do not allow the write. Either
-    gate failing open would be invisible from the other side.
+    A read-only credential earns no `vogt-write` at the door and is refused
+    there, before the core is asked. A `project.write` credential clears the
+    door — it may write to Vogt in general — and is still refused by the core
+    for a *work* write its scopes do not cover. Either gate failing open would
+    be invisible from the other side.
     """
-    ungranted, _ = post(
-        pair["base"],
-        "/api/vogt/work",
-        "front-door-ungranted-token-0000",
-        {
-            "kind": "bug",
-            "title": "nope",
-            "project": "alpha",
-            "reason": "front door test",
-        },
+    work = {
+        "kind": "bug",
+        "title": "nope",
+        "project": "alpha",
+        "reason": "front door test",
+    }
+    reader, body = post(pair["base"], "/api/vogt/work", pair["token:reader"], work)
+    assert reader == 403, (
+        f"the front door refuses a credential without `vogt-write`: {reader} {body}"
     )
-    assert ungranted == 403, (
-        "the front door refuses a token without `vogt-write`, whatever the "
-        "core token behind it could do"
-    )
+    assert "capability" in body
 
-    reader, body = post(
-        pair["base"],
-        "/api/vogt/work",
-        "front-door-reader-token-000000",
-        {
-            "kind": "bug",
-            "title": "nope",
-            "project": "alpha",
-            "reason": "front door test",
-        },
+    projector, body = post(
+        pair["base"], "/api/vogt/work", pair["token:projector"], work
     )
-    assert reader in (401, 403), (
-        f"the core refuses a read-only pairing that cleared the front door: "
-        f"{reader} {body}"
+    assert projector == 403, (
+        f"the core refuses a work write from a project.write credential that "
+        f"cleared the front door: {projector} {body}"
     )
+    assert "work.write" in body, body
 
     titles = json.loads(
         vogt(
@@ -395,3 +397,63 @@ def test_the_front_doors_gate_and_the_cores_gate_both_stand(
     assert not [item for item in titles if item["title"] == "nope"], (
         "a refusal at either gate writes nothing"
     )
+
+
+def test_an_unknown_credential_is_refused_at_the_door(pair: dict[str, str]) -> None:
+    status, body = post(
+        pair["base"],
+        "/api/vogt/labels",
+        "nobody-issued-this-token-0000000000",
+        {"name": "never", "reason": "front door test"},
+    )
+    assert status == 401, f"{status} {body}"
+    assert "not valid" in body
+
+
+def test_a_person_signs_in_with_a_password_and_writes_as_themselves(
+    pair: dict[str, str],
+) -> None:
+    """The browser's path, end to end: an open login through the door mints a
+    session at the core; the session is a credential the door resolves; a
+    write with it is audited to the person; a logout ends it at both halves.
+    """
+    refused, body = post(
+        pair["base"],
+        "/api/auth/login",
+        None,
+        {"username": "ada", "password": "not it"},
+    )
+    assert refused == 401, f"{refused} {body}"
+
+    status, body = post(
+        pair["base"],
+        "/api/auth/login",
+        None,
+        {"username": "Ada", "password": ADA_PASSWORD},
+    )
+    assert status == 200, f"{status} {body}"
+    session = json.loads(body)
+    assert session["token"]["kind"] == "session"
+    secret = session["secret"]
+
+    status, body = get(pair["base"], "/api/auth/check", secret)
+    assert status == 200, body
+    assert json.loads(body)["identity"]["name"] == "human:ada"
+
+    status, body = post(
+        pair["base"],
+        "/api/vogt/labels",
+        secret,
+        {"name": "ada-was-here", "reason": "front door test"},
+    )
+    assert status == 200, f"{status} {body}"
+    assert "human:ada" in audit_by_actor(pair["data_dir"], "label.create")
+
+    status, body = post(
+        pair["base"], "/api/vogt/auth/logout", secret, {"reason": "front door test"}
+    )
+    assert status == 200 and json.loads(body)["revoked"] is True, body
+    # Refused at the door on the very next request: the logout evicted the
+    # door's cache and the core no longer knows the session.
+    status, _ = get(pair["base"], "/api/auth/check", secret)
+    assert status == 401
