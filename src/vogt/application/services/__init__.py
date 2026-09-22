@@ -8,10 +8,17 @@ from __future__ import annotations
 
 from vogt.application.services.agent_clis import agent_cli_list, agent_cli_update
 from vogt.application.services.auth import (
+    create_user,
     issue_token,
     list_auth_decisions,
     list_tokens,
+    list_users,
+    login,
+    logout,
+    remove_user,
     revoke_token,
+    set_password,
+    whoami,
 )
 from vogt.application.services.board import list_board
 from vogt.application.services.collect import coverage, deps, observations, sweep
@@ -143,6 +150,7 @@ __all__ = [
     "create_initiative",
     "create_label",
     "create_project",
+    "create_user",
     "create_work",
     "deps",
     "detect_drift",
@@ -174,10 +182,13 @@ __all__ = [
     "list_sessions",
     "list_suppressions",
     "list_tokens",
+    "list_users",
     "list_work",
     "list_workflows",
     "list_write_backs",
     "log_tail",
+    "login",
+    "logout",
     "migrate_instance",
     "observations",
     "onboard",
@@ -187,6 +198,7 @@ __all__ = [
     "publish_project",
     "register_project",
     "relate_work",
+    "remove_user",
     "reproject_initiative",
     "resolve_drift",
     "restore",
@@ -197,6 +209,7 @@ __all__ = [
     "search_output",
     "serve",
     "serve_mcp_stdio",
+    "set_password",
     "set_write_back",
     "snooze_inbox",
     "start_session",
@@ -211,5 +224,6 @@ __all__ = [
     "unrelate_work",
     "update_project",
     "update_work",
+    "whoami",
     "why",
 ]

@@ -15,7 +15,11 @@ import pytest
 from vogt.application.context import AppContext, build_context
 from vogt.application.models import InitParams
 from vogt.application.services import init_instance
-from vogt.application.services.auth import authenticate
+from vogt.application.services.auth import (
+    Unauthenticated,
+    adopt_bootstrap_core_token,
+    authenticate,
+)
 from vogt.config import VogtConfig
 from vogt.core.auth import MIN_ADOPTED_SECRET_LEN, adopt, hash_token, issue
 from vogt.errors import InvalidRequest
@@ -192,3 +196,40 @@ def test_the_secret_never_reaches_the_audit_row(tmp_path: Path) -> None:
         rows = view.list_audit(limit=100)
     assert rows
     assert not any(SECRET in str(row.model_dump()) for row in rows)
+
+
+def test_a_changed_secret_rotates_rather_than_accumulates(tmp_path: Path) -> None:
+    """A new value revokes the previous bootstrap token on the same actor."""
+    token_file = tmp_path / "core-token"
+    token_file.write_text("first-secret-value-0123456789", encoding="utf-8")
+    ctx = _context(_config(tmp_path, token_file))
+    init_instance(ctx, InitParams())
+    first = authenticate(ctx, bearer="first-secret-value-0123456789")
+    assert first.token is not None
+
+    token_file.write_text("second-secret-value-0123456789", encoding="utf-8")
+    assert adopt_bootstrap_core_token(ctx) == "adopted"
+    second = authenticate(ctx, bearer="second-secret-value-0123456789")
+    assert second.principal.identity_ref == first.principal.identity_ref
+    with pytest.raises(Unauthenticated):
+        authenticate(ctx, bearer="first-secret-value-0123456789")
+    with ctx.declared.read() as view:
+        live = list(view.tokens_for_actor(first.token.actor_id))
+    assert [t.id for t in live] == [second.token_id]
+
+
+def test_rotating_back_to_an_earlier_secret_reinstates_it(tmp_path: Path) -> None:
+    """The hash is unique, so an old value comes back as its old row."""
+    token_file = tmp_path / "core-token"
+    token_file.write_text("first-secret-value-0123456789", encoding="utf-8")
+    ctx = _context(_config(tmp_path, token_file))
+    init_instance(ctx, InitParams())
+    token_file.write_text("second-secret-value-0123456789", encoding="utf-8")
+    assert adopt_bootstrap_core_token(ctx) == "adopted"
+    token_file.write_text("first-secret-value-0123456789", encoding="utf-8")
+    assert adopt_bootstrap_core_token(ctx) == "adopted"
+    first = authenticate(ctx, bearer="first-secret-value-0123456789")
+    assert first.token is not None and first.token.revoked_at is None
+    with pytest.raises(Unauthenticated):
+        authenticate(ctx, bearer="second-secret-value-0123456789")
+    assert adopt_bootstrap_core_token(ctx) == "already_present"

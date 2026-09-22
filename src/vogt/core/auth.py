@@ -17,6 +17,7 @@ ARCHITECTURE.md sets out the rules this module implements:
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import secrets
@@ -72,6 +73,20 @@ class AuthDecisionCode:
     DISABLED_ACTOR = "actor_disabled"
     MISSING_SCOPE = "missing_scope"
     WRITES_DISABLED = "writes_disabled"
+    #: A password login named a user that does not exist or gave the wrong
+    #: password. One code for both: the holder is told neither.
+    BAD_PASSWORD = "bad_password"
+    #: A password login refused before the password was even checked, because
+    #: that username has failed too often too recently.
+    LOGIN_THROTTLED = "login_throttled"
+    #: A password login that succeeded and minted a session token.
+    LOGIN_OK = "login_ok"
+
+
+#: What a token row is for. Authentication treats every kind identically;
+#: the kind exists so "every browser session this person holds" is a
+#: question the store can answer.
+TokenKind = Literal["api", "session", "agent"]
 
 
 @dataclass(frozen=True)
@@ -185,3 +200,114 @@ def parse_scopes(raw: str) -> tuple[Scope, ...]:
 
 def is_expired(expires_at: datetime | None, *, now: datetime) -> bool:
     return expires_at is not None and expires_at <= now
+
+
+# -- passwords ---------------------------------------------------------------
+#
+# The human credential. Everything above is about tokens — 256 bits of urandom
+# that nobody chooses — and is hashed with plain SHA-256 for exactly that
+# reason. A password is chosen by a person, is short, and is reused, so it
+# gets the slow, salted hash a person's secret needs. scrypt is in the
+# standard library, which keeps the core's dependency set where it is.
+
+PASSWORD_SCHEME = "scrypt"
+#: CPU/memory cost. 2**15 with r=8 is ~32 MiB and a few tens of milliseconds
+#: on commodity hardware: negligible per login, ruinous per guess.
+PASSWORD_SCRYPT_N = 2**15
+PASSWORD_SCRYPT_R = 8
+PASSWORD_SCRYPT_P = 1
+PASSWORD_SALT_BYTES = 16
+PASSWORD_HASH_BYTES = 32
+#: The floor on a chosen password. Short enough not to be a nuisance; the
+#: throttle in the service is what defeats guessing, not this.
+MIN_PASSWORD_LEN = 8
+MAX_PASSWORD_LEN = 1024
+
+
+def hash_password(password: str) -> str:
+    """Hash a chosen password for storage: `scrypt$n$r$p$<salt>$<hash>`."""
+    if len(password) < MIN_PASSWORD_LEN:
+        msg = f"a password must be at least {MIN_PASSWORD_LEN} characters"
+        raise ValueError(msg)
+    if len(password) > MAX_PASSWORD_LEN:
+        msg = f"a password must be at most {MAX_PASSWORD_LEN} characters"
+        raise ValueError(msg)
+    salt = secrets.token_bytes(PASSWORD_SALT_BYTES)
+    digest = _scrypt(
+        password, salt, PASSWORD_SCRYPT_N, PASSWORD_SCRYPT_R, PASSWORD_SCRYPT_P
+    )
+    return "$".join(
+        (
+            PASSWORD_SCHEME,
+            str(PASSWORD_SCRYPT_N),
+            str(PASSWORD_SCRYPT_R),
+            str(PASSWORD_SCRYPT_P),
+            _b64(salt),
+            _b64(digest),
+        )
+    )
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Constant-time check of a password against its stored hash.
+
+    A malformed stored value verifies as false rather than raising: the row is
+    the operator's to repair, and the caller's answer is still "no".
+    """
+    try:
+        scheme, n_raw, r_raw, p_raw, salt_raw, digest_raw = stored.split("$")
+        if scheme != PASSWORD_SCHEME:
+            return False
+        salt = _unb64(salt_raw)
+        expected = _unb64(digest_raw)
+        candidate = _scrypt(password, salt, int(n_raw), int(r_raw), int(p_raw))
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(candidate, expected)
+
+
+def _scrypt(password: str, salt: bytes, n: int, r: int, p: int) -> bytes:
+    return hashlib.scrypt(
+        password.encode("utf-8"),
+        salt=salt,
+        n=n,
+        r=r,
+        p=p,
+        maxmem=128 * n * r * 2,
+        dklen=PASSWORD_HASH_BYTES,
+    )
+
+
+def _b64(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _unb64(text: str) -> bytes:
+    padded = text + "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(padded.encode("ascii"))
+
+
+#: A login name: lower-case letters, digits, dots, dashes and underscores,
+#: 2–64 characters. Case-folded before storage so `Ada` and `ada` are one
+#: person; the actor's display name keeps the case the person typed.
+USERNAME_MIN_LEN = 2
+USERNAME_MAX_LEN = 64
+_USERNAME_ALPHABET = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+def normalise_username(raw: str) -> str:
+    """Fold and validate a login name, raising `ValueError` when it is not one."""
+    username = raw.strip().lower()
+    if not USERNAME_MIN_LEN <= len(username) <= USERNAME_MAX_LEN:
+        msg = (
+            f"a username is {USERNAME_MIN_LEN} to {USERNAME_MAX_LEN} characters, "
+            f"not {len(username)}"
+        )
+        raise ValueError(msg)
+    if not set(username) <= _USERNAME_ALPHABET or username[0] in "._-":
+        msg = (
+            "a username is lower-case letters, digits, '.', '-' and '_', "
+            "starting with a letter or digit"
+        )
+        raise ValueError(msg)
+    return username

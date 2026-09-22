@@ -316,6 +316,10 @@ class Token(Entity):
     actor_identity_ref: str | None = None
     name: str
     scopes: list[str]
+    #: `api` for a minted or adopted token, `session` for one a password
+    #: login produced (expiring, revoked by `auth.logout`), `agent` for a
+    #: coding session's own token. Checked identically at authentication.
+    kind: Literal["api", "session", "agent"] = "api"
     created_at: datetime
     expires_at: datetime | None = None
     last_used_at: datetime | None = None
@@ -325,6 +329,21 @@ class Token(Entity):
     @property
     def active(self) -> bool:
         return self.revoked_at is None
+
+
+class PasswordCredential(Entity):
+    """A human's login: a username, the scopes a login grants, and nothing else.
+
+    The hash is deliberately not on the model. It is written and read by the
+    storage layer alone, so no listing, result or audit payload can carry it.
+    """
+
+    actor_id: str
+    actor_identity_ref: str | None = None
+    username: str
+    scopes: list[str]
+    created_at: datetime
+    updated_at: datetime
 
 
 class AuthDecision(Entity):

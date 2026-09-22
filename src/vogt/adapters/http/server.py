@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request
 from vogt import __version__
 from vogt.adapters.http.access_log import AccessLogSettings, RequestLogMiddleware
 from vogt.adapters.http.app import API_PREFIX, build_app
+from vogt.adapters.http.auth import add_auth_routes
 from vogt.adapters.http.health import ServerInfo, add_health_routes
 from vogt.adapters.http.install import add_install_routes
 from vogt.adapters.http.scheduler import CollectorSchedule
@@ -29,6 +30,7 @@ from vogt.adapters.mcp.http import MCP_PATH, add_mcp_route
 from vogt.application.context import AppContext, build_context
 from vogt.application.services.auth import Authenticated, authenticate, local
 from vogt.config import VogtConfig, load_config
+from vogt.core.entities import Token
 from vogt.core.principal import Principal
 from vogt.errors import InvalidRequest
 from vogt.observability import configure_logging, logger, set_request_actor
@@ -88,8 +90,10 @@ def build_server(
     # schedule needs to read its interval before any request arrives.
     resolved_config = config if config is not None else load_config()
 
-    def context(principal: Principal | None = None) -> AppContext:
-        return build_context(config=resolved_config, principal=principal)
+    def context(
+        principal: Principal | None = None, *, token: Token | None = None
+    ) -> AppContext:
+        return build_context(config=resolved_config, principal=principal, token=token)
 
     # Migrate before anything can be served, not merely report on it.
     # The deployed topology runs `command: serve` and never runs `init`, so
@@ -165,7 +169,7 @@ def build_server(
         # which address did (NFR-OB1). Set on the request's context, not on
         # the application: two requests are two contexts.
         set_request_actor(caller.principal.identity_ref)
-        return context(caller.principal), caller
+        return context(caller.principal, token=caller.token), caller
 
     app = build_app(
         registry=active_registry,
@@ -191,6 +195,9 @@ def build_server(
     # mounted like the probes because a browser with no token yet must be
     # able to reach it.
     add_install_routes(app, context_factory=context)
+    # The password login: unauthenticated for the same reason the install
+    # surface is — it exists for a caller who holds no credential yet.
+    add_auth_routes(app, context_factory=context)
     add_mcp_route(app, registry=active_registry, resolve=resolve, path=MCP_PATH)
     # Outermost, so the line it writes covers everything inside it — routing,
     # authentication, the error handlers, and the requests that never reach a

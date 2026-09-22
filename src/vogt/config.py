@@ -405,10 +405,12 @@ class VogtConfig(BaseSettings):
     engine_token_file: Path | None = Field(
         default=None,
         description=(
-            "Path to a file containing the engine token Vogt calls it with. "
-            "The token needs only the engine's `sessions` capability: Vogt "
-            "starts and stops terminals, and has no business writing that "
-            "pod's files. A file rather than an environment variable, for the "
+            "Path to a file containing the credential Vogt calls the engine "
+            "with. Unset, `bootstrap_core_token_file` is used: the one stack "
+            "secret both halves share is recognised by the engine as the "
+            "core's own identity, so a deployment needs no second token for "
+            "this direction. Set it only to give the core a distinct engine "
+            "credential. A file rather than an environment variable, for the "
             "same reason as `github_token_file` — a token in the environment "
             "is a token in every `docker inspect`."
         ),
@@ -491,6 +493,18 @@ class VogtConfig(BaseSettings):
             "Identity the adopted agent token is bound to, created if absent. "
             "Audit rows name it, so it should say this stack's sessions acted — "
             "not a person, and not something shared with another instance."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    session_ttl_days: int = Field(
+        default=30,
+        ge=1,
+        le=3650,
+        description=(
+            "How long a session minted by a password login (`auth.login`) "
+            "stays valid. A session is a token like any other — revocable by "
+            "`auth.logout` or `token.revoke` — with this expiry attached, so a "
+            "browser or phone that is lost stops working on its own."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
