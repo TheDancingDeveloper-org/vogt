@@ -209,6 +209,7 @@ async function installFixtures(
   // only when it starts signed out — so the wizard's presence is a fixture
   // decision, never an accidental 404.
   const bootstrapRequests: Record<string, unknown>[] = [];
+  const loginRequests: Record<string, unknown>[] = [];
   const linkRequests: Record<string, unknown>[] = [];
   const registerRequests: Record<string, unknown>[] = [];
   const importRequests: Record<string, unknown>[] = [];
@@ -230,10 +231,29 @@ async function installFixtures(
         display_name: body.display_name,
         kind: "human",
       },
-      token: { id: "tok-wizard", name: "first-run browser token", scopes: ["admin"] },
+      token: { id: "tok-wizard", name: "first-run browser token", scopes: ["admin"], kind: "session" },
       secret: "vogt_browser-test-first-run-secret",
-      warning: "This is the only time the secret is shown.",
+      warning: "This is a browser session; sign in again with your password when it expires.",
+      username: body.username ?? slug,
     } });
+  });
+  // The password login. The mocked door accepts one pair and refuses the
+  // rest with the core's own shape, so the gate's copy is exercised for
+  // real rather than asserted against a stub that agrees with itself.
+  await registerRoute("**/api/auth/login", async (route) => {
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    loginRequests.push(body);
+    if (body.username === "ada" && body.password === "correct horse battery") {
+      return route.fulfill({ json: {
+        actor: { id: "act-ada", identity_ref: "human:ada", display_name: "Ada", kind: "human" },
+        token: { id: "tok-session", name: "browser session", scopes: ["admin"], kind: "session" },
+        secret: "browser-test-token",
+      } });
+    }
+    return route.fulfill({
+      status: 401,
+      json: { error: { code: "unauthenticated", message: "the username or password is not right" } },
+    });
   });
   await registerRoute("**/api/status**", async (route) => route.fulfill({ json: {
     version: "test",
@@ -686,6 +706,7 @@ async function installFixtures(
     createdSessions: () => createdSessions,
     sessionDeletes: () => sessionDeletes,
     bootstrapRequests,
+    loginRequests,
     linkRequests,
     registerRequests,
     importRequests,
@@ -795,16 +816,44 @@ test("Login and authentication errors present Vogt as the only product", async (
   await expect(page).toHaveTitle("Sign in · Vogt");
   await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
   await expect(page.locator("body")).not.toContainText("MyDevEnv2");
+  // The gate leads with a username and password; a wrong pair is refused
+  // in the core's words, and the reader stays at the gate.
+  await page.route("**/api/auth/login", async (route) => route.fulfill({
+    status: 401,
+    json: { error: { code: "unauthenticated", message: "the username or password is not right" } },
+  }));
+  await page.getByLabel("Username").fill("ada");
+  await page.getByLabel("Password", { exact: true }).fill("not the password");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("username or password");
+  // The token path is one disclosure away, for agents and the break-glass token.
+  await page.getByRole("button", { name: "Sign in with a token" }).click();
   await page.getByLabel("Bearer token").fill("rejected-browser-token");
-  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("current Vogt token");
+});
+
+// A password login: the gate posts the pair, stores the session the core
+// minted where a pasted token lives, and enters the shell.
+test("Sign in with a username and password enters the shell with the session", async ({ page }) => {
+  const fixtures = await installFixtures(page, {}, [], undefined, { noToken: true });
+  await page.goto("/#/sessions");
+  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeVisible();
+  await page.getByLabel("Username").fill("ada");
+  await page.getByLabel("Password", { exact: true }).fill("correct horse battery");
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Sign in to Vogt" })).toBeHidden();
+  expect(fixtures.loginRequests).toEqual([
+    { username: "ada", password: "correct horse battery", session_name: "browser session" },
+  ]);
+  expect(await page.evaluate(() => localStorage.getItem("vogt.token"))).toBe("browser-test-token");
 });
 
 // The first-run wizard. A fresh instance has no tokens, so the core
 // reports install mode and the shell leads with the wizard rather than a
 // demand for a token nobody has minted yet. Verified at the two shapes the
 // product ships: a 1440×900 desktop and a 390×844 phone.
-test("First run: the wizard claims the instance, shows the secret once, and signs in", async ({ page }) => {
+test("First run: the wizard claims the instance with a password and signs in", async ({ page }) => {
   if (test.info().project.name === "desktop") {
     await page.setViewportSize({ width: 1440, height: 900 });
   } else {
@@ -829,18 +878,22 @@ test("First run: the wizard claims the instance, shows the secret once, and sign
   expect(overflow, "the wizard must not overflow horizontally").toBe(false);
 
   await page.getByLabel("Your name").fill("Ada Lovelace");
-  await page.getByRole("button", { name: "Claim instance & mint my token" }).click();
+  // The username is suggested from the name and stays editable.
+  await expect(page.getByLabel("Username")).toHaveValue("ada-lovelace");
+  await page.getByLabel("Password", { exact: true }).fill("correct horse battery");
+  await page.getByLabel("Confirm password").fill("correct horse battery");
+  await page.getByRole("button", { name: "Claim instance & create my login" }).click();
 
   await expect(page.getByRole("heading", { name: "Welcome, Ada Lovelace" })).toBeVisible();
-  await expect(page.getByTestId("setup-secret")).toContainText(
-    "vogt_browser-test-first-run-secret",
-  );
-  expect(fixtures.bootstrapRequests).toEqual([{ display_name: "Ada Lovelace" }]);
+  await expect(page.getByTestId("setup-username")).toContainText("ada-lovelace");
+  expect(fixtures.bootstrapRequests).toEqual([
+    { display_name: "Ada Lovelace", username: "ada-lovelace", password: "correct horse battery" },
+  ]);
   // The CLI/MCP equivalents are one disclosure away.
   await page.getByText("Use it from a terminal or an agent").click();
   await expect(page.getByText("vogt-mcp-remote")).toBeVisible();
 
-  // Continue hands the minted secret to the ordinary sign-in path: the shell
+  // Continue hands the minted session to the ordinary sign-in path: the shell
   // comes up authenticated with it stored where a pasted token lives, and the
   // pending flag lands the fresh operator on the remaining setup steps.
   await page.getByRole("button", { name: "Continue to Vogt" }).click();

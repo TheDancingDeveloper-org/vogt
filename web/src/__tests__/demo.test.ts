@@ -15,7 +15,7 @@ const WRITES = new Set([
   "project.import", "project.register", "forge.account_link", "sweep",
   "work.create", "work.transition", "work.comment", "work.update",
   "drift.resolve", "inbox.archive", "inbox.snooze", "inbox.restore",
-  "suppress", "work.adopt", "session.start", "session.stop",
+  "suppress", "work.adopt", "session.start", "session.stop", "auth.logout",
 ]);
 
 describe("public demo contracts", () => {
