@@ -18,7 +18,7 @@
     "@capacitor-community/speech-recognition": "^7.0.1",
     "@capacitor/app": "^8.0.5",
     "@capacitor/core": "^8.5.2",
-    "@capacitor/push-notifications": "^8.1.1",
+    "@capacitor/push-notifications": "^8.1.2",
     "@solidjs/router": "^0.16.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
