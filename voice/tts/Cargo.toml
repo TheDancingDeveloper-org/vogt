@@ -31,6 +31,6 @@ zeroize = "=1.9.0"
 # crates, and 3.x keeps that floor.
 ureq = "3.4"
 url = "2.5"
-tempfile = "=3.23.0"
+tempfile = "=3.27.0"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "time"] }
 thiserror = "2"
