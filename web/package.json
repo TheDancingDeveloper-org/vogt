@@ -32,7 +32,7 @@
     "@playwright/test": "^1.63.0",
     "@solidjs/testing-library": "^0.8.10",
     "@testing-library/jest-dom": "^7.0.1",
-    "@testing-library/user-event": "^14.6.4",
+    "@testing-library/user-event": "^14.6.7",
     "@xterm/headless": "^6.0.0",
     "fake-indexeddb": "^6.2.5",
     "jsdom": "^30.0.1",
