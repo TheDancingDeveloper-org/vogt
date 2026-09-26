@@ -59,7 +59,7 @@ web-push = "0.11"
 # determine the process-level CryptoProvider"). `rust_crypto` links a
 # self-contained pure-Rust backend (rsa + sha2 for RS256), so no provider needs
 # installing. `use_pem` (default) stays on for EncodingKey::from_rsa_pem.
-jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
+jsonwebtoken = { version = "11.1", features = ["rust_crypto"] }
 base64 = "0.22"
 sha2 = "0.10"
 ring = "0.17"
