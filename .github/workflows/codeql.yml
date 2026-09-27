@@ -47,7 +47,7 @@ jobs:
       # The Actions runtime bundles Node for action execution, but the
       # JavaScript/TypeScript extractor starts `node` from PATH. The
       # self-hosted base runner deliberately has no language runtimes.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         if: matrix.language == 'javascript-typescript'
         with:
           node-version: "22"

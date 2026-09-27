@@ -19,7 +19,7 @@ piper-rs = "=0.1.2"
 # Keep the legacy inference stack buildable with the workspace's Rust 1.80
 # MSRV. These are transitive build dependencies of ort-sys/bindgen; newer
 # releases moved to edition 2024.
-home = "=0.5.9"
+home = "=0.5.12"
 half = "=2.7.1"
 rustls-pki-types = "=1.12.0"
 zeroize = "=1.9.0"
@@ -31,6 +31,6 @@ zeroize = "=1.9.0"
 # crates, and 3.x keeps that floor.
 ureq = "3.4"
 url = "2.5"
-tempfile = "=3.23.0"
+tempfile = "=3.27.0"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "time"] }
 thiserror = "2"
