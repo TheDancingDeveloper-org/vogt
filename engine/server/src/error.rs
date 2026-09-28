@@ -13,6 +13,8 @@ pub enum ApiError {
     Unauthorized,
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("payload too large: {0}")]
+    TooLarge(String),
     #[error("config: {0}")]
     Config(String),
     #[error("pty error: {0}")]
@@ -35,6 +37,7 @@ impl ApiError {
             ApiError::BadRequest(_) => StatusCode::BAD_REQUEST,
             ApiError::Unauthorized => StatusCode::UNAUTHORIZED,
             ApiError::Conflict(_) => StatusCode::CONFLICT,
+            ApiError::TooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             ApiError::Config(_) | ApiError::Internal(_) | ApiError::Pty(_) | ApiError::Io(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }

@@ -203,9 +203,24 @@ export class DemoStore {
   }
 
   async request(pathname: string, method: string, query: URLSearchParams, init?: RequestInit): Promise<Response> {
+    // Streaming upload carries a Blob body, not JSON, so it is handled before
+    // `bodyOf` (which only parses JSON strings) reduces it to `{}`.
+    if (pathname === "/api/files/upload" && method === "PUT") return this.uploadFile(query, init);
     const body = bodyOf(init);
     if (pathname.startsWith("/api/vogt/")) return this.vogt(pathname.slice("/api/vogt".length), method, query, body);
     return this.engine(pathname, method, query, body);
+  }
+
+  private async uploadFile(query: URLSearchParams, init?: RequestInit): Promise<Response> {
+    const key = query.get("path") ?? "";
+    const raw = init?.body;
+    let content = "";
+    let bytes = 0;
+    if (typeof raw === "string") { content = raw; bytes = raw.length; }
+    else if (raw instanceof Blob) { content = await raw.text(); bytes = raw.size; }
+    const row = { content, mtime: this.nowMs(), hash: hash(content) };
+    this.state.files[key] = row; this.write();
+    return json({ ok: true, bytes, mtime: row.mtime, hash: row.hash });
   }
 
   private async engine(path: string, method: string, query: URLSearchParams, body: Record<string, unknown>): Promise<Response> {

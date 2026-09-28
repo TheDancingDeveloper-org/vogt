@@ -806,16 +806,34 @@ export const api = {
       // preserves the server's last-writer-wins behaviour (new files, uploads).
       ...(if_match ? { if_match } : {}),
     }),
-  writeFileBase64: (
+  /**
+   * Streaming upload. The file is sent as the raw request body (no base64, no
+   * JSON envelope), so neither the browser nor the engine buffers the whole
+   * thing in memory — large files upload at a fixed, small memory cost. Used
+   * by the file browser's upload; small text writes still use `writeFile`.
+   */
+  uploadFile: async (
     path: string,
-    content_base64: string,
+    file: Blob,
     create_parents = false,
-  ) =>
-    req<WriteFileResponse>("PUT", "/api/files", {
-      path,
-      content_base64,
-      create_parents,
-    }),
+  ): Promise<WriteFileResponse> => {
+    const params = new URLSearchParams({ path });
+    if (create_parents) params.set("create_parents", "true");
+    const res = await runtimeTransport().request(
+      `${getBase()}/api/files/upload?${params.toString()}`,
+      {
+        method: "PUT",
+        headers: authHeaders({ "Content-Type": "application/octet-stream" }),
+        body: file,
+      },
+    );
+    const text = await res.text();
+    if (!res.ok) throw refused(res.status, text);
+    invalidate();
+    return text
+      ? (JSON.parse(text) as WriteFileResponse)
+      : { ok: true, bytes: 0, hash: "", mtime: 0 };
+  },
   fileOp: (request: FileOpRequest) =>
     req<FileOpResponse>("POST", "/api/files/op", request),
   downloadFile: async (path: string): Promise<void> => {
