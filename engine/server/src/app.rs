@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use axum::{
+    extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method},
     middleware,
-    routing::{any, get, post},
+    routing::{any, get, post, put},
     Router,
 };
 use tower_http::{compression::CompressionLayer, cors::CorsLayer, trace::TraceLayer};
@@ -44,6 +45,16 @@ use crate::{
 /// name the same strings, which is what makes the guarantee a property rather
 /// than a comment.
 pub const MACHINE_NAMESPACES: [&str; 2] = ["/api", "/mcp"];
+
+/// Body-size ceiling for the JSON file-write route (`PUT /api/files`). It
+/// buffers the whole body (a base64 or UTF-8 payload) via the `Json`
+/// extractor, so this caps memory, not just transfer size. 16 MiB comfortably
+/// covers an editor save of the largest readable file (`MAX_READ_BYTES`, 5 MiB)
+/// even after base64 inflation — well above axum's 2 MiB default, which
+/// otherwise rejected mid-size saves with `HTTP 413`. Large *uploads* do not
+/// use this route: they stream through `PUT /api/files/upload`, which never
+/// buffers the body and carries no such limit.
+const JSON_WRITE_BODY_LIMIT: usize = 16 * 1024 * 1024;
 
 pub struct AppState {
     pub config: Arc<Config>,
@@ -284,7 +295,21 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         // reached from a running pod. The POST needs `agent-clis-write`.
         .route("/api/agent-clis", get(agent_clis::list))
         .route("/api/agent-clis/{tool}", post(agent_clis::update))
-        .route("/api/files", get(files::read_file).put(files::write_file))
+        .route(
+            "/api/files",
+            get(files::read_file)
+                .put(files::write_file)
+                // The JSON write buffers the whole body; raise the 2 MiB
+                // default enough to cover an editor save of the largest
+                // readable file. This route is for edits and small writes —
+                // large uploads take the streaming route below.
+                .layer(DefaultBodyLimit::max(JSON_WRITE_BODY_LIMIT)),
+        )
+        // Streaming upload. The raw request body is spooled straight to disk,
+        // so it never buffers in memory and needs no body-limit layer (the
+        // `Body` extractor ignores `DefaultBodyLimit`); the handler caps size
+        // itself. This is the path the file browser's "upload" uses.
+        .route("/api/files/upload", put(files::upload_file))
         .route("/api/files/op", post(files::operate))
         .route("/api/files/download", get(files::download_file))
         .route("/api/dir", get(files::list_dir))

@@ -530,13 +530,11 @@ const FileTree: Component<Props> = (props) => {
     const targetDir = uploadTarget();
     try {
       for (const file of Array.from(files)) {
-        const buffer = await file.arrayBuffer();
-        const bytes = new Uint8Array(buffer);
-        let binary = "";
-        for (const byte of bytes) binary += String.fromCharCode(byte);
-        const b64 = btoa(binary);
         const dest = joinPath(targetDir, file.name);
-        await api.writeFileBase64(dest, b64, true);
+        // Stream the File straight through as the request body — no
+        // in-browser base64 buffering, so a large upload doesn't blow up
+        // client memory (or trip the server's body limit).
+        await api.uploadFile(dest, file, true);
       }
       refreshFolder(targetDir);
     } catch (e) {

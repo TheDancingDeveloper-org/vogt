@@ -4601,6 +4601,86 @@ async fn file_api_round_trip() {
 }
 
 #[tokio::test]
+async fn file_upload_streams_to_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        default_cwd: tmp.path().to_path_buf(),
+        workspace_root: tmp.path().canonicalize().unwrap(),
+        ..test_config()
+    };
+    let (router, _state) = router(cfg).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let base = format!("http://{addr}");
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // A payload comfortably larger than the 2 MiB JSON default, to prove the
+    // streaming route carries what the buffered one would reject.
+    let payload: Vec<u8> = (0..(5 * 1024 * 1024u32)).map(|i| (i % 251) as u8).collect();
+
+    let r = client
+        .put(format!(
+            "{base}/api/files/upload?path=up/big.bin&create_parents=true"
+        ))
+        .body(payload.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), StatusCode::OK);
+    let body: Value = r.json().await.unwrap();
+    assert_eq!(body["bytes"].as_u64().unwrap(), payload.len() as u64);
+
+    // Bytes landed exactly, and the returned hash is the content SHA-256.
+    let on_disk = std::fs::read(tmp.path().join("up/big.bin")).unwrap();
+    assert_eq!(on_disk, payload);
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+    sha2::Digest::update(&mut hasher, &payload);
+    let expect_hash = sha2::Digest::finalize(hasher)
+        .iter()
+        .fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+    assert_eq!(body["hash"].as_str().unwrap(), expect_hash);
+
+    // No spooled temp file is left behind in the target directory.
+    let leftovers: Vec<String> = std::fs::read_dir(tmp.path().join("up"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        leftovers,
+        vec!["big.bin".to_string()],
+        "temp file leaked: {leftovers:?}"
+    );
+
+    // if_match guards a streaming overwrite just like the JSON write does: a
+    // stale baseline is a 409, not a clobber.
+    let stale = client
+        .put(format!(
+            "{base}/api/files/upload?path=up/big.bin&if_match=deadbeef"
+        ))
+        .body(vec![b'x'; 16])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        std::fs::read(tmp.path().join("up/big.bin")).unwrap(),
+        payload
+    );
+}
+
+#[tokio::test]
 async fn read_returns_hash_and_mtime_and_if_match_guards_writes() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::write(tmp.path().join("note.txt"), "original").unwrap();

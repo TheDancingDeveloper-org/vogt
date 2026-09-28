@@ -8,9 +8,10 @@ use axum::{
     Json,
 };
 use base64::Engine as _;
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::process::Command;
+use tokio::{io::AsyncWriteExt as _, process::Command};
 use tokio_util::io::ReaderStream;
 use vogt_engine_contract::{
     FileEntry, FileRead, FileSearchResult, SearchHit, TreeNode, WriteFileResponse, WriteReq,
@@ -35,7 +36,14 @@ fn rel_to(root: &Path, p: &Path) -> String {
 fn hash_bytes(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    let digest = h.finalize();
+    hex_digest(h.finalize())
+}
+
+/// Hex-encode a finalised SHA-256 digest. Split out so a streaming write can
+/// hash chunk-by-chunk and still produce the same content-based ETag as
+/// [`hash_bytes`], without ever holding the whole file in memory.
+fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+    let digest = digest.as_ref();
     let mut out = String::with_capacity(digest.len() * 2);
     for b in digest {
         use std::fmt::Write as _;
@@ -274,6 +282,131 @@ pub async fn write_file(
     Ok(Json(WriteFileResponse {
         ok: true,
         bytes: n,
+        hash,
+        mtime,
+    }))
+}
+
+/// Hard ceiling for a streaming upload — 10 GiB. The body never lands in
+/// memory (it spools straight to disk), so this only guards against an upload
+/// filling the workspace disk without bound, not against OOM.
+const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+
+#[derive(Debug, Deserialize)]
+pub struct UploadQuery {
+    pub path: String,
+    #[serde(default)]
+    pub create_parents: bool,
+    /// Same optimistic-concurrency guard as [`WriteReq::if_match`]: the SHA-256
+    /// hex the client last read. Uploads of new files omit it.
+    #[serde(default)]
+    pub if_match: Option<String>,
+}
+
+/// Removes a spooled temp file on any early return. Disarmed once the file has
+/// been renamed into place, so the successful path leaves nothing behind.
+struct TempFileGuard(Option<std::path::PathBuf>);
+
+impl TempFileGuard {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            // Best-effort: the upload already failed, so a leftover temp file
+            // is the only thing to clean up and a failure to do so is not worth
+            // surfacing.
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
+/// Streaming file write. The request body is the raw file bytes; they are
+/// spooled straight to a temp file in the target's directory, hashed on the
+/// way through, then atomically renamed into place. Unlike [`write_file`]
+/// (which buffers a whole base64 JSON body), an upload of any size costs a
+/// fixed, small amount of memory — this is the path large uploads take.
+pub async fn upload_file(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<UploadQuery>,
+    body: Body,
+) -> Result<Json<WriteFileResponse>> {
+    if q.create_parents {
+        // Materialise the parent before resolve_for_write can canonicalise it
+        // (mirrors write_file).
+        let lexical =
+            workspace_path::resolve_existing_or_lexical(&state.config.workspace_root, &q.path)?;
+        if let Some(parent) = lexical.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+    let target = workspace_path::resolve_for_write(&state.config.workspace_root, &q.path)?;
+    let parent = target
+        .parent()
+        .ok_or_else(|| ApiError::BadRequest("path has no parent".into()))?;
+
+    // Spool into the target's own directory so the final rename is atomic (a
+    // cross-filesystem rename is not). A dotfile-prefixed, uuid-suffixed name
+    // keeps it out of directory listings and collision-free under concurrency.
+    let file_name = target
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("upload");
+    let tmp = parent.join(format!(".{file_name}.upload-{}.tmp", uuid::Uuid::new_v4()));
+    let mut guard = TempFileGuard(Some(tmp.clone()));
+
+    let mut file = tokio::fs::File::create(&tmp).await?;
+    let mut hasher = Sha256::new();
+    let mut written: u64 = 0;
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| ApiError::BadRequest(format!("upload stream error: {e}")))?;
+        written += chunk.len() as u64;
+        if written > MAX_UPLOAD_BYTES {
+            return Err(ApiError::TooLarge(format!(
+                "upload exceeds the {MAX_UPLOAD_BYTES}-byte limit"
+            )));
+        }
+        hasher.update(&chunk);
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+    // Durability before the rename: a crash mid-upload must not leave a
+    // renamed-but-empty file where the old content used to be.
+    file.sync_all().await?;
+    drop(file);
+
+    // Optimistic-concurrency guard, checked just before the commit so the
+    // window between check and rename is as small as possible. Uploads of new
+    // files pass no `if_match` and skip this entirely.
+    if let Some(expected) = q.if_match.as_deref() {
+        let current_hash = match tokio::fs::read(&target).await {
+            Ok(cur) => hash_bytes(&cur),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => hash_bytes(&[]),
+            Err(e) => return Err(ApiError::Io(e)),
+        };
+        if current_hash != expected {
+            return Err(ApiError::Conflict(format!(
+                "file changed on disk since it was read (expected {expected}, found {current_hash}); \
+                 reload before saving to avoid clobbering newer content"
+            )));
+        }
+    }
+
+    tokio::fs::rename(&tmp, &target).await?;
+    guard.disarm();
+
+    let hash = hex_digest(hasher.finalize());
+    let mtime = tokio::fs::metadata(&target)
+        .await
+        .map(|m| mtime_millis(&m))
+        .unwrap_or(0);
+    Ok(Json(WriteFileResponse {
+        ok: true,
+        bytes: written as usize,
         hash,
         mtime,
     }))
