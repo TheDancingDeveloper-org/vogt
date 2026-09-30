@@ -2384,6 +2384,18 @@ textarea {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
 }
+/* The rail pulses are infinite opacity animations: with a rail full of
+   running sessions the compositor never idles, even with nothing typed. Under
+   reduced motion the colour and ring already carry the state, so drop the
+   motion and let the GPU go quiet (WI-642). */
+@media (prefers-reduced-motion: reduce) {
+  .activity-dot.running,
+  .activity-dot.waiting-for-input,
+  .activity-dot.bell,
+  .rail-attention-dot {
+    animation: none;
+  }
+}
 
 .main {
   grid-area: main;
@@ -2514,11 +2526,12 @@ textarea {
   padding: 6px 10px;
   border: 1px solid rgba(240, 246, 252, 0.16);
   border-radius: 6px;
-  background: rgba(13, 17, 23, 0.88);
+  /* Flat, not blurred: a backdrop-filter over a streaming terminal re-renders
+     and re-blurs the terminal on every frame it changes (WI-643). */
+  background: rgba(13, 17, 23, 0.94);
   color: var(--fg);
   font-size: 12px;
   pointer-events: none;
-  backdrop-filter: blur(4px);
 }
 
 .terminal-reconnect-overlay {
@@ -4200,8 +4213,9 @@ textarea {
 .command-palette-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(4px);
+  /* Flat, not blurred: a full-viewport backdrop-filter over live terminals
+     re-blurs the whole page on every frame they change (WI-643). */
+  background: rgba(0, 0, 0, 0.75);
   z-index: 1000;
   display: flex;
   align-items: flex-start;
