@@ -18,6 +18,26 @@ describe("foreground wake coordinator", () => {
     stop();
   });
 
+  // The event stream notes its own loss on this channel. That note is not the
+  // app coming forward, so when a real lifecycle signal lands in the same
+  // burst the wake must carry the lifecycle reason: listeners that only act
+  // on a genuine return-to-front (the forced stream reconnect) key on it.
+  it("lets a lifecycle signal outrank a stream-loss note in the same burst", async () => {
+    vi.useFakeTimers();
+    const wakes: string[] = [];
+    const stop = onWake((wake) => wakes.push(wake.reason));
+    noteForeground("sse-reconnect");
+    noteForeground("focus");
+    noteForeground("sse-reconnect");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(wakes).toEqual(["focus"]);
+
+    noteForeground("sse-reconnect");
+    await vi.advanceTimersByTimeAsync(250);
+    expect(wakes).toEqual(["focus", "sse-reconnect"]);
+    stop();
+  });
+
   it("shares an in-flight resource read and records its result", async () => {
     vi.useFakeTimers();
     const stop = onWake(() => {});

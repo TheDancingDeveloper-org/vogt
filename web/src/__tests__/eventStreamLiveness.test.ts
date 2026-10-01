@@ -17,6 +17,7 @@ function scriptedTransport() {
   const streams: Controller[] = [];
   let sessionsStatus = 200;
   let sessionsHang = false;
+  let eventsStatus = 200;
   const requests: string[] = [];
   const transport: RuntimeTransport = {
     request: async (input, init) => {
@@ -31,6 +32,7 @@ function scriptedTransport() {
         });
       }
       if (url.includes("/api/events")) {
+        if (eventsStatus !== 200) return new Response("down", { status: eventsStatus });
         const body = new ReadableStream<Uint8Array>({
           start(controller) { streams.push(controller); },
         });
@@ -50,6 +52,8 @@ function scriptedTransport() {
     requests,
     setSessionsStatus: (status: number) => { sessionsStatus = status; },
     setSessionsHang: (hang: boolean) => { sessionsHang = hang; },
+    setEventsStatus: (status: number) => { eventsStatus = status; },
+    eventRequests: () => requests.filter((url) => url.includes("/api/events")).length,
     sessionRequests: () => requests.filter((url) => url.includes("/api/sessions")).length,
     feed: (text: string) => streams.at(-1)!.enqueue(encoder.encode(text)),
     streamCount: () => streams.length,
@@ -201,6 +205,31 @@ describe("event stream liveness", () => {
       script.feed(":ka\n\n");
       await settle();
     }
+    expect(script.streamCount()).toBe(1);
+    expect(store.isConnected()).toBe(true);
+  });
+
+  // The phone's terminal would not scroll (2026-10-01). A stream that could
+  // not stay up noted its own loss as a foreground wake, and the wake answered
+  // by tearing the stream down, zeroing the backoff and reconnecting at once —
+  // which failed, which noted another wake 250 ms later. Four connects a
+  // second for as long as the outage lasted, and every one of those wakes
+  // also reached each open terminal. The loss is the backoff's to retry.
+  it("retries a stream that keeps failing on its backoff, not on every wake", async () => {
+    script.setEventsStatus(503);
+    store.startEventStream();
+    // Backoff is 1 s then 2 s (plus up to 30% jitter): the first connect, a
+    // retry after ~1 s and one after ~3 s all fall inside five seconds; the
+    // next is not due before seven. The loop this pins made about twenty.
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(script.eventRequests()).toBeGreaterThanOrEqual(2);
+    expect(script.eventRequests()).toBeLessThanOrEqual(3);
+    expect(script.streamCount()).toBe(0);
+
+    // And it still comes back by itself once the server does.
+    script.setEventsStatus(200);
+    await vi.advanceTimersByTimeAsync(6_000);
+    await settle();
     expect(script.streamCount()).toBe(1);
     expect(store.isConnected()).toBe(true);
   });

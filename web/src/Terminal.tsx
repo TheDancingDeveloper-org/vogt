@@ -853,9 +853,14 @@ const TerminalView: Component<Props> = (props) => {
 
     // On mobile the OS kills the WebSocket when the app is backgrounded. The
     // shared wake gives every retained pane one debounced return-to-front.
+    //
+    // The wake does not move the viewport. A reader at the live tail stays
+    // there by xterm's own follow; one who scrolled up keeps their place and
+    // has the jump-to-bottom chip. Snapping to the tail here threw a phone
+    // reader back down on every WebView focus and every event-stream loss —
+    // which read as the terminal ignoring swipes.
     wakeCleanup = onWake(() => {
       scheduleFit();
-      term?.scrollToBottom();
       if (!readyToConnect()) return;
       if (isParked()) return;
       if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
