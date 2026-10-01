@@ -63,10 +63,22 @@ function emit(): void {
   for (const listener of listeners) listener(wake);
 }
 
-/** Schedule one foreground wake for the current burst of lifecycle events. */
+/**
+ * Schedule one foreground wake for the current burst of lifecycle events.
+ *
+ * The first reason names the burst, with one exception: `sse-reconnect` is
+ * the event stream noting its own loss, not the app coming forward, so a real
+ * lifecycle signal in the same burst replaces it. Listeners that act only on
+ * a genuine return-to-front (the forced stream reconnect) key on the reason.
+ */
 export function noteForeground(reason: WakeReason): void {
   if (!visible()) return;
-  if (pendingReason === null) pendingReason = reason;
+  if (
+    pendingReason === null
+    || (pendingReason === "sse-reconnect" && reason !== "sse-reconnect")
+  ) {
+    pendingReason = reason;
+  }
   if (timer === null) timer = setTimeout(emit, DEBOUNCE_MS);
 }
 

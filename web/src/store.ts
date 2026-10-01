@@ -404,7 +404,17 @@ export function forceReconnectEventStream(): void {
 
 // Lifecycle ownership lives in wakeCoordinator: one reconnect and one session
 // reconciliation for a burst of visibility/focus/resume events.
-onWake(() => forceReconnectEventStream());
+//
+// A wake the stream raised about its own loss is not answered with a forced
+// reconnect: the stream is already retrying on its backoff, and forcing it
+// zeroes that backoff and reconnects at once — which, while the server or the
+// tunnel is still away, fails and notes another wake 250 ms later. That loop
+// made four connects a second for the length of an outage and woke every open
+// terminal each time. The session reconciliation below still runs.
+onWake((wake: Wake) => {
+  if (wake.reason === "sse-reconnect") return;
+  forceReconnectEventStream();
+});
 onWake((wake: Wake) => {
   if (wake.reason === "boot" && sessionsStore.ready) return;
   void reconcile("sessions", wake, (signal) => refreshSessions(signal));
