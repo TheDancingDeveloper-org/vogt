@@ -131,8 +131,15 @@ pub fn capabilities_for_scopes(scopes: &[String]) -> Vec<TokenCapability> {
 }
 
 /// What the stack secret — the core's own credential — may do here.
-const STACK_SECRET_CAPABILITIES: [TokenCapability; 2] =
-    [TokenCapability::Sessions, TokenCapability::AgentClisWrite];
+///
+/// `history` is a read: the core's `session-outcomes` collector asks
+/// `GET /api/history/{id}` for the archive of every session that has ended.
+/// Without it each sweep is refused and the collector reports `partial`.
+const STACK_SECRET_CAPABILITIES: [TokenCapability; 3] = [
+    TokenCapability::Sessions,
+    TokenCapability::History,
+    TokenCapability::AgentClisWrite,
+];
 
 pub struct AuthRuntime {
     mutation_windows: Mutex<HashMap<String, VecDeque<Instant>>>,
