@@ -59,7 +59,7 @@ a static credential the core has never heard of: **it 401s the core**, and on
 |---|---|---|---|---|
 | **Session** (a person's login) | `session` | the **core** — `/api/*`, `/mcp` — and the **engine** | the scopes on the login: `read,work.write,project.write` by default, `admin` for the first operator | `POST /api/auth/login` with a username and password; expires after `session_ttl_days` (30) or at `auth.logout` |
 | **API token** (an agent's credential) | `api` | the core and the engine | as issued | `vogt token issue` (admin) |
-| **Stack secret** (`deploy/vogt-core-token`) | `api` | the core, as the front-door actor; the engine, as `vogt-core` (`sessions`, `agent-clis-write`) | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | the file both halves read, adopted at `init` (#199); server-side only, never in a browser |
+| **Stack secret** (`deploy/vogt-core-token`) | `api` | the core, as the front-door actor; the engine, as `vogt-core` (`sessions`, `history`, `agent-clis-write`) | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | the file both halves read, adopted at `init` (#199); server-side only, never in a browser |
 | **Coding-session token** (`session.start`) | `agent` | the core, per session | `agent_session_scopes` — default everything except `admin` | minted per session (#726) |
 | **Brokered agent token** | — | the core, as a shell/agent session's `VOGT_HTTP_TOKEN` | deployment-chosen | `ENGINE_AGENT_AUTH_VOGT_SECRET_NAME`, brokered from the secrets manager at session launch |
 | **Break-glass token** (`ENGINE_TOKEN`, optional) | none | the **engine only** — full capability, no actor | — | `deploy/.env`; its Vogt calls are made with the stack secret |

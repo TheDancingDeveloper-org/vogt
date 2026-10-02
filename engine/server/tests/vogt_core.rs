@@ -588,8 +588,8 @@ async fn a_core_outage_is_503_not_401() {
     assert_eq!(res.status(), StatusCode::OK);
 }
 
-/// The stack secret is the core's own identity here: it may start sessions,
-/// and nothing a person would do.
+/// The stack secret is the core's own identity here: it may start sessions
+/// and read the archive of ended ones, and nothing a person would do.
 #[tokio::test]
 async fn the_stack_secret_is_the_cores_identity_on_this_door() {
     let (base, _log) = front_door().await;
@@ -600,6 +600,15 @@ async fn the_stack_secret_is_the_cores_identity_on_this_door() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::OK);
+    // `session-outcomes` reads ended sessions' archives with this credential.
+    // An unknown id is a 404 from the handler, not a 403 from the gate.
+    let archive = client()
+        .get(format!("{base}/api/history/no-such-session"))
+        .headers(bearer(CORE_TOKEN))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(archive.status(), StatusCode::FORBIDDEN);
     let refused = client()
         .post(format!("{base}/api/gui/launch"))
         .headers(bearer(CORE_TOKEN))

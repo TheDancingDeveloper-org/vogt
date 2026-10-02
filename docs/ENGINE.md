@@ -394,8 +394,9 @@ section that documents it.
   holds all eleven; `work.write` or `project.write` holds everything except
   `gui-control` and `agent-clis-write`; `read` alone holds `push-write`, so a
   viewer can subscribe to notifications; `writeback` adds nothing. The
-  break-glass token holds all eleven, and the stack secret holds `sessions`
-  and `agent-clis-write` — what the core needs to start sessions here. The
+  break-glass token holds all eleven, and the stack secret holds `sessions`,
+  `history` and `agent-clis-write` — what the core needs to start sessions
+  here and to read the archive of the ones that ended. The
   capability-to-route mapping lives in `required_capability` in
   `engine/server/src/auth.rs` and is keyed on method *and* path, so
   `GET /api/sessions` needs no capability while `POST /api/sessions` needs
