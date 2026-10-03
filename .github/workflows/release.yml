@@ -153,7 +153,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         id: meta
         with:
           images: ${{ env.IMAGE }}
@@ -276,7 +276,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         id: meta
         with:
           images: ${{ env.VOICE_IMAGE }}
@@ -417,7 +417,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         id: meta
         with:
           images: ${{ env.STACK_IMAGE }}
