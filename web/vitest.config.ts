@@ -64,5 +64,9 @@ export default defineConfig({
     // whose next test is reading the previous one's state.
     restoreMocks: true,
     clearMocks: true,
+    // The same loaded runner pushed a jsdom test past the 5 s default
+    // (`terminalReplaySchedule`, 2026-10-03); CI gets headroom, local runs
+    // keep the default so a genuinely slow test still shows up here.
+    testTimeout: process.env.CI ? 15_000 : 5_000,
   },
 });

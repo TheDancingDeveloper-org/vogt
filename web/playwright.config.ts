@@ -21,6 +21,12 @@ const liveBaseURL = process.env.PLAYWRIGHT_LIVE_BASE_URL;
 export default defineConfig({
   testDir: "./tests/browser",
   timeout: 30_000,
+  // The mocked projects run on the Vite *dev* server, which serves ~150
+  // unbundled modules one by one. On a loaded self-hosted runner each took
+  // 200-700 ms (2026-10-03), so a reload's cold load outran the default 5 s
+  // assertion timeout and different demo tests failed run to run. CI gets
+  // headroom; local runs keep the strict default.
+  expect: { timeout: process.env.CI ? 15_000 : 5_000 },
   fullyParallel: false,
   reporter: process.env.CI ? "line" : "list",
   use: {
