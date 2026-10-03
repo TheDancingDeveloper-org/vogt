@@ -1763,6 +1763,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `label.create` | Confirmation-gated | Available after approval: Define a label. |
 | `label.list` | Voice-readable | Available: List labels. |
 | `initiative.create` | Confirmation-gated | Available after approval: Create a cross-project initiative with a ranking weight. |
+| `initiative.update` | Confirmation-gated | Available after approval: Correct an initiative's title, body or weight, or close or reopen it. |
 | `initiative.list` | Voice-readable | Available: List initiatives. |
 | `initiative.publish` | Confirmation-gated | Available after approval: Create or adopt one forge tracking issue per linked repo the initiative spans, each carrying a managed checkbox task list of its member work items. Additive and forward-only; a closed initiative proposes closing its tracking issues, never writes it. |
 | `actor.create` | Operator-only | Unavailable: Admin identity provisioning; actors can be listed and assigned by voice. |

@@ -1045,6 +1045,28 @@ class CreateInitiativeParams(Params):
     reason: Reason
 
 
+class UpdateInitiativeParams(Params):
+    """Correct an initiative after creation, or close and reopen it.
+
+    The slug is its identity — forge tracking issues carry the
+    ``initiative:<slug>`` label — so a new title leaves the slug as it was.
+    Every field left unset keeps its current value.
+    """
+
+    slug: str = Field(description="Initiative to update.")
+    title: Name | None = None
+    body: str | None = None
+    weight: int | None = Field(
+        default=None, ge=0, le=100, description="Feeds ranking; 0 means no lift."
+    )
+    state: InitiativeState | None = Field(
+        default=None,
+        description="`closed` ends it; `initiative publish` then proposes "
+        "closing its tracking issues.",
+    )
+    reason: Reason
+
+
 class InitiativeResult(Result):
     initiative: Initiative
 

@@ -16,10 +16,12 @@ from vogt.application.models import (
     ListActorsParams,
     ListInitiativesParams,
     ListLabelsParams,
+    UpdateInitiativeParams,
     WorkflowListParams,
     WorkflowListResult,
     WorkflowView,
 )
+from vogt.application.services import _resolve
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.core.entities import Actor, Initiative, Label
 from vogt.core.ids import slugify
@@ -28,10 +30,12 @@ from vogt.storage.interface import WriteTxn
 
 LABEL_CREATE = "label.create"
 INITIATIVE_CREATE = "initiative.create"
+INITIATIVE_UPDATE = "initiative.update"
 ACTOR_CREATE = "actor.create"
 
 LABEL_CREATED_EVENT = "label.created"
 INITIATIVE_CREATED_EVENT = "initiative.created"
+INITIATIVE_UPDATED_EVENT = "initiative.updated"
 ACTOR_CREATED_EVENT = "actor.created"
 
 WORK_KINDS = ("feature", "bug", "chore", "question")
@@ -109,6 +113,55 @@ def create_initiative(
     return audited_write(
         ctx, operation=INITIATIVE_CREATE, reason=params.reason, body=body
     )
+
+
+def update_initiative(
+    ctx: AppContext, params: UpdateInitiativeParams
+) -> InitiativeResult:
+    """Correct an initiative's title, body or weight, or close or reopen it.
+
+    The slug never changes: it is what tracking issues are labelled with. A
+    new title or body re-renders any tracking issues already published —
+    adopt-only and best-effort, after the local write commits, as a
+    membership change does. Closing writes nothing upstream; the next
+    `initiative publish` proposes closing the tracking issues.
+    """
+    changes = {
+        field: value
+        for field, value in (
+            ("title", params.title),
+            ("body", params.body),
+            ("weight", params.weight),
+            ("state", params.state),
+        )
+        if value is not None
+    }
+    if not changes:
+        msg = "give a title, body, weight or state; there is nothing else to update"
+        raise InvalidRequest(msg)
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[InitiativeResult]:
+        del actor
+        current = _resolve.initiative(txn, params.slug)
+        updated = current.model_copy(update={**changes, "updated_at": ctx.clock()})
+        txn.update_initiative(updated)
+        return WriteOutcome(
+            result=InitiativeResult(initiative=updated),
+            entity_kind="initiative",
+            entity_id=updated.id,
+            payload=updated.model_dump(mode="json"),
+            event_kind=INITIATIVE_UPDATED_EVENT,
+            summary={"slug": updated.slug, "fields": sorted(changes)},
+        )
+
+    result = audited_write(
+        ctx, operation=INITIATIVE_UPDATE, reason=params.reason, body=body
+    )
+    if params.title is not None or params.body is not None:
+        from vogt.application.services.initiative_publish import reproject_initiative
+
+        reproject_initiative(ctx, result.initiative.id, reason=params.reason)
+    return result
 
 
 def list_initiatives(
