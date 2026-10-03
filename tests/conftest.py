@@ -155,8 +155,7 @@ def native_comment(
 ) -> object:
     """A local comment on a native declared item, written the audited way.
 
-    `work.comment` refuses on an unlinked project;
-    audit- and trail-shaped tests that need "a comment on this project's
+    Audit- and trail-shaped tests that need "a comment on this project's
     item" use this, which lands the same comment row, audit row and event
     the native service path does — minus the write-back attempt, which those
     tests were never about.
