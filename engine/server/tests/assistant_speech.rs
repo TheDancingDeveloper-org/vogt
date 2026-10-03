@@ -95,12 +95,20 @@ async fn mock_audio_server() -> (String, MockLog) {
     (format!("http://{addr}"), log)
 }
 
-/// An address nothing listens on — bind to claim a free port, then drop it, so
-/// a connection is refused immediately (the "dead endpoint" case).
+/// An endpoint that never answers: every connection is dropped before a byte
+/// of response, so the request fails at once (the "dead endpoint" case).
+///
+/// The port stays bound for the test's lifetime. Releasing it instead — bind,
+/// read the port, drop — let a test running in parallel bind the same port for
+/// its live mock, and the "dead" entry then answered 200 (CI, 2026-10-03).
 async fn dead_url() -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    drop(listener);
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            drop(stream);
+        }
+    });
     format!("http://{addr}")
 }
 
