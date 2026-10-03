@@ -21,6 +21,13 @@ updates:
     directory: "/voice"
     schedule:
       interval: weekly
+    # ort and ort-sys are a matched pair pinned for piper-rs (voice/tts
+    # Cargo.toml). A lone bump of either does not build (ort-sys rc.13
+    # under ort rc.9 fails its own build script), so they move together,
+    # by hand, with the TTS stack.
+    ignore:
+      - dependency-name: ort
+      - dependency-name: ort-sys
   - package-ecosystem: docker
     directory: "/"
     schedule:
@@ -29,3 +36,9 @@ updates:
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      # init and analyze must run the same CodeQL bundle; split bumps fail
+      # the analyze job on whichever PR lands first.
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
