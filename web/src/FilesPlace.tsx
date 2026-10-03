@@ -11,6 +11,7 @@ interface Props {
   confirmAction: (title: string, body?: string) => Promise<boolean>;
   onCreatePresetHere?: (path: string) => void;
   onError: (message: string) => void;
+  onNotify?: (message: string) => void;
 }
 
 /**
@@ -34,7 +35,8 @@ const FilesPlace: Component<Props> = (props) => (
       )}
       honesty={(
         <p class="files-place-honesty">
-          Workspace files. Open a folder's ⋯ menu to upload into it.
+          Workspace files. + uploads or creates; right-click or long-press a
+          file or folder for its actions, including Copy path for an agent.
         </p>
       )}
     />
@@ -45,6 +47,7 @@ const FilesPlace: Component<Props> = (props) => (
         confirmAction={props.confirmAction}
         onCreatePresetHere={props.onCreatePresetHere}
         onError={props.onError}
+        onNotify={props.onNotify}
       />
     </div>
   </section>

@@ -3,6 +3,11 @@ import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "../api";
 import FileTree, { buildStatusMap, statusForPath } from "../FileTree";
+import { writeClipboardText } from "../clipboard";
+import { joinWorkspacePath, resetWorkspaceRootForTests } from "../workspaceRoot";
+import type { OperationalStatus } from "../api";
+
+vi.mock("../clipboard", () => ({ writeClipboardText: vi.fn(async () => undefined) }));
 
 vi.mock("../store", async () => {
   const actual = await vi.importActual<typeof import("../store")>("../store");
@@ -67,13 +72,15 @@ describe("FileTree", () => {
     expect(screen.getByLabelText("Expand source")).toHaveAttribute("aria-expanded", "false");
     expect(screen.queryByText("DIR", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByText("TSX", { exact: true })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "New file" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "New" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Refresh files" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "New folder" })).not.toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole("button", { name: "More file actions" }));
-    expect(screen.getByRole("button", { name: "New folder" })).toBeVisible();
+    // `+` holds every way to put something in the workspace, upload first.
+    await fireEvent.click(screen.getByRole("button", { name: "New" }));
     expect(screen.getByRole("button", { name: "Upload files" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "New file" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "New folder" })).toBeVisible();
 
     await fireEvent.click(screen.getByLabelText("Expand source"));
     expect(await screen.findByText("nested.tsx")).toBeVisible();
@@ -230,6 +237,9 @@ describe("FileTree", () => {
     );
     expect(fileOp).not.toHaveBeenCalled();
 
+    // Every action closes the picker (a phone's sheet must not sit over the
+    // dialog), so the second attempt reopens it.
+    await fireEvent.click(screen.getByLabelText("Actions for docs/notes.txt"));
     await fireEvent.click(screen.getByRole("button", { name: "Delete" }));
     await waitFor(() => expect(fileOp).toHaveBeenCalledWith({
       op: "delete",
@@ -239,5 +249,62 @@ describe("FileTree", () => {
     await waitFor(() =>
       expect(onError).toHaveBeenCalledWith("delete failed: disk is read-only"),
     );
+  });
+
+  describe("Copy path", () => {
+    const setup = (onNotify = vi.fn()) => {
+      resetWorkspaceRootForTests();
+      vi.mocked(writeClipboardText).mockClear();
+      vi.spyOn(api, "tree").mockResolvedValue([
+        { name: "notes.md", path: "docs/notes.md", is_dir: false },
+      ]);
+      vi.spyOn(api, "gitStatus").mockResolvedValue({
+        repo: "", is_repo: false, branch: "", ahead: 0, behind: 0, entries: [],
+      });
+      render(() => (
+        <Router>
+          <Route path="*" component={() => <FileTree alwaysExpanded onNotify={onNotify} />} />
+        </Router>
+      ));
+      return onNotify;
+    };
+
+    it("opens a row's actions on right-click or long-press, instead of the browser menu", async () => {
+      setup();
+      const row = (await screen.findByText("notes.md")).closest(".tree-row")!;
+      const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+      row.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(await screen.findByRole("button", { name: "Copy path" })).toBeVisible();
+    });
+
+    it("copies the absolute path on the engine host and says so", async () => {
+      vi.spyOn(api, "operationalStatus").mockResolvedValue({
+        storage: { state_dir: "/state", workspace_root: "/home/dev/Working/" },
+      } as OperationalStatus);
+      const onNotify = setup();
+      await fireEvent.click(await screen.findByLabelText("Actions for docs/notes.md"));
+      await fireEvent.click(screen.getByRole("button", { name: "Copy path" }));
+      await waitFor(() =>
+        expect(writeClipboardText).toHaveBeenCalledWith("/home/dev/Working/docs/notes.md"),
+      );
+      expect(onNotify).toHaveBeenCalledWith("Copied /home/dev/Working/docs/notes.md");
+      // The action closes the picker, so a phone's sheet does not linger.
+      expect(screen.queryByRole("button", { name: "Copy path" })).not.toBeInTheDocument();
+    });
+
+    it("falls back to the workspace-relative path when the root is unknown", async () => {
+      vi.spyOn(api, "operationalStatus").mockRejectedValue(new Error("offline"));
+      setup();
+      await fireEvent.click(await screen.findByLabelText("Actions for docs/notes.md"));
+      await fireEvent.click(screen.getByRole("button", { name: "Copy path" }));
+      await waitFor(() => expect(writeClipboardText).toHaveBeenCalledWith("docs/notes.md"));
+    });
+
+    it("joins a root and a tree path with exactly one separator", () => {
+      expect(joinWorkspacePath("/w/", "/a/b.txt")).toBe("/w/a/b.txt");
+      expect(joinWorkspacePath("/w", "a")).toBe("/w/a");
+      expect(joinWorkspacePath("/w/", "")).toBe("/w");
+    });
   });
 });

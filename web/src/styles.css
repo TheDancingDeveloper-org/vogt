@@ -3553,6 +3553,53 @@ textarea {
   font-size: 11px;
 }
 .tree-actions button.danger { color: var(--activity-errored); }
+/* Sheet-only parts: on a desk the actions are a block under the row, with no
+   title, backdrop or Cancel. */
+.tree-actions-backdrop,
+.tree-actions-title,
+.tree-actions-cancel { display: none; }
+.tree-row { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+/* On a phone the row's actions are a bottom sheet, the same pattern as the
+   More sheet: it no longer pushes the tree down, and the long path it acts on
+   is named at the top. */
+@media (max-width: 768px) {
+  .tree-actions-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 30;
+    background: rgba(0, 0, 0, 0.6);
+  }
+  .tree-actions {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: var(--keyboard-inset, 0px);
+    z-index: 31;
+    margin: 0;
+    gap: 4px;
+    max-height: min(85dvh, 720px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 12px max(16px, var(--safe-left)) calc(14px + var(--safe-bottom)) max(16px, var(--safe-right));
+    border-radius: 14px 14px 0 0;
+    background: var(--bg-elev);
+  }
+  .tree-actions-title {
+    display: block;
+    padding: 2px 4px 8px;
+    color: var(--fg-muted);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+  }
+  .tree-actions button {
+    min-height: 48px;
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: 15px;
+  }
+  .tree-actions-cancel { display: block; }
+}
 .tree-children { padding-left: 12px; }
 @media (pointer: coarse) {
   .tree-actions-toggle { opacity: 0.85; min-width: 44px; min-height: 44px; }
