@@ -175,7 +175,7 @@ jobs:
       # green and signs valid, and every container exits 255 in a restart
       # loop. A publish gate that only proves an image assembles proves the
       # wrong thing.
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: candidate
         with:
           context: .
@@ -211,7 +211,7 @@ jobs:
           fi
           echo "image runs, and still refuses to guess an address"
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: push
         with:
           context: .
@@ -290,7 +290,7 @@ jobs:
       # Built and run before it is pushed: a full local round trip through the
       # baked models, so a signed release cannot ship a sidecar that assembles
       # but cannot speak. Same reasoning as the core image's run gate.
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: candidate
         with:
           context: voice
@@ -330,7 +330,7 @@ jobs:
           echo "$transcript" | grep -qE '"text":"[^"]+"'
           echo "voice sidecar speaks and transcribes with the baked models"
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: push
         with:
           context: voice
@@ -434,7 +434,7 @@ jobs:
           flavor: |
             latest=auto
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: candidate
         with:
           # The repository root: the Dockerfile reaches for `web/dist`,
@@ -491,7 +491,7 @@ jobs:
           done
           echo "the release image carries the agent CLIs"
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: push
         with:
           context: .

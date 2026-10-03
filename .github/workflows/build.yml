@@ -176,7 +176,7 @@ jobs:
       # Built and run before it is pushed. v0.1.0 shipped an image whose
       # entrypoint did not exist and v0.1.1 one that imported no application;
       # both builds were green and both artefacts had never been started.
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: candidate
         with:
           context: .
@@ -210,7 +210,7 @@ jobs:
           fi
           echo "image runs, has git, and still refuses to guess an address"
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: push
         with:
           context: .
@@ -297,7 +297,7 @@ jobs:
       # a full local round trip — synthesise wav, feed it back, read a
       # transcript — so a broken model or a missing runtime library fails here
       # rather than as inert controls on a fresh install.
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: candidate
         with:
           context: voice
@@ -344,7 +344,7 @@ jobs:
           echo "$transcript" | grep -qE '"text":"[^"]+"' || { echo "STT returned an empty transcript" >&2; exit 1; }
           echo "voice sidecar speaks and transcribes with the baked models"
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: push
         with:
           context: voice
@@ -404,7 +404,7 @@ jobs:
           flavor: |
             latest=false
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: demo-candidate
         with:
           context: .
@@ -520,7 +520,7 @@ jobs:
             --severity CRITICAL,HIGH \
             "$CANDIDATE"
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: demo-push
         with:
           context: .
@@ -646,7 +646,7 @@ jobs:
           flavor: |
             latest=false
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: candidate
         with:
           # The repository root, not `engine/`: the Dockerfile reaches for
@@ -698,7 +698,7 @@ jobs:
           done
           echo "stack image carries the agent CLIs"
 
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
         id: push
         with:
           context: .
