@@ -19,6 +19,8 @@ import {
 } from "./api";
 import { openEditorTab, openTerminalTab } from "./tabs";
 import { createSession } from "./store";
+import { writeClipboardText } from "./clipboard";
+import { referencePath } from "./workspaceRoot";
 import { railSections, setRailSection } from "./railSections";
 import {
   expandedPaths,
@@ -45,6 +47,8 @@ interface Props {
   ) => Promise<string | null>;
   confirmAction?: (title: string, body?: string) => Promise<boolean>;
   onError?: (message: string) => void;
+  /** A confirmation worth a toast, such as a copied path. */
+  onNotify?: (message: string) => void;
   /** Outside the rail (the Files place) the tree is the whole surface: it
    *  ignores the rail's collapsed/expanded memory and shows no caret. */
   alwaysExpanded?: boolean;
@@ -60,6 +64,7 @@ interface NodeProps {
   onDuplicate: (node: TreeNode) => void;
   onDelete: (node: TreeNode) => void;
   onUploadHere: (path: string) => void;
+  onCopyPath: (node: TreeNode) => void;
   statusEntries: ReadonlyMap<string, FileStatus>;
 }
 
@@ -171,6 +176,13 @@ const TreeNodeView: Component<NodeProps> = (props) => {
     if (openPickerNode() === props.node.path) setOpenPickerNode(null);
   };
 
+  // Every action closes the picker first: a phone's bottom sheet left open
+  // would sit over the dialog the action opens.
+  const run = (action: () => void) => {
+    closeActions();
+    action();
+  };
+
   // Another node opened its picker: close ours. This is the single-open-at-a-time
   // rule, expressed once for the whole tree.
   createEffect(() => {
@@ -216,7 +228,18 @@ const TreeNodeView: Component<NodeProps> = (props) => {
 
   return (
     <div>
-      <div class="tree-row" title={props.node.path} ref={rowRef}>
+      <div
+        class="tree-row"
+        title={props.node.path}
+        ref={rowRef}
+        onContextMenu={(event) => {
+          // Right-click on a desk, long-press in the Android app (the WebView
+          // fires `contextmenu` for it): the row's own actions, not the
+          // browser's menu.
+          event.preventDefault();
+          openActions();
+        }}
+      >
         <button
           type="button"
           class="tree-main"
@@ -251,20 +274,27 @@ const TreeNodeView: Component<NodeProps> = (props) => {
         </button>
       </div>
       <Show when={actionsOpen()}>
+        {/* On a phone the actions are a bottom sheet over a backdrop rather
+            than a block that pushes the tree down; on a desk the backdrop is
+            not drawn and the block sits under its row. */}
+        <div class="tree-actions-backdrop" aria-hidden="true" onClick={closeActions} />
         <div class="tree-actions" aria-label={`Actions for ${props.node.path}`} ref={actionsRef}>
+          <div class="tree-actions-title" title={props.node.path}>{props.node.path}</div>
+          <button type="button" onClick={() => run(() => props.onCopyPath(props.node))}>Copy path</button>
           <Show when={props.node.is_dir}>
             <Show when={props.onCreatePresetHere}>
-              <button type="button" onClick={() => props.onCreatePresetHere?.(props.node.path)}>Create preset</button>
+              <button type="button" onClick={() => run(() => props.onCreatePresetHere?.(props.node.path))}>Create preset</button>
             </Show>
-            <button type="button" onClick={() => props.onUploadHere(props.node.path)}>Upload here</button>
-            <button type="button" onClick={() => props.onOpenTerminalHere(props.node.path)}>Open terminal</button>
+            <button type="button" onClick={() => run(() => props.onUploadHere(props.node.path))}>Upload here</button>
+            <button type="button" onClick={() => run(() => props.onOpenTerminalHere(props.node.path))}>Open terminal</button>
           </Show>
-          <button type="button" onClick={() => props.onRenameMove(props.node)}>Rename / move</button>
-          <button type="button" onClick={() => props.onDuplicate(props.node)}>Duplicate</button>
+          <button type="button" onClick={() => run(() => props.onRenameMove(props.node))}>Rename / move</button>
+          <button type="button" onClick={() => run(() => props.onDuplicate(props.node))}>Duplicate</button>
           <Show when={!props.node.is_dir}>
-            <button type="button" onClick={() => void api.downloadFile(props.node.path)}>Download</button>
+            <button type="button" onClick={() => run(() => void api.downloadFile(props.node.path))}>Download</button>
           </Show>
-          <button type="button" class="danger" onClick={() => props.onDelete(props.node)}>Delete</button>
+          <button type="button" class="danger" onClick={() => run(() => props.onDelete(props.node))}>Delete</button>
+          <button type="button" class="tree-actions-cancel" onClick={closeActions}>Cancel</button>
         </div>
       </Show>
       <Show when={open() && props.node.is_dir}>
@@ -291,6 +321,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
                 onDuplicate={props.onDuplicate}
                 onDelete={props.onDelete}
                 onUploadHere={props.onUploadHere}
+                onCopyPath={props.onCopyPath}
                 statusEntries={props.statusEntries}
               />
             )}
@@ -342,6 +373,18 @@ const FileTree: Component<Props> = (props) => {
   const reportError = (message: string) => {
     if (props.onError) props.onError(message);
     else console.error(message);
+  };
+
+  // A reference to hand an agent: the absolute path on the engine host, which
+  // is where agent sessions run, so they can open it as given.
+  const copyPath = async (path: string) => {
+    try {
+      const reference = await referencePath(path);
+      await writeClipboardText(reference);
+      props.onNotify?.(`Copied ${reference}`);
+    } catch (e) {
+      reportError(`copy path failed: ${(e as Error).message}`);
+    }
   };
 
   // A full manual refresh (the ↻ button): the root, Git markers, and every
@@ -574,9 +617,12 @@ const FileTree: Component<Props> = (props) => {
             <button
               type="button"
               class="file-tree-primary-action"
-              onClick={() => void newFile()}
-              title="New file"
-              aria-label="New file"
+              onClick={() => setMoreActionsOpen((open) => !open)}
+              title="Upload, new file or new folder"
+              aria-label="New"
+              aria-haspopup="true"
+              aria-expanded={moreActionsOpen()}
+              aria-controls={moreActionsId}
             >
               <span aria-hidden="true">+</span>
             </button>
@@ -589,30 +635,22 @@ const FileTree: Component<Props> = (props) => {
             >
               <span aria-hidden="true">↻</span>
             </button>
-            <button
-              type="button"
-              class="file-tree-more-toggle"
-              onClick={() => setMoreActionsOpen((open) => !open)}
-              title="More file actions"
-              aria-label="More file actions"
-              aria-expanded={moreActionsOpen()}
-              aria-controls={moreActionsId}
-            >
-              <span aria-hidden="true">⋯</span>
-            </button>
           </span>
         </h2>
         <Show when={moreActionsOpen()}>
           <div
             id={moreActionsId}
             class="file-tree-more-actions"
-            aria-label="More file actions"
+            aria-label="New"
           >
-            <button type="button" onClick={() => { setMoreActionsOpen(false); void newFolder(); }}>
-              New folder
-            </button>
             <button type="button" onClick={() => { setMoreActionsOpen(false); triggerUpload(""); }}>
               Upload files
+            </button>
+            <button type="button" onClick={() => { setMoreActionsOpen(false); void newFile(); }}>
+              New file
+            </button>
+            <button type="button" onClick={() => { setMoreActionsOpen(false); void newFolder(); }}>
+              New folder
             </button>
           </div>
         </Show>
@@ -647,6 +685,7 @@ const FileTree: Component<Props> = (props) => {
                   onDuplicate={(entry) => void duplicateNode(entry)}
                   onDelete={(entry) => void deleteNode(entry)}
                   onUploadHere={triggerUpload}
+                  onCopyPath={(entry) => void copyPath(entry.path)}
                   statusEntries={statusMap()}
                 />
               )}
@@ -669,6 +708,10 @@ const FileTree: Component<Props> = (props) => {
                   <button
                     class="tree-search-result"
                     onClick={() => openFile(file.path)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      void copyPath(file.path);
+                    }}
                     title={file.path}
                   >
                     <span class="tree-search-main">

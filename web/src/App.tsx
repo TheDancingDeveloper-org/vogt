@@ -1749,6 +1749,7 @@ const App: Component = () => {
             confirmAction={confirmUser}
             onCreatePresetHere={(path) => { void onCreate(path); }}
             onError={(message) => showToast(message, { kind: "error" })}
+            onNotify={(message) => showToast(message)}
           />
           <div class="places-rail-footer">
             <button type="button" onClick={openSettings}>Settings</button>
@@ -1917,6 +1918,7 @@ const App: Component = () => {
                 confirmAction={confirmUser}
                 onCreatePresetHere={(path) => { void onCreate(path); }}
                 onError={(msg) => showToast(msg, { kind: "error" })}
+                onNotify={(msg) => showToast(msg)}
               />
             </div>
           </Show>

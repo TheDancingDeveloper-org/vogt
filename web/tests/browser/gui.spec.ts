@@ -2325,14 +2325,15 @@ test("Files rail keeps its hierarchy compact and exposes real modified-file stat
   await expect(search).toBeVisible();
   await expect(page.getByLabel("Modified file")).toHaveText("M");
   await expect(page.getByText("TSX", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Refresh files" })).toBeVisible();
   await expect(page.getByRole("button", { name: "New folder" })).toHaveCount(0);
 
-  await page.getByRole("button", { name: "More file actions" }).click();
-  await expect(page.getByRole("button", { name: "New folder" })).toBeVisible();
+  await page.getByRole("button", { name: "New", exact: true }).click();
   await expect(page.getByRole("button", { name: "Upload files" })).toBeVisible();
-  await page.getByRole("button", { name: "More file actions" }).click();
+  await expect(page.getByRole("button", { name: "New file" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "New folder" })).toBeVisible();
+  await page.getByRole("button", { name: "New", exact: true }).click();
 
   await page.getByRole("button", { name: "Expand src" }).click();
   await expect(page.getByText("nested-component.tsx")).toBeVisible();
@@ -2469,10 +2470,11 @@ test("Phone editor keeps the compact Files hierarchy and progressive controls us
     await fileTree.getByRole("button", { name: "Files", exact: true }).tap();
   }
   await expect(fileTree.getByRole("searchbox", { name: "Search files" })).toBeVisible();
-  await expect(fileTree.getByRole("button", { name: "New file" })).toBeVisible();
-  await fileTree.getByRole("button", { name: "More file actions" }).tap();
-  await expect(fileTree.getByRole("button", { name: "New folder" })).toBeVisible();
+  await expect(fileTree.getByRole("button", { name: "New", exact: true })).toBeVisible();
+  await fileTree.getByRole("button", { name: "New", exact: true }).tap();
   await expect(fileTree.getByRole("button", { name: "Upload files" })).toBeVisible();
+  await expect(fileTree.getByRole("button", { name: "New file" })).toBeVisible();
+  await expect(fileTree.getByRole("button", { name: "New folder" })).toBeVisible();
 });
 
 test("Phone editor gives the editor the width and floats Files as an overlay drawer", async ({ page }) => {
@@ -2600,8 +2602,8 @@ for (const height of [700, 900]) {
     await expect(row).toBeInViewport();
     await page.getByRole("link", { name: "Board" }).focus();
     await expect(page.getByRole("link", { name: "Board" })).toBeInViewport();
-    await page.getByRole("button", { name: "New file" }).focus();
-    await expect(page.getByRole("button", { name: "New file" })).toBeInViewport();
+    await page.getByRole("button", { name: "New", exact: true }).focus();
+    await expect(page.getByRole("button", { name: "New", exact: true })).toBeInViewport();
     const fileHeight = await page.locator(".file-tree").evaluate((element) =>
       element.getBoundingClientRect().height,
     );

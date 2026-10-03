@@ -114,6 +114,7 @@ const EditorWorkspace: Component<Props> = (props) => {
               promptPath={props.promptPath}
               confirmAction={props.confirmAction}
               onError={(message) => props.onNotify?.(message, "error")}
+              onNotify={(message) => props.onNotify?.(message, "info")}
             />
           </div>
         </aside>
