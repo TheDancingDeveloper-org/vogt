@@ -26,6 +26,9 @@ interface Props {
   path: string;
 }
 
+/** How long typing must pause before the draft is captured. */
+const DRAFT_CAPTURE_DELAY_MS = 300;
+
 const Editor: Component<Props> = (props) => {
   let host: HTMLDivElement | undefined;
   let editor: StandaloneEditor | null = null;
@@ -58,6 +61,7 @@ const Editor: Component<Props> = (props) => {
   let diskMtime: number | undefined;
   let disposed = false;
   let contentChangeDisposable: { dispose: () => void } | null = null;
+  let draftTimer: ReturnType<typeof setTimeout> | undefined;
   let unregisterEditor: () => void = () => undefined;
 
   const isDirty = () => {
@@ -196,7 +200,11 @@ const Editor: Component<Props> = (props) => {
       editor = createdEditor;
       if (remembered?.viewState) createdEditor.restoreViewState(remembered.viewState);
       setEditorDirty(props.tabId, initialContent !== savedContent);
-      contentChangeDisposable = createdEditor.onDidChangeModelContent(() => {
+      // Materialising the document is O(size), so a keystroke does only the
+      // O(1) length check — a length change is certainly dirty — and the exact
+      // comparison and the draft capture wait until typing pauses (#538).
+      const captureDraft = () => {
+        draftTimer = undefined;
         if (!editor) return;
         const content = editor.getValue();
         if (content === savedContent) {
@@ -211,6 +219,14 @@ const Editor: Component<Props> = (props) => {
           });
         }
         setEditorDirty(props.tabId, content !== savedContent);
+      };
+      contentChangeDisposable = createdEditor.onDidChangeModelContent(() => {
+        if (!model) return;
+        if (model.getValueLength() !== savedContent.length) {
+          setEditorDirty(props.tabId, true);
+        }
+        clearTimeout(draftTimer);
+        draftTimer = setTimeout(captureDraft, DRAFT_CAPTURE_DELAY_MS);
       });
       createdEditor.addCommand(
         monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
@@ -234,6 +250,7 @@ const Editor: Component<Props> = (props) => {
 
   onCleanup(() => {
     disposed = true;
+    clearTimeout(draftTimer);
     if (editor) {
       rememberEditorDraft(props.tabId, {
         path: props.path,

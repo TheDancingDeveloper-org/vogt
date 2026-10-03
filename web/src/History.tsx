@@ -528,15 +528,20 @@ const History: Component<Props> = (props) => {
       return haystack.includes(metadataNeedle);
     });
 
+    // Parse each timestamp once, not O(n log n) times inside the comparator.
+    const createdAt = new Map(
+      filtered.map((session) => [session.id, Date.parse(session.created_at)]),
+    );
+    const mode = sortMode();
     filtered.sort((a, b) => {
       const pinDelta = Number(pinned.has(b.id)) - Number(pinned.has(a.id));
       if (pinDelta !== 0) return pinDelta;
-      if (sortMode() === "largest") {
+      if (mode === "largest") {
         return b.scrollback_bytes - a.scrollback_bytes;
       }
-      const aTs = Date.parse(a.created_at);
-      const bTs = Date.parse(b.created_at);
-      return sortMode() === "oldest" ? aTs - bTs : bTs - aTs;
+      const aTs = createdAt.get(a.id)!;
+      const bTs = createdAt.get(b.id)!;
+      return mode === "oldest" ? aTs - bTs : bTs - aTs;
     });
     return filtered;
   });
