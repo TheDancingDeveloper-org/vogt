@@ -1435,6 +1435,20 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def update_initiative(self, initiative: Initiative) -> None:
+        self._conn.execute(
+            "UPDATE initiatives SET title = ?, body = ?, state = ?, weight = ?, "
+            "updated_at = ? WHERE id = ?",
+            (
+                initiative.title,
+                initiative.body,
+                initiative.state,
+                initiative.weight,
+                to_iso(initiative.updated_at),
+                initiative.id,
+            ),
+        )
+
     def insert_comment(self, comment: Comment) -> None:
         self._conn.execute(
             "INSERT INTO comments (id, work_item_id, actor_id, body, created_at) "

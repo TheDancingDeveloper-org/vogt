@@ -291,6 +291,11 @@ people who only have the forge open, `initiative_publish` creates — or, on a
 later run, re-adopts — **one tracking issue per forge-linked project** the
 initiative spans, carrying a checkbox list of its member work items.
 
+`initiative_update` corrects an initiative's title, body or weight, or closes
+and reopens it (`state`). The slug never changes — it is the tracking issues'
+`initiative:<slug>` label — and a title or body edit re-renders any tracking
+issue already published.
+
 ```console
 $ uv run vogt initiative publish --slug platform-epic --reason "make the epic visible on the forge"
 ```

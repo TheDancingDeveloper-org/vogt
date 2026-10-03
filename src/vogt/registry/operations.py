@@ -165,6 +165,7 @@ from vogt.application.models import (
     TransitionProjectParams,
     TransitionWorkParams,
     UnrelateWorkParams,
+    UpdateInitiativeParams,
     UpdateProjectParams,
     UpdateWorkParams,
     UserListParams,
@@ -536,6 +537,18 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.list_initiatives,
             route=HttpRoute("GET", "/initiatives"),
             cli=CliBinding(("initiative", "list")),
+        ),
+        Operation(
+            name="initiative.update",
+            summary="Correct an initiative's title, body or weight, or close or "
+            "reopen it.",
+            scope="work.write",
+            mutating=True,
+            params_model=UpdateInitiativeParams,
+            result_model=InitiativeResult,
+            handler=services.update_initiative,
+            route=HttpRoute("POST", "/initiatives/update"),
+            cli=CliBinding(("initiative", "update")),
         ),
         # Project an initiative onto a forge tracking issue per linked repo
         #: additive, forward-only, and never a close. The scope is

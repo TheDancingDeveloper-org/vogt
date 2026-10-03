@@ -107,6 +107,7 @@ from vogt.application.services.taxonomy import (
     list_initiatives,
     list_labels,
     list_workflows,
+    update_initiative,
 )
 from vogt.application.services.views import backlog, bugs, why
 from vogt.application.services.work import (
@@ -222,6 +223,7 @@ __all__ = [
     "transition_work",
     "unlink_forge_account",
     "unrelate_work",
+    "update_initiative",
     "update_project",
     "update_work",
     "whoami",

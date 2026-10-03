@@ -32,6 +32,7 @@ from vogt.application.models import (
     RegisterProjectParams,
     SetWriteBackParams,
     SweepParams,
+    UpdateInitiativeParams,
     UpdateWorkParams,
 )
 from vogt.application.services import (
@@ -44,10 +45,12 @@ from vogt.application.services import (
     register_project,
     set_write_back,
     sweep,
+    update_initiative,
     update_work,
 )
 from vogt.core.drift import INITIATIVE_CHECKBOX_DRIFT, INITIATIVE_TRACKING_CLOSE
 from vogt.core.initiative_projection import MANAGED_END, MANAGED_START, marker_for
+from vogt.errors import InvalidRequest, NotFound
 
 from tests.conftest import TEST_PRINCIPAL, SequentialIds, StepClock
 
@@ -431,3 +434,77 @@ def test_nothing_the_projection_does_is_destructive(
     # and no PUT replace anywhere.
     assert methods <= {"POST", "PATCH"}
     assert not any(m == "DELETE" for m, _ in forge.requests)
+
+
+# -- initiative.update (#770): correct, close and reopen -------------------
+
+
+def test_update_corrects_title_body_and_weight_and_keeps_the_slug(
+    ctx: AppContext,
+) -> None:
+    result = update_initiative(
+        ctx,
+        UpdateInitiativeParams(
+            slug="platform-epic",
+            title="Platform rebuild",
+            body="Corrected scope.",
+            weight=60,
+            reason=WHY,
+        ),
+    )
+    updated = result.initiative
+    assert updated.slug == "platform-epic", "the slug is the tracking label"
+    assert (updated.title, updated.body, updated.weight) == (
+        "Platform rebuild",
+        "Corrected scope.",
+        60,
+    )
+    assert updated.state == "open", "an unset field keeps its value"
+    with ctx.declared.read() as view:
+        stored = view.initiative_by_slug("platform-epic")
+    assert stored == updated
+
+
+def test_a_body_edit_re_renders_an_already_published_tracking_issue(
+    ctx: AppContext, forge: TrackingForge
+) -> None:
+    publish_initiative(ctx, PublishInitiativeParams(slug="platform-epic", reason=WHY))
+    update_initiative(
+        ctx,
+        UpdateInitiativeParams(slug="platform-epic", body="New scope.", reason=WHY),
+    )
+    body = forge.tracking_issue("acme/demo", "platform-epic")["body"]
+    assert "New scope." in body
+    assert "The platform." not in body
+    assert "- [ ] #1 First" in body
+
+
+def test_closing_writes_nothing_upstream_until_publish_proposes_it(
+    ctx: AppContext, forge: TrackingForge
+) -> None:
+    publish_initiative(ctx, PublishInitiativeParams(slug="platform-epic", reason=WHY))
+    sent = len(forge.requests)
+    closed = update_initiative(
+        ctx, UpdateInitiativeParams(slug="platform-epic", state="closed", reason=WHY)
+    )
+    assert closed.initiative.state == "closed"
+    assert len(forge.requests) == sent, "a state change alone sends nothing"
+
+    publish_initiative(ctx, PublishInitiativeParams(slug="platform-epic", reason=WHY))
+    with ctx.declared.read() as view:
+        proposals = view.list_drift(status="open", kind=INITIATIVE_TRACKING_CLOSE)
+    assert len(proposals) == 1
+
+    reopened = update_initiative(
+        ctx, UpdateInitiativeParams(slug="platform-epic", state="open", reason=WHY)
+    )
+    assert reopened.initiative.state == "open"
+
+
+def test_update_refuses_an_empty_change_and_an_unknown_slug(ctx: AppContext) -> None:
+    with pytest.raises(InvalidRequest):
+        update_initiative(ctx, UpdateInitiativeParams(slug="platform-epic", reason=WHY))
+    with pytest.raises(NotFound):
+        update_initiative(
+            ctx, UpdateInitiativeParams(slug="nope", weight=10, reason=WHY)
+        )

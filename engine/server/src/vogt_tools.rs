@@ -104,6 +104,7 @@ pub const CURATED_WRITES: &[&str] = &[
     "work.bind_branch",
     "label.create",
     "initiative.create",
+    "initiative.update",
     "initiative.publish",
     "sweep",
     "suppress",

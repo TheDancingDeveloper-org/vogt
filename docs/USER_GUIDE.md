@@ -1042,6 +1042,14 @@ work items.
 $ uv run vogt initiative publish --slug platform-epic --reason "make the epic visible"
 ```
 
+To correct an initiative later, or to close it, use `initiative update`. The
+slug stays as it was, because the tracking issues are labelled with it:
+
+```console
+$ uv run vogt initiative update --slug platform-epic --body "Narrowed scope" --reason "scope changed"
+$ uv run vogt initiative update --slug platform-epic --state closed --reason "shipped"
+```
+
 The tracking issue is labelled `initiative:<slug>` and its body looks like this,
 one line per member — `- [ ] #<issue> <title>`, checked when the member is done
 or won't-do:
