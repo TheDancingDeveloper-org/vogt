@@ -21,7 +21,7 @@ piper-rs = "=0.1.2"
 # releases moved to edition 2024.
 home = "=0.5.12"
 half = "=2.7.1"
-rustls-pki-types = "=1.12.0"
+rustls-pki-types = "=1.15.1"
 zeroize = "=1.9.0"
 # Version floors that steer the shared voice/Cargo.lock past the vulnerable
 # transitive crates: ureq >=2.12 pulls rustls-webpki >=0.103.13
