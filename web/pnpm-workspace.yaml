@@ -1,6 +1,8 @@
 overrides:
   '@babel/core': 7.29.7
-  dompurify: 3.4.14
+  # GHSA-p98j-92pf-mc4p: `monaco-editor` pins dompurify 3.4.8 transitively;
+  # 3.4.13–3.4.15 leave detached-subtree handlers armed. Patched in 3.4.16.
+  dompurify: '>=3.4.16'
   # GHSA-c83g-rgw3-j3cx and GHSA-73wf-gq98-2v4g: prototype write and uncaught
   # crash via untrusted `browserslist-stats.json`. Reached only transitively —
   # `vite-plugin-solid` -> `@babel/core` -> `@babel/helper-compilation-targets`
