@@ -9,7 +9,7 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use piper_rs::from_config_path;
-use piper_rs::synth::{AudioOutputConfig, SonataSpeechSynthesizer};
+use piper_rs::synth::{AudioOutputConfig, PiperSpeechSynthesizer};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, process::Command};
@@ -47,7 +47,7 @@ pub enum SpeechError {
 /// until an explicit, bounded encoder is added; requests for another format
 /// are rejected rather than mislabeled.
 pub struct PiperSynthesizer {
-    synthesizer: Arc<SonataSpeechSynthesizer>,
+    synthesizer: Arc<PiperSpeechSynthesizer>,
     model_id: String,
 }
 
@@ -73,7 +73,7 @@ impl PiperSynthesizer {
         }
         let model = from_config_path(Path::new(&config_path))
             .map_err(|error| SpeechError::Provider(format!("load Piper model: {error}")))?;
-        let synthesizer = SonataSpeechSynthesizer::new(model)
+        let synthesizer = PiperSpeechSynthesizer::new(model)
             .map_err(|error| SpeechError::Provider(format!("create Piper synthesizer: {error}")))?;
         Ok(Self {
             synthesizer: Arc::new(synthesizer),
