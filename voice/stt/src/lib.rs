@@ -15,15 +15,14 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use opus::{Channels as OpusChannels, Decoder as OpusDecoder};
 use symphonia::core::{
-    audio::{AudioBufferRef, SampleBuffer},
-    codecs::DecoderOptions,
-    codecs::CODEC_TYPE_OPUS,
+    audio::GenericAudioBufferRef,
+    codecs::audio::{well_known::CODEC_ID_OPUS, AudioDecoderOptions},
+    codecs::CodecParameters,
     errors::Error as SymphoniaError,
-    formats::FormatOptions,
-    formats::FormatReader,
+    formats::probe::Hint,
+    formats::{FormatOptions, FormatReader, TrackType},
     io::{MediaSourceStream, MediaSourceStreamOptions},
     meta::MetadataOptions,
-    probe::Hint,
 };
 use symphonia::default::{get_codecs, get_probe};
 use thiserror::Error;
@@ -317,31 +316,31 @@ fn decode_container_mono_16khz(
     let source = Cursor::new(audio.to_vec());
     let media_source =
         MediaSourceStream::new(Box::new(source), MediaSourceStreamOptions::default());
-    let format_options = FormatOptions {
-        enable_gapless: true,
-        ..FormatOptions::default()
-    };
-    let probed = get_probe()
-        .format(
+    // Gapless trimming is no longer a container option: the readers always
+    // report each packet's trim, and audio decoders apply it by default.
+    let mut format = get_probe()
+        .probe(
             &hint,
             media_source,
-            &format_options,
-            &MetadataOptions::default(),
+            FormatOptions::default(),
+            MetadataOptions::default(),
         )
         .map_err(|error| format_decode_error("probe audio container", error))?;
-    let mut format = probed.format;
     let track = format
-        .default_track()
+        .default_track(TrackType::Audio)
         .ok_or_else(|| TranscriptionError::Provider("audio has no default track".into()))?;
     let track_id = track.id;
-    let sample_rate = track
-        .codec_params
+    let Some(CodecParameters::Audio(params)) = track.codec_params.clone() else {
+        return Err(TranscriptionError::Provider(
+            "audio track has no audio codec parameters".into(),
+        ));
+    };
+    let sample_rate = params
         .sample_rate
         .ok_or_else(|| TranscriptionError::Provider("audio has no sample rate".into()))?;
-    let codec = track.codec_params.codec;
-    let channels = track
-        .codec_params
+    let channels = params
         .channels
+        .as_ref()
         .map(|channels| channels.count())
         .ok_or_else(|| TranscriptionError::Provider("audio has no channel layout".into()))?;
     if channels == 0 || channels > 2 {
@@ -349,17 +348,18 @@ fn decode_container_mono_16khz(
             "audio must contain one or two channels".into(),
         ));
     }
-    if codec == CODEC_TYPE_OPUS {
+    if params.codec == CODEC_ID_OPUS {
         return decode_opus_container(format.as_mut(), track_id, channels);
     }
     let mut decoder = get_codecs()
-        .make(&track.codec_params, &DecoderOptions::default())
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
         .map_err(|error| format_decode_error("create audio decoder", error))?;
     let mut mono = Vec::new();
     loop {
         let packet = match format.next_packet() {
-            Ok(packet) if packet.track_id() == track_id => packet,
-            Ok(_) => continue,
+            Ok(Some(packet)) if packet.track_id == track_id => packet,
+            Ok(Some(_)) => continue,
+            Ok(None) => break,
             Err(SymphoniaError::ResetRequired) => {
                 return Err(TranscriptionError::Provider(
                     "audio decoder requires a reset".into(),
@@ -403,8 +403,9 @@ fn decode_opus_container(
     let mut mono = Vec::new();
     loop {
         let packet = match format.next_packet() {
-            Ok(packet) if packet.track_id() == track_id => packet,
-            Ok(_) => continue,
+            Ok(Some(packet)) if packet.track_id == track_id => packet,
+            Ok(Some(_)) => continue,
+            Ok(None) => break,
             Err(SymphoniaError::ResetRequired) => {
                 return Err(TranscriptionError::Provider(
                     "audio decoder requires a reset".into(),
@@ -423,8 +424,8 @@ fn decode_opus_container(
             .map_err(|error| {
                 TranscriptionError::Provider(format!("decode Opus packet: {error}"))
             })?;
-        let start = usize::try_from(packet.trim_start).unwrap_or(usize::MAX);
-        let end_trim = usize::try_from(packet.trim_end).unwrap_or(usize::MAX);
+        let start = usize::try_from(packet.trim_start.get()).unwrap_or(usize::MAX);
+        let end_trim = usize::try_from(packet.trim_end.get()).unwrap_or(usize::MAX);
         if start.saturating_add(end_trim) >= frame_samples {
             continue;
         }
@@ -441,17 +442,15 @@ fn decode_opus_container(
     Ok(resample_linear(&mono, 48_000, 16_000))
 }
 
-fn append_mono(output: &mut Vec<f32>, audio: AudioBufferRef<'_>) {
-    let spec = *audio.spec();
-    let channels = spec.channels.count();
+fn append_mono(output: &mut Vec<f32>, audio: GenericAudioBufferRef<'_>) {
+    let channels = audio.spec().channels().count();
     if channels == 0 {
         return;
     }
-    let mut samples = SampleBuffer::<f32>::new(audio.capacity() as u64, spec);
-    samples.copy_interleaved_ref(audio);
+    let mut samples = Vec::<f32>::new();
+    audio.copy_to_vec_interleaved(&mut samples);
     output.extend(
         samples
-            .samples()
             .chunks(channels)
             .map(|frame| frame.iter().copied().sum::<f32>() / channels as f32),
     );
@@ -698,6 +697,37 @@ mod tests {
         assert_eq!(samples.len(), 2);
         assert!(samples[0].abs() < 0.0001);
         assert!((samples[1] - 0.5).abs() < 0.0001);
+    }
+
+    // 0.2 s of a 440 Hz test tone (gst-launch-1.0 audiotestsrc num-buffers=10),
+    // in the containers browsers' MediaRecorder emits plus Ogg/Vorbis. Each
+    // decodes to roughly 3,500 samples at 16 kHz; a sine of amplitude 0.8 has
+    // an RMS near 0.57, so a near-silent result means a broken decode.
+    #[test]
+    fn native_decoder_reads_webm_and_ogg_containers() {
+        for (name, audio) in [
+            (
+                "speech.webm",
+                &include_bytes!("../tests/fixtures/sine-mono-opus.webm")[..],
+            ),
+            (
+                "speech.ogg",
+                &include_bytes!("../tests/fixtures/sine-stereo-opus.ogg")[..],
+            ),
+            (
+                "speech.ogg",
+                &include_bytes!("../tests/fixtures/sine-mono-vorbis.ogg")[..],
+            ),
+        ] {
+            let samples = decode_audio_mono_16khz(audio, name).unwrap();
+            assert!(
+                (3_300..=3_800).contains(&samples.len()),
+                "{name}: {} samples",
+                samples.len()
+            );
+            let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+            assert!(rms > 0.4, "{name}: rms {rms}");
+        }
     }
 
     #[test]
