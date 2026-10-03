@@ -12,9 +12,12 @@ The write plane has two shapes, split by the project's persisted link state
   assignee, initiative, vogt-only workflow states — touch the `work_overlay`
   row and produce **zero** provider calls (decision 2).
 - **No project** — native declared items, exactly as before.
-- **Unlinked project** — the write verbs refuse with `NotLinked` (decision
-  10): link the project or publish it. Native items that already
-  exist there stay readable; the surface withdrawal is the ranked views'.
+- **Unlinked project** — the verbs that would *reach the forge* refuse with
+  `NotLinked` (decision 10): an upstreamed `work.create` and label writes,
+  which are shared vocabulary with the forge. Link the project or publish
+  it. A native item there (`work.create` with `local_only`) is a local
+  record: edits, comments and transitions land locally, so an item that
+  could be created can also be discussed and closed (#770).
 """
 
 from __future__ import annotations
@@ -826,8 +829,8 @@ def transition_work(ctx: AppContext, params: TransitionWorkParams) -> WorkResult
     if not native:
         assert project is not None  # an upstream item always has its project
         return _transition_upstream(ctx, params, item, project)
-    if project is not None and not upstream.is_linked(project):
-        raise _refuse_unlinked(project, "work.transition")
+    # A native item is a local record even on an unlinked project: the
+    # transition lands locally and its write-back records `skipped` (#770).
     return _transition_native(ctx, params)
 
 
@@ -1141,8 +1144,8 @@ def comment_work(ctx: AppContext, params: CommentParams) -> CommentResult:
     if not native:
         assert project is not None  # an upstream item always has its project
         return _comment_upstream(ctx, params, item, project)
-    if project is not None and not upstream.is_linked(project):
-        raise _refuse_unlinked(project, "work.comment")
+    # As with transitions, a native item's comment is local whatever the
+    # project's link state; there is no upstream thread to post to (#770).
     return _comment_native(ctx, params)
 
 

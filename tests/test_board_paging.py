@@ -41,9 +41,8 @@ def test_cells_page_independently_with_exact_totals(instance: AppContext) -> Non
         native_work_item(
             instance, kind="feature", title=f"open {index}", project="alpha"
         )
-    # Straight to `in_progress`: `work.transition` refuses on an unlinked
-    # project, and what this test pages is the Board SQL, not the
-    # state machine.
+    # Straight to `in_progress`: what this test pages is the Board SQL,
+    # not the state machine.
     moving = native_work_item(
         instance,
         kind="feature",

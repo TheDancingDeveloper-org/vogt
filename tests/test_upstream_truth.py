@@ -388,17 +388,10 @@ def test_create_on_an_unlinked_project_is_the_typed_refusal(
     )
 
 
-def test_the_other_write_verbs_refuse_on_an_unlinked_project(
+def test_label_writes_refuse_on_an_unlinked_project(
     linked: AppContext,
 ) -> None:
     item = native_work_item(linked, kind="bug", title="Stuck", project="folder")
-    with pytest.raises(NotLinked):
-        comment_work(linked, CommentParams(ref=item.ref, body="hi", reason=WHY))
-    with pytest.raises(NotLinked):
-        transition_work(
-            linked,
-            TransitionWorkParams(ref=item.ref, to_state="in_progress", reason=WHY),
-        )
     create_label(linked, CreateLabelParams(name="tag", reason=WHY))
     with pytest.raises(NotLinked):
         update_work(
@@ -410,6 +403,32 @@ def test_the_other_write_verbs_refuse_on_an_unlinked_project(
         linked, UpdateWorkParams(ref=item.ref, priority="p0", reason=WHY)
     )
     assert updated.item.priority == "p0"
+
+
+def test_a_local_only_item_on_an_unlinked_project_comments_and_closes(
+    linked: AppContext, forge: RecordingForge
+) -> None:
+    """#770: what `local_only` can create, it can also discuss and close."""
+    item = create_work(
+        linked,
+        CreateWorkParams(
+            kind="bug", title="Decide", project="folder", local_only=True, reason=WHY
+        ),
+    ).item
+    commented = comment_work(
+        linked, CommentParams(ref=item.ref, body="decided", reason=WHY)
+    )
+    assert commented.write_back == "skipped"
+    for state in ("in_progress", "review", "done"):
+        moved = transition_work(
+            linked, TransitionWorkParams(ref=item.ref, to_state=state, reason=WHY)
+        )
+        assert moved.item.state == state
+    reopened = transition_work(
+        linked, TransitionWorkParams(ref=item.ref, to_state="open", reason=WHY)
+    )
+    assert reopened.item.state == "open"
+    assert forge.mutations == [], "nothing reached the forge"
 
 
 def test_projectless_items_are_untouched_by_the_refusal(
