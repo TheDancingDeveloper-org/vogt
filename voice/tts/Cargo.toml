@@ -15,7 +15,7 @@ ort = "=2.0.0-rc.9"
 # piper-rs's ort dependency is a caret requirement; constrain the transitive
 # sys crate too, otherwise Cargo may unify it with a newer incompatible rc.
 ort-sys = "=2.0.0-rc.9"
-piper-rs = "=0.1.2"
+piper-rs = "=0.1.9"
 # Keep the legacy inference stack buildable with the workspace's Rust 1.80
 # MSRV. These are transitive build dependencies of ort-sys/bindgen; newer
 # releases moved to edition 2024.
