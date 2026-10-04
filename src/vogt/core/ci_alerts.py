@@ -37,6 +37,13 @@ PULL_REQUEST_EVENTS: frozenset[str] = frozenset(
     {"pull_request", "pull_request_target", "merge_group"}
 )
 
+#: Runs GitHub starts from its own managed ("dynamic") workflows: Dependabot
+#: updates, CodeQL default setup and similar. They are not the repository's
+#: CI, they land on the default branch, and Dependabot's fail routinely when
+#: an update can't be resolved, so alerting on them floods the Inbox with
+#: "Update #N failed on main" noise.
+GITHUB_MANAGED_EVENTS: frozenset[str] = frozenset({"dynamic"})
+
 #: Conclusions that are a failure worth an alert.
 FAILING_CONCLUSIONS: frozenset[str] = frozenset(
     {"failure", "timed_out", "startup_failure", "action_required", "error"}
@@ -104,14 +111,17 @@ def watched_ref(
 ) -> WatchedRef | None:
     """The lane a run belongs to, or `None` when it is not watched.
 
-    A run with no ref, or one a pull request started, is never watched. A
+    A run with no ref, one a pull request started, or one from a
+    GitHub-managed dynamic workflow (Dependabot updates) is never watched. A
     ref matching a branch pattern is a branch even if a tag pattern would also
     match it — a branch and a tag of the same name are vanishingly rare, and
     the branch lane is the stricter of the two.
     """
     if not isinstance(branch, str) or not branch:
         return None
-    if isinstance(event, str) and event in PULL_REQUEST_EVENTS:
+    if isinstance(event, str) and (
+        event in PULL_REQUEST_EVENTS or event in GITHUB_MANAGED_EVENTS
+    ):
         return None
     for pattern in branches:
         if fnmatchcase(branch, pattern):
