@@ -126,6 +126,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         brief=_brief_with_task(subject.brief, params.task),
         model=params.model,
         effort=params.effort,
+        resume=params.resume,
     )
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
@@ -202,6 +203,11 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 "scratch": subject.is_scratch,
                 "model": params.model,
                 "effort": params.effort,
+                # The agent conversation this session continues, when it was
+                # asked to. Recorded on the audit row rather than the session:
+                # it is what the session was *asked* to resume, the same
+                # standing as `model`.
+                "resume": params.resume,
             },
         )
 
@@ -791,6 +797,7 @@ def _start_on_engine(
     brief: str,
     model: str | None = None,
     effort: str | None = None,
+    resume: str | None = None,
 ) -> EngineSession:
     return engine.create_session(
         prompt=brief,
@@ -811,6 +818,7 @@ def _start_on_engine(
         # how to ask for it, and refuses by name when it cannot.
         model=model,
         effort=effort,
+        resume=resume,
     )
 
 
