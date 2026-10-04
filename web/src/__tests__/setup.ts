@@ -7,7 +7,7 @@
 
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach } from "vitest";
-import { cleanup } from "@solidjs/testing-library";
+import { cleanup, configure } from "@solidjs/testing-library";
 import { clearEditorDrafts } from "../editorDrafts";
 import { clearToolDrafts } from "../toolDrafts";
 import { clearPendingAction } from "../pendingAction";
@@ -17,6 +17,18 @@ import { invalidate } from "../swr";
 import { clearTaxonomyCache } from "../taxonomyCache";
 import { resetAccountPreferences } from "../accountPrefs";
 import { invalidateAssistantSnapshot } from "../assistantCache";
+
+// waitFor/findBy default to 1 s. A loaded CI runner can take longer to load
+// a lazily imported surface (shell.test "opens it for the same link when a
+// key is configured" timed out at 1048 ms on PR #816), the same slow-runner
+// class vitest.config.ts already gives headroom for. Local runs keep the
+// fast default so a real hang still surfaces quickly.
+// The PWA's tsconfig carries no Node types, so read CI through globalThis.
+const onCi = Boolean(
+  (globalThis as { process?: { env?: Record<string, string | undefined> } })
+    .process?.env?.CI,
+);
+configure({ asyncUtilTimeout: onCi ? 10_000 : 1_000 });
 
 class StubResizeObserver implements ResizeObserver {
   observe(): void {}
