@@ -85,6 +85,44 @@ if [[ -x /usr/local/bin/vogt-verify-agent-clis ]]; then
     /usr/local/bin/vogt-verify-agent-clis
 fi
 
+# Claude Code's "Teach auto mode about your environment?" dialog. Sessions
+# here are often driven by another agent over the engine's input API, and a
+# modal that waits for an answer reads to that driver as a hung session. Unlike
+# prompt suggestions and the feedback survey (switched off per session by the
+# engine, `engine/server/src/agent_cli.rs`), it has no environment variable:
+# its only off switch is the `autoModeEnvSetup.dismissed` flag that answering
+# "Don't show again" writes to Claude Code's global config. Set it once here,
+# before any session can run Claude Code and race this write. Best effort —
+# a config this cannot parse is left exactly as it was. Opt out with
+# ENGINE_AGENT_QUIET_ONBOARDING=0.
+if [[ "${ENGINE_AGENT_QUIET_ONBOARDING:-1}" != "0" ]] && command -v python3 >/dev/null 2>&1; then
+    python3 - "${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json" <<'PY' || echo "agent-onboarding: could not update Claude Code's global config; continuing" >&2
+import json, os, sys, tempfile
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        config = json.load(fh)
+except FileNotFoundError:
+    config = {}
+if not isinstance(config, dict):
+    sys.exit(0)
+setup = config.get("autoModeEnvSetup")
+setup = dict(setup) if isinstance(setup, dict) else {}
+if setup.get("dismissed") is True:
+    sys.exit(0)
+setup["dismissed"] = True
+config["autoModeEnvSetup"] = setup
+directory = os.path.dirname(os.path.abspath(path))
+os.makedirs(directory, exist_ok=True)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".claude.json.")
+with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    json.dump(config, fh, indent=2)
+if os.path.exists(path):
+    os.chmod(tmp, os.stat(path).st_mode & 0o777)
+os.replace(tmp, path)
+PY
+fi
+
 # Agent CLIs are deliberately not installed at container startup; the image
 # carries neutral infrastructure tooling and optional agents can be added by
 # the user. Service credentials for agent commands are brokered on demand by a

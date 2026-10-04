@@ -1471,6 +1471,7 @@ impl AgentTaskRegistry {
             prompt: None,
             model: None,
             effort: None,
+            resume: None,
             cols: Some(100),
             rows: Some(30),
             scrollback_bytes: None,
