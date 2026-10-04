@@ -79,6 +79,7 @@ def _view(
 ) -> DeployedLaneView:
     if observation is None:
         return DeployedLaneView(
+            name=lane.name,
             lane=lane.name,
             project_slug=lane.project,
             branch=lane.branch,
@@ -126,6 +127,7 @@ def _view(
     ahead = _int(None if compare is None else compare.get("ahead_by"))
     deployed_from = payload.get("deployed_from")
     return DeployedLaneView(
+        name=lane.name,
         lane=lane.name,
         project_slug=lane.project,
         branch=lane.branch,

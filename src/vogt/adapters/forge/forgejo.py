@@ -466,6 +466,7 @@ class ForgejoProvider:
                 branch=item.get("head_branch"),
                 event=item.get("event"),
                 run_number=item.get("run_number"),
+                workflow_path=_text(item.get("path")),
                 updated_at=item.get("updated_at") or item.get("created_at"),
                 source_url=item.get("url"),
             )

@@ -23,7 +23,8 @@ Pure: observations in, verdicts out. Nothing here reads a store or a clock.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from fnmatch import fnmatchcase
@@ -43,6 +44,34 @@ PULL_REQUEST_EVENTS: frozenset[str] = frozenset(
 #: an update can't be resolved, so alerting on them floods the Inbox with
 #: "Update #N failed on main" noise.
 GITHUB_MANAGED_EVENTS: frozenset[str] = frozenset({"dynamic"})
+
+#: Where GitHub files its managed workflows (`dynamic/dependabot/...`).
+GITHUB_MANAGED_PATH_PREFIX = "dynamic/"
+
+#: A Dependabot update run's name: "npm_and_yarn in /web for undici - Update
+#: #1606151494". Observations collected before the event and workflow path
+#: were stored carry only the name, so this is how they are recognised.
+_DEPENDABOT_RUN_NAME = re.compile(r" - Update #\d+$")
+
+
+def github_managed(payload: Mapping[str, object]) -> bool:
+    """Whether a check observation is a run of a GitHub-managed workflow.
+
+    Its event is `dynamic`, its workflow path sits under `dynamic/`, or —
+    for an observation stored before either was recorded — its name is a
+    Dependabot update's. Reads only the stored payload.
+    """
+    event = payload.get("event")
+    if isinstance(event, str) and event in GITHUB_MANAGED_EVENTS:
+        return True
+    path = payload.get("workflow_path")
+    if isinstance(path, str) and path.startswith(GITHUB_MANAGED_PATH_PREFIX):
+        return True
+    if isinstance(event, str) and event:
+        return False
+    name = payload.get("check")
+    return isinstance(name, str) and _DEPENDABOT_RUN_NAME.search(name) is not None
+
 
 #: Conclusions that are a failure worth an alert.
 FAILING_CONCLUSIONS: frozenset[str] = frozenset(
@@ -160,7 +189,7 @@ def watched_failures(
             branches=branches,
             tags=tags,
         )
-        if where is None:
+        if where is None or github_managed(payload):
             continue
         workflow = _workflow(check)
         key = (check.project_id, workflow, where.kind, where.lane)
@@ -269,6 +298,7 @@ def _conclusion(check: Observation) -> str | None:
 
 __all__ = [
     "FAILING_CONCLUSIONS",
+    "GITHUB_MANAGED_EVENTS",
     "PASSING_CONCLUSIONS",
     "PULL_REQUEST_EVENTS",
     "BranchCi",
@@ -276,6 +306,7 @@ __all__ = [
     "RefFailure",
     "WatchedRef",
     "branch_ci",
+    "github_managed",
     "ran_at",
     "watched_failures",
     "watched_ref",

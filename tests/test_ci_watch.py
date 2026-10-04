@@ -44,7 +44,12 @@ from vogt.application.services.ci_watch import (
 from vogt.collectors import CollectorContext
 from vogt.collectors.base import Finding, finding
 from vogt.config import DeployLane
-from vogt.core.ci_alerts import branch_ci, watched_failures, watched_ref
+from vogt.core.ci_alerts import (
+    branch_ci,
+    github_managed,
+    watched_failures,
+    watched_ref,
+)
 from vogt.core.entities import Observation, Project
 
 from tests.conftest import native_work_item
@@ -100,6 +105,50 @@ def test_watched_ref_excludes_github_managed_dynamic_runs() -> None:
     # GitHub's managed workflow, not the repository's CI, and must not alert.
     assert watched_ref("main", "dynamic", branches=BRANCHES, tags=TAGS) is None
     assert watched_ref("main", "schedule", branches=BRANCHES, tags=TAGS) is not None
+
+
+DEPENDABOT = "npm_and_yarn in /apps/rustnzb/frontend for undici - Update #1606151494"
+
+
+def test_github_managed_reads_event_path_or_the_dependabot_name() -> None:
+    assert github_managed({"event": "dynamic", "check": "anything"})
+    assert github_managed(
+        {"event": "push", "workflow_path": "dynamic/dependabot/dependabot-updates"}
+    )
+    # Observations stored before event/path were recorded: the name decides.
+    assert github_managed({"check": DEPENDABOT})
+    assert github_managed({"event": None, "check": DEPENDABOT})
+    assert not github_managed({"check": "build"})
+    assert not github_managed(
+        {"event": "push", "workflow_path": ".github/workflows/ci.yml", "check": "ci"}
+    )
+
+
+def test_watched_failures_skip_dynamic_runs_by_path_and_by_old_name() -> None:
+    runs = [
+        _obs(
+            check="dependabot",
+            branch="main",
+            conclusion="failure",
+            updated_at="2026-10-04T01:00:00Z",
+            extra={"workflow_path": "dynamic/dependabot/dependabot-updates"},
+        ),
+        _obs(
+            check=DEPENDABOT,
+            branch="main",
+            conclusion="failure",
+            updated_at="2026-10-04T01:00:00Z",
+            extra={"event": None},
+        ),
+        _obs(
+            check="build",
+            branch="main",
+            conclusion="failure",
+            updated_at="2026-10-04T01:00:00Z",
+        ),
+    ]
+    failures = watched_failures(runs, branches=BRANCHES, tags=TAGS)
+    assert [f.workflow for f in failures] == ["build"]
 
 
 def test_watched_ref_excludes_pull_requests_and_unwatched_branches() -> None:
@@ -283,10 +332,12 @@ def _run(
     event: str = "push",
     sha: str = SHA_72,
     updated_at: str = "2026-08-12T04:00:00Z",
+    path: str = ".github/workflows/ci.yml",
 ) -> dict[str, Any]:
     return {
         "id": run_id,
         "name": name,
+        "path": path,
         "head_branch": branch,
         "head_sha": sha,
         "event": event,
@@ -435,6 +486,59 @@ def test_a_later_successful_tag_run_clears_the_alert(
     ]
     _sweep(ctx, _checks_collector(ctx, forges))
     assert not any(e.kind == "ci.ref_failure" for e in _ci_entries(ctx))
+
+
+def test_dependabot_runs_never_reach_the_ci_failing_rollup(
+    wired: tuple[AppContext, _Forges],
+) -> None:
+    ctx, forges = wired
+    # Dependabot's runs land on main at the default branch's head, so they sit
+    # on the project's newest revision next to its real CI.
+    forges.runs = [
+        _run(
+            7001,
+            DEPENDABOT,
+            "main",
+            "failure",
+            event="dynamic",
+            path="dynamic/dependabot/dependabot-updates",
+        ),
+        _run(7002, "build", "main", "failure"),
+    ]
+    found = _sweep(ctx, _checks_collector(ctx, forges))
+    stored = next(f for f in found if f.payload["check"] == DEPENDABOT)
+    assert stored.payload["event"] == "dynamic"
+    assert stored.payload["workflow_path"] == "dynamic/dependabot/dependabot-updates"
+    build = next(f for f in found if f.payload["check"] == "build")
+    assert build.payload["workflow_path"] == ".github/workflows/ci.yml"
+
+    # An observation collected before event/path were stored: name only.
+    old_name = DEPENDABOT.replace("1606151494", "1606151000")
+    _seed(
+        ctx,
+        [
+            finding(
+                kind="ci.check",
+                subject_key=f"ci:acme/app@{SHA_72}:{old_name}@main",
+                project=_project(ctx),
+                source_url=None,
+                payload={
+                    "revision": SHA_72,
+                    "check": old_name,
+                    "conclusion": "failure",
+                    "status": "completed",
+                    "branch": "main",
+                    "event": None,
+                    "updated_at": "2026-08-12T04:00:00Z",
+                },
+            )
+        ],
+    )
+
+    titles = [e.title for e in _ci_entries(ctx)]
+    assert not [t for t in titles if "Update #" in t], titles
+    # The repository's own failing CI is still reported.
+    assert "build failed on main" in titles, titles
 
 
 def _ci_entries(ctx: AppContext) -> list[InboxEntry]:
@@ -642,6 +746,7 @@ def test_a_configured_lane_nobody_swept_is_not_collected(
     ctx = _with_lanes(wired[0], DEV)
     result = deployed_versions(ctx, DeployedVersionsParams())
     assert [lane.status for lane in result.lanes] == ["not_collected"]
+    assert [lane.model_dump(mode="json")["name"] for lane in result.lanes] == ["dev"]
 
 
 def test_deployed_versions_says_how_far_behind_head_a_lane_is(
@@ -674,6 +779,9 @@ def test_deployed_versions_says_how_far_behind_head_a_lane_is(
 
     result = deployed_versions(ctx, DeployedVersionsParams(lane="dev"))
     lane = result.lanes[0]
+    # The configured name is on the wire as `name` — dev validation saw
+    # `name: null` because only `lane` carried it.
+    assert lane.model_dump(mode="json")["name"] == "dev" and lane.lane == "dev"
     assert lane.status == "behind"
     assert lane.deployed_sha == SHA_72 and lane.deployed_from == "live"
     assert lane.version == "0.7.2" and lane.receipt_status == "passed"
