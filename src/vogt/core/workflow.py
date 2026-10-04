@@ -91,11 +91,53 @@ class Workflow:
             )
         allowed = self.allowed_from(from_state)
         if to_state not in allowed:
+            path = self.shortest_path(from_state, to_state)
+            hint = (
+                ""
+                if path is None
+                else f"; shortest path: {' -> '.join(path)} — pass walk=true "
+                "to take it one audited hop at a time"
+            )
             raise TransitionRejected(
                 "transition.not_allowed",
                 f"{self.kind} has no {from_state} -> {to_state} edge "
-                f"(allowed from {from_state}: {', '.join(allowed) or 'nothing'})",
+                f"(allowed from {from_state}: {', '.join(allowed) or 'nothing'})"
+                f"{hint}",
             )
+
+    def shortest_path(self, from_state: str, to_state: str) -> list[str] | None:
+        """The fewest edges from one state to another, or `None` if unreachable.
+
+        A breadth-first search over this machine's own edges, so every hop it
+        returns is one `check` accepts. Finished states are never passed
+        *through*: walking `blocked -> done` must not route via `wont_do ->
+        open`, closing and reopening an issue upstream on the way. They may
+        still be the start or the target. Ties break in the order the
+        definition lists its edges, so the answer is deterministic.
+        """
+        if from_state == to_state:
+            return [from_state]
+        previous: dict[str, str] = {}
+        frontier = [from_state]
+        seen = {from_state}
+        while frontier:
+            following: list[str] = []
+            for state in frontier:
+                if state != from_state and state in TERMINAL_STATES:
+                    continue
+                for target in self.allowed_from(state):
+                    if target in seen:
+                        continue
+                    seen.add(target)
+                    previous[target] = state
+                    if target == to_state:
+                        path = [target]
+                        while path[-1] != from_state:
+                            path.append(previous[path[-1]])
+                        return list(reversed(path))
+                    following.append(target)
+            frontier = following
+        return None
 
     def to_definition(self) -> dict[str, object]:
         return {"initial_state": self.initial_state, "transitions": self.transitions}

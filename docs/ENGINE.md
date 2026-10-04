@@ -2059,6 +2059,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `init` | Operator-only | Unavailable: Local instance initialization; no remote MCP tool. |
 | `migrate` | Operator-only | Unavailable: Local schema maintenance; no remote MCP tool. |
 | `status` | Voice-readable | Available: Report instance identity, schema versions, and row counts. |
+| `instance.diagnostics` | Operator-only | Unavailable: Deploy diagnostics (version, digest, readiness, migrations, redacted error log, optional peer probe) are for operators and agents over MCP, not the assistant. |
 | `place.metrics` | Voice-readable | Available: Read all bounded shell navigation counts in one response. |
 | `connect` | Operator-only | Unavailable: Client and connection configuration belongs to operator setup. |
 | `mcp.stdio` | Operator-only | Unavailable: Local process transport; no remote MCP tool. |
@@ -2066,13 +2067,13 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `project.create` | Operator-only | Unavailable: Creates host directories and files; use project setup outside the assistant. |
 | `project.import` | Operator-only | Unavailable: Clones into host paths and performs bulk import; use project setup. |
 | `project.get` | Voice-readable | Available: Fetch one project by slug. |
-| `project.list` | Voice-readable | Available: List registered projects. |
+| `project.list` | Voice-readable | Available: List registered projects, each with whether work.create lands there now. |
 | `project.brief` | Voice-readable | Available: The per-repo view: state, work, bugs, version, compliance. |
 | `project.update` | Confirmation-gated | Available after approval: Correct a project's declared repo URL or exclusions. |
 | `project.transition` | Confirmation-gated | Available after approval: Move a project through its lifecycle states. |
 | `work.create` | Confirmation-gated | Available after approval: Create a work item (feature / bug / chore / question). |
 | `work.get` | Voice-readable | Available: Fetch one work item with its relations, labels and comments. |
-| `work.list` | Voice-readable | Available: List work items with filters. |
+| `work.list` | Voice-readable | Available: List work items with filters; compact summary rows by default. |
 | `board.list` | Voice-readable | Available: Read bounded, independently pageable Board cells in one snapshot. |
 | `work.update` | Confirmation-gated | Available after approval: Change a work item's fields, assignee, or labels. |
 | `work.transition` | Confirmation-gated | Available after approval: Move a work item to another state, validating the edge. |

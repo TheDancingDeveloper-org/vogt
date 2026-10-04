@@ -66,6 +66,7 @@ from vogt.application.services.initiative_publish import (
 from vogt.application.services.install import install_bootstrap, install_status
 from vogt.application.services.instance import (
     init_instance,
+    instance_diagnostics,
     migrate_instance,
     serve,
     serve_mcp_stdio,
@@ -177,6 +178,7 @@ __all__ = [
     "init_instance",
     "install_bootstrap",
     "install_status",
+    "instance_diagnostics",
     "issue_token",
     "link_forge_account",
     "link_project",

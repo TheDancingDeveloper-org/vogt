@@ -345,6 +345,78 @@ tally (`by_entity`), the baseline it measured change against (`base`,
 The matching rules and the conflict policy are in
 [`DEPLOYMENT.md` §5](DEPLOYMENT.md#export-and-import-merging-one-instance-into-another).
 
+## Calling work and project operations from an agent
+
+The work tools are shaped so an agent's first call succeeds and its result
+fits in context.
+
+- **Parameter aliases.** A common name is accepted for the field it means,
+  on every transport that validates through the registry (MCP, and the
+  `run_raw` path generally): `work.get` and `work.transition` take `id` for
+  `ref`; `work.transition` takes `to` or `state` for `to_state`; `work.list`
+  takes `status` or `state` for `states` (one state, a comma-separated string,
+  or a list) and `text`, `search` or `q` for `query`; `project.brief` takes
+  `project` or `id` for `slug`. Naming an alias *and* its field is refused as
+  ambiguous. Each alias is documented on its field in the tool schema.
+- **Errors that say what to change.** A call whose arguments do not fit fails
+  `invalid_params`, naming each missing or unknown parameter and listing the
+  parameters the tool does take. `reason` is **never defaulted** — every
+  write is audited and the registry refuses to build a write with an optional
+  reason — so a missing one is told exactly that, with an example.
+- **Transitions.** A refused edge (`transition.not_allowed`) lists the edges
+  allowed from the current state *and* the shortest path to the target.
+  `work.transition` with `walk=true` takes that path, one ordinary audited
+  transition per edge, each recording the caller's reason annotated
+  `(walk 2/3: in_progress -> review)`; the result's `walked` lists the states
+  passed through. Only the workflow's own edges are walked and finished states
+  are never passed *through*, so a walk to `done` goes via `review` and cannot
+  close and reopen an issue on the way. A `depends_on` blocker or an upstream
+  write-through refusal is checked before the first hop, so a walk that would
+  stop part-way is refused before it moves anything.
+- **Summary mode and paging.** `work.list`, `backlog` and `project.brief`
+  take `mode`: `summary` (the default) returns compact rows — `work.list`
+  items carry only `ref`, `title`, `kind`, `state`, `priority` and
+  `project_slug`; `backlog` and `project.brief` rows keep their ranking fields
+  but drop the embedded `item` (bodies) — and `full` returns everything. The
+  PWA asks for `full`. `work.list` and `backlog` return `next_offset` (null on
+  the last page). `work.list --query` matches title, body and ref,
+  case-insensitively; naming a finished state in `states` includes finished
+  items without `include_finished`.
+- **Can I create here?** Each `project.list` entry carries `writable` and
+  `writable_reason`: whether a default `work.create` (no `local_only`) would
+  land there now — forge-linked, write-back policy permits `create`, a forge
+  credential resolves, the repo URL parses — and, if not, whether it would
+  refuse `project_not_linked` or `upstream_write_refused` and how to fix it.
+  `local_only=true` creates a local record on any project.
+
+## Deploy diagnostics
+
+`instance.diagnostics` (`GET /api/instance/diagnostics`, `vogt diagnostics`,
+MCP `instance_diagnostics`; `read` scope) answers "is this instance what it
+should be, and is it well" in one read, so confirming a deploy needs neither
+tailnet access nor the orchestrator:
+
+- `vogt_version`, `image_digest` (as the deployment stated it through
+  `VOGT_IMAGE_DIGEST`; `null` when unstated, never guessed), `instance_id`,
+  `started_at` and `uptime_seconds` of the core process;
+- `checks` — named readiness checks (`declared_store`, `observed_store`
+  schema against this build, `engine` liveness, `collection` freshness), each
+  `ok`, `degraded`, `failing` or `not_configured`, rolled up into `status`;
+- `migrations` — applied, expected and pending per store;
+- `recent_log` — the newest `log_lines` (default 20, at most 200)
+  warning-or-worse lines this core process logged, with URL credentials,
+  bearer values, token shapes and secret-named `key=value` pairs redacted.
+  `capturing: false` (a one-shot CLI process) means nothing is retained, not
+  that nothing went wrong. Only the core's own log is here; the engine's log
+  is not reachable from the core.
+- `peer` — with `peer=true`, the same answer from the instance at
+  `diagnostics_peer_url` (e.g. prod's `https://…/api/vogt` from dev),
+  authenticated with the read-scoped token in `diagnostics_peer_token_file`.
+  Reported as `not_requested`, `not_configured`, `ok` (with the peer's
+  answer, as it sent it), `unreachable`, `refused` or `invalid_response`. The
+  peer is asked with `peer=false`, so two instances configured as each
+  other's peer never recurse.
+
 ## See also
 
 - `DESIGN.md` §4 — the security model (FR-S*), scopes, and per-project scope

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime
+from itertools import pairwise
 from typing import Literal
 
 from vogt.adapters.forge import ForgeProvider
@@ -42,6 +43,7 @@ from vogt.application.models import (
     TransitionWorkParams,
     UnrelateWorkParams,
     UpdateWorkParams,
+    WorkItemRow,
     WorkListResult,
     WorkResult,
 )
@@ -113,14 +115,21 @@ def _write_through_gaps(ctx: AppContext, project: Project, action: str) -> list[
     also unmet. This reports the whole chain, in order, so a caller fixes it in
     one pass rather than one refusal at a time.
     """
+    with ctx.declared.read() as view:
+        actor = view.actor_by_identity(ctx.principal.identity_ref)
+    return _gaps_for(ctx, project, action, actor)
+
+
+def _gaps_for(
+    ctx: AppContext, project: Project, action: str, actor: Actor | None
+) -> list[str]:
+    """`_write_through_gaps` with the acting actor already resolved."""
     gaps: list[str] = []
     if not permits(project.write_back, action):
         gaps.append(
             f"write-back policy is {project.write_back!r}, which does not "
             f"permit {action!r} — set it with `forge writeback`"
         )
-    with ctx.declared.read() as view:
-        actor = view.actor_by_identity(ctx.principal.identity_ref)
     provider, _identity = writeback._writer_provider(ctx, actor, project.repo_url)
     if provider is None:
         gaps.append(
@@ -134,6 +143,46 @@ def _write_through_gaps(ctx: AppContext, project: Project, action: str) -> list[
             "the forge provider — correct it with `project update`"
         )
     return gaps
+
+
+def create_writability(
+    ctx: AppContext, projects: list[Project]
+) -> dict[str, tuple[bool, str]]:
+    """Per project id: would a default `work.create` land there now, and why.
+
+    The same gates `work.create` applies, evaluated without writing: the
+    decision-10 link check, then every write-through precondition. An agent
+    reads this from `project.list` before creating rather than learning it
+    from a `project_not_linked` or `upstream_write_refused` refusal. Nothing
+    here touches the network — credentials resolve from local configuration.
+    """
+    with ctx.declared.read() as view:
+        actor = view.actor_by_identity(ctx.principal.identity_ref)
+    answers: dict[str, tuple[bool, str]] = {}
+    for project in projects:
+        if not upstream.is_linked(project):
+            answers[project.id] = (
+                False,
+                "not forge-linked: work.create refuses with project_not_linked. "
+                "Pass local_only=true for a local record, or link "
+                "(`forge link`) or publish (`forge publish`) the project.",
+            )
+            continue
+        gaps = _gaps_for(ctx, project, "create", actor)
+        if gaps:
+            answers[project.id] = (
+                False,
+                "linked, but work.create refuses with upstream_write_refused: "
+                + "; ".join(gaps)
+                + ". Or pass local_only=true for a local record.",
+            )
+        else:
+            answers[project.id] = (
+                True,
+                "linked and write-back permits create: work.create opens the "
+                "issue upstream.",
+            )
+    return answers
 
 
 def _require_permitted(
@@ -512,16 +561,22 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
     native rows either, because the forge-less work surface is withdrawn —
     they remain reachable by ref, and a link or publish migrates them.
     """
+    include_finished = params.include_finished or any(
+        state in TERMINAL_STATES for state in params.states or ()
+    )
     with ctx.declared.read() as view:
         project_row = (
             None if params.project is None else _resolve.project(view, params.project)
         )
         if project_row is not None and not upstream.is_linked(project_row):
-            return WorkListResult(items=[], total=0, link_state="unlinked")
+            return WorkListResult(
+                items=[], total=0, link_state="unlinked", mode=params.mode
+            )
+        states = tuple(params.states or ())
         work_filter = WorkFilter(
             project_id=None if project_row is None else project_row.id,
             kinds=tuple(params.kinds or ()),
-            states=tuple(params.states or ()),
+            states=states,
             priorities=tuple(params.priorities or ()),
             assignee_actor_id=(
                 None
@@ -534,7 +589,11 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
                 else _resolve.initiative(view, params.initiative).id
             ),
             label=params.label,
-            exclude_terminal=not params.include_finished,
+            text=params.query or None,
+            # Asking for a finished state by name is asking for finished
+            # items: `states=[done]` answering nothing unless
+            # `include_finished` was also set was a trap, not a filter.
+            exclude_terminal=not include_finished,
             limit=params.limit,
             offset=params.offset,
         )
@@ -543,7 +602,7 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
             upstream_rows.extend(
                 item
                 for item in upstream.upstream_items(
-                    ctx, view, linked, include_closed=params.include_finished
+                    ctx, view, linked, include_closed=include_finished
                 )
                 if upstream.matches(item, work_filter)
             )
@@ -551,8 +610,9 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
             None if project_row is None else "linked"
         )
         if not upstream_rows:
-            return WorkListResult(
-                items=view.list_work_items(work_filter),
+            return _work_page(
+                params,
+                view.list_work_items(work_filter),
                 total=view.count_work_items(work_filter),
                 link_state=scope_state,
             )
@@ -571,10 +631,29 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
             key=lambda item: (item.created_at, item.ref),
         )
         total = view.count_work_items(work_filter) + len(upstream_rows)
-    return WorkListResult(
-        items=merged[params.offset : params.offset + params.limit],
+    return _work_page(
+        params,
+        merged[params.offset : params.offset + params.limit],
         total=total,
         link_state=scope_state,
+    )
+
+
+def _work_page(
+    params: ListWorkParams,
+    page: list[WorkItem],
+    *,
+    total: int,
+    link_state: Literal["linked"] | None,
+) -> WorkListResult:
+    """One page of `work.list`, projected to the requested mode."""
+    following = params.offset + len(page)
+    return WorkListResult(
+        items=page if params.mode == "full" else [WorkItemRow.of(i) for i in page],
+        total=total,
+        link_state=link_state,
+        mode=params.mode,
+        next_offset=following if page and following < total else None,
     )
 
 
@@ -813,13 +892,100 @@ def transition_work(ctx: AppContext, params: TransitionWorkParams) -> WorkResult
     """Move an item through its kind's state machine.
 
     Two rules can refuse, and both name themselves: the machine has no such
-    edge, or an unfinished `depends_on` target blocks completion.
+    edge, or an unfinished `depends_on` target blocks completion. A refused
+    edge names the edges that do exist and the shortest path to the target.
 
     On an upstream-truth item, entering a terminal state closes the
     issue and leaving one reopens it — write-through, fail-loud — while a
     move between non-terminal vogt states is overlay-only and sends nothing
     (decision 2).
+
+    `walk` takes the shortest path of valid edges instead of one edge; see
+    `_walk_transition`.
     """
+    if params.walk:
+        return _walk_transition(ctx, params)
+    return _transition_once(ctx, params)
+
+
+def _walk_transition(ctx: AppContext, params: TransitionWorkParams) -> WorkResult:
+    """Walk the shortest valid path to `to_state`, one audited hop per edge.
+
+    Every hop is an ordinary `work.transition` through the same audited write
+    path, recording the caller's reason annotated with the hop — so the audit
+    trail reads exactly as if each edge had been asked for by hand, and the
+    walk can take no edge the workflow does not define. Finished states are
+    never passed through (`Workflow.shortest_path`), so a walk cannot close
+    and reopen an issue on its way, nor skip `review` on the way to `done`.
+
+    The refusals a hop could meet are checked before the first hop — the
+    edge path exists, `depends_on` targets are finished when the target is
+    `done`, and an upstream write-through the path needs is permitted — so a
+    walk that would stop half-way is refused before it moves anything. Hops
+    are separate transactions, so a failure no pre-flight can foresee (the
+    forge going away mid-walk) leaves the item at the last hop that landed,
+    which `work.get` reports.
+    """
+    with ctx.declared.read() as view:
+        item = upstream.resolve_work_ref(ctx, view, params.ref)
+        native = view.work_item_by_ref(params.ref) is not None
+        workflow = view.workflow_for(item.kind)
+        project = (
+            None if item.project_id is None else view.project_by_id(item.project_id)
+        )
+        blockers = (
+            view.unfinished_blockers(
+                item.id, terminal_states=tuple(sorted(TERMINAL_STATES))
+            )
+            if native
+            else []
+        )
+    path = workflow.shortest_path(item.state, params.to_state)
+    if path is None or len(path) < 3:
+        # No path, no-op, unknown state or a single edge: the one-edge
+        # transition answers each of those exactly, refusals included.
+        return _transition_once(ctx, params)
+    check_completion_allowed(
+        to_state=params.to_state,
+        blockers=[(blocker.ref, blocker.state) for blocker in blockers],
+    )
+    if not native and project is not None:
+        for source, target in pairwise(path):
+            action = _state_action(source, target)
+            if action is not None:
+                _require_permitted(ctx, project, action)
+
+    hops = len(path) - 1
+    result: WorkResult | None = None
+    for number, (source, target) in enumerate(pairwise(path), start=1):
+        result = _transition_once(
+            ctx,
+            params.model_copy(
+                update={
+                    "to_state": target,
+                    "walk": False,
+                    "reason": (
+                        f"{params.reason} (walk {number}/{hops}: {source} -> {target})"
+                    ),
+                }
+            ),
+        )
+    assert result is not None  # a path of three states has two hops
+    return result.model_copy(update={"walked": path})
+
+
+def _state_action(from_state: str, to_state: str) -> Literal["close", "reopen"] | None:
+    """What an edge sends upstream: entering a finished state closes, leaving
+    one reopens, and anything else is overlay-only."""
+    if to_state in TERMINAL_STATES:
+        return "close"
+    if from_state in TERMINAL_STATES:
+        return "reopen"
+    return None
+
+
+def _transition_once(ctx: AppContext, params: TransitionWorkParams) -> WorkResult:
+    """One edge of the state machine — the transition as it always was."""
     with ctx.declared.read() as view:
         item = upstream.resolve_work_ref(ctx, view, params.ref)
         native = view.work_item_by_ref(params.ref) is not None

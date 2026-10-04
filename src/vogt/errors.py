@@ -291,6 +291,19 @@ class MissingReason(InvalidRequest):
     http_status = 400
 
 
+class InvalidParams(InvalidRequest):
+    """A tool call's arguments did not fit the operation's parameters.
+
+    Raised by the registry's untyped entry point (`Operation.run_raw`, which
+    MCP uses) in place of the raw validation error, with a message that says
+    what to change: which parameter is missing or unknown, and the parameters
+    the operation does take — so an agent corrects the call in one retry.
+    """
+
+    code = "invalid_params"
+    http_status = 422
+
+
 class MigrationError(VogtError):
     """The schema could not be brought forward to the expected version."""
 

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Generic, Literal, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from vogt.application.context import AppContext
+from vogt.errors import InvalidParams
 
 #: Authorization scopes. Every operation declares what it needs; the tokens
 #: that grant them are issued separately, and nothing gates on them until
@@ -69,5 +70,48 @@ class Operation(Generic[P, R]):
         return self.handler(ctx, params)
 
     def run_raw(self, ctx: AppContext, raw: dict[str, object]) -> R:
-        """Validate untyped input from a transport, then run."""
-        return self.handler(ctx, self.params_model.model_validate(raw))
+        """Validate untyped input from a transport, then run.
+
+        A validation failure becomes `InvalidParams` naming what to change
+        (`describe_invalid`), rather than pydantic's report.
+        """
+        try:
+            params = self.params_model.model_validate(raw)
+        except ValidationError as exc:
+            raise InvalidParams(describe_invalid(self, exc)) from exc
+        return self.handler(ctx, params)
+
+
+#: What a missing `reason` is told. Every write is audited and the registry
+#: refuses to build a write whose reason is optional (ARCHITECTURE.md), so
+#: the reason cannot be defaulted — but the refusal can say exactly what is
+#: wanted rather than "Field required".
+REASON_HINT = (
+    "every write is audited and must say why it is being made — pass "
+    '`reason` as a short sentence, e.g. reason="tests pass, ready for review"'
+)
+
+
+def describe_invalid(operation: Operation[Any, Any], exc: ValidationError) -> str:
+    """A validation failure as an instruction: what is wrong, what is accepted."""
+    fields = operation.params_model.model_fields
+    problems: list[str] = []
+    for error in exc.errors():
+        location = ".".join(str(part) for part in error["loc"])
+        kind = error["type"]
+        if kind == "missing" and location == "reason":
+            problems.append(f"missing required parameter 'reason': {REASON_HINT}")
+        elif kind == "missing":
+            problems.append(f"missing required parameter {location!r}")
+        elif kind == "extra_forbidden":
+            problems.append(f"unknown parameter {location!r}")
+        elif location:
+            problems.append(f"{location}: {error['msg']}")
+        else:
+            problems.append(str(error["msg"]))
+    required = [name for name, field in fields.items() if field.is_required()]
+    optional = [name for name, field in fields.items() if not field.is_required()]
+    accepted = f"required: {', '.join(required) or 'none'}"
+    if optional:
+        accepted += f"; optional: {', '.join(optional)}"
+    return f"{'; '.join(problems)}. {operation.mcp_tool_name} takes {accepted}"

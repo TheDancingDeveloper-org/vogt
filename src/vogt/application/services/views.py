@@ -32,6 +32,7 @@ from vogt.application.models import (
     BugsParams,
     ContributionView,
     Freshness,
+    ListMode,
     RankedItem,
     WhyParams,
     WhyResult,
@@ -628,6 +629,18 @@ def _unlinked_scope(ctx: AppContext, project: str) -> BacklogResult | None:
     )
 
 
+def project_rows(rows: list[RankedItem], mode: ListMode) -> list[RankedItem]:
+    """Ranked rows as the caller asked for them.
+
+    `summary` drops each row's full work item — the body is what overflows
+    an agent's context, and the row already carries ref, title, kind, state,
+    priority and score. `full` returns them untouched.
+    """
+    if mode == "full":
+        return rows
+    return [row.model_copy(update={"item": None}) for row in rows]
+
+
 def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
     """The ranked backlog, globally or for one project.
 
@@ -656,9 +669,12 @@ def backlog(ctx: AppContext, params: BacklogParams) -> BacklogResult:
         trust_states=params.trust_states,
         include_prs=params.include_prs,
     )
+    page = gathered.ranked[params.offset : params.offset + params.limit]
+    following = params.offset + len(page)
     return BacklogResult(
-        items=gathered.ranked[params.offset : params.offset + params.limit],
+        items=project_rows(page, params.mode),
         total_considered=len(gathered.ranked),
+        next_offset=(following if page and following < len(gathered.ranked) else None),
         declared=gathered.declared,
         observed=gathered.observed,
         suppressed=gathered.suppressed,
