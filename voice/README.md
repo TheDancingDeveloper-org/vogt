@@ -134,7 +134,8 @@ CARGO_TARGET_DIR=/tmp/vt cargo build -p vogt-voice-tts
 ```
 
 The `Dockerfile` builds the native runtimes on the estate-mirrored
-`rust:1-bookworm` base, fetches and verifies the default models in a stage of
+`rust:1-trixie` base (glibc 2.41: the ONNX Runtime static library `ort-sys`
+downloads needs glibc >= 2.38, which bookworm's 2.36 is not), fetches and verifies the default models in a stage of
 their own (so the ~210 MB download is a cache layer that only changes when a
 pinned revision does), and copies the binary, the compiled espeak-ng data and
 the models into a minimal `ubuntu:26.04` final stage. The ONNX Runtime is linked

@@ -15,11 +15,17 @@
 # (`ghcr.io/thedancingdeveloper-org/vogt-base/*`) rather than Docker Hub, so a
 # busy self-hosted runner's shared anonymous pull limit is not on the build's
 # critical path. `mirror-base-images.yml` guards that these stay mirror
-# refs. The `rust:1-bookworm` and `ubuntu:26.04` tags are already mirrored for
-# the engine and pod-base builds, so this file adds no new mirrored base.
+# refs. `ubuntu:26.04` is shared with the pod-base build; `rust:1-trixie` is
+# this file's own, and the mirror discovers it from the `FROM` line below.
 
 # ─── build: the Rust binary with native inference runtimes ──────────────────
-FROM ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-bookworm AS build
+#
+# trixie, not the engine's bookworm: the ONNX Runtime static library `ort-sys`
+# downloads (2.0.0-rc.12) was compiled against glibc >= 2.38 and references
+# the C23 `__isoc23_strtol*` symbols, which bookworm's glibc 2.36 lacks, so
+# the link fails there. trixie ships glibc 2.41, and the `ubuntu:26.04` final
+# stage below is newer still, so the binary's glibc floor is met at run time.
+FROM ghcr.io/thedancingdeveloper-org/vogt-base/rust:1-trixie AS build
 RUN apt-get update \
     && apt-get install --no-install-recommends -y clang cmake libclang-dev libopus-dev pkg-config \
     && rm -rf /var/lib/apt/lists/*
