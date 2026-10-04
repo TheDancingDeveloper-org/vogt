@@ -62,7 +62,8 @@ name: mirror base images
 # source digest and fails if it does not.
 
 on:
-  # Called as a prerequisite by `build.yml` and `release.yml`.
+  # Called as a prerequisite by `build.yml` (`release.yml` builds nothing; it
+  # promotes `build.yml`'s images by digest).
   workflow_call:
   push:
     branches: [main]
@@ -95,7 +96,7 @@ permissions:
 # No `concurrency:` block, and that absence is deliberate — two of them have
 # been tried here and both broke a build.
 #
-# This workflow is a *prerequisite*: `build.yml` and `release.yml` reach it
+# This workflow is a *prerequisite*: `build.yml` reaches it
 # with `uses:`/`needs:`, so a run of it that gets cancelled fails the build
 # waiting on it. GitHub cancels a **pending** run whenever a newer run joins
 # its group, whatever `cancel-in-progress` says, so any shared group at all

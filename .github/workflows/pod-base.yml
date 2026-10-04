@@ -33,7 +33,7 @@ name: pod-base
 # The *image* is published to GHCR, where every base this repository consumes
 # lives and where a `FROM` is authenticated and unmetered. The BuildKit *layer
 # cache* goes to the operator's configured LAN registry, the same backend
-# `build.yml` and `release.yml` use. The reason is proximity: a cache round-trip
+# `build.yml` uses. The reason is proximity: a cache round-trip
 # that stays beside the runners is local while GHCR is a WAN hop. The workers
 # trust that configured registry over HTTP.
 #
@@ -254,7 +254,8 @@ jobs:
       # one job: `engine/Dockerfile`'s `POD_BASE_IMAGE` default, so that a hand
       # `docker build -f engine/Dockerfile .` resolves without anybody having
       # to look a digest up first. Nothing CI publishes is ever built on it —
-      # `build.yml` and `release.yml` pass the digest from `outputs.image` —
+      # `build.yml` passes the digest from `outputs.image` (and a release
+      # promotes that build rather than building again) —
       # and `docs/ENGINE.md` §3.1 says so where the hand-build is documented.
       - name: point the convenience alias at it
         env:

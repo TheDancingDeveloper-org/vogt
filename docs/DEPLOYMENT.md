@@ -565,7 +565,10 @@ docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.
 
 Verify the keyless signatures before starting Compose. Every release image is
 signed by the release workflow's own OIDC identity, so the check constrains
-both the workflow and the issuer, and performs an anonymous registry read:
+both the workflow and the issuer, and performs an anonymous registry read.
+(The same digest also carries the signature `build.yml` made when it built it
+on `main` — a release promotes that build rather than rebuilding, §9 — but
+the release identity is the one that says "this is version X".)
 
 ```console
 cosign verify \
@@ -655,34 +658,91 @@ verify it with the `build.yml` workflow identity rather than the release one.
 ## 9. Releases
 
 Development happens on `main`; releases are `v*` tags on commits reachable
-from it. The release workflow checks that the tag matches the package version
-and that the PWA, mobile and workflow metadata agree, then publishes, for
-each of the core image (`vogt`), the stack (`vogt-stack`) and the sidecar
-(`vogt-voice`):
+from it. A release publishes, for each of the core image (`vogt`), the stack
+(`vogt-stack`) and the sidecar (`vogt-voice`):
 
 - tags `X.Y.Z`, `X.Y` and `latest` — `latest` moves on a release and on
-  nothing else;
+  nothing else (a pre-release tag such as `v1.0.0-rc.1` gets only its exact
+  version);
 - a keyless **cosign signature** over the digest, bound to
   `release.yml@refs/tags/v*` (§6);
 - an **SBOM** and **provenance** attestation attached to the digest.
 
-Each image is run before it is pushed — the stack must start both halves and
-both agent CLIs, the sidecar must synthesise and transcribe with its baked
-models — and the three versions must agree before the release is accepted.
-The workflow then creates a GitHub Release carrying
-`vogt-release-manifest.json` (the source SHA and all three digests) and the
-signed Android APK of the mobile shell; the shell is a remote WebView onto
-whichever deployed stack the user picks on-device at first launch, so a server
-or PWA release reaches installed phones without a new APK. The shell's lifecycle/connectivity/voice validation — the emulator
-instrumentation suite and the device / Play pre-launch checklists — is in
+### Release process: build once, promote by digest
+
+A release does not build images. The bytes a release ships are the bytes that
+were built, smoke-tested and deployed to a development lane before the tag
+existed:
+
+1. **Bump on `main`.** The version bump lands on `main` like any change, so
+   the `build.yml` run for that commit bakes the release version into the
+   images.
+2. **Build once.** `build.yml` builds the three images for that commit, runs
+   each before pushing it — the stack must start both halves and both agent
+   CLIs, the sidecar must synthesise and transcribe with its baked models —
+   then publishes them as `sha-<7-char commit>` with SBOM and provenance and
+   signs each digest under `build.yml@refs/heads/main`.
+3. **Validate.** A development deployment pins those digests and runs its
+   smoke test against them.
+4. **Tag** `vX.Y.Z` on that same commit. `release.yml` then:
+   - checks the tag is reachable from `main` and matches the package, PWA,
+     mobile and workflow versions (`scripts/check_product_version.py`, which
+     also proves `build.yml` baked that version);
+   - finds a `build.yml` run for the exact commit on `main` whose three
+     image jobs succeeded (the demo image's job is not required), resolves
+     each `sha-<commit>` tag to its digest, and verifies that digest carries
+     `build.yml`'s signature **for that commit** (the certificate's
+     workflow-sha) plus its SBOM and provenance attestations;
+   - retags each digest `X.Y.Z`, `X.Y` and `latest` with
+     `docker buildx imagetools create --prefer-index=false <repo>@<digest>` —
+     a registry-side copy of the original manifest, no pull and no rebuild —
+     and asserts every new tag resolves to exactly the source digest;
+   - signs those same digests with cosign under its own identity, so both a
+     build signature and a release signature sit on one digest;
+   - builds and signs the Android APK (the app is not a container image, so
+     it is still built at tag time; `release-mobile.yml` builds the Play AAB
+     the same way) and writes a GitHub Release carrying the APK and
+     `vogt-release-manifest.json`.
+
+`vogt-release-manifest.json` keeps every key of schema
+`vogt-release-manifest.v1` (`source_sha`, `images.{core,merged_stack,voice}`
+as `<repo>@<digest>`) and adds `image_digests`, `release_tags` and a
+`promotion` block naming the `build.yml` run and `sha-` tag the digests came
+from (`rebuilt: false`). A deployment can match `source_sha` and the three
+digests against the receipt of the development deploy that ran them, and
+refuse anything else.
+
+**Failure modes, all fail-closed — a release never falls back to a rebuild:**
+
+| Symptom | Cause | Recovery |
+| ------- | ----- | -------- |
+| `build.yml never ran for <sha> on main` | the tagged commit only touched docs (`build.yml` ignores `docs/**` and `*.md`), or a newer push cancelled its build before it started | tag the commit `build.yml` built (normally the bump), or dispatch `build.yml` on `main` while that commit is its head; then re-run the release |
+| `did not publish every image` | an image job of that `build.yml` run failed or was cancelled | `gh run rerun <id> --failed`, then re-run the failed release jobs |
+| `<repo>:sha-<short> is not in the registry` | the tag was never pushed or has been pruned | as above |
+| `carries no build.yml signature for <sha>` | the `sha-` tag now names a digest some other commit's build pushed (a 7-character collision), or the image is unsigned | investigate before releasing; never re-sign by hand |
+| `has no SBOM / Provenance attestation` | the digest was not pushed by `build.yml` | as above |
+| `<repo>:<tag> resolves to <x>, not the promoted <y>` | the retag did not preserve the digest | do not deploy the tag; pin `@<digest>` from the manifest |
+
+The tag-time `release.yml` run is idempotent: re-running it re-resolves the
+same digests, re-points the same tags and adds another release signature.
+
+The shell is a remote WebView onto whichever deployed stack the user picks
+on-device at first launch, so a server or PWA release reaches installed
+phones without a new APK. The shell's lifecycle/connectivity/voice
+validation — the emulator instrumentation suite and the device / Play
+pre-launch checklists — is in
 [`mobile-release-validation.md`](mobile-release-validation.md).
 
 Publishing is not deploying: a release changes nothing you run until you pin
-its digests (§6).
+its digests (§6). Because a release digest *is* a `main` build digest, a
+deployment already running the `sha-` build of the tagged commit is already
+running the release; only its pin's spelling changes.
 
 Pushes to `main` are **builds, not releases**. `build.yml` publishes the same
 three images tagged `sha-<commit>` (signed, with SBOM and provenance) and the
 demo image as `main` and `main-<commit>`. No semver tag is created and
 `latest` does not move, so "which build is that?" stays answerable. Pin the
 release family for a deployment; a `sha-` image is a way to run a specific
-commit, not a version.
+commit, not a version. One visible consequence of promoting a `main` build:
+the stack's build metadata names `main` as its source ref (with the tagged
+commit's sha and the release version), not the `vX.Y.Z` tag.
