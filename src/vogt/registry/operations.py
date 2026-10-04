@@ -60,6 +60,8 @@ from vogt.application.models import (
     CreateProjectResult,
     CreateUserParams,
     CreateWorkParams,
+    DeployedVersionsParams,
+    DeployedVersionsResult,
     DepsParams,
     DepsResult,
     DriftDetectParams,
@@ -1416,6 +1418,20 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.list_notifications,
             route=HttpRoute("GET", "/notifications"),
             cli=CliBinding(("notifications",)),
+        ),
+        Operation(
+            name="deployed.versions",
+            summary="What each configured deployment lane runs (deployed "
+            "SHA/version) against its branch head, with the commits and work "
+            "items merged but not yet deployed. Read from the deploy-lanes "
+            "collector's last sweep.",
+            scope="read",
+            mutating=False,
+            params_model=DeployedVersionsParams,
+            result_model=DeployedVersionsResult,
+            handler=services.deployed_versions,
+            route=HttpRoute("GET", "/deployed-versions"),
+            cli=CliBinding(("deployed-versions",)),
         ),
         Operation(
             name="inbox.list",

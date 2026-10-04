@@ -18,7 +18,11 @@ from typing import Any, Literal, cast
 
 from vogt.adapters.engine import EngineUnavailable
 from vogt.adapters.forge import KIND_CHECK, KIND_NOTIFICATION
-from vogt.adapters.forge.kinds import COLLECTOR_CHECKS, COLLECTOR_NOTIFICATIONS
+from vogt.adapters.forge.kinds import (
+    COLLECTOR_CHECKS,
+    COLLECTOR_NOTIFICATIONS,
+    KIND_DEPLOY_LANE,
+)
 from vogt.application.context import AppContext
 from vogt.application.models import (
     InboxAction,
@@ -33,6 +37,11 @@ from vogt.application.models import (
     InboxTriageResult,
 )
 from vogt.application.services import _resolve
+from vogt.application.services.ci_watch import (
+    BoundBranch,
+    bound_branches,
+    index_by_branch,
+)
 from vogt.application.services.views import trust_for
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.session_outcomes import KIND_TASK_RUN
@@ -45,6 +54,7 @@ from vogt.core.actors import (
     normalise_bot_logins,
 )
 from vogt.core.checks import roll_up
+from vogt.core.ci_alerts import RefFailure, watched_failures
 from vogt.core.digest import digest_of
 from vogt.core.entities import (
     Actor,
@@ -70,6 +80,10 @@ DRIFT_KIND: Literal["drift"] = "drift"
 CI_KIND: Literal["ci"] = "ci"
 GITHUB_KIND: Literal["github"] = "github"
 AGENT_KIND: Literal["agent"] = "agent"
+#: The `kind` of the CI entries beyond "the newest revision is red".
+REF_FAILURE_KIND = "ci.ref_failure"
+BRANCH_CONCLUDED_KIND = "ci.branch_concluded"
+DEPLOY_FAILED_KIND = "deploy.failed"
 MAX_SCAN = 10_000
 Cursor = tuple[str, str]
 
@@ -407,8 +421,25 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
             checks_by_project.setdefault(observation.project_id, []).append(observation)
     newest_revision_ids: dict[str, frozenset[str]] = {}
 
+    # Watched refs first (WI-867): a failed run on the default branch, a
+    # release tag or prod, judged by its own workflow+ref lane rather than by
+    # the project's newest revision — which is how a tag's failed
+    # `release-mobile` went unseen for two releases. One pass, O(checks).
+    alerted: set[str] = set()
+    for failure in watched_failures(
+        checks_all,
+        branches=ctx.config.ci_alert_branches,
+        tags=ctx.config.ci_alert_tags,
+    ):
+        if failure.observation.project_id not in projects:
+            continue
+        alerted.add(failure.observation.id)
+        entries.append(_ref_failure_entry(ctx, failure, projects, links))
+
     for observation in checks_all:
         if _text(observation.payload.get("conclusion")) in (None, "success", "skipped"):
+            continue
+        if observation.id in alerted:
             continue
         project = projects.get(observation.project_id or "")
         if project is None:
@@ -436,6 +467,24 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
             )
         )
 
+    # Bound branches (WI-855): the settled CI verdict on the newest revision
+    # of each branch an open work item is bound to.
+    for bound in bound_branches(view, index_by_branch(checks_all)):
+        if bound.ci.settled and bound.project_id in projects:
+            entries.append(_bound_branch_entry(ctx, bound, projects))
+
+    # Read only when lanes are configured: an instance without any pays no
+    # extra store read on every Inbox and badge projection.
+    lanes = (
+        ctx.observed.latest(kinds=(KIND_DEPLOY_LANE,), limit=MAX_SCAN)
+        if ctx.config.deploy_lanes
+        else []
+    )
+    for lane in lanes:
+        entry = _deploy_lane_entry(ctx, lane, projects)
+        if entry is not None:
+            entries.append(entry)
+
     for proposal in view.list_drift(status="open", limit=MAX_SCAN):
         entries.append(_drift_entry(ctx, proposal, projects, view))
 
@@ -461,6 +510,175 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
             pass
     triage = view.inbox_triage_by_keys([entry.entry_key for entry in entries])
     return [_apply_triage(ctx, triage, entry) for entry in entries]
+
+
+def _freshness(
+    ctx: AppContext, observed_at: datetime
+) -> tuple[TrustState, Literal["current", "stale"]]:
+    trust = cast(TrustState, trust_for(ctx, observed_at=observed_at))
+    return trust, "current" if trust == "verified" else "stale"
+
+
+def _ref_failure_entry(
+    ctx: AppContext,
+    failure: RefFailure,
+    projects: dict[str, Project],
+    links: dict[str, str],
+) -> InboxEntry:
+    """A failed run on a watched ref, naming the failed jobs and their log.
+
+    Keyed by the run (id, attempt, conclusion) rather than by the whole
+    payload: the job list arrives a sweep after the failure when the lookup
+    budget is spent, and a key that moved then would resurrect an entry
+    somebody had already archived."""
+    observation = failure.observation
+    payload = observation.payload
+    project = projects.get(observation.project_id or "")
+    where = failure.where
+    listed = payload.get("failed_jobs")
+    jobs = [
+        job
+        for job in (listed if isinstance(listed, list) else [])
+        if isinstance(job, dict) and isinstance(job.get("name"), str)
+    ]
+    revision = _text(payload.get("revision")) or "unknown revision"
+    lane = (
+        f"a later run on {where.ref}"
+        if where.kind == "branch"
+        else f"a later run on a tag matching {where.lane}"
+    )
+    if jobs:
+        named = ", ".join(str(job["name"]) for job in jobs[:3])
+        more = f" (+{len(jobs) - 3} more)" if len(jobs) > 3 else ""
+        what = f"Failed job: {named}{more}."
+    else:
+        what = f"The run concluded {failure.conclusion}."
+    summary = (
+        f"{what} {failure.workflow} on {where.ref} at {revision[:12]}. "
+        f"Clears when {lane} of {failure.workflow} succeeds."
+    )
+    log_url = next(
+        (
+            job["url"]
+            for job in jobs
+            if isinstance(job.get("url"), str) and job.get("url")
+        ),
+        observation.source_url,
+    )
+    material = {
+        "subject_key": observation.subject_key,
+        "run_id": payload.get("run_id"),
+        "run_attempt": payload.get("run_attempt"),
+        "run_number": payload.get("run_number"),
+        "conclusion": failure.conclusion,
+    }
+    trust, freshness = _freshness(ctx, observation.observed_at)
+    return InboxEntry(
+        entry_key=f"ci:ref:{observation.subject_key}:{digest_of(material)}",
+        source=CI_KIND,
+        kind=REF_FAILURE_KIND,
+        occurred_at=_when(payload.get("updated_at")) or observation.observed_at,
+        observed_at=observation.observed_at,
+        title=f"{failure.workflow} failed on {where.ref}",
+        summary=summary[:1000],
+        project_slug=None if project is None else project.slug,
+        work_item_ref=links.get(observation.subject_key),
+        source_subject_key=observation.subject_key,
+        source_url=log_url if isinstance(log_url, str) else observation.source_url,
+        trust_state=trust,
+        freshness=freshness,
+        action=InboxAction(kind="observation", subject_key=observation.subject_key),
+        **_actor_fields(SYSTEM_ACTOR),
+    )
+
+
+def _bound_branch_entry(
+    ctx: AppContext, bound: BoundBranch, projects: dict[str, Project]
+) -> InboxEntry:
+    """CI settled on a branch a work item is bound to — pass or fail."""
+    ci = bound.ci
+    project = projects.get(bound.project_id)
+    newest = max(ci.runs, key=lambda run: run.observation.observed_at)
+    failing_url = next(
+        (
+            run.observation.source_url
+            for run in ci.runs
+            if run.workflow in ci.failing and run.observation.source_url
+        ),
+        None,
+    )
+    if ci.state == "failed":
+        summary = f"Failing: {', '.join(ci.failing)}."
+    elif ci.state == "passed":
+        summary = f"All {len(ci.runs)} workflow(s) passed."
+    else:
+        summary = "Every run on the revision was cancelled."
+    summary = (
+        f"{summary} {bound.branch} @ {ci.revision[:12]} for {bound.work_item_ref}."
+    )
+    material = {
+        "branch": bound.branch,
+        "revision": ci.revision,
+        "state": ci.state,
+        "runs": [[run.workflow, run.conclusion] for run in ci.runs],
+    }
+    trust, freshness = _freshness(ctx, newest.observation.observed_at)
+    subject = f"ci-branch:{bound.work_item_ref}:{bound.branch}"
+    return InboxEntry(
+        entry_key=f"ci:branch:{subject}:{digest_of(material)}",
+        source=CI_KIND,
+        kind=BRANCH_CONCLUDED_KIND,
+        occurred_at=_when(ci.concluded_at) or newest.observation.observed_at,
+        observed_at=newest.observation.observed_at,
+        title=f"CI {ci.state} on {bound.branch}",
+        summary=summary[:1000],
+        project_slug=None if project is None else project.slug,
+        work_item_ref=bound.work_item_ref,
+        source_subject_key=newest.observation.subject_key,
+        source_url=failing_url or newest.observation.source_url,
+        trust_state=trust,
+        freshness=freshness,
+        action=InboxAction(
+            kind="observation", subject_key=newest.observation.subject_key
+        ),
+        **_actor_fields(SYSTEM_ACTOR),
+    )
+
+
+def _deploy_lane_entry(
+    ctx: AppContext, observation: Observation, projects: dict[str, Project]
+) -> InboxEntry | None:
+    """A deploy lane whose latest receipt says the deploy failed."""
+    receipt = observation.payload.get("receipt")
+    if not isinstance(receipt, dict) or receipt.get("status") != "failed":
+        return None
+    project = projects.get(observation.project_id or "")
+    if project is None:
+        return None
+    lane = _text(observation.payload.get("lane")) or "deploy"
+    sha = _text(receipt.get("source_sha")) or "unknown revision"
+    tag = _text(receipt.get("source_tag"))
+    material = {"subject_key": observation.subject_key, "receipt": receipt}
+    trust, freshness = _freshness(ctx, observation.observed_at)
+    return InboxEntry(
+        entry_key=f"ci:deploy:{observation.subject_key}:{digest_of(material)}",
+        source=CI_KIND,
+        kind=DEPLOY_FAILED_KIND,
+        occurred_at=_when(receipt.get("timestamp")) or observation.observed_at,
+        observed_at=observation.observed_at,
+        title=f"Deploy failed on lane {lane}",
+        summary=(
+            f"The {lane} receipt reports a failed deploy of "
+            f"{tag or sha[:12]}. Clears when a later receipt reports success."
+        ),
+        project_slug=project.slug,
+        source_subject_key=observation.subject_key,
+        source_url=_text(receipt.get("url")) or observation.source_url,
+        trust_state=trust,
+        freshness=freshness,
+        action=InboxAction(kind="observation", subject_key=observation.subject_key),
+        **_actor_fields(SYSTEM_ACTOR),
+    )
 
 
 def _observation_entry(

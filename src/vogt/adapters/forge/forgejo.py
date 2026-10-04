@@ -39,11 +39,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from vogt.adapters.forge._payloads import comparison, decoded_content, quote_path
 from vogt.adapters.forge.models import (
     ForgeActor,
     ForgeCapabilities,
     ForgeCheck,
+    ForgeComparison,
     ForgeIssue,
+    ForgeJob,
     ForgeLabel,
     ForgeNotification,
     ForgePosture,
@@ -466,6 +469,31 @@ class ForgejoProvider:
                 updated_at=item.get("updated_at") or item.get("created_at"),
                 source_url=item.get("url"),
             )
+
+    def watched_ref_checks(self, ref: RepoRef) -> Iterable[ForgeCheck]:
+        # The tasks endpoint takes no event filter, so there is no cheaper
+        # second page to read; `checks` is all this forge can offer.
+        del ref
+        return ()
+
+    def failed_jobs(self, ref: RepoRef, run_id: int) -> list[ForgeJob]:
+        # A Forgejo "task" already *is* one job, named and linked by
+        # `checks`; there is no per-run job listing to add.
+        del ref, run_id
+        return []
+
+    def read_file(self, ref: RepoRef, path: str) -> bytes | None:
+        payload = self._client.get(
+            f"/repos/{ref.owner}/{ref.repo}/contents/{quote_path(path)}"
+        )
+        return decoded_content(payload)
+
+    def compare(self, ref: RepoRef, base: str, head: str) -> ForgeComparison | None:
+        payload = self._client.get(
+            f"/repos/{ref.owner}/{ref.repo}/compare/"
+            f"{quote_path(base)}...{quote_path(head)}"
+        )
+        return comparison(base, head, payload)
 
     def labels(self, ref: RepoRef) -> Iterable[ForgeLabel]:
         payloads = self._client.get(

@@ -357,6 +357,13 @@ class ReadView(Protocol):
         """
         ...
 
+    def bound_branch_overlays(self, *, limit: int) -> list[WorkOverlay]:
+        """Every overlay that declares at least one branch, newest first.
+
+        What the CI watch walks: the branches work items were bound to
+        (`work.bind_branch`, `session.start`)."""
+        ...
+
     # -- tokens ------------------------------------------------------------
 
     def token_by_hash(self, token_hash: str) -> Token | None: ...

@@ -36,6 +36,7 @@ from vogt.application.services.contracts import (
     contract_evaluate,
     contract_inapplicable,
 )
+from vogt.application.services.deployed import deployed_versions
 from vogt.application.services.drift_service import (
     detect_drift,
     list_drift,
@@ -162,6 +163,7 @@ __all__ = [
     "create_project",
     "create_user",
     "create_work",
+    "deployed_versions",
     "deps",
     "detect_drift",
     "export_instance",

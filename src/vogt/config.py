@@ -39,6 +39,8 @@ from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
 
 from pydantic import Field, field_validator
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
@@ -69,6 +71,57 @@ def default_data_dir() -> Path:
     xdg = os.environ.get("XDG_DATA_HOME")
     base = Path(xdg) if xdg else Path.home() / ".local" / "share"
     return base / "vogt"
+
+
+class DeployLane(BaseModel):
+    """One deployment lane whose deployed revision Vogt reads (`deploy_lanes`).
+
+    Configuration only: a lane names *where* its evidence lives, never a
+    hostname Vogt knows by itself. Two sources, either or both:
+
+    - a **receipt** — a JSON file in a forge repository (`receipt_repo` +
+      `receipt_path`) a deploy pipeline writes, carrying at least
+      `source_sha` (and optionally `source_tag`, `timestamp`, a `status` or
+      `live_smoke.status`). Read through the forge configured for that
+      repository's host, with its credential.
+    - a **version URL** — a public JSON endpoint of the running instance
+      (Vogt's own front door answers `/api/config` with `source_sha` and
+      `product_version`). Read without credentials.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1, description="The lane's name, e.g. `dev`.")
+    project: str = Field(
+        min_length=1,
+        description="Slug of the registered project the lane deploys.",
+    )
+    branch: str = Field(
+        default="main",
+        min_length=1,
+        description="The branch the lane is expected to track.",
+    )
+    receipt_repo: str | None = None
+    receipt_path: str | None = None
+    version_url: str | None = None
+
+    @model_validator(mode="after")
+    def _has_a_source(self) -> DeployLane:
+        if (self.receipt_repo is None) != (self.receipt_path is None):
+            msg = (
+                f"deploy lane {self.name!r}: give receipt_repo and receipt_path "
+                "together"
+            )
+            raise ValueError(msg)
+        if self.receipt_repo is None and self.version_url is None:
+            msg = f"deploy lane {self.name!r} names no receipt and no version_url"
+            raise ValueError(msg)
+        if self.version_url is not None and not self.version_url.startswith(
+            ("https://", "http://")
+        ):
+            msg = f"deploy lane {self.name!r}: version_url must be http(s)"
+            raise ValueError(msg)
+        return self
 
 
 class _TomlFileSource(PydanticBaseSettingsSource):
@@ -262,6 +315,58 @@ class VogtConfig(BaseSettings):
             "automation out of the Inbox's *External people only* filter. "
             "Applied when the Inbox is read, so a change here needs no "
             "re-sweep."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    ci_alert_branches: tuple[str, ...] = Field(
+        default=("main", "master", "prod"),
+        description=(
+            "Branches (glob patterns) whose failed CI runs raise an Inbox "
+            "alert. Only pushed, scheduled and manually dispatched runs "
+            "count — a pull-request run never alerts, whatever its branch. "
+            "An alert names the failing jobs, links the log, and clears "
+            "itself when a later run of the same workflow on the same "
+            "branch succeeds."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    ci_alert_tags: tuple[str, ...] = Field(
+        default=("v*",),
+        description=(
+            "Tags (glob patterns) whose failed CI runs raise an Inbox alert "
+            "— the release workflows a tag push starts, which block no pull "
+            "request and so fail silently otherwise. Tags are one lane per "
+            "workflow: a later tag's successful run of the same workflow "
+            "clears an earlier tag's failure, because the release it would "
+            "have shipped has been superseded."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    ci_watch_notify_sessions: bool = Field(
+        default=True,
+        description=(
+            "When CI finishes on a branch bound to a work item "
+            "(`work.bind_branch`), type a one-line pass/fail notice into "
+            "each live session started for that item, so an agent wakes on "
+            "the result instead of polling. Sent once per run conclusion, "
+            "by the sweep that observed it. The Inbox entry is raised "
+            "either way; this only turns the session nudge off."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    deploy_lanes: tuple[DeployLane, ...] = Field(
+        default=(),
+        description=(
+            "Deployment lanes `deployed_versions` reports on, each a table "
+            "with `name`, `project` (a registered slug), `branch` (default "
+            "`main`), and a source: `receipt_repo` + `receipt_path` (a JSON "
+            "receipt a deploy pipeline commits, read through the configured "
+            "forge) and/or `version_url` (a running instance's public JSON "
+            "version endpoint, e.g. Vogt's `/api/config`). Empty means the "
+            "`deploy-lanes` collector is not registered and deployed "
+            "versions are reported as not configured. A receipt whose "
+            "status says the deploy or its smoke test failed raises an "
+            "Inbox alert."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
@@ -723,6 +828,8 @@ def _label_for(annotation: Any) -> str:
         return "one of " + ", ".join(f"`{arg}`" for arg in args)
     if origin in (tuple, list, set, frozenset):
         inner = args[0] if args else str
+        if isinstance(inner, type) and issubclass(inner, BaseModel):
+            return f"list of `{inner.__name__}` tables"
         return f"list of {_SCALAR_NAMES.get(inner, 'values')}s"
     if origin is dict:
         key, value = (args[0], args[1]) if len(args) == 2 else (str, str)
@@ -881,6 +988,12 @@ def _example_value(field: FieldDoc) -> str:
         return '{ claude = "~/.claude/projects", codex = "~/.codex/sessions" }'
     if field.name == "agent_activity_services":
         return "{ ci = 'ci\\.example\\.org' }"
+
+    if field.name == "deploy_lanes":
+        return (
+            '[{ name = "dev", project = "my-app", version_url = '
+            '"https://dev.example.com/api/config" }]'
+        )
     if field.name == "public_url":
         # Shown as an example rather than `null`, because an exposure value
         # with no default still has a *shape*, and the shape is the part an

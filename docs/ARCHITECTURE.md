@@ -308,6 +308,17 @@ subject.
 | `session-outcomes` | a configured engine | `session.outcome`, `agent_task.run` |
 | `forge-issues`, `forge-prs` | a forge token | `forge.issue`, `forge.pull_request`, synced all-state and incrementally by watermark, plus a `forge.sync` receipt |
 | `forge-checks`, `forge-releases`, `forge-labels`, `forge-posture`, `forge-notifications` | a forge token | `ci.check`, `release`, `forge.label`, `forge.posture`, `forge.notification` |
+| `deploy-lanes` | `deploy_lanes` configured | `deploy.lane` — per lane, the deployed SHA (version endpoint or pipeline receipt) compared with the lane's branch |
+
+CI is read two ways (`core/ci_alerts.py`). `core/checks.py` rolls a project
+up by its newest revision — right for a pull request. Watched refs (default
+branches, prod, release tags) are read by *lane*, one workflow per ref (tags:
+per tag pattern), so a release-tag failure stays an Inbox alert until a later
+run in that lane succeeds rather than vanishing when another commit becomes
+newest. Branches bound to work items are read per branch; after a sweep the
+application layer announces a fresh settled verdict once (a
+`ci.branch_concluded` event plus a nudge into the item's live sessions) —
+the collector itself still writes nothing.
 
 Every observation carries a deterministic `subject_key`
 (`gh:{owner}/{repo}#{n}`, `contract:{slug}`, `session:{id}`, …) and a content

@@ -24,6 +24,9 @@ KIND_LABEL = "forge.label"
 #: The per-project sync receipt (the `dep_scan` pattern): "not collected" is
 #: never reported as "nothing there".
 KIND_SYNC = "forge.sync"
+#: One configured deployment lane: its deployed revision and how far behind
+#: its branch that is (`deploy_lanes`).
+KIND_DEPLOY_LANE = "deploy.lane"
 
 # -- collector names -------------------------------------------------------
 
@@ -34,6 +37,7 @@ COLLECTOR_RELEASES = "forge-releases"
 COLLECTOR_POSTURE = "forge-posture"
 COLLECTOR_NOTIFICATIONS = "forge-notifications"
 COLLECTOR_LABELS = "forge-labels"
+COLLECTOR_DEPLOY_LANES = "deploy-lanes"
 
 #: Old collector names → the ones that replaced them (D4). A drift proposal or
 #: retirement lookup raised before a rename carries the old name; coverage now
@@ -57,6 +61,7 @@ def current_collector(name: str) -> str:
 __all__ = [
     "COLLECTOR_ALIASES",
     "COLLECTOR_CHECKS",
+    "COLLECTOR_DEPLOY_LANES",
     "COLLECTOR_ISSUES",
     "COLLECTOR_LABELS",
     "COLLECTOR_NOTIFICATIONS",
@@ -64,6 +69,7 @@ __all__ = [
     "COLLECTOR_PULLS",
     "COLLECTOR_RELEASES",
     "KIND_CHECK",
+    "KIND_DEPLOY_LANE",
     "KIND_ISSUE",
     "KIND_LABEL",
     "KIND_NOTIFICATION",
