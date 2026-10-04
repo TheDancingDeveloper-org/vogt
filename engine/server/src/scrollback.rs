@@ -287,7 +287,7 @@ mod tests {
         let tail = sb.snapshot_tail(3);
         // Raw cut drops 5 -> index 5 = 0xA9 (continuation); align forward to 6.
         assert_eq!(&*tail, b"fg");
-        assert!(tail.first().map_or(true, |&b| (b & 0xC0) != 0x80));
+        assert!(tail.first().is_none_or(|&b| (b & 0xC0) != 0x80));
         assert!(tail.len() <= 3);
     }
 
@@ -349,7 +349,7 @@ mod tests {
         let snap = sb.snapshot();
         assert_eq!(&*snap, b"b");
         // Continuation bytes are 0b10xx_xxxx.
-        assert!(snap.first().map_or(true, |&b| (b & 0xC0) != 0x80));
+        assert!(snap.first().is_none_or(|&b| (b & 0xC0) != 0x80));
     }
 
     /// Even after a boundary-aligned overflow trim, the retained-cursor
