@@ -95,6 +95,13 @@ def _obs(
     )
 
 
+def test_watched_ref_excludes_github_managed_dynamic_runs() -> None:
+    # Dependabot's "Update #N" runs arrive as event "dynamic" on main; they are
+    # GitHub's managed workflow, not the repository's CI, and must not alert.
+    assert watched_ref("main", "dynamic", branches=BRANCHES, tags=TAGS) is None
+    assert watched_ref("main", "schedule", branches=BRANCHES, tags=TAGS) is not None
+
+
 def test_watched_ref_excludes_pull_requests_and_unwatched_branches() -> None:
     assert watched_ref("main", "push", branches=BRANCHES, tags=TAGS) is not None
     assert watched_ref("main", "pull_request", branches=BRANCHES, tags=TAGS) is None
