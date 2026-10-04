@@ -172,6 +172,8 @@ class ForgeChecksCollector(_ForgeReadCollector):
                 "updated_at": check.updated_at,
                 "repo": ref.slug,
             }
+            if check.workflow_path is not None:
+                payload["workflow_path"] = check.workflow_path
             if check.run_id is not None:
                 payload["run_id"] = check.run_id
                 payload["run_attempt"] = check.run_attempt

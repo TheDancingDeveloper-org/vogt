@@ -643,6 +643,7 @@ def _runs(ref: RepoRef, payloads: object) -> Iterable[ForgeCheck]:
             branch=item.get("head_branch"),
             event=item.get("event"),
             run_number=item.get("run_number"),
+            workflow_path=_text(item.get("path")),
             updated_at=item.get("updated_at"),
             source_url=item.get("html_url"),
             run_id=run_id if isinstance(run_id, int) else None,

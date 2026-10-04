@@ -225,6 +225,9 @@ class ForgeCheck:
     updated_at: str | None = None
     source_url: str | None = None
     extra: dict[str, object] = field(default_factory=dict)
+    #: The workflow file the run came from (`.github/workflows/ci.yml`, or
+    #: `dynamic/dependabot/...` for a GitHub-managed one), where known.
+    workflow_path: str | None = None
     #: The forge's id for the run, where it has one — what a job lookup
     #: (`failed_jobs`) is keyed by.
     run_id: int | None = None

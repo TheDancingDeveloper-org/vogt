@@ -315,7 +315,8 @@ store. Without roots the collector is not registered, and both reads say so in
   on it; nothing needs to poll a forge.
 - **`deployed.versions`** (`GET /api/deployed-versions`, `vogt
   deployed-versions`, MCP `deployed_versions`; `read`) — one row per lane in
-  `deploy_lanes`: `status` (`at_head` | `behind` | `diverged` | `unknown` |
+  `deploy_lanes`: `name` (the configured lane name; also echoed as `lane`),
+  `status` (`at_head` | `behind` | `diverged` | `unknown` |
   `not_collected`), `deployed_sha` and whether it came from the running
   instance (`live`, its version endpoint) or the pipeline `receipt`,
   `version`, `source_tag`, `receipt_status`, `head_sha`, `commits_behind`,

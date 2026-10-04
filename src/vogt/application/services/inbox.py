@@ -54,7 +54,7 @@ from vogt.core.actors import (
     normalise_bot_logins,
 )
 from vogt.core.checks import roll_up
-from vogt.core.ci_alerts import RefFailure, watched_failures
+from vogt.core.ci_alerts import RefFailure, github_managed, watched_failures
 from vogt.core.digest import digest_of
 from vogt.core.entities import (
     Actor,
@@ -415,8 +415,16 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
     # Σ failing × checks-per-project — 730 queries and 732k observation
     # objects for one page on a two-week-old estate, and the read crossed the
     # PWA's deadline, which turned every badge refresh into a retry.
+    # GitHub-managed runs (Dependabot "Update #N") are not the repository's
+    # CI and fail routinely; they never make a "CI failing" entry, nor move a
+    # project's newest revision. Judged on the stored payload alone.
+    repo_checks = [
+        observation
+        for observation in checks_all
+        if not github_managed(observation.payload)
+    ]
     checks_by_project: dict[str, list[Observation]] = {}
-    for observation in checks_all:
+    for observation in repo_checks:
         if observation.project_id is not None:
             checks_by_project.setdefault(observation.project_id, []).append(observation)
     newest_revision_ids: dict[str, frozenset[str]] = {}
@@ -436,7 +444,7 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
         alerted.add(failure.observation.id)
         entries.append(_ref_failure_entry(ctx, failure, projects, links))
 
-    for observation in checks_all:
+    for observation in repo_checks:
         if _text(observation.payload.get("conclusion")) in (None, "success", "skipped"):
             continue
         if observation.id in alerted:

@@ -3328,7 +3328,10 @@ class UnpromotedWorkItem(Result):
 class DeployedLaneView(Result):
     """One lane: what it runs, and how far that is behind its branch."""
 
-    lane: str
+    name: str = Field(
+        description="The lane's configured name (`deploy_lanes[].name`), e.g. `dev`."
+    )
+    lane: str = Field(description="The same name; kept for existing readers.")
     project_slug: str
     branch: str
     status: Literal["at_head", "behind", "diverged", "unknown", "not_collected"] = (
