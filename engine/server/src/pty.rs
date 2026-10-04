@@ -85,6 +85,24 @@ impl Session {
         *self.exit_code.lock()
     }
 
+    /// Whether the child process is still running. An exited session stays
+    /// in the registry (its scrollback is still readable) until deleted.
+    pub fn is_alive(&self) -> bool {
+        self.exit_code.lock().is_none()
+    }
+
+    /// The bytes and size to render the current screen from: the last
+    /// `limit` bytes of the same scrollback ring attach replays (aligned to a
+    /// ground-state boundary), and the PTY's current rows and cols.
+    pub fn screen_source(&self, limit: usize) -> (Bytes, u16, u16) {
+        let (rows, cols) = match self.master.lock().get_size() {
+            Ok(size) => (size.rows, size.cols),
+            Err(_) => (24, 80),
+        };
+        let bytes = self.scrollback.lock().snapshot_tail(limit);
+        (bytes, rows, cols)
+    }
+
     pub fn command(&self) -> Option<String> {
         self.command.clone()
     }
@@ -95,12 +113,17 @@ impl Session {
     }
 
     pub fn summary(&self) -> SessionSummary {
+        // Read once: a guard taken inside the struct literal lives to the end
+        // of the statement, so locking `exit_code` again for `alive` there
+        // would deadlock (parking_lot mutexes are not re-entrant).
+        let exit_code = self.exit_code();
         let sb = self.scrollback.lock();
         SessionSummary {
             id: self.id,
             name: self.name.lock().clone(),
             activity: *self.activity.lock(),
-            exit_code: *self.exit_code.lock(),
+            exit_code,
+            alive: exit_code.is_none(),
             scrollback_bytes: sb.total_written(),
             cwd: self.cwd.clone(),
             command: self.command.clone(),
@@ -651,7 +674,7 @@ fn spawn_reader_thread(
 
                         let _ = tx.send(OutputChunk { pos, data });
 
-                        let new_state = compute_activity(&session, false);
+                        let new_state = compute_activity(&session);
                         update_activity_if_changed(&session, new_state, &bus);
                         wake_activity_watcher(&session);
                     }
@@ -692,7 +715,7 @@ fn spawn_exit_waiter(
         let code = status.exit_code() as i32;
         *session.ended_at.lock() = Some(time::OffsetDateTime::now_utc());
         *session.exit_code.lock() = Some(code);
-        let new_state = compute_activity(&session, code != 0);
+        let new_state = compute_activity(&session);
         update_activity_if_changed(&session, new_state, &bus);
         wake_activity_watcher(&session);
 
@@ -753,6 +776,7 @@ fn try_spawn_archive(
             cwd: Some(session.cwd.clone()),
             command: session.command.clone(),
             scrollback_bytes,
+            end_reason: Some(crate::history::END_EXITED),
         };
 
         if let Err(e) = history
@@ -787,6 +811,11 @@ pub async fn archive_live_session(session: &Arc<Session>, history: &SessionHisto
         cwd: Some(session.cwd.clone()),
         command: session.command.clone(),
         scrollback_bytes,
+        end_reason: Some(if session.exit_code().is_some() {
+            crate::history::END_EXITED
+        } else {
+            crate::history::END_ENGINE_SHUTDOWN
+        }),
     };
     if let Err(e) = history
         .archive_session_with_output(record, output_text.as_ref())
@@ -850,7 +879,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
             let elapsed_ms = reference.elapsed().as_millis() as u64;
             if elapsed_ms >= session.idle_after_ms {
                 let new_state = if session.last_output.lock().is_some() {
-                    compute_activity(&session, false)
+                    compute_activity(&session)
                 } else {
                     ActivityState::Idle
                 };
@@ -874,7 +903,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                         break;
                     }
                     let new_state = if session.last_output.lock().is_some() {
-                        compute_activity(&session, false)
+                        compute_activity(&session)
                     } else {
                         ActivityState::Idle
                     };
@@ -890,20 +919,29 @@ fn wake_activity_watcher(session: &Session) {
     session.activity_notify.notify_one();
 }
 
-fn compute_activity(session: &Arc<Session>, exited_nonzero: bool) -> ActivityState {
+fn compute_activity(session: &Arc<Session>) -> ActivityState {
     let tail = {
         let sb = session.scrollback.lock();
         sb.tail(2048).to_vec()
     };
     let last = *session.last_output.lock();
-    classify(last, &tail, session.idle_after_ms, exited_nonzero)
+    classify(last, &tail, session.idle_after_ms, session.exit_code())
 }
 
+/// Store and announce a new activity state.
+///
+/// Once the child has exited the state is pinned to `exited`/`errored`: the
+/// PTY reader keeps draining the last bytes after the exit waiter has run,
+/// and a live state it computed from those bytes (before it saw the exit
+/// code) must not overwrite the terminal one — that is how a stopped session
+/// used to read `running` forever. The exit code is re-read under the
+/// activity lock, and the event is published under it too, so subscribers
+/// see the transitions in the order they were stored.
 fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &EventBus) {
     let mut a = session.activity.lock();
+    let new = crate::activity::exit_state(session.exit_code()).unwrap_or(new);
     if *a != new {
         *a = new;
-        drop(a);
         *session.activity_since.lock() = Instant::now();
         *session.activity_changed_at.lock() = time::OffsetDateTime::now_utc();
         let activity_changed_at = format_rfc3339(*session.activity_changed_at.lock());

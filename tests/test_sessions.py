@@ -65,6 +65,10 @@ class StandInEngine:
         #: Sessions the engine holds that Vogt never started — keyed by id,
         #: value is the activity. Listed by GET /api/sessions like any other.
         self.unlinked: dict[str, str] = {}
+        #: Exit codes of sessions whose process has exited but which the
+        #: engine still lists (it keeps them until deleted), as it reports
+        #: them: with `exit_code` set and `alive` false.
+        self.exit_codes: dict[str, int] = {}
         self.counter = 0
         #: When set, the history log endpoint 404s — the engine has no log for
         #: that id (history off, or the id is unknown).
@@ -112,6 +116,8 @@ class StandInEngine:
                         "activity": state,
                         "cwd": ROOT,
                         "created_at": "2026-01-03T00:00:00Z",
+                        "exit_code": self.exit_codes.get(key),
+                        "alive": key not in self.exit_codes,
                     }
                     for key, state in {**self.alive, **self.unlinked}.items()
                 ]
@@ -477,6 +483,53 @@ def test_activity_comes_from_the_engine_not_from_storage(
     assert after.activity is None
     assert after.alive is False
     assert after.id == result.session.id, "the link survives the process"
+
+
+def test_an_exited_process_is_not_alive_though_the_engine_still_lists_it(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-830: listed by the engine is not alive.
+
+    The engine keeps an exited session (its output stays readable) until it
+    is deleted; reading presence as liveness is how a `/bin/true` smoke
+    session stayed `alive: true` forever.
+    """
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    engine_id = result.session.engine_session_id
+    assert engine_id is not None
+    engine.alive[engine_id] = "exited"
+    engine.exit_codes[engine_id] = 0
+
+    row = list_sessions(wired, ListSessionsParams()).sessions[0]
+    assert row.activity == "exited"
+    assert row.alive is False
+
+
+def test_an_exited_unlinked_session_is_listed_only_with_the_stopped_ones(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    engine.unlinked["eng-smoke"] = "exited"
+    engine.exit_codes["eng-smoke"] = 0
+
+    default = list_sessions(wired, ListSessionsParams()).sessions
+    assert all(row.id != "eng-smoke" for row in default)
+
+    kept = list_sessions(wired, ListSessionsParams(include_stopped=True)).sessions
+    smoke = [row for row in kept if row.id == "eng-smoke"]
+    assert len(smoke) == 1
+    assert smoke[0].alive is False
+    assert smoke[0].activity == "exited"
+
+
+def test_an_older_engine_without_alive_is_read_from_the_exit_code() -> None:
+    from vogt.adapters.engine.client import EngineSession
+
+    exited = EngineSession.from_payload(
+        {"id": "a", "activity": "running", "exit_code": 1}
+    )
+    running = EngineSession.from_payload({"id": "b", "activity": "running"})
+    assert exited.alive is False
+    assert running.alive is True
 
 
 def test_a_stopped_session_leaves_the_list(wired: AppContext) -> None:

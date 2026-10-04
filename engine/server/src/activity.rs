@@ -98,18 +98,29 @@ pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Decide the next activity state given current state, time of last output,
-/// and a tail snapshot of scrollback.
+/// The terminal state an exit code maps to: `exited` for 0, `errored` for
+/// anything else. `None` while the child is still running.
+pub fn exit_state(exit_code: Option<i32>) -> Option<ActivityState> {
+    match exit_code {
+        None => None,
+        Some(0) => Some(ActivityState::Exited),
+        Some(_) => Some(ActivityState::Errored),
+    }
+}
+
+/// Decide the next activity state given time of last output, a tail snapshot
+/// of scrollback, and the child's exit code if it has exited.
 ///
-/// `idle_after_ms` is the quiet window before Running collapses to Idle.
+/// `idle_after_ms` is the quiet window before Running collapses to Idle. An
+/// exited child is always `exited`/`errored`, whatever the tail says.
 pub fn classify(
     last_output: Option<Instant>,
     tail: &[u8],
     idle_after_ms: u64,
-    is_exited_nonzero: bool,
+    exit_code: Option<i32>,
 ) -> ActivityState {
-    if is_exited_nonzero {
-        return ActivityState::Errored;
+    if let Some(state) = exit_state(exit_code) {
+        return state;
     }
     let stripped = strip_ansi(tail);
     // Only check the last ~512 bytes of stripped content — patterns anchor on $.
@@ -149,34 +160,36 @@ mod tests {
 
     #[test]
     fn detects_yn_prompt() {
-        let s = classify(Some(Instant::now()), b"Continue? [y/N] ", 1500, false);
+        let s = classify(Some(Instant::now()), b"Continue? [y/N] ", 1500, None);
         // Trailing space breaks the `$` anchor — verify the un-spaced form works.
         assert_ne!(s, ActivityState::Errored);
-        let s = classify(Some(Instant::now()), b"Continue? [y/N]", 1500, false);
+        let s = classify(Some(Instant::now()), b"Continue? [y/N]", 1500, None);
         assert_eq!(s, ActivityState::WaitingForInput);
     }
 
     #[test]
     fn detects_password_prompt() {
-        let s = classify(
-            Some(Instant::now()),
-            b"sudo password for user:",
-            1500,
-            false,
-        );
+        let s = classify(Some(Instant::now()), b"sudo password for user:", 1500, None);
         assert_eq!(s, ActivityState::WaitingForInput);
     }
 
     #[test]
     fn nonzero_exit_becomes_errored() {
-        let s = classify(Some(Instant::now()), b"hello", 1500, true);
+        let s = classify(Some(Instant::now()), b"hello", 1500, Some(1));
         assert_eq!(s, ActivityState::Errored);
+    }
+
+    #[test]
+    fn zero_exit_is_exited_even_with_a_prompt_in_the_tail() {
+        let s = classify(Some(Instant::now()), b"Continue? [y/N]", 1500, Some(0));
+        assert_eq!(s, ActivityState::Exited);
+        assert_eq!(exit_state(None), None);
     }
 
     #[test]
     fn quiet_window_collapses_to_idle() {
         let t = Instant::now() - std::time::Duration::from_secs(10);
-        let s = classify(Some(t), b"hello", 1500, false);
+        let s = classify(Some(t), b"hello", 1500, None);
         assert_eq!(s, ActivityState::Idle);
     }
 
@@ -192,7 +205,7 @@ mod tests {
 
     #[test]
     fn recent_output_is_running() {
-        let s = classify(Some(Instant::now()), b"hello", 1500, false);
+        let s = classify(Some(Instant::now()), b"hello", 1500, None);
         assert_eq!(s, ActivityState::Running);
     }
 }

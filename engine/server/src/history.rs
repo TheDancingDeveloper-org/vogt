@@ -40,7 +40,21 @@ pub struct SessionMetadata {
     pub cwd: Option<String>,
     pub command: Option<String>,
     pub scrollback_bytes: i64,
+    /// How the session ended, when it has: `exited` (the child exited while
+    /// the engine watched; `exit_code` is its code), `engine-shutdown` (the
+    /// engine archived it while shutting down; `exit_code` NULL) or
+    /// `engine-restart` (the engine found it unfinished at startup — killed by
+    /// a restart it never saw; `ended_at` is the last time its log was
+    /// written, `exit_code` NULL). NULL while the session is live, and on
+    /// rows written before the column existed.
+    #[sqlx(default)]
+    pub end_reason: Option<String>,
 }
+
+/// `end_reason` values. See [`SessionMetadata::end_reason`].
+pub const END_EXITED: &str = "exited";
+pub const END_ENGINE_SHUTDOWN: &str = "engine-shutdown";
+pub const END_ENGINE_RESTART: &str = "engine-restart";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
@@ -77,6 +91,7 @@ pub struct ArchiveRecord {
     pub cwd: Option<String>,
     pub command: Option<String>,
     pub scrollback_bytes: u64,
+    pub end_reason: Option<&'static str>,
 }
 
 impl SessionHistory {
@@ -166,6 +181,23 @@ impl SessionHistory {
         .await
         .map_err(|e| ApiError::Internal(format!("failed to create fts table: {}", e)))?;
 
+        // `end_reason` arrived after the table did; add it to an existing
+        // database. SQLite has no ADD COLUMN IF NOT EXISTS, so look first.
+        let has_end_reason =
+            sqlx::query("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'end_reason'")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| {
+                    ApiError::Internal(format!("failed to inspect sessions table: {}", e))
+                })?
+                .is_some();
+        if !has_end_reason {
+            sqlx::query("ALTER TABLE sessions ADD COLUMN end_reason TEXT")
+                .execute(&self.pool)
+                .await
+                .map_err(|e| ApiError::Internal(format!("failed to add end_reason: {}", e)))?;
+        }
+
         // Index on created_at for date-range queries
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at)")
             .execute(&self.pool)
@@ -199,12 +231,16 @@ impl SessionHistory {
 
         sqlx::query(
             r#"
-            INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
                 exit_code = COALESCE(excluded.exit_code, sessions.exit_code),
+                end_reason = CASE
+                    WHEN excluded.exit_code IS NOT NULL THEN excluded.end_reason
+                    ELSE COALESCE(sessions.end_reason, excluded.end_reason)
+                END,
                 cwd = COALESCE(excluded.cwd, sessions.cwd),
                 command = COALESCE(excluded.command, sessions.command),
                 scrollback_bytes = MAX(excluded.scrollback_bytes, sessions.scrollback_bytes)
@@ -218,6 +254,7 @@ impl SessionHistory {
         .bind(record.cwd)
         .bind(record.command)
         .bind(record.scrollback_bytes as i64)
+        .bind(record.end_reason)
         .execute(&self.pool)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to archive session: {}", e)))?;
@@ -230,7 +267,7 @@ impl SessionHistory {
         let limit = limit.min(200);
         let sessions = sqlx::query_as::<_, SessionMetadata>(
             r#"
-            SELECT id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes
+            SELECT id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason
             FROM sessions
             ORDER BY created_at DESC
             LIMIT ? OFFSET ?
@@ -369,6 +406,17 @@ impl SessionHistory {
     /// indexes the stripped output so search reaches it. Rows that already
     /// exist are left untouched.
     pub async fn backfill_orphaned_logs(&self) -> Result<usize> {
+        self.backfill_orphaned_logs_before(OffsetDateTime::now_utc())
+            .await
+    }
+
+    /// [`Self::backfill_orphaned_logs`], closing out every recovered log last
+    /// written before `booted_at`: such a log belongs to a session of an
+    /// earlier process, which cannot still be running, so its row gets
+    /// `ended_at` = the log's mtime and `end_reason = engine-restart` (exit
+    /// code unknown, NULL). A log written since boot may be a live session of
+    /// this process whose provisional row has not landed yet; it stays open.
+    pub async fn backfill_orphaned_logs_before(&self, booted_at: OffsetDateTime) -> Result<usize> {
         let rows = sqlx::query("SELECT id FROM sessions")
             .fetch_all(&self.pool)
             .await
@@ -408,10 +456,13 @@ impl SessionHistory {
                 Err(_) => continue,
             };
             let size = meta.len();
-            let created_str = meta
-                .modified()
-                .ok()
-                .map(OffsetDateTime::from)
+            let modified = meta.modified().ok().map(OffsetDateTime::from);
+            let ended_str = modified.filter(|t| *t < booted_at).and_then(|t| {
+                t.format(&time::format_description::well_known::Rfc3339)
+                    .ok()
+            });
+            let end_reason = ended_str.as_ref().map(|_| END_ENGINE_RESTART);
+            let created_str = modified
                 .and_then(|t| {
                     t.format(&time::format_description::well_known::Rfc3339)
                         .ok()
@@ -425,17 +476,20 @@ impl SessionHistory {
             // `DO NOTHING`: another writer that raced us to this id keeps its
             // (more complete) row. The outcome is unknown, so exit_code/ended_at
             // stay NULL, which the `unfinished` history filter now surfaces.
+            // (`ended_at` is the log's mtime when that predates this boot.)
             sqlx::query(
                 r#"
-                INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes)
-                VALUES (?, ?, ?, NULL, NULL, NULL, NULL, ?)
+                INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason)
+                VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
                 ON CONFLICT(id) DO NOTHING
                 "#,
             )
             .bind(id.to_string())
             .bind(format!("recovered {}", &stem[..stem.len().min(8)]))
             .bind(&created_str)
+            .bind(&ended_str)
             .bind(size as i64)
+            .bind(end_reason)
             .execute(&self.pool)
             .await
             .map_err(|e| ApiError::Internal(format!("backfill: insert failed: {e}")))?;
@@ -452,11 +506,57 @@ impl SessionHistory {
         Ok(recovered)
     }
 
+    /// Close out rows a previous engine process left unfinished.
+    ///
+    /// Sessions live in this process's memory, so at startup none of the
+    /// rows with a NULL `ended_at` can still be running: each was a session
+    /// the previous process lost — SIGKILLed by a redeploy before the drain
+    /// could archive it, or crashed. Without this they read as live in the
+    /// History tab forever. Each gets `ended_at` = the last time its raw log
+    /// was written (the best evidence of when it stopped; now if there is no
+    /// log), `end_reason = engine-restart`, and `exit_code` stays NULL because
+    /// the code is genuinely unknown.
+    ///
+    /// Must run before this process creates any session, since a new
+    /// session's provisional row also has a NULL `ended_at`.
+    pub async fn reconcile_unfinished(&self) -> Result<usize> {
+        let rows = sqlx::query("SELECT id FROM sessions WHERE ended_at IS NULL")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("reconcile: list failed: {e}")))?;
+        let now = OffsetDateTime::now_utc();
+        let mut closed = 0usize;
+        for row in rows {
+            let id: String = row.get("id");
+            let ended = Uuid::parse_str(&id)
+                .ok()
+                .and_then(|uuid| std::fs::metadata(self.log_path(uuid)).ok())
+                .and_then(|meta| meta.modified().ok())
+                .map(OffsetDateTime::from)
+                .unwrap_or(now);
+            let ended = ended
+                .format(&time::format_description::well_known::Rfc3339)
+                .map_err(|e| ApiError::Internal(format!("time format error: {e}")))?;
+            sqlx::query(
+                "UPDATE sessions SET ended_at = ?, end_reason = COALESCE(end_reason, ?) \
+                 WHERE id = ? AND ended_at IS NULL",
+            )
+            .bind(&ended)
+            .bind(END_ENGINE_RESTART)
+            .bind(&id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("reconcile: update failed: {e}")))?;
+            closed += 1;
+        }
+        Ok(closed)
+    }
+
     /// Get session by ID
     pub async fn get_session(&self, id: Uuid) -> Result<SessionMetadata> {
         let session = sqlx::query_as::<_, SessionMetadata>(
             r#"
-            SELECT id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes
+            SELECT id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason
             FROM sessions
             WHERE id = ?
             "#,

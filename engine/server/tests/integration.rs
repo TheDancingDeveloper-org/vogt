@@ -2321,6 +2321,7 @@ async fn provisional_history_row_is_written_at_spawn_and_not_clobbered() {
             cwd: None,
             command: None,
             scrollback_bytes: 0,
+            end_reason: None,
         })
         .await
         .unwrap();
@@ -7549,4 +7550,308 @@ esac
             .unwrap();
         assert_eq!(write.status(), StatusCode::FORBIDDEN);
     }
+}
+
+/// Poll the live list until `pred` holds for session `id`, returning its row.
+async fn wait_for_session_row(
+    client: &reqwest::Client,
+    base: &str,
+    id: &str,
+    pred: impl Fn(&Value) -> bool,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let list: Vec<Value> = client
+            .get(format!("{base}/api/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(row) = list.iter().find(|s| s["id"] == id && pred(s)) {
+            return row.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {id} never matched; got {list:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn create_session_with(client: &reqwest::Client, base: &str, body: Value) -> String {
+    client
+        .post(format!("{base}/api/sessions"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// WI-830: an exited child reads as exited and not alive, and stays that way
+/// — the PTY reader's late drain must not flip it back to `running`/`idle`.
+#[tokio::test]
+async fn an_exited_session_reports_a_terminal_state_and_not_alive() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let ok = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "true-smoke", "command": ["/bin/sh", "-c", "printf 'bye\\n'; exit 0"] }),
+    )
+    .await;
+    let failing = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "false-smoke", "command": ["/bin/sh", "-c", "printf 'oops\\n'; exit 3"] }),
+    )
+    .await;
+    let live = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "cat", "command": ["/bin/cat"] }),
+    )
+    .await;
+
+    let row = wait_for_session_row(&client, &base, &ok, |s| s["exit_code"] == json!(0)).await;
+    // Well past the 200 ms idle window: nothing may move it off `exited`.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let row_later = wait_for_session_row(&client, &base, &ok, |_| true).await;
+    for r in [&row, &row_later] {
+        assert_eq!(r["activity"], "exited", "{r:?}");
+        assert_eq!(r["alive"], false, "{r:?}");
+    }
+
+    let row = wait_for_session_row(&client, &base, &failing, |s| s["exit_code"] == json!(3)).await;
+    assert_eq!(row["activity"], "errored", "{row:?}");
+    assert_eq!(row["alive"], false, "{row:?}");
+
+    let row = wait_for_session_row(&client, &base, &live, |_| true).await;
+    assert_eq!(row["alive"], true, "{row:?}");
+    assert!(row["exit_code"].is_null());
+
+    // A stopped (killed) session is not alive either.
+    client
+        .post(format!("{base}/api/sessions/{live}/kill"))
+        .send()
+        .await
+        .unwrap();
+    let row = wait_for_session_row(&client, &base, &live, |s| !s["exit_code"].is_null()).await;
+    assert_eq!(row["alive"], false, "{row:?}");
+    assert!(
+        row["activity"] == "errored" || row["activity"] == "exited",
+        "{row:?}"
+    );
+
+    // History records the exit and why it ended.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let rows: Vec<Value> = client
+            .get(format!("{base}/api/history/sessions?limit=20"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(r) = rows
+            .iter()
+            .find(|r| r["id"] == ok && r["exit_code"] == json!(0))
+        {
+            assert!(r["ended_at"].is_string(), "{r:?}");
+            assert_eq!(r["end_reason"], "exited", "{r:?}");
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "{rows:?}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// WI-831: `/screen` renders the visible grid with the documented shape.
+#[tokio::test]
+async fn session_screen_renders_the_visible_grid() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "screen",
+            "cols": 40,
+            "rows": 5,
+            "command": [
+                "/bin/sh",
+                "-c",
+                "printf '\\033]0;my-title\\007\\033[2J\\033[1;1HIf\\033[1;4Hnothing\\033[1;12His   \\033[3;1HContinue? [y/N]'; sleep 30",
+            ],
+        }),
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let screen = loop {
+        let resp = client
+            .get(format!("{base}/api/sessions/{id}/screen"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let screen: Value = resp.json().await.unwrap();
+        if screen["ready"] == true {
+            break screen;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "screen never became ready: {screen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+
+    let keys: std::collections::BTreeSet<&str> = screen
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["activity", "alive", "cols", "cursor", "id", "lines", "ready", "rows", "title"]
+            .into_iter()
+            .collect(),
+        "{screen:?}"
+    );
+    assert_eq!(screen["id"], id);
+    assert_eq!(screen["cols"], 40);
+    assert_eq!(screen["rows"], 5);
+    assert_eq!(
+        screen["lines"],
+        json!(["If nothing is", "", "Continue? [y/N]", "", ""])
+    );
+    assert_eq!(screen["cursor"], json!({ "row": 2, "col": 15 }));
+    assert_eq!(screen["title"], "my-title");
+    assert_eq!(screen["activity"], "waiting-for-input");
+    assert_eq!(screen["alive"], true);
+
+    // Same gate as the other session reads, and 404 for an unknown id.
+    let anon = reqwest::Client::new()
+        .get(format!("{base}/api/sessions/{id}/screen"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+    let missing = client
+        .get(format!(
+            "{base}/api/sessions/{}/screen",
+            uuid::Uuid::new_v4()
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+}
+
+/// WI-830: rows a previous engine process left unfinished (killed by a
+/// restart it never drained) are closed out when the next one boots.
+#[tokio::test]
+async fn startup_closes_out_history_rows_left_unfinished_by_a_restart() {
+    use vogt_engine_server::history::{ArchiveRecord, SessionHistory};
+
+    let mut cfg = test_config();
+    let state_dir = cfg.state_dir.clone();
+
+    // The previous process: a provisional row and some output, then gone.
+    let lost = uuid::Uuid::new_v4();
+    {
+        let history = SessionHistory::new(&state_dir).await.unwrap();
+        history
+            .archive_session(ArchiveRecord {
+                id: lost,
+                name: "lost-to-redeploy".into(),
+                created_at: OffsetDateTime::now_utc() - time::Duration::minutes(5),
+                ended_at: None,
+                exit_code: None,
+                cwd: None,
+                command: None,
+                scrollback_bytes: 0,
+                end_reason: None,
+            })
+            .await
+            .unwrap();
+        std::fs::write(history.log_path(lost), b"working...\n").unwrap();
+        // An engine from before `end_reason` existed: the next boot must
+        // add the column to the existing table.
+        sqlx::query("ALTER TABLE sessions DROP COLUMN end_reason")
+            .execute(&history.pool)
+            .await
+            .unwrap();
+        history.pool.close().await;
+    }
+
+    cfg.state_dir = state_dir.clone();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let rows: Vec<Value> = client
+        .get(format!("{base}/api/history/sessions?limit=20"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = rows.iter().find(|r| r["id"] == lost.to_string()).unwrap();
+    assert!(row["ended_at"].is_string(), "{row:?}");
+    assert!(row["exit_code"].is_null(), "the code is unknown: {row:?}");
+    assert_eq!(row["end_reason"], "engine-restart", "{row:?}");
+
+    // A session of this process is not touched by the reconcile.
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "fresh", "command": ["/bin/cat"] }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let rows: Vec<Value> = client
+        .get(format!("{base}/api/history/sessions?limit=20"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = rows.iter().find(|r| r["id"] == id).unwrap();
+    assert!(row["ended_at"].is_null(), "{row:?}");
+    assert!(row["end_reason"].is_null(), "{row:?}");
+
+    // A live child holds a blocking-pool waiter the test runtime would wait
+    // on forever at shutdown.
+    client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
 }

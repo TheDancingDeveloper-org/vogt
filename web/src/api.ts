@@ -16,7 +16,8 @@ export type ActivityState =
   | "idle"
   | "running"
   | "waiting-for-input"
-  | "errored";
+  | "errored"
+  | "exited";
 
 export interface SessionSummary {
   id: string;
