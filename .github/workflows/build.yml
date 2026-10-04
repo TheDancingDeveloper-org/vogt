@@ -3,9 +3,19 @@ name: build
 # A *build*, which is not a release.
 #
 # `release.yml` owns releases: a `v*` tag, semver-tagged images, `latest`,
-# an SBOM. This owns the other thing — an image for a commit on main,
+# a GitHub Release. This owns the other thing — an image for a commit on main,
 # identified only by its sha, so deploying a fix does not require inventing a
 # version number for it.
+#
+# It is also the ONLY place an image is built. A release is "build once,
+# promote by digest": tagging `vX.Y.Z` on a commit makes `release.yml` find
+# the `sha-<commit>` digests this workflow published (requiring the three
+# image jobs below to have succeeded, by their `name:`), verify this
+# workflow's signature for that exact commit, retag those digests with the
+# semver tags and sign them again under the release identity. So the version
+# baked below (`VOGT_PRODUCT_VERSION`) is the version a release ships, the
+# image job names are a contract (tests/test_release_workflow.py), and a
+# change here changes every future release's bytes.
 #
 # The original rule was that a push to main shall never publish an image, and
 # the effect was that every fix needed a version bump to become deployable:

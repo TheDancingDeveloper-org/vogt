@@ -26,9 +26,17 @@ def main() -> int:
     build = (ROOT / ".github/workflows/build.yml").read_text()
     if f"VOGT_PRODUCT_VERSION={version}" not in build:
         raise SystemExit("dev build does not inject the canonical product version")
+    # A release promotes the images build.yml built for the tagged commit
+    # (build once, promote by digest), so the version above, baked by build.yml,
+    # is the one a release ships. A release that built again would ship bytes
+    # the dev lane never ran, with whatever version it chose to inject.
     release = (ROOT / ".github/workflows/release.yml").read_text()
-    if "VOGT_PRODUCT_VERSION=${{ github.ref_name }}" not in release:
-        raise SystemExit("tagged release does not inject its tag as product version")
+    if "docker/build-push-action" in release or "VOGT_PRODUCT_VERSION=" in release:
+        raise SystemExit(
+            "tagged release must promote build.yml's images, not rebuild them"
+        )
+    if "docker buildx imagetools create" not in release:
+        raise SystemExit("tagged release does not promote build.yml's images by digest")
     if '"local/dev"' not in (ROOT / "engine/server/src/product.rs").read_text():
         raise SystemExit("engine local/dev fallback is missing")
     return 0

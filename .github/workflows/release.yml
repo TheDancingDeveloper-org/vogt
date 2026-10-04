@@ -1,9 +1,40 @@
 name: release
 
-# Tag-triggered only: a push to main can never publish. And
-# publishing is not deploying: this workflow produces a signed
-# image; a deployment moves only when its operator pins the published digest
+# Tag-triggered only: a push to main can never publish a release. And
+# publishing is not deploying: this workflow promotes signed images; a
+# deployment moves only when its operator pins the published digest
 # (docs/DEPLOYMENT.md).
+#
+# ── Build once, promote by digest ─────────────────────────────────────────
+#
+# A release does NOT build images. `build.yml` builds, smoke-tests, signs and
+# publishes `vogt`, `vogt-stack` and `vogt-voice` once, for the commit on
+# `main`, tagged `sha-<7-char commit>`, with the product version already baked
+# from the bump on `main`. The dev lane deploys and validates exactly those
+# digests. Tagging `vX.Y.Z` on that commit then makes this workflow:
+#
+#   1. prove the tag is on main and names the version the source carries;
+#   2. prove `build.yml` ran for this commit on main and its three image jobs
+#      succeeded, resolve each `sha-<commit>` tag to its digest, and verify
+#      the digest carries build.yml's own signature for this exact commit plus
+#      its SBOM and provenance attestations — anything missing FAILS the
+#      release; nothing is ever rebuilt as a fallback;
+#   3. retag those digests `X.Y.Z`, `X.Y` and `latest` with
+#      `docker buildx imagetools create --prefer-index=false` (a registry-side
+#      copy of the original manifest bytes: no pull, no rebuild, no new index,
+#      so the digest is unchanged — and every new tag is asserted to resolve
+#      to it);
+#   4. sign the same digests keylessly under THIS workflow's identity
+#      (`release.yml@refs/tags/v*`), which is what deployments verify;
+#   5. build and sign the Android shell (the app is not a container image, so
+#      it is still built at tag time) and write the GitHub Release with a
+#      machine-readable `vogt-release-manifest.json` naming the source sha and
+#      every digest, so a deployment can match it against its dev receipt.
+#
+# There is no rebuild path, by design: a release that rebuilt would ship bytes
+# the dev lane never ran. If build.yml did not publish the commit, re-run that
+# build.yml run (or dispatch build.yml on main while the commit is its head)
+# and re-run this workflow — see docs/DEPLOYMENT.md §9.
 
 on:
   push:
@@ -14,27 +45,25 @@ permissions:
   contents: read
 
 env:
-  # The core alone. Published and signed at every release because the stack
-  # image below copies `/opt/vogt` out of it by digest and the release
-  # manifest records the pair — it is the verifiable build input of the
-  # product, not the product. Nothing tells an operator to deploy it
-  # (DEPLOYMENT.md).
+  # The core alone — the verifiable build input of the product (the stack
+  # image copies `/opt/vogt` out of it by digest), not the product. Promoted
+  # and release-signed with the pair so the manifest records all three.
+  # Nothing tells an operator to deploy it (DEPLOYMENT.md).
   IMAGE: ghcr.io/thedancingdeveloper-org/vogt
   # The product: core plus session engine, PWA and agent CLIs in one
-  # container. This is the one supported install of Vogt — the image
-  # `deploy/stack.compose.yml` runs and the docs point at. A development pod
-  # by design (writable home, sudo, sshd, the CLIs), published, versioned and
-  # signed.
+  # container — the image `deploy/stack.compose.yml` runs. build.yml builds it
+  # from the `lean` pod base with INSTALL_AI_CLIENTS=true and proves `claude`
+  # and `codex` run, which is the shape every release has shipped since 0.5.0.
   STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
-  # The first-party voice sidecar, published and signed from the release
-  # so the shipped stack has working speech out of the box. One image, no
-  # variants, versioned in lockstep with the stack and named by that version
-  # in `deploy/stack.compose.yml`.
+  # The first-party voice sidecar, versioned in lockstep with the stack and
+  # named by that version in `deploy/stack.compose.yml`.
   VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
-  # NOTE: signed releases build cold and never import the plaintext LAN
-  # BuildKit layer cache — an unauthenticated LAN write to that cache
-  # must not become a signed, verified artifact. The ordinary per-commit cache
-  # stays in build.yml; releases are rare enough to pay the cold build.
+  # build.yml's commit tag: docker/metadata-action `type=sha`, i.e. `sha-`
+  # plus the first 7 characters of the commit. The digest is what is
+  # promoted; this tag is only how it is found, and the build.yml signature
+  # check below binds the digest to the full commit sha.
+  BUILD_TAG_PREFIX: sha-
+  BUILD_TAG_SHA_LENGTH: "7"
 
 jobs:
   validate-release:
@@ -59,23 +88,10 @@ jobs:
             exit 1
           fi
 
-  # Docker Hub is not on the critical path: both Dockerfiles build
-  # `FROM` this organisation's GHCR mirror of the library images. This job
-  # makes sure the mirror holds what this tag's Dockerfiles ask for before
-  # either image job starts — a release is cut from whatever commit the tag
-  # names, which may be older than the last scheduled mirror run and may
-  # carry a base digest that was never copied.
-  base-images:
-    name: the bases are in GHCR
-    needs: validate-release
-    uses: ./.github/workflows/mirror-base-images.yml
-    permissions:
-      contents: read
-      packages: write
-
   # The version gate: the tag, the package, the PWA and mobile manifests, and
-  # the workflows all name one version. No wheel or sdist is built — nothing
-  # consumes one (no PyPI publish, no image built from it).
+  # the workflows all name one version. `check_product_version.py` also proves
+  # build.yml at this commit baked this version (its VOGT_PRODUCT_VERSION) into
+  # the images promoted below — the version is in the bytes, not in a tag.
   distribution:
     name: the version matches the tag
     needs: validate-release
@@ -102,445 +118,242 @@ jobs:
           fi
           uv run --no-sync python scripts/check_product_version.py "${TAG#v}"
 
-  image:
-    name: build, sign and publish the image
-    # The core Dockerfile starts FROM the organisation's GHCR mirror too.
-    # Keep the mirror job on the dependency edge: a release must not race the
-    # copy of a newly bumped base digest.
-    needs: [distribution, base-images]
-    # The merged image copies /opt/vogt out of this one by digest.
+  # build.yml is the only thing that builds images, so a release starts by
+  # proving it did so for this commit. Its run *conclusion* is deliberately not
+  # the test: the run also builds the public demo image, whose Trivy scan can
+  # fail on a stale base package without touching the three product images.
+  # What must have succeeded is each job that publishes one of them, in the
+  # latest attempt of some build.yml run for this exact commit on main.
+  build-run:
+    name: build.yml built this commit
+    needs: validate-release
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
-      digest: ${{ steps.push.outputs.digest }}
-      version: ${{ steps.meta.outputs.version }}
-    # `publish` is advertised only by the Docker-in-Docker workers.
+      run_id: ${{ steps.find.outputs.run_id }}
+      run_url: ${{ steps.find.outputs.run_url }}
+    steps:
+      - id: find
+        name: find a build.yml run whose image jobs all succeeded
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_SHA: ${{ github.sha }}
+          # The `name:` of build.yml's three publishing jobs. tests/
+          # test_release_workflow.py fails if build.yml renames one.
+          REQUIRED_JOBS: |
+            build and publish a commit image
+            build and publish the voice sidecar
+            build and publish the merged image
+        run: |
+          set -euo pipefail
+          api="${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}"
+          get() {
+            curl -fsSL --retry 3 \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" "$1"
+          }
+          runs="$(get "${api}/actions/workflows/build.yml/runs?head_sha=${TAG_SHA}&branch=main&per_page=50")"
+          ids="$(jq -r '.workflow_runs | sort_by(.created_at) | reverse | .[].id' <<<"$runs")"
+          if [ -z "$ids" ]; then
+            echo "::error::build.yml never ran for ${TAG_SHA} on main, so there are no images to promote and nothing is rebuilt. A docs-only commit is skipped by build.yml's paths-ignore, and a superseded push is cancelled before it starts. Tag the commit build.yml built (normally the version bump), or dispatch build.yml on main while ${TAG_SHA} is its head, then re-run this workflow."
+            exit 1
+          fi
+          for id in $ids; do
+            jobs="$(get "${api}/actions/runs/${id}/jobs?filter=latest&per_page=100")"
+            missing=""
+            while IFS= read -r job; do
+              [ -n "$job" ] || continue
+              conclusion="$(jq -r --arg n "$job" '[.jobs[] | select(.name == $n) | .conclusion][0] // "absent"' <<<"$jobs")"
+              if [ "$conclusion" != "success" ]; then
+                missing="${missing}  - ${job}: ${conclusion}"$'\n'
+              fi
+            done <<<"$REQUIRED_JOBS"
+            url="$(jq -r --argjson id "$id" '.workflow_runs[] | select(.id == $id) | .html_url' <<<"$runs")"
+            if [ -z "$missing" ]; then
+              echo "build.yml run ${url} published all three images for ${TAG_SHA}"
+              echo "run_id=${id}" >> "$GITHUB_OUTPUT"
+              echo "run_url=${url}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            printf 'build.yml run %s did not publish every image:\n%s' "$url" "$missing"
+          done
+          echo "::error::No build.yml run for ${TAG_SHA} on main published all three images (see above). Nothing is rebuilt here: re-run the failed build.yml jobs (gh run rerun <id> --failed) and then re-run this workflow."
+          exit 1
+
+  # The promotion itself: resolve, verify, retag, release-sign. One job, so
+  # the three digests leave it together and a partial promotion is visible as
+  # one red job rather than three half-done ones.
+  promote:
+    name: promote the built images by digest
+    needs: [distribution, build-run]
+    # `publish` is advertised only by the Docker-in-Docker workers, which
+    # carry the buildx CLI plugin `imagetools` needs.
     runs-on: [self-hosted, publish]
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
       # Keyless signing: the workflow's own OIDC identity is the signer, so
       # there is no key to store or rotate and the signature binds to this
-      # repository and this workflow.
+      # repository, this workflow and this tag.
       id-token: write
+    outputs:
+      core: ${{ steps.resolve.outputs.core }}
+      stack: ${{ steps.resolve.outputs.stack }}
+      voice: ${{ steps.resolve.outputs.voice }}
+      tags: ${{ steps.tags.outputs.tags }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        # A signed release never imports the plaintext LAN layer cache,
-        # so the release builder needs neither host networking nor a
-        # trust-HTTP buildkitd entry for that registry: the default
-        # docker-container builder (HTTPS, bridge network) pulls the
-        # digest-pinned base from GHCR and pushes the signed image over HTTPS,
-        # and never reaches the LAN registry at all.
-
-      # No Docker Hub login, deliberately — and this is a trap worth naming,
-      # because the obvious "improvement" is to add one.
-      #
-      # A Docker Hub credential shared across an organisation's CI has its
-      # 200 pulls/hour split between every job that uses it, so it is empty
-      # exactly when CI is busy — which is when builds happen — while the
-      # anonymous per-IP allowance of a single self-hosted runner is barely
-      # touched. Authenticating trades a bucket this repository mostly
-      # controls for one it does not control at all.
-      #
-      # So this build does not reach Docker Hub at all. The bases are
-      # `ghcr.io/thedancingdeveloper-org/vogt-base/*`, copied there by
-      # `mirror-base-images.yml`, which the `base-images` job runs as a
-      # prerequisite so a Renovate digest bump is mirrored before anything
-      # builds from it. A Docker Hub login here would not help anything and
-      # would put a shared bucket on this repository's critical path.
-
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
-        id: meta
-        with:
-          images: ${{ env.IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-          # Stated rather than inherited. `latest=auto` is metadata-action's
-          # default, and it is the behaviour a release requires — `latest` moves
-          # on a semver tag and on nothing else — but relying on a default
-          # means the rule lives in another project's source. `build.yml` says
-          # `latest=false` explicitly for the same reason; this is the other
-          # half of the same statement.
-          flavor: |
-            latest=auto
-
-      # Built and *run* before it is pushed. An image whose entrypoint does
-      # not exist — a venv built at one path and copied to another — builds
-      # green and signs valid, and every container exits 255 in a restart
-      # loop. A publish gate that only proves an image assembles proves the
-      # wrong thing.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: candidate
-        with:
-          context: .
-          load: true
-          tags: ${{ env.IMAGE }}:smoke-test
-          labels: ${{ steps.meta.outputs.labels }}
-          # No shared build cache for a release. Every published image
-          # here is cosign-signed and verified downstream, but the LAN cache
-          # registry is plaintext HTTP with no auth: anyone on the LAN — fork
-          # PR code on the same runner fleet included — can push poisoned cache
-          # manifests that BuildKit would import verbatim into a signed
-          # artifact, laundering an unauthenticated LAN write into signed
-          # provenance. Releases are rare enough to build cold from the
-          # digest-pinned base; the ordinary commit cache stays in build.yml.
-          build-args: |
-            PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
-
-      - name: the image runs
-        env:
-          CANDIDATE: ${{ env.IMAGE }}:smoke-test
-        run: |
-          set -euo pipefail
-          # The entrypoint resolves and the interpreter behind it exists.
-          docker run --rm "$CANDIDATE" --version
-          # git is a runtime dependency: `project.import` and the `git-local`
-          # collector both shell out to it, and nothing else is red when it
-          # is missing.
-          docker run --rm --entrypoint git "$CANDIDATE" --version
-          # `serve` still refuses to invent a listen address.
-          if docker run --rm "$CANDIDATE" serve 2>/dev/null; then
-            echo "serve started without being told where to listen" >&2
-            exit 1
-          fi
-          echo "image runs, and still refuses to guess an address"
-
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: push
-        with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-          sbom: true
-          # No shared build cache for a signed release.
-          build-args: |
-            PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
-
       - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
 
-      - name: sign the image and attest its SBOM
+      - id: tags
+        name: the semver tags this release moves
         env:
-          DIGEST: ${{ steps.push.outputs.digest }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          docker buildx version
+          version="${TAG#v}"
+          # docker/metadata-action's semver rules, which the release followed
+          # when it built: a pre-release gets only its exact version — no
+          # `X.Y`, and `latest` does not move.
+          if [[ "$version" == *-* ]]; then
+            tags="$version"
+          else
+            tags="$version ${version%.*} latest"
+          fi
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "will tag: ${tags}"
+
+      - id: resolve
+        name: resolve and verify build.yml's digests for this commit
+        env:
+          TAG_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          build_tag="${BUILD_TAG_PREFIX}${TAG_SHA:0:${BUILD_TAG_SHA_LENGTH}}"
+          # Only build.yml, on main, at exactly this commit, may have signed
+          # what is promoted. The workflow-sha extension in the Fulcio
+          # certificate is what ties the digest to the full commit, not the
+          # short tag it was found by.
+          build_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/build.yml@refs/heads/main"
+          fail=""
+          for pair in "core=${IMAGE}" "stack=${STACK_IMAGE}" "voice=${VOICE_IMAGE}"; do
+            name="${pair%%=*}"; repo="${pair#*=}"
+            ref="${repo}:${build_tag}"
+            err="${RUNNER_TEMP}/inspect-${name}.err"
+            if ! manifest="$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>"$err")"; then
+              echo "::error::${name}: ${ref} is not in the registry — build.yml did not publish this commit. Nothing is rebuilt. ($(tr '\n' ' ' <"$err"))"
+              fail=1; continue
+            fi
+            digest="$(jq -r '.digest // empty' <<<"$manifest")"
+            case "$digest" in
+              sha256:*) ;;
+              *) echo "::error::${name}: could not read a digest for ${ref}"; fail=1; continue ;;
+            esac
+            if ! cosign verify \
+                --certificate-identity "$build_identity" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                --certificate-github-workflow-sha "$TAG_SHA" \
+                "${repo}@${digest}" >/dev/null; then
+              echo "::error::${name}: ${repo}@${digest} carries no build.yml signature for ${TAG_SHA}; refusing to promote it."
+              fail=1; continue
+            fi
+            # build.yml pushes with `provenance: true` and `sbom: true`, so the
+            # attestations live in the image index beside the image and travel
+            # with the digest. A release has always carried both; a digest
+            # without them is not promoted.
+            for kind in SBOM Provenance; do
+              att="$(docker buildx imagetools inspect "${repo}@${digest}" --format "{{json .${kind}}}" 2>/dev/null || true)"
+              case "$att" in
+                ""|null|"{}") echo "::error::${name}: ${repo}@${digest} has no ${kind} attestation"; fail=1 ;;
+              esac
+            done
+            echo "${name}=${digest}" >> "$GITHUB_OUTPUT"
+            echo "${name}: ${ref} -> ${repo}@${digest} (build.yml-signed for ${TAG_SHA})"
+          done
+          if [ -n "$fail" ]; then
+            echo "the build for ${TAG_SHA} cannot be promoted — see the errors above" >&2
+            exit 1
+          fi
+
+      - name: retag by digest
+        env:
+          TAGS: ${{ steps.tags.outputs.tags }}
+          CORE_DIGEST: ${{ steps.resolve.outputs.core }}
+          STACK_DIGEST: ${{ steps.resolve.outputs.stack }}
+          VOICE_DIGEST: ${{ steps.resolve.outputs.voice }}
+        run: |
+          set -euo pipefail
+          for pair in "${IMAGE}@${CORE_DIGEST}" "${STACK_IMAGE}@${STACK_DIGEST}" "${VOICE_IMAGE}@${VOICE_DIGEST}"; do
+            repo="${pair%@*}"; digest="${pair#*@}"
+            args=()
+            for t in $TAGS; do args+=(-t "${repo}:${t}"); done
+            # One source, no annotations and `--prefer-index=false`: buildx
+            # pushes the source manifest's original bytes under the new tags,
+            # registry side — it never wraps a single manifest in a new index
+            # (which would be a new digest). No layer is pulled, nothing is
+            # built.
+            docker buildx imagetools create --prefer-index=false \
+              "${args[@]}" "${repo}@${digest}"
+            # Trust, but check: every new tag must name exactly the digest
+            # build.yml published and the dev lane ran — the deployment's
+            # promotion gate compares these digests exactly. Fail otherwise.
+            for t in $TAGS; do
+              got="$(docker buildx imagetools inspect "${repo}:${t}" --format '{{json .Manifest}}' | jq -r .digest)"
+              if [ "$got" != "$digest" ]; then
+                echo "::error::${repo}:${t} resolves to ${got}, not the promoted ${digest}"
+                exit 1
+              fi
+            done
+            echo "${repo}: ${TAGS} -> ${digest}"
+          done
+
+      - name: sign the same digests as the release
+        env:
+          CORE_DIGEST: ${{ steps.resolve.outputs.core }}
+          STACK_DIGEST: ${{ steps.resolve.outputs.stack }}
+          VOICE_DIGEST: ${{ steps.resolve.outputs.voice }}
         run: |
           set -euo pipefail
           # The digest, never a tag: a tag can be moved after signing, and a
-          # signature over a movable reference proves nothing.
-          cosign sign --yes "${IMAGE}@${DIGEST}"
-
-      - name: report the build input
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          {
-            echo "## Published (core — a build input, not the product)"
-            echo
-            echo '```'
-            echo "${IMAGE}@${DIGEST}"
-            echo '```'
-            echo
-            echo "The merged \`vogt-stack\` image below lifts its core from this"
-            echo "digest. Deployments pin the merged image, never this one"
-            echo "(DEPLOYMENT.md). Nothing has been deployed."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  voice-image:
-    name: build, sign and publish the voice sidecar
-    needs: [distribution, base-images]
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
-      version: ${{ steps.meta.outputs.version }}
-    runs-on: [self-hosted, publish]
-    timeout-minutes: 90
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        # A signed release builds cold from the digest-pinned mirror bases and
-        # never touches the plaintext LAN cache, so the default builder
-        # is right here too.
-
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
-        id: meta
-        with:
-          images: ${{ env.VOICE_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-          flavor: |
-            latest=auto
-
-      # Built and run before it is pushed: a full local round trip through the
-      # baked models, so a signed release cannot ship a sidecar that assembles
-      # but cannot speak. Same reasoning as the core image's run gate.
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: candidate
-        with:
-          context: voice
-          file: voice/Dockerfile
-          load: true
-          tags: ${{ env.VOICE_IMAGE }}:smoke-test
-          labels: ${{ steps.meta.outputs.labels }}
-
-      - name: the sidecar transcribes and speaks
-        env:
-          CANDIDATE: ${{ env.VOICE_IMAGE }}:smoke-test
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint /usr/local/bin/vogt-voice "$CANDIDATE" --version
-          docker run -d --name voice-smoke "$CANDIDATE"
-          trap 'docker logs voice-smoke || true; docker rm -f voice-smoke >/dev/null 2>&1 || true' EXIT
-
-          ready=""
-          for _ in $(seq 1 60); do
-            if docker exec voice-smoke curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
-              ready=1; break
-            fi
-            sleep 2
-          done
-          [ -n "$ready" ] || { echo "voice sidecar never became healthy" >&2; exit 1; }
-
-          models="$(docker exec voice-smoke curl -fsS http://127.0.0.1:8000/v1/models)"
-          echo "$models" | grep -q '"whisper-1"'
-          echo "$models" | grep -q '"tts-1"'
-
-          docker exec voice-smoke sh -c 'curl -fsS -X POST http://127.0.0.1:8000/v1/audio/speech -H "content-type: application/json" -d "{\"model\":\"tts-1\",\"voice\":\"alloy\",\"input\":\"the quick brown fox\",\"response_format\":\"wav\"}" -o /tmp/out.wav'
-          docker exec voice-smoke sh -c 'test "$(wc -c < /tmp/out.wav)" -gt 1000'
-          docker exec voice-smoke sh -c 'head -c 4 /tmp/out.wav | grep -q RIFF'
-
-          transcript="$(docker exec voice-smoke curl -fsS -X POST http://127.0.0.1:8000/v1/audio/transcriptions -F model=whisper-1 -F file=@/tmp/out.wav)"
-          echo "transcript: $transcript"
-          echo "$transcript" | grep -qE '"text":"[^"]+"'
-          echo "voice sidecar speaks and transcribes with the baked models"
-
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: push
-        with:
-          context: voice
-          file: voice/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          provenance: true
-          sbom: true
-
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
-
-      - name: sign the image
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          set -euo pipefail
-          cosign sign --yes "${VOICE_IMAGE}@${DIGEST}"
+          # signature over a movable reference proves nothing. This adds the
+          # release.yml@refs/tags/v* signature beside build.yml's; deployments
+          # verify the release identity (DEPLOYMENT.md §6).
+          cosign sign --yes "${IMAGE}@${CORE_DIGEST}"
+          cosign sign --yes "${STACK_IMAGE}@${STACK_DIGEST}"
+          cosign sign --yes "${VOICE_IMAGE}@${VOICE_DIGEST}"
 
       - name: report what to pin
         env:
-          DIGEST: ${{ steps.push.outputs.digest }}
+          TAGS: ${{ steps.tags.outputs.tags }}
+          CORE_DIGEST: ${{ steps.resolve.outputs.core }}
+          STACK_DIGEST: ${{ steps.resolve.outputs.stack }}
+          VOICE_DIGEST: ${{ steps.resolve.outputs.voice }}
+          BUILD_RUN: ${{ needs.build-run.outputs.run_url }}
         run: |
           {
-            echo "## Published (voice sidecar)"
+            echo "## Promoted (built once by build.yml, not rebuilt)"
+            echo
+            echo "Built by ${BUILD_RUN}; tagged \`${TAGS}\` and release-signed:"
             echo
             echo '```'
-            echo "VOGT_VOICE_IMAGE=${VOICE_IMAGE}@${DIGEST}"
+            echo "VOGT_STACK_IMAGE=${STACK_IMAGE}@${STACK_DIGEST}"
+            echo "VOGT_VOICE_IMAGE=${VOICE_IMAGE}@${VOICE_DIGEST}"
+            echo "# build input, not a deployment target:"
+            echo "${IMAGE}@${CORE_DIGEST}"
             echo '```'
             echo
-            echo "Bundled on by default in \`deploy/stack.compose.yml\`. Pin this"
-            echo "digest in a real deployment."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  # The dev-pod toolchain base, built (or reused) before the merged image that
-  # is built `FROM` it. A release is always the `lean` variant — no Flutter;
-  # the agent CLIs are installed by the stack build below, not by the base.
-  # `needs: base-images` because the pod base builds `FROM` a mirrored Ubuntu
-  # the mirror job must have copied first.
-  pod-base:
-    name: the pod base is in GHCR
-    needs: base-images
-    uses: ./.github/workflows/pod-base.yml
-    with:
-      variant: lean
-    permissions:
-      contents: read
-      packages: write
-
-  stack-image:
-    name: build, sign and publish the merged image
-    needs: [distribution, base-images, pod-base, image]
-    outputs:
-      digest: ${{ steps.push.outputs.digest }}
-      version: ${{ steps.meta.outputs.version }}
-    runs-on: [self-hosted, publish]
-    timeout-minutes: 60
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-        # A signed release never imports the plaintext LAN layer cache,
-        # so the release builder needs neither host networking nor a
-        # trust-HTTP buildkitd entry for that registry: the default
-        # docker-container builder (HTTPS, bridge network) pulls the
-        # digest-pinned base from GHCR and pushes the signed image over HTTPS,
-        # and never reaches the LAN registry at all.
-
-      # No runner-side `pnpm build`: it would never reach the image
-      # (`engine/Dockerfile.dockerignore` excludes `web/dist`, and stage 1 of
-      # `engine/Dockerfile` builds the bundle the image embeds). The PWA is
-      # still built before the engine that embeds it — stage 1 before stage 2.
-
-      # No Docker Hub login, deliberately — see the core image job above for
-      # why a shared credential is the wrong remedy for a 429 at `FROM`. The
-      # bases come from the GHCR mirror the `base-images` job fills first.
-
-      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
-        id: meta
-        with:
-          images: ${{ env.STACK_IMAGE }}
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
-          # Stated rather than inherited. `latest=auto` is metadata-action's
-          # default, and it is the behaviour a release requires — `latest` moves
-          # on a semver tag and on nothing else — but relying on a default
-          # means the rule lives in another project's source. `build.yml` says
-          # `latest=false` explicitly for the same reason; this is the other
-          # half of the same statement.
-          flavor: |
-            latest=auto
-
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: candidate
-        with:
-          # The repository root: the Dockerfile reaches for `web/dist`,
-          # `pyproject.toml` and `src/` as well as the crates.
-          context: .
-          file: engine/Dockerfile
-          load: true
-          tags: ${{ env.STACK_IMAGE }}:smoke-test
-          labels: ${{ steps.meta.outputs.labels }}
-          # `#` inside a `|` block scalar is literal content, not a YAML
-          # comment, and build-push-action parses the input without a comment
-          # option — so a note in there reaches buildx as a build arg. It goes
-          # here instead, as it does in `build.yml`.
-          #
-          # The same shape `build.yml` publishes from `main`: the agent CLIs
-          # the product exists to run, baked in, so a release carries what a
-          # consumer needs to run a session.
-          build-args: |
-            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
-            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
-            VOGT_SOURCE_REF=${{ github.ref_name }}
-            VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=${{ github.ref_name }}
-            INSTALL_AI_CLIENTS=true
-          # No shared build cache for a signed release.
-
-      - name: both halves run
-        env:
-          CANDIDATE: ${{ env.STACK_IMAGE }}:smoke-test
-        run: |
-          set -euo pipefail
-          docker run --rm --entrypoint vogt "$CANDIDATE" --version
-          docker run --rm --entrypoint vogt-engine "$CANDIDATE" --help >/dev/null
-          docker run --rm --entrypoint vogt-verify-agent-clis "$CANDIDATE"
-          echo "both halves are present and start"
-
-          # `vogt-verify-agent-clis` above does NOT prove the CLIs are here. It
-          # is a *shadow* detector: `check_tool` returns 0 when the system path
-          # does not exist, `check_package` returns 0 unless the binary is
-          # executable, and `agent-versions.resolved` is written unconditionally
-          # — so it is green on a CLI-free image. It answers "is a persisted
-          # $HOME copy shadowing the image's?", not "is there an image copy?".
-          #
-          # The release carries the clients by decision, and a build arg that
-          # nothing executes is a default waiting to be forgotten: with
-          # INSTALL_AI_CLIENTS silently false, a stack runs without claude or
-          # codex and nothing is red. Running them is the only thing that
-          # distinguishes a release from a reversion to the CLI-free image.
-          # `flutter` is absent from the list on purpose — a release is the
-          # `lean` pod base.
-          for tool in claude codex; do
-            docker run --rm --entrypoint "$tool" "$CANDIDATE" --version >/dev/null \
-              || { echo "the release image is missing $tool" >&2; exit 1; }
-          done
-          echo "the release image carries the agent CLIs"
-
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
-        id: push
-        with:
-          context: .
-          file: engine/Dockerfile
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          # Identical to the candidate's, so the pushed image is the layers the
-          # smoke test just ran rather than a rebuild that resembles them. The
-          # two lists drifting apart is how an image gets smoke-tested in one
-          # shape and published in another.
-          build-args: |
-            POD_BASE_IMAGE=${{ needs.pod-base.outputs.image }}
-            CORE_IMAGE=${{ env.IMAGE }}@${{ needs.image.outputs.digest }}
-            VOGT_SOURCE_REF=${{ github.ref_name }}
-            VOGT_SOURCE_SHA=${{ github.sha }}
-            VOGT_PRODUCT_VERSION=${{ github.ref_name }}
-            INSTALL_AI_CLIENTS=true
-          provenance: true
-          sbom: true
-          # No shared build cache for a signed release.
-
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
-
-      - name: sign the image
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: cosign sign --yes "${STACK_IMAGE}@${DIGEST}"
-
-      - name: report what to pin
-        env:
-          DIGEST: ${{ steps.push.outputs.digest }}
-        run: |
-          {
-            echo "## Published (the product)"
-            echo
-            echo "In \`deploy/.env\` beside \`deploy/stack.compose.yml\`:"
-            echo
-            echo '```'
-            echo "VOGT_STACK_IMAGE=${STACK_IMAGE}@${DIGEST}"
-            echo '```'
-            echo
-            echo "Publishing is not deploying. See"
-            echo "\`docs/DEPLOYMENT.md\` §2 before the first one."
+            echo "Publishing is not deploying. See \`docs/DEPLOYMENT.md\` §2."
           } >> "$GITHUB_STEP_SUMMARY"
 
   # ── The signed APK ───────────────────────────────────────────────
@@ -665,43 +478,60 @@ jobs:
         if: always()
         run: rm -f mobile/android/app/google-services.json
 
-  # The stack and its voice sidecar are one release pair. Both images
-  # take their version from the same tag via docker/metadata-action, so a
-  # mismatch here means a tagging change slipped one out of step — fail the
-  # release with a diagnosable message rather than publishing a pair a
-  # deployment cannot trust to be compatible.
+
+  # The stack and its voice sidecar are one release pair, with the core they
+  # were built from. An independent read-back after promotion: every semver
+  # tag of all three images resolves to the digest promoted (and therefore to
+  # the one commit's build), so a deployment pinning `X.Y.Z` of each gets the
+  # pair the dev lane ran together.
   release-pair:
     name: the stack and voice images are a matching pair
-    needs: [validate-release, image, voice-image, stack-image]
-    runs-on: [self-hosted]
+    needs: [validate-release, promote]
+    runs-on: [self-hosted, publish]
     timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
     steps:
-      - name: versions agree with each other and the tag
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: every release tag names the promoted digest
         env:
           TAG: ${{ github.ref_name }}
-          CORE_VERSION: ${{ needs.image.outputs.version }}
-          STACK_VERSION: ${{ needs.stack-image.outputs.version }}
-          VOICE_VERSION: ${{ needs.voice-image.outputs.version }}
+          TAGS: ${{ needs.promote.outputs.tags }}
+          CORE_DIGEST: ${{ needs.promote.outputs.core }}
+          STACK_DIGEST: ${{ needs.promote.outputs.stack }}
+          VOICE_DIGEST: ${{ needs.promote.outputs.voice }}
         run: |
           set -euo pipefail
-          expected="${TAG#v}"
+          case "$CORE_DIGEST:$STACK_DIGEST:$VOICE_DIGEST" in
+            sha256:*:sha256:*:sha256:*) ;;
+            *) echo "::error::release image digests are missing (core/stack/voice)" >&2; exit 1;;
+          esac
           fail=""
-          for pair in "core:$CORE_VERSION" "stack:$STACK_VERSION" "voice:$VOICE_VERSION"; do
-            name="${pair%%:*}"; got="${pair#*:}"
-            if [ "$got" != "$expected" ]; then
-              echo "::error::${name} image published version '${got}', expected '${expected}' (tag ${TAG})" >&2
-              fail=1
-            fi
+          for pair in "core|${IMAGE}|${CORE_DIGEST}" "stack|${STACK_IMAGE}|${STACK_DIGEST}" "voice|${VOICE_IMAGE}|${VOICE_DIGEST}"; do
+            IFS='|' read -r name repo digest <<<"$pair"
+            for t in $TAGS; do
+              got="$(docker buildx imagetools inspect "${repo}:${t}" --format '{{json .Manifest}}' | jq -r .digest)"
+              if [ "$got" != "$digest" ]; then
+                echo "::error::${name} ${repo}:${t} is ${got}, expected the promoted ${digest} (tag ${TAG})" >&2
+                fail=1
+              fi
+            done
           done
           if [ -n "$fail" ]; then
             echo "the stack and voice images are not a matching release pair — see the errors above" >&2
             exit 1
           fi
-          echo "core=stack=voice=${expected}: the release is a matching pair"
+          echo "core, stack and voice ${TAGS}: one commit's build, one release pair"
 
   github-release:
     name: create the durable GitHub Release
-    needs: [validate-release, distribution, image, voice-image, stack-image, android, release-pair]
+    needs: [validate-release, distribution, build-run, promote, android, release-pair]
     runs-on: [self-hosted]
     timeout-minutes: 15
     permissions:
@@ -721,12 +551,13 @@ jobs:
         env:
           TAG: ${{ github.ref_name }}
           SOURCE_SHA: ${{ github.sha }}
-          CORE_DIGEST: ${{ needs.image.outputs.digest }}
-          STACK_DIGEST: ${{ needs.stack-image.outputs.digest }}
-          VOICE_DIGEST: ${{ needs.voice-image.outputs.digest }}
-          CORE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt
-          STACK_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-stack
-          VOICE_IMAGE: ghcr.io/thedancingdeveloper-org/vogt-voice
+          CORE_DIGEST: ${{ needs.promote.outputs.core }}
+          STACK_DIGEST: ${{ needs.promote.outputs.stack }}
+          VOICE_DIGEST: ${{ needs.promote.outputs.voice }}
+          RELEASE_TAGS: ${{ needs.promote.outputs.tags }}
+          BUILD_RUN_ID: ${{ needs.build-run.outputs.run_id }}
+          BUILD_RUN_URL: ${{ needs.build-run.outputs.run_url }}
+          RELEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           apk_count="$(find release-assets/android -type f -name '*.apk' | wc -l)"
@@ -738,17 +569,69 @@ jobs:
             sha256:*:sha256:*:sha256:*) ;;
             *) echo "release image digests are missing (core/stack/voice)" >&2; exit 1;;
           esac
+          [ -n "$BUILD_RUN_ID" ] || { echo "the build.yml run is unknown" >&2; exit 1; }
+          build_tag="${BUILD_TAG_PREFIX}${SOURCE_SHA:0:${BUILD_TAG_SHA_LENGTH}}"
           mkdir -p release-assets/final
           find release-assets/android -type f -name '*.apk' -exec cp {} release-assets/final/ \;
+          # Schema v1, extended additively: every v1 key keeps its meaning
+          # (`images.*` is still `<repo>@<digest>`), so an existing consumer
+          # reads it unchanged. The new keys say how the digests came to be —
+          # built once by build.yml, promoted without a rebuild — so a
+          # deployment can match `source_sha` and `image_digests` against the
+          # receipt of the dev deploy that ran those exact digests.
           jq -n \
             --arg schema "vogt-release-manifest.v1" \
             --arg tag "$TAG" \
             --arg source_sha "$SOURCE_SHA" \
-            --arg core "${CORE_IMAGE}@${CORE_DIGEST}" \
-            --arg stack "${STACK_IMAGE}@${STACK_DIGEST}" \
-            --arg voice "${VOICE_IMAGE}@${VOICE_DIGEST}" \
+            --arg core_repo "$IMAGE" \
+            --arg stack_repo "$STACK_IMAGE" \
+            --arg voice_repo "$VOICE_IMAGE" \
+            --arg core_digest "$CORE_DIGEST" \
+            --arg stack_digest "$STACK_DIGEST" \
+            --arg voice_digest "$VOICE_DIGEST" \
+            --arg tags "$RELEASE_TAGS" \
+            --arg build_tag "$build_tag" \
+            --arg build_run_id "$BUILD_RUN_ID" \
+            --arg build_run_url "$BUILD_RUN_URL" \
+            --arg release_run_url "$RELEASE_RUN_URL" \
+            --arg repository "$GITHUB_REPOSITORY" \
             --arg guide "https://github.com/TheDancingDeveloper-org/vogt/blob/main/docs/DEPLOYMENT.md" \
-            '{schema: $schema, product: "Vogt", product_version: ($tag | ltrimstr("v")), source_tag: $tag, source_sha: $source_sha, images: {core: $core, merged_stack: $stack, voice: $voice}, provenance: {cosign: "keyless signature from .github/workflows/release.yml", sbom: "GitHub Actions SBOM attestation for the published image digests"}, deployment_guide: $guide, assets: {android: "signed APK"}}' \
+            '{
+              schema: $schema,
+              product: "Vogt",
+              product_version: ($tag | ltrimstr("v")),
+              source_tag: $tag,
+              source_sha: $source_sha,
+              images: {
+                core: "\($core_repo)@\($core_digest)",
+                merged_stack: "\($stack_repo)@\($stack_digest)",
+                voice: "\($voice_repo)@\($voice_digest)"
+              },
+              image_digests: {core: $core_digest, merged_stack: $stack_digest, voice: $voice_digest},
+              image_repositories: {core: $core_repo, merged_stack: $stack_repo, voice: $voice_repo},
+              release_tags: ($tags | split(" ") | map(select(length > 0))),
+              promotion: {
+                method: "build-once-promote-by-digest",
+                rebuilt: false,
+                build_workflow: ".github/workflows/build.yml",
+                build_ref: "refs/heads/main",
+                build_tag: $build_tag,
+                build_run_id: ($build_run_id | tonumber),
+                build_run_url: $build_run_url,
+                release_run_url: $release_run_url
+              },
+              provenance: {
+                cosign: "keyless signatures over the same digests from .github/workflows/release.yml (at release) and .github/workflows/build.yml (at build)",
+                cosign_identities: {
+                  release: "https://github.com/\($repository)/.github/workflows/release.yml@refs/tags/\($tag)",
+                  build: "https://github.com/\($repository)/.github/workflows/build.yml@refs/heads/main"
+                },
+                cosign_issuer: "https://token.actions.githubusercontent.com",
+                sbom: "BuildKit SBOM and provenance attestations recorded in each image index by build.yml, carried by the digest"
+              },
+              deployment_guide: $guide,
+              assets: {android: "signed APK"}
+            }' \
             > release-assets/final/vogt-release-manifest.json
           jq empty release-assets/final/vogt-release-manifest.json
           jq -r . release-assets/final/vogt-release-manifest.json > release-assets/release-notes.json

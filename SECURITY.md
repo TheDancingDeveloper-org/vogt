@@ -158,13 +158,46 @@ by where the pipeline runs. What the tree _does_ enforce:
 - Secret-bearing steps (the Android keystore, the Firebase configuration)
   are gated on `github.event_name != 'pull_request'`, and no workflow uses
   `pull_request_target`.
-- Signed release images build without importing a shared layer cache, so
-  nothing a pull-request job writes to a cache can reach a signed artifact
-  (`release.yml`).
+- Release images are not built at release time: `release.yml` promotes, by
+  digest, the images `build.yml` built on `main` (see *Release signing*
+  below). Pull-request jobs never publish or sign an image.
 
 If the approval setting is ever found disabled, treat every self-hosted runner
 as potentially compromised by fork-submitted code and rotate the credentials
 those runners can reach.
+
+### Release signing: build once, promote by digest
+
+Every published image is signed keylessly with cosign, by digest, using the
+workflow's own GitHub OIDC identity — there is no signing key to store or
+rotate. A released image carries two signatures on the **same digest**:
+
+- `…/.github/workflows/build.yml@refs/heads/main`, made when `build.yml` built
+  and smoke-tested it for a commit on `main`;
+- `…/.github/workflows/release.yml@refs/tags/vX.Y.Z`, made when the `v*` tag
+  promoted that digest. Deployments verify this identity
+  ([`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) §6).
+
+`release.yml` never builds. Before it signs, it requires a `build.yml` run on
+`main` for the tagged commit whose image jobs succeeded, and it verifies each
+digest's `build.yml` signature with the certificate's workflow-sha pinned to
+the tagged commit, so it can only promote what `build.yml` built from that
+exact source. It retags by digest (`imagetools create --prefer-index=false`)
+and asserts every semver tag resolves to the promoted digest. The SBOM and
+provenance attestations are the ones BuildKit recorded in the image index at
+build time; they travel with the digest. If any of this is missing the
+release fails; there is no rebuild fallback.
+
+**Accepted trade-off.** `build.yml` imports its BuildKit layer cache from the
+operator's plaintext, unauthenticated LAN registry (`VOGT_BUILDKIT_CACHE_REGISTRY`)
+to keep per-commit builds fast. Releases used to build cold precisely so that
+a poisoned cache entry could not become a release-signed artefact; promoting
+the `main` build gives that up in exchange for shipping exactly the bytes the
+development lane ran. The cache is therefore part of the release trust
+boundary: it must stay reachable only from the runner hosts, and the
+fork-approval setting above is what keeps pull-request code from writing to
+it. If either is in doubt, purge the cache repository and rebuild the release
+commit on `main` before tagging.
 
 ### Reading runner state from an agent session
 
