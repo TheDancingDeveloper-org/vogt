@@ -125,6 +125,9 @@ Ogg/Vorbis paths are pinned by the fixtures in `stt/tests/fixtures/` (0.2 s
 test tones generated with GStreamer's `audiotestsrc`). The WAV-only tests do
 not reach that code, so keep those fixtures when changing the decoder.
 
-The declared `rust-version = "1.80"` is out of date: the lockfile already
-needs Rust 1.88 or newer (`whisper-rs-sys`, `icu_*`), and every build, in CI
-and in the image, uses current stable.
+The declared `rust-version = "1.88"` is the floor the lockfile actually needs
+(`whisper-rs-sys`, `icu_*`, `home`); every build, in CI and in the image,
+uses current stable. CI's `scripts/check_rust_version.py` fails when a locked
+crate declares a newer `rust-version` than the workspace does, so a dependency
+bump that raises the floor must raise the declaration with it. There are no
+pins held back only for an older toolchain.
