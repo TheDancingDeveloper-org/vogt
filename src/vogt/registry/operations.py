@@ -125,6 +125,10 @@ from vogt.application.models import (
     OnboardResult,
     PlaceMetricsParams,
     PlaceMetricsResult,
+    PreferenceGetParams,
+    PreferenceGetResult,
+    PreferenceSetParams,
+    PreferenceSetResult,
     ProjectBriefParams,
     ProjectBriefResult,
     ProjectListResult,
@@ -1332,6 +1336,36 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.restore_inbox,
             route=HttpRoute("POST", "/inbox/restore"),
             cli=CliBinding(("inbox", "restore")),
+        ),
+        # -- per-actor preferences ------------------------------------------
+        #
+        # Both act only on the calling principal's own rows — neither takes an
+        # actor — so `set` is a `read`-scope write, as `auth.logout` is: a
+        # read-only token may still save its own Inbox filter, and can touch
+        # nobody else's. It is still audited and takes a reason.
+        Operation(
+            name="preference.get",
+            summary="Read your own saved settings (e.g. inbox.filter), "
+            "each with its version.",
+            scope="read",
+            mutating=False,
+            params_model=PreferenceGetParams,
+            result_model=PreferenceGetResult,
+            handler=services.get_preferences,
+            route=HttpRoute("GET", "/preferences"),
+            cli=CliBinding(("preference", "get")),
+        ),
+        Operation(
+            name="preference.set",
+            summary="Save one of your own settings as a JSON object; {} clears "
+            "it. Optionally only if it is still at expected_version.",
+            scope="read",
+            mutating=True,
+            params_model=PreferenceSetParams,
+            result_model=PreferenceSetResult,
+            handler=services.set_preference,
+            route=HttpRoute("POST", "/preferences"),
+            cli=CliBinding(("preference", "set")),
         ),
         Operation(
             name="audit.list",

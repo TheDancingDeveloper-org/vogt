@@ -80,6 +80,7 @@ from vogt.application.services.observed_first import (
     suppress,
 )
 from vogt.application.services.place import place_metrics
+from vogt.application.services.preferences import get_preferences, set_preference
 from vogt.application.services.projects import (
     brief_project,
     create_project,
@@ -156,6 +157,7 @@ __all__ = [
     "deps",
     "detect_drift",
     "export_instance",
+    "get_preferences",
     "get_project",
     "get_work",
     "history_list",
@@ -211,6 +213,7 @@ __all__ = [
     "serve",
     "serve_mcp_stdio",
     "set_password",
+    "set_preference",
     "set_write_back",
     "snooze_inbox",
     "start_session",

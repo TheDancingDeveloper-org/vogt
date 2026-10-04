@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from vogt.core.entities import CodingSession
+from vogt.core.entities import ActorPreference, CodingSession
 from vogt.errors import MigrationError, MigrationLocked
 from vogt.storage.sqlite.connection import connect, split_statements
 from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
@@ -344,3 +344,56 @@ def test_an_m0_instance_migrates_forward_with_its_data(tmp_path: Path) -> None:
         assert view.counts().work_items == 0
         # No workflow_defs rows exist on this path; the defaults still answer.
         assert view.workflow_for("bug").initial_state == "open"
+
+
+#: The migration that added `actor_preferences` (WI-839).
+PREFERENCES_MIGRATION = 18
+
+
+def test_an_instance_before_preferences_gains_them_with_its_actors(
+    tmp_path: Path,
+) -> None:
+    """An 0017 instance migrates to per-actor preferences without losing the
+    actor rows a preference hangs from — built from the shipped directory
+    with 0018 onward withheld, so the upgrade is the real one."""
+    shipped = load_migrations(DECLARED_MIGRATIONS)
+    old_migrations = tmp_path / "before-preferences"
+    old_migrations.mkdir()
+    for migration in shipped:
+        if migration.number < PREFERENCES_MIGRATION:
+            (old_migrations / f"{migration.id}.sql").write_text(
+                migration.sql, encoding="utf-8"
+            )
+    path = tmp_path / "declared.sqlite3"
+    conn = connect(path, create=True)
+    Migrator(store="declared", directory=old_migrations, holder="old/1").migrate(
+        conn, now=NOW
+    )
+    conn.close()
+
+    store = SqliteDeclaredStore(path, clock=StepClock())
+    store.bootstrap(TEST_PRINCIPAL)
+    assert store.schema_version() == PREFERENCES_MIGRATION - 1
+    with store.write() as txn:
+        actor = txn.actor_by_identity(TEST_PRINCIPAL.identity_ref)
+        assert actor is not None
+        actor_id = actor.id
+
+    report = store.migrate()
+    assert "0018_actor_preferences" in report.applied
+
+    with store.write() as txn:
+        txn.upsert_actor_preference(
+            ActorPreference(
+                actor_id=actor_id,
+                key="inbox.filter",
+                value={"actor": "external"},
+                version=1,
+                updated_at=NOW,
+            )
+        )
+    with store.read() as view:
+        assert view.actor_by_identity(TEST_PRINCIPAL.identity_ref) is not None
+        stored = view.actor_preference(actor_id=actor_id, key="inbox.filter")
+        assert stored is not None and stored.value == {"actor": "external"}
+        assert view.actor_preferences(actor_id) == [stored]

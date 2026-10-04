@@ -311,3 +311,21 @@ def clean_env() -> Iterator[None]:
             if key.startswith("VOGT_"):
                 os.environ.pop(key, None)
         os.environ.update(inherited)
+
+
+@pytest.fixture(autouse=True)
+def fresh_process_caches() -> Iterator[None]:
+    """Start every test with empty process-wide caches.
+
+    The notification author/org-membership resolver and the Inbox badge
+    projection are deliberately process-wide in production (they outlive one
+    request or one sweep); between tests that would let one test's fake forge
+    answer another's question."""
+    from vogt.adapters.forge.actors import RESOLVER
+    from vogt.application.services.inbox import clear_badge_cache
+
+    RESOLVER.clear()
+    clear_badge_cache()
+    yield
+    RESOLVER.clear()
+    clear_badge_cache()

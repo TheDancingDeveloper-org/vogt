@@ -1828,6 +1828,8 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `inbox.archive` | Confirmation-gated | Available after approval: Archive one normalized Inbox occurrence. |
 | `inbox.snooze` | Confirmation-gated | Available after approval: Snooze one normalized Inbox occurrence until a deadline. |
 | `inbox.restore` | Confirmation-gated | Available after approval: Restore one archived or snoozed Inbox occurrence. |
+| `preference.get` | Operator-only | Unavailable: Per-person UI settings (saved filters); the assistant has no use for them. |
+| `preference.set` | Operator-only | Unavailable: Changes a person's saved UI settings; set them in the surface they belong to. |
 | `audit.list` | Voice-readable | Available: Query the audit log. |
 <!-- voice-capabilities:end -->
 

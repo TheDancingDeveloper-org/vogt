@@ -15,6 +15,7 @@ from typing import Protocol
 
 from vogt.core.entities import (
     Actor,
+    ActorPreference,
     AuditRecord,
     AuthDecision,
     CodingSession,
@@ -184,6 +185,14 @@ class ReadView(Protocol):
     def instance_id(self) -> str: ...
 
     def current_revision(self) -> int: ...
+
+    def latest_event_seq(self) -> int:
+        """The newest event's sequence number, 0 for an empty feed.
+
+        Moves on every declared write *and* every observed-side happening
+        published on the collectors' behalf (a sweep finishing), so a cache
+        over a composite read can key on it."""
+        ...
 
     def counts(self) -> Counts: ...
 
@@ -392,6 +401,14 @@ class ReadView(Protocol):
     # -- inbox triage -------------------------------------------------------
 
     def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None: ...
+
+    def actor_preference(self, *, actor_id: str, key: str) -> ActorPreference | None:
+        """One actor's setting under `key`, or `None` when never written."""
+        ...
+
+    def actor_preferences(self, actor_id: str) -> list[ActorPreference]:
+        """Every setting the actor has written, ordered by key."""
+        ...
 
     def inbox_triage_by_keys(self, entry_keys: list[str]) -> dict[str, InboxTriage]:
         """Every triage decision among `entry_keys`, keyed by entry key.
@@ -616,6 +633,10 @@ class WriteTxn(ReadView, Protocol):
     def insert_drift(self, proposal: DriftProposal) -> None: ...
 
     def upsert_inbox_triage(self, triage: InboxTriage) -> None: ...
+
+    def upsert_actor_preference(self, preference: ActorPreference) -> None:
+        """Insert or replace one (actor, key) setting, version and all."""
+        ...
 
     def mark_drift_superseded(
         self, proposal_id: str, *, detail: str | None, at: datetime | None

@@ -261,6 +261,18 @@ class InvalidTriageState(Conflict):
     code = "invalid_triage_state"
 
 
+class PreferenceVersionConflict(Conflict):
+    """A preference write named a version that is no longer current."""
+
+    code = "preference_version_conflict"
+
+
+class InvalidPreference(InvalidRequest):
+    """A preference key or value is not acceptable."""
+
+    code = "invalid_preference"
+
+
 class InvalidSnooze(InvalidRequest):
     """A snooze deadline is not a future instant."""
 

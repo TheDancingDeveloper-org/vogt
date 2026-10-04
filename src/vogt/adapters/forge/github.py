@@ -20,6 +20,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from vogt.adapters.forge.models import (
+    ForgeActor,
     ForgeCapabilities,
     ForgeCheck,
     ForgeIssue,
@@ -290,7 +291,45 @@ class GitHubProvider:
                 updated_at=item.get("updated_at"),
                 last_read_at=item.get("last_read_at"),
                 source_url=_notification_web_url(subject.get("url")),
+                subject_api_url=_text(subject.get("url")),
+                latest_comment_api_url=_text(subject.get("latest_comment_url")),
             )
+
+    def resolve_actor(self, api_url: str) -> ForgeActor | None:
+        """The author of a comment/issue/PR/release the API URL names.
+
+        Only `{api_root}/repos/...` is followed: the URL comes out of a
+        notification payload, and the token must not be sent anywhere a
+        payload chose."""
+        path = _api_path(api_url, self._client.api_root)
+        if path is None:
+            return None
+        payload = self._client.get(path)
+        if not isinstance(payload, dict):
+            return None
+        return _actor_of(payload)
+
+    def org_members(self, owner: str) -> frozenset[str] | None:
+        """`GET /orgs/{owner}/members`, every page up to a bound.
+
+        A 404 is a user-owned repository (no org) or an org the token cannot
+        see — `None`, "unknown". A token that is not itself a member sees only
+        public members, which is why the classifier also honours a reported
+        `MEMBER` association."""
+        members: set[str] = set()
+        for page in range(1, _ORG_MEMBER_PAGES + 1):
+            payloads = self._client.get(
+                f"/orgs/{owner}/members", per_page=DEFAULT_PER_PAGE, page=page
+            )
+            if payloads is None:
+                return None if page == 1 else frozenset(members)
+            batch = _as_list(payloads)
+            members.update(
+                str(item["login"]).lower() for item in batch if item.get("login")
+            )
+            if len(batch) < DEFAULT_PER_PAGE:
+                break
+        return frozenset(members)
 
     #: Where the ecosystems keep their update-automation config. Presence is
     #: the signal; the contents are not parsed.
@@ -441,6 +480,8 @@ def _to_issue(ref: RepoRef, item: dict[str, Any]) -> ForgeIssue:
             if isinstance(label, dict) and label.get("name")
         ),
         author=(item.get("user") or {}).get("login"),
+        author_type=(item.get("user") or {}).get("type"),
+        author_association=item.get("author_association"),
         assignees=tuple(
             str((a or {}).get("login"))
             for a in item.get("assignees", [])
@@ -451,6 +492,41 @@ def _to_issue(ref: RepoRef, item: dict[str, Any]) -> ForgeIssue:
         updated_at=item.get("updated_at"),
         closed_at=item.get("closed_at"),
         source_url=item.get("html_url"),
+    )
+
+
+#: How many pages of org members a sweep reads (100 a page). An org larger
+#: than this is answered from the first pages plus the association fallback.
+_ORG_MEMBER_PAGES = 10
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _api_path(api_url: str, api_root: str) -> str | None:
+    """`{api_root}/repos/o/r/...` -> `/repos/o/r/...`, or None for anything
+    outside this API's repository tree."""
+    root = api_root.rstrip("/")
+    if not api_url.startswith(f"{root}/repos/"):
+        return None
+    path = api_url[len(root) :].split("?", 1)[0].split("#", 1)[0]
+    if ".." in path.split("/"):
+        return None
+    return path
+
+
+def _actor_of(payload: dict[str, Any]) -> ForgeActor | None:
+    """The author of an issue/PR/comment (`user`) or release (`author`)."""
+    user = payload.get("user") or payload.get("author")
+    if not isinstance(user, dict):
+        return None
+    login = user.get("login")
+    association = payload.get("author_association")
+    return ForgeActor(
+        login=str(login) if login else None,
+        user_type=_text(user.get("type")),
+        association=_text(association),
     )
 
 
@@ -477,6 +553,8 @@ def _to_pull(ref: RepoRef, item: dict[str, Any]) -> ForgePull:
         # list endpoint omits `merged` but carries `merged_at`, so read either.
         merged=bool(item.get("merged") or item.get("merged_at")),
         author=(item.get("user") or {}).get("login"),
+        author_type=(item.get("user") or {}).get("type"),
+        author_association=item.get("author_association"),
         head=head.get("sha"),
         head_ref=head.get("ref"),
         base=(item.get("base") or {}).get("ref"),

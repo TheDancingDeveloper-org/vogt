@@ -18,10 +18,11 @@ Two conventions worth knowing before adding one:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from vogt.core.entities import (
     Actor,
@@ -119,6 +120,21 @@ class InboxEntry(Result):
     action: InboxAction | None = None
     evidence_snapshot: dict[str, object] | None = None
     proposed_change: dict[str, object] | None = None
+    actor_login: str | None = Field(
+        default=None,
+        description="Who caused this occurrence, where the forge said so.",
+    )
+    actor_kind: Literal["human", "bot"] | None = Field(
+        default=None,
+        description="human or bot; null when no author could be resolved. "
+        "Drift, CI and agent entries are the instance itself: bot.",
+    )
+    actor_relation: Literal["org_member", "external", "unknown"] = Field(
+        default="unknown",
+        description="org_member: on the repository's owning org's member list "
+        "(or reported MEMBER/OWNER). external: a person outside the org, "
+        "outside collaborators included. unknown: not resolvable.",
+    )
 
 
 class InboxCoverage(Result):
@@ -133,13 +149,43 @@ class InboxCoverage(Result):
     detail: str | None = None
 
 
+InboxActorFilter = Literal["any", "external", "org", "bot"]
+
+
 class InboxListParams(Params):
     sources: list[InboxSource] | None = None
     triage_states: list[InboxTriageState] = Field(default=["active"])
+    actor: InboxActorFilter = Field(
+        default="any",
+        description="Who caused the entry: any; external (people outside the "
+        "repository's org — never bots, and entries whose author is unknown "
+        "are hidden and counted in actor_unknown_hidden); org (org members); "
+        "bot (bots and the instance's own drift/CI/agent entries).",
+    )
     project: str | None = None
     work_item: str | None = None
     limit: int = Field(default=50, ge=1, le=100)
     cursor: str | None = None
+
+
+class InboxSavedFilter(BaseModel):
+    """The structured Inbox filter a person saves (`inbox.filter`).
+
+    Search text is deliberately absent: it is a temporary, client-side narrowing
+    of what is on screen, and the sidebar badge never counts by it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sources: list[InboxSource] | None = None
+    actor: InboxActorFilter = "any"
+    triage_states: list[InboxTriageState] = Field(default=["active"], min_length=1)
+
+    def is_default(self) -> bool:
+        return (
+            self.sources is None
+            and self.actor == "any"
+            and self.triage_states == ["active"]
+        )
 
 
 class InboxListResult(Result):
@@ -155,6 +201,11 @@ class InboxListResult(Result):
     engine_status: Literal["not_configured", "available", "unreachable"]
     engine_detail: str | None = None
     engine_available: bool = True
+    actor_unknown_hidden: int = Field(
+        default=0,
+        description="With actor=external: how many entries matching every "
+        "other filter were hidden because their author is unknown.",
+    )
 
 
 class InboxArchiveParams(Params):
@@ -256,7 +307,10 @@ class StatusResult(Result):
 
 
 class PlaceMetricsParams(Params):
-    """The shell's bounded, aggregate navigation counts."""
+    """The shell's bounded, aggregate navigation counts.
+
+    The Inbox count honours the caller's saved Inbox filter (the
+    `inbox.filter` preference) — the same answer `inbox.list` gives under it."""
 
 
 class PlaceMetricsResult(Result):
@@ -266,13 +320,89 @@ class PlaceMetricsResult(Result):
     unavailable answer into a misleading zero.
     """
 
-    inbox_active: int | None = None
+    inbox_active: int | None = Field(
+        default=None,
+        description="The Inbox badge: entries matching the caller's saved "
+        "Inbox filter (all active entries when none is saved).",
+    )
+    inbox_active_unfiltered: int | None = Field(
+        default=None, description="Every active Inbox entry, ignoring the filter."
+    )
+    inbox_filter: InboxSavedFilter | None = Field(
+        default=None,
+        description="The saved filter the badge applied; null when the caller "
+        "has none (or only the default), so the badge is unfiltered.",
+    )
     projects_total: int | None = None
     work_total: int | None = None
     backlog_total_considered: int | None = None
     drift_present: bool | None = None
     revision: int
     generated_at: datetime
+
+
+# -- per-actor preferences --------------------------------------------------
+
+
+PREFERENCE_KEY_PATTERN = r"^[a-z][a-z0-9_-]*(\.[a-z0-9_-]+)*$"
+
+
+class PreferenceView(Result):
+    """One of the caller's own settings."""
+
+    key: str
+    value: dict[str, object]
+    version: int
+    updated_at: datetime
+
+
+class PreferenceGetParams(Params):
+    key: str | None = Field(
+        default=None,
+        max_length=64,
+        description="One key, e.g. inbox.filter; omit for every key you hold.",
+    )
+
+
+class PreferenceGetResult(Result):
+    preferences: list[PreferenceView]
+
+
+class PreferenceSetParams(Params):
+    key: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=PREFERENCE_KEY_PATTERN,
+        description="Namespaced key, e.g. inbox.filter.",
+    )
+    value: dict[str, object] = Field(
+        description="A JSON object. {} clears the setting back to defaults. "
+        "From the CLI pass it as JSON text."
+    )
+    expected_version: int | None = Field(
+        default=None,
+        ge=0,
+        description="Apply only if the stored version is this one (0: only if "
+        "the key has never been written). Omit to write unconditionally.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _parse_json_text(cls, value: object) -> object:
+        # The generated CLI hands every non-list flag over as text; a JSON
+        # object arrives here as its source.
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError as error:
+                msg = f"value is not valid JSON: {error.msg}"
+                raise ValueError(msg) from None
+        return value
+
+
+class PreferenceSetResult(Result):
+    preference: PreferenceView
 
 
 # -- projects --------------------------------------------------------------
