@@ -14,6 +14,8 @@ import re
 import sys
 from pathlib import Path
 
+import check_engine_spec
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".git", ".venv", "node_modules", "dist", "build", ".mypy_cache", "local"}
 LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
@@ -126,7 +128,9 @@ def main() -> int:
         return 1
 
     print(f"checked {len(files)} markdown files; all relative links resolve")
-    return 0
+    # The engine's hand-written OpenAPI document against its routes. Run here
+    # so the docs workflow, which runs only this script, checks it too.
+    return check_engine_spec.main()
 
 
 if __name__ == "__main__":
