@@ -64,6 +64,8 @@ from vogt.application.models import (
     DeployedVersionsResult,
     DepsParams,
     DepsResult,
+    DiagnosticsParams,
+    DiagnosticsResult,
     DriftDetectParams,
     DriftDetectResult,
     DriftListParams,
@@ -239,6 +241,21 @@ def build_operations() -> list[Operation[Any, Any]]:
             cli=CliBinding(("status",)),
         ),
         Operation(
+            name="instance.diagnostics",
+            summary=(
+                "Deploy diagnostics: version, image digest, uptime, readiness "
+                "checks, migration state and recent error log lines (redacted); "
+                "peer=true also asks the configured peer instance (e.g. prod)."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=DiagnosticsParams,
+            result_model=DiagnosticsResult,
+            handler=services.instance_diagnostics,
+            route=HttpRoute("GET", "/instance/diagnostics"),
+            cli=CliBinding(("diagnostics",)),
+        ),
+        Operation(
             name="place.metrics",
             summary="Read all bounded shell navigation counts in one response.",
             scope="read",
@@ -320,7 +337,10 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="project.list",
-            summary="List registered projects.",
+            summary=(
+                "List registered projects, each with `writable`: whether a "
+                "default work.create lands there now, and why not."
+            ),
             scope="read",
             mutating=False,
             params_model=ListProjectsParams,
@@ -331,7 +351,10 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="project.brief",
-            summary="The per-repo view: state, work, bugs, version, compliance.",
+            summary=(
+                "The per-repo view: state, work, bugs, version, compliance. "
+                "mode=summary (default) omits full items from top_backlog."
+            ),
             scope="read",
             mutating=False,
             params_model=ProjectBriefParams,
@@ -376,7 +399,10 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="work.get",
-            summary="Fetch one work item with its relations, labels and comments.",
+            summary=(
+                "Fetch one work item with its relations, labels and comments "
+                "(`id` is accepted for `ref`)."
+            ),
             scope="read",
             mutating=False,
             params_model=GetWorkParams,
@@ -387,7 +413,12 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="work.list",
-            summary="List work items with filters.",
+            summary=(
+                "List work items with filters, paged (limit/offset, next_offset). "
+                "mode=summary (default) returns compact rows; mode=full returns "
+                "whole items. `query` searches title/body/ref; `status`/`state` "
+                "alias `states`."
+            ),
             scope="read",
             mutating=False,
             params_model=ListWorkParams,
@@ -422,7 +453,11 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="work.transition",
-            summary="Move a work item to another state, validating the edge.",
+            summary=(
+                "Move a work item to another state, validating the edge; a "
+                "refusal lists the allowed edges and the shortest path. "
+                "walk=true takes that path, one audited hop per edge."
+            ),
             scope="work.write",
             mutating=True,
             params_model=TransitionWorkParams,
@@ -478,7 +513,11 @@ def build_operations() -> list[Operation[Any, Any]]:
         # -- views ---------------------------------------------------------
         Operation(
             name="backlog",
-            summary="The ranked backlog, globally or for one project.",
+            summary=(
+                "The ranked backlog, globally or for one project, paged "
+                "(limit/offset, next_offset). mode=summary (default) omits each "
+                "row's full item; mode=full includes it."
+            ),
             scope="read",
             mutating=False,
             params_model=BacklogParams,

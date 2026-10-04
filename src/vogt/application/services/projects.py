@@ -15,6 +15,7 @@ from vogt.application.models import (
     ListProjectsParams,
     ProjectBriefParams,
     ProjectBriefResult,
+    ProjectListing,
     ProjectListResult,
     ProjectResult,
     RegisterProjectParams,
@@ -24,7 +25,7 @@ from vogt.application.models import (
     UpdateProjectParams,
 )
 from vogt.application.services import _resolve
-from vogt.application.services.views import _gather, freshness_of
+from vogt.application.services.views import _gather, freshness_of, project_rows
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.dep_refs import KIND_DEP_SCAN
 from vogt.core.checks import roll_up
@@ -329,11 +330,24 @@ def get_project(ctx: AppContext, params: GetProjectParams) -> ProjectResult:
 
 
 def list_projects(ctx: AppContext, params: ListProjectsParams) -> ProjectListResult:
+    """Registered projects, each with whether `work.create` lands there now."""
+    from vogt.application.services.work import create_writability
+
     with ctx.declared.read() as view:
-        return ProjectListResult(
-            projects=view.list_projects(limit=params.limit, offset=params.offset),
-            total=view.counts().projects,
-        )
+        projects = view.list_projects(limit=params.limit, offset=params.offset)
+        total = view.counts().projects
+    writability = create_writability(ctx, projects)
+    return ProjectListResult(
+        projects=[
+            ProjectListing(
+                **project.model_dump(),
+                writable=writability[project.id][0],
+                writable_reason=writability[project.id][1],
+            )
+            for project in projects
+        ],
+        total=total,
+    )
 
 
 def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefResult:
@@ -383,7 +397,7 @@ def brief_project(ctx: AppContext, params: ProjectBriefParams) -> ProjectBriefRe
         observed_work=gathered.observed,
         by_state=dict(sorted(by_state.items())),
         by_kind=dict(sorted(by_kind.items())),
-        top_backlog=gathered.ranked[: params.backlog_limit],
+        top_backlog=project_rows(gathered.ranked[: params.backlog_limit], params.mode),
         current_version=project.current_version,
         declared_version=project.current_version,
         observed_version=observed_version,

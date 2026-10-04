@@ -2321,6 +2321,16 @@ def _work_where(work_filter: WorkFilter) -> tuple[str, list[object]]:
         clauses.append(f"w.state NOT IN ({placeholders})")
         params.extend(terminal)
 
+    if work_filter.text:
+        # instr over lower() rather than LIKE: the needle is caller text, and
+        # LIKE would read its `%` and `_` as wildcards.
+        needle = work_filter.text.lower()
+        clauses.append(
+            "(instr(lower(w.title), ?) > 0 OR instr(lower(w.body), ?) > 0 "
+            "OR instr(lower(w.ref), ?) > 0)"
+        )
+        params.extend((needle, needle, needle))
+
     if work_filter.label is not None:
         clauses.append(
             "EXISTS (SELECT 1 FROM work_item_labels wl JOIN labels l "

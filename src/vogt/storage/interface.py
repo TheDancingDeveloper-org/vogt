@@ -147,6 +147,9 @@ class WorkFilter:
     initiative_id: str | None = None
     label: str | None = None
     trust_states: tuple[str, ...] = ()
+    #: Case-insensitive text the title, body or ref must contain. `None`
+    #: (and the empty string) narrows nothing.
+    text: str | None = None
     exclude_terminal: bool = False
     #: The forge-less withdrawal, expressed as a filter: leave out native rows
     #: whose

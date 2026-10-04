@@ -55,6 +55,9 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `sqlite_synchronous` | `VOGT_SQLITE_SYNCHRONOUS` | one of `off`, `normal`, `full`, `extra` | `normal` | behaviour |
 | `sweep_interval_seconds` | `VOGT_SWEEP_INTERVAL_SECONDS` | integer | `900` | behaviour |
 | `verify_horizon_hours` | `VOGT_VERIFY_HORIZON_HOURS` | integer | `24` | behaviour |
+| `image_digest` | `VOGT_IMAGE_DIGEST` | string, optional | *(no default — must be set)* | behaviour |
+| `diagnostics_peer_url` | `VOGT_DIAGNOSTICS_PEER_URL` | string, optional | *(no default — must be set)* | exposure |
+| `diagnostics_peer_token_file` | `VOGT_DIAGNOSTICS_PEER_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 
 ## What each setting decides
 
@@ -233,6 +236,18 @@ How often `serve` runs collectors in the background. Zero disables the schedule,
 ### `verify_horizon_hours`
 
 How recently a subject must have been observed for a linked declared entity to count as `verified` rather than `stale`. Trust is computed from this, never hand-set.
+
+### `image_digest`
+
+The digest of the image this instance runs, as the deployment pinned it (e.g. `sha256:...`), reported by `instance.diagnostics`. A running container cannot see its own digest, so the deployment states it — typically by setting `VOGT_IMAGE_DIGEST` from the same value Compose pins. Unset is reported as unknown, never guessed.
+
+### `diagnostics_peer_url`
+
+The REST base of a peer Vogt instance (e.g. prod for a dev instance) that `instance.diagnostics --peer` asks for its diagnostics: the core's `/api` prefix, or a front door's `/api/vogt`, e.g. `https://vogt.example.com/api/vogt`. Lets an agent confirm a peer's deploy without tailnet or orchestrator access. An exposure value, so it is never guessed; unset means the peer half of the answer says it is not configured.
+
+### `diagnostics_peer_token_file`
+
+Path to a file holding a read-scoped token for `diagnostics_peer_url`. A file rather than an environment variable for the same reason as `github_token_file`. Unset sends no credential, which a peer that requires authentication refuses.
 
 ## Default policy
 

@@ -717,6 +717,41 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    image_digest: str | None = Field(
+        default=None,
+        description=(
+            "The digest of the image this instance runs, as the deployment "
+            "pinned it (e.g. `sha256:...`), reported by "
+            "`instance.diagnostics`. A running container cannot see its own "
+            "digest, so the deployment states it — typically by setting "
+            "`VOGT_IMAGE_DIGEST` from the same value Compose pins. Unset is "
+            "reported as unknown, never guessed."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    diagnostics_peer_url: str | None = Field(
+        default=None,
+        description=(
+            "The REST base of a peer Vogt instance (e.g. prod for a dev "
+            "instance) that `instance.diagnostics --peer` asks for its "
+            "diagnostics: the core's `/api` prefix, or a front door's "
+            "`/api/vogt`, e.g. `https://vogt.example.com/api/vogt`. Lets an "
+            "agent confirm a peer's deploy without tailnet or orchestrator "
+            "access. An exposure value, so it is never guessed; unset means "
+            "the peer half of the answer says it is not configured."
+        ),
+        json_schema_extra={"default_policy": "exposure"},
+    )
+    diagnostics_peer_token_file: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a file holding a read-scoped token for "
+            "`diagnostics_peer_url`. A file rather than an environment "
+            "variable for the same reason as `github_token_file`. Unset sends "
+            "no credential, which a peer that requires authentication refuses."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
 
     @field_validator("agent_activity_roots")
     @classmethod

@@ -185,6 +185,12 @@ def matches(item: WorkItem, work_filter: WorkFilter) -> bool:
         return False
     if work_filter.trust_states and item.trust_state not in work_filter.trust_states:
         return False
+    if work_filter.text:
+        needle = work_filter.text.lower()
+        if not any(
+            needle in field.lower() for field in (item.title, item.body, item.ref)
+        ):
+            return False
     return not (work_filter.exclude_terminal and item.state in TERMINAL_STATES)
 
 
