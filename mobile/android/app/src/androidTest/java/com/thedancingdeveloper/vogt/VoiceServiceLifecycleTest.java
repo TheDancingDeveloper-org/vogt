@@ -40,7 +40,7 @@ public class VoiceServiceLifecycleTest {
     private static final String POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS";
     private static final String RECORD_AUDIO = "android.permission.RECORD_AUDIO";
 
-    /** A pollable condition — avoids java.util.function (API 24) under minSdk 23. */
+    /** A pollable condition. */
     private interface Condition {
         boolean met();
     }
