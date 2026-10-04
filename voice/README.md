@@ -33,9 +33,10 @@ mono 16 kHz before inference. The native TTS backend is `piper-rs` over ONNX
 and returns PCM **WAV only** — which is why the stack sets
 `ENGINE_ASSISTANT_TTS_FORMAT=wav`; the engine streams the upstream content
 type through, so it plays in the PWA. OpenAI-compatible `speed` values from
-`0.25` through `4.0` are honoured. Unsupported formats and invalid speeds are
-rejected rather than mislabeled. No audio is retained: Piper's response is
-written to a temporary file and read back before that file is deleted.
+`0.25` through `4.0` are honoured by dividing the voice's own `length_scale`
+(its phoneme-duration multiplier), so `2.0` speaks in half the time. Unsupported
+formats and invalid speeds are rejected rather than mislabeled. No audio is
+retained: Piper's samples are encoded to WAV in memory and never touch disk.
 
 ## Bring your own models
 
@@ -54,7 +55,10 @@ export VOGT_VOICE_THREADS=2
 Build an image that starts `FROM` the published sidecar and overrides these,
 or mount a read-only model cache and set the paths. Piper's JSON configuration
 must sit beside its ONNX file under Piper's normal naming (for example
-`voice.onnx` and `voice.onnx.json`). When a native model path is configured,
+`voice.onnx` and `voice.onnx.json`). Only single-file voices are supported:
+a config declaring Piper's streaming encoder/decoder layout (`"streaming":
+true`) is refused at load, since `piper-rs` 0.2 no longer runs it. When a
+native model path is configured,
 `/health` returns `503` until that model has loaded, so a broken model mount
 keeps the sidecar unhealthy rather than serving — the engine is never
 started against it.
@@ -101,10 +105,18 @@ cargo run -p vogt-voice-server
 ```
 
 The development host needs `clang`, `cmake`, `libclang-dev`, `libopus-dev`,
-and `pkg-config` for the native bindings (`apt install clang cmake
-libclang-dev libopus-dev pkg-config` on Debian/Ubuntu). `cargo test
---workspace` does not require model weights; the model-backed round trip is
-the image build's own gate.
+`libssl-dev` and `pkg-config` for the native bindings (`apt install clang cmake
+libclang-dev libopus-dev libssl-dev pkg-config` on Debian/Ubuntu); OpenSSL is
+for `ort-sys`'s build script, which downloads the ONNX Runtime over native TLS.
+`cargo test --workspace` does not require model weights; the model-backed round
+trip is the image build's own gate. To run one locally, fetch the pinned voice
+from the `Dockerfile` and run the ignored test:
+
+```bash
+VOGT_VOICE_TEST_PIPER_CONFIG=/path/to/en_US-ljspeech-medium.onnx.json \
+PIPER_ESPEAKNG_DATA_DIRECTORY="$(dirname "$(find /tmp/vt/debug/build -type d -path '*/out/share/espeak-ng-data' -print -quit)")" \
+CARGO_TARGET_DIR=/tmp/vt cargo test -p vogt-voice-tts -- --ignored
+```
 
 Keep the target directory's path short. `espeak-rs-sys` compiles espeak-ng's
 phoneme data in its build script, and espeak-ng builds each source path in a
@@ -124,16 +136,25 @@ CARGO_TARGET_DIR=/tmp/vt cargo build -p vogt-voice-tts
 The `Dockerfile` builds the native runtimes on the estate-mirrored
 `rust:1-bookworm` base, fetches and verifies the default models in a stage of
 their own (so the ~210 MB download is a cache layer that only changes when a
-pinned revision does), and installs the ONNX Runtime's one runtime library
-into a minimal `ubuntu:26.04` final stage.
+pinned revision does), and copies the binary, the compiled espeak-ng data and
+the models into a minimal `ubuntu:26.04` final stage. The ONNX Runtime is linked
+statically into the binary, so the final stage carries no runtime library for
+it.
 
 ### Dependency pins
 
-`tts/Cargo.toml` pins `ort`, `ort-sys` and `piper-rs` exactly. `ort` and
-`ort-sys` must stay on the same release candidate (`ort-sys` rc.13 under `ort`
-rc.9 fails its own build script), so Dependabot ignores both, and they move by
-hand together with `piper-rs`. Check for API renames when bumping `piper-rs`:
-0.1.9 renamed `SonataSpeechSynthesizer` to `PiperSpeechSynthesizer`.
+`tts/Cargo.toml` pins `ort` and `ort-sys` at `=2.0.0-rc.12` and `piper-rs` at
+`=0.2.0`, which requires exactly that `ort`. `ort` and `ort-sys` must stay on
+the same release candidate (a lone `ort-sys` bump fails its own build script),
+so Dependabot ignores both, and they move by hand together with `piper-rs`.
+`piper-rs` uses `ort`'s default features, which include `tls-native`, so a
+rustls-only build is not available without forking it.
+
+Check for API changes when bumping `piper-rs`. 0.2 replaced
+`from_config_path`, the `synth` module and `synthesize_to_file` with
+`Piper::create`, which returns raw f32 samples through `&mut self`; `tts/`
+therefore builds the ONNX session itself, holds the voice behind a mutex,
+encodes WAV with `hound`, and maps `speed` onto `length_scale`.
 
 STT container decoding uses `symphonia` 0.6. Its WebM/Opus, Ogg/Opus and
 Ogg/Vorbis paths are pinned by the fixtures in `stt/tests/fixtures/` (0.2 s

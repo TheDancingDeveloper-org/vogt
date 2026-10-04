@@ -21,10 +21,11 @@ updates:
     directory: "/voice"
     schedule:
       interval: weekly
-    # ort and ort-sys are a matched pair pinned for piper-rs (voice/tts
-    # Cargo.toml). A lone bump of either does not build (ort-sys rc.13
-    # under ort rc.9 fails its own build script), so they move together,
-    # by hand, with the TTS stack.
+    # ort and ort-sys are a matched pair pinned at =2.0.0-rc.12 for
+    # piper-rs 0.2.0 (voice/tts Cargo.toml), which requires exactly that
+    # ort. A lone bump of either does not build (ort-sys fails its own build
+    # script under an older ort), so they move together, by hand, with
+    # piper-rs.
     ignore:
       - dependency-name: ort
       - dependency-name: ort-sys

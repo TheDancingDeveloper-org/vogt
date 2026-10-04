@@ -1,16 +1,16 @@
 //! The provider seam for OpenAI-compatible text-to-speech backends.
 
 use std::{
+    io::Cursor,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use piper_rs::from_config_path;
-use piper_rs::synth::{AudioOutputConfig, PiperSpeechSynthesizer};
-use tempfile::NamedTempFile;
+use ort::session::Session;
+use piper_rs::{ModelConfig, Piper};
 use thiserror::Error;
 use tokio::{io::AsyncWriteExt, process::Command};
 
@@ -43,11 +43,19 @@ pub enum SpeechError {
 ///
 /// The JSON model configuration and its neighboring ONNX file are loaded once
 /// at startup. Synthesis executes through piper-rs in this process and emits a
-/// valid PCM WAV response. WAV is intentionally the only native output format
-/// until an explicit, bounded encoder is added; requests for another format
-/// are rejected rather than mislabeled.
+/// valid 16-bit PCM WAV response. WAV is intentionally the only native output
+/// format until an explicit, bounded encoder is added; requests for another
+/// format are rejected rather than mislabeled.
+///
+/// Only single-file VITS voices (`<voice>.onnx` next to `<voice>.onnx.json`)
+/// are supported. piper-rs 0.2 dropped the streaming encoder/decoder model
+/// layout, so a config that declares `"streaming": true` is rejected at load.
 pub struct PiperSynthesizer {
-    synthesizer: Arc<PiperSpeechSynthesizer>,
+    // piper-rs 0.2 synthesizes through `&mut self`, so one inference runs at a
+    // time per loaded voice.
+    piper: Arc<Mutex<Piper>>,
+    // The voice's own `inference.length_scale`, which `speed` divides.
+    base_length_scale: f32,
     model_id: String,
 }
 
@@ -71,15 +79,52 @@ impl PiperSynthesizer {
                 config_path.display()
             )));
         }
-        let model = from_config_path(Path::new(&config_path))
+        let config = load_model_config(&config_path)?;
+        let model_path = onnx_path(&config_path)?;
+        if !model_path.is_file() {
+            return Err(SpeechError::Provider(format!(
+                "Piper ONNX model does not exist: {}",
+                model_path.display()
+            )));
+        }
+        let session = Session::builder()
+            .and_then(|mut builder| builder.commit_from_file(&model_path))
             .map_err(|error| SpeechError::Provider(format!("load Piper model: {error}")))?;
-        let synthesizer = PiperSpeechSynthesizer::new(model)
-            .map_err(|error| SpeechError::Provider(format!("create Piper synthesizer: {error}")))?;
+        let base_length_scale = config.inference.length_scale;
         Ok(Self {
-            synthesizer: Arc::new(synthesizer),
+            piper: Arc::new(Mutex::new(Piper::from_session(session, config))),
+            base_length_scale,
             model_id: model_id.into(),
         })
     }
+}
+
+/// Parse a Piper voice config, rejecting the streaming (encoder/decoder)
+/// layout that piper-rs 0.2 no longer runs.
+fn load_model_config(config_path: &Path) -> Result<ModelConfig, SpeechError> {
+    let raw = std::fs::read(config_path)
+        .map_err(|error| SpeechError::Provider(format!("read Piper model config: {error}")))?;
+    let value: serde_json::Value = serde_json::from_slice(&raw)
+        .map_err(|error| SpeechError::Provider(format!("parse Piper model config: {error}")))?;
+    if value.get("streaming").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err(SpeechError::Provider(
+            "streaming Piper models (encoder.onnx/decoder.onnx) are not supported".into(),
+        ));
+    }
+    serde_json::from_value(value)
+        .map_err(|error| SpeechError::Provider(format!("parse Piper model config: {error}")))
+}
+
+/// The ONNX weights live beside the config: `voice.onnx.json` -> `voice.onnx`
+/// (the rule piper-rs 0.1's `from_config_path` applied).
+fn onnx_path(config_path: &Path) -> Result<PathBuf, SpeechError> {
+    let stem = config_path.file_stem().ok_or_else(|| {
+        SpeechError::Provider(format!(
+            "invalid Piper model config filename: {}",
+            config_path.display()
+        ))
+    })?;
+    Ok(config_path.with_file_name(stem))
 }
 
 #[async_trait]
@@ -94,22 +139,22 @@ impl SpeechBackend for PiperSynthesizer {
                 request.response_format
             )));
         }
-        let output_config = output_config(request.speed)?;
-        let synthesizer = Arc::clone(&self.synthesizer);
+        let length_scale = length_scale(self.base_length_scale, request.speed)?;
+        let piper = Arc::clone(&self.piper);
         tokio::task::spawn_blocking(move || {
-            let output = NamedTempFile::new().map_err(|error| {
-                SpeechError::Provider(format!("create Piper output file: {error}"))
-            })?;
-            synthesizer
-                .synthesize_to_file(output.path(), request.input, output_config)
-                .map_err(|error| SpeechError::Provider(format!("Piper inference: {error}")))?;
-            let audio = std::fs::read(output.path())
-                .map_err(|error| SpeechError::Provider(format!("read Piper output: {error}")))?;
-            if audio.is_empty() {
+            let (samples, sample_rate) = {
+                let mut piper = piper
+                    .lock()
+                    .map_err(|_| SpeechError::Provider("Piper worker poisoned".into()))?;
+                piper
+                    .create(&request.input, false, None, length_scale, None, None)
+                    .map_err(|error| SpeechError::Provider(format!("Piper inference: {error}")))?
+            };
+            if samples.is_empty() {
                 return Err(SpeechError::Provider("Piper returned no audio".into()));
             }
             Ok(SpeechResponse {
-                audio: Bytes::from(audio),
+                audio: Bytes::from(encode_wav(&samples, sample_rate)?),
                 content_type: "audio/wav".into(),
             })
         })
@@ -122,7 +167,10 @@ impl SpeechBackend for PiperSynthesizer {
     }
 }
 
-fn output_config(speed: Option<f32>) -> Result<Option<AudioOutputConfig>, SpeechError> {
+/// Map the OpenAI-compatible `speed` (0.25..=4.0, 1.0 = normal) onto Piper's
+/// `length_scale`, the model's own phoneme-duration multiplier: twice as fast
+/// is half as long. `None` keeps the voice's configured default.
+fn length_scale(base: f32, speed: Option<f32>) -> Result<Option<f32>, SpeechError> {
     let Some(speed) = speed else {
         return Ok(None);
     };
@@ -131,16 +179,28 @@ fn output_config(speed: Option<f32>) -> Result<Option<AudioOutputConfig>, Speech
             "speed {speed} is outside the supported range 0.25..=4.0"
         )));
     }
-    // piper-rs exposes its speed post-processing as a 0..=100 percentage for
-    // the underlying Sonic range 0.5..=5.5. Keep the OpenAI-compatible speed
-    // field meaningful without changing the voice model itself.
-    let rate = (((speed - 0.5) / 5.0) * 100.0).round().clamp(0.0, 100.0) as u8;
-    Ok(Some(AudioOutputConfig {
-        rate: Some(rate),
-        volume: None,
-        pitch: None,
-        appended_silence_ms: None,
-    }))
+    Ok(Some(base / speed))
+}
+
+/// Encode mono f32 PCM (nominally -1.0..=1.0) as a 16-bit PCM WAV file.
+fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, SpeechError> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let encode_error = |error: hound::Error| SpeechError::Provider(format!("encode WAV: {error}"));
+    let mut buffer = Cursor::new(Vec::with_capacity(44 + samples.len() * 2));
+    let mut writer = hound::WavWriter::new(&mut buffer, spec).map_err(encode_error)?;
+    for &sample in samples {
+        let sample = if sample.is_finite() { sample } else { 0.0 };
+        writer
+            .write_sample((sample.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16)
+            .map_err(encode_error)?;
+    }
+    writer.finalize().map_err(encode_error)?;
+    Ok(buffer.into_inner())
 }
 
 /// A text-to-speech implementation. Audio encoding and model execution stay
@@ -326,11 +386,59 @@ mod tests {
     }
 
     #[test]
-    fn native_speed_is_validated_and_mapped_to_piper_post_processing() {
-        assert!(output_config(Some(0.24)).is_err());
-        assert!(output_config(Some(4.01)).is_err());
-        assert_eq!(output_config(Some(0.5)).unwrap().unwrap().rate, Some(0));
-        assert_eq!(output_config(Some(4.0)).unwrap().unwrap().rate, Some(70));
+    fn native_speed_is_validated_and_mapped_to_piper_length_scale() {
+        assert!(length_scale(1.0, Some(0.24)).is_err());
+        assert!(length_scale(1.0, Some(4.01)).is_err());
+        assert!(length_scale(1.0, Some(f32::NAN)).is_err());
+        assert_eq!(length_scale(1.0, None).unwrap(), None);
+        assert_eq!(length_scale(1.0, Some(1.0)).unwrap(), Some(1.0));
+        assert_eq!(length_scale(1.0, Some(0.25)).unwrap(), Some(4.0));
+        assert_eq!(length_scale(1.0, Some(4.0)).unwrap(), Some(0.25));
+        // A voice with a slower default keeps its proportions.
+        assert_eq!(length_scale(1.2, Some(2.0)).unwrap(), Some(0.6));
+    }
+
+    #[test]
+    fn wav_encoding_is_mono_16_bit_pcm_at_the_model_rate() {
+        let wav = encode_wav(&[0.0, 1.0, -1.0, 2.0, f32::NAN], 22_050).unwrap();
+        let mut reader = hound::WavReader::new(Cursor::new(wav)).unwrap();
+        let spec = reader.spec();
+        assert_eq!(spec.channels, 1);
+        assert_eq!(spec.sample_rate, 22_050);
+        assert_eq!(spec.bits_per_sample, 16);
+        let samples: Vec<i16> = reader.samples::<i16>().map(Result::unwrap).collect();
+        assert_eq!(samples, [0, i16::MAX, -i16::MAX, i16::MAX, 0]);
+    }
+
+    #[test]
+    fn onnx_weights_sit_beside_the_config() {
+        assert_eq!(
+            onnx_path(Path::new("/m/en_US-ljspeech-medium.onnx.json")).unwrap(),
+            Path::new("/m/en_US-ljspeech-medium.onnx")
+        );
+    }
+
+    #[test]
+    fn native_constructor_rejects_streaming_models_and_missing_weights() {
+        let directory = tempfile::tempdir().unwrap();
+        let streaming = directory.path().join("streaming.onnx.json");
+        std::fs::write(&streaming, br#"{"streaming": true}"#).unwrap();
+        let error = PiperSynthesizer::new(&streaming, "tts-1").unwrap_err();
+        assert!(error.to_string().contains("streaming"), "{error}");
+
+        let config = directory.path().join("voice.onnx.json");
+        std::fs::write(
+            &config,
+            br#"{"audio": {"sample_rate": 22050}, "espeak": {"voice": "en-us"},
+                "inference": {"noise_scale": 0.667, "length_scale": 1.0, "noise_w": 0.8},
+                "num_speakers": 1, "speaker_id_map": {}, "phoneme_id_map": {}}"#,
+        )
+        .unwrap();
+        let error = PiperSynthesizer::new(&config, "tts-1").unwrap_err();
+        assert!(
+            error.to_string().contains("ONNX model does not exist"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -395,5 +503,36 @@ mod tests {
         .unwrap();
         let error = slow.synthesize(request).await.unwrap_err();
         assert!(error.to_string().contains("timed out"));
+    }
+
+    /// A real model round trip. Unit tests carry no weights, so this runs only
+    /// on request: point `VOGT_VOICE_TEST_PIPER_CONFIG` at a voice's
+    /// `.onnx.json` (and `PIPER_ESPEAKNG_DATA_DIRECTORY` at the directory
+    /// holding `espeak-ng-data`), then `cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore = "needs a Piper voice; set VOGT_VOICE_TEST_PIPER_CONFIG"]
+    async fn piper_round_trip_produces_speech_and_honours_speed() {
+        let config = std::env::var("VOGT_VOICE_TEST_PIPER_CONFIG")
+            .expect("VOGT_VOICE_TEST_PIPER_CONFIG names a Piper .onnx.json");
+        let backend = PiperSynthesizer::new(config, "tts-1").unwrap();
+        let request = |speed| SpeechRequest {
+            model: "tts-1".into(),
+            voice: "alloy".into(),
+            input: "Hello from the Vogt voice sidecar.".into(),
+            response_format: "wav".into(),
+            speed,
+        };
+        let duration = |audio: &Bytes| {
+            let reader = hound::WavReader::new(Cursor::new(audio.to_vec())).unwrap();
+            let spec = reader.spec();
+            assert_eq!((spec.channels, spec.bits_per_sample), (1, 16));
+            reader.duration() as f32 / spec.sample_rate as f32
+        };
+        let normal = backend.synthesize(request(None)).await.unwrap();
+        assert_eq!(normal.content_type, "audio/wav");
+        let normal = duration(&normal.audio);
+        assert!(normal > 0.5, "{normal}s of speech");
+        let fast = duration(&backend.synthesize(request(Some(2.0))).await.unwrap().audio);
+        assert!(fast < normal * 0.75, "2x speed: {fast}s vs {normal}s");
     }
 }
