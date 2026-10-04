@@ -13,14 +13,15 @@ eleven, and it never touches declared data.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from vogt.collectors.base import Collector, CollectorContext, Finding
-from vogt.core.entities import Project
+from vogt.core.entities import Project, SweepOutcome
 from vogt.storage.interface import ObservedStore
-from vogt.storage.observed_types import SweepReport
+from vogt.storage.observed_types import ActivityBatch, SweepReport, TranscriptCursor
 
 
 @runtime_checkable
@@ -32,6 +33,18 @@ class PostAppend(Protocol):
     never move past observations that failed to persist (D1)."""
 
     def after_append(self, *, at: datetime) -> None: ...
+
+
+@runtime_checkable
+class ActivityIndexer(Protocol):
+    """A collector that indexes agent transcripts rather than projects.
+
+    It is handed the stored cursors, reads a bounded batch from them, and
+    returns it; the sweeper stores the batch and moves the cursors in one
+    transaction — the same "collectors never write" rule, with an index in
+    place of findings (`collectors/agent_activity.py`)."""
+
+    def scan(self, cursors: Mapping[str, TranscriptCursor]) -> ActivityBatch: ...
 
 
 @dataclass(frozen=True)
@@ -78,6 +91,8 @@ class Sweeper:
         return [self.run_one(collector, projects) for collector in collectors]
 
     def run_one(self, collector: Collector, projects: list[Project]) -> SweepReport:
+        if isinstance(collector, ActivityIndexer):
+            return self.run_index(collector)
         started = self._ctx.clock()
         sweep = self._store.begin_sweep(
             collector=collector.name,
@@ -133,5 +148,64 @@ class Sweeper:
             new=stats.new,
             unchanged=stats.unchanged,
             failures=failures,
+            detail=detail,
+        )
+
+    def run_index(self, indexer: ActivityIndexer) -> SweepReport:
+        """Run a transcript indexer once, recording coverage like any sweep.
+
+        Its scope is empty — transcripts are not projects, so this sweep
+        claims no project coverage — and its stats say how much was read and
+        how much is still waiting. A failure is recorded as `failed` and
+        indexes nothing: the batch and its cursors commit together or not
+        at all."""
+        name = getattr(indexer, "name", "agent-activity")
+        sweep = self._store.begin_sweep(
+            collector=str(name), scope=[], at=self._ctx.clock()
+        )
+        try:
+            batch = indexer.scan(self._store.activity_cursors())
+            stats = self._store.index_activity(sweep.id, batch, at=self._ctx.clock())
+        except Exception as exc:
+            why = f"{type(exc).__name__}: {exc}"
+            self._store.finish_sweep(
+                sweep.id,
+                outcome="failed",
+                stats={"projects": 0, "new": 0, "unchanged": 0},
+                at=self._ctx.clock(),
+                detail=why,
+            )
+            return SweepReport(
+                collector=str(name), sweep_id=sweep.id, outcome="failed", detail=why
+            )
+        outcome: SweepOutcome = "partial" if batch.skipped else "ok"
+        detail = (
+            None
+            if not batch.skipped
+            else "; ".join(
+                f"{path}: {why}" for path, why in sorted(batch.skipped.items())
+            )
+        )
+        self._store.finish_sweep(
+            sweep.id,
+            outcome=outcome,
+            stats={
+                "projects": 0,
+                "new": stats.calls,
+                "unchanged": 0,
+                "results": stats.results,
+                "files": batch.files,
+                "bytes_read": batch.bytes_read,
+                "backlog_bytes": batch.backlog_bytes,
+            },
+            at=self._ctx.clock(),
+            detail=detail,
+        )
+        return SweepReport(
+            collector=str(name),
+            sweep_id=sweep.id,
+            outcome=outcome,
+            new=stats.calls,
+            failures=dict(batch.skipped),
             detail=detail,
         )

@@ -6,6 +6,10 @@ transports are generated and there is only one of each use-case.
 
 from __future__ import annotations
 
+from vogt.application.services.agent_activity import (
+    search_agent_activity,
+    summarize_agent_activity,
+)
 from vogt.application.services.agent_clis import agent_cli_list, agent_cli_update
 from vogt.application.services.auth import (
     create_user,
@@ -213,6 +217,7 @@ __all__ = [
     "revoke_suppression",
     "revoke_token",
     "scaffold_project",
+    "search_agent_activity",
     "search_output",
     "serve",
     "serve_mcp_stdio",
@@ -226,6 +231,7 @@ __all__ = [
     "status",
     "status_forge_account",
     "stop_session",
+    "summarize_agent_activity",
     "suppress",
     "sweep",
     "transition_project",

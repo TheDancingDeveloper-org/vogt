@@ -236,6 +236,57 @@ docker exec <core-container> \
   The count reads only stored fields, and one Inbox projection serves every
   badge read until the declared revision or the event feed moves (at most 5 s).
 
+## Agent activity: what agents did, searchable
+
+Opt-in. With `agent_activity_roots` set (`claude = "~/.claude/projects"`,
+`codex = "~/.codex/sessions"`), every sweep's `agent-activity` collector reads
+new transcript lines, at most `agent_activity_max_bytes_per_sweep` (32 MiB) per
+sweep, newest files first, and stores one row per tool call in the observed
+store. Without roots the collector is not registered, and both reads say so in
+`detail` rather than returning an empty list.
+
+| Operation (MCP tool) | Route | CLI | Scope |
+|---|---|---|---|
+| `agent_activity.search` (`agent_activity_search`) | `GET /api/agent-activity` | `vogt agent-activity search` | `read` |
+| `agent_activity.summary` (`agent_activity_summary`) | `GET /api/agent-activity/summary` | `vogt agent-activity summary` | `read` |
+
+- **`search`** filters by `q` (case-insensitive substring of the tool name,
+  the call summary or the error excerpt), `service` (an exact tag such as
+  `github`, `docker`, `komodo` or `infisical`), `tool`, `errors_only`, `since`,
+  `project` (calls made in the project root or under it, worktrees included)
+  and `session`. Every filter narrows. Results are newest first and paged with
+  `limit` (≤ 500) and `offset`, and `next_offset` is set while a full page came
+  back. Each event carries `at`, `finished_at`, `duration_ms`, `agent`
+  (`claude` | `codex`), `agent_session_id`, `vogt_session_id`, `project`,
+  `cwd`, `tool`, `summary`, `services`, `error` and `excerpt`.
+- **`summary`** returns one row per agent conversation, most recently active
+  first, narrowed by `session`, `project` and `since`. Each row has `calls`,
+  `errors`, `error_rate`, `tool_wait_ms` (wall-clock time spent waiting on tool
+  results), `unfinished`, `tools` (calls per tool) and `services` (calls per
+  tag).
+- **`session`** takes a Vogt `ses_…` id, an engine session id, or the agent's
+  own conversation id. A Claude Code session that Vogt started uses the
+  engine session id as its conversation id, so such a session links
+  (`vogt_session_id`). Codex conversations, and Claude sessions resumed under
+  an older id, have no link.
+- **Redaction happens at ingest.** The summary and the excerpt are redacted
+  before they are stored. Redaction removes token, key, JWT and PEM shapes,
+  credential-named assignments, flags and JSON fields, `Authorization`
+  headers, URL user-info, and long random strings. Only a failed call keeps an
+  excerpt, a redacted head and tail of about 400 characters. Raw output is
+  never stored. Output from a call that dumps configuration or environment
+  (`.config.environment`, `printenv`, kubeconfig reads, `.env` files, secrets
+  CLIs) is replaced with `[withheld: …]`, and so is output shaped like a
+  kubeconfig or an `env` listing.
+- **Tags and the error flag are heuristics.** Built-in service patterns can be
+  extended or removed with `agent_activity_services`. A call is an error when
+  the agent flagged it, when its wrapper reported a failing exit status, or
+  when the output starts with a failure line. File and search tools (`Read`,
+  `Grep`, …) count only the agent's own flag.
+- The index is local to the instance and is never synced to a forge. It can
+  be regenerated: clearing the `agent_activity*` tables re-reads the
+  transcripts from the beginning on the next sweeps.
+
 ## See also
 
 - `DESIGN.md` §4 — the security model (FR-S*), scopes, and per-project scope

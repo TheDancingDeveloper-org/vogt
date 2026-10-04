@@ -2084,6 +2084,8 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `agent_cli.list` | Voice-readable | Available: Report the pod's agent CLIs: active, baked and upstream versions. |
 | `agent_cli.update` | Operator-only | Unavailable: Installs executable tooling on the host. |
 | `session.history_list` | Voice-readable | Available: List archived sessions (history), newest first. |
+| `agent_activity.search` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
+| `agent_activity.summary` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `session.search_output` | Voice-readable | Available: Search session output (live sessions included). |
 | `session.log_tail` | Voice-readable | Available: Read the tail of a session's output log, readable. |
 | `session.input` | Operator-only | Unavailable: The assistant types into terminals with its own engine tool (`send_input`, approval-gated); not offered twice. |
