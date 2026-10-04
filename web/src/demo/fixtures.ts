@@ -16,6 +16,8 @@ export interface DemoState {
   comments: Record<string, { id: string; body: string; created_at: string }[]>;
   sessions: Record<string, Record<string, unknown>>;
   inbox: Record<string, unknown>[];
+  /** Per-account settings (`preference.set`), absent in older saved states. */
+  preferences?: Record<string, { value: Record<string, unknown>; version: number; updated_at: string }>;
   audit: Record<string, unknown>[];
   events: Record<string, unknown>[];
   drift: Record<string, unknown>[];
@@ -64,10 +66,10 @@ export function createDemoState(): DemoState {
     sessions: Object.fromEntries(sessions),
     inbox: [
       { entry_key: "drift:demo-version", source: "drift", kind: "version_mismatch", occurred_at: "2026-08-24T14:40:00Z", observed_at: "2026-08-24T14:41:00Z", title: "Declared and observed versions differ", summary: "Orbit declares 2.4.0 while its checkout reports 2.5.0.", project_slug: "orbit", work_item_ref: "WI-101", source_subject_key: "project:orbit", trust_state: "disputed", freshness: "current", triage_state: "active", evidence_snapshot: { collector: "git-local", observed_version: "2.5.0", observed_at: "2026-08-24T14:41:00Z" }, proposed_change: { from: "2.4.0", to: "2.5.0" }, action: { kind: "drift", drift_id: "demo-version" } },
-      { entry_key: "github:pr-42", source: "github", kind: "pull_request_review", occurred_at: "2026-08-24T14:15:00Z", observed_at: "2026-08-24T14:17:00Z", title: "Review requested on split-layout showcase", summary: "Two comments remain on the responsive terminal layout.", project_slug: "orbit", work_item_ref: "WI-102", source_subject_key: "repo:orbit:pr:42", source_url: "https://example.invalid/orbit/pull/42", trust_state: "verified", freshness: "current", triage_state: "active" },
+      { entry_key: "github:pr-42", source: "github", kind: "pull_request_review", actor_login: "river-contributor", actor_kind: "human", actor_relation: "external", occurred_at: "2026-08-24T14:15:00Z", observed_at: "2026-08-24T14:17:00Z", title: "Review requested on split-layout showcase", summary: "Two comments remain on the responsive terminal layout.", project_slug: "orbit", work_item_ref: "WI-102", source_subject_key: "repo:orbit:pr:42", source_url: "https://example.invalid/orbit/pull/42", trust_state: "verified", freshness: "current", triage_state: "active" },
       { entry_key: "ci:orbit-main", source: "ci", kind: "checks_failed", occurred_at: "2026-08-24T13:52:00Z", observed_at: "2026-08-24T13:53:00Z", title: "Responsive browser check needs attention", summary: "The 768px boundary screenshot changed intentionally and awaits review.", project_slug: "orbit", work_item_ref: "WI-104", source_subject_key: "checks:orbit:demo-72", trust_state: "verified", freshness: "current", triage_state: "active" },
       { entry_key: "agent:demo-agent", source: "agent", kind: "waiting_for_input", occurred_at: "2026-08-24T14:48:00Z", observed_at: "2026-08-24T14:48:00Z", title: "Agent review is waiting for approval", summary: "The scripted agent wants permission to update a demo-only snapshot.", project_slug: "orbit", work_item_ref: "WI-101", session_id: "demo-agent", source_subject_key: "session:demo-agent", trust_state: "provisional", freshness: "live", triage_state: "active" },
-      { entry_key: "github:archived", source: "github", kind: "issue_closed", occurred_at: "2026-08-23T11:00:00Z", title: "Keyboard coverage accepted", summary: "The shortcut help review was completed.", project_slug: "lighthouse", source_subject_key: "repo:lighthouse:issue:18", triage_state: "archived" },
+      { entry_key: "github:archived", source: "github", kind: "issue_closed", actor_login: "ana", actor_kind: "human", actor_relation: "org_member", occurred_at: "2026-08-23T11:00:00Z", title: "Keyboard coverage accepted", summary: "The shortcut help review was completed.", project_slug: "lighthouse", source_subject_key: "repo:lighthouse:issue:18", triage_state: "archived" },
       { entry_key: "ci:snoozed", source: "ci", kind: "checks_slow", occurred_at: "2026-08-24T10:00:00Z", title: "Bundle analysis is slower than baseline", summary: "Recheck after the shared runner cools down.", project_slug: "orbit", source_subject_key: "checks:orbit:bundle", triage_state: "snoozed", snooze_until: "2026-08-25T09:00:00Z" },
     ],
     audit: [

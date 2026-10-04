@@ -155,7 +155,30 @@ mistaken for “not collected.” Entry and batch reason fields appear only afte
 you choose the corresponding write, and a refusal stays beside that composer
 so the reason can be corrected without losing focus or context.
 
-On a phone, the source filter becomes labelled pills and each entry keeps its
+Beside Source, **From** filters by who caused an entry: *Anyone*, *External
+people only* (people outside the repository's owning GitHub org — outside
+collaborators included, bots never), *Org members*, or *Bots and Vogt* (bots
+such as Dependabot, Renovate and GitHub Actions, plus Vogt's own drift, CI and
+agent entries). Each entry says who it came from where that is known. Under
+*External people only*, entries whose author could not be resolved yet are
+hidden and the view says how many ("N hidden: author unknown"); choose
+*Anyone* to see them. **State** shows active, snoozed, archived or all
+entries. The bot list is the `inbox_bot_logins` setting.
+
+The Inbox filter is **saved to your account** and stays applied until you
+change or clear it: leaving the Inbox, reloading, or opening Vogt on another
+device brings back the same Source, From and State. A link that names a
+filter (`#/inbox?source=drift&actor=external`) applies it for that visit
+without saving it. Whenever a filter is applied the view says so in a chip
+("Saved filter: external people only") with a **Clear filters** control.
+Search text is temporary and is not saved.
+
+The Inbox badge in the Places rail and on the phone tab counts under the
+saved filter, so it matches the list you land on; its tooltip says when a
+filter is on ("1 active Inbox entries — filter on: external people only"),
+and the badge carries a ring. Search text never changes the badge.
+
+On a phone, the source and From filters become labelled pills and each entry keeps its
 evidence in the stream while moving applicable writes into an **Inbox actions**
 bottom sheet. The sheet is keyboard-operable, restores focus to its trigger on
 cancel, and keeps archive, snooze, restore, adoption, suppression and drift

@@ -1041,6 +1041,11 @@ textarea {
   background: var(--accent);
   border-color: var(--accent);
 }
+/* Counted under a saved Inbox filter: a small funnel notch so a filtered
+   number is never mistaken for the whole Inbox (the label says which). */
+.place-count--filtered {
+  box-shadow: 0 0 0 2px var(--bg, transparent), 0 0 0 3px var(--accent);
+}
 /* Drift on the estate: an outlined --activity-running badge on Projects. The
    number stays the project total; the colour is the attention signal. */
 .place-count--drift {
@@ -1420,6 +1425,7 @@ textarea {
 }
 
 .inbox-filter,
+.inbox-facet,
 .inbox-entry-composer label,
 .inbox-batch-composer label {
   display: flex;
@@ -1430,6 +1436,7 @@ textarea {
 }
 
 .inbox-filter select,
+.inbox-facet select,
 .inbox-entry-composer input,
 .inbox-batch input {
   min-height: 32px;
@@ -7614,6 +7621,34 @@ textarea {
 .vogt-backlog-exclude-builder select,
 .board-search,
 .vogt-backlog-search {
+  font-size: 12px;
+}
+
+/* The Inbox's applied filter, stated: a saved (or linked) filter is never
+   silent, and one control resets it. */
+.inbox-active-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+.inbox-filter-chip {
+  padding: 3px 9px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  color: var(--fg);
+  background: var(--bg-elev);
+  overflow-wrap: anywhere;
+}
+.inbox-clear-filters {
+  min-height: 32px;
+}
+.inbox-hidden-note {
+  margin: 4px 0;
+  color: var(--fg-muted);
   font-size: 12px;
 }
 
