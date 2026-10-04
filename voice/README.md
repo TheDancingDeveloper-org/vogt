@@ -106,6 +106,21 @@ libclang-dev libopus-dev pkg-config` on Debian/Ubuntu). `cargo test
 --workspace` does not require model weights; the model-backed round trip is
 the image build's own gate.
 
+Keep the target directory's path short. `espeak-rs-sys` compiles espeak-ng's
+phoneme data in its build script, and espeak-ng builds each source path in a
+fixed buffer (160 bytes for the data directory plus a few dozen for the file
+name), silently truncating longer ones. With the checkout deep in the file
+system, such as a worktree under `.claude/worktrees/`, the build directory
+`target/debug/build/espeak-rs-sys-<hash>/out/build/espeak-ng-data` passes that
+limit and the build fails with `Failed to open: '…/phsource/vowel/oo_e'` (the
+real file is `oo_en`) or `Error processing file '…/phsource/intonation'`.
+CI and the image build from short paths. Locally, point Cargo at a short
+target directory:
+
+```bash
+CARGO_TARGET_DIR=/tmp/vt cargo build -p vogt-voice-tts
+```
+
 The `Dockerfile` builds the native runtimes on the estate-mirrored
 `rust:1-bookworm` base, fetches and verifies the default models in a stage of
 their own (so the ~210 MB download is a cache layer that only changes when a
