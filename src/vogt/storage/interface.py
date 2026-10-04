@@ -72,6 +72,50 @@ class Counts:
 
 
 @dataclass(frozen=True)
+class CloneStamp:
+    """That this instance's data came from another instance's backup.
+
+    Kept in `meta` by `clone`, and read back by `status`, so a copy of an
+    instance can always say what it is a copy of — and so the two are not
+    indistinguishable in an export or a receipt.
+    """
+
+    source_instance_id: str
+    cloned_at: datetime
+    backup_taken_at: datetime
+
+
+@dataclass(frozen=True)
+class CarriedCredentials:
+    """An instance's own credentials, secrets included, held across a clone.
+
+    Read from the target before its stores are replaced and written back
+    into the cloned copy (`WriteTxn.carry_credentials`). The rows are opaque
+    column maps on purpose: the hashes and ciphertext they hold are copied,
+    never interpreted, and this type never reaches a result model.
+    """
+
+    #: The actors the rows below belong to, as the target knew them.
+    actors: tuple[Actor, ...]
+    tokens: tuple[dict[str, object], ...]
+    password_credentials: tuple[dict[str, object], ...]
+    forge_accounts: tuple[dict[str, object], ...]
+
+
+@dataclass(frozen=True)
+class CarryReport:
+    """What `carry_credentials` did to the cloned copy."""
+
+    tokens_kept: int
+    source_tokens_revoked: int
+    password_logins_kept: int
+    source_password_logins_dropped: int
+    forge_accounts_kept: int
+    source_forge_accounts_dropped: int
+    actors_added: int
+
+
+@dataclass(frozen=True)
 class BootstrapResult:
     """The outcome of creating an instance."""
 
@@ -182,6 +226,10 @@ class ReadView(Protocol):
     """Read access to the declared store within one consistent snapshot."""
 
     def instance_id(self) -> str: ...
+
+    def clone_stamp(self) -> CloneStamp | None:
+        """What this instance was cloned from, or `None` if it never was."""
+        ...
 
     def current_revision(self) -> int: ...
 
@@ -551,6 +599,24 @@ class WriteTxn(ReadView, Protocol):
 
     def insert_token(self, token: Token, *, token_hash: str) -> None: ...
 
+    def carry_credentials(
+        self, carried: CarriedCredentials, *, reason: str, at: datetime
+    ) -> CarryReport:
+        """Make `carried` the only live credentials in this store.
+
+        The clone's sanitising step. Every live token not in `carried` is
+        revoked (revoked, not deleted: `auth_decisions` names token ids, and
+        the history stays readable); every password login and linked forge
+        account is replaced by the carried ones. Carried actors are matched
+        by `identity_ref` and remapped onto the existing row, or inserted
+        when this store has never seen them.
+        """
+        ...
+
+    def set_instance_identity(self, instance_id: str, stamp: CloneStamp) -> None:
+        """Re-key this store as `instance_id` and record the clone stamp."""
+        ...
+
     def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool: ...
 
     def reinstate_token(self, token_id: str) -> bool:
@@ -680,6 +746,14 @@ class DeclaredStore(Protocol):
 
     def bootstrap(self, principal: Principal) -> BootstrapResult: ...
 
+    def credentials(self) -> CarriedCredentials:
+        """Every token, password login and forge account, secrets included.
+
+        Exists for one caller: `clone`, which carries the target's own
+        credentials across the replacement of its stores.
+        """
+        ...
+
     def record_auth_decision(self, decision: AuthDecision) -> None:
         """Append an authorization decision.
 
@@ -748,6 +822,10 @@ class ObservedStore(Protocol):
         The two stores are backed up and restored independently, so a
         mismatched pair has to be detectable rather than merely unlikely.
         """
+        ...
+
+    def rebind_instance(self, instance_id: str) -> None:
+        """Re-stamp an already-bound store, for a clone keeping its own id."""
         ...
 
     def instance_id(self) -> str | None: ...

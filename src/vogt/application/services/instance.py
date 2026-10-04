@@ -9,6 +9,7 @@ from vogt.adapters.mcp.stdio import SUPPORTED_PROTOCOL_VERSIONS, StdioServer
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    CloneInfo,
     InitParams,
     InitResult,
     McpStdioParams,
@@ -112,6 +113,7 @@ def status(ctx: AppContext, params: StatusParams) -> StatusResult:
     del params
     with ctx.declared.read() as view:
         counts = view.counts()
+        stamp = view.clone_stamp()
         return StatusResult(
             vogt_version=__version__,
             instance_id=view.instance_id(),
@@ -127,6 +129,13 @@ def status(ctx: AppContext, params: StatusParams) -> StatusResult:
                 audit=counts.audit,
                 work_items=counts.work_items,
                 initiatives=counts.initiatives,
+            ),
+            clone=None
+            if stamp is None
+            else CloneInfo(
+                source_instance_id=stamp.source_instance_id,
+                cloned_at=stamp.cloned_at,
+                backup_taken_at=stamp.backup_taken_at,
             ),
         )
 

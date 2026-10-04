@@ -263,6 +263,115 @@ docker compose -f deploy/stack.compose.yml exec vogt \
 backup whose schema is *ahead* of the running build. Stop the traffic first
 if you can, and restore from the container that owns the data directory.
 
+### Cloning prod into dev
+
+`restore` is for putting an instance back. Pointed at *another* instance's
+backup it makes the target become that instance: the source's API tokens and
+password logins work on the target and the target's own are gone, projects
+with forge write-back armed send the target's edits upstream as if from the
+source, and the two answer with one instance id. `vogt clone` is the restore
+for a copy:
+
+```console
+vogt clone --source /var/lib/vogt/backups/<label> \
+  --confirm --reason "clone prod into dev" [--include-engine-state]
+```
+
+It verifies the manifest exactly as `restore` does (an older schema is
+migrated forward, a newer one is refused, nothing is touched before the
+checks pass) and refuses a backup of the target itself. It then copies the
+stores into a staging directory beside the live ones, migrates them there,
+and sanitises the copy in **one audited write** before swapping it in, so a
+failure part-way leaves the live stores as they were:
+
+- **Credentials stay the target's.** Every live token the source had is
+  revoked in the copy (revoked rather than deleted, so `auth_decisions`
+  still resolves); its password logins and linked forge accounts are
+  dropped. The target's own tokens, password logins and forge accounts are
+  carried in, with their actors matched by `identity_ref`. A secret both
+  instances hold — one stack secret on both — stays live as the target's.
+- **Forge write-back is disarmed**: every project's `write_back` becomes
+  `none`. Re-arm a project deliberately with `vogt forge writeback`.
+- **Running sessions are closed**: a session the source recorded as running
+  is a process on the source's engine, so the copy marks it stopped.
+- **The target keeps its instance id**, and `meta` records the clone stamp —
+  source instance id, clone time and the backup's as-of time — which
+  `vogt status` reports as `clone`. The audit log carries a `clone` row and
+  the feed an `instance.cloned` event.
+- **Engine state.** Without `--include-engine-state` the target engine's
+  state is untouched. With it, only session history is copied
+  (`history.db`, `session-logs/`, `assistant-log.db`); the source's
+  `push.json` (its phones' push subscriptions and VAPID keys) and its agent
+  tasks are never copied, so the copy notifies the target's devices and
+  does not run the source's scheduled work.
+
+`clone` is local-only like `restore`: the CLI in the container that owns the
+data directory, never REST or MCP.
+
+**The estate procedure.** Prod is the source, dev the target. Run it from a
+shell *outside* the dev stack: step 6 recreates the dev container and every
+session in it.
+
+1. **Dev runs a build with `vogt clone`**, at a schema at or past prod's.
+   Check with `vogt migrate` (or `/readyz`) on both.
+2. **Freeze prod, then back it up.** Stop writing to prod first, so the
+   backup is the last word. Then, on the prod host:
+
+   ```console
+   docker exec <prod-container> vogt backup --label prod-to-dev-<date> \
+     --reason "clone prod into dev"
+   ```
+
+   It lands in `/var/lib/vogt/backups/prod-to-dev-<date>/`. The manifest's
+   `engine_state` line says whether the engine's state came too
+   (`VOGT_ENGINE_STATE_DIR`, above).
+3. **Move the backup directory to dev's data volume.**
+
+   ```console
+   docker cp <prod-container>:/var/lib/vogt/backups/prod-to-dev-<date> .
+   # copy ./prod-to-dev-<date> to the dev host (scp/rsync), then there:
+   docker cp prod-to-dev-<date> <dev-container>:/var/lib/vogt/backups/
+   ```
+
+   The clone only reads the directory, so root ownership from `docker cp`
+   is fine.
+4. **Back up dev**, so the clone is reversible:
+   `docker exec <dev-container> vogt backup --label pre-clone-<date> --reason "before clone"`.
+5. **Clone.**
+
+   ```console
+   docker exec <dev-container> vogt clone \
+     --source /var/lib/vogt/backups/prod-to-dev-<date> \
+     --confirm --reason "clone prod into dev"
+   ```
+
+   Add `--include-engine-state` to bring prod's session history. Read the
+   result: `source_tokens_revoked`, `write_back_reset`, `engine_state` and
+   the two `import_root` lines. Differing import roots mean the project
+   paths in the copy do not exist on dev.
+6. **Restart dev** (redeploy the stack, or `docker restart <dev-container>`)
+   so the engine and core reopen the new stores. The entrypoint's
+   `vogt init` re-adopts dev's bootstrap tokens, as on any boot.
+7. **Verify.** `docker exec <dev-container> vogt status` shows dev's own
+   `instance_id` and a `clone` block naming prod. `/readyz` is ready. A dev
+   token works and a prod token gets 401. `vogt project list` shows every
+   `write_back` as `none`. The work items, comments and initiatives you
+   expect are there.
+
+**Which copy is live.** After the clone, dev is the working copy and prod is
+frozen. Nothing keeps the two in step. The way back is a cut-over, or a
+clone in the other direction, not a merge: `vogt import` reports what an
+export holds but does not apply it.
+
+**Agent context** (transcripts, per-project memory, Codex sessions, the notes
+in `~/Working`) lives on the engine home volume, not in the stores.
+`scripts/clone-agent-context.sh SRC_HOME DST_HOME` copies an allowlist of it
+between two homes, local or one side over rsync/ssh. It never copies
+credentials, MCP configuration, settings or caches. It is a dry run unless
+given `--apply`, and it warns when project paths do not match. Run it while no
+session is writing on either side, and after the clone. The script's header
+lists exactly what it copies.
+
 **Migrations run at boot.** The entrypoint runs `vogt init` before every
 `vogt serve`. `init` is idempotent: it creates the instance on a new volume,
 brings an existing one forward to this build's schema, and leaves the audit

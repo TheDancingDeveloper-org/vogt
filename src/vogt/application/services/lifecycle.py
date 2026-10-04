@@ -9,6 +9,11 @@ through, with the live data already gone.
 Backups use SQLite's own backup API rather than copying files: a copy taken
 while a write is in flight is a torn database, and WAL mode makes that more
 likely rather than less.
+
+`clone` is `restore` for a backup of *another* instance: the data comes
+across, the target's identity and credentials stay, and the copy is made
+unable to act as its source (no source tokens, no armed forge write-back, no
+source push subscriptions). See `clone` for the full list.
 """
 
 from __future__ import annotations
@@ -20,10 +25,12 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from vogt.application.context import AppContext
+from vogt.application.context import AppContext, with_stores_at
 from vogt.application.models import (
     BackupParams,
     BackupResult,
+    CloneParams,
+    CloneResult,
     ExportParams,
     ExportResult,
     ImportParams,
@@ -31,9 +38,17 @@ from vogt.application.models import (
     RestoreParams,
     RestoreResult,
 )
+from vogt.application.writes import WriteOutcome, audited_write, validate_reason
 from vogt.core.clock import from_iso, to_iso
+from vogt.core.entities import Actor
 from vogt.errors import Conflict, InvalidRequest, NotFound
-from vogt.storage.interface import WorkFilter
+from vogt.storage.interface import (
+    CarryReport,
+    CloneStamp,
+    ProjectUpdate,
+    WorkFilter,
+    WriteTxn,
+)
 
 MANIFEST_NAME = "manifest.json"
 MANIFEST_VERSION = 2
@@ -47,6 +62,20 @@ _ALL_WORK = WorkFilter(limit=10_000, exclude_terminal=False, include_superseded=
 
 BACKUP_EVENT = "instance.backed_up"
 RESTORE_EVENT = "instance.restored"
+CLONE_EVENT = "instance.cloned"
+CLONE_OPERATION = "clone"
+
+#: The two store files, in the order they are swapped into place.
+_STORE_FILES = ("declared.sqlite3", "observed.sqlite3")
+
+#: What `clone --include-engine-state` copies from the backup's engine state:
+#: session history only. Everything else in that directory is left behind —
+#: `push.json` above all (the source's phones would receive this instance's
+#: notifications), and `agent-tasks.json` / `agent-task-prompts/` (the
+#: source's scheduled agent work would start running here too). An allowlist
+#: rather than a denylist, so a file a later engine adds is left behind until
+#: somebody decides it belongs to a copy.
+_CLONED_ENGINE_STATE = ("history.db", "assistant-log.db", "session-logs")
 
 
 @dataclass(frozen=True)
@@ -225,14 +254,13 @@ def backup(ctx: AppContext, params: BackupParams) -> BackupResult:
     )
 
 
-def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
-    """Verify the manifest, then replace the data directory's stores.
+def _verified_manifest(ctx: AppContext, source: Path) -> Manifest:
+    """Read a backup's manifest and refuse anything this build cannot take.
 
-    Verification happens **before anything is touched**. A restore that
-    discovers a problem half way through has already destroyed the thing you
-    would have wanted to keep.
+    Shared by `restore` and `clone`, which have to refuse the same things for
+    the same reasons: an unreadable or future manifest, a missing store, a
+    schema ahead of this build.
     """
-    source = Path(params.source).expanduser()
     manifest_path = source / MANIFEST_NAME
     if not manifest_path.is_file():
         msg = f"{source} has no {MANIFEST_NAME}; it is not a Vogt backup"
@@ -263,6 +291,18 @@ def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
             "build rather than restoring backwards."
         )
         raise InvalidRequest(msg)
+    return manifest
+
+
+def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
+    """Verify the manifest, then replace the data directory's stores.
+
+    Verification happens **before anything is touched**. A restore that
+    discovers a problem half way through has already destroyed the thing you
+    would have wanted to keep.
+    """
+    source = Path(params.source).expanduser()
+    manifest = _verified_manifest(ctx, source)
 
     if not params.confirm:
         msg = (
@@ -293,6 +333,222 @@ def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
         restored_from=manifest.taken_at,
         migrations_applied=list(migrated.applied),
         declared_schema_version=ctx.declared.schema_version(),
+        engine_state=engine_state,
+        import_root_then=manifest.import_root,
+        import_root_now=str(ctx.config.resolved_import_root),
+    )
+
+
+def _clone_engine_state(source: Path, target: Path | None, *, include: bool) -> str:
+    """Copy the allowlisted session history, or say why nothing was copied.
+
+    Never fatal, like `_restore_engine_state`: by the time this runs the
+    stores are already in place.
+    """
+    left_behind = (
+        "push subscriptions and agent tasks are never copied by a clone; "
+        "this engine keeps its own"
+    )
+    if not include:
+        return f"not copied (pass include_engine_state to copy history); {left_behind}"
+    if not source.is_dir():
+        return f"not in this backup; {left_behind}"
+    if target is None:
+        return (
+            f"in the backup at {source}, but no engine_state_dir is configured "
+            f"here, so it was not copied; {left_behind}"
+        )
+    resolved = Path(target).expanduser()
+    copied: list[str] = []
+    try:
+        resolved.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(source.iterdir()):
+            # `history.db-wal` travels with `history.db`: the backup copied the
+            # pair as they stood, and one without the other is a torn database.
+            if not any(
+                entry.name == name or entry.name.startswith(f"{name}-")
+                for name in _CLONED_ENGINE_STATE
+            ):
+                continue
+            destination = resolved / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, destination, symlinks=True, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry, destination)
+            copied.append(entry.name)
+    except OSError as exc:
+        return f"copying session history into {resolved} failed: {exc}"
+    if not copied:
+        return f"no session history in the backup; {left_behind}"
+    return f"copied {', '.join(copied)} into {resolved}; {left_behind}"
+
+
+@dataclass(frozen=True)
+class _Sanitised:
+    carried: CarryReport
+    write_back_reset: list[str]
+    sessions_closed: int
+
+
+def clone(ctx: AppContext, params: CloneParams) -> CloneResult:
+    """Restore another instance's backup here as a copy, not as that instance.
+
+    A plain `restore` of another instance's backup makes this instance *be*
+    that one: its tokens work here, this instance's own tokens are gone, its
+    forge write-back sends this copy's edits upstream as if from the source,
+    and the two carry one instance id. A clone, in order:
+
+    1. verifies the backup exactly as `restore` does, before touching
+       anything, and refuses a backup of this same instance (that is a
+       `restore`);
+    2. reads this instance's own credentials — every token, password login
+       and linked forge account, with the actors they belong to;
+    3. copies the backup's stores into a staging directory beside the live
+       ones and migrates them forward there;
+    4. sanitises the staged copy in one audited write: the source's live
+       tokens are revoked, its password logins and forge accounts dropped,
+       this instance's credentials carried in (actors matched by
+       identity_ref); every project's write-back set to `none`; sessions
+       the source recorded as running marked stopped (they are processes on
+       the source's engine); the instance id set back to this instance's and
+       the clone stamp recorded; the audit row and `instance.cloned` event
+       land in the same transaction;
+    5. only then swaps the staged stores over the live ones.
+
+    A failure before step 5 leaves the live stores untouched. The source
+    engine's push subscriptions and agent tasks are never copied; its session
+    history is copied only when asked for (`include_engine_state`).
+    """
+    source = Path(params.source).expanduser()
+    manifest = _verified_manifest(ctx, source)
+    current_observed = ctx.observed.schema_version()
+    if manifest.observed_schema_version > current_observed:
+        msg = (
+            f"the backup was taken at observed schema "
+            f"{manifest.observed_schema_version} and this build is at "
+            f"{current_observed}. Run a newer build rather than cloning backwards."
+        )
+        raise InvalidRequest(msg)
+    reason = validate_reason(params.reason)
+
+    with ctx.declared.read() as view:
+        instance_id = view.instance_id()
+    if manifest.instance_id == instance_id:
+        msg = (
+            f"{source} is a backup of this instance ({instance_id}); a clone "
+            "copies another instance. Use `restore` to put this one back."
+        )
+        raise InvalidRequest(msg)
+
+    if not params.confirm:
+        msg = (
+            f"this replaces the stores in {ctx.config.resolved_data_dir} with a "
+            f"copy of instance {manifest.instance_id} as it was at "
+            f"{to_iso(manifest.taken_at)}, keeping this instance's id and "
+            "credentials. Pass --confirm."
+        )
+        raise InvalidRequest(msg)
+
+    carried = ctx.declared.credentials()
+    cloned_at = ctx.clock()
+    stamp = CloneStamp(
+        source_instance_id=manifest.instance_id,
+        cloned_at=cloned_at,
+        backup_taken_at=manifest.taken_at,
+    )
+    revoke_reason = (
+        f"cloned from instance {manifest.instance_id}: the source's credentials "
+        "are not valid on a copy"
+    )
+
+    data_dir = ctx.config.resolved_data_dir
+    data_dir.mkdir(parents=True, exist_ok=True)
+    # Beside the live stores, so the final swap is a same-filesystem rename.
+    staging = data_dir / f".clone-staging-{cloned_at.strftime('%Y%m%dT%H%M%S%f')}"
+    staging.mkdir()
+    try:
+        for name in _STORE_FILES:
+            shutil.copy2(source / name, staging / name)
+        staged = with_stores_at(ctx, staging)
+        migrated = staged.declared.migrate()
+        staged.observed.migrate()
+
+        def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[_Sanitised]:
+            del actor
+            carry = txn.carry_credentials(carried, reason=revoke_reason, at=cloned_at)
+            reset: list[str] = []
+            for project in txn.list_projects(limit=10_000, offset=0):
+                if project.write_back != "none":
+                    txn.update_project(
+                        project.id, ProjectUpdate(write_back="none"), at=cloned_at
+                    )
+                    reset.append(project.slug)
+            running = txn.list_sessions(include_stopped=False, limit=10_000, offset=0)
+            for session in running:
+                txn.mark_session_stopped(session.id, at=cloned_at)
+            txn.set_instance_identity(instance_id, stamp)
+            summary: dict[str, object] = {
+                "source_instance_id": manifest.instance_id,
+                "backup_taken_at": to_iso(manifest.taken_at),
+                "source": str(source),
+                "tokens_kept": carry.tokens_kept,
+                "source_tokens_revoked": carry.source_tokens_revoked,
+                "write_back_reset": reset,
+                "sessions_closed": len(running),
+            }
+            return WriteOutcome(
+                result=_Sanitised(
+                    carried=carry, write_back_reset=reset, sessions_closed=len(running)
+                ),
+                entity_kind="instance",
+                entity_id=instance_id,
+                payload=summary,
+                event_kind=CLONE_EVENT,
+                summary=summary,
+            )
+
+        sanitised = audited_write(
+            staged, operation=CLONE_OPERATION, reason=reason, body=body
+        )
+        staged.observed.rebind_instance(instance_id)
+
+        for name in _STORE_FILES:
+            # WAL and shm files belong to the replaced database, not the new one.
+            for suffix in ("-wal", "-shm"):
+                stale = data_dir / f"{name}{suffix}"
+                if stale.exists():
+                    stale.unlink()
+            (staging / name).replace(data_dir / name)
+            # Every staged connection is closed, so SQLite has normally folded
+            # its WAL back already; if one is left, it travels with its file.
+            leftover = staging / f"{name}-wal"
+            if leftover.exists():
+                leftover.replace(data_dir / f"{name}-wal")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    engine_state = _clone_engine_state(
+        source / ENGINE_STATE_DIR,
+        ctx.config.engine_state_dir,
+        include=params.include_engine_state,
+    )
+    carry = sanitised.carried
+    return CloneResult(
+        source=str(source),
+        instance_id=instance_id,
+        source_instance_id=manifest.instance_id,
+        restored_from=manifest.taken_at,
+        cloned_at=cloned_at,
+        migrations_applied=list(migrated.applied),
+        declared_schema_version=ctx.declared.schema_version(),
+        tokens_kept=carry.tokens_kept,
+        source_tokens_revoked=carry.source_tokens_revoked,
+        password_logins_kept=carry.password_logins_kept,
+        source_password_logins_dropped=carry.source_password_logins_dropped,
+        forge_accounts_kept=carry.forge_accounts_kept,
+        source_forge_accounts_dropped=carry.source_forge_accounts_dropped,
+        write_back_reset=sanitised.write_back_reset,
+        sessions_closed=sanitised.sessions_closed,
         engine_state=engine_state,
         import_root_then=manifest.import_root,
         import_root_now=str(ctx.config.resolved_import_root),

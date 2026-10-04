@@ -68,6 +68,7 @@ from vogt.application.services.instance import (
 )
 from vogt.application.services.lifecycle import (
     backup,
+    clone,
     export_instance,
     import_instance,
     restore,
@@ -139,6 +140,7 @@ __all__ = [
     "bind_branch",
     "brief_project",
     "bugs",
+    "clone",
     "comment_work",
     "compliance",
     "connect",

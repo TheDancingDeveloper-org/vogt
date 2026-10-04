@@ -46,11 +46,14 @@ from vogt.core.entities import (
 from vogt.core.ids import IdFactory, new_id
 from vogt.core.principal import Principal
 from vogt.core.workflow import TERMINAL_STATES, Workflow, default_workflow
-from vogt.errors import AlreadyInitialized, NotFound, NotInitialized
+from vogt.errors import AlreadyInitialized, Conflict, NotFound, NotInitialized
 from vogt.storage.interface import (
     Blocker,
     BoardCellQuery,
     BootstrapResult,
+    CarriedCredentials,
+    CarryReport,
+    CloneStamp,
     Counts,
     MigrationReport,
     ProjectUpdate,
@@ -76,6 +79,45 @@ META_INSTANCE_ID = "instance_id"
 META_REVISION = "revision"
 META_CREATED_AT = "created_at"
 META_WORK_REF_SEQ = "work_ref_seq"
+#: Written by `clone` (`set_instance_identity`), absent on any instance that
+#: was never cloned into.
+META_CLONED_FROM = "cloned_from_instance_id"
+META_CLONED_AT = "cloned_at"
+META_CLONED_BACKUP_TAKEN_AT = "cloned_backup_taken_at"
+
+#: The columns a clone carries for each credential table. Fixed lists, never
+#: derived from a row, so the statements built from them are not dynamic SQL
+#: in any sense a caller could influence.
+_TOKEN_CARRY_COLUMNS: tuple[str, ...] = (
+    "id",
+    "actor_id",
+    "name",
+    "token_hash",
+    "scopes",
+    "kind",
+    "created_at",
+    "expires_at",
+    "last_used_at",
+    "revoked_at",
+    "revoked_reason",
+)
+_PASSWORD_CARRY_COLUMNS: tuple[str, ...] = (
+    "actor_id",
+    "username",
+    "password_hash",
+    "scopes",
+    "created_at",
+    "updated_at",
+)
+_FORGE_ACCOUNT_CARRY_COLUMNS: tuple[str, ...] = (
+    "actor_id",
+    "host",
+    "login",
+    "scopes",
+    "encrypted_token",
+    "created_at",
+    "updated_at",
+)
 
 WORK_REF_PREFIX = "WI-"
 
@@ -384,6 +426,38 @@ class SqliteDeclaredStore:
         finally:
             conn.close()
 
+    def credentials(self) -> CarriedCredentials:
+        """Every credential row, secrets included, for `clone` to carry."""
+        conn = self._open_initialized()
+        try:
+            conn.execute("BEGIN")
+            tokens = _select_columns(conn, "tokens", _TOKEN_CARRY_COLUMNS)
+            passwords = _select_columns(
+                conn, "password_credentials", _PASSWORD_CARRY_COLUMNS
+            )
+            forge = _select_columns(
+                conn, "forge_accounts", _FORGE_ACCOUNT_CARRY_COLUMNS
+            )
+            actor_ids = sorted(
+                {str(row["actor_id"]) for row in (*tokens, *passwords, *forge)}
+            )
+            actors: list[Actor] = []
+            for actor_id in actor_ids:
+                row = conn.execute(
+                    "SELECT * FROM actors WHERE id = ?", (actor_id,)
+                ).fetchone()
+                if row is not None:
+                    actors.append(_row_to_actor(row))
+            return CarriedCredentials(
+                actors=tuple(actors),
+                tokens=tuple(tokens),
+                password_credentials=tuple(passwords),
+                forge_accounts=tuple(forge),
+            )
+        finally:
+            _rollback_quietly(conn)
+            conn.close()
+
     def touch_token(self, token_id: str, *, at: datetime) -> None:
         """Record that a token was used, for the operator's benefit."""
         conn = self._open_initialized()
@@ -477,6 +551,18 @@ class SqliteReadView:
         if value is None:  # pragma: no cover - guarded by _open_initialized
             raise NotInitialized("instance id missing")
         return value
+
+    def clone_stamp(self) -> CloneStamp | None:
+        source = _meta_get(self._conn, META_CLONED_FROM)
+        cloned_at = _meta_get(self._conn, META_CLONED_AT)
+        taken_at = _meta_get(self._conn, META_CLONED_BACKUP_TAKEN_AT)
+        if source is None or cloned_at is None or taken_at is None:
+            return None
+        return CloneStamp(
+            source_instance_id=source,
+            cloned_at=from_iso(cloned_at),
+            backup_taken_at=from_iso(taken_at),
+        )
 
     def current_revision(self) -> int:
         value = _meta_get(self._conn, META_REVISION)
@@ -1556,6 +1642,130 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def carry_credentials(
+        self, carried: CarriedCredentials, *, reason: str, at: datetime
+    ) -> CarryReport:
+        conn = self._conn
+        # 1. The carried actors, matched by identity rather than by id: the
+        # two instances minted their actor ids independently, and the same
+        # person is the same identity_ref on both.
+        actor_map: dict[str, str] = {}
+        added = 0
+        for actor in carried.actors:
+            existing = self.actor_by_identity(actor.identity_ref)
+            if existing is None:
+                # Ids are independent ULIDs, so a clash with another identity
+                # is not expected; if one happens, the carried actor takes a
+                # fresh id rather than failing the clone or merging two people.
+                inserted = actor
+                if self.actor_by_id(actor.id) is not None:
+                    inserted = actor.model_copy(update={"id": self._id_factory("act")})
+                _insert_actor(conn, inserted)
+                actor_map[actor.id] = inserted.id
+                added += 1
+                continue
+            actor_map[actor.id] = existing.id
+            # The carried credentials must keep working, so their actor
+            # keeps the enabled state it had where they were issued.
+            conn.execute(
+                "UPDATE actors SET disabled = ? WHERE id = ?",
+                (int(actor.disabled), existing.id),
+            )
+
+        def _mapped(row: dict[str, object]) -> dict[str, object]:
+            actor_id = str(row["actor_id"])
+            if actor_id not in actor_map:  # pragma: no cover - credentials() pairs them
+                msg = f"carried credential names actor {actor_id}, not carried"
+                raise Conflict(msg)
+            return {**row, "actor_id": actor_map[actor_id]}
+
+        # 2. Tokens. Every live token the backup brought is revoked unless
+        # it is one of the carried ones (the same secret on both sides).
+        carried_hashes = {str(row["token_hash"]) for row in carried.tokens}
+        live = conn.execute(
+            "SELECT id, token_hash FROM tokens WHERE revoked_at IS NULL"
+        ).fetchall()
+        revoked = 0
+        for live_row in live:
+            if str(live_row["token_hash"]) in carried_hashes:
+                continue
+            conn.execute(
+                "UPDATE tokens SET revoked_at = ?, revoked_reason = ? WHERE id = ?",
+                (to_iso(at), reason, str(live_row["id"])),
+            )
+            revoked += 1
+        token_values = ", ".join("?" for _ in _TOKEN_CARRY_COLUMNS)
+        token_updates = ", ".join(
+            f"{column} = ?" for column in _TOKEN_CARRY_COLUMNS if column != "id"
+        )
+        for raw in carried.tokens:
+            row = _mapped(raw)
+            same_secret = conn.execute(
+                "SELECT id FROM tokens WHERE token_hash = ?", (row["token_hash"],)
+            ).fetchone()
+            if same_secret is not None:
+                # Both instances hold this secret. Keep the existing row's id
+                # (the history refers to it) and make it say what the
+                # target's row said.
+                conn.execute(
+                    f"UPDATE tokens SET {token_updates} WHERE id = ?",
+                    (
+                        *(row[c] for c in _TOKEN_CARRY_COLUMNS if c != "id"),
+                        str(same_secret["id"]),
+                    ),
+                )
+                continue
+            clash_row = conn.execute(
+                "SELECT id FROM tokens WHERE id = ?", (row["id"],)
+            ).fetchone()
+            if clash_row is not None:
+                # Another secret already holds this id in the copy: the carried
+                # token keeps its secret and takes a fresh id.
+                row = {**row, "id": self._id_factory("tok")}
+            conn.execute(
+                f"INSERT INTO tokens ({', '.join(_TOKEN_CARRY_COLUMNS)}) "
+                f"VALUES ({token_values})",
+                tuple(row[c] for c in _TOKEN_CARRY_COLUMNS),
+            )
+
+        # 3. Password logins and forge accounts: replaced wholesale. Nothing
+        # refers to either by id, so there is no history to keep.
+        dropped_passwords = conn.execute("DELETE FROM password_credentials").rowcount
+        for raw in carried.password_credentials:
+            row = _mapped(raw)
+            conn.execute(
+                f"INSERT INTO password_credentials "
+                f"({', '.join(_PASSWORD_CARRY_COLUMNS)}) VALUES "
+                f"({', '.join('?' for _ in _PASSWORD_CARRY_COLUMNS)})",
+                tuple(row[c] for c in _PASSWORD_CARRY_COLUMNS),
+            )
+        dropped_forge = conn.execute("DELETE FROM forge_accounts").rowcount
+        for raw in carried.forge_accounts:
+            row = _mapped(raw)
+            conn.execute(
+                f"INSERT INTO forge_accounts "
+                f"({', '.join(_FORGE_ACCOUNT_CARRY_COLUMNS)}) VALUES "
+                f"({', '.join('?' for _ in _FORGE_ACCOUNT_CARRY_COLUMNS)})",
+                tuple(row[c] for c in _FORGE_ACCOUNT_CARRY_COLUMNS),
+            )
+        return CarryReport(
+            tokens_kept=len(carried.tokens),
+            source_tokens_revoked=revoked,
+            password_logins_kept=len(carried.password_credentials),
+            source_password_logins_dropped=dropped_passwords,
+            forge_accounts_kept=len(carried.forge_accounts),
+            source_forge_accounts_dropped=dropped_forge,
+            actors_added=added,
+        )
+
+    def set_instance_identity(self, instance_id: str, stamp: CloneStamp) -> None:
+        _meta_set(self._conn, META_INSTANCE_ID, instance_id)
+        _meta_set(self._conn, META_CLONED_FROM, stamp.source_instance_id)
+        _meta_set(self._conn, META_CLONED_AT, to_iso(stamp.cloned_at))
+        _meta_set(
+            self._conn, META_CLONED_BACKUP_TAKEN_AT, to_iso(stamp.backup_taken_at)
+        )
+
     def revoke_token(self, token_id: str, *, reason: str, at: datetime) -> bool:
         cursor = self._conn.execute(
             "UPDATE tokens SET revoked_at = ?, revoked_reason = ? "
@@ -2474,6 +2684,14 @@ def _insert_audit(conn: sqlite3.Connection, record: AuditRecord) -> None:
             to_iso(record.at),
         ),
     )
+
+
+def _select_columns(
+    conn: sqlite3.Connection, table: str, columns: tuple[str, ...]
+) -> list[dict[str, object]]:
+    # `table` and `columns` are module constants at every call site.
+    rows = conn.execute(f"SELECT {', '.join(columns)} FROM {table}").fetchall()
+    return [{column: row[column] for column in columns} for row in rows]
 
 
 def _meta_get(conn: sqlite3.Connection, key: str) -> str | None:
