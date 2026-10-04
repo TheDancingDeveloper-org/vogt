@@ -184,6 +184,34 @@ environment is a token in every `docker inspect`. `vogt connect --format
 markdown` renders the connection document for a running instance so nothing
 about the address is hand-copied.
 
+**Read-only MCP servers for agents.** The image carries pinned GitHub,
+Grafana and Gitea/Forgejo MCP servers, and each session registers the ones
+whose token it holds, read-only ([`ENGINE.md`](ENGINE.md) §4). Nothing is on
+by default. To turn one on, put its variables in the session's environment —
+with the reference agent-auth helper, as launch-time lines in
+`ENGINE_AGENT_AUTH_SECRETS` (not `ondemand`: the registration happens at
+launch), with the non-secret URLs in the overlay's `environment:`:
+
+```text
+GITHUB_MCP_TOKEN               <project-id> <github-readonly-pat-name>
+GRAFANA_SERVICE_ACCOUNT_TOKEN  <project-id> <grafana-viewer-token-name>
+GITEA_MCP_TOKEN                <project-id> <forgejo-readonly-token-name>
+```
+
+```yaml
+environment:
+  GRAFANA_URL: https://grafana.example
+  GITEA_HOST: https://forge.example
+```
+
+Issue every one of these tokens read-only — a fine-grained GitHub PAT with
+read permissions on the repositories agents may see, a Grafana service
+account with the Viewer role, a Forgejo token with `read:` scopes only. The
+servers run in their read-only modes as well, but the token is the control
+that holds if a mode has a gap. `git-forgejo` (git with a forge token header
+that cannot be word-split) uses `FORGEJO_TOKEN` and `FORGEJO_URL` instead,
+because it pushes as well as reads.
+
 ## 4. Reverse proxy and TLS
 
 Exposure values carry no default. `ENGINE_BIND` stays on loopback until you

@@ -384,6 +384,46 @@ RUN set -eu; \
 # the only sanctioned writer of a non-image copy.
 ENV DISABLE_UPDATES=1
 
+# Read-only MCP servers an agent may be given (docs/ENGINE.md §4): GitHub,
+# Grafana and Gitea/Forgejo. Exact release versions, each tarball checked
+# against a sha256 recorded here — not against a digest fetched in the same
+# request, which proves only that the download matched what the server said.
+# A bump is a deliberate edit of these lines. The pod base also installs a
+# `github-mcp-server` resolved to latest; the pinned copy replaces it, so the
+# binary a session runs is decided by this file. Nothing is registered with a
+# client here: `vogt-mcp-bootstrap` does that per session, and only when the
+# session holds the server's read-only token.
+ARG GITHUB_MCP_SERVER_VERSION=1.14.0
+ARG GITHUB_MCP_SERVER_SHA256_AMD64=2fcad56bb164b6c4918fdd9f1d5572257bf4e1f14b7eb1119d015b079818fd38
+ARG GITHUB_MCP_SERVER_SHA256_ARM64=dd06beb81e62c42afa2d4217d86be79ca588a083f63da38ca3cbef0b7785e88d
+ARG MCP_GRAFANA_VERSION=2.0.0
+ARG MCP_GRAFANA_SHA256_AMD64=0a0dde2c882c24fedcce79a07d97b232f71730c744b84a09b6b0735c2ca3d024
+ARG MCP_GRAFANA_SHA256_ARM64=5b29581cad5ce21a0db67c655e5e7e71a9163b4e1ba1b518559baa3c54133a28
+ARG GITEA_MCP_VERSION=1.8.0
+ARG GITEA_MCP_SHA256_AMD64=0a3aec987216b3299693ecf988f0b80686af6053d093d44148d26502e139f80c
+ARG GITEA_MCP_SHA256_ARM64=0714a101ab2163126580078ea1fc2291df306bfbd74e3af1b0f7a09c3f210ebb
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) arch=x86_64; sfx=AMD64 ;; \
+        arm64) arch=arm64; sfx=ARM64 ;; \
+        *) echo "no pinned MCP servers for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    fetch() { \
+        url="$1"; sum="$2"; bin="$3"; \
+        curl -fsSL "$url" -o /tmp/mcp.tar.gz; \
+        echo "$sum  /tmp/mcp.tar.gz" | sha256sum -c -; \
+        mkdir -p /tmp/mcp; tar -xzf /tmp/mcp.tar.gz -C /tmp/mcp "$bin"; \
+        install -m 755 "/tmp/mcp/$bin" "/usr/local/bin/$bin"; \
+        rm -rf /tmp/mcp /tmp/mcp.tar.gz; \
+    }; \
+    eval "gh_sum=\$GITHUB_MCP_SERVER_SHA256_$sfx graf_sum=\$MCP_GRAFANA_SHA256_$sfx gitea_sum=\$GITEA_MCP_SHA256_$sfx"; \
+    fetch "https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_SERVER_VERSION}/github-mcp-server_Linux_${arch}.tar.gz" "$gh_sum" github-mcp-server; \
+    fetch "https://github.com/grafana/mcp-grafana/releases/download/v${MCP_GRAFANA_VERSION}/mcp-grafana_Linux_${arch}.tar.gz" "$graf_sum" mcp-grafana; \
+    fetch "https://gitea.com/gitea/gitea-mcp/releases/download/v${GITEA_MCP_VERSION}/gitea-mcp_Linux_${arch}.tar.gz" "$gitea_sum" gitea-mcp; \
+    github-mcp-server --version | grep -qF "$GITHUB_MCP_SERVER_VERSION"; \
+    mcp-grafana --version | grep -qF "$MCP_GRAFANA_VERSION"; \
+    gitea-mcp --version | grep -qF "$GITEA_MCP_VERSION"
+
 # The server binary (built in stage 2 with the web bundle embedded; cache
 # mounts in stage 2 mean we have to copy out of /usr/local/bin, not /app).
 COPY --from=server-build /usr/local/bin/vogt-engine /usr/local/bin/vogt-engine
@@ -432,6 +472,8 @@ COPY engine/deploy/vogt-mcp-auth.sh /usr/local/bin/vogt-mcp
 COPY engine/deploy/mcp-bootstrap.sh /usr/local/bin/vogt-mcp-bootstrap
 COPY engine/deploy/git-askpass.sh /usr/local/bin/vogt-git-askpass
 COPY engine/deploy/rust-analyzer-mcp.sh /usr/local/bin/vogt-rust-analyzer-mcp
+COPY engine/deploy/readonly-mcp.sh /usr/local/bin/vogt-readonly-mcp
+COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
 RUN chmod +x \
     /usr/local/bin/vogt-lifecycle \
     /usr/local/bin/vogt-entrypoint \
@@ -441,7 +483,9 @@ RUN chmod +x \
     /usr/local/bin/vogt-mcp \
     /usr/local/bin/vogt-mcp-bootstrap \
     /usr/local/bin/vogt-git-askpass \
-    /usr/local/bin/vogt-rust-analyzer-mcp
+    /usr/local/bin/vogt-rust-analyzer-mcp \
+    /usr/local/bin/vogt-readonly-mcp \
+    /usr/local/bin/git-forgejo
 
 # One port. vogt-core listens on loopback inside this namespace and is not
 # exposed here, because there is nothing to expose it to: the engine is the
