@@ -48,6 +48,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from vogt.adapters.forge.models import (
+    ForgeActor,
     ForgeCapabilities,
     ForgeCheck,
     ForgeIssue,
@@ -159,6 +160,20 @@ class ForgeProvider(Protocol):
     def notifications(self, ref: RepoRef) -> Iterable[ForgeNotification]:
         """Per-repository notifications. Gated on
         `capabilities.supports_notifications`."""
+
+    def resolve_actor(self, api_url: str) -> ForgeActor | None:
+        """The author of the API resource at `api_url` (a comment, issue, PR
+        or release a notification thread points at), or `None`.
+
+        Only a URL under this provider's own API root is followed — the URL
+        comes from a forge payload, and the credential must never be sent to
+        an address the payload chose. `None` covers "not ours", gone, and
+        "the resource names no author"."""
+
+    def org_members(self, owner: str) -> frozenset[str] | None:
+        """Lower-cased logins of the members of org `owner`, or `None` when
+        that list cannot be read (a user-owned repository, a token without org
+        visibility, a forge error). `None` is "unknown", never "empty"."""
 
     # -- write surface (append-only by construction) -----------------------
 

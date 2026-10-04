@@ -91,6 +91,10 @@ class ForgeIssue:
     repo: str
     labels: tuple[str, ...] = ()
     author: str | None = None
+    #: The forge's account type for `author` (`User`, `Bot`), and GitHub's
+    #: `author_association`. `None` is "the forge did not say".
+    author_type: str | None = None
+    author_association: str | None = None
     assignees: tuple[str, ...] = ()
     comments: int = 0
     #: The issue body. Carried so an initiative tracking issue can be
@@ -121,6 +125,8 @@ class ForgePull:
     draft: bool = False
     merged: bool = False
     author: str | None = None
+    author_type: str | None = None
+    author_association: str | None = None
     head: str | None = None
     head_ref: str | None = None
     base: str | None = None
@@ -188,6 +194,20 @@ class ForgeNotification:
     updated_at: str | None = None
     last_read_at: str | None = None
     source_url: str | None = None
+    #: The API resources the thread points at: the subject (issue, PR,
+    #: release) and its latest comment. A thread carries no author of its own;
+    #: these are what the collector resolves one from.
+    subject_api_url: str | None = None
+    latest_comment_api_url: str | None = None
+
+
+@dataclass(frozen=True)
+class ForgeActor:
+    """The author of one forge resource, as the forge reported them."""
+
+    login: str | None
+    user_type: str | None = None
+    association: str | None = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +228,7 @@ class ForgeCheck:
 
 
 __all__ = [
+    "ForgeActor",
     "ForgeCapabilities",
     "ForgeCheck",
     "ForgeIssue",

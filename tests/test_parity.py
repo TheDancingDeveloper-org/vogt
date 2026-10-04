@@ -370,6 +370,18 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    ("inbox.list", {"actor": "external"}),
+    (
+        "preference.set",
+        {
+            "key": "inbox.filter",
+            "value": {"actor": "external", "triage_states": ["active"]},
+            "expected_version": 0,
+            "reason": WHY,
+        },
+    ),
+    ("preference.get", {"key": "inbox.filter"}),
+    ("place.metrics", {}),
     (
         "drift.resolve",
         lambda seen: {
@@ -959,6 +971,8 @@ def _argv_for(operation: Operation[Any, Any], params: dict[str, Any]) -> list[st
                     flag,
                     json.dumps(entry) if isinstance(entry, dict) else str(entry),
                 ]
+        elif isinstance(value, dict):
+            argv += [flag, json.dumps(value)]
         else:
             argv += [flag, str(value)]
     return argv

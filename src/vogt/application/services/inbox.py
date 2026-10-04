@@ -10,7 +10,9 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
@@ -26,6 +28,7 @@ from vogt.application.models import (
     InboxListParams,
     InboxListResult,
     InboxRestoreParams,
+    InboxSavedFilter,
     InboxSnoozeParams,
     InboxTriageResult,
 )
@@ -33,6 +36,14 @@ from vogt.application.services import _resolve
 from vogt.application.services.views import trust_for
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.session_outcomes import KIND_TASK_RUN
+from vogt.core.actors import (
+    SYSTEM_ACTOR,
+    ActorClass,
+    classify,
+    facts_from_payload,
+    matches,
+    normalise_bot_logins,
+)
 from vogt.core.checks import roll_up
 from vogt.core.digest import digest_of
 from vogt.core.entities import (
@@ -88,6 +99,12 @@ def list_inbox(ctx: AppContext, params: InboxListParams) -> InboxListResult:
             and (work_item_id is None or entry.work_item_ref == params.work_item)
             and _triage_matches(entry, params.triage_states, ctx.clock())
         ]
+        unknown_hidden = (
+            sum(1 for entry in entries if _actor_unknown(entry))
+            if params.actor == "external"
+            else 0
+        )
+        entries = [entry for entry in entries if actor_matches(entry, params.actor)]
         source_water = _high_water(entries)
         cursor_value = (
             _decode_cursor(params.cursor, fingerprint) if params.cursor else None
@@ -129,6 +146,7 @@ def list_inbox(ctx: AppContext, params: InboxListParams) -> InboxListResult:
             engine_status=engine_status,
             engine_detail=engine_detail,
             engine_available=engine_status == "available",
+            actor_unknown_hidden=unknown_hidden,
         )
 
 
@@ -204,9 +222,97 @@ def _triage(
     return audited_write(ctx, operation=operation, reason=reason, body=body)
 
 
+def actor_matches(entry: InboxEntry, wanted: str) -> bool:
+    """Whether an entry passes the `inbox.list` actor filter.
+
+    Reads only the actor fields already on the entry — which came from the
+    stored observation — so it is safe on the badge path."""
+    actor = ActorClass(
+        login=entry.actor_login, kind=entry.actor_kind, relation=entry.actor_relation
+    )
+    return matches(actor, cast(Any, wanted))
+
+
+def _actor_unknown(entry: InboxEntry) -> bool:
+    """A person-or-unresolved author the `external` filter cannot place."""
+    return entry.actor_kind != "bot" and entry.actor_relation == "unknown"
+
+
+def _actor_fields(actor: ActorClass) -> dict[str, Any]:
+    return {
+        "actor_login": actor.login,
+        "actor_kind": actor.kind,
+        "actor_relation": actor.relation,
+    }
+
+
+@dataclass(frozen=True)
+class InboxBadge:
+    """The sidebar count under a saved filter, and the unfiltered total."""
+
+    filtered: int
+    active_total: int
+
+
+#: How long one projection may answer badge reads. Short: the key already
+#: moves on every declared write and every published sweep, so the TTL only
+#: bounds what the key cannot see — live engine session state and a snooze
+#: running out.
+BADGE_TTL_SECONDS = 5.0
+_badge_cache: dict[tuple[int, int, int, int], tuple[float, list[InboxEntry]]] = {}
+
+
+def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
+    """Count the Inbox under a saved filter, for the shell's badge.
+
+    Same answer as `inbox.list` under the same filter (`counts`/length), but
+    cheaper: it skips the coverage and engine-status reads `inbox.list`
+    reports, and it shares one projection between every badge read that
+    arrives while nothing has changed — every open tab and device nudges its
+    badge on the same event, and before this each one rebuilt the whole
+    Inbox. It filters only on fields already on the entry (the actor was
+    resolved at collect time), so no forge call can happen here.
+    """
+    with ctx.declared.read() as view:
+        key = (
+            id(ctx.declared),
+            id(ctx.observed),
+            view.current_revision(),
+            view.latest_event_seq(),
+        )
+        now = time.monotonic()
+        cached = _badge_cache.get(key)
+        if cached is not None and cached[0] > now:
+            entries = cached[1]
+        else:
+            entries = _collect(ctx, view)
+            _badge_cache.clear()
+            _badge_cache[key] = (now + BADGE_TTL_SECONDS, entries)
+    moment = ctx.clock()
+    active_total = sum(
+        1 for entry in entries if _triage_matches(entry, ["active"], moment)
+    )
+    if saved is None:
+        return InboxBadge(filtered=active_total, active_total=active_total)
+    filtered = sum(
+        1
+        for entry in entries
+        if (saved.sources is None or entry.source in saved.sources)
+        and _triage_matches(entry, saved.triage_states, moment)
+        and actor_matches(entry, saved.actor)
+    )
+    return InboxBadge(filtered=filtered, active_total=active_total)
+
+
+def clear_badge_cache() -> None:
+    """Drop the shared badge projection (tests, and a restore)."""
+    _badge_cache.clear()
+
+
 def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
     projects = {p.id: p for p in view.list_projects(limit=MAX_SCAN, offset=0)}
     entries: list[InboxEntry] = []
+    bots = normalise_bot_logins(ctx.config.inbox_bot_logins)
 
     notifications = ctx.observed.latest(kinds=(KIND_NOTIFICATION,), limit=MAX_SCAN)
     checks_all = ctx.observed.latest(kinds=(KIND_CHECK,), limit=MAX_SCAN)
@@ -222,6 +328,7 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
         payload = observation.payload
         title = _text(payload.get("title")) or "GitHub notification"
         occurred = _when(payload.get("updated_at")) or observation.observed_at
+        facts = facts_from_payload(payload.get("actor"))
         entries.append(
             _observation_entry(
                 ctx,
@@ -232,6 +339,11 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                 title,
                 _text(payload.get("reason")) or title,
                 occurred,
+                actor=(
+                    ActorClass(login=None, kind=None, relation="unknown")
+                    if facts is None
+                    else classify(facts, bots=bots)
+                ),
             )
         )
 
@@ -279,6 +391,7 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                 action=InboxAction(
                     kind="observation", subject_key=observation.subject_key
                 ),
+                **_actor_fields(SYSTEM_ACTOR),
             )
         )
 
@@ -319,6 +432,7 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                 f"CI failing: {check}",
                 f"{check} is failing on {revision}",
                 observation.observed_at,
+                actor=SYSTEM_ACTOR,
             )
         )
 
@@ -358,6 +472,8 @@ def _observation_entry(
     title: str,
     summary: str,
     occurred: datetime,
+    *,
+    actor: ActorClass,
 ) -> InboxEntry:
     project = projects.get(observation.project_id or "")
     ref = links.get(observation.subject_key)
@@ -366,10 +482,14 @@ def _observation_entry(
         "title": title,
         "summary": summary,
         "source_url": observation.source_url,
+        # `actor` is excluded like the read markers: it is who caused the
+        # occurrence, resolved later than the occurrence itself, and an
+        # author resolved on a later sweep must not turn an archived entry
+        # back into a new one.
         "payload": {
             key: value
             for key, value in observation.payload.items()
-            if key not in {"unread", "last_read", "observed_at"}
+            if key not in {"unread", "last_read", "observed_at", "actor"}
         },
     }
     return InboxEntry(
@@ -391,6 +511,7 @@ def _observation_entry(
         if trust_for(ctx, observed_at=observation.observed_at) == "verified"
         else "stale",
         action=InboxAction(kind="observation", subject_key=observation.subject_key),
+        **_actor_fields(actor),
     )
 
 
@@ -427,6 +548,7 @@ def _drift_entry(
         evidence_snapshot=proposal.evidence_snapshot,
         proposed_change=proposal.proposed_change,
         action=InboxAction(kind="drift", drift_id=proposal.id),
+        **_actor_fields(SYSTEM_ACTOR),
     )
 
 
@@ -458,6 +580,7 @@ def _session_entry(
         freshness="live",
         provisional=True,
         action=InboxAction(kind="session", session_id=session_id),
+        **_actor_fields(SYSTEM_ACTOR),
     )
 
 
@@ -505,14 +628,17 @@ def _sort_key(entry: InboxEntry) -> tuple[datetime, str]:
 def _fingerprint(
     params: InboxListParams, project_ids: dict[str, str], work_item_id: str | None
 ) -> str:
-    return digest_of(
-        {
-            "sources": params.sources,
-            "states": params.triage_states,
-            "project": sorted(project_ids),
-            "work_item": work_item_id,
-        }
-    )
+    material: dict[str, object] = {
+        "sources": params.sources,
+        "states": params.triage_states,
+        "project": sorted(project_ids),
+        "work_item": work_item_id,
+    }
+    # The actor filter joins the fingerprint only when it narrows, so a
+    # cursor minted before the filter existed still pages an `any` read.
+    if params.actor != "any":
+        material["actor"] = params.actor
+    return digest_of(material)
 
 
 def _encode_cursor(
@@ -690,4 +816,13 @@ def _when(value: object) -> datetime | None:
         return None
 
 
-__all__ = ["archive_inbox", "list_inbox", "restore_inbox", "snooze_inbox"]
+__all__ = [
+    "InboxBadge",
+    "actor_matches",
+    "archive_inbox",
+    "clear_badge_cache",
+    "inbox_badge",
+    "list_inbox",
+    "restore_inbox",
+    "snooze_inbox",
+]

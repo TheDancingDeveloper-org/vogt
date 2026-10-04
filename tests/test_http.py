@@ -29,6 +29,8 @@ def test_place_metrics_are_one_bounded_read(client: TestClient) -> None:
     assert response.status_code == 200
     assert response.json() == {
         "inbox_active": 0,
+        "inbox_active_unfiltered": 0,
+        "inbox_filter": None,
         "projects_total": 0,
         "work_total": 0,
         "backlog_total_considered": 0,

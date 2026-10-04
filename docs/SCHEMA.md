@@ -149,6 +149,7 @@ graph.
 | `comments` | collaboration | `id, work_item_id, actor_id, body, created_at` |
 | `work_overlay` | the vogt-local half of an upstream-truth item on a **linked** project, keyed by the forge subject, not a `wrk_*` id | `subject_key(pk), project_id, rank, workflow_state, priority, effort, assignee_actor_id, initiative_id, branches(json), created_at, updated_at` |
 | `inbox_triage` | a person's current Inbox decision on one occurrence — a projection; the audit and event tables keep the history | `entry_key(pk), state(active\|archived\|snoozed), snooze_until, actor_id, decided_at, occurrence_snapshot(json)` |
+| `actor_preferences` | one actor's own settings — a versioned JSON object per namespaced key (the Inbox's saved filter is `inbox.filter`); the audit table keeps the history | `actor_id, key, value(json), version, updated_at`, PK `(actor_id, key)` |
 | `workflow_defs` | state machine per work-item kind | `kind, definition(json)` |
 | `writeback_actions` | one row per attempted forge write | `id, at, actor_id, work_item_id, project_id, policy, action(create\|comment\|label\|close\|reopen), outcome(attempted\|succeeded\|failed\|skipped), detail` |
 
@@ -232,6 +233,14 @@ new subject because the dedup reads one as "this declared row IS the item".
 gap. Ids stay ULID-shaped and stable; refs are what a human or an agent
 actually types, and every parameter that names a work item takes one.
 `initiatives` carry a slug for the same reason.
+
+`actor_preferences` is the generic per-actor settings store (WI-839): a JSON
+object per `(actor, key)`, with a `version` that increments on every write so
+a client can tell its cached copy is behind and `preference.set` can apply
+only on top of the version it read. Operations act on the caller's own rows
+only. The Inbox's saved structured filter is the first key; Board and Backlog
+saved filters can move onto the same shape without another table. Browser
+storage remains only an offline cache of it.
 
 There is deliberately **no `rank_order` column**. Ordering is computed from
 documented weights and is fully explainable by `why`; manual influence is
@@ -463,6 +472,16 @@ seven. Update-automation posture is observation kind `posture`, subject
 `posture:<owner>/<repo>`, with three independent facts in the payload.
 `projects.compliance_status` is a real column, written by the on-demand
 contract check; there is no `latest_contract_checks` table behind it.
+
+A forge notification observation carries an `actor` block — `login`,
+`user_type`, `association`, `org_member`, and the `resolved_from` URL and
+`resolved_for` thread timestamp it was resolved against — or `null` when the
+author could not be resolved that sweep. The collector resolves it, never a
+read; the Inbox classifies human/bot and org member/external from these stored
+facts (`core/actors.py`), so a changed bot list needs no re-sweep. The block
+is excluded from the Inbox occurrence digest, so an author resolved on a later
+sweep does not re-open an archived entry. Issue and PR observations carry
+`author_type` and `author_association` beside `author`.
 
 No lockfile is parsed and no version is resolved: `latest_dep_refs` records
 references (path, git, workspace-inherited), not requested specs or locked

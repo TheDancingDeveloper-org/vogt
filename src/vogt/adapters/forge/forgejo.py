@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from vogt.adapters.forge.models import (
+    ForgeActor,
     ForgeCapabilities,
     ForgeCheck,
     ForgeIssue,
@@ -519,7 +520,43 @@ class ForgejoProvider:
                 updated_at=item.get("updated_at"),
                 last_read_at=None,
                 source_url=_subject_web_url(subject.get("url")),
+                subject_api_url=_text(subject.get("url")),
+                latest_comment_api_url=_text(subject.get("latest_comment_url")),
             )
+
+    def resolve_actor(self, api_url: str) -> ForgeActor | None:
+        """The author of the resource a notification points at. Forgejo
+        reports no account type or association, so only the login is known;
+        the `[bot]`/configured-list rules and the org list do the rest."""
+        root = self._client.api_root.rstrip("/")
+        if not api_url.startswith(f"{root}/repos/"):
+            return None
+        path = api_url[len(root) :].split("?", 1)[0].split("#", 1)[0]
+        if ".." in path.split("/"):
+            return None
+        payload = self._client.get(path)
+        if not isinstance(payload, dict):
+            return None
+        login = _login(payload.get("user") or payload.get("author"))
+        return None if login is None else ForgeActor(login=login)
+
+    def org_members(self, owner: str) -> frozenset[str] | None:
+        """`GET /orgs/{owner}/members`; `None` for a user-owned repository
+        or an org this credential cannot read."""
+        members: set[str] = set()
+        for page in range(1, 11):
+            payloads = self._client.get(
+                f"/orgs/{owner}/members", limit=DEFAULT_PER_PAGE, page=page
+            )
+            if payloads is None:
+                return None if page == 1 else frozenset(members)
+            batch = _as_list(payloads)
+            members.update(
+                login.lower() for login in (_login(item) for item in batch) if login
+            )
+            if len(batch) < DEFAULT_PER_PAGE:
+                break
+        return frozenset(members)
 
     # -- write surface (append-only by construction) -----------------------
 
@@ -710,6 +747,10 @@ def _as_list(payloads: object) -> list[dict[str, Any]]:
     if payloads is None or payloads is NO_CONTENT or not isinstance(payloads, list):
         return []
     return [item for item in payloads if isinstance(item, dict)]
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
 
 
 def _login(user: object) -> str | None:

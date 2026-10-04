@@ -484,6 +484,20 @@ class InboxTriage(Entity):
     occurrence_snapshot: dict[str, object] = {}
 
 
+class ActorPreference(Entity):
+    """One per-actor setting: a versioned JSON object under a namespaced key.
+
+    Generic on purpose — the Inbox's saved filter is the first key, and the
+    Board's and Backlog's saved filters can move onto the same row shape
+    without another table."""
+
+    actor_id: str
+    key: str
+    value: dict[str, object] = {}
+    version: int
+    updated_at: datetime
+
+
 class DepRef(Entity):
     """One reference from a project to another project.
 
