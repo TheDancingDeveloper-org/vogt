@@ -111,3 +111,20 @@ The `Dockerfile` builds the native runtimes on the estate-mirrored
 their own (so the ~210 MB download is a cache layer that only changes when a
 pinned revision does), and installs the ONNX Runtime's one runtime library
 into a minimal `ubuntu:26.04` final stage.
+
+### Dependency pins
+
+`tts/Cargo.toml` pins `ort`, `ort-sys` and `piper-rs` exactly. `ort` and
+`ort-sys` must stay on the same release candidate (`ort-sys` rc.13 under `ort`
+rc.9 fails its own build script), so Dependabot ignores both, and they move by
+hand together with `piper-rs`. Check for API renames when bumping `piper-rs`:
+0.1.9 renamed `SonataSpeechSynthesizer` to `PiperSpeechSynthesizer`.
+
+STT container decoding uses `symphonia` 0.6. Its WebM/Opus, Ogg/Opus and
+Ogg/Vorbis paths are pinned by the fixtures in `stt/tests/fixtures/` (0.2 s
+test tones generated with GStreamer's `audiotestsrc`). The WAV-only tests do
+not reach that code, so keep those fixtures when changing the decoder.
+
+The declared `rust-version = "1.80"` is out of date: the lockfile already
+needs Rust 1.88 or newer (`whisper-rs-sys`, `icu_*`), and every build, in CI
+and in the image, uses current stable.
