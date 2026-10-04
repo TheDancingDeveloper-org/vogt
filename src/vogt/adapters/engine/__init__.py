@@ -1,11 +1,12 @@
 """Talking to the session engine.
 
 The engine is the other half of the merged product — the Rust process that
-owns PTYs, scrollback and activity state. Vogt asks it for nine things and
-nothing else: start a session, list sessions, describe one, stop one, read
-the archive of one that has ended, list the scheduled agent tasks, and — the
-history-search trio — list archived sessions, search session output
-(live sessions included), and read the tail of one session's log. That list
+owns PTYs, scrollback and activity state. Vogt asks it for a short list of
+things and nothing else: start a session, list sessions, describe one, stop
+one, type into one, read its current screen, read the archive of one that has
+ended, list the scheduled agent tasks, and — the history-search trio — list
+archived sessions, search session output (live sessions included), and read
+the tail of one session's log. That list
 is the whole coupling, and keeping it that short is what makes the two-process
 shape worth having rather than merely tolerable.
 
@@ -27,6 +28,7 @@ from vogt.adapters.engine.client import (
     EngineClient,
     EngineHistoryMatch,
     EngineHistorySession,
+    EngineScreen,
     EngineSession,
     EngineSessionLog,
     EngineTaskFinding,
@@ -40,6 +42,7 @@ __all__ = [
     "EngineClient",
     "EngineHistoryMatch",
     "EngineHistorySession",
+    "EngineScreen",
     "EngineSession",
     "EngineSessionLog",
     "EngineTaskFinding",

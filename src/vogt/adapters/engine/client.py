@@ -221,6 +221,47 @@ class EngineSessionLog:
 
 
 @dataclass(frozen=True)
+class EngineScreen:
+    """A session's current visible screen (`GET /api/sessions/{id}/screen`).
+
+    Rendered lines rather than the raw byte stream: what a person looking at
+    the terminal would see now. Fields the engine leaves out stay `None`
+    rather than being guessed.
+    """
+
+    id: str
+    cols: int = 0
+    rows: int = 0
+    lines: tuple[str, ...] = ()
+    cursor_row: int | None = None
+    cursor_col: int | None = None
+    title: str | None = None
+    activity: str | None = None
+    alive: bool | None = None
+    ready: bool | None = None
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineScreen:
+        raw_lines = payload.get("lines")
+        cursor = payload.get("cursor")
+        cursor = cursor if isinstance(cursor, dict) else {}
+        return cls(
+            id=str(payload.get("id", "")),
+            cols=_optional_int(payload.get("cols")) or 0,
+            rows=_optional_int(payload.get("rows")) or 0,
+            lines=tuple(str(line) for line in raw_lines)
+            if isinstance(raw_lines, list)
+            else (),
+            cursor_row=_optional_int(cursor.get("row")),
+            cursor_col=_optional_int(cursor.get("col")),
+            title=_optional_str(payload.get("title")),
+            activity=_optional_str(payload.get("activity")),
+            alive=_optional_bool(payload.get("alive")),
+            ready=_optional_bool(payload.get("ready")),
+        )
+
+
+@dataclass(frozen=True)
 class EngineTaskFinding:
     """Something a bound agent-task run reported about itself.
 
@@ -324,6 +365,10 @@ def _optional_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _optional_bool(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
 @dataclass(frozen=True)
 class EngineClient:
     """Access to one session engine."""
@@ -359,7 +404,7 @@ class EngineClient:
                 token = resolved.read_text(encoding="utf-8").strip() or None
         return cls(base_url=url.strip().rstrip("/"), token=token, transport=transport)
 
-    # -- the nine things Vogt asks of the engine ---------------------------
+    # -- what Vogt asks of the engine ---------------------------
 
     def create_session(
         self,
@@ -543,6 +588,36 @@ class EngineClient:
             return None
         return EngineSessionLog.from_payload(payload)
 
+    def send_input(self, session_id: str, text: str, *, submit: bool = False) -> bool:
+        """Write `text` to a session's PTY (`submit` appends a carriage return).
+
+        `False` when the engine has no such session. The engine caps one
+        write at 64 KiB; the caller checks that first so the refusal names
+        the limit rather than an HTTP status.
+        """
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/input",
+            method="POST",
+            payload={"text": text, "submit": submit},
+            allow_missing=True,
+        )
+        return payload is not None
+
+    def session_screen(self, session_id: str) -> EngineScreen | None:
+        """The session's current rendered screen, or `None` on a 404.
+
+        A 404 means either the session is unknown or the engine predates the
+        `/screen` route; the caller tells the two apart, because only it
+        knows whether the session exists.
+        """
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/screen",
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineScreen.from_payload(payload)
+
     # -- transport ---------------------------------------------------------
 
     # -- runtime-pinned agent CLIs ------------------------------------
@@ -674,6 +749,7 @@ __all__ = [
     "EngineClient",
     "EngineHistoryMatch",
     "EngineHistorySession",
+    "EngineScreen",
     "EngineSession",
     "EngineSessionLog",
     "EngineTaskFinding",

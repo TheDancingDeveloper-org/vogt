@@ -529,6 +529,21 @@ accepted or refused whichever transport carries it. Over the cap is `400` on
 HTTP; over the WebSocket the frame is dropped silently, because there is no
 reply channel to refuse into.
 
+**Agents drive sessions through the core, not these routes.** The core wraps
+them as registry operations on CLI, REST and MCP: `session.input`
+(`work.write`) calls `/input` once for the text, once per named key, and once
+more with `submit`; `session.screen` (`read`) calls `GET
+/api/sessions/:id/screen`; `session.log_tail` (`read`) reads the history log.
+Each takes Vogt's `ses_…` id or the engine UUID. The core calls with its stack
+secret, so what a caller may do is decided by its core scope, and every
+`session.input` is audited by the core with the actor, the session, the byte
+count and the key names, never the text (`API.md`, "Who may read and type into
+sessions"). A core bearer calling these routes directly is authorized by the
+`sessions` capability, which `work.write` implies. That mapping is deliberate:
+typing into a terminal is the same grant as opening one. A session the core
+starts gets `VOGT_ENGINE_URL` (the URL the core reaches this engine at) in its
+environment, next to `VOGT_URL` and `VOGT_HTTP_TOKEN`.
+
 `SessionSummary` carries an optional `command` field — the explicit command
 the session was created with; absent for default-shell sessions. It also
 carries `activity_changed_at`, the wall-clock instant when the current
@@ -1888,12 +1903,14 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `serve` | Operator-only | Unavailable: Local server process management; no remote MCP tool. |
 | `session.start` | Confirmation-gated | Available after approval: Open a coding session for a work item or a project. |
 | `session.list` | Voice-readable | Available: List coding sessions with their live activity state. |
-| `session.stop` | Confirmation-gated | Available after approval: Stop a coding session and revoke the token it ran with. |
+| `session.stop` | Confirmation-gated | Available after approval: Stop a coding session and revoke the token it ran with (either id form). |
 | `agent_cli.list` | Voice-readable | Available: Report the pod's agent CLIs: active, baked and upstream versions. |
 | `agent_cli.update` | Operator-only | Unavailable: Installs executable tooling on the host. |
 | `session.history_list` | Voice-readable | Available: List archived sessions (history), newest first. |
 | `session.search_output` | Voice-readable | Available: Search session output (live sessions included). |
 | `session.log_tail` | Voice-readable | Available: Read the tail of a session's output log, readable. |
+| `session.input` | Operator-only | Unavailable: The assistant types into terminals with its own engine tool (`send_input`, approval-gated); not offered twice. |
+| `session.screen` | Operator-only | Unavailable: The assistant reads terminals with its own engine tool (`read_session_tail`); for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |

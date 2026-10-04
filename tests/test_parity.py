@@ -419,6 +419,22 @@ SCRIPT: list[tuple[str, StepParams]] = [
         "session.log_tail",
         {"id": "01000000-0000-0000-0000-000000000001"},
     ),
+    # Driving a session, by both id forms: input by Vogt's ses_ id, the
+    # screen by the engine's own id.
+    (
+        "session.input",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "text": "make test",
+            "keys": ["esc", "up"],
+            "submit": True,
+            "reason": WHY,
+        },
+    ),
+    (
+        "session.screen",
+        lambda seen: {"id": seen["session.start"]["session"]["engine_session_id"]},
+    ),
     (
         "session.stop",
         lambda seen: {
@@ -803,6 +819,22 @@ def _stand_in_engine() -> EngineClient:
             ).encode()
         if method == "POST" and url.endswith("/kill"):
             return 200, b'{"ok":true}'
+        if method == "POST" and url.endswith("/input"):
+            return 200, b'{"ok":true}'
+        if method == "GET" and path.endswith("/screen"):
+            return 200, json.dumps(
+                {
+                    "id": path.rsplit("/", 2)[-2],
+                    "cols": 80,
+                    "rows": 1,
+                    "lines": ["$ "],
+                    "cursor": {"row": 0, "col": 2},
+                    "title": "bash",
+                    "activity": "idle",
+                    "alive": True,
+                    "ready": True,
+                }
+            ).encode()
         if method == "GET" and url.endswith("/api/sessions"):
             return 200, b"[]"
         # Session history. Canned, deterministic rows so the three

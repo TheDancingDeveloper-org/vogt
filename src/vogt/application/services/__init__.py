@@ -96,6 +96,8 @@ from vogt.application.services.sessions import (
     list_sessions,
     log_tail,
     search_output,
+    session_input,
+    session_screen,
     start_session,
     stop_session,
 )
@@ -210,6 +212,8 @@ __all__ = [
     "search_output",
     "serve",
     "serve_mcp_stdio",
+    "session_input",
+    "session_screen",
     "set_password",
     "set_write_back",
     "snooze_inbox",
