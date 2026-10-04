@@ -1,5 +1,14 @@
+import { createEffect, on } from "solid-js";
 import { createStore } from "solid-js/store";
 import { ApiError } from "./api";
+import {
+  describeFilter,
+  filterParams,
+  isDefaultFilter,
+  parseFilter,
+  savedInboxFilter,
+  type InboxFilter,
+} from "./inboxFilter";
 import {
   backlog,
   listDrift,
@@ -43,6 +52,9 @@ function metricValue(value: number | null | undefined): number | null {
 
 export interface PlaceMetricsController {
   metrics: PlaceMetrics;
+  /** The saved Inbox filter the Inbox badge was counted under, described for
+   *  its label ("external people only · github"), or null when unfiltered. */
+  inboxFilter: () => string | null;
   /** Read now, and settle before the promise does. Sign-in and first paint. */
   refresh: () => Promise<void>;
   /** Something changed. Coalesces a burst of events into one read. */
@@ -94,6 +106,7 @@ export function createPlaceMetrics(): PlaceMetricsController {
     backlog: initial(),
     drift: initial(),
   });
+  const [filterState, setFilterState] = createStore<{ described: string | null }>({ described: null });
   let generation = 0;
   let aggregateSupported: boolean | null = null;
   let failures = 0;
@@ -163,6 +176,9 @@ export function createPlaceMetrics(): PlaceMetricsController {
           value: metricValue(result.inbox_active),
           state: result.inbox_active === null || result.inbox_active === undefined ? "unavailable" : "ready",
         });
+        // The core counted under the caller's saved filter and says which.
+        const applied = result.inbox_filter ? parseFilter(result.inbox_filter as Record<string, unknown>) : null;
+        setFilterState("described", applied && !isDefaultFilter(applied) ? describeFilter(applied) : null);
         setMetrics("projects", {
           value: metricValue(result.projects_total),
           state: result.projects_total === null || result.projects_total === undefined ? "unavailable" : "ready",
@@ -198,8 +214,14 @@ export function createPlaceMetrics(): PlaceMetricsController {
       load(
         "inbox",
         async () => {
-          const result = await listInbox({ limit: 1 });
-          return requiredCount(result.counts?.active, "Inbox");
+          // An older core has no saved-filter badge, so ask the list for the
+          // same filter: the count still matches what the Inbox will show.
+          const saved: InboxFilter = savedInboxFilter.value();
+          const result = await listInbox({ limit: 1, ...filterParams(saved) });
+          setFilterState("described", isDefaultFilter(saved) ? null : describeFilter(saved));
+          const counts = result.counts ?? {};
+          const states = saved.triage === "all" ? ["active", "snoozed", "archived"] : [saved.triage];
+          return states.reduce((total, state) => total + requiredCount(counts[state], "Inbox"), 0);
         },
         currentGeneration,
       ),
@@ -284,5 +306,10 @@ export function createPlaceMetrics(): PlaceMetricsController {
     timer = null;
   };
 
-  return { metrics, refresh, nudge, dispose };
+  // A changed saved filter changes what the Inbox badge counts. The write is
+  // also an event the shell hears, but the change is the reader's own and
+  // should not wait on the stream.
+  createEffect(on(savedInboxFilter.value, () => nudge(), { defer: true }));
+
+  return { metrics, inboxFilter: () => filterState.described, refresh, nudge, dispose };
 }

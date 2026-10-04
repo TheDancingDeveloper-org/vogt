@@ -1,4 +1,4 @@
-import { Component, For, Show, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, For, Show, createEffect, createSignal, on, onCleanup, onMount, untrack } from "solid-js";
 import { useLocation, useNavigate } from "@solidjs/router";
 import {
   VogtUnavailable,
@@ -23,6 +23,26 @@ import {
 import Dialog from "./Dialog";
 import SurfaceHeader from "./SurfaceHeader";
 import { safeHref } from "./markdown";
+import {
+  ACTOR_LABELS,
+  ACTOR_PILLS,
+  DEFAULT_INBOX_FILTER,
+  INBOX_ACTORS,
+  INBOX_SOURCES,
+  INBOX_TRIAGE,
+  TRIAGE_LABELS,
+  describeFilter,
+  filterFromQuery,
+  filterParams,
+  filterPath,
+  isDefaultFilter,
+  sameFilter,
+  saveReason,
+  savedInboxFilter,
+  type InboxActor,
+  type InboxFilter,
+  type InboxTriage,
+} from "./inboxFilter";
 
 /** A datetime-local value (no timezone) for `now + days`. */
 function localDatetimeIn(days: number): string {
@@ -35,7 +55,22 @@ interface Props {
   onError?: (message: string) => void;
 }
 
-const SOURCES = ["github", "drift", "ci", "agent"] as const;
+const SOURCES = INBOX_SOURCES;
+
+/** "From mallory · external person" — who caused it, where that is known. */
+function actorCopy(entry: InboxEntry): string | null {
+  if (entry.actor_kind === "bot" && !entry.actor_login) return null;
+  if (!entry.actor_login) return null;
+  const relation =
+    entry.actor_kind === "bot"
+      ? "bot"
+      : entry.actor_relation === "external"
+        ? "external person"
+        : entry.actor_relation === "org_member"
+          ? "org member"
+          : "relation unknown";
+  return `From ${entry.actor_login} · ${relation}`;
+}
 
 function age(value: string | null | undefined): string {
   if (!value) return "age unavailable";
@@ -238,6 +273,7 @@ const Entry: Component<EntryProps> = (props) => {
           <Show when={props.entry.project_slug}><span>Project: {props.entry.project_slug}</span></Show>
           <Show when={props.entry.work_item_ref}><span>Work item: {props.entry.work_item_ref}</span></Show>
           <span>Source: {props.entry.source_subject_key ?? "server-normalized entry"}</span>
+          <Show when={actorCopy(props.entry)}>{(copy) => <span class="inbox-entry-actor">{copy()}</span>}</Show>
           <Show when={props.entry.trust_state}><span>Trust: {props.entry.trust_state}</span></Show>
           <span>State: {props.entry.triage_state}</span>
         </div>
@@ -415,7 +451,13 @@ const Inbox: Component<Props> = (props) => {
   const [loading, setLoading] = createSignal(false);
   const [cursor, setCursor] = createSignal<string | null>(null);
   const [seen, setSeen] = createSignal<Set<string>>(new Set<string>());
-  const [source, setSource] = createSignal("");
+  // The structured filter on screen. It comes from the URL when the URL
+  // names one (an explicit link, honoured for that visit), otherwise from the
+  // account's saved filter — which is what makes it survive navigation,
+  // reloads and a switch of device until the reader changes or clears it.
+  const [filter, setFilter] = createSignal<InboxFilter>(DEFAULT_INBOX_FILTER);
+  const [explicitFilter, setExplicitFilter] = createSignal(false);
+  const source = () => filter().source;
   const [triaging, setTriaging] = createSignal<string | null>(null);
   const [selected, setSelected] = createSignal<Set<string>>(new Set<string>());
   const [batchReason, setBatchReason] = createSignal("");
@@ -476,11 +518,10 @@ const Inbox: Component<Props> = (props) => {
 
   const fetchPage = (pageCursor: string | null) => {
     const query = new URLSearchParams(location.search);
-    const selectedSource = query.get("source") ?? source();
     return listInbox({
       limit: 50,
       cursor: pageCursor ?? undefined,
-      sources: selectedSource || undefined,
+      ...filterParams(filter()),
       project: query.get("project") ?? undefined,
       work_item: query.get("work_item") ?? undefined,
     });
@@ -572,18 +613,51 @@ const Inbox: Component<Props> = (props) => {
     }
   };
 
-  const applySource = (next: string) => {
-    setSource(next);
-    navigate(next ? `/inbox?source=${encodeURIComponent(next)}` : "/inbox", { replace: true });
+  /** The reader changed a filter control: apply it, save it to the account
+   *  (so it stays until changed or cleared), and state it in the URL. */
+  const applyFilter = (next: InboxFilter) => {
+    setFilter(next);
+    void savedInboxFilter.save(next, saveReason(next));
+    const target = filterPath(next);
+    // Already there (e.g. clearing a saved filter on a plain /inbox): no
+    // navigation will happen to re-read, so read now.
+    if (target === `${location.pathname}${location.search}`) void load();
+    else navigate(target, { replace: true });
+  };
+  const applySource = (next: string) =>
+    applyFilter({ ...filter(), source: (next || "") as InboxFilter["source"] });
+  const applyActor = (next: InboxActor) => applyFilter({ ...filter(), actor: next });
+  const applyTriage = (next: InboxTriage) => applyFilter({ ...filter(), triage: next });
+  const clearFilters = () => {
+    setSearch("");
+    applyFilter(DEFAULT_INBOX_FILTER);
   };
 
   createEffect(() => {
     location.pathname;
     location.search;
-    setSource(new URLSearchParams(location.search).get("source") ?? "");
-    readSeen();
-    void load();
+    const explicit = filterFromQuery(location.search);
+    setExplicitFilter(explicit !== null);
+    setFilter(explicit ?? untrack(savedInboxFilter.value));
+    untrack(() => {
+      readSeen();
+      void load();
+    });
   });
+  // The saved filter arrives from the core after first paint (or changes on
+  // another device). Without an explicit filter in the URL, follow it.
+  createEffect(
+    on(
+      savedInboxFilter.value,
+      (saved) => {
+        if (untrack(explicitFilter) || sameFilter(saved, untrack(filter))) return;
+        setFilter(saved);
+        void load();
+      },
+      { defer: true },
+    ),
+  );
+  onMount(() => void savedInboxFilter.load());
   // Live, like the board: re-read on what the front door announced, but not
   // under a reason somebody is composing, and not while a batch decision is
   // half-made. A hidden tab is skipped and reconciled on return — that is
@@ -814,13 +888,27 @@ const Inbox: Component<Props> = (props) => {
         controls={(
           <>
             <Show when={phone()} fallback={(
-              <label class="inbox-filter">
-                <span>Source</span>
-                <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
-                  <option value="">All sources</option>
-                  <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
-                </select>
-              </label>
+              <>
+                <label class="inbox-filter">
+                  <span>Source</span>
+                  <select value={source()} onChange={(event) => applySource(event.currentTarget.value)}>
+                    <option value="">All sources</option>
+                    <For each={SOURCES}>{(value) => <option value={value}>{value}</option>}</For>
+                  </select>
+                </label>
+                <label class="inbox-facet inbox-facet-actor">
+                  <span>From</span>
+                  <select value={filter().actor} onChange={(event) => applyActor(event.currentTarget.value as InboxActor)}>
+                    <For each={INBOX_ACTORS}>{(value) => <option value={value}>{ACTOR_LABELS[value]}</option>}</For>
+                  </select>
+                </label>
+                <label class="inbox-facet inbox-facet-state">
+                  <span>State</span>
+                  <select value={filter().triage} onChange={(event) => applyTriage(event.currentTarget.value as InboxTriage)}>
+                    <For each={INBOX_TRIAGE}>{(value) => <option value={value}>{TRIAGE_LABELS[value]}</option>}</For>
+                  </select>
+                </label>
+              </>
             )}>
               <div class="inbox-filter-pills" role="group" aria-label="Source filter">
                 <For each={["", ...SOURCES]}>
@@ -836,6 +924,27 @@ const Inbox: Component<Props> = (props) => {
                   )}
                 </For>
               </div>
+              <div class="inbox-filter-pills" role="group" aria-label="From filter">
+                <For each={INBOX_ACTORS}>
+                  {(value) => (
+                    <button
+                      type="button"
+                      class={filter().actor === value ? "active" : ""}
+                      aria-pressed={filter().actor === value}
+                      aria-label={ACTOR_LABELS[value]}
+                      onClick={() => applyActor(value)}
+                    >
+                      {ACTOR_PILLS[value]}
+                    </button>
+                  )}
+                </For>
+              </div>
+              <label class="inbox-facet inbox-facet-state">
+                <span>State</span>
+                <select value={filter().triage} onChange={(event) => applyTriage(event.currentTarget.value as InboxTriage)}>
+                  <For each={INBOX_TRIAGE}>{(value) => <option value={value}>{TRIAGE_LABELS[value]}</option>}</For>
+                </select>
+              </label>
             </Show>
             {/* A free-text box beside the source pills, over the loaded
                 entries' title and summary. */}
@@ -858,6 +967,28 @@ const Inbox: Component<Props> = (props) => {
           </details>
         )}
       />
+      <Show when={!isDefaultFilter(filter()) || search().trim()}>
+        <div class="inbox-active-filter" role="status" aria-label="Active Inbox filter">
+          <Show when={!isDefaultFilter(filter())}>
+            <span class="inbox-filter-chip">
+              {sameFilter(filter(), savedInboxFilter.value()) ? "Saved filter" : "Filter from link, not saved"}:{" "}
+              {describeFilter(filter())}
+            </span>
+          </Show>
+          <Show when={search().trim()}>
+            <span class="inbox-filter-chip">Search: “{search().trim()}”</span>
+          </Show>
+          <button type="button" class="inbox-clear-filters" onClick={clearFilters}>
+            Clear filters
+          </button>
+        </div>
+      </Show>
+      <Show when={filter().actor === "external" && (result()?.actor_unknown_hidden ?? 0) > 0}>
+        <p class="inbox-hidden-note">
+          {result()!.actor_unknown_hidden} hidden: author unknown. These entries could
+          not be attributed to a person yet; choose “Anyone” to see them.
+        </p>
+      </Show>
       <Show when={failure()}>
         {(error) => (
           <div class="inbox-outage" role="alert">
