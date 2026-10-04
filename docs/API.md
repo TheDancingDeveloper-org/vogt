@@ -86,7 +86,7 @@ project (DESIGN.md §4.1).
 | `work.write` | work-item writes — create, transition, comment |
 | `project.write` | project register/import and project-level writes |
 | `writeback` | exactly `forge.writeback` (arming forge write-back) |
-| `admin` | token minting, actor creation, password logins (`user.*`), and instance ops — `init`, `migrate`, `backup`, `restore`, `serve` |
+| `admin` | token minting, actor creation, password logins (`user.*`), and instance ops — `init`, `migrate`, `backup`, `restore`, `clone`, `serve` |
 
 - The default session scope set is **`read,work.write,project.write,writeback`**
   (`agent_session_scopes`, #726) — everything except `admin`, applied to every

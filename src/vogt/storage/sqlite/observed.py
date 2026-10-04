@@ -145,6 +145,28 @@ class SqliteObservedStore:
         finally:
             conn.close()
 
+    def rebind_instance(self, instance_id: str) -> None:
+        """Re-stamp the store with `instance_id`, for a clone (`clone`)."""
+        conn = connect(self._path, create=False, synchronous=self._synchronous)
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            updated = conn.execute(
+                "UPDATE meta SET value = ? WHERE key = ?",
+                (instance_id, META_INSTANCE_ID),
+            ).rowcount
+            if updated == 0:
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?)",
+                    (META_INSTANCE_ID, instance_id),
+                )
+            conn.execute("COMMIT")
+        except BaseException:
+            with suppress(sqlite3.OperationalError):  # pragma: no cover
+                conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
+
     def instance_id(self) -> str | None:
         if not self._path.exists():
             return None

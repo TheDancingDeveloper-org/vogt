@@ -31,6 +31,8 @@ from vogt.application.models import (
     BoardListParams,
     BoardListResult,
     BugsParams,
+    CloneParams,
+    CloneResult,
     CommentParams,
     CommentResult,
     ComplianceParams,
@@ -1133,6 +1135,21 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.restore,
             route=HttpRoute("POST", "/instance/restore"),
             cli=CliBinding(("restore",)),
+        ),
+        Operation(
+            name="clone",
+            summary="Restore another instance's backup here as a copy: keep "
+            "this instance's id and credentials, revoke the source's tokens, "
+            "disarm forge write-back, never copy push subscriptions.",
+            scope="admin",
+            # Unlike restore, a clone lands an audit row (in the copy it
+            # writes), so it is a mutation with a required reason.
+            mutating=True,
+            params_model=CloneParams,
+            result_model=CloneResult,
+            handler=services.clone,
+            route=HttpRoute("POST", "/instance/clone"),
+            cli=CliBinding(("clone",)),
         ),
         Operation(
             name="export",

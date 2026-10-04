@@ -287,7 +287,7 @@ def test_local_only_tools_are_not_callable_over_http(
     them the same way REST and tools/list already do — as unknown tools,
     before authorization or dispatch.
     """
-    for tool in ("restore", "backup", "serve", "import", "init", "migrate"):
+    for tool in ("restore", "clone", "backup", "serve", "import", "init", "migrate"):
         response = _rpc(
             authed,
             "tools/call",

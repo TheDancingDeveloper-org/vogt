@@ -55,7 +55,7 @@ Rules:
 
 | Table | Purpose | Key columns |
 |---|---|---|
-| `meta` | schema version, instance id, monotonic `revision` counter | |
+| `meta` | schema version, instance id, monotonic `revision` counter; on a clone, `cloned_from_instance_id`, `cloned_at`, `cloned_backup_taken_at` (`DEPLOYMENT.md` §5) | |
 | `migrations` | forward-only migration ledger | `id, applied_at, checksum` |
 | `migration_lock` | single-writer migration guard | |
 | `actors` | humans **and** agents | `id, kind(human\|agent), display_name, identity_ref, disabled` |

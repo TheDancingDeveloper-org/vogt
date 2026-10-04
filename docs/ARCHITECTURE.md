@@ -225,7 +225,7 @@ CLI, REST and MCP and asserts identical results and identical audit rows. Two
 named exclusion lists live in `src/vogt/registry/registry.py`, each entry
 carrying its reason, and the test fails if either names an operation that
 does not exist: `LOCAL_ONLY` (`init`, `migrate`, `serve`, `backup`,
-`restore`, `import`, `mcp.stdio` — each acts on the local process or data
+`restore`, `clone`, `import`, `mcp.stdio` — each acts on the local process or data
 directory, and none is mounted under `/api` or offered over MCP) and
 `HTTP_ONLY`, which is empty.
 
@@ -498,6 +498,19 @@ push subscriptions and the VAPID keypair (`push.json`), the agent-task
 registry and the assistant's interaction log (`assistant-log.db`). In the
 shipped stack the core's data and the engine's home are two named volumes
 (`vogt-data`, `engine-home`), so the data outlives a pod you reset.
+
+**Clone** (`clone`, same module) is a restore of *another* instance's backup
+that leaves this instance itself. It verifies the manifest as `restore` does,
+copies the stores into a staging directory beside the live ones, migrates them
+there, and sanitises the copy in one audited write before swapping it in: the
+source's live tokens are revoked and its password logins and linked forge
+accounts dropped, this instance's own credentials are carried in (actors
+matched by `identity_ref`), every project's `write_back` becomes `none`,
+sessions the source recorded as running are marked stopped, and the instance id
+stays this instance's, with a clone stamp in `meta` that `status` reports. Of
+the engine's state it copies session history only on request, and never
+`push.json` or the agent-task registry. The operator procedure is
+`DEPLOYMENT.md` §5.
 
 ---
 
