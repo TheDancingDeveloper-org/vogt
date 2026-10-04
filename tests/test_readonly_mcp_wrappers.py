@@ -1,0 +1,290 @@
+"""The read-only MCP wrapper and `git-forgejo`, driven through the real scripts.
+
+`engine/deploy/readonly-mcp.sh` is what `vogt-mcp-bootstrap` registers for the
+optional GitHub, Grafana and Gitea/Forgejo MCP servers, so the read-only
+switches it sets are the contract: a session can neither drop them nor point
+the server at a broader credential. `engine/deploy/git-forgejo.sh` exists
+because the hand-written `git -c http.extraheader="Authorization: token …"`
+split at its spaces in four sessions; it must hand git the header as one
+value, scoped to the forge, and never put the token on git's command line.
+
+Each upstream binary (and git) is replaced by a shim on PATH that records its
+argv and environment, so the tests are offline and exercise only the
+wrappers.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEPLOY = REPO_ROOT / "engine" / "deploy"
+READONLY = DEPLOY / "readonly-mcp.sh"
+GIT_FORGEJO = DEPLOY / "git-forgejo.sh"
+BOOTSTRAP = DEPLOY / "mcp-bootstrap.sh"
+
+pytestmark = pytest.mark.skipif(
+    not (READONLY.is_file() and GIT_FORGEJO.is_file()) or shutil.which("bash") is None,
+    reason="needs engine/deploy (absent in the core-alone job) and bash",
+)
+
+SHIM = """#!/usr/bin/env python3
+import json, os, sys
+with open(os.environ["SHIM_OUT"], "w") as fh:
+    json.dump({"argv": sys.argv, "env": dict(os.environ)}, fh)
+"""
+
+
+def shim_dir(tmp_path: Path, *names: str) -> Path:
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    for name in names:
+        path = bindir / name
+        path.write_text(SHIM, encoding="utf-8")
+        path.chmod(0o755)
+    return bindir
+
+
+def run(
+    script: Path, args: list[str], env: dict[str, str], tmp_path: Path, bindir: Path
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any] | None]:
+    out = tmp_path / "shim.json"
+    if out.exists():
+        out.unlink()
+    full_env = {
+        "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "HOME": str(tmp_path),
+        "SHIM_OUT": str(out),
+        **env,
+    }
+    proc = subprocess.run(
+        ["bash", str(script), *args],
+        env=full_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    recorded = json.loads(out.read_text(encoding="utf-8")) if out.exists() else None
+    return proc, recorded
+
+
+def test_github_is_read_only_with_the_pinned_toolsets(tmp_path: Path) -> None:
+    bindir = shim_dir(tmp_path, "github-mcp-server")
+    proc, rec = run(
+        READONLY,
+        ["github"],
+        {
+            "GITHUB_MCP_TOKEN": "ro-token",
+            # A session trying to widen the server: both must be overridden.
+            "GITHUB_READ_ONLY": "0",
+            "GITHUB_TOOLSETS": "all",
+            "GITHUB_TOOLS": "create_pull_request",
+        },
+        tmp_path,
+        bindir,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert rec is not None
+    argv, env = rec["argv"], rec["env"]
+    assert argv[1:] == ["stdio", "--read-only"]
+    assert env["GITHUB_READ_ONLY"] == "1"
+    assert env["GITHUB_PERSONAL_ACCESS_TOKEN"] == "ro-token"
+    assert env["GITHUB_TOOLSETS"] == (
+        "actions,pull_requests,repos,code_security,dependabot"
+    )
+    assert "GITHUB_TOOLS" not in env
+    assert proc.stdout == ""
+
+
+def test_grafana_disables_writes_and_usage_stats(tmp_path: Path) -> None:
+    bindir = shim_dir(tmp_path, "mcp-grafana")
+    proc, rec = run(
+        READONLY,
+        ["grafana"],
+        {
+            "GRAFANA_URL": "http://grafana.example",
+            "GRAFANA_SERVICE_ACCOUNT_TOKEN": "viewer",
+            "GRAFANA_API_KEY": "admin-key",
+        },
+        tmp_path,
+        bindir,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert rec is not None
+    assert rec["argv"][1:] == [
+        "-t",
+        "stdio",
+        "--disable-write",
+        "--usage-stats=disabled",
+    ]
+    assert "GRAFANA_API_KEY" not in rec["env"]
+
+
+def test_gitea_is_read_only(tmp_path: Path) -> None:
+    bindir = shim_dir(tmp_path, "gitea-mcp")
+    proc, rec = run(
+        READONLY,
+        ["gitea"],
+        {
+            "GITEA_HOST": "https://forge.example",
+            "GITEA_MCP_TOKEN": "ro",
+            "GITEA_READONLY": "false",
+        },
+        tmp_path,
+        bindir,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert rec is not None
+    assert rec["argv"][1:] == ["-t", "stdio", "-r"]
+    assert rec["env"]["GITEA_READONLY"] == "true"
+    assert rec["env"]["GITEA_ACCESS_TOKEN"] == "ro"
+
+
+@pytest.mark.parametrize(
+    ("server", "binary"),
+    [
+        ("github", "github-mcp-server"),
+        ("grafana", "mcp-grafana"),
+        ("gitea", "gitea-mcp"),
+    ],
+)
+def test_missing_token_refuses_without_starting(
+    tmp_path: Path, server: str, binary: str
+) -> None:
+    bindir = shim_dir(tmp_path, binary)
+    proc, rec = run(READONLY, [server], {}, tmp_path, bindir)
+    assert proc.returncode == 64
+    assert rec is None
+    assert proc.stdout == ""
+
+
+def test_git_forgejo_passes_one_scoped_header_outside_argv(tmp_path: Path) -> None:
+    bindir = shim_dir(tmp_path, "git")
+    token = "tok with spaces"  # would split under the unquoted one-liner
+    proc, rec = run(
+        GIT_FORGEJO,
+        ["push", "origin", "main"],
+        {
+            "FORGEJO_TOKEN": token,
+            "FORGEJO_URL": "https://forge.example",
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "user.name",
+            "GIT_CONFIG_VALUE_0": "someone",
+        },
+        tmp_path,
+        bindir,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert rec is not None
+    argv, env = rec["argv"], rec["env"]
+    assert argv[1:] == ["push", "origin", "main"]
+    assert not any(token in arg for arg in argv)
+    assert env["GIT_CONFIG_COUNT"] == "2"
+    assert env["GIT_CONFIG_KEY_0"] == "user.name"
+    assert env["GIT_CONFIG_KEY_1"] == "http.https://forge.example/.extraheader"
+    assert env["GIT_CONFIG_VALUE_1"] == f"Authorization: token {token}"
+    assert token not in proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"FORGEJO_URL": "https://forge.example"},
+        {"FORGEJO_TOKEN": "t"},
+        {"FORGEJO_TOKEN": "t", "FORGEJO_URL": "forge.example"},
+    ],
+)
+def test_git_forgejo_refuses_without_token_or_url(
+    tmp_path: Path, env: dict[str, str]
+) -> None:
+    bindir = shim_dir(tmp_path, "git")
+    proc, rec = run(GIT_FORGEJO, ["status"], env, tmp_path, bindir)
+    assert proc.returncode == 64
+    assert rec is None
+
+
+CLI_SHIM = """#!/usr/bin/env bash
+# A stand-in for `claude`/`codex mcp`: records registrations in a JSON file.
+set -euo pipefail
+db="$HOME/$(basename "$0").json"
+[[ -f "$db" ]] || echo '{}' >"$db"
+[[ "$1" == mcp ]] || exit 0
+shift
+op="$1"; shift
+python3 - "$db" "$op" "$@" <<'PY'
+import json, sys
+db, op, *rest = sys.argv[1:]
+data = json.load(open(db))
+args = [a for a in rest if not a.startswith("--scope") and a not in ("user", "--json")]
+if op == "get":
+    name = args[0]
+    if name not in data:
+        sys.exit(1)
+    print(json.dumps(data[name]))
+elif op == "remove":
+    data.pop(args[0], None)
+elif op == "add":
+    name, cmd = args[0], args[args.index("--") + 1 :] if "--" in args else args[1:]
+    data[name] = {"command": cmd}
+json.dump(data, open(db, "w"))
+PY
+"""
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None, reason="the CLI stand-in needs python3"
+)
+def test_bootstrap_registers_only_servers_whose_token_is_present(
+    tmp_path: Path,
+) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "claude").write_text(CLI_SHIM, encoding="utf-8")
+    (bindir / "claude").chmod(0o755)
+    for name in ("github-mcp-server", "mcp-grafana", "gitea-mcp"):
+        (bindir / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        (bindir / name).chmod(0o755)
+    wrapper = bindir / "vogt-readonly-mcp"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    base_env = {
+        "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "HOME": str(tmp_path),
+        "VOGT_SRC": str(tmp_path / "absent"),
+        "VOGT_READONLY_MCP_WRAPPER": str(wrapper),
+    }
+
+    def bootstrap(extra: dict[str, str]) -> dict[str, Any]:
+        proc = subprocess.run(
+            ["bash", str(BOOTSTRAP)],
+            env={**base_env, **extra},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout == "", "stdout is the MCP transport"
+        loaded: dict[str, Any] = json.loads(
+            (tmp_path / "claude.json").read_text(encoding="utf-8")
+        )
+        return loaded
+
+    first = bootstrap(
+        {"GITHUB_MCP_TOKEN": "x", "GITEA_HOST": "https://f", "GITEA_MCP_TOKEN": "y"}
+    )
+    assert set(first) >= {"github-ro", "forgejo-ro"}
+    assert "grafana-ro" not in first
+    assert first["github-ro"] == {"command": [str(wrapper), "github"]}
+    # No token value ever reaches the stored registration.
+    assert "x" not in json.dumps(first["github-ro"]).replace(str(wrapper), "")
+
+    second = bootstrap({"GITEA_HOST": "https://f", "GITEA_MCP_TOKEN": "y"})
+    assert "github-ro" not in second
+    assert "forgejo-ro" in second

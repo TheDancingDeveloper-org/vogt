@@ -102,12 +102,106 @@ install_vogt_opencode() {
         -- "$VOGT_WRAPPER" >/dev/null
 }
 
+# Optional read-only MCP servers (docs/ENGINE.md §4). Each is registered only
+# while this session holds its token, and unregistered when it does not, so a
+# deployment opts in by adding the token to its agent-auth manifest and opts
+# out by removing it. The registration names `vogt-readonly-mcp <server>` and
+# nothing else: the token stays in the session's environment, read at spawn,
+# and the read-only switches live in the wrapper where a session cannot edit
+# them. Names end in `-ro` so a server an operator registered by hand under
+# the plain name is never replaced or removed.
+# Overridable only so the registration logic can be exercised outside the image.
+readonly READONLY_WRAPPER="${VOGT_READONLY_MCP_WRAPPER:-/usr/local/bin/vogt-readonly-mcp}"
+# name | wrapper argument | upstream binary | variables that enable it (all
+# required) and that Codex must pass through to the server (Codex starts stdio
+# servers with a minimal environment unless told which variables to forward).
+readonly READONLY_SERVERS=(
+    "github-ro|github|github-mcp-server|GITHUB_MCP_TOKEN|VOGT_GITHUB_MCP_TOOLSETS"
+    "grafana-ro|grafana|mcp-grafana|GRAFANA_URL GRAFANA_SERVICE_ACCOUNT_TOKEN|"
+    "forgejo-ro|gitea|gitea-mcp|GITEA_HOST GITEA_MCP_TOKEN|"
+)
+
+readonly_wanted() {
+    local var
+    for var in $1; do
+        [[ -n "${!var:-}" ]] || return 1
+    done
+    return 0
+}
+
+readonly_codex() {
+    local name="$1" arg="$2" required="$3" optional="$4" config vars var
+    command -v codex >/dev/null 2>&1 || return 0
+    config="${CODEX_HOME:-$HOME/.codex}/config.toml"
+    if [[ "$5" != "yes" ]]; then
+        # Remove only what this script wrote: an entry running the wrapper.
+        if codex mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER"; then
+            codex mcp remove "$name" >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+    vars=""
+    for var in $required $optional; do
+        vars+="${vars:+, }\"$var\""
+    done
+    if codex mcp get "$name" --json 2>/dev/null | tr -d ' \n' \
+        | grep -qF "\"env_vars\":[${vars// /}]"; then
+        codex mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER" && return 0
+    fi
+    codex mcp remove "$name" >/dev/null 2>&1 || true
+    # `codex mcp add` cannot set `env_vars`, so the table is written whole. A
+    # new table appended at the end of the file is valid TOML wherever the
+    # file's other tables are.
+    mkdir -p "$(dirname "$config")"
+    printf '\n[mcp_servers.%s]\ncommand = "%s"\nargs = ["%s"]\nenv_vars = [%s]\n' \
+        "$name" "$READONLY_WRAPPER" "$arg" "$vars" >>"$config"
+}
+
+readonly_claude() {
+    local name="$1" arg="$2"
+    command -v claude >/dev/null 2>&1 || return 0
+    if [[ "$3" != "yes" ]]; then
+        if claude mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER"; then
+            claude mcp remove --scope user "$name" >/dev/null 2>&1 || true
+        fi
+        return 0
+    fi
+    # Claude Code hands a stdio server the session's own environment, so the
+    # registration needs no `-e`: an `-e TOKEN=...` would store the value.
+    if claude mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER"; then
+        return 0
+    fi
+    claude mcp remove --scope user "$name" >/dev/null 2>&1 || true
+    claude mcp add --scope user "$name" -- "$READONLY_WRAPPER" "$arg" >/dev/null
+}
+
+install_readonly_servers() {
+    local entry name arg bin required optional wanted
+    for entry in "${READONLY_SERVERS[@]}"; do
+        IFS='|' read -r name arg bin required optional <<<"$entry"
+        wanted=no
+        if readonly_wanted "$required"; then
+            if [[ -x "$READONLY_WRAPPER" ]] && command -v "$bin" >/dev/null 2>&1; then
+                wanted=yes
+            else
+                printf 'mcp-bootstrap: %s token present but %s or %s is not installed; not registered\n' \
+                    "$name" "$READONLY_WRAPPER" "$bin" >&2
+            fi
+        fi
+        readonly_codex "$name" "$arg" "$required" "$optional" "$wanted" \
+            || printf 'mcp-bootstrap: codex registration of %s failed\n' "$name" >&2
+        readonly_claude "$name" "$arg" "$wanted" \
+            || printf 'mcp-bootstrap: claude registration of %s failed\n' "$name" >&2
+    done
+}
+
 # Vogt registrations are best-effort: a failure here must not cost an agent its
 # git/gh credentials.
 install_vogt_bridge
 install_vogt_codex
 install_vogt_claude
 install_vogt_opencode
+install_readonly_servers
 
 # stderr, like every other message in this script, because of who calls it.
 #

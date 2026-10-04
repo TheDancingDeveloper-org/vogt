@@ -145,9 +145,11 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 |---|---|---|---|
 | `vogt-entrypoint` | `deploy/entrypoint.sh` | container supervisor, above | yes |
 | `vogt-agent-cli-install` | `deploy/agent-cli-install.sh` | applies the runtime agent-CLI pin at boot and on `POST /api/agent-clis/{tool}` (§5) | only with agent CLIs present |
-| `vogt-mcp-bootstrap` | `deploy/mcp-bootstrap.sh` | registers Vogt's MCP server with the agent CLIs present in the image | optional — without it an agent registers MCP servers by hand |
+| `vogt-mcp-bootstrap` | `deploy/mcp-bootstrap.sh` | registers Vogt's MCP server with the agent CLIs present in the image, and the read-only third-party servers whose tokens the session holds (§4) | optional — without it an agent registers MCP servers by hand |
 | `vogt-mcp` | `deploy/vogt-mcp-auth.sh` | stdio bridge to Vogt's `/mcp` for clients that cannot take a bearer directly; uses the session's own token | optional |
 | `vogt-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml` | optional |
+| `vogt-readonly-mcp` | `deploy/readonly-mcp.sh` | starts the GitHub, Grafana or Gitea/Forgejo MCP server in read-only mode with the session's token (§4) | optional — registered only when its token is present |
+| `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
 | `codex` wrapper | `deploy/codex-full-access.sh` | runs Codex without its nested sandbox, because the pod is the isolation boundary | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
@@ -297,7 +299,9 @@ and serves no Vogt.
 ## 4. Agent-facing MCP servers inside the pod
 
 The runtime image bundles MCP servers so agents running in a session can
-reach a Rust LSP, GitHub and Vogt itself without the user wiring anything.
+reach a Rust LSP and Vogt itself without the user wiring anything, and —
+when a deployment hands sessions the token — GitHub, Grafana and a
+Gitea/Forgejo forge, read-only.
 Everything in this section is about the *image*; a from-source engine has
 none of it and loses nothing the engine's own routes provide.
 
@@ -314,16 +318,47 @@ claude mcp add --scope project rust-analyzer -- vogt-rust-analyzer-mcp
 Set `VOGT_ENGINE_RUST_ANALYZER_WORKSPACE` for that MCP entry if a client launches
 it from a non-Rust directory.
 
-**GitHub.** `/usr/local/bin/github-mcp-server`, resolved to latest when the
-pod base is built. It needs `GITHUB_PERSONAL_ACCESS_TOKEN` — a PAT you supply
-to the session's environment (the `agent-auth` helper, where configured,
-exports the manifest entry named by `ENGINE_AGENT_AUTH_GH_TOKEN_FROM` as
-`$GH_TOKEN`).
+**GitHub, Grafana, Gitea/Forgejo — optional, read-only.** The image carries
+three third-party MCP servers at exact versions, each tarball checked against a
+sha256 recorded in `engine/Dockerfile` (a bump is an edit there):
+`github-mcp-server` 1.14.0, `mcp-grafana` 2.0.0 and `gitea-mcp` 1.8.0.
+`vogt-mcp-bootstrap` registers each one with Claude Code and Codex **only
+while the session holds its token**, and removes the registration when it
+does not, so a deployment turns one on by adding its token to the session's
+environment (normally a launch-time line in `ENGINE_AGENT_AUTH_SECRETS`, §9 —
+an `ondemand` line is not in the environment when the bootstrap runs, so it
+does not register anything) and off by removing it.
 
-```bash
-codex mcp add github -- env GITHUB_PERSONAL_ACCESS_TOKEN=$GH_TOKEN github-mcp-server stdio
-claude mcp add --scope project github -e GITHUB_PERSONAL_ACCESS_TOKEN=$GH_TOKEN -- github-mcp-server stdio
-```
+| Registered as | Turned on by | Read-only because |
+|---|---|---|
+| `github-ro` | `GITHUB_MCP_TOKEN` — a fine-grained, read-only PAT; `VOGT_GITHUB_MCP_TOOLSETS` overrides the toolsets (default `actions,pull_requests,repos,code_security,dependabot`) | `--read-only` and `GITHUB_READ_ONLY=1` (write tools are not offered), plus the token's scope |
+| `grafana-ro` | `GRAFANA_URL` + `GRAFANA_SERVICE_ACCOUNT_TOKEN` — a Viewer-role service account | `--disable-write` (create/update tools and raw-SQL query tools are not offered), plus the Viewer role; `--usage-stats=disabled` |
+| `forgejo-ro` | `GITEA_HOST` + `GITEA_MCP_TOKEN` — a read-scoped token; works against Forgejo's Gitea-compatible API | `-r` and `GITEA_READONLY=true` (only read tools are offered), plus the token's scope |
+
+The registration stores `vogt-readonly-mcp <server>` and nothing else: no
+token value (Claude Code passes a stdio server the session's environment;
+Codex is told which variables to pass with `env_vars`) and no flag a session
+could edit. `vogt-readonly-mcp` (`deploy/readonly-mcp.sh`) renames the token
+to the variable the upstream server reads and sets the read-only switches on
+every start, overriding any `GITHUB_TOOLSETS`, `GITHUB_READ_ONLY` or
+`GITEA_READONLY` the session carries. The `-ro` names leave a server an
+operator registered by hand under its plain name untouched. Read-only rests
+on the token as well as on the server's mode, so each token should be issued
+read-only even though the mode already hides write tools.
+
+Cloudflare is not among them. Cloudflare's official MCP servers are hosted
+(`*.mcp.cloudflare.com`), so there is no version to pin, and none has a
+read-only mode — only the API token's scopes would make one read-only.
+
+**`git-forgejo`.** For git itself against a Gitea/Forgejo host, the image
+installs `git-forgejo` on PATH (so `git forgejo …` works too). It reads
+`FORGEJO_TOKEN` and `FORGEJO_URL` (falling back to `GITEA_HOST`), and hands git
+`http.<FORGEJO_URL>/.extraheader=Authorization: token …` through
+`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` — one value no shell
+re-splits, scoped to the forge so a submodule or redirect elsewhere is not
+handed the token, and never on git's command line where `/proc/<pid>/cmdline`
+shows it. The hand-written `git -c http.extraheader="Authorization: token
+$TOKEN"` breaks the moment a layer of shell drops its quotes.
 
 **Vogt.** A session started for a project or work item registers Vogt's own MCP
 server automatically, carrying a per-session actor-scoped token, so an agent's
@@ -333,7 +368,7 @@ identity. The session exports the endpoint as `VOGT_URL` and
 with neither set the bootstrap falls back to the front door on loopback.
 
 Any further MCP server an agent should reach is registered by hand inside the
-session, the way the two above show; the image bakes in no other bridge.
+session, the way the Rust LSP entry above shows.
 
 ---
 
