@@ -2916,9 +2916,16 @@ async fn session_prompt_is_written_to_a_file_the_child_is_pointed_at() {
         .join(format!("{id}.md"));
     assert_eq!(std::fs::read_to_string(&prompt_path).unwrap(), brief);
 
-    let printed = session_output_after_exit(&client, &base, &id).await;
+    let path_line = format!("file=[{}]", prompt_path.display());
+    let printed = session_output_after_exit(
+        &client,
+        &base,
+        &id,
+        &[&path_line, "Fix the flaky forge test."],
+    )
+    .await;
     assert!(
-        printed.contains(&format!("file=[{}]", prompt_path.display())),
+        printed.contains(&path_line),
         "child should be told the prompt file path; got {printed:?}"
     );
     assert!(
@@ -2959,7 +2966,7 @@ async fn a_session_without_a_prompt_gets_no_file_and_no_variable() {
         .unwrap();
     let id = created["id"].as_str().unwrap().to_string();
 
-    let printed = session_output_after_exit(&client, &base, &id).await;
+    let printed = session_output_after_exit(&client, &base, &id, &["file=[]"]).await;
     assert!(
         printed.contains("file=[]"),
         "no brief means no variable; got {printed:?}"
@@ -3110,9 +3117,22 @@ async fn artifact_cleanup_collects_prompts_of_sessions_the_registry_forgot() {
 }
 
 /// Run a session to completion and return everything it printed.
-async fn session_output_after_exit(client: &reqwest::Client, base: &str, id: &str) -> String {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let detail: SessionDetail = loop {
+/// The scrollback of a session that has exited, once it holds every string
+/// in `expected`.
+///
+/// The exit code and the PTY reader's last bytes race: on a loaded runner the
+/// session can report its exit while the tail of the child's output is still
+/// on its way into the scrollback. So this polls until both the exit and the
+/// expected content are visible, and on its deadline returns what it has for
+/// the caller's assertion to report.
+async fn session_output_after_exit(
+    client: &reqwest::Client,
+    base: &str,
+    id: &str,
+    expected: &[&str],
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
         let detail: SessionDetail = client
             .get(format!("{base}/api/sessions/{id}"))
             .send()
@@ -3121,21 +3141,24 @@ async fn session_output_after_exit(client: &reqwest::Client, base: &str, id: &st
             .json()
             .await
             .unwrap();
-        if detail.summary.exit_code.is_some() && detail.summary.scrollback_bytes > 0 {
-            break detail;
+        let exited = detail.summary.exit_code.is_some() && detail.summary.scrollback_bytes > 0;
+        let snapshot = base64::engine::general_purpose::STANDARD
+            .decode(detail.scrollback_base64.as_bytes())
+            .unwrap();
+        let printed = String::from_utf8_lossy(&snapshot).into_owned();
+        if exited && expected.iter().all(|want| printed.contains(want)) {
+            return printed;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "session {id} never exited with output; exit_code={:?}, scrollback_bytes={}",
-            detail.summary.exit_code,
-            detail.summary.scrollback_bytes,
-        );
+        if tokio::time::Instant::now() >= deadline {
+            assert!(
+                exited,
+                "session {id} never exited with output; exit_code={:?}, scrollback_bytes={}",
+                detail.summary.exit_code, detail.summary.scrollback_bytes,
+            );
+            return printed;
+        }
         tokio::time::sleep(Duration::from_millis(40)).await;
-    };
-    let snapshot = base64::engine::general_purpose::STANDARD
-        .decode(detail.scrollback_base64.as_bytes())
-        .unwrap();
-    String::from_utf8_lossy(&snapshot).into_owned()
+    }
 }
 
 async fn ws_attach(
