@@ -2991,7 +2991,7 @@ async fn an_agent_started_with_a_brief_is_told_to_read_it() {
         .join("sessions")
         .join(format!("{id}.md"));
 
-    let printed = session_output_after_exit(&client, &base, &id).await;
+    let printed = session_output_after_exit(&client, &base, &id, &["suggest=["]).await;
     assert!(
         printed.contains(&format!("arg=[--session-id]\r\narg=[{id}]")),
         "a fresh claude launch should carry the session id; got {printed:?}"
