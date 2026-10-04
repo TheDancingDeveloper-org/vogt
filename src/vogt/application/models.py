@@ -244,6 +244,18 @@ class StoreCounts(Result):
     initiatives: int
 
 
+class CloneInfo(Result):
+    """That this instance is a copy of another one, and of when."""
+
+    source_instance_id: str = Field(
+        description="The instance whose backup this instance was cloned from."
+    )
+    cloned_at: datetime
+    backup_taken_at: datetime = Field(
+        description="When the source's backup was taken: the copy's as-of time."
+    )
+
+
 class StatusResult(Result):
     vogt_version: str
     instance_id: str
@@ -253,6 +265,13 @@ class StatusResult(Result):
     declared_schema_version: int
     observed_schema_version: int
     counts: StoreCounts
+    clone: CloneInfo | None = Field(
+        default=None,
+        description=(
+            "Set when this instance's data was cloned from another instance's "
+            "backup (`vogt clone`); absent on an instance that never was."
+        ),
+    )
 
 
 class PlaceMetricsParams(Params):
@@ -2228,6 +2247,55 @@ class RestoreResult(Result):
             "here rather than discovered there."
         ),
     )
+
+
+class CloneParams(Params):
+    """Restore another instance's backup here, as a copy rather than a move."""
+
+    source: str = Field(description="A backup directory containing manifest.json.")
+    confirm: bool = Field(
+        default=False, description="Required: this replaces the live stores."
+    )
+    include_engine_state: bool = Field(
+        default=False,
+        description=(
+            "Also copy the source engine's session history (history.db, "
+            "session-logs/, assistant-log.db) into this engine's state "
+            "directory. Push subscriptions and agent tasks are never copied."
+        ),
+    )
+    reason: Reason
+
+
+class CloneResult(Result):
+    """What came across, and what was deliberately left behind."""
+
+    source: str
+    instance_id: str = Field(description="This instance's id, which it keeps.")
+    source_instance_id: str
+    restored_from: datetime = Field(description="When the source's backup was taken.")
+    cloned_at: datetime
+    migrations_applied: list[str]
+    declared_schema_version: int
+    tokens_kept: int = Field(description="This instance's own tokens, carried over.")
+    source_tokens_revoked: int = Field(
+        description="Live tokens from the source, revoked in the copy."
+    )
+    password_logins_kept: int
+    source_password_logins_dropped: int
+    forge_accounts_kept: int
+    source_forge_accounts_dropped: int
+    write_back_reset: list[str] = Field(
+        description="Projects whose write-back was armed in the source, now `none`."
+    )
+    sessions_closed: int = Field(
+        description="Source sessions recorded as running, now recorded as stopped."
+    )
+    engine_state: str = Field(
+        description="What happened to the session engine's state directory."
+    )
+    import_root_then: str | None = None
+    import_root_now: str | None = None
 
 
 class ExportParams(Params):

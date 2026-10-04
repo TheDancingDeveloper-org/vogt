@@ -44,6 +44,11 @@ LOCAL_ONLY: Mapping[str, str] = {
         "and every client's view of the instance changes underneath them. "
         "That is an operator action taken at the machine, not a request."
     ),
+    "clone": (
+        "Replaces the live stores from a path on the server's filesystem, "
+        "exactly as restore does, so it is an operator action at the machine "
+        "for the same reason."
+    ),
     "import": (
         "Reads a file from the machine holding the data directory, for the "
         "same reason as backup."

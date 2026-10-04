@@ -1810,6 +1810,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `user.remove` | Operator-only | Unavailable: Admin identity removal. |
 | `backup` | Operator-only | Unavailable: Local backup destination; no remote MCP tool. |
 | `restore` | Operator-only | Unavailable: Replaces instance stores; no remote MCP tool. |
+| `clone` | Operator-only | Unavailable: Replaces instance stores with another instance's copy; no remote MCP tool. |
 | `export` | Operator-only | Unavailable: Writes a host filesystem destination, despite its registry read classification. |
 | `import` | Operator-only | Unavailable: Local bulk state import; no remote MCP tool. |
 | `forge.onboard` | Confirmation-gated | Available after approval: Read a repository's existing issues, PRs, labels and releases into observations. Changes nothing upstream. |

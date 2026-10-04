@@ -7,7 +7,8 @@ the registry; they never reach past it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 from vogt.adapters.engine import EngineClient
 from vogt.adapters.git import Cloner, Pusher, clone_repository, push_branch
@@ -133,5 +134,30 @@ def build_context(
             public_identity
             if public_identity is not None
             else identity_from_config(resolved_config)
+        ),
+    )
+
+
+def with_stores_at(ctx: AppContext, data_dir: Path) -> AppContext:
+    """The same context over the two store files in another directory.
+
+    For `clone`, which migrates and sanitises a staged copy of a backup
+    before it replaces the live stores — so a failure part-way leaves the
+    live stores exactly as they were. The concrete store classes are wired
+    here, at the composition root, like everywhere else.
+    """
+    synchronous = ctx.config.sqlite_synchronous
+    return replace(
+        ctx,
+        declared=SqliteDeclaredStore(
+            data_dir / ctx.config.declared_db_path.name,
+            clock=ctx.clock,
+            id_factory=ctx.id_factory,
+            synchronous=synchronous,
+        ),
+        observed=SqliteObservedStore(
+            data_dir / ctx.config.observed_db_path.name,
+            clock=ctx.clock,
+            synchronous=synchronous,
         ),
     )
