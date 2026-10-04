@@ -15,8 +15,7 @@ import androidx.test.platform.app.InstrumentationRegistry;
  * <p>{@link VoiceServiceLifecycleTest} carries its own inlined copies of these
  * (it landed first, self-contained); the later tiers — permission denial,
  * process reclaim, screen-off survival — share this so the polling and
- * permission plumbing is written once. Everything here is deliberately free of
- * java.util.function (API 24) so it stays valid under the app's minSdk 23.
+ * permission plumbing is written once.
  */
 final class VoiceServiceTestSupport {
 
@@ -25,7 +24,7 @@ final class VoiceServiceTestSupport {
     static final String POST_NOTIFICATIONS = "android.permission.POST_NOTIFICATIONS";
     static final String RECORD_AUDIO = "android.permission.RECORD_AUDIO";
 
-    /** A pollable condition — avoids java.util.function (API 24) under minSdk 23. */
+    /** A pollable condition. */
     interface Condition {
         boolean met();
     }
