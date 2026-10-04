@@ -224,6 +224,10 @@ class ForgeIssuesCollector(_ForgeSyncCollector):
                 "state": item.state,
                 "labels": list(item.labels),
                 "author": item.author,
+                # Who the author is, as the forge reported it: the account
+                # type (`Bot` for an app) and their association with the repo.
+                "author_type": item.author_type,
+                "author_association": item.author_association,
                 "assignees": list(item.assignees),
                 "comments": item.comments,
                 # Carried so an initiative tracking issue is observed
@@ -272,6 +276,8 @@ class ForgePullsCollector(_ForgeSyncCollector):
                 "state": "merged" if item.merged else item.state,
                 "draft": item.draft,
                 "author": item.author,
+                "author_type": item.author_type,
+                "author_association": item.author_association,
                 "head": item.head,
                 "head_ref": item.head_ref,
                 "base": item.base,

@@ -250,6 +250,20 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    inbox_bot_logins: tuple[str, ...] = Field(
+        default=("dependabot", "renovate", "renovate-bot", "github-actions"),
+        description=(
+            "Forge logins the Inbox treats as bots even when the forge does "
+            "not mark them as one. Matched case-insensitively, with or "
+            "without a `[bot]` suffix. An account the forge reports as a "
+            "`Bot`, or whose login ends in `[bot]`, is a bot regardless. "
+            "Bots are never 'external', so this list is what keeps "
+            "automation out of the Inbox's *External people only* filter. "
+            "Applied when the Inbox is read, so a change here needs no "
+            "re-sweep."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     marker_file_extensions: tuple[str, ...] = Field(
         default=(
             ".py",

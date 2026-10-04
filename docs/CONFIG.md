@@ -25,6 +25,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `contract_required_meta` | `VOGT_CONTRACT_REQUIRED_META` | list of strings | `name`, `lifecycle_state`, `owner` | behaviour |
 | `contract_version` | `VOGT_CONTRACT_VERSION` | string | `v1` | behaviour |
 | `marker_promotion_patterns` | `VOGT_MARKER_PROMOTION_PATTERNS` | list of strings | `TODO(vogt)`, `FIXME(vogt)` | behaviour |
+| `inbox_bot_logins` | `VOGT_INBOX_BOT_LOGINS` | list of strings | `dependabot`, `renovate`, `renovate-bot`, `github-actions` | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `branch_binding_patterns` | `VOGT_BRANCH_BINDING_PATTERNS` | list of strings | `(?i)\bwi-?(?P<n>\d+)\b`, `(?i)\bgh-(?P<forge>\d+)\b` | behaviour |
 | `branch_binding_template` | `VOGT_BRANCH_BINDING_TEMPLATE` | string | `wi-{number}` | behaviour |
@@ -105,6 +106,10 @@ Names which contract a recorded compliance status was evaluated against. If the 
 ### `marker_promotion_patterns`
 
 Source markers containing one of these enter backlog and bug views. Every other marker is still observed, still queryable and still counted; it just does not claim to be work. Widening this is how you drown the ranked view.
+
+### `inbox_bot_logins`
+
+Forge logins the Inbox treats as bots even when the forge does not mark them as one. Matched case-insensitively, with or without a `[bot]` suffix. An account the forge reports as a `Bot`, or whose login ends in `[bot]`, is a bot regardless. Bots are never 'external', so this list is what keeps automation out of the Inbox's *External people only* filter. Applied when the Inbox is read, so a change here needs no re-sweep.
 
 ### `marker_file_extensions`
 

@@ -78,7 +78,9 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
             ctx.observed, transport=ctx.forge_transport
         ):
             registry.add(sync_collector)
-        for read_collector in forge_read_collectors(transport=ctx.forge_transport):
+        for read_collector in forge_read_collectors(
+            transport=ctx.forge_transport, store=ctx.observed
+        ):
             registry.add(read_collector)
     if ctx.engine is not None:
         registry.add(SessionOutcomeCollector(ctx.engine, _DeclaredSessions(ctx)))

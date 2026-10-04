@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 
+from vogt.adapters.forge.actors import RESOLVE_BUDGET, RESOLVER, ActorResolver
 from vogt.adapters.forge.kinds import (
     COLLECTOR_CHECKS,
     COLLECTOR_LABELS,
@@ -34,6 +35,7 @@ from vogt.adapters.forge.registry import provider_for, unsupported_reason
 from vogt.adapters.github.client import Transport
 from vogt.collectors.base import CollectorContext, Finding, finding
 from vogt.core.entities import Project
+from vogt.storage.interface import ObservedStore
 
 
 class _ForgeReadCollector:
@@ -218,14 +220,46 @@ class ForgeNotificationsCollector(_ForgeReadCollector):
         "not collected here"
     )
 
+    def __init__(
+        self,
+        *,
+        transport: Transport | None = None,
+        store: ObservedStore | None = None,
+        resolver: ActorResolver | None = None,
+    ) -> None:
+        super().__init__(transport=transport)
+        # Read-only: the previous observation of a thread is the persistent
+        # author cache, the same way the sync collectors read their
+        # watermarks. Nothing here writes the store.
+        self._store = store
+        self._resolver = RESOLVER if resolver is None else resolver
+
     def _read(
         self, provider: ForgeProvider, ref: RepoRef, project: Project
     ) -> Iterable[Finding]:
-        for note in provider.notifications(ref):
+        notes = list(provider.notifications(ref))
+        prior: dict[str, dict[str, object]] = {}
+        if self._store is not None and notes:
+            prior = {
+                observation.subject_key: observation.payload
+                for observation in self._store.latest(
+                    kinds=(KIND_NOTIFICATION,),
+                    project_id=project.id,
+                    limit=len(notes) * 4 + 100,
+                )
+            }
+        budget = [RESOLVE_BUDGET]
+        # Newest first, so a spent budget leaves the oldest threads unknown.
+        ordered = sorted(notes, key=lambda note: note.updated_at or "", reverse=True)
+        for note in ordered:
+            subject_key = f"gh:{ref.slug}!{note.thread}"
+            actor = self._resolver.actor_block(
+                provider, ref, note, prior=prior.get(subject_key), budget=budget
+            )
             yield finding(
                 kind=KIND_NOTIFICATION,
                 # Unchanged from the retired `gh-notifications` collector.
-                subject_key=f"gh:{ref.slug}!{note.thread}",
+                subject_key=subject_key,
                 project=project,
                 source_url=note.source_url,
                 promoted=False,  # never promoted
@@ -239,12 +273,15 @@ class ForgeNotificationsCollector(_ForgeReadCollector):
                     "last_read_at": note.last_read_at,
                     "repo": ref.slug,
                     "source": "forge notification",
+                    # Who caused it, resolved at collect time (never on a read
+                    # path); None when it could not be resolved this sweep.
+                    "actor": actor,
                 },
             )
 
 
 def forge_read_collectors(
-    *, transport: Transport | None = None
+    *, transport: Transport | None = None, store: ObservedStore | None = None
 ) -> list[_ForgeReadCollector]:
     """The provider-backed read collectors (checks, releases, labels, posture,
     notifications). Registered whenever a forge is configured; the provider is
@@ -254,7 +291,7 @@ def forge_read_collectors(
         ForgeReleasesCollector(transport=transport),
         ForgeLabelsCollector(transport=transport),
         ForgePostureCollector(transport=transport),
-        ForgeNotificationsCollector(transport=transport),
+        ForgeNotificationsCollector(transport=transport, store=store),
     ]
 
 

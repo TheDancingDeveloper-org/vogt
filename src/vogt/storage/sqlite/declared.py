@@ -20,6 +20,7 @@ from typing import Literal
 from vogt.core.clock import Clock, from_iso, to_iso, utc_now
 from vogt.core.entities import (
     Actor,
+    ActorPreference,
     AuditRecord,
     AuthDecision,
     CodingSession,
@@ -1012,6 +1013,24 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_drift(row) for row in rows]
 
+    # -- actor preferences --------------------------------------------------
+
+    def actor_preference(self, *, actor_id: str, key: str) -> ActorPreference | None:
+        row = self._conn.execute(
+            "SELECT actor_id, key, value, version, updated_at "
+            "FROM actor_preferences WHERE actor_id = ? AND key = ?",
+            (actor_id, key),
+        ).fetchone()
+        return None if row is None else _row_to_actor_preference(row)
+
+    def actor_preferences(self, actor_id: str) -> list[ActorPreference]:
+        rows = self._conn.execute(
+            "SELECT actor_id, key, value, version, updated_at "
+            "FROM actor_preferences WHERE actor_id = ? ORDER BY key",
+            (actor_id,),
+        ).fetchall()
+        return [_row_to_actor_preference(row) for row in rows]
+
     # -- inbox triage -------------------------------------------------------
 
     def inbox_triage_by_key(self, entry_key: str) -> InboxTriage | None:
@@ -1216,6 +1235,10 @@ class SqliteReadView:
             )
             for row in rows
         ]
+
+    def latest_event_seq(self) -> int:
+        row = self._conn.execute("SELECT MAX(seq) AS seq FROM events").fetchone()
+        return 0 if row is None or row["seq"] is None else int(row["seq"])
 
     def list_events(
         self, *, after: int, limit: int, entity_id: str | None = None
@@ -1911,6 +1934,27 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def upsert_actor_preference(self, preference: ActorPreference) -> None:
+        values = (
+            json.dumps(preference.value, sort_keys=True),
+            preference.version,
+            to_iso(preference.updated_at),
+            preference.actor_id,
+            preference.key,
+        )
+        # Portable upsert, as `upsert_forge_account` does it.
+        cursor = self._conn.execute(
+            "UPDATE actor_preferences SET value = ?, version = ?, updated_at = ? "
+            "WHERE actor_id = ? AND key = ?",
+            values,
+        )
+        if cursor.rowcount == 0:
+            self._conn.execute(
+                "INSERT INTO actor_preferences (value, version, updated_at, "
+                "actor_id, key) VALUES (?, ?, ?, ?, ?)",
+                values,
+            )
+
     def upsert_inbox_triage(self, triage: InboxTriage) -> None:
         self._conn.execute(
             "INSERT INTO inbox_triage (entry_key, state, snooze_until, actor_id, "
@@ -2577,6 +2621,17 @@ def _row_to_drift(row: sqlite3.Row) -> DriftProposal:
         resolution_reason=(
             None if row["resolution_reason"] is None else str(row["resolution_reason"])
         ),
+    )
+
+
+def _row_to_actor_preference(row: sqlite3.Row) -> ActorPreference:
+    value = json.loads(str(row["value"]))
+    return ActorPreference(
+        actor_id=str(row["actor_id"]),
+        key=str(row["key"]),
+        value=value if isinstance(value, dict) else {},
+        version=int(row["version"]),
+        updated_at=from_iso(str(row["updated_at"])),
     )
 
 

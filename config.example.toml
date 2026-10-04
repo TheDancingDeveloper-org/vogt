@@ -60,6 +60,10 @@
 # default policy: behaviour
 # marker_promotion_patterns = ["TODO(vogt)", "FIXME(vogt)"]
 
+# Forge logins the Inbox treats as bots even when the forge does not mark them as one. Matched case-insensitively, with or without a `[bot]` suffix. An account the forge reports as a `Bot`, or whose login ends in `[bot]`, is a bot regardless. Bots are never 'external', so this list is what keeps automation out of the Inbox's *External people only* filter. Applied when the Inbox is read, so a change here needs no re-sweep.
+# default policy: behaviour
+# inbox_bot_logins = ["dependabot", "renovate", "renovate-bot", "github-actions"]
+
 # File types the marker collector reads. Configuration rather than a hard-coded list, because which extensions hold source is a workspace's business, not Vogt's.
 # default policy: behaviour
 # marker_file_extensions = [".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rb", ".sh", ".sql", ".toml", ".yaml", ".yml", ".md"]

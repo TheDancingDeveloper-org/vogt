@@ -82,7 +82,7 @@ project (DESIGN.md §4.1).
 
 | Scope | Gates |
 |---|---|
-| `read` | every read |
+| `read` | every read, plus writes that touch only the caller's own state (`auth.logout`, `preference.set`) |
 | `work.write` | work-item writes — create, transition, comment |
 | `project.write` | project register/import and project-level writes |
 | `writeback` | exactly `forge.writeback` (arming forge write-back) |
@@ -170,6 +170,46 @@ docker exec <core-container> vogt user remove --username ada --reason "<why>"
 docker exec <core-container> \
   vogt token issue --actor <ref> --name <n> --scopes read,work.write,project.write,writeback --reason "<why>"
 ```
+
+## The Inbox: who caused it, saved filters, and the badge
+
+- **Actor fields.** Every `inbox.list` entry carries `actor_login`,
+  `actor_kind` (`human` | `bot`, `null` when unresolved) and `actor_relation`
+  (`org_member` | `external` | `unknown`). A GitHub notification thread names
+  no author, so the notifications collector follows the thread's
+  `latest_comment_url` (else the subject) **at collect time**, cached per
+  `(url, updated_at)` and bounded per sweep, and stores the raw facts
+  (`login`, `user_type`, `association`, `org_member`) on the observation's
+  `actor` block. Reads classify from those stored facts and never call the
+  forge. *External* means not a member of the repository's owning org: the
+  org's member list (cached for an hour) is the source of truth, a reported
+  `MEMBER`/`OWNER` association also counts as a member, outside
+  collaborators are external, and with no readable list the association
+  decides. A bot is `user.type == "Bot"`, a login ending `[bot]`, or a login
+  on `inbox_bot_logins` (default `dependabot`, `renovate`, `renovate-bot`,
+  `github-actions`), and is never external. Drift, CI and agent entries are
+  the instance itself: `bot`, `org_member`. Issue and PR observations also
+  keep `author_type` and `author_association`.
+- **`inbox.list --actor`** — `any` (default), `external`, `org`, `bot`,
+  server-side, so paging and `counts` agree with the filter; a cursor belongs
+  to its filter. Under `external`, `actor_unknown_hidden` says how many
+  otherwise-matching entries were hidden because their author is unknown.
+- **`preference.get` / `preference.set`** (`GET`/`POST /api/preferences`,
+  `vogt preference get|set`, MCP `preference_get`/`preference_set`) — the
+  caller's own settings, a JSON object per namespaced key, versioned. `set`
+  takes `value` (JSON text from the CLI; `{}` clears), optional
+  `expected_version` (0 = only if never written; a mismatch is a `409`
+  `preference_version_conflict`) and a `reason`; it is audited like any
+  declared write and needs only `read`, because it can only write the
+  caller's own row. `inbox.filter` is validated:
+  `{"sources": [...] | null, "actor": "any|external|org|bot",
+  "triage_states": ["active", ...]}`.
+- **`place.metrics`** — `inbox_active` is the badge: the count under the
+  caller's saved `inbox.filter` (the same answer `inbox.list` gives under it;
+  free-text search is client-side and never counted). `inbox_active_unfiltered`
+  is every active entry and `inbox_filter` the filter applied (`null` = none).
+  The count reads only stored fields, and one Inbox projection serves every
+  badge read until the declared revision or the event feed moves (at most 5 s).
 
 ## See also
 
