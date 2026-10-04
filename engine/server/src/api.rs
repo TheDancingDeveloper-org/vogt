@@ -11,7 +11,7 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
-use vogt_engine_contract::{OkResponse, SessionDetail, SessionSummary};
+use vogt_engine_contract::{OkResponse, SessionDetail, SessionScreen, SessionSummary};
 
 use crate::{app::AppState, error::Result, pty::SessionSpec};
 
@@ -51,6 +51,18 @@ pub async fn get_session(
         scrollback_pos: pos,
         scrollback_base64: base64::engine::general_purpose::STANDARD.encode(&snap),
     }))
+}
+
+/// The session's current terminal screen, rendered: visible rows as text,
+/// cursor, title, and whether the program is ready for input. Gated like
+/// `GET /api/sessions/{id}` (the `sessions` capability), since it is a read
+/// of live output.
+pub async fn get_session_screen(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<SessionScreen>> {
+    let s = state.sessions.get(id)?;
+    Ok(Json(crate::screen::session_screen(s).await?))
 }
 
 #[derive(Debug, Deserialize)]

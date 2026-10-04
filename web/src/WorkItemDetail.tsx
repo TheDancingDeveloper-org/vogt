@@ -365,14 +365,16 @@ function liveness(session: SessionSummary, engineNote: string | null): Liveness 
 /**
  * Still running, for the freshness downgrade the trust rule's second clause asks for.
  *
- * `errored` counts as not running: the session is still there, but nothing is
+ * `errored` and `exited` count as not running: the session is still there, but nothing is
  * being produced by it, so evidence behind it is not mid-flight. An engine
  * that could not be asked yields false here — an unknown is not a claim that
  * something is running, in either direction.
  */
 function isLive(session: SessionSummary): boolean {
   if (session.stopped_at) return false;
-  if (session.activity) return session.activity !== "errored";
+  if (session.activity) {
+    return session.activity !== "errored" && session.activity !== "exited";
+  }
   return session.alive === true;
 }
 

@@ -1,6 +1,13 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// What a session's terminal is doing.
+///
+/// `idle`, `running` and `waiting-for-input` are the live states and are only
+/// ever reported while the child process is alive. `exited` (exit code 0) and
+/// `errored` (any other exit code) are terminal: once a session's child has
+/// exited its activity is one of these two and never goes back, whatever
+/// late output the PTY reader still drains afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ActivityState {
@@ -8,6 +15,8 @@ pub enum ActivityState {
     Running,
     WaitingForInput,
     Errored,
+    /// The child exited with code 0. Not alive.
+    Exited,
 }
 
 impl ActivityState {
@@ -17,7 +26,13 @@ impl ActivityState {
             ActivityState::Running => "●",
             ActivityState::WaitingForInput => "⏵",
             ActivityState::Errored => "✗",
+            ActivityState::Exited => "■",
         }
+    }
+
+    /// Whether this state is one only an exited session reports.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, ActivityState::Exited | ActivityState::Errored)
     }
 }
 
@@ -72,6 +87,13 @@ pub struct SessionSummary {
     pub activity: ActivityState,
     #[serde(default)]
     pub exit_code: Option<i32>,
+    /// Whether the session's child process is still running. False exactly
+    /// when `exit_code` is set. An exited session stays in the engine's list
+    /// (its scrollback is still readable) until it is deleted, so a caller
+    /// that wants only running sessions filters on this, not on presence.
+    /// Defaults to true when read from an engine that predates the field.
+    #[serde(default = "default_true")]
+    pub alive: bool,
     #[serde(default)]
     pub scrollback_bytes: u64,
     #[serde(default)]
@@ -86,6 +108,38 @@ pub struct SessionSummary {
     /// live attention occurrence keys stable across reads.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub activity_changed_at: String,
+}
+
+/// A session's current terminal screen, rendered: what a person looking at
+/// the terminal would see right now. `GET /api/sessions/{id}/screen`.
+///
+/// For a program driving a session (an agent typing into another agent's
+/// TUI) this is the readable alternative to the raw byte stream, which is
+/// full of redraws, cursor moves and spinner frames.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionScreen {
+    pub id: Uuid,
+    pub cols: u16,
+    pub rows: u16,
+    /// The visible rows, top to bottom, each with trailing spaces trimmed.
+    /// Always exactly `rows` entries.
+    pub lines: Vec<String>,
+    pub cursor: ScreenCursor,
+    /// The last window title the program set (OSC 0/2), if any.
+    pub title: Option<String>,
+    pub activity: ActivityState,
+    pub alive: bool,
+    /// True when the program is at a prompt waiting for input: the session
+    /// is alive and either its activity is `waiting-for-input`, or it is
+    /// `idle` with the cursor on a recognisable prompt line.
+    pub ready: bool,
+}
+
+/// Zero-based cursor position on a [`SessionScreen`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScreenCursor {
+    pub row: u16,
+    pub col: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,6 +649,22 @@ mod tests {
         assert_eq!(j, "\"waiting-for-input\"");
         let back: ActivityState = serde_json::from_str(&j).unwrap();
         assert_eq!(back, ActivityState::WaitingForInput);
+        assert_eq!(
+            serde_json::to_string(&ActivityState::Exited).unwrap(),
+            "\"exited\""
+        );
+        assert!(ActivityState::Exited.is_terminal());
+        assert!(ActivityState::Errored.is_terminal());
+        assert!(!ActivityState::Idle.is_terminal());
+    }
+
+    #[test]
+    fn a_summary_from_an_older_engine_reads_as_alive() {
+        let s: SessionSummary = serde_json::from_str(
+            r#"{"id":"00000000-0000-0000-0000-000000000000","name":"x","activity":"idle"}"#,
+        )
+        .unwrap();
+        assert!(s.alive);
     }
 
     #[test]

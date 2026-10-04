@@ -78,17 +78,26 @@ class EngineSession:
     exit_code: int | None = None
     activity_changed_at: str | None = None
     created_at: str | None = None
+    #: Whether the session's process is still running. The engine keeps an
+    #: exited session in its list (its output stays readable) until it is
+    #: deleted, so being listed is not being alive. Read from the engine's
+    #: own `alive` field; an older engine that does not send it is alive
+    #: exactly when it reports no exit code.
+    alive: bool = True
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineSession:
+        exit_code = payload.get("exit_code")
+        alive = payload.get("alive")
         return cls(
             id=str(payload.get("id", "")),
             name=str(payload.get("name", "")),
             activity=str(payload.get("activity", "unknown")),
             cwd=str(payload.get("cwd", "")),
-            exit_code=payload.get("exit_code"),
+            exit_code=exit_code,
             activity_changed_at=_optional_str(payload.get("activity_changed_at")),
             created_at=_optional_str(payload.get("created_at")),
+            alive=bool(alive) if isinstance(alive, bool) else exit_code is None,
         )
 
 
