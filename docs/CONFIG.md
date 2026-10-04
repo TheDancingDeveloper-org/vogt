@@ -26,6 +26,10 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `contract_version` | `VOGT_CONTRACT_VERSION` | string | `v1` | behaviour |
 | `marker_promotion_patterns` | `VOGT_MARKER_PROMOTION_PATTERNS` | list of strings | `TODO(vogt)`, `FIXME(vogt)` | behaviour |
 | `inbox_bot_logins` | `VOGT_INBOX_BOT_LOGINS` | list of strings | `dependabot`, `renovate`, `renovate-bot`, `github-actions` | behaviour |
+| `ci_alert_branches` | `VOGT_CI_ALERT_BRANCHES` | list of strings | `main`, `master`, `prod` | behaviour |
+| `ci_alert_tags` | `VOGT_CI_ALERT_TAGS` | list of strings | `v*` | behaviour |
+| `ci_watch_notify_sessions` | `VOGT_CI_WATCH_NOTIFY_SESSIONS` | boolean | `True` | behaviour |
+| `deploy_lanes` | `VOGT_DEPLOY_LANES` | list of `DeployLane` tables | *(empty)* | behaviour |
 | `marker_file_extensions` | `VOGT_MARKER_FILE_EXTENSIONS` | list of strings | `.py`, `.rs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.go`, `.java`, `.rb`, `.sh`, `.sql`, `.toml`, `.yaml`, `.yml`, `.md` | behaviour |
 | `branch_binding_patterns` | `VOGT_BRANCH_BINDING_PATTERNS` | list of strings | `(?i)\bwi-?(?P<n>\d+)\b`, `(?i)\bgh-(?P<forge>\d+)\b` | behaviour |
 | `branch_binding_template` | `VOGT_BRANCH_BINDING_TEMPLATE` | string | `wi-{number}` | behaviour |
@@ -113,6 +117,22 @@ Source markers containing one of these enter backlog and bug views. Every other 
 ### `inbox_bot_logins`
 
 Forge logins the Inbox treats as bots even when the forge does not mark them as one. Matched case-insensitively, with or without a `[bot]` suffix. An account the forge reports as a `Bot`, or whose login ends in `[bot]`, is a bot regardless. Bots are never 'external', so this list is what keeps automation out of the Inbox's *External people only* filter. Applied when the Inbox is read, so a change here needs no re-sweep.
+
+### `ci_alert_branches`
+
+Branches (glob patterns) whose failed CI runs raise an Inbox alert. Only pushed, scheduled and manually dispatched runs count — a pull-request run never alerts, whatever its branch. An alert names the failing jobs, links the log, and clears itself when a later run of the same workflow on the same branch succeeds.
+
+### `ci_alert_tags`
+
+Tags (glob patterns) whose failed CI runs raise an Inbox alert — the release workflows a tag push starts, which block no pull request and so fail silently otherwise. Tags are one lane per workflow: a later tag's successful run of the same workflow clears an earlier tag's failure, because the release it would have shipped has been superseded.
+
+### `ci_watch_notify_sessions`
+
+When CI finishes on a branch bound to a work item (`work.bind_branch`), type a one-line pass/fail notice into each live session started for that item, so an agent wakes on the result instead of polling. Sent once per run conclusion, by the sweep that observed it. The Inbox entry is raised either way; this only turns the session nudge off.
+
+### `deploy_lanes`
+
+Deployment lanes `deployed_versions` reports on, each a table with `name`, `project` (a registered slug), `branch` (default `main`), and a source: `receipt_repo` + `receipt_path` (a JSON receipt a deploy pipeline commits, read through the configured forge) and/or `version_url` (a running instance's public JSON version endpoint, e.g. Vogt's `/api/config`). Empty means the `deploy-lanes` collector is not registered and deployed versions are reported as not configured. A receipt whose status says the deploy or its smoke test failed raises an Inbox alert.
 
 ### `marker_file_extensions`
 

@@ -178,6 +178,31 @@ saved filter, so it matches the list you land on; its tooltip says when a
 filter is on ("1 active Inbox entries — filter on: external people only"),
 and the badge carries a ring. Search text never changes the badge.
 
+**CI** entries come in four kinds, all clearing themselves when the evidence
+moves on:
+
+- **`<workflow> failed on <ref>`** — a failed run on a watched ref: a default
+  or prod branch (`ci_alert_branches`, default `main`, `master`, `prod`) or a
+  release tag (`ci_alert_tags`, default `v*`). These are the runs that block no
+  pull request — `release`, `release-mobile`, `build` on `main` — so they
+  failed silently before. The entry names the failed jobs and links the first
+  job's log. It stays until a later run of the same workflow on the same
+  branch succeeds; tags are one lane per workflow, so a later tag's green run
+  of the same workflow clears an earlier tag's failure. Pull-request runs never
+  raise one; a cancelled or still-running run neither raises nor clears one.
+- **`CI failing: <check>`** — a failure on the project's newest revision that
+  no watched-ref alert already covers.
+- **`CI passed|failed on <branch>`** — CI settled on the newest revision of a
+  branch a still-open work item is bound to (`work.bind_branch`, or the branch
+  `session.start` records). The entry carries the work item. When it settles,
+  Vogt also types a one-line notice (`[vogt] CI FAILED on wi-7 @ … (WI-7);
+  failing: ci — <log>`) into each live session started for that item, once per
+  conclusion, so an agent waiting on CI wakes instead of polling
+  (`ci_watch_notify_sessions` turns the nudge off).
+- **`Deploy failed on lane <lane>`** — a configured deploy lane's receipt
+  (`deploy_lanes`) reports the deploy or its smoke test failed; it clears when
+  a later receipt reports success.
+
 On a phone, the source and From filters become labelled pills and each entry keeps its
 evidence in the stream while moving applicable writes into an **Inbox actions**
 bottom sheet. The sheet is keyboard-operable, restores focus to its trigger on

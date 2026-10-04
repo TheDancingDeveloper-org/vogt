@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from vogt.adapters.forge.kinds import COLLECTOR_CHECKS
 from vogt.application.context import AppContext
 from vogt.application.models import (
     CoverageEntry,
@@ -28,6 +29,7 @@ from vogt.application.models import (
     SweepResult,
 )
 from vogt.application.services import _resolve
+from vogt.application.services.ci_watch import announce_concluded
 from vogt.application.services.views import freshness_of
 from vogt.collectors import CollectorContext, CollectorRegistry, Sweeper
 from vogt.collectors.agent_activity import AgentActivityCollector
@@ -44,10 +46,12 @@ from vogt.collectors.session_outcomes import (
 )
 from vogt.core.entities import DepRef, Project
 from vogt.errors import InvalidRequest
+from vogt.observability import logger
 from vogt.storage.interface import ReadView
 from vogt.storage.observed_types import DepRefRow
 
 SWEEP_COMPLETED_EVENT = "sweep.completed"
+_log = logger("collect")
 
 _GIT_SUFFIX = re.compile(r"\.git$")
 _SCP_STYLE = re.compile(r"^(?:git\+)?(?:ssh://)?git@(?P<host>[^:/]+)[:/](?P<path>.+)$")
@@ -83,6 +87,12 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
             transport=ctx.forge_transport, store=ctx.observed
         ):
             registry.add(read_collector)
+    if ctx.config.deploy_lanes:
+        # Registered only when a lane is configured, so an instance without
+        # any reports deployed versions as "not configured", not "none".
+        from vogt.adapters.forge.lanes import DeployLanesCollector
+
+        registry.add(DeployLanesCollector(transport=ctx.forge_transport))
     if ctx.engine is not None:
         registry.add(SessionOutcomeCollector(ctx.engine, _DeclaredSessions(ctx)))
     # Off unless an operator names a transcript root: agent transcripts are
@@ -274,6 +284,18 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
             },
             at=ctx.clock(),
         )
+
+    if any(report.collector == COLLECTOR_CHECKS for report in reports):
+        # After the feed has the sweep: a bound branch whose CI just settled
+        # is announced to its sessions. Contained — a nudge that cannot be
+        # delivered must never fail a sweep whose evidence already landed.
+        try:
+            announce_concluded(ctx)
+        except Exception as exc:
+            _log.warning(
+                "CI watch could not announce bound-branch conclusions",
+                extra={"vogt": {"error": f"{type(exc).__name__}: {exc}"}},
+            )
 
     return SweepResult(
         scope=params.project or "all registered projects",

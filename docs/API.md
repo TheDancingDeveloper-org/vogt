@@ -287,6 +287,49 @@ store. Without roots the collector is not registered, and both reads say so in
   be regenerated: clearing the `agent_activity*` tables re-reads the
   transcripts from the beginning on the next sweeps.
 
+## CI watching and deployed versions
+
+- **Watched-ref CI alerts.** `forge-checks` reads the newest runs plus one
+  bounded page of pushed runs only (GitHub `actions/runs?event=push`, 50), so
+  a tag or default-branch run is not pushed off the page by pull-request
+  churn. Check subjects are now `ci:{repo}@{sha}:{workflow}@{ref}` — the ref
+  joined the key because one commit is built on `main` and again on the tag
+  cut from it. A failed run on a watched ref (`ci_alert_branches`,
+  `ci_alert_tags`) has its failed jobs looked up (`failed_jobs`: name,
+  conclusion, log URL), at most 5 new lookups per project per sweep; a looked
+  up list is carried forward from the previous observation. `inbox.list`
+  raises one `ci` entry of kind `ci.ref_failure` per workflow lane whose
+  newest decisive run failed — `source_url` is the failed job's log — and the
+  entry disappears when a later run in the lane succeeds. Its `entry_key` is
+  the run (id, attempt, conclusion), so an archived alert stays archived when
+  the job list arrives a sweep later.
+- **Bound-branch CI.** `inbox.list` raises a `ci.branch_concluded` entry,
+  with `work_item_ref`, for the settled newest revision of every branch an
+  open work item is bound to. After each sweep that ran `forge-checks`, the
+  core publishes one `ci.branch_concluded` event (entity
+  `<ref>:<branch>@<sha>:<state>`, summary: `work_item`, `branch`,
+  `revision`, `state`, `failing`, `sessions_notified`) per fresh conclusion
+  (last run finished within 6 hours) that has no such event yet, and, unless
+  `ci_watch_notify_sessions` is off, types a one-line notice plus Enter into
+  each live session started for the item. Subscribe to the event feed to wake
+  on it; nothing needs to poll a forge.
+- **`deployed.versions`** (`GET /api/deployed-versions`, `vogt
+  deployed-versions`, MCP `deployed_versions`; `read`) — one row per lane in
+  `deploy_lanes`: `status` (`at_head` | `behind` | `diverged` | `unknown` |
+  `not_collected`), `deployed_sha` and whether it came from the running
+  instance (`live`, its version endpoint) or the pipeline `receipt`,
+  `version`, `source_tag`, `receipt_status`, `head_sha`, `commits_behind`,
+  `unpromoted_commits` (sha, subject, work item refs) and
+  `unpromoted_work_items` (ref, title, state), plus `detail` when a source
+  could not be read. Filters: `project`, `lane`. The `deploy-lanes`
+  collector (registered only when lanes are configured) does the reading — a
+  receipt through the forge configured for its host, the version URL without
+  credentials, then a forge compare of the deployed SHA against the lane's
+  branch — so this read makes no network call. With no lanes configured it
+  answers `configured: 0` and says so; a configured lane no sweep has read is
+  `not_collected`, never `at_head`. A receipt whose `status` (or
+  `live_smoke.status`) is failed raises a `deploy.failed` Inbox entry.
+
 ## See also
 
 - `DESIGN.md` §4 — the security model (FR-S*), scopes, and per-project scope

@@ -1148,6 +1148,14 @@ class SqliteReadView:
         ).fetchall()
         return {str(row["subject_key"]): _row_to_overlay(row) for row in rows}
 
+    def bound_branch_overlays(self, *, limit: int) -> list[WorkOverlay]:
+        rows = self._conn.execute(
+            "SELECT * FROM work_overlay WHERE branches != '[]' "
+            "ORDER BY updated_at DESC, subject_key LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [_row_to_overlay(row) for row in rows]
+
     # -- sessions ----------------------------------------------------------
 
     def session_by_id(self, session_id: str) -> CodingSession | None:

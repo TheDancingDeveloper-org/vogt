@@ -51,7 +51,9 @@ from vogt.adapters.forge.models import (
     ForgeActor,
     ForgeCapabilities,
     ForgeCheck,
+    ForgeComparison,
     ForgeIssue,
+    ForgeJob,
     ForgeLabel,
     ForgeNotification,
     ForgePosture,
@@ -148,6 +150,26 @@ class ForgeProvider(Protocol):
 
     def checks(self, ref: RepoRef) -> Iterable[ForgeCheck]:
         """Recent CI checks, as generic per-revision facts."""
+
+    def watched_ref_checks(self, ref: RepoRef) -> Iterable[ForgeCheck]:
+        """Recent CI runs on pushed refs only (branches and tags, never pull
+        requests), as a supplement to `checks`.
+
+        A busy repository's newest runs are mostly pull-request runs, so a
+        release-tag or default-branch run falls out of `checks`' one page
+        within hours; this bounded second read keeps them visible to the
+        failure alerts. A forge with nothing extra to add yields nothing."""
+
+    def failed_jobs(self, ref: RepoRef, run_id: int) -> list[ForgeJob]:
+        """The failed jobs of one run, each with its log link. Empty when the
+        forge cannot say (or the run has no failed job)."""
+
+    def read_file(self, ref: RepoRef, path: str) -> bytes | None:
+        """One file's bytes on the default branch, or `None` when absent."""
+
+    def compare(self, ref: RepoRef, base: str, head: str) -> ForgeComparison | None:
+        """How `head` (a branch or SHA) relates to `base`, or `None` when the
+        forge cannot compare them (unknown revision, no compare surface)."""
 
     def labels(self, ref: RepoRef) -> Iterable[ForgeLabel]:
         """Repository labels."""
