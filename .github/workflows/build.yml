@@ -113,6 +113,7 @@ jobs:
     name: build and publish a commit image
     needs: base-images
     runs-on: [self-hosted, publish]
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -261,6 +262,7 @@ jobs:
     name: build and publish the voice sidecar
     needs: base-images
     runs-on: [self-hosted, publish]
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -374,6 +376,7 @@ jobs:
     needs: [base-images, stack-image]
     if: github.ref == 'refs/heads/main'
     runs-on: [self-hosted, publish]
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -592,6 +595,7 @@ jobs:
     # `needs: pod-base` supplies the toolchain base it now builds `FROM`.
     needs: [base-images, pod-base, image]
     runs-on: [self-hosted, publish]
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write

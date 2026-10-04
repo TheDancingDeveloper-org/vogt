@@ -126,6 +126,7 @@ jobs:
     name: every base image is a mirrored one
     # Every job names a self-hosted runner.
     runs-on: [self-hosted]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -173,6 +174,7 @@ jobs:
     # Dockerfile change and on the daily cron, so a package going private is
     # caught within a day rather than by the next stranger to try a build.
     runs-on: [self-hosted]
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: the public bases pull without authentication
@@ -186,6 +188,7 @@ jobs:
     if: github.event_name != 'pull_request'
     # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
     runs-on: [self-hosted, publish]
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
