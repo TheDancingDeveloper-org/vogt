@@ -389,6 +389,13 @@ fits in context.
   credential resolves, the repo URL parses — and, if not, whether it would
   refuse `project_not_linked` or `upstream_write_refused` and how to fix it.
   `local_only=true` creates a local record on any project.
+- **Unlinked projects.** A project-scoped `work.list` on an unlinked project
+  answers `items: []` with `link_state: "unlinked"`; when the project holds
+  open native items, `detail` says how many, names a few refs, and that they
+  are still reachable by ref. Native items (`WI-n`) on an unlinked project
+  take comments, transitions (including to `done`) and field edits; only a
+  default `work.create` and label edits refuse `project_not_linked`, and that
+  refusal says so.
 
 ## Deploy diagnostics
 

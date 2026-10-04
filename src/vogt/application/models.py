@@ -1230,6 +1230,14 @@ class WorkListResult(Result):
             "lists carry null."
         ),
     )
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "On an `unlinked` project with open native items: how many there "
+            "are, a few refs, and that they still take comments and "
+            "transitions by ref. Null otherwise."
+        ),
+    )
 
 
 BoardLaneMode = Literal["none", "project", "initiative"]

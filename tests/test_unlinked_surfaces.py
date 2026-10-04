@@ -62,6 +62,21 @@ def test_scoped_work_list_answers_with_the_marker(instance: AppContext) -> None:
     result = list_work(estate, ListWorkParams(project="folder"))
     assert result.items == [] and result.total == 0
     assert result.link_state == "unlinked", "the machine-readable CTA marker"
+    # WI-879: an empty list must not read as "these items do not exist".
+    assert result.detail is not None
+    assert "2 open native item(s)" in result.detail
+    assert "work.comment" in result.detail and "work.transition" in result.detail
+
+
+def test_scoped_work_list_detail_is_null_without_native_items(
+    instance: AppContext,
+) -> None:
+    register_project(
+        instance,
+        RegisterProjectParams(name="Empty", root_path="/srv/empty", reason=WHY),
+    )
+    result = list_work(instance, ListWorkParams(project="empty"))
+    assert result.link_state == "unlinked" and result.detail is None
 
 
 def test_scoped_backlog_answers_with_the_marker_and_the_migration_count(
