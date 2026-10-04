@@ -628,13 +628,19 @@ class SessionSummary(Result):
     activity: str | None = Field(
         default=None,
         description=(
-            "Live from the engine: idle / running / waiting-for-input / "
-            "errored. None when the engine could not be asked."
+            "Live from the engine: idle / running / waiting-for-input "
+            "while the process runs; exited (exit code 0) / errored "
+            "(any other code) once it has ended. None when the engine "
+            "could not be asked."
         ),
     )
     alive: bool | None = Field(
         default=None,
-        description="Whether the engine still has this session. None if unasked.",
+        description=(
+            "Whether the session's process is still running on the engine: "
+            "false once it has exited or the engine no longer has it. None "
+            "if the engine could not be asked."
+        ),
     )
 
 

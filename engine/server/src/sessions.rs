@@ -220,6 +220,7 @@ impl SessionRegistry {
                 cwd: Some(session.cwd.clone()),
                 command: session.command(),
                 scrollback_bytes: 0,
+                end_reason: None,
             };
             let sid = session.id;
             tokio::spawn(async move {

@@ -112,9 +112,25 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // restart but never got an index row (the engine was SIGKILLed before it
     // could archive). Spawned rather than awaited so a large log dir does not
     // delay the server binding its port; it runs once and reports the count.
+    //
+    // Before that, and awaited so it is done before any session of this
+    // process can write a provisional row: close out every row the previous
+    // process left with no `ended_at`. No session survives a restart, so
+    // each of them was killed by it (`SessionHistory::reconcile_unfinished`).
+    let booted_at = time::OffsetDateTime::now_utc();
+    if let Some(history) = history.as_ref() {
+        match history.reconcile_unfinished().await {
+            Ok(0) => {}
+            Ok(closed) => tracing::info!(
+                closed,
+                "closed out history rows left unfinished by the previous engine process"
+            ),
+            Err(e) => tracing::warn!("history reconcile failed: {e}"),
+        }
+    }
     if let Some(history) = history.clone() {
         tokio::spawn(async move {
-            match history.backfill_orphaned_logs().await {
+            match history.backfill_orphaned_logs_before(booted_at).await {
                 Ok(0) => {}
                 Ok(recovered) => {
                     tracing::info!(recovered, "backfilled orphaned session logs into history")
@@ -270,6 +286,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
                 .patch(api::rename_session)
                 .delete(api::delete_session),
         )
+        .route("/api/sessions/{id}/screen", get(api::get_session_screen))
         .route("/api/sessions/{id}/kill", post(api::kill_session))
         .route("/api/sessions/{id}/input", post(api::session_input))
         .route("/api/assistant/message", post(assistant_api::message))

@@ -293,9 +293,14 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
         # filter is a filter on the declared half, which these do not have, so
         # they surface only when neither filter is set; and they are appended
         # only on the first page, having no stable position to paginate by.
+        # An unlinked session whose process has exited is the engine's
+        # leftover, not a running terminal: it is listed only when stopped
+        # sessions were asked for, as a linked one Vogt stopped would be.
         unfiltered = project_id is None and work_item_id is None
         if unfiltered and params.offset == 0:
             for engine_session in live.values():
+                if not engine_session.alive and not params.include_stopped:
+                    continue
                 if view.session_by_engine_id(engine_session.id) is None:
                     summaries.append(_summarize_engine_only(engine_session))
             summaries = summaries[: params.limit]
@@ -686,7 +691,11 @@ def _summarize(
         started_at=session.started_at,
         stopped_at=session.stopped_at,
         activity=None if engine_session is None else engine_session.activity,
-        alive=(engine_session is not None) if engine_asked else None,
+        # Listed by the engine is not alive: an exited session stays in its
+        # list, with an exit code, until it is deleted.
+        alive=(engine_session is not None and engine_session.alive)
+        if engine_asked
+        else None,
     )
 
 
@@ -713,8 +722,9 @@ def _summarize_engine_only(engine_session: EngineSession) -> SessionSummary:
         started_at=_parse_engine_timestamp(engine_session.created_at),
         stopped_at=None,
         activity=engine_session.activity,
-        # It is in the live listing, so the engine has it and was asked.
-        alive=True,
+        # The engine has it and was asked; whether its process still runs is
+        # the engine's own answer.
+        alive=engine_session.alive,
     )
 
 

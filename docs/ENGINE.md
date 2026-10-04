@@ -510,6 +510,9 @@ surfaces that need it say so themselves.
 - `POST /api/sessions` `SessionSpec` -> `SessionSummary` (requires the
   `sessions` capability)
 - `GET /api/sessions/:id` -> `SessionDetail`
+- `GET /api/sessions/:id/screen` -> `SessionScreen` — the current terminal
+  screen, rendered (see [Reading the screen](#reading-the-screen)). Gated
+  like `GET /api/sessions/:id`: the `sessions` capability
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability)
 - `POST /api/sessions/:id/kill` -> `OkResponse` (SIGKILL to the child; the
@@ -620,8 +623,9 @@ to them: session prompts are retained by liveness, not by count.
   "summary": {
     "id": "uuid",
     "name": "terminal",
-    "activity": "idle|running|waiting-for-input|errored",
+    "activity": "idle|running|waiting-for-input|exited|errored",
     "exit_code": null,
+    "alive": true,
     "scrollback_bytes": 123,
     "cwd": "apps/vogt",
     "created_at": "2026-07-06T00:00:00Z",
@@ -634,18 +638,46 @@ to them: session prompts are retained by liveness, not by count.
 
 #### Activity states
 
-`activity` is a *heuristic*, computed in `engine/server/src/activity.rs` from
-the tail of ANSI-stripped scrollback, and a client should render it as a hint
-rather than treat it as a fact about the child process:
+`SessionSummary.alive` is the fact: `true` while the child process runs,
+`false` from the moment it exits (exactly when `exit_code` is set). An exited
+session **stays in `GET /api/sessions`** — its scrollback and screen are still
+readable — until it is deleted, so a caller that wants running sessions
+filters on `alive`, never on presence in the list. An engine that predates
+the field omits it; read it then as `exit_code == null`.
 
-- `errored` — the child exited non-zero. This one is not a heuristic and wins
-  over everything else.
+`activity` has two terminal states, which are facts, and three live states,
+which are a *heuristic*:
+
+```text
+live (alive: true)
+  spawn                       -> running
+  running, quiet for activity_idle_after_ms -> idle
+  prompt pattern in the tail  -> waiting-for-input
+  new output, no prompt       -> running
+
+terminal (alive: false, never changes again)
+  child exits with 0          -> exited
+  child exits with non-0      -> errored
+```
+
+- `exited` — the child exited with code 0. Terminal.
+- `errored` — the child exited non-zero (a kill is a signal, which reports as
+  non-zero). Terminal.
+  Once either is set the activity never changes again: output the PTY reader
+  drains after the exit cannot move it back to a live state (before WI-830 it
+  could, which is how a stopped session read `running` forever).
 - `waiting-for-input` — the last ~512 visible bytes match a prompt pattern
   (`[y/n]`, a password prompt, a numbered approval menu, a bare `❯`). The
   pattern set is deliberately conservative, because a false positive sends a
   push notification to someone's phone.
 - `running` — output arrived within `activity_idle_after_ms`.
-- `idle` — no output for longer than that, or none ever.
+- `idle` — no output for longer than that, or none ever. Only ever a live
+  process: a session whose program finished reads `exited`/`errored`, not
+  `idle`.
+
+The live states are computed in `engine/server/src/activity.rs` from the tail
+of ANSI-stripped scrollback, and a client should render them as a hint rather
+than treat them as a fact about the child process.
 
 A session that goes quiet without printing a recognizable prompt therefore
 reads as `idle`, not `waiting-for-input`. That gap is what the idle-stall
@@ -654,6 +686,54 @@ notification, and re-arms only once the session leaves the state. It is
 switched **off** for a new subscription — a heuristic about silence is not one
 of the four kinds worth a phone interruption by default (see Push APIs) — so
 the watcher runs and dispatches to whoever asked for it and to nobody else.
+
+#### Reading the screen
+
+`GET /api/sessions/:id/screen` is for a program driving a session — an agent
+typing into another agent's TUI. The raw scrollback (and the history log) is
+the byte stream the program wrote: redraws, spinner frames and dismissed
+menus pile up, and cursor-positioned text loses its spaces once escapes are
+stripped. This route instead answers with what the terminal shows now:
+
+```json
+{
+  "id": "uuid",
+  "cols": 120,
+  "rows": 40,
+  "lines": ["╭────────╮", "│ > fix the flaky test", "╰────────╯", "", "…"],
+  "cursor": { "row": 1, "col": 22 },
+  "title": "claude",
+  "activity": "idle",
+  "alive": true,
+  "ready": true
+}
+```
+
+- `lines` — the visible rows, top to bottom, trailing spaces trimmed; always
+  exactly `rows` entries.
+- `cursor` — zero-based row and column.
+- `title` — the last window title the program set (OSC 0/2), or `null`.
+- `activity`, `alive` — as in `SessionSummary`.
+- `ready` — the program is waiting for input: the session is alive and
+  either `activity` is `waiting-for-input`, or it is `idle` and one of the
+  lowest ten non-blank lines, box border stripped, starts with a prompt glyph
+  (`>`, `❯`, `›`, `>>>`) — Claude Code's input box, Codex's composer, a REPL.
+  `running` is never ready, because those TUIs keep drawing their input box
+  while they work.
+
+The engine keeps no terminal emulator of its own. The screen is rendered per
+request by replaying the last 1 MiB of the session's scrollback ring — the
+same bytes an attach replays into xterm.js, aligned to the same ground-state
+boundary — into a `vt100` grid at the PTY's current size
+(`engine/server/src/screen.rs`). It is therefore what a client attaching now
+would see, and costs one bounded replay on the blocking pool per call.
+
+**Readiness for a driver.** Watch `GET /api/events` for the `activity` event
+of your session: `waiting-for-input` is the push signal that a prompt is up.
+An agent TUI whose prompt the tail patterns do not recognise reaches `idle`
+instead; on `activity` → `idle`, read `/screen` and check `ready`. An
+`activity` of `exited`/`errored` (or a `session-killed` event) means the
+program is gone and nothing will read input again.
 
 ### Attach protocol
 
@@ -735,7 +815,9 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
 
 - `GET /api/events` -> `text/event-stream` of `ServerEvent`, one JSON object
   per `data:` line. Variants are `session-created`, `session-renamed`,
-  `session-killed`, `activity` (`{id, state, activity_changed_at}`),
+  `session-killed`, `activity` (`{id, state, activity_changed_at}`; `state`
+  is one of the activity states above, `exited`/`errored` once the child has
+  exited),
   `vogt.changed`, and the agent-task steering
   trio — `task.gate.opened` (`{task_id, run_id, session_id, gate_id, question,
   options}`), `task.gate.answered` (`{…, gate_id, option?, outcome, actor,
@@ -1233,6 +1315,20 @@ a session need not have exited while the engine was alive to appear here. A row
 with a NULL `exit_code` is one whose outcome is unknown (still provisional,
 terminated on shutdown, or backfilled); the `unfinished` status filter selects
 exactly those.
+
+Sessions live in the engine's memory, so none survives a restart. At startup,
+before it creates any session, the engine closes out every row the previous
+process left with a NULL `ended_at` — a session SIGKILLed by a redeploy the
+shutdown drain never ran for, or lost to a crash: `ended_at` becomes the last
+time its raw log was written, `exit_code` stays NULL (genuinely unknown).
+Backfilled logs from before the boot are closed the same way. A NULL
+`ended_at` therefore always means a session of the running process.
+
+`SessionMetadata.end_reason` says how a row ended: `exited` (the child exited
+while the engine watched; `exit_code` is its code), `engine-shutdown`
+(archived by the graceful-shutdown drain while still running), `engine-restart`
+(closed out at the next startup), or `null` while the session is live and on
+rows from before the field existed.
 
 - `GET /api/history/sessions?limit=&offset=` -> `SessionMetadata[]`; `limit`
   defaults to 50.
