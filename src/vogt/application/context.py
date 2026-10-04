@@ -13,6 +13,7 @@ from pathlib import Path
 from vogt.adapters.engine import EngineClient
 from vogt.adapters.git import Cloner, Pusher, clone_repository, push_branch
 from vogt.adapters.github.client import Transport
+from vogt.adapters.peer import PeerClient
 from vogt.application.identity import PublicIdentity, identity_from_config
 from vogt.config import VogtConfig, load_config
 from vogt.core.clock import Clock, utc_now
@@ -69,6 +70,9 @@ class AppContext:
     #: and this process cannot see either — see `identity.py` for why that is
     #: not the caller-supplied identity the principal rule forbids.
     public_identity: PublicIdentity = field(default_factory=PublicIdentity)
+    #: A peer instance `instance.diagnostics` can ask about itself, or `None`
+    #: when none is configured. Injectable for the same reason the engine is.
+    peer: PeerClient | None = None
 
 
 def build_context(
@@ -83,6 +87,7 @@ def build_context(
     public_identity: PublicIdentity | None = None,
     forge_transport: Transport | None = None,
     token: Token | None = None,
+    peer: PeerClient | None = None,
 ) -> AppContext:
     """Build a context over the SQLite backend.
 
@@ -134,6 +139,11 @@ def build_context(
             public_identity
             if public_identity is not None
             else identity_from_config(resolved_config)
+        ),
+        peer=peer
+        or PeerClient.from_config(
+            resolved_config.diagnostics_peer_url,
+            resolved_config.diagnostics_peer_token_file,
         ),
     )
 

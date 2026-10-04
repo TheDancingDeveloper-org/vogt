@@ -43,6 +43,7 @@ import logging
 import re
 import sys
 import uuid
+from collections import deque
 from contextvars import ContextVar, Token
 from datetime import UTC, datetime
 from typing import Any, Literal, TextIO
@@ -62,6 +63,39 @@ _SAFE_REQUEST_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 _request_id: ContextVar[str | None] = ContextVar("vogt_request_id", default=None)
 _actor: ContextVar[str | None] = ContextVar("vogt_request_actor", default=None)
+
+#: When this process started, for `instance.diagnostics`' uptime. Captured at
+#: import, which for every entry point is process start to within the import
+#: time of the package.
+PROCESS_STARTED_AT = datetime.now(UTC)
+
+#: How many recent warning-or-worse lines the process keeps in memory for
+#: `instance.diagnostics`. Bounded, so a crash loop cannot grow it.
+RECENT_PROBLEMS_CAPACITY = 200
+
+#: The longest single retained line; a traceback is cut, not stored whole.
+_RECENT_LINE_LIMIT = 2000
+
+_REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Credentials embedded in a URL: scheme://user:secret@host.
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@"), r"\1[redacted]@"),
+    # Bearer / Basic authorisation values.
+    (re.compile(r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+"), r"\1 [redacted]"),
+    # This product's own tokens, and the forge token shapes it handles.
+    (re.compile(r"\bvogt_[A-Za-z0-9_-]{8,}"), "[redacted]"),
+    (
+        re.compile(r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"),
+        "[redacted]",
+    ),
+    # key=value / "key": "value" for secret-shaped keys.
+    (
+        re.compile(
+            r"(?i)\b([a-z_]*(?:token|secret|password|passwd|api[_-]?key|"
+            r"authorization|cookie)[a-z_]*)(\"?\s*[:=]\s*\"?)[^\s\",;&]+"
+        ),
+        r"\1\2[redacted]",
+    ),
+)
 
 
 def logger(area: str) -> logging.Logger:
@@ -184,6 +218,60 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+def redact(text: str) -> str:
+    """Remove credential-shaped substrings from a log line.
+
+    Best-effort and conservative: it errs towards removing a value that was
+    not a secret. Log lines reach `instance.diagnostics`, a read-scoped
+    operation, so anything a token could appear in is scrubbed on the way.
+    """
+    for pattern, replacement in _REDACTIONS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+class _RecentProblems(logging.Handler):
+    """A bounded in-memory tail of warning-or-worse records, redacted."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.lines: deque[str] = deque(maxlen=RECENT_PROBLEMS_CAPACITY)
+        self.setFormatter(TextFormatter())
+        self.addFilter(_ContextFilter())
+        self.set_name("vogt-recent")
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            line = redact(self.format(record))
+        except Exception:  # pragma: no cover - logging must never raise
+            self.handleError(record)
+            return
+        self.lines.append(line[:_RECENT_LINE_LIMIT])
+
+
+_recent_problems = _RecentProblems()
+
+
+def recent_problems(limit: int) -> list[str]:
+    """The newest `limit` retained warning-or-worse lines, oldest first."""
+    if limit <= 0:
+        return []
+    # A deque copy is atomic under the GIL; appends from other threads land
+    # before or after it, never inside it.
+    lines = list(_recent_problems.lines)
+    return lines[-limit:]
+
+
+def capturing_problems() -> bool:
+    """Whether this process retains recent problems at all.
+
+    Only `configure_logging` installs the tail — `serve` and the MCP entry
+    points call it — so a one-shot CLI process answers "not capturing"
+    rather than an empty list that would read as "no errors".
+    """
+    return _recent_problems in logging.getLogger().handlers
+
+
 def _terse(value: object) -> str:
     """Render one field value for the text format, quoting only when needed."""
     text = "" if value is None else str(value)
@@ -213,6 +301,8 @@ def configure_logging(
     for existing in [h for h in root.handlers if h.get_name() == "vogt"]:
         root.removeHandler(existing)
     root.addHandler(handler)
+    if _recent_problems not in root.handlers:
+        root.addHandler(_recent_problems)
     root.setLevel(logging.WARNING)
     logging.getLogger(LOGGER_NAMESPACE).setLevel(level.upper())
 

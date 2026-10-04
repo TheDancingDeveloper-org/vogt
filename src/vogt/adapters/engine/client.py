@@ -625,6 +625,10 @@ class EngineClient:
 
     # -- transport ---------------------------------------------------------
 
+    def healthz(self) -> None:
+        """Raise `EngineUnavailable` unless the engine answers its liveness probe."""
+        self._call("/healthz")
+
     # -- runtime-pinned agent CLIs ------------------------------------
 
     def agent_clis(self, *, upstream: bool = False) -> dict[str, Any]:

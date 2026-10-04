@@ -173,7 +173,7 @@ def test_m1_demo(instance: AppContext, agent: Agent) -> None:
 
     # ask backlog and why
     ranked = agent.tool("backlog")
-    assert [entry["item"]["ref"] for entry in ranked["items"]] == [
+    assert [entry["ref"] for entry in ranked["items"]] == [
         bug["ref"],
         blocker["ref"],
     ], "the p1 bug outranks the p2 feature it depends on"

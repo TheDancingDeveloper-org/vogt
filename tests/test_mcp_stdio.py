@@ -120,7 +120,7 @@ def test_a_tool_call_round_trips(instance: AppContext) -> None:
     assert created["structuredContent"]["item"]["ref"] == "WI-1"
 
     listed = responses[1]["result"]["structuredContent"]
-    assert listed["items"][0]["item"]["title"] == "Raised over stdio"
+    assert listed["items"][0]["title"] == "Raised over stdio"
 
 
 def test_a_failing_tool_is_a_result_not_a_dead_session(

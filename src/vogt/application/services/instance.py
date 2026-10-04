@@ -3,30 +3,45 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from vogt import __version__
 from vogt.adapters.mcp.stdio import SUPPORTED_PROTOCOL_VERSIONS, StdioServer
 from vogt.adapters.mcp.surface import McpSurface
+from vogt.adapters.peer import PeerUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
     CloneInfo,
+    DiagnosticCheck,
+    DiagnosticsParams,
+    DiagnosticsResult,
     InitParams,
     InitResult,
     McpStdioParams,
     McpStdioResult,
     MigrateParams,
     MigrateResult,
+    PeerDiagnostics,
+    RecentLog,
     ServeParams,
     ServeResult,
     StatusParams,
     StatusResult,
     StoreCounts,
+    StoreMigration,
 )
 from vogt.application.services.auth import (
     adopt_bootstrap_agent_token,
     adopt_bootstrap_core_token,
 )
-from vogt.errors import InvalidRequest
+from vogt.errors import InvalidRequest, VogtError
+from vogt.observability import (
+    PROCESS_STARTED_AT,
+    RECENT_PROBLEMS_CAPACITY,
+    capturing_problems,
+    recent_problems,
+    redact,
+)
 
 
 def init_instance(ctx: AppContext, params: InitParams) -> InitResult:
@@ -138,6 +153,140 @@ def status(ctx: AppContext, params: StatusParams) -> StatusResult:
                 backup_taken_at=stamp.backup_taken_at,
             ),
         )
+
+
+def instance_diagnostics(
+    ctx: AppContext, params: DiagnosticsParams
+) -> DiagnosticsResult:
+    """Is this instance what it should be, and is it well — in one read.
+
+    Version, the image digest the deployment stated, uptime, named readiness
+    checks, per-store migration state and the process's recent problems
+    (redacted) — plus, on request, the same answer from a configured peer
+    instance, so an agent confirming a deploy needs no tailnet route to it
+    and no orchestrator access.
+
+    Every check reports rather than raises: a diagnostics read that fails
+    when something is wrong would fail exactly when it is needed.
+    """
+    from vogt.application.services.views import freshness_of
+
+    checks: list[DiagnosticCheck] = []
+    migrations: dict[str, StoreMigration] = {}
+    instance_id: str | None = None
+
+    for name, store in (("declared", ctx.declared), ("observed", ctx.observed)):
+        try:
+            applied = store.schema_version()
+            expected = store.bundled_schema_version()
+        except Exception as exc:  # report, never raise
+            checks.append(
+                DiagnosticCheck(
+                    name=f"{name}_store",
+                    status="failing",
+                    detail=redact(f"store did not answer: {exc}"),
+                )
+            )
+            continue
+        migrations[name] = StoreMigration(
+            applied=applied, expected=expected, pending=max(expected - applied, 0)
+        )
+        checks.append(
+            DiagnosticCheck(
+                name=f"{name}_store",
+                status="ok" if applied == expected else "failing",
+                detail=None
+                if applied == expected
+                else f"schema {applied}, this build expects {expected} — run migrate",
+            )
+        )
+    try:
+        with ctx.declared.read() as view:
+            instance_id = view.instance_id()
+    except Exception as exc:  # report, never raise
+        checks.append(
+            DiagnosticCheck(name="instance", status="failing", detail=redact(str(exc)))
+        )
+
+    if ctx.engine is None:
+        checks.append(
+            DiagnosticCheck(
+                name="engine",
+                status="not_configured",
+                detail="no engine_url; session operations are unavailable",
+            )
+        )
+    else:
+        try:
+            ctx.engine.healthz()
+            checks.append(DiagnosticCheck(name="engine", status="ok"))
+        except VogtError as exc:
+            checks.append(
+                DiagnosticCheck(name="engine", status="degraded", detail=str(exc))
+            )
+
+    try:
+        freshness = freshness_of(ctx)
+        checks.append(
+            DiagnosticCheck(
+                name="collection",
+                status="ok" if freshness.status == "fresh" else "degraded",
+                detail=freshness.detail
+                if freshness.age_seconds is None
+                else f"oldest sweep {freshness.age_seconds}s ago"
+                + (f"; {freshness.detail}" if freshness.detail else ""),
+            )
+        )
+    except Exception as exc:  # report, never raise
+        checks.append(
+            DiagnosticCheck(
+                name="collection", status="degraded", detail=redact(str(exc))
+            )
+        )
+
+    counted = [check.status for check in checks if check.status != "not_configured"]
+    overall: Literal["ok", "degraded", "failing"] = (
+        "failing"
+        if "failing" in counted
+        else ("degraded" if "degraded" in counted else "ok")
+    )
+    now = ctx.clock()
+    return DiagnosticsResult(
+        status=overall,
+        vogt_version=__version__,
+        image_digest=ctx.config.image_digest,
+        instance_id=instance_id,
+        started_at=PROCESS_STARTED_AT,
+        uptime_seconds=max(int((now - PROCESS_STARTED_AT).total_seconds()), 0),
+        checks=checks,
+        migrations=migrations,
+        recent_log=RecentLog(
+            capturing=capturing_problems(),
+            lines=recent_problems(params.log_lines),
+            capacity=RECENT_PROBLEMS_CAPACITY,
+        ),
+        peer=_peer_diagnostics(ctx, params),
+    )
+
+
+def _peer_diagnostics(ctx: AppContext, params: DiagnosticsParams) -> PeerDiagnostics:
+    """The peer half: asked only on request, and never recursively."""
+    if not params.peer:
+        return PeerDiagnostics(status="not_requested")
+    if ctx.peer is None:
+        return PeerDiagnostics(
+            status="not_configured",
+            detail="set diagnostics_peer_url (and diagnostics_peer_token_file)",
+        )
+    try:
+        answer = ctx.peer.diagnostics(log_lines=params.log_lines)
+    except PeerUnavailable as exc:
+        return PeerDiagnostics(
+            status=exc.status,  # type: ignore[arg-type]
+            url=ctx.peer.base_url,
+            detail=str(exc),
+        )
+    return PeerDiagnostics(status="ok", url=ctx.peer.base_url, diagnostics=answer)
 
 
 def serve_mcp_stdio(ctx: AppContext, params: McpStdioParams) -> McpStdioResult:

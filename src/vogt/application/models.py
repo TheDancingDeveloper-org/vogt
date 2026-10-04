@@ -22,7 +22,7 @@ import json
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from vogt.core.entities import (
     Actor,
@@ -79,6 +79,38 @@ class Result(BaseModel):
     """Base for operation results."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+#: How much of each row a listing returns. `summary` is the compact row an
+#: agent can hold two hundred of in one tool result; `full` is every field,
+#: bodies included, which is what a GUI rendering a detail pane needs.
+ListMode = Literal["summary", "full"]
+
+
+def apply_aliases(data: object, aliases: dict[str, str], *, model: str) -> object:
+    """Rename a tolerated parameter alias to the field it means.
+
+    Agents reach for the common name — `work_get(id=...)`,
+    `work_list(status=...)` — and a schema error costs a round trip that
+    teaches nothing. An alias is accepted only when the canonical field is
+    absent; naming both is ambiguous and is refused rather than guessed.
+    The aliases are documented on the field they map to and pinned by tests
+    so they cannot drift silently.
+    """
+    if not isinstance(data, dict):
+        return data
+    renamed = dict(data)
+    for alias, field in aliases.items():
+        if alias not in renamed:
+            continue
+        if field in renamed:
+            msg = (
+                f"{model}: {alias!r} is an alias of {field!r}; pass one of "
+                "them, not both"
+            )
+            raise ValueError(msg)
+        renamed[field] = renamed.pop(alias)
+    return renamed
 
 
 # -- normalized attention inbox -------------------------------------------
@@ -325,6 +357,96 @@ class StatusResult(Result):
     )
 
 
+class DiagnosticsParams(Params):
+    peer: bool = Field(
+        default=False,
+        description=(
+            "Also ask the configured peer instance (`diagnostics_peer_url`) "
+            "for its diagnostics, e.g. prod from dev."
+        ),
+    )
+    log_lines: int = Field(
+        default=20,
+        ge=0,
+        le=200,
+        description="How many recent warning-or-worse log lines to return.",
+    )
+
+
+class DiagnosticCheck(Result):
+    """One readiness check, named, with what it found."""
+
+    name: str
+    status: Literal["ok", "degraded", "failing", "not_configured"]
+    detail: str | None = None
+
+
+class StoreMigration(Result):
+    """One store's schema: what is applied against what this build carries."""
+
+    applied: int
+    expected: int
+    pending: int = Field(
+        description="Migrations this build carries that are not applied yet."
+    )
+
+
+class RecentLog(Result):
+    """The process's recent warning-or-worse lines, redacted."""
+
+    capturing: bool = Field(
+        description=(
+            "Whether this process retains recent problems at all. False (a "
+            "one-shot CLI process) means `lines` is empty because nothing is "
+            "kept, not because nothing went wrong."
+        )
+    )
+    lines: list[str] = []
+    capacity: int
+
+
+class PeerDiagnostics(Result):
+    """What the configured peer instance said about itself."""
+
+    status: Literal[
+        "not_requested",
+        "not_configured",
+        "ok",
+        "unreachable",
+        "refused",
+        "invalid_response",
+    ]
+    url: str | None = None
+    detail: str | None = None
+    diagnostics: dict[str, object] | None = Field(
+        default=None,
+        description=(
+            "The peer's own `instance.diagnostics` answer, as it sent it. "
+            "Another instance's data: possibly another version's shape."
+        ),
+    )
+
+
+class DiagnosticsResult(Result):
+    """Is this instance what it should be, and is it well — in one read."""
+
+    status: Literal["ok", "degraded", "failing"] = Field(
+        description="The worst of `checks`; not_configured checks do not count."
+    )
+    vogt_version: str
+    image_digest: str | None = Field(
+        default=None,
+        description="As the deployment stated it (`image_digest`); null if unstated.",
+    )
+    instance_id: str | None = None
+    started_at: datetime
+    uptime_seconds: int
+    checks: list[DiagnosticCheck]
+    migrations: dict[str, StoreMigration]
+    recent_log: RecentLog
+    peer: PeerDiagnostics
+
+
 class PlaceMetricsParams(Params):
     """The shell's bounded, aggregate navigation counts.
 
@@ -511,8 +633,26 @@ class ListProjectsParams(Params):
     offset: int = Field(default=0, ge=0)
 
 
+class ProjectListing(Project):
+    """A project, plus whether `work.create` would land there right now."""
+
+    writable: bool = Field(
+        description=(
+            "Whether a default `work.create` (no `local_only`) succeeds on "
+            "this project now: it is forge-linked, its write-back policy "
+            "permits `create`, a forge credential resolves and its repo_url "
+            "parses. False means the create refuses with "
+            "`project_not_linked` or `upstream_write_refused`; "
+            "`writable_reason` says which and how to fix it."
+        )
+    )
+    writable_reason: str = Field(
+        description="Why `writable` is what it is, naming the way forward."
+    )
+
+
 class ProjectListResult(Result):
-    projects: list[Project]
+    projects: list[ProjectListing]
     total: int
 
 
@@ -596,8 +736,22 @@ class RankedItem(Result):
 
 
 class ProjectBriefParams(Params):
-    slug: str
+    slug: str = Field(description="Project slug. Aliases: `project`, `id`.")
     backlog_limit: int = Field(default=10, ge=1, le=100)
+    mode: ListMode = Field(
+        default="summary",
+        description=(
+            "`summary` (default) ranks `top_backlog` without each row's full "
+            "work item (`item` is null); `full` includes it, bodies and all."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: object) -> object:
+        return apply_aliases(
+            data, {"project": "slug", "id": "slug"}, model="project.brief"
+        )
 
 
 class CiSummary(Result):
@@ -953,17 +1107,68 @@ class WorkResult(Result):
     #: Populated by `work.get`; None on the write operations and when there is
     #: no git evidence at all.
     git: WorkItemGitStory | None = None
+    #: The states a `work.transition` with `walk` passed through, starting
+    #: state first and target last — one audited transition per edge. Empty
+    #: for a single-edge transition and on every other operation.
+    walked: list[str] = []
 
 
 class GetWorkParams(Params):
-    ref: str = Field(description="Work item reference, e.g. WI-7.")
+    ref: str = Field(description="Work item reference, e.g. WI-7. Alias: `id`.")
     comment_limit: int = Field(default=50, ge=0, le=500)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: object) -> object:
+        return apply_aliases(data, {"id": "ref"}, model="work.get")
+
+
+class WorkItemRow(Result):
+    """One work item in `summary` mode: what a reader scans, nothing more.
+
+    Bodies, relations and audit-shaped fields are left out; `work.get` with
+    the ref returns the rest.
+    """
+
+    ref: str
+    title: str
+    kind: WorkKind
+    state: str
+    priority: Priority
+    project_slug: str | None = None
+
+    @classmethod
+    def of(cls, item: WorkItem) -> WorkItemRow:
+        return cls(
+            ref=item.ref,
+            title=item.title,
+            kind=item.kind,
+            state=item.state,
+            priority=item.priority,
+            project_slug=item.project_slug,
+        )
 
 
 class ListWorkParams(Params):
     project: str | None = Field(default=None, description="Project slug.")
     kinds: list[WorkKind] | None = None
-    states: list[str] | None = None
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Workflow states to include, e.g. [open, in_progress]. Aliases: "
+            "`status`, `state` (a single state or a comma-separated string "
+            "is accepted). Naming a terminal state (done, wont_do) includes "
+            "finished items without needing `include_finished`."
+        ),
+    )
+    query: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "Case-insensitive text matched against the title, body and ref. "
+            "Aliases: `text`, `search`, `q`."
+        ),
+    )
     priorities: list[Priority] | None = None
     assignee: str | None = Field(default=None, description="Actor identity_ref.")
     initiative: str | None = Field(default=None, description="Initiative slug.")
@@ -971,13 +1176,50 @@ class ListWorkParams(Params):
     include_finished: bool = Field(
         default=False, description="Include done and wont_do items."
     )
+    mode: ListMode = Field(
+        default="summary",
+        description=(
+            "`summary` (default) returns compact rows — ref, title, kind, "
+            "state, priority, project — so a long page fits one tool result; "
+            "`full` returns every field, bodies included."
+        ),
+    )
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: object) -> object:
+        data = apply_aliases(
+            data,
+            {
+                "status": "states",
+                "state": "states",
+                "text": "query",
+                "search": "query",
+                "q": "query",
+            },
+            model="work.list",
+        )
+        if isinstance(data, dict) and isinstance(data.get("states"), str):
+            data["states"] = [
+                part.strip() for part in data["states"].split(",") if part.strip()
+            ]
+        return data
+
 
 class WorkListResult(Result):
-    items: list[WorkItem]
+    items: list[WorkItem] | list[WorkItemRow] = Field(
+        description=(
+            "Compact `WorkItemRow`s in `summary` mode, whole work items in `full` mode."
+        )
+    )
     total: int
+    mode: ListMode = "full"
+    next_offset: int | None = Field(
+        default=None,
+        description="The `offset` of the next page; null on the last page.",
+    )
     link_state: Literal["linked", "unlinked"] | None = Field(
         default=None,
         description=(
@@ -1110,9 +1352,34 @@ class UpdateWorkParams(Params):
 
 
 class TransitionWorkParams(Params):
-    ref: str
-    to_state: str = Field(description="Target state, e.g. in_progress.")
-    reason: Reason
+    ref: str = Field(description="Work item reference, e.g. WI-7. Alias: `id`.")
+    to_state: str = Field(
+        description="Target state, e.g. in_progress. Aliases: `to`, `state`."
+    )
+    reason: Reason = Field(
+        description=(
+            "Why the item is moving (audited, required on every write). With "
+            "`walk`, each hop records this reason annotated with the hop."
+        )
+    )
+    walk: bool = Field(
+        default=False,
+        description=(
+            "Walk the shortest path of valid edges to `to_state`, one audited "
+            "transition per hop (e.g. open -> in_progress -> review -> done). "
+            "Only the workflow's own edges are taken and finished states are "
+            "never passed through, so no review step is skipped."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _aliases(cls, data: object) -> object:
+        return apply_aliases(
+            data,
+            {"id": "ref", "to": "to_state", "state": "to_state"},
+            model="work.transition",
+        )
 
 
 class RelateWorkParams(Params):
@@ -1322,6 +1589,14 @@ class BacklogParams(Params):
             "`observations list`."
         ),
     )
+    mode: ListMode = Field(
+        default="summary",
+        description=(
+            "`summary` (default) returns each ranked row without its full "
+            "work item (`item` is null; ref, title, kind, state, priority and "
+            "score remain); `full` includes it, bodies and all."
+        ),
+    )
     limit: int = Field(default=20, ge=1, le=200)
     offset: int = Field(
         default=0,
@@ -1338,6 +1613,10 @@ class BacklogParams(Params):
 class BacklogResult(Result):
     items: list[RankedItem]
     total_considered: int
+    next_offset: int | None = Field(
+        default=None,
+        description="The `offset` of the next page; null on the last page.",
+    )
     declared: int = 0
     observed: int = 0
     suppressed: int = 0

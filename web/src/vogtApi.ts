@@ -742,6 +742,8 @@ export const listWorkflows = (options: { cache?: boolean } = {}) =>
 
 export const placeMetrics = () => call<PlaceMetricsResult>("place.metrics");
 
+/** The GUI renders whole items, so it asks for `mode: "full"`: the core's
+ *  default is the compact `summary` row an agent's context can hold. */
 export const listWork = (
   params: Record<string, unknown> = {},
   signal?: AbortSignal,
@@ -751,7 +753,7 @@ export const listWork = (
     total?: number;
     /** "unlinked" on a project scope is the link-or-publish marker. */
     link_state?: "linked" | "unlinked" | null;
-  }>("work.list", params, "GET", signal);
+  }>("work.list", { mode: "full", ...params }, "GET", signal);
 
 export const listBoard = (params: Record<string, unknown>, signal?: AbortSignal) =>
   call<BoardListResult>("board.list", params, "POST", signal);
@@ -759,7 +761,7 @@ export const listBoard = (params: Record<string, unknown>, signal?: AbortSignal)
 export const getWork = (ref: string) => call<WorkDetail>("work.get", { ref });
 
 export const backlog = (params: Record<string, unknown> = {}) =>
-  call<RankedView>("backlog", params);
+  call<RankedView>("backlog", { mode: "full", ...params });
 
 export const bugs = (params: Record<string, unknown> = {}) =>
   call<RankedView>("bugs", params);
@@ -908,7 +910,7 @@ export const listAudit = (params: Record<string, unknown> = {}) =>
 export const projectBrief = (slug: string) =>
   call<Record<string, unknown> & { freshness: FreshnessSummary }>(
     "project.brief",
-    { slug },
+    { slug, mode: "full" },
   );
 
 export const listDrift = (params: Record<string, unknown> = {}) =>
