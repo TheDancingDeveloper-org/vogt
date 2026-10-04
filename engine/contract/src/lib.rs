@@ -138,7 +138,8 @@ pub struct SessionScreen {
     pub alive: bool,
     /// True when the program is at a prompt waiting for input: the session
     /// is alive and either its activity is `waiting-for-input`, or it is
-    /// `idle` with the cursor on a recognisable prompt line.
+    /// `idle` and one of the lowest ten non-blank lines starts with a prompt
+    /// glyph (`screen::shows_prompt`).
     pub ready: bool,
 }
 

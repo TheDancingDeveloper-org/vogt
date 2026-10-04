@@ -2011,6 +2011,67 @@ async fn session_child_receives_its_own_session_id() {
     );
 }
 
+/// Run a one-shot command in a new session and return what it printed once
+/// it holds `expected`.
+async fn session_output(base: &str, body: Value, expected: &str) -> String {
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    session_output_after_exit(&client, base, &id, &[expected]).await
+}
+
+#[tokio::test]
+async fn every_session_is_told_the_engine_url_and_a_caller_can_override_it() {
+    // A session opened from the GUI never passes through vogt-core, which is
+    // what used to set VOGT_ENGINE_URL; the engine now sets it itself, from
+    // its bind address (a wildcard bind reads as loopback).
+    let (base, _h) = boot_with_config(Config {
+        bind: "0.0.0.0:48910".parse().unwrap(),
+        ..test_config()
+    })
+    .await;
+    let printed = session_output(
+        &base,
+        json!({
+            "name": "engine-url-env",
+            "command": ["/bin/sh", "-lc", "printf '<%s>' \"$VOGT_ENGINE_URL\""],
+        }),
+        "<http://127.0.0.1:48910>",
+    )
+    .await;
+    assert!(
+        printed.contains("<http://127.0.0.1:48910>"),
+        "child should see the engine URL; got {printed:?}"
+    );
+
+    // The caller's value (vogt-core's view of the engine) wins.
+    let printed = session_output(
+        &base,
+        json!({
+            "name": "engine-url-env-override",
+            "command": ["/bin/sh", "-lc", "printf '<%s>' \"$VOGT_ENGINE_URL\""],
+            "env": [["VOGT_ENGINE_URL", "http://engine.example:8910"]],
+        }),
+        "<http://engine.example:8910>",
+    )
+    .await;
+    assert!(
+        printed.contains("<http://engine.example:8910>"),
+        "a caller-supplied VOGT_ENGINE_URL should win; got {printed:?}"
+    );
+}
+
 #[tokio::test]
 async fn exited_sessions_are_archived_searchable_and_deletable() {
     let tmp = tempfile::tempdir().unwrap();
@@ -2991,7 +3052,7 @@ async fn an_agent_started_with_a_brief_is_told_to_read_it() {
         .join("sessions")
         .join(format!("{id}.md"));
 
-    let printed = session_output_after_exit(&client, &base, &id).await;
+    let printed = session_output_after_exit(&client, &base, &id, &["suggest=[false]"]).await;
     assert!(
         printed.contains(&format!("arg=[--session-id]\r\narg=[{id}]")),
         "a fresh claude launch should carry the session id; got {printed:?}"

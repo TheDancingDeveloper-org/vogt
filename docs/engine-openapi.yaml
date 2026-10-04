@@ -1,0 +1,562 @@
+openapi: 3.1.0
+# Hand-maintained. The source of truth is the code: routes in
+# engine/server/src/app.rs, handlers in engine/server/src/api.rs and ws.rs,
+# wire types in engine/contract/src/lib.rs, the capability gate in
+# engine/server/src/auth.rs. `scripts/check_engine_spec.py` (run by
+# `scripts/check_docs.py` and by pytest) fails when a `/api/sessions…` route in
+# app.rs has no path here, or when a path here names no route in app.rs.
+# Prose, rationale and the driving recipe: docs/ENGINE.md, "Session APIs".
+info:
+  title: Vogt session engine
+  version: "1"
+  summary: The engine's HTTP API for terminal sessions — list, create, read, type into, render and stop PTYs.
+  description: |
+    The engine (a Rust process, `:8910` by default) owns PTY sessions. This
+    document covers its session routes and the few routes a session driver
+    also needs (events, auth check, health). Everything else the engine serves
+    — files, git, assistant, push, agent tasks, history, the `/api/vogt` and
+    `/mcp` proxies to vogt-core — is described in prose in docs/ENGINE.md §5.
+
+    **Prefer the core's operations.** An agent drives sessions through
+    vogt-core's `session.*` operations (MCP `session_start`, `session_list`,
+    `session_screen`, `session_input`, `session_log_tail`, `session_stop`),
+    which accept either id form and audit every input. Calling these routes
+    directly is the fallback; a direct `POST …/input` is not recorded in the
+    core's audit log.
+
+    **Ids.** Every `{id}` here is the engine's session UUID. Vogt's own
+    `ses_…` ids are a core concept and are refused (`400`) by these routes;
+    the core maps one to the other (`engine_session_id` in `session.list`).
+
+    **Reaching it from inside a session.** Every session's environment
+    carries `VOGT_ENGINE_URL` (the engine's own loopback URL, or the URL
+    vogt-core reaches it at for a session the core started). Authenticate with
+    `Authorization: Bearer $VOGT_HTTP_TOKEN`; a core token with `work.write`,
+    `project.write` or `admin` scope carries the engine's `sessions`
+    capability.
+
+    **Errors** are `{"error": "<message>"}` (except an `{id}` that is not a
+    UUID, which is a plain-text `400` from the router): `400` malformed
+    input, `401` unknown bearer, `403` the bearer
+    lacks the route's capability, `404` no such session, `429` the
+    per-identity write-rate cap (with `Retry-After`), `503` the core could not
+    be asked about the bearer (with `Retry-After`).
+  license:
+    name: AGPL-3.0-only
+servers:
+  - url: http://127.0.0.1:8910
+    description: The engine on loopback, as a session in the pod reaches it ($VOGT_ENGINE_URL).
+security:
+  - bearer: []
+tags:
+  - name: sessions
+  - name: events
+  - name: health
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: Liveness — the process is listening.
+      operationId: healthz
+      security: []
+      responses:
+        "200":
+          description: Listening.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OkResponse" }
+  /readyz:
+    get:
+      tags: [health]
+      summary: Readiness checks; 503 when a fatal check fails.
+      operationId: readyz
+      security: []
+      responses:
+        "200":
+          description: Every fatal check passes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+        "503":
+          description: A fatal check failed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Readiness" }
+  /api/auth/check:
+    get:
+      tags: [health]
+      summary: Who this bearer is, and which engine capabilities it holds.
+      description: >-
+        A cheap credential probe. A driver checks `identity.capabilities`
+        contains `sessions` before it tries to create, read or type into a
+        session.
+      operationId: authCheck
+      responses:
+        "200":
+          description: The bearer's identity and capabilities.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthCheck" }
+  /api/events:
+    get:
+      tags: [events]
+      summary: Server-sent event stream (session lifecycle and activity).
+      description: >-
+        `text/event-stream`, one JSON `ServerEvent` per `data:` line, with a
+        `:ka` keep-alive comment every 15 seconds. Read it with `fetch` (it
+        needs the bearer header). A driver waits here for its session's
+        `activity` event: `waiting-for-input` means a prompt is up; on `idle`
+        read `/screen` and check `ready`; `exited`/`errored` or
+        `session-killed` mean nothing will read input again. Missed events are
+        not replayed — resynchronise with `GET /api/sessions`. Other event
+        types (`vogt.changed`, `task.*`) are documented in docs/ENGINE.md.
+      operationId: events
+      responses:
+        "200":
+          description: The stream.
+          content:
+            text/event-stream:
+              schema: { $ref: "#/components/schemas/SessionEvent" }
+  /api/sessions:
+    get:
+      tags: [sessions]
+      summary: List every session the engine holds, live and exited.
+      description: >-
+        Any valid bearer. An exited session stays listed (its scrollback and
+        screen remain readable) until it is deleted, so filter on `alive` for
+        running sessions.
+      operationId: listSessions
+      responses:
+        "200":
+          description: Sessions.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SessionSummary" }
+    post:
+      tags: [sessions]
+      summary: Create (spawn) a session.
+      description: >-
+        Requires the `sessions` capability. A `prompt` is written to a file
+        whose path the child receives as `VOGT_ENGINE_AGENT_TASK_PROMPT_FILE`;
+        an agent CLI the engine recognises (`claude`, `codex`, `opencode`,
+        wrapped or not) is also given a fixed first prompt telling it to read
+        that file and carry out its "Task" section. The text of the brief is
+        never put on argv.
+      operationId: createSession
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionSpec" }
+      responses:
+        "200":
+          description: The new session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400":
+          description: >-
+            Bad name or cwd, an unknown template, or `model`/`effort`/`resume`
+            given for a command the engine cannot pass them to.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: One session with its raw scrollback (base64).
+      description: >-
+        Requires the `sessions` capability: the scrollback routinely holds
+        pasted secrets. The scrollback is the raw byte stream, escapes and
+        redraws included; to read what the terminal shows, use `/screen`.
+      operationId: getSession
+      x-capability: sessions
+      parameters:
+        - name: tail_bytes
+          in: query
+          required: false
+          description: Return only the last N bytes, aligned forward to a safe replay boundary.
+          schema: { type: integer, minimum: 0 }
+      responses:
+        "200":
+          description: The session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionDetail" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [sessions]
+      summary: Rename a session.
+      operationId: renameSession
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: Trimmed; non-empty and at most 256 bytes, else 400.
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [sessions]
+      summary: Kill the child (if running) and forget the session and its prompt file.
+      operationId: deleteSession
+      x-capability: sessions
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/screen:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: The terminal's current visible screen, rendered as text.
+      description: >-
+        Rendered per request by replaying the last 1 MiB of scrollback into a
+        terminal grid at the PTY's current size — what a client attaching now
+        would see. Works for an exited session too (`alive` false, `ready`
+        false).
+      operationId: getSessionScreen
+      x-capability: sessions
+      responses:
+        "200":
+          description: The screen.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionScreen" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/kill:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: SIGKILL the child; the session stays listed and readable.
+      description: >-
+        The session then reads `alive` false and `activity` `errored` (a
+        signal is a non-zero exit). Use `DELETE` to forget it.
+      operationId: killSession
+      x-capability: sessions
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/input:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Write bytes to the session's PTY stdin.
+      description: >-
+        `text` is written verbatim — control sequences included (Esc is
+        `\u001b`, Up `\u001b[A`, Ctrl-C `\u0003`, Enter `\r`). `submit`
+        appends `\r` after the text. At most 64 KiB of UTF-8 per request.
+        Not recorded in vogt-core's audit log (only the engine's own request
+        log line); agents should prefer the core's `session.input`, which is.
+        Never send a bare Enter without first reading `/screen`: an Enter at
+        an unexpected menu accepts whatever is highlighted.
+      operationId: sessionInput
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionInput" }
+      responses:
+        "200": { $ref: "#/components/responses/Ok" }
+        "400":
+          description: Over the 64 KiB cap, or malformed body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "500":
+          description: The write to the PTY failed (for example the child has exited).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+  /api/sessions/{id}/attach:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: WebSocket attach — live, bidirectional terminal stream.
+      description: >-
+        A WebSocket upgrade, outside the bearer middleware: the first text
+        frame must be `{"type":"auth","token":"…","resume_from"?:N,
+        "snapshot_tail_bytes"?:N}` and the token needs the `sessions`
+        capability. The server replies `snapshot-start`, binary scrollback
+        chunks, `snapshot-done`, then live output. Client binary frames (and
+        text frames that are not control messages) go to PTY stdin; control
+        frames are `resize` and `ping`. Close codes: 4408 no auth frame within
+        five seconds, 4401 bad auth, 4404 no such session. The full protocol
+        is in docs/ENGINE.md, "Attach protocol". Agents should not need it:
+        `/screen` and `/input` cover driving.
+      operationId: attachSession
+      security: []
+      responses:
+        "101":
+          description: Switching protocols to WebSocket.
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      description: >-
+        A vogt-core token (API token, login session, or a coding session's
+        `VOGT_HTTP_TOKEN`), resolved through the core, or the engine's static
+        `ENGINE_TOKEN`. Core scopes map to engine capabilities: `admin` holds
+        all; `work.write`/`project.write` hold `sessions` among others; `read`
+        alone holds no session capability.
+  parameters:
+    SessionId:
+      name: id
+      in: path
+      required: true
+      description: The engine session UUID (not Vogt's `ses_…` id).
+      schema: { type: string, format: uuid }
+  responses:
+    Ok:
+      description: Done.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/OkResponse" }
+    BadRequest:
+      description: Malformed input.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: The engine holds no session with this id.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+  schemas:
+    OkResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+    ActivityState:
+      type: string
+      enum: [running, idle, waiting-for-input, exited, errored]
+      description: >-
+        `exited` (code 0) and `errored` (non-zero or a signal) are terminal
+        facts: `alive` is false and the state never changes again. The three
+        live states are a heuristic over the last ~512 visible bytes:
+        `running` — output within the idle threshold; `idle` — quiet longer
+        than that; `waiting-for-input` — a recognised prompt pattern
+        (`[y/n]`, a password prompt, a numbered approval menu, a bare `❯`).
+    SessionSummary:
+      type: object
+      required: [id, name, activity, alive]
+      properties:
+        id: { type: string, format: uuid, description: The engine session UUID. }
+        name: { type: string }
+        activity: { $ref: "#/components/schemas/ActivityState" }
+        exit_code:
+          type: [integer, "null"]
+          description: Set exactly when the child has exited.
+        alive:
+          type: boolean
+          description: True while the child runs; false exactly when `exit_code` is set.
+        scrollback_bytes: { type: integer }
+        cwd: { type: string }
+        command:
+          type: string
+          description: The explicit command, shell-quoted; absent for a default-shell session.
+        created_at: { type: string, format: date-time }
+        activity_changed_at:
+          type: string
+          format: date-time
+          description: When the current activity state began.
+    SessionDetail:
+      type: object
+      required: [summary, scrollback_pos, scrollback_base64]
+      properties:
+        summary: { $ref: "#/components/schemas/SessionSummary" }
+        scrollback_pos:
+          type: integer
+          description: Absolute end position of the scrollback stream.
+        scrollback_base64:
+          type: string
+          contentEncoding: base64
+          description: The raw scrollback (or its tail), escapes included.
+    SessionScreen:
+      type: object
+      required: [id, cols, rows, lines, cursor, title, activity, alive, ready]
+      properties:
+        id: { type: string, format: uuid }
+        cols: { type: integer }
+        rows: { type: integer }
+        lines:
+          type: array
+          items: { type: string }
+          description: The visible rows top to bottom, trailing spaces trimmed; exactly `rows` entries.
+        cursor:
+          type: object
+          required: [row, col]
+          properties:
+            row: { type: integer, description: Zero-based. }
+            col: { type: integer, description: Zero-based. }
+        title:
+          type: [string, "null"]
+          description: The last window title the program set (OSC 0/2).
+        activity: { $ref: "#/components/schemas/ActivityState" }
+        alive: { type: boolean }
+        ready:
+          type: boolean
+          description: >-
+            The program is waiting for input: alive, and either `activity` is
+            `waiting-for-input`, or it is `idle` and one of the lowest ten
+            non-blank lines (box border stripped) starts with a prompt glyph
+            (`>`, `❯`, `›`, `>>>`). Never true while `running`.
+    SessionSpec:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          description: Trimmed; non-empty, at most 256 bytes. Need not be unique.
+        command:
+          type: array
+          items: { type: string }
+          description: argv. Omitted means the configured default shell (or `template`).
+        template:
+          type: string
+          description: >-
+            A configured session template, by name (case-insensitive) or tag
+            (an `agent`-tagged template wins an ambiguous tag). Ignored when
+            `command` is given; an unknown name is 400.
+        cwd:
+          type: string
+          description: Resolved against the workspace root; escaping it is 400.
+        env:
+          type: array
+          description: Extra environment, applied last (overrides engine defaults such as VOGT_ENGINE_URL).
+          items:
+            type: array
+            prefixItems:
+              - { type: string }
+              - { type: string }
+            minItems: 2
+            maxItems: 2
+        prompt:
+          type: string
+          description: >-
+            The brief. Written to `state_dir/agent-task-prompts/sessions/<id>.md`;
+            the child gets the path as `VOGT_ENGINE_AGENT_TASK_PROMPT_FILE`.
+            Empty or whitespace means no file.
+        model:
+          type: string
+          description: Model id for the agent CLI in `command`; refused for a command with no mapping.
+        effort:
+          type: string
+          description: Reasoning effort for the agent CLI; refused for `opencode` and unmapped commands.
+        resume:
+          type: string
+          pattern: "^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$"
+          description: >-
+            The agent CLI's own conversation id to continue (`claude --resume`,
+            `codex resume`, `opencode --session`). A fresh Claude Code session
+            the engine started has its engine session id as its conversation id.
+        cols: { type: integer }
+        rows: { type: integer }
+        scrollback_bytes: { type: integer }
+    SessionInput:
+      type: object
+      required: [text]
+      properties:
+        text:
+          type: string
+          description: Written verbatim; at most 64 KiB of UTF-8. May be empty with `submit`.
+        submit:
+          type: boolean
+          default: false
+          description: Append `\r` (press Enter) after `text`.
+    SessionEvent:
+      description: The session-related `ServerEvent` variants, tagged by `type`.
+      oneOf:
+        - type: object
+          required: [type, id, name]
+          properties:
+            type: { const: session-created }
+            id: { type: string, format: uuid }
+            name: { type: string }
+        - type: object
+          required: [type, id, name]
+          properties:
+            type: { const: session-renamed }
+            id: { type: string, format: uuid }
+            name: { type: string }
+        - type: object
+          required: [type, id]
+          description: >-
+            The child has exited, however it ended (its own exit, a kill, a
+            delete), published once its last output is in the scrollback.
+          properties:
+            type: { const: session-killed }
+            id: { type: string, format: uuid }
+            exit_code: { type: [integer, "null"] }
+        - type: object
+          required: [type, id, state]
+          properties:
+            type: { const: activity }
+            id: { type: string, format: uuid }
+            state: { $ref: "#/components/schemas/ActivityState" }
+            activity_changed_at: { type: string, format: date-time }
+    AuthCheck:
+      type: object
+      required: [ok, version, product_version, storage, identity]
+      properties:
+        ok: { type: boolean }
+        version: { type: string }
+        product_version: { type: string }
+        storage:
+          type: object
+          properties:
+            state_dir: { type: string }
+            workspace_root: { type: string }
+        identity:
+          type: object
+          required: [name, scopes, capabilities]
+          properties:
+            name:
+              type: string
+              description: The core actor's identity_ref, or `primary` / `vogt-core` for the static credentials.
+            scopes:
+              type: array
+              items: { type: string }
+            capabilities:
+              type: array
+              items: { type: string }
+              description: Engine capabilities, e.g. `sessions`, `filesystem-write`.
+    Readiness:
+      type: object
+      required: [ok, checks]
+      properties:
+        ok: { type: boolean }
+        checks:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              ok: { type: boolean }
+              detail: { type: string }
+              fatal: { type: boolean }
