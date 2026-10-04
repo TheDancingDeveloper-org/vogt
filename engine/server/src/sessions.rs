@@ -126,28 +126,47 @@ impl SessionRegistry {
                 spec.cwd = None;
             }
         }
-        // Before the prompt file is written and before anything is spawned:
-        // a request naming a model this command cannot be told about is
-        // refused, not started plain. Doing it here rather than in
-        // `pty::spawn` keeps the refusal free of side effects to undo.
-        if let Some(rewritten) = agent_cli::apply(
-            spec.command.as_deref(),
-            spec.model.as_deref(),
-            spec.effort.as_deref(),
-        )? {
-            spec.command = Some(rewritten);
-        }
-
         // Allocated here rather than inside `pty::spawn` so the prompt file
-        // below can be named for the session it belongs to, and so the file
-        // exists before the child does.
+        // below can be named for the session it belongs to, so the file
+        // exists before the child does, and so the agent's launch can name
+        // both.
         let id = Uuid::new_v4();
-        let prompt_file = match spec
+        let brief = spec
             .prompt
             .as_deref()
             .map(str::trim)
-            .filter(|text| !text.is_empty())
-        {
+            .filter(|text| !text.is_empty());
+        let brief_path = brief.map(|_| prompt_files::session_prompt_path(&self.cfg.state_dir, id));
+
+        // Before the prompt file is written and before anything is spawned:
+        // a request naming a model (or a conversation to resume) this command
+        // cannot be told about is refused, not started plain. Doing it here
+        // rather than in `pty::spawn` keeps the refusal free of side effects
+        // to undo. An agent CLI started with a brief is also given its first
+        // prompt here — a pointer to the file, so it begins the brief's task
+        // instead of opening idle.
+        let launch = agent_cli::launch(
+            spec.command.as_deref(),
+            &agent_cli::LaunchRequest {
+                model: spec.model.as_deref(),
+                effort: spec.effort.as_deref(),
+                resume: spec.resume.as_deref(),
+                brief_file: brief_path.as_deref(),
+                session_id: Some(id),
+            },
+        )?;
+        if let Some(rewritten) = launch.command {
+            spec.command = Some(rewritten);
+        }
+        if !launch.env.is_empty() {
+            // Defaults: first, so a template or caller that sets the same
+            // variable still has the last word.
+            let mut env = launch.env;
+            env.extend(spec.env.take().unwrap_or_default());
+            spec.env = Some(env);
+        }
+
+        let prompt_file = match brief {
             Some(text) => Some(prompt_files::write_session_prompt(
                 &self.cfg.state_dir,
                 id,

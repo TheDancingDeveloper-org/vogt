@@ -2927,6 +2927,111 @@ async fn session_prompt_is_written_to_a_file_the_child_is_pointed_at() {
     );
 }
 
+/// WI-827/832/833 end to end: an agent CLI started with a brief is handed a
+/// first prompt naming the brief file (so it begins the task rather than
+/// opening idle), a fresh Claude Code launch is pinned to the engine's
+/// session id as its conversation id, and the quiet defaults reach its env.
+/// A stub named `claude` prints what it was given, standing in for the CLI.
+#[tokio::test]
+async fn an_agent_started_with_a_brief_is_told_to_read_it() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("claude");
+    std::fs::write(
+        &stub,
+        // One write, then a pause: the helper below stops reading once the
+        // child has exited, so output must not trail the exit.
+        "#!/bin/sh\nout=$(printf 'arg=[%s]\\n' \"$@\")\n\
+         printf '%s\\nsuggest=[%s]\\n' \"$out\" \"$CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION\"\n\
+         sleep 0.3\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "agent with a task",
+            "prompt": "Context.\n\n## Task\n\nCheck the containers.\n",
+            "command": [stub.to_string_lossy()],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let prompt_path = tmp
+        .path()
+        .join("state")
+        .join("agent-task-prompts")
+        .join("sessions")
+        .join(format!("{id}.md"));
+
+    let printed = session_output_after_exit(&client, &base, &id).await;
+    assert!(
+        printed.contains(&format!("arg=[--session-id]\r\narg=[{id}]")),
+        "a fresh claude launch should carry the session id; got {printed:?}"
+    );
+    assert!(
+        printed.contains(&format!(
+            "arg=[Vogt started this session with a brief in {}.",
+            prompt_path.display()
+        )),
+        "the first prompt should name the brief file; got {printed:?}"
+    );
+    assert!(
+        !printed.contains("Check the containers"),
+        "the brief's text must not be argv; got {printed:?}"
+    );
+    assert!(
+        printed.contains("suggest=[false]"),
+        "prompt suggestions should be off; got {printed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_resume_for_a_shell_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    for (command, resume) in [
+        (json!(["bash"]), "0f8fad5b-d9cb-469f-a165-70867728950e"),
+        (json!(["claude"]), "--dangerously-skip-permissions"),
+    ] {
+        let status = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({"name": "r", "command": command, "resume": resume}))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, 400, "{command} resume {resume}");
+    }
+}
+
 #[tokio::test]
 async fn a_session_without_a_prompt_gets_no_file_and_no_variable() {
     let tmp = tempfile::tempdir().unwrap();

@@ -579,12 +579,76 @@ Three rules, each written against a specific failure:
 }
 ```
 
-The text is not passed to the child. The engine writes it to
+`SessionSpec` also carries an optional `resume` — the agent CLI's own id for a
+previous conversation to continue instead of starting a new one:
+
+| Command | `resume` |
+|---|---|
+| `claude` | `--resume <id>` |
+| `codex` | `resume <id>` — a subcommand, so inserted straight after the binary, ahead of the template's own arguments and the model flags |
+| `opencode` | `--session <id>` |
+
+It follows the same rules as `model`: refused (`400`) for a command with no
+mapping or the default shell, and validated before it becomes argv — letters,
+digits and `. _ -` only, at most 128 characters, never a leading dash.
+
+**Which conversation id a session has.** A fresh Claude Code launch whose
+command is the bare agent (nothing of the template's own after `claude`, as
+in every protected template) is started with `--session-id <engine session
+id>`, so its conversation id *is* the engine session id — the `id` every
+session listing, `engine_session_id` in vogt-core, and session history
+already show. A session lost to a redeploy is resumed with
+`resume: <that id>` and the `claude` template. A resumed Claude session keeps
+the id it resumed (no `--session-id` is added), and a command that carries
+arguments of its own after `claude` is not pinned, because Claude Code refuses
+`--session-id` next to a `--continue` or `--session-id` it already has. Codex
+and OpenCode cannot be told an id at launch, so their conversation ids are
+not knowable to the engine; find them with `codex resume` (its picker) or
+`opencode session list` inside the pod.
+
+The brief's text is not passed to the child. The engine writes it to
 `state_dir/agent-task-prompts/sessions/<session-id>.md` before the PTY is
 spawned and exports that path as `VOGT_ENGINE_AGENT_TASK_PROMPT_FILE` — the same
 variable a scheduled agent task run sets, so an agent started for a work item
 and an agent started by a schedule are configured identically. A `prompt` that
 is absent, empty, or all whitespace writes no file and sets no variable.
+
+When the command is an agent CLI the engine knows (`claude`, `codex`,
+`opencode`, wrapped or not), it is also given a **first prompt** pointing at
+that file, so an agent started with a task begins it instead of opening idle:
+
+> Vogt started this session with a brief in `<path>`. Read that file now. If
+> it has a "Task" section, carry that task out; otherwise summarise the brief
+> in one line and wait for instructions.
+
+It is the positional prompt for `claude` and `codex` (after every flag above)
+and `--prompt` for `opencode`. Only this fixed sentence and the path reach
+argv — never the brief, which would hit argv limits, need quoting, and stand
+in `ps` for every process in the pod to read. vogt-core folds a `session.start`
+`task` into the brief as its `## Task` section. A plain shell, or any command
+the engine does not recognise, gets no first prompt and keeps only the
+variable.
+
+**Quiet defaults for Claude Code.** Engine sessions are often driven by
+another agent through `POST /api/sessions/:id/input`, and Claude Code's
+interactive niceties become traps there. Every session whose agent binary is
+`claude` starts with these variables, placed *before* the template's and the
+caller's env so either can override them:
+
+| Variable | Why |
+|---|---|
+| `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` | A greyed-out suggested next prompt is accepted by a bare Enter, which a driver sends to submit what it typed. |
+| `CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY=1` | The session-quality survey takes the next keystrokes as its answer. |
+
+The "Teach auto mode about your environment?" dialog has no variable. Its
+only off switch is `autoModeEnvSetup.dismissed` in Claude Code's global config
+(what "Don't show again" writes), so the pod entrypoint sets that flag in
+`${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` at boot, before any session can
+run Claude Code; `ENGINE_AGENT_QUIET_ONBOARDING=0` skips it. Spinner tips are
+left on: they are text, not a prompt, and wait for no answer. A dialog
+Claude Code adds later can still appear; a driver dismisses one with `Esc`
+(sent as `\u001b` over `/input`), or picks an option with the arrow keys and
+`Enter` (`\r`).
 
 `cwd` is resolved against `workspace_root` and must stay inside it; a path
 that escapes via `..` is `400` rather than a shell in `/etc`. `name` is trimmed
@@ -1983,7 +2047,10 @@ than by hand.
   `state_dir/agent-task-prompts/sessions/<session-id>.md` and exported as the
   same `VOGT_ENGINE_AGENT_TASK_PROMPT_FILE` variable, so one prompt root exists
   and `POST /api/agent-tasks/artifacts/cleanup` accounts for everything under
-  it. See `engine/server/src/prompt_files.rs`.
+  it. See `engine/server/src/prompt_files.rs`. An agent CLI started with a
+  brief is also given a one-line first prompt naming the file (§5,
+  `agent_cli.rs`); a task run's own command is untouched, because it already
+  says how to use its prompt file.
 - Tasks can schedule `manual`, `interval`, or UTC `daily` runs. The first useful
   product-monitor shape is `interval { minutes = 720 }` for twice daily.
 - The default notification hook is output-driven: if an agent prints a line

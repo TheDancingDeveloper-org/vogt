@@ -57,6 +57,13 @@ pub struct SessionSpec {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// A previous conversation of the agent CLI in `command` to continue —
+    /// its own conversation id, which the engine turns into `claude --resume
+    /// <id>`, `codex resume <id>` or `opencode --session <id>`. Refused, like
+    /// `model`, for a command the engine cannot tell, and validated before it
+    /// becomes argv.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
