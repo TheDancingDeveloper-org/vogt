@@ -136,6 +136,7 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     ("notifications", {}),
+    ("deployed.versions", {}),
     # -- the forge foundation, armed before the work plane --
     # Per-actor account linking: paste, confirm, enumerate. The token is
     # validated against the stand-in forge and never echoed back; it is also

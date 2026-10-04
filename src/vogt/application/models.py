@@ -2907,6 +2907,91 @@ class NotificationsResult(Result):
     detail: str | None = None
 
 
+# -- deployed versions ---------------------------------------------
+
+
+class DeployedVersionsParams(Params):
+    """Which configured deployment lanes to report (`deploy_lanes`)."""
+
+    project: str | None = Field(
+        default=None, description="Project slug. Omit for every configured lane."
+    )
+    lane: str | None = Field(
+        default=None, description="One lane by name, e.g. `dev`. Omit for all."
+    )
+
+
+class DeployedCommit(Result):
+    """A commit on the lane's branch that the lane is not running yet."""
+
+    sha: str
+    subject: str
+    work_items: list[str] = Field(
+        default=[], description="Work item refs the commit subject names."
+    )
+
+
+class UnpromotedWorkItem(Result):
+    """A work item named by a commit the lane has not deployed."""
+
+    ref: str
+    title: str | None = None
+    state: str | None = None
+
+
+class DeployedLaneView(Result):
+    """One lane: what it runs, and how far that is behind its branch."""
+
+    lane: str
+    project_slug: str
+    branch: str
+    status: Literal["at_head", "behind", "diverged", "unknown", "not_collected"] = (
+        Field(
+            description="at_head: deployed revision is the branch head; behind: "
+            "commits on the branch are not deployed; diverged: the deployed "
+            "revision is not on the branch; unknown: the evidence could not "
+            "say (see detail); not_collected: no sweep has read this lane."
+        )
+    )
+    deployed_sha: str | None = None
+    deployed_from: Literal["live", "receipt"] | None = Field(
+        default=None,
+        description="Where deployed_sha came from: the running instance's "
+        "version endpoint (live) or the deploy pipeline's receipt.",
+    )
+    version: str | None = Field(
+        default=None, description="The running instance's reported version."
+    )
+    source_tag: str | None = Field(
+        default=None, description="The tag the receipt says was deployed."
+    )
+    receipt_status: str | None = None
+    receipt_at: str | None = None
+    live_sha: str | None = None
+    head_sha: str | None = None
+    commits_behind: int | None = None
+    unpromoted_commits: list[DeployedCommit] = []
+    unpromoted_work_items: list[UnpromotedWorkItem] = []
+    truncated: bool = Field(
+        default=False,
+        description="More commits are behind than are listed (commits_behind "
+        "is still exact).",
+    )
+    observed_at: datetime | None = None
+    detail: str | None = None
+
+
+class DeployedVersionsResult(Result):
+    """Every configured lane, honest about lanes nobody has read yet."""
+
+    lanes: list[DeployedLaneView]
+    configured: int = Field(
+        description="How many lanes `deploy_lanes` configures in total."
+    )
+    detail: str | None = None
+    freshness: Freshness = Freshness()
+
+
 # -- connecting a client -------------------------------------------
 
 

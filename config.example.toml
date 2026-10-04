@@ -64,6 +64,22 @@
 # default policy: behaviour
 # inbox_bot_logins = ["dependabot", "renovate", "renovate-bot", "github-actions"]
 
+# Branches (glob patterns) whose failed CI runs raise an Inbox alert. Only pushed, scheduled and manually dispatched runs count — a pull-request run never alerts, whatever its branch. An alert names the failing jobs, links the log, and clears itself when a later run of the same workflow on the same branch succeeds.
+# default policy: behaviour
+# ci_alert_branches = ["main", "master", "prod"]
+
+# Tags (glob patterns) whose failed CI runs raise an Inbox alert — the release workflows a tag push starts, which block no pull request and so fail silently otherwise. Tags are one lane per workflow: a later tag's successful run of the same workflow clears an earlier tag's failure, because the release it would have shipped has been superseded.
+# default policy: behaviour
+# ci_alert_tags = ["v*"]
+
+# When CI finishes on a branch bound to a work item (`work.bind_branch`), type a one-line pass/fail notice into each live session started for that item, so an agent wakes on the result instead of polling. Sent once per run conclusion, by the sweep that observed it. The Inbox entry is raised either way; this only turns the session nudge off.
+# default policy: behaviour
+# ci_watch_notify_sessions = true
+
+# Deployment lanes `deployed_versions` reports on, each a table with `name`, `project` (a registered slug), `branch` (default `main`), and a source: `receipt_repo` + `receipt_path` (a JSON receipt a deploy pipeline commits, read through the configured forge) and/or `version_url` (a running instance's public JSON version endpoint, e.g. Vogt's `/api/config`). Empty means the `deploy-lanes` collector is not registered and deployed versions are reported as not configured. A receipt whose status says the deploy or its smoke test failed raises an Inbox alert.
+# default policy: behaviour
+# deploy_lanes = [{ name = "dev", project = "my-app", version_url = "https://dev.example.com/api/config" }]
+
 # File types the marker collector reads. Configuration rather than a hard-coded list, because which extensions hold source is a workspace's business, not Vogt's.
 # default policy: behaviour
 # marker_file_extensions = [".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".rb", ".sh", ".sql", ".toml", ".yaml", ".yml", ".md"]

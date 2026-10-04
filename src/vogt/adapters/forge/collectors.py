@@ -14,6 +14,7 @@ history — so unlike the issue/PR sync they need no `subject_seen` bookkeeping.
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import cast
 
 from vogt.adapters.forge.actors import RESOLVE_BUDGET, RESOLVER, ActorResolver
 from vogt.adapters.forge.kinds import (
@@ -29,11 +30,12 @@ from vogt.adapters.forge.kinds import (
     KIND_RELEASE,
     KIND_SYNC,
 )
-from vogt.adapters.forge.models import RepoRef
+from vogt.adapters.forge.models import ForgeCheck, RepoRef
 from vogt.adapters.forge.provider import ForgeProvider
 from vogt.adapters.forge.registry import provider_for, unsupported_reason
 from vogt.adapters.github.client import Transport
 from vogt.collectors.base import CollectorContext, Finding, finding
+from vogt.core.ci_alerts import FAILING_CONCLUSIONS, watched_ref
 from vogt.core.entities import Project
 from vogt.storage.interface import ObservedStore
 
@@ -70,10 +72,21 @@ class _ForgeReadCollector:
             yield self._receipt(project, supported=False, detail=self.missing_detail)
             return
         count = 0
-        for entry in self._read(provider, ref, project):
+        for entry in self._read_in(ctx, provider, ref, project):
             count += 1
             yield entry
         yield self._receipt(project, supported=True, count=count, ref=ref)
+
+    def _read_in(
+        self,
+        ctx: CollectorContext,
+        provider: ForgeProvider,
+        ref: RepoRef,
+        project: Project,
+    ) -> Iterable[Finding]:
+        """`_read`, for a collector that also needs the sweep's context."""
+        del ctx
+        return self._read(provider, ref, project)
 
     def _read(
         self, provider: ForgeProvider, ref: RepoRef, project: Project
@@ -103,32 +116,152 @@ class _ForgeReadCollector:
         )
 
 
+#: How many failed runs per project per sweep may have their jobs looked up
+#: (one forge call each). A job list never changes once a run concludes, so
+#: a looked-up answer is carried forward from the previous observation and
+#: this budget is only spent on runs that are new — the rest wait a sweep.
+JOB_LOOKUP_BUDGET = 5
+
+
 class ForgeChecksCollector(_ForgeReadCollector):
-    """CI checks, per revision. Replaces `gh-actions`."""
+    """CI checks, per revision and ref. Replaces `gh-actions`.
+
+    Two reads: the newest runs of every kind, and a bounded page of pushed
+    runs only (`watched_ref_checks`) so a tag or default-branch run is not
+    pushed off the first page by pull-request churn before anyone sees it
+    fail. A failed run on a watched ref (`ci_alert_branches`,
+    `ci_alert_tags`) also has its failed jobs looked up, so the alert can
+    name the job and link its log.
+    """
 
     name = COLLECTOR_CHECKS
 
-    def _read(
-        self, provider: ForgeProvider, ref: RepoRef, project: Project
+    def __init__(
+        self,
+        *,
+        transport: Transport | None = None,
+        store: ObservedStore | None = None,
+    ) -> None:
+        super().__init__(transport=transport)
+        # Read-only: the previous observation of a run is the job-list cache,
+        # the same way notifications read their author cache.
+        self._store = store
+
+    def _read_in(
+        self,
+        ctx: CollectorContext,
+        provider: ForgeProvider,
+        ref: RepoRef,
+        project: Project,
     ) -> Iterable[Finding]:
-        for check in provider.checks(ref):
+        runs: dict[tuple[object, ...], ForgeCheck] = {}
+        for check in (*provider.checks(ref), *provider.watched_ref_checks(ref)):
+            runs.setdefault(_run_identity(check), check)
+        prior = self._prior(project, len(runs))
+        budget = [JOB_LOOKUP_BUDGET]
+        for check in runs.values():
+            subject_key = check_subject_key(ref.slug, check)
+            payload: dict[str, object] = {
+                "revision": check.revision,
+                "check": check.check,
+                "status": check.status,
+                "conclusion": check.conclusion,
+                "branch": check.branch,
+                "event": check.event,
+                "run_number": check.run_number,
+                "updated_at": check.updated_at,
+                "repo": ref.slug,
+            }
+            if check.run_id is not None:
+                payload["run_id"] = check.run_id
+                payload["run_attempt"] = check.run_attempt
+            jobs = self._failed_jobs(
+                ctx, provider, ref, check, prior.get(subject_key), budget
+            )
+            if jobs is not None:
+                payload["failed_jobs"] = jobs
             yield finding(
                 kind=KIND_CHECK,
-                subject_key=f"ci:{ref.slug}@{check.revision}:{check.check}",
+                subject_key=subject_key,
                 project=project,
                 source_url=check.source_url,
-                payload={
-                    "revision": check.revision,
-                    "check": check.check,
-                    "status": check.status,
-                    "conclusion": check.conclusion,
-                    "branch": check.branch,
-                    "event": check.event,
-                    "run_number": check.run_number,
-                    "updated_at": check.updated_at,
-                    "repo": ref.slug,
-                },
+                payload=payload,
             )
+
+    def _prior(self, project: Project, count: int) -> dict[str, dict[str, object]]:
+        if self._store is None or count == 0:
+            return {}
+        return {
+            observation.subject_key: observation.payload
+            for observation in self._store.latest(
+                kinds=(KIND_CHECK,),
+                project_id=project.id,
+                limit=count * 4 + 200,
+            )
+        }
+
+    def _failed_jobs(
+        self,
+        ctx: CollectorContext,
+        provider: ForgeProvider,
+        ref: RepoRef,
+        check: ForgeCheck,
+        prior: dict[str, object] | None,
+        budget: list[int],
+    ) -> list[dict[str, object]] | None:
+        """The failed jobs of a failed watched-ref run, or `None` when the run
+        is not one, or its jobs are not known yet (budget spent this sweep)."""
+        if (
+            check.run_id is None
+            or check.conclusion not in FAILING_CONCLUSIONS
+            or watched_ref(
+                check.branch,
+                check.event,
+                branches=ctx.config.ci_alert_branches,
+                tags=ctx.config.ci_alert_tags,
+            )
+            is None
+        ):
+            return None
+        if (
+            prior is not None
+            and prior.get("run_id") == check.run_id
+            and prior.get("run_attempt") == check.run_attempt
+            and prior.get("conclusion") == check.conclusion
+            and isinstance(prior.get("failed_jobs"), list)
+        ):
+            return cast(list[dict[str, object]], prior["failed_jobs"])
+        if budget[0] <= 0:
+            return None
+        budget[0] -= 1
+        return [
+            {
+                "name": job.name,
+                "conclusion": job.conclusion,
+                "url": job.source_url,
+            }
+            for job in provider.failed_jobs(ref, check.run_id)
+        ]
+
+
+def check_subject_key(slug: str, check: ForgeCheck) -> str:
+    """One workflow on one revision *and ref*.
+
+    The ref joins the key because one commit is routinely built twice by the
+    same workflow — on the default branch and again on the release tag cut
+    from it — and without it the two runs shared a subject: whichever the
+    forge listed last overwrote the other, so a tag's failed release could be
+    hidden by the branch's green build of the same commit.
+    """
+    base = f"ci:{slug}@{check.revision}:{check.check}"
+    return base if not check.branch else f"{base}@{check.branch}"
+
+
+def _run_identity(check: ForgeCheck) -> tuple[object, ...]:
+    """Dedupe key across the two reads: the run id where the forge has one."""
+    if check.run_id is not None:
+        return ("id", check.run_id)
+    return (check.revision, check.check, check.branch, check.event, check.run_number)
 
 
 class ForgeReleasesCollector(_ForgeReadCollector):
@@ -287,7 +420,7 @@ def forge_read_collectors(
     notifications). Registered whenever a forge is configured; the provider is
     resolved per project (D4)."""
     return [
-        ForgeChecksCollector(transport=transport),
+        ForgeChecksCollector(transport=transport, store=store),
         ForgeReleasesCollector(transport=transport),
         ForgeLabelsCollector(transport=transport),
         ForgePostureCollector(transport=transport),
@@ -301,5 +434,6 @@ __all__ = [
     "ForgeNotificationsCollector",
     "ForgePostureCollector",
     "ForgeReleasesCollector",
+    "check_subject_key",
     "forge_read_collectors",
 ]

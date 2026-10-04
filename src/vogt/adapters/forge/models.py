@@ -225,13 +225,46 @@ class ForgeCheck:
     updated_at: str | None = None
     source_url: str | None = None
     extra: dict[str, object] = field(default_factory=dict)
+    #: The forge's id for the run, where it has one — what a job lookup
+    #: (`failed_jobs`) is keyed by.
+    run_id: int | None = None
+    run_attempt: int | None = None
+
+
+@dataclass(frozen=True)
+class ForgeJob:
+    """One job of a CI run, as the forge reported it — the unit a log is
+    attached to, so the thing an alert links."""
+
+    name: str
+    conclusion: str | None = None
+    source_url: str | None = None
+
+
+@dataclass(frozen=True)
+class ForgeComparison:
+    """How `head` relates to `base` on one repository.
+
+    `commits` are the commits reachable from `head` and not from `base`,
+    oldest first, each `(sha, first line of the message)` — bounded by the
+    forge's own page, so `ahead_by` can exceed `len(commits)`."""
+
+    base: str
+    head: str
+    head_sha: str | None
+    status: str | None
+    ahead_by: int
+    behind_by: int
+    commits: tuple[tuple[str, str], ...] = ()
 
 
 __all__ = [
     "ForgeActor",
     "ForgeCapabilities",
     "ForgeCheck",
+    "ForgeComparison",
     "ForgeIssue",
+    "ForgeJob",
     "ForgeLabel",
     "ForgeNotification",
     "ForgePosture",

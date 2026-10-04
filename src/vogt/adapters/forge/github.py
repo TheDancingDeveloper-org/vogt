@@ -19,11 +19,14 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from vogt.adapters.forge._payloads import comparison, decoded_content, quote_path
 from vogt.adapters.forge.models import (
     ForgeActor,
     ForgeCapabilities,
     ForgeCheck,
+    ForgeComparison,
     ForgeIssue,
+    ForgeJob,
     ForgeLabel,
     ForgeNotification,
     ForgePosture,
@@ -229,22 +232,54 @@ class GitHubProvider:
         payloads = self._client.get(
             f"/repos/{ref.owner}/{ref.repo}/actions/runs", per_page=20
         )
-        runs = payloads.get("workflow_runs", []) if isinstance(payloads, dict) else []
-        for item in runs:
-            if not isinstance(item, dict):
+        yield from _runs(ref, payloads)
+
+    def watched_ref_checks(self, ref: RepoRef) -> Iterable[ForgeCheck]:
+        # `event=push` is every branch and tag push and never a pull-request
+        # run — exactly the population a release or default-branch failure
+        # lives in, without the PR churn that pushes it off `checks`' page.
+        payloads = self._client.get(
+            f"/repos/{ref.owner}/{ref.repo}/actions/runs",
+            per_page=WATCHED_RUNS_PAGE,
+            event="push",
+        )
+        yield from _runs(ref, payloads)
+
+    def failed_jobs(self, ref: RepoRef, run_id: int) -> list[ForgeJob]:
+        payload = self._client.get(
+            f"/repos/{ref.owner}/{ref.repo}/actions/runs/{int(run_id)}/jobs",
+            filter="latest",
+            per_page=DEFAULT_PER_PAGE,
+        )
+        jobs = payload.get("jobs", []) if isinstance(payload, dict) else []
+        failed: list[ForgeJob] = []
+        for job in jobs:
+            if not isinstance(job, dict):
                 continue
-            yield ForgeCheck(
-                revision=item.get("head_sha", ""),
-                check=item.get("name", "workflow"),
-                repo=ref.slug,
-                status=item.get("status"),
-                conclusion=item.get("conclusion"),
-                branch=item.get("head_branch"),
-                event=item.get("event"),
-                run_number=item.get("run_number"),
-                updated_at=item.get("updated_at"),
-                source_url=item.get("html_url"),
+            conclusion = job.get("conclusion")
+            if conclusion in (None, "success", "skipped", "neutral", "cancelled"):
+                continue
+            failed.append(
+                ForgeJob(
+                    name=str(job.get("name") or "job"),
+                    conclusion=str(conclusion),
+                    source_url=job.get("html_url"),
+                )
             )
+        return failed
+
+    def read_file(self, ref: RepoRef, path: str) -> bytes | None:
+        payload = self._client.get(
+            f"/repos/{ref.owner}/{ref.repo}/contents/{quote_path(path)}"
+        )
+        return decoded_content(payload)
+
+    def compare(self, ref: RepoRef, base: str, head: str) -> ForgeComparison | None:
+        payload = self._client.get(
+            f"/repos/{ref.owner}/{ref.repo}/compare/"
+            f"{quote_path(base)}...{quote_path(head)}"
+        )
+        return comparison(base, head, payload)
 
     def labels(self, ref: RepoRef) -> Iterable[ForgeLabel]:
         payloads = self._client.get(
@@ -584,6 +619,35 @@ def _check_rollup(item: dict[str, Any]) -> str | None:
     if isinstance(status, dict) and isinstance(status.get("state"), str):
         return str(status["state"])
     return None
+
+
+#: How many push runs the supplementary read asks for: a push to the default
+#: branch fans out into one run per workflow (six or so here), so fifty spans
+#: several pushes and any tag cut between them.
+WATCHED_RUNS_PAGE = 50
+
+
+def _runs(ref: RepoRef, payloads: object) -> Iterable[ForgeCheck]:
+    runs = payloads.get("workflow_runs", []) if isinstance(payloads, dict) else []
+    for item in runs:
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("id")
+        attempt = item.get("run_attempt")
+        yield ForgeCheck(
+            revision=item.get("head_sha", ""),
+            check=item.get("name", "workflow"),
+            repo=ref.slug,
+            status=item.get("status"),
+            conclusion=item.get("conclusion"),
+            branch=item.get("head_branch"),
+            event=item.get("event"),
+            run_number=item.get("run_number"),
+            updated_at=item.get("updated_at"),
+            source_url=item.get("html_url"),
+            run_id=run_id if isinstance(run_id, int) else None,
+            run_attempt=attempt if isinstance(attempt, int) else None,
+        )
 
 
 __all__ = ["GITHUB_CAPABILITIES", "HOST", "GitHubProvider"]
