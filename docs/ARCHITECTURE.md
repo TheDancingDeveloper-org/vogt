@@ -523,6 +523,21 @@ the engine's state it copies session history only on request, and never
 `push.json` or the agent-task registry. The operator procedure is
 `DEPLOYMENT.md` §5.
 
+**Export and import** (same module, policy in
+`services/instance_merge.py`, decision in `core/merge.py`) move declared
+entities between *live* instances rather than replacing one. Export format 2
+carries projects, work items (labels, relations and the initiative link
+inside each), initiatives, labels, actors, every comment and the clone
+stamp, never a credential; `--project` narrows it to one project. `import`
+merges such a file: a dry-run report by default, one audited write under
+`--apply --confirm`. Entities match on stable identity (project slug, work
+item id, initiative slug, label name, actor `identity_ref`, comment id), and
+"which side changed" is measured against the clone stamp's backup time, so
+only an instance pair related by `clone` can take one side's change without
+a conflict. A change on both sides keeps the target and records the incoming
+version as a comment, or fails the import under `--strict`. The merge is
+additive: it never deletes. The full policy is `DEPLOYMENT.md` §5.
+
 ---
 
 ## 10. MCP

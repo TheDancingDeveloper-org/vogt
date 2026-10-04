@@ -387,9 +387,9 @@ session in it.
    expect are there.
 
 **Which copy is live.** After the clone, dev is the working copy and prod is
-frozen. Nothing keeps the two in step. The way back is a cut-over, or a
-clone in the other direction, not a merge: `vogt import` reports what an
-export holds but does not apply it.
+frozen. Nothing keeps the two in step. The way back is a cut-over, a clone in
+the other direction, or a merge with `vogt import` (below), which carries
+dev's work into a prod that kept running.
 
 **Agent context** (transcripts, per-project memory, Codex sessions, the notes
 in `~/Working`) lives on the engine home volume, not in the stores.
@@ -399,6 +399,93 @@ credentials, MCP configuration, settings or caches. It is a dry run unless
 given `--apply`, and it warns when project paths do not match. Run it while no
 session is writing on either side, and after the clone. The script's header
 lists exactly what it copies.
+
+### Export and import: merging one instance into another
+
+`vogt export` writes the declared entities as JSON; `vogt import` merges such
+a file into a live instance. Unlike `restore` and `clone`, nothing is
+replaced: both sides' work survives, under the policy below.
+
+```console
+vogt export --destination /var/lib/vogt/exports/dev.json \
+  [--project <slug>] --reason "carry dev back to prod"
+vogt import --source /var/lib/vogt/exports/dev.json [--project <slug>] \
+  --reason "carry dev back to prod"                  # dry run: the report
+vogt import --source ... --apply --confirm [--strict] \
+  --reason "carry dev back to prod"                  # writes it
+```
+
+**The export (format 2)** carries projects, work items — with their labels,
+relations and initiative link — initiatives, labels, actors, every comment,
+each entity's `created_at`/`updated_at`, and the instance's clone stamp. It
+never carries tokens, password logins, forge accounts, auth decisions or
+sessions. `--project` exports one project's items with their comments, and
+only the initiatives, labels and actors they reference. An export written
+before format 2 (no `export_format_version` key) is still readable: `import`
+reports what it holds and refuses to apply it.
+
+**Matching.** Entities match on identity that is stable across instances:
+projects by slug, work items by id (never by `WI-n`, which each instance
+numbers on its own), initiatives by slug, labels by name, actors by
+`identity_ref`, comments by id, relations by (from, kind, to).
+
+**The conflict policy.** "Changed" means an entity's `updated_at` is later
+than the *baseline*, the moment the two instances last agreed. The baseline
+is the clone stamp's backup time when one instance is a clone of the other
+(in either direction), or the export's own `exported_at` for an export of the
+same instance. Unrelated instances have no baseline. The import reports which
+it used (`base`, `base_source`).
+
+| Case | Result |
+|---|---|
+| only in the export | **created**; a work item gets a fresh ref here, and the report names both refs |
+| identical on both sides | unchanged (counted, not listed) |
+| changed only in the export | **updated** to the incoming version |
+| changed only here | **skipped**: this instance's version kept |
+| changed on both sides, or no baseline | **conflict**: this instance's version kept; for a work item the incoming version is attached as a comment, once |
+| any conflict, with `--strict` | the whole import refused, nothing written |
+| comment, relation, label, actor not here | **created** (append-only) |
+
+The merge is **additive**: it never deletes a work item, comment, relation
+or label, and a project's `root_path` is never changed (a difference is
+reported). **Never imported:** tokens, password logins, forge accounts,
+`write_back` (a created project starts at `none` and unlinked), push
+subscriptions, sessions, the instance id and the clone stamp. Items retired
+upstream (`superseded_by`) and items of a project that is upstream-truth here
+are skipped; the forge holds those. A work item whose state the target's
+workflow does not know is skipped and named.
+
+**Safety.** Without `--apply` the import is a dry run and writes nothing.
+`--apply` requires `--confirm` and a reason, and lands as **one audited
+write** (an `import` audit row and an `instance.imported` event): a failure,
+including a `--strict` refusal, leaves the target untouched. A re-import of
+the same file changes nothing — a standing conflict is reported again, but
+its comment is not repeated. Like `restore` and `clone` it is local-only:
+the CLI where the data directory is, never REST or MCP. Nothing runs an
+import automatically.
+
+**Carrying dev back to prod.** Prod is the target, dev the source; dev must be
+a clone of prod (`vogt status` on dev shows a `clone` block naming prod's
+instance id), otherwise every difference is a conflict.
+
+1. **Prod and dev run the same build**, or prod a newer one.
+2. **Back up prod** so the merge is reversible:
+   `docker exec <prod-container> vogt backup --label pre-import-<date> --reason "before import"`.
+3. **Export dev** (whole, or `--project <slug>`):
+   `docker exec <dev-container> vogt export --destination /var/lib/vogt/exports/dev-<date>.json --reason "carry dev back to prod"`,
+   then copy the file into prod's container (`docker cp`, as in the clone
+   procedure).
+4. **Dry run on prod**, and read the report:
+   `docker exec <prod-container> vogt import --source /var/lib/vogt/exports/dev-<date>.json --reason "carry dev back to prod"`.
+   Check `base_source` names the clone, and read every `conflict` and
+   `skipped` entry.
+5. **Apply**: the same command with `--apply --confirm` (add `--strict` to
+   refuse rather than record conflicts). No restart is needed; the write is
+   an ordinary audited transaction.
+6. **Resolve conflicts** by reading each conflicted item's `Import conflict`
+   comment and editing the item. After carrying dev back, re-clone dev from a
+   fresh prod backup: the clone baseline is now behind both sides, so a
+   second carry would report every item touched by the first as a conflict.
 
 **Migrations run at boot.** The entrypoint runs `vogt init` before every
 `vogt serve`. `init` is idempotent: it creates the instance on a new volume,

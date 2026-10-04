@@ -1216,7 +1216,8 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="export",
-            summary="Write the declared entities as JSON.",
+            summary="Write the declared entities as JSON (format 2: with "
+            "comments, relations and the clone stamp; --project for one).",
             scope="read",
             mutating=False,
             params_model=ExportParams,
@@ -1227,9 +1228,13 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="import",
-            summary="Report what an export contains. Read-only in v1.",
+            summary="Merge an export into this instance under the documented "
+            "conflict policy. A dry-run diff unless --apply --confirm; "
+            "--strict refuses any both-sides change.",
             scope="admin",
-            mutating=False,
+            # With --apply it lands one audited write (operation `import`), so
+            # it is a mutation with a required reason, like clone.
+            mutating=True,
             params_model=ImportParams,
             result_model=ImportResult,
             handler=services.import_instance,

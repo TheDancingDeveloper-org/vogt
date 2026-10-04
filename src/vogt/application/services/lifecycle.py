@@ -1,4 +1,4 @@
-"""Backup, restore, export, import.
+"""Backup, restore, clone, export, import.
 
 A backup snapshots **both** stores consistently and writes a manifest naming
 the schema version of each. Restore verifies that manifest *before touching
@@ -38,6 +38,7 @@ from vogt.application.models import (
     RestoreParams,
     RestoreResult,
 )
+from vogt.application.services.instance_merge import merge_export
 from vogt.application.writes import WriteOutcome, audited_write, validate_reason
 from vogt.core.clock import from_iso, to_iso
 from vogt.core.entities import Actor
@@ -555,37 +556,73 @@ def clone(ctx: AppContext, params: CloneParams) -> CloneResult:
     )
 
 
+#: The export file format. 1 (no version key) carried projects, work items,
+#: initiatives, labels and actors; 2 adds the format key, the scope, the
+#: source's clone stamp and every comment — what an applying `import` needs.
+#: Relations, labels and the initiative link travel inside each work item.
+EXPORT_FORMAT_VERSION = 2
+
+
 def export_instance(ctx: AppContext, params: ExportParams) -> ExportResult:
     """Write the declared entities as JSON, for reading and for moving.
 
     Deliberately declared-only: observations are evidence a collector can
     reproduce, and shipping a million of them around is not what anybody
-    means by "export my backlog".
+    means by "export my backlog". Never exported: tokens, password logins,
+    forge accounts, auth decisions, sessions — nothing that would let the
+    file act as the instance it came from.
+
+    With `project`, the export is one project: its work items (comments and
+    relations with them) and only the initiatives, labels and actors those
+    reference. A relation to an item in another project still names it by
+    id; an import links it if the target already holds that item.
     """
     with ctx.declared.read() as view:
-        payload = {
+        stamp = view.clone_stamp()
+        projects = view.list_projects(limit=10_000, offset=0)
+        items = view.list_work_items(_ALL_WORK)
+        initiatives = view.list_initiatives(limit=10_000, offset=0)
+        labels = view.list_labels(limit=10_000, offset=0)
+        actors = view.list_actors(limit=10_000, offset=0)
+        if params.project is not None:
+            scoped = view.project_by_slug(params.project)
+            if scoped is None:
+                msg = f"no project with slug {params.project!r}"
+                raise NotFound(msg)
+            projects = [scoped]
+            items = [item for item in items if item.project_id == scoped.id]
+        comments = [
+            comment
+            for item in items
+            for comment in view.comments_for(item.id, limit=100_000)
+        ]
+        if params.project is not None:
+            initiative_ids = {i.initiative_id for i in items if i.initiative_id}
+            initiatives = [i for i in initiatives if i.id in initiative_ids]
+            label_names = {name for item in items for name in item.labels}
+            labels = [label for label in labels if label.name in label_names]
+            actor_ids = {i.assignee_actor_id for i in items if i.assignee_actor_id}
+            actor_ids |= {comment.actor_id for comment in comments}
+            actors = [actor for actor in actors if actor.id in actor_ids]
+        payload: dict[str, object] = {
+            "export_format_version": EXPORT_FORMAT_VERSION,
             "instance_id": view.instance_id(),
             "exported_at": to_iso(ctx.clock()),
             "revision": view.current_revision(),
-            "projects": [
-                p.model_dump(mode="json")
-                for p in view.list_projects(limit=10_000, offset=0)
-            ],
-            "work_items": [
-                item.model_dump(mode="json") for item in view.list_work_items(_ALL_WORK)
-            ],
-            "initiatives": [
-                initiative.model_dump(mode="json")
-                for initiative in view.list_initiatives(limit=10_000, offset=0)
-            ],
-            "labels": [
-                label.model_dump(mode="json")
-                for label in view.list_labels(limit=10_000, offset=0)
-            ],
-            "actors": [
-                actor.model_dump(mode="json")
-                for actor in view.list_actors(limit=10_000, offset=0)
-            ],
+            "scope": {"project": params.project},
+            "clone_stamp": None
+            if stamp is None
+            else {
+                "source_instance_id": stamp.source_instance_id,
+                "cloned_at": to_iso(stamp.cloned_at),
+                "backup_taken_at": to_iso(stamp.backup_taken_at),
+            },
+            "projects": [p.model_dump(mode="json") for p in projects],
+            "work_items": [item.model_dump(mode="json") for item in items],
+            "initiatives": [i.model_dump(mode="json") for i in initiatives],
+            "labels": [label.model_dump(mode="json") for label in labels],
+            "actors": [actor.model_dump(mode="json") for actor in actors],
+            "comments": [comment.model_dump(mode="json") for comment in comments],
         }
 
     destination = Path(params.destination).expanduser()
@@ -593,35 +630,19 @@ def export_instance(ctx: AppContext, params: ExportParams) -> ExportResult:
     destination.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     return ExportResult(
         path=str(destination),
-        projects=len(payload["projects"]),  # type: ignore[arg-type]
-        work_items=len(payload["work_items"]),  # type: ignore[arg-type]
+        export_format_version=EXPORT_FORMAT_VERSION,
+        project=params.project,
+        projects=len(projects),
+        work_items=len(items),
+        comments=len(comments),
     )
 
 
 def import_instance(ctx: AppContext, params: ImportParams) -> ImportResult:
-    """Report what an export contains, without writing anything.
+    """Merge an export into this instance under the documented policy.
 
-    A real merge needs an identity-conflict policy — same slug, different
-    project; same ref, different item — and inventing one silently is how
-    an import destroys the thing it was meant to restore. Until that policy
-    is designed, this reads the file and tells you what is in it, and
-    `restore` remains the supported way to move an instance.
+    A dry run unless `apply` (with `confirm`): the same report either way, so
+    what an apply will do is always readable first. The policy, the identity
+    matching and what is never imported are in `instance_merge`.
     """
-    source = Path(params.source).expanduser()
-    if not source.is_file():
-        msg = f"no such export: {source}"
-        raise NotFound(msg)
-    payload = json.loads(source.read_text(encoding="utf-8"))
-    return ImportResult(
-        source=str(source),
-        instance_id=str(payload.get("instance_id", "")),
-        projects=len(payload.get("projects", [])),
-        work_items=len(payload.get("work_items", [])),
-        applied=False,
-        detail=(
-            "Import is read-only in v1: merging two instances needs a "
-            "documented conflict policy, and guessing one silently is how an "
-            "import destroys what it was meant to restore. Use `restore` to "
-            "move an instance."
-        ),
-    )
+    return merge_export(ctx, params)
