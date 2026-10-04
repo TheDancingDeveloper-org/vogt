@@ -40,6 +40,7 @@ jobs:
   validate-release:
     name: the tag is on main
     runs-on: [self-hosted]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -79,6 +80,7 @@ jobs:
     name: the version matches the tag
     needs: validate-release
     runs-on: [self-hosted]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -112,6 +114,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
     # `publish` is advertised only by the Docker-in-Docker workers.
     runs-on: [self-hosted, publish]
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -258,6 +261,7 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
       version: ${{ steps.meta.outputs.version }}
     runs-on: [self-hosted, publish]
+    timeout-minutes: 90
     permissions:
       contents: read
       packages: write
@@ -387,6 +391,7 @@ jobs:
       digest: ${{ steps.push.outputs.digest }}
       version: ${{ steps.meta.outputs.version }}
     runs-on: [self-hosted, publish]
+    timeout-minutes: 60
     permissions:
       contents: read
       packages: write
@@ -562,6 +567,7 @@ jobs:
     name: build and sign the Android shell
     needs: distribution
     runs-on: [self-hosted]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -668,6 +674,7 @@ jobs:
     name: the stack and voice images are a matching pair
     needs: [validate-release, image, voice-image, stack-image]
     runs-on: [self-hosted]
+    timeout-minutes: 15
     steps:
       - name: versions agree with each other and the tag
         env:
@@ -696,6 +703,7 @@ jobs:
     name: create the durable GitHub Release
     needs: [validate-release, distribution, image, voice-image, stack-image, android, release-pair]
     runs-on: [self-hosted]
+    timeout-minutes: 15
     permissions:
       contents: write
       actions: read

@@ -14,6 +14,7 @@ jobs:
   triage:
     name: track open security alerts
     runs-on: [self-hosted]
+    timeout-minutes: 15
     steps:
       - name: create or update tracking issues
         env:

@@ -108,6 +108,7 @@ jobs:
   plan:
     name: which variants
     runs-on: [self-hosted]
+    timeout-minutes: 10
     outputs:
       variants: ${{ steps.plan.outputs.variants }}
     steps:
@@ -135,6 +136,7 @@ jobs:
     needs: plan
     # `docker`/`publish` is advertised only by the Docker-in-Docker workers.
     runs-on: [self-hosted, docker, publish]
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write

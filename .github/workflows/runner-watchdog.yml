@@ -1,0 +1,84 @@
+# Long-running job watchdog.
+#
+# `timeout-minutes` (enforced on every job by runner-policy) bounds a wedged
+# job, but a timeout is only as good as its budget, and a runner that loses
+# contact mid-job leaves a run "in progress" that no timeout on the job ever
+# fires for. This sweep is the backstop: every 30 minutes it lists this
+# repository's in-progress runs and flags any that started more than
+# STUCK_AFTER_MINUTES ago.
+#
+# Output is one issue, never one per run: an open issue labelled `ci-stuck`
+# carries a hidden marker and is rewritten each time stuck runs are found, and
+# closed with a comment once none are. The job also fails while anything is
+# stuck, so the Actions tab shows it red as well.
+#
+# Cheap by construction: one `gh api` call and at most one issue write, on
+# the smallest job the pool runs. It needs a free runner to report, which is
+# why STUCK_AFTER_MINUTES sits above the longest job budget (pod-base `full`,
+# 120 minutes) — a pool fully wedged by stuck jobs is then still visible as
+# this workflow's own queued, unstarted runs.
+name: runner watchdog
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+jobs:
+  watchdog:
+    name: flag runs in progress too long
+    runs-on: [self-hosted]
+    timeout-minutes: 5
+    steps:
+      - name: find stuck runs and update the tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          STUCK_AFTER_MINUTES: "150"
+          LABEL: ci-stuck
+          MARKER: "<!-- vogt-runner-watchdog -->"
+        run: |
+          set -euo pipefail
+          now="$(date -u +%s)"
+          cutoff=$(( now - STUCK_AFTER_MINUTES * 60 ))
+          # `run_started_at` is when the current attempt began, so a rerun of
+          # an old run is measured from its rerun, not its first attempt.
+          stuck="$(gh api --paginate "repos/$GH_REPO/actions/runs?status=in_progress&per_page=100" \
+            --jq ".workflow_runs[]
+                  | select((.run_started_at | fromdateiso8601) < $cutoff)
+                  | \"- [\(.name) #\(.run_number)](\(.html_url)) on \`\(.head_branch)\` — started \(.run_started_at)\"")"
+
+          # The label is the identity of the one tracking issue; the marker in
+          # its body says to a reader what maintains it. A missing label (the
+          # first run) reads as "no issue yet".
+          existing="$(gh issue list --state open --label "$LABEL" \
+            --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+
+          if [ -z "$stuck" ]; then
+            if [ -n "$existing" ]; then
+              gh issue close "$existing" --comment "No run has been in progress longer than ${STUCK_AFTER_MINUTES} minutes as of $(date -u +%FT%TZ)."
+            fi
+            echo "no runs in progress longer than ${STUCK_AFTER_MINUTES} minutes"
+            exit 0
+          fi
+
+          body="$MARKER
+          Runs in progress for more than **${STUCK_AFTER_MINUTES} minutes** as of $(date -u +%FT%TZ):
+
+          $stuck
+
+          A job past its \`timeout-minutes\` that is still running usually means its runner lost contact. Cancel the run (\`gh run cancel <id>\`), check the runner, and rerun. This issue is rewritten by the runner watchdog workflow and closed when nothing is stuck."
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body "$body"
+          else
+            gh label create "$LABEL" --color B60205 \
+              --description "A workflow run has been in progress too long" 2>/dev/null || true
+            gh issue create --title "CI: workflow runs stuck in progress" --label "$LABEL" --body "$body"
+          fi
+          printf '%s\n' "$stuck" | sed 's/^/::error::stuck run: /'
+          exit 1
