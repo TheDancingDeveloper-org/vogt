@@ -270,6 +270,15 @@ jobs:
         working-directory: engine
         run: cargo fmt --all -- --check
 
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+
+      # `rust-version` is a promise about the oldest toolchain that builds the
+      # locked tree. CI builds with current stable, so nothing else would
+      # notice a dependency bump that raised the real floor past the declared
+      # one; this reads `cargo metadata` and fails when it does.
+      - name: declared rust-version covers the lockfile
+        run: uv run --no-project python scripts/check_rust_version.py engine
+
       - name: audit Rust dependencies
         working-directory: engine
         run: |
@@ -385,8 +394,6 @@ jobs:
           VOGT_SOURCE_REF: ${{ github.ref_name }}
           VOGT_SOURCE_SHA: ${{ github.sha }}
         run: pnpm build
-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
 
       - name: normal and demo packaging share one PWA artifact
         run: |
@@ -515,6 +522,15 @@ jobs:
       - name: cargo fmt
         working-directory: voice
         run: cargo fmt --all -- --check
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+
+      # `rust-version` is a promise about the oldest toolchain that builds the
+      # locked tree. CI builds with current stable, so nothing else would
+      # notice a dependency bump that raised the real floor past the declared
+      # one; this reads `cargo metadata` and fails when it does.
+      - name: declared rust-version covers the lockfile
+        run: uv run --no-project python scripts/check_rust_version.py voice
 
       - name: cargo clippy
         working-directory: voice
