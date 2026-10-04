@@ -74,6 +74,43 @@ test("canonical terminal links restore split layouts with responsive chrome", as
   }
 });
 
+test("a saved Inbox filter stays applied and the Inbox badge counts under it", async ({ page }, testInfo) => {
+  const phone = testInfo.project.name === "phone";
+  await installDemo(page);
+  await page.goto("/#/inbox");
+  const entries = page.locator(".inbox-entry");
+  const badge = page.locator('a[href="#/inbox"] .place-count').filter({ visible: true }).first();
+  await expect(entries).toHaveCount(4, { timeout: 15_000 });
+  await expect(badge).toHaveText("4");
+
+  // External people only: the demo's one outside contributor.
+  if (phone) {
+    await page.getByRole("group", { name: "From filter" }).getByRole("button", { name: "External people only" }).click();
+  } else {
+    await page.getByLabel("From").selectOption("external");
+  }
+  await expect(entries).toHaveCount(1);
+  await expect(entries.first()).toContainText("From river-contributor · external person");
+  await expect(page.getByText(/Saved filter: external people only/)).toBeVisible();
+  await expect(badge).toHaveText("1");
+  await expect(badge).toHaveAttribute("aria-label", /filter on: external people only/);
+
+  // Leave and come back the ordinary way: the filter is still applied.
+  await page.goto("/#/board");
+  await expect(page.getByRole("heading", { name: "Board" })).toBeVisible();
+  await page.locator('a[href="#/inbox"]').filter({ visible: true }).first().click();
+  await expect(page.getByText(/Saved filter: external people only/)).toBeVisible();
+  await expect(entries).toHaveCount(1);
+  await expect(badge).toHaveText(String(await entries.count()));
+
+  // One control clears it, and the badge follows.
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(entries).toHaveCount(4);
+  await expect(page.getByRole("button", { name: "Clear filters" })).toHaveCount(0);
+  await expect(badge).toHaveText("4");
+  await expect(badge).not.toHaveAttribute("aria-label", /filter on/);
+});
+
 test("demo reset restores canonical tab-local state", async ({ page }) => {
   await installDemo(page);
   await page.goto("/#/board");

@@ -534,6 +534,18 @@ function defaults(): Routes {
       body: { ref: "WI-1", title: "t", total: 4.25, contributions: [], inputs_not_yet_available: {} },
     },
     "GET /drift": { body: { proposals: [], freshness: freshness() } },
+    // Per-account settings: none saved, and a save echoes what it stored.
+    "GET /preferences": { body: { preferences: [] } },
+    "POST /preferences": (call) => ({
+      body: {
+        preference: {
+          key: String(call.body?.key ?? ""),
+          value: (call.body?.value as Record<string, unknown>) ?? {},
+          version: 1,
+          updated_at: "2026-08-17T10:01:00Z",
+        },
+      },
+    }),
     "GET /deps": {
       body: { project: "alpha", references_out: [], referenced_by: [], unresolved: 0, freshness: freshness() },
     },

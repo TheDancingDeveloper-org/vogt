@@ -112,6 +112,7 @@ import {
   createPlaceMetrics,
   type PlaceMetric,
 } from "./placeMetrics";
+import { savedInboxFilter } from "./inboxFilter";
 import { createNow, onVogtLive } from "./viewAge";
 import { noteForeground } from "./wakeCoordinator";
 import { startPrewarm } from "./terminalPrewarm";
@@ -180,15 +181,18 @@ const PlaceCount: Component<{
   label: string;
   tone?: "accent" | "drift";
   attention?: number;
+  /** A saved filter the count honours, described; the label says so. */
+  filtered?: string | null;
 }> = (props) => {
   const copy = () => {
     if (props.metric.state === "loading") return { glyph: "…", label: `${props.label} loading` };
     if (props.metric.state === "unavailable") return { glyph: "—", label: `${props.label} unavailable` };
     const value = props.metric.value ?? 0;
     const glyph = value > 999 ? "999+" : `${value}`;
+    const filtered = props.filtered ? ` — filter on: ${props.filtered}` : "";
     return props.metric.state === "stale"
-      ? { glyph, label: `${value} ${props.label}, refreshing` }
-      : { glyph, label: `${value} ${props.label}` };
+      ? { glyph, label: `${value} ${props.label}${filtered}, refreshing` }
+      : { glyph, label: `${value} ${props.label}${filtered}` };
   };
   const attention = () => props.attention ?? props.metric.value ?? 0;
   const toned = () => props.metric.state === "ready" && attention() > 0;
@@ -199,6 +203,7 @@ const PlaceCount: Component<{
         "place-count--attention": (props.metric.value ?? 0) > 0 && props.label.includes("waiting"),
         "place-count--accent": props.tone === "accent" && toned(),
         "place-count--drift": props.tone === "drift" && toned(),
+        "place-count--filtered": Boolean(props.filtered),
       }}
       data-state={props.metric.state}
       aria-label={copy().label}
@@ -776,6 +781,12 @@ const App: Component = () => {
         // click restores from cache and reattaches with a cheap delta.
         startPrewarm();
         void placeMetrics.refresh();
+
+        // The saved Inbox filter is per account: read it once signed in, so the
+
+        // Inbox restores it on entry and the badge label can describe it.
+
+        void savedInboxFilter.load();
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) {
           setAuthError("Your saved session was rejected. Sign in again to continue.");
@@ -803,6 +814,8 @@ const App: Component = () => {
         noteForeground("boot");
         startPrewarm();
         void placeMetrics.refresh();
+
+        void savedInboxFilter.load();
       }
     })();
   });
@@ -828,6 +841,8 @@ const App: Component = () => {
     setAuthError(null);
     setAuthState("authenticated");
     void placeMetrics.refresh();
+
+    void savedInboxFilter.load();
     // A fresh operator arriving from the identity wizard: the URL
     // effect resolved "/" to a default surface before there was a session,
     // so the handoff to the remaining setup steps happens here, at the
@@ -1545,7 +1560,7 @@ const App: Component = () => {
               <span class="places-group-label">Work</span>
               <a class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} href={`#${surfaceHref(recentPlacesStore.places, "/board")}`}><span>Board</span><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></a>
               <a class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} href={`#${surfaceHref(recentPlacesStore.places, "/backlog")}`}><span>Backlog</span><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></a>
-              <a class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} href="#/inbox"><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></a>
+              <a class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} href="#/inbox"><span>Inbox</span><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" filtered={placeMetrics.inboxFilter()} /></a>
             </div>
             <Show when={publicCfg()?.vogt?.configured}>
               <div class="places-group">
@@ -2130,7 +2145,7 @@ const App: Component = () => {
 
       <nav class={`phone-bottom-nav${terminalScreenActive() ? " phone-bottom-nav--terminal" : ""}`} aria-label="Primary navigation">
         <a href="#/sessions" class={currentPlace("sessions") ? "active" : ""} aria-current={currentPlace("sessions") ? "page" : undefined} aria-label="Sessions"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4.5" width="18" height="15" rx="2.5" /><path d="M7.5 9.5l3 2.7-3 2.7M13.5 15h3.5" /></svg><PlaceCount metric={waitingSessionMetric()} label="sessions waiting for input" /></span><span class="phone-nav-label">Sessions</span></a>
-        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} aria-label="Inbox"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13.5V7a2 2 0 012-2h14a2 2 0 012 2v6.5M3 13.5h5.2l1.6 2.5h4.4l1.6-2.5H21M3 13.5V17a2 2 0 002 2h14a2 2 0 002-2v-3.5" /></svg><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" /></span><span class="phone-nav-label">Inbox</span></a>
+        <a href="#/inbox" class={currentPlace("inbox") ? "active" : ""} aria-current={currentPlace("inbox") ? "page" : undefined} aria-label="Inbox"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13.5V7a2 2 0 012-2h14a2 2 0 012 2v6.5M3 13.5h5.2l1.6 2.5h4.4l1.6-2.5H21M3 13.5V17a2 2 0 002 2h14a2 2 0 002-2v-3.5" /></svg><PlaceCount metric={placeMetrics.metrics.inbox} label="active Inbox entries" tone="accent" filtered={placeMetrics.inboxFilter()} /></span><span class="phone-nav-label">Inbox</span></a>
         <a href={`#${surfaceHref(recentPlacesStore.places, "/board")}`} class={currentPlace("board") ? "active" : ""} aria-current={currentPlace("board") ? "page" : undefined} aria-label="Board"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4" width="4.6" height="11" rx="1.2" /><rect x="9.7" y="4" width="4.6" height="16" rx="1.2" /><rect x="15.9" y="4" width="4.6" height="7.5" rx="1.2" /></svg><PlaceCount metric={placeMetrics.metrics.board} label="Board work items" /></span><span class="phone-nav-label">Board</span></a>
         <a href={`#${surfaceHref(recentPlacesStore.places, "/backlog")}`} class={currentPlace("backlog") ? "active" : ""} aria-current={currentPlace("backlog") ? "page" : undefined} aria-label="Backlog"><span class="phone-nav-icon-slot"><svg class="phone-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 6h12M8.5 12h12M8.5 18h12" /><circle cx="4.2" cy="6" r="1.1" /><circle cx="4.2" cy="12" r="1.1" /><circle cx="4.2" cy="18" r="1.1" /></svg><PlaceCount metric={placeMetrics.metrics.backlog} label="Backlog candidates" /></span><span class="phone-nav-label">Backlog</span></a>
         {/* The bar reaches four of eleven places; this fifth slot opens a sheet

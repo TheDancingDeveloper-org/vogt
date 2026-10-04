@@ -75,6 +75,8 @@ export const ROUTES = {
   "inbox.archive": "/inbox/archive",
   "inbox.snooze": "/inbox/snooze",
   "inbox.restore": "/inbox/restore",
+  "preference.get": "/preferences",
+  "preference.set": "/preferences",
   suppress: "/suppressions",
   "work.adopt": "/work/adopt",
   "events.list": "/events",
@@ -249,6 +251,11 @@ export interface InboxEntry {
     drift_id?: string;
     subject_key?: string;
   };
+  /** Who caused the occurrence (resolved at collect time). Drift, CI and
+   *  agent entries are the instance itself: a bot inside the org. */
+  actor_login?: string | null;
+  actor_kind?: "human" | "bot" | null;
+  actor_relation?: "org_member" | "external" | "unknown";
 }
 
 export interface InboxSourceCoverage {
@@ -271,10 +278,22 @@ export interface InboxListResult {
   engine_available?: boolean;
   engine_status?: "not_configured" | "available" | "unreachable" | string;
   engine_detail?: string | null;
+  /** Under `actor=external`: entries hidden because their author is unknown. */
+  actor_unknown_hidden?: number;
+}
+
+/** The structured Inbox filter saved per account (`inbox.filter`). */
+export interface InboxSavedFilterWire {
+  sources?: string[] | null;
+  actor?: "any" | "external" | "org" | "bot";
+  triage_states?: ("active" | "archived" | "snoozed")[];
 }
 
 export interface PlaceMetricsResult {
+  /** The badge: the count under the caller's saved Inbox filter. */
   inbox_active?: number | null;
+  inbox_active_unfiltered?: number | null;
+  inbox_filter?: InboxSavedFilterWire | null;
   projects_total?: number | null;
   work_total?: number | null;
   backlog_total_considered?: number | null;
@@ -823,6 +842,37 @@ export const restoreInbox = (entry_key: string, reason: string) =>
   call<{ entry: InboxEntry }>(
     "inbox.restore",
     { entry_key, reason },
+    "POST",
+  );
+
+/** One of the caller's own server-side settings. */
+export interface PreferenceView {
+  key: string;
+  value: Record<string, unknown>;
+  version: number;
+  updated_at: string;
+}
+
+/** Read the caller's own settings — one key, or all of them. Per account,
+ *  so a filter saved on the phone is the one the desktop restores. */
+export const getPreferences = (key?: string, signal?: AbortSignal) =>
+  call<{ preferences: PreferenceView[] }>(
+    "preference.get",
+    key ? { key } : {},
+    "GET",
+    signal,
+  );
+
+/** Save one setting (`{}` clears it). Audited like every write, so it takes
+ *  a reason; the caller can only ever write its own row. */
+export const setPreference = (
+  key: string,
+  value: Record<string, unknown>,
+  reason: string,
+) =>
+  call<{ preference: PreferenceView }>(
+    "preference.set",
+    { key, value, reason },
     "POST",
   );
 

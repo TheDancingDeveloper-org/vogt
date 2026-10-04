@@ -343,11 +343,58 @@ export class DemoStore {
     return json({ error: `No demo response for ${method} ${path}` }, { status: 404 });
   }
 
+  /** The Inbox under a structured filter, as `inbox.list` answers it. */
+  private inboxMatching(filter: { sources?: unknown; actor?: unknown; triage_states?: unknown }): { entries: Record<string, unknown>[]; unknown: number } {
+    const sources = Array.isArray(filter.sources) ? filter.sources.map(String) : [];
+    const states = Array.isArray(filter.triage_states) && filter.triage_states.length ? filter.triage_states.map(String) : ["active"];
+    const actor = typeof filter.actor === "string" ? filter.actor : "any";
+    const base = this.state.inbox.filter((entry) =>
+      (sources.length === 0 || sources.includes(String(entry.source))) &&
+      states.includes(String(entry.triage_state ?? "active")));
+    const kind = (entry: Record<string, unknown>) => entry.actor_kind ?? (entry.source === "github" ? null : "bot");
+    const relation = (entry: Record<string, unknown>) => entry.actor_relation ?? (entry.source === "github" ? "unknown" : "org_member");
+    const passes = (entry: Record<string, unknown>) => actor === "any"
+      || (actor === "bot" && kind(entry) === "bot")
+      || (actor === "external" && kind(entry) === "human" && relation(entry) === "external")
+      || (actor === "org" && kind(entry) === "human" && relation(entry) === "org_member");
+    const unknown = actor === "external" ? base.filter((entry) => kind(entry) !== "bot" && relation(entry) === "unknown").length : 0;
+    return { entries: base.filter(passes), unknown };
+  }
+
+  private inboxBadge(): { inbox_active: number; inbox_active_unfiltered: number; inbox_filter: Record<string, unknown> | null } {
+    const saved = this.state.preferences?.["inbox.filter"]?.value ?? {};
+    const filtered = Object.keys(saved).length > 0;
+    return {
+      inbox_active: this.inboxMatching(filtered ? saved : {}).entries.length,
+      inbox_active_unfiltered: this.inboxMatching({}).entries.length,
+      inbox_filter: filtered ? saved : null,
+    };
+  }
+
   private async vogt(path: string, method: string, query: URLSearchParams, body: Record<string, unknown>): Promise<Response> {
     const params = method === "GET" ? Object.fromEntries(query.entries()) : body;
     if (path === "/status") return json({ ok: true });
+    if (path === "/preferences" && method === "GET") {
+      const all = this.state.preferences ?? {};
+      const key = typeof params.key === "string" ? params.key : null;
+      const rows = Object.entries(all)
+        .filter(([name]) => key === null || name === key)
+        .map(([name, row]) => ({ key: name, ...row }));
+      return json({ preferences: rows });
+    }
+    if (path === "/preferences" && method === "POST") {
+      const key = String(body.key ?? "");
+      const value = body.value && typeof body.value === "object" ? body.value as Record<string, unknown> : {};
+      const all = (this.state.preferences ??= {});
+      const row = { value, version: (all[key]?.version ?? 0) + 1, updated_at: this.now() };
+      all[key] = row;
+      this.audit("preference.set", "preference", key, String(body.reason));
+      this.changed("preference.set", "preference", key);
+      return json({ preference: { key, ...row } });
+    }
     if (path === "/place/metrics") return json({
-      inbox_active: this.state.inbox.filter((row) => row.triage_state === "active").length,
+      // The badge honours the saved Inbox filter, as the core does.
+      ...this.inboxBadge(),
       projects_total: this.projects().length,
       work_total: this.filterWork({}).length,
       backlog_total_considered: this.filterWork({}).length + 2,
@@ -388,7 +435,7 @@ export class DemoStore {
     if (path === "/observations") { const observations = [{ id: "obs-session", sweep_id: "sweep-24", collector: "session-outcomes", kind: "session.outcome", project_id: "project-orbit", subject_key: "session:demo-finished", payload: { session: "vogt-session-demo-finished", engine_session_id: "demo-finished", project: "orbit", work_item: "WI-101", cwd: "/Working/orbit", started_at: "2026-08-24T12:00:00Z", state: "finished", provisional: false, exit_code: 0 }, content_digest: "sha256:session", source_url: null, promoted: true, observed_at: "2026-08-24T14:40:00Z" }, { id: "obs-pr", sweep_id: "sweep-24", collector: "forge", kind: "forge.pull_request", project_id: "project-orbit", subject_key: "repo:orbit:pr:42", payload: { work_item: "WI-101", number: 42, state: "in-review", checks: "red" }, content_digest: "sha256:pr42", source_url: "https://example.invalid/orbit/pull/42", promoted: true, observed_at: "2026-08-24T14:38:00Z" }]; return json({ observations, total: observations.length }); }
     if (path === "/audit") { let rows = [...this.state.audit]; if (params.operation) rows = rows.filter((row) => row.operation === params.operation); if (params.actor_id) rows = rows.filter((row) => row.actor_id === params.actor_id); if (params.entity_id) { const item = this.state.work.find((candidate) => candidate.id === params.entity_id); rows = rows.filter((row) => row.entity_id === params.entity_id || (item && row.entity_id === item.id)); } if (params.project) { const ids = new Set(this.state.work.filter((item) => item.project_slug === params.project).map((item) => item.id)); rows = rows.filter((row) => ids.has(String(row.entity_id)) || row.entity_id === `project-${params.project}`); } const total = rows.length; const offset = Number(params.offset ?? 0); const limit = Number(params.limit ?? 50); return json({ records: rows.slice(offset, offset + limit), total }); }
     if (path === "/notifications") { const rows = [{ thread: "thread-review", project_slug: "orbit", repo: "demo-labs/orbit", title: "Review requested on split-layout showcase", reason: "review_requested", subject_type: "PullRequest", unread: true, url: "https://example.invalid/orbit/pull/42", updated_at: "2026-08-24T14:15:00Z", observed_at: "2026-08-24T14:17:00Z" }, { thread: "thread-mention", project_slug: "lighthouse", repo: "demo-labs/lighthouse", title: "You were mentioned in demo deployment notes", reason: "mention", subject_type: "Issue", unread: true, url: "https://example.invalid/lighthouse/issues/18", updated_at: "2026-08-24T13:00:00Z", observed_at: "2026-08-24T13:02:00Z" }].filter((row) => !params.project || row.project_slug === params.project).filter((row) => !params.reason || row.reason === params.reason).filter((row) => !params.unread_only || row.unread); return json({ notifications: rows, total: rows.length, by_reason: { review_requested: 1, mention: 1 }, unread: rows.filter((row) => row.unread).length, scope: "fictional repositories visible to the demo operator", freshness: this.freshness(), detail: "No upstream read state is changed." }); }
-    if (path === "/inbox") { const triage = String(params.triage_state ?? params.state ?? "active"); const entries = this.state.inbox.filter((entry) => String(entry.triage_state ?? "active") === triage); return json({ entries, next_cursor: null, snapshot_at: DEMO_NOW, high_water: { github: "2026-08-24T14:17:00Z", drift: "2026-08-24T14:42:00Z", ci: "2026-08-24T13:53:00Z", agent: "2026-08-24T14:48:00Z" }, coverage: { github: { status: "current", count: 2, observed_at: "2026-08-24T14:17:00Z" }, drift: { status: "current", count: 2, observed_at: "2026-08-24T14:42:00Z" }, ci: { status: "current", count: 2, observed_at: "2026-08-24T13:53:00Z" }, agent: { status: "current", count: 1, observed_at: "2026-08-24T14:48:00Z" } }, counts: { active: this.state.inbox.filter((row) => row.triage_state === "active").length, archived: this.state.inbox.filter((row) => row.triage_state === "archived").length, snoozed: this.state.inbox.filter((row) => row.triage_state === "snoozed").length }, instance_scope: "two registered fictional projects", engine_available: true, engine_status: "available" }); }
+    if (path === "/inbox") { const filter = { sources: query.getAll("sources"), actor: String(params.actor ?? "any"), triage_states: query.getAll("triage_states") }; const matching = this.inboxMatching(filter); const entries = matching.entries; return json({ actor_unknown_hidden: matching.unknown,  entries, next_cursor: null, snapshot_at: DEMO_NOW, high_water: { github: "2026-08-24T14:17:00Z", drift: "2026-08-24T14:42:00Z", ci: "2026-08-24T13:53:00Z", agent: "2026-08-24T14:48:00Z" }, coverage: { github: { status: "current", count: 2, observed_at: "2026-08-24T14:17:00Z" }, drift: { status: "current", count: 2, observed_at: "2026-08-24T14:42:00Z" }, ci: { status: "current", count: 2, observed_at: "2026-08-24T13:53:00Z" }, agent: { status: "current", count: 1, observed_at: "2026-08-24T14:48:00Z" } }, counts: { active: this.state.inbox.filter((row) => row.triage_state === "active").length, archived: this.state.inbox.filter((row) => row.triage_state === "archived").length, snoozed: this.state.inbox.filter((row) => row.triage_state === "snoozed").length }, instance_scope: "two registered fictional projects", engine_available: true, engine_status: "available" }); }
     if (["/inbox/archive", "/inbox/snooze", "/inbox/restore"].includes(path)) { const entry = this.state.inbox.find((row) => row.entry_key === body.entry_key); if (!entry) return refusal("Inbox entry not found", 404); entry.triage_state = path.endsWith("archive") ? "archived" : path.endsWith("snooze") ? "snoozed" : "active"; if (path.endsWith("snooze")) entry.snooze_until = body.until; this.audit(`inbox.${path.split("/").at(-1)}`, "inbox_entry", String(entry.entry_key), String(body.reason)); this.changed("inbox.changed", "inbox_entry", String(entry.entry_key)); return json({ entry }); }
     if (path === "/suppressions" || path === "/work/adopt") { this.audit(path === "/suppressions" ? "suppress" : "work.adopt", "subject", String(body.subject), String(body.reason)); this.changed("subject.changed", "subject", String(body.subject)); return json({ ok: true, subject: body.subject }); }
     if (path === "/events") { const after = Number(params.after ?? 0); const rows = this.state.events.filter((row) => Number(row.seq) > after).filter((row) => !params.entity_id || row.entity_id === params.entity_id); return json({ events: rows, next_cursor: rows.reduce((max, row) => Math.max(max, Number(row.seq)), after) }); }
