@@ -43,6 +43,7 @@ jobs:
   android:
     name: build the signed Play AAB and upload to internal testing
     runs-on: [self-hosted]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -161,6 +162,27 @@ jobs:
           printf '%s' "$VOGT_PLAY_SERVICE_ACCOUNT_JSON" > "${RUNNER_TEMP}/play-service-account.json"
           python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${RUNNER_TEMP}/play-service-account.json"
 
+      # Play preflight: refuse, before `fastlane supply`, a bundle Play would
+      # reject - SDK floors, launcher icon, upload-key signer, and (when
+      # upload is armed and the service account is written above) a
+      # versionCode above everything Play has seen plus proof the account can
+      # act on this app. Runs on dry runs too, minus the Play API half, so a
+      # bad bundle shows red before anyone arms the upload. Results land in
+      # the job summary. See docs/mobile-release-validation.md.
+      - name: Play preflight
+        working-directory: mobile/android
+        env:
+          PLAY_UPLOAD_CERT_SHA256: ${{ vars.VOGT_PLAY_UPLOAD_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          aab="$(find app/build/outputs/bundle/release -name '*.aab' | head -1)"
+          test -n "$aab"
+          python3 "$GITHUB_WORKSPACE/scripts/play_preflight.py" \
+            --aab "$aab" \
+            --package "${PACKAGE_NAME}" \
+            --service-account "${RUNNER_TEMP}/play-service-account.json" \
+            --title "Play preflight (prod)"
+
       - name: upload to Play internal testing
         if: vars.VOGT_PLAY_PUBLISH == 'true'
         working-directory: mobile/android
@@ -183,6 +205,18 @@ jobs:
             --json_key "$json_key" \
             --skip_upload_metadata --skip_upload_images --skip_upload_screenshots
 
-      - name: remove Firebase config
+      - name: remove Firebase config and the Play service account
         if: always()
-        run: rm -f mobile/android/app/google-services.json
+        run: rm -f mobile/android/app/google-services.json "${RUNNER_TEMP}/play-service-account.json"
+
+      # Loud failure: a red run on a tag push is easy to miss (v0.7.1 and
+      # v0.7.2 were), so say in the summary what did not happen.
+      - name: report the failure
+        if: failure()
+        run: |
+          {
+            echo "## release-mobile FAILED"
+            echo
+            echo "No bundle reached Play from this run. Check the failed step above; when the Play preflight failed, its table says why."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::release-mobile failed for ${GITHUB_REF_NAME}; no bundle was uploaded to Play."
