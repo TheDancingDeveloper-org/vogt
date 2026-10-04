@@ -75,6 +75,51 @@ workflow, so a dev re-upload between product releases is never refused for a
 version code Play has already seen. `tests/test_mobile_identity.py` holds
 the three inputs and the workflow to this.
 
+### Play preflight (automated, before every upload)
+
+`release-mobile.yml` and `release-mobile-dev.yml` run
+[`scripts/play_preflight.py`](../scripts/play_preflight.py) on the built AAB
+before `fastlane supply`. A failed check fails the job before anything is
+uploaded, prints an `::error::` per failure, and writes a table of every
+check to the run's job summary; a further `report the failure` step states in
+the summary that no bundle reached Play. The checks:
+
+| Check | Source | Fails when |
+|---|---|---|
+| package | `bundletool dump manifest` | the bundle's package is not the one the workflow uploads to |
+| minSdk | manifest `uses-sdk` | below 24 (Play automatic protection; v0.7.1/v0.7.2 were rejected for 23) |
+| targetSdk | manifest `uses-sdk` | below `PLAY_TARGET_SDK_FLOOR` (36 since 2026-08-31) |
+| launcher icon | manifest + bundle entries | no MAIN/LAUNCHER activity, no `android:icon`, or the icon resource is absent |
+| signing certificate | `keytool -printcert -jarfile` | the signer's SHA-256 differs from the configured upload-key fingerprint |
+| Play service-account access | androidpublisher `edits.insert` | the account cannot open an edit on the app (403 → grant it in Play Console → Users and permissions; 404 → the app record does not exist) |
+| versionCode | `edits.tracks.list` + `edits.bundles.list` | not greater than every code on any track or ever uploaded |
+
+The Play API half runs only when upload is armed (`VOGT_PLAY_PUBLISH` /
+`VOGT_PLAY_PUBLISH_DEV`), because it needs the
+`VOGT_PLAY_SERVICE_ACCOUNT_JSON` service account; dry runs report it as
+skipped. The edit it opens is always deleted, never committed. The
+signing comparison reads the repository variables
+`VOGT_PLAY_UPLOAD_CERT_SHA256` (prod) and `VOGT_PLAY_DEV_UPLOAD_CERT_SHA256`
+(dev; ignored while the dev build uses a throwaway key). Unset, the check
+is reported as a warning and does not block. Set each to the upload
+certificate's SHA-256 as Play Console shows it (Setup → App integrity →
+Upload key certificate), or from
+`keytool -printcert -jarfile <a signed AAB>`; colons are optional.
+
+The script downloads `bundletool` at a pinned version and sha256 into
+`$RUNNER_TEMP`, and needs `java`, `keytool` and `openssl` on the runner, all
+of which a signing job already has. Two values age and are bumped by hand:
+`PLAY_TARGET_SDK_FLOOR` every August when Play raises the target-API
+requirement, and `BUNDLETOOL_VERSION`/`BUNDLETOOL_SHA256` together. To check
+a bundle locally:
+
+```sh
+python3 scripts/play_preflight.py --aab app-release.aab \
+  --package com.thedancingdeveloper.vogt \
+  --expected-cert-sha256 <fingerprint> \
+  [--service-account play-sa.json]
+```
+
 ### Play internal-track / pre-launch report
 
 The Play Console pre-launch report and internal-track validation are an external
