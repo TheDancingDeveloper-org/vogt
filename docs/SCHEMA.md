@@ -506,6 +506,30 @@ small overlap), so a closure between sweeps is observed rather than missed.
 "last changed" while `observations` stays immutable and `observed_at` stays
 first-seen (§3.1).
 
+### 3.4 Agent activity index
+
+The opt-in `agent-activity` collector (`agent_activity_roots`) builds this
+index from Claude Code and Codex transcripts. Like §3.3, it is bookkeeping
+rather than evidence. It can be regenerated from the transcripts on disk, it is
+mutable (a call's row is completed when its result is read), and nothing in
+`declared` references it.
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `agent_activity_files` | the incremental cursor per transcript file | `path` (PK), `agent`, `byte_offset` (always at a line boundary), `size`, `agent_session_id`, `cwd`, `updated_at` |
+| `agent_activity` | one row per tool call | `id`, `sweep_id`, `source_path` + `call_id` (unique), `agent`, `agent_session_id`, `cwd`, `tool`, `summary`, `services` (`,tag,tag,`), `withheld`, `error`, `excerpt`, `at`, `finished_at` |
+
+`summary` and `excerpt` are redacted before they are written
+(`core/agent_activity.py`), and only an error keeps an excerpt. `withheld`
+marks a call that dumps configuration or environment, so its result is never
+excerpted, even when that result is read in a later sweep. A sweep stores its
+calls, applies its results and moves its cursors in one transaction, and an
+insert ignores a (file, call id) pair it already holds. The sweep row's scope
+is empty, because transcripts are not projects. Its stats record `bytes_read`
+and `backlog_bytes`. Projects and Vogt sessions are joined at read time: a
+project by its root containing `cwd`, and a Vogt session by its
+`engine_session_id` equalling `agent_session_id`.
+
 ## 4. Cross-store semantics
 
 - **Trust computation**: `verified` = declared row's linked subjects were

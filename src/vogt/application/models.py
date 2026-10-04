@@ -3362,3 +3362,155 @@ class SessionScreenResult(Result):
         default=None,
         description="The engine's view of whether the session awaits input.",
     )
+
+
+# -- agent activity index ---------------------------------------------------
+
+
+class AgentActivitySearchParams(Params):
+    """How the agent activity index is narrowed. Every field narrows."""
+
+    q: str | None = Field(
+        default=None,
+        description=(
+            "Text to find, case-insensitively, in a call's tool name, its "
+            "redacted one-line summary, or its error excerpt."
+        ),
+    )
+    service: str | None = Field(
+        default=None,
+        description="A service tag, e.g. github, docker, komodo, infisical.",
+    )
+    tool: str | None = Field(
+        default=None, description="An exact tool name, e.g. Bash or exec_command."
+    )
+    errors_only: bool = Field(default=False, description="Only calls that failed.")
+    since: datetime | None = Field(
+        default=None, description="Inclusive lower bound on the call's time."
+    )
+    project: str | None = Field(
+        default=None,
+        description="Project slug: calls made in its root or anywhere under it.",
+    )
+    session: str | None = Field(
+        default=None,
+        description=(
+            "A Vogt session (`ses_…`), an engine session id, or an agent's own "
+            "conversation id."
+        ),
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+    offset: int = Field(default=0, ge=0)
+
+
+class AgentActivityEvent(Result):
+    """One tool call an agent made, as the index keeps it.
+
+    `summary` and `excerpt` were redacted before they were stored, and the
+    excerpt exists only for a failed call. `services` and `error` are
+    heuristics over the call and its output, not verdicts.
+    """
+
+    id: str
+    at: datetime
+    finished_at: datetime | None = Field(
+        default=None, description="When its result was read; null until then."
+    )
+    duration_ms: int | None = None
+    agent: str = Field(description="Transcript format: claude or codex.")
+    agent_session_id: str = Field(description="The agent's own conversation id.")
+    vogt_session_id: str | None = Field(
+        default=None,
+        description=(
+            "The Vogt session this conversation ran in, where derivable: a "
+            "Claude Code session Vogt started uses the engine session id as its "
+            "conversation id."
+        ),
+    )
+    project: str | None = Field(
+        default=None, description="The registered project whose root holds `cwd`."
+    )
+    cwd: str | None = None
+    tool: str
+    summary: str
+    services: list[str] = []
+    error: bool
+    excerpt: str | None = None
+
+
+class AgentActivitySearchResult(Result):
+    events: list[AgentActivityEvent]
+    total: int = Field(
+        description="Rows on this page; `total == limit` means there may be more."
+    )
+    next_offset: int | None = Field(
+        default=None, description="Pass back as `offset` for the next page."
+    )
+    indexed_at: datetime | None = Field(
+        default=None,
+        description="When the index last finished a sweep; null if it never has.",
+    )
+    detail: str | None = Field(
+        default=None,
+        description=(
+            "Why an empty answer is empty, where that is not 'there are none': "
+            "indexing not configured, or never run."
+        ),
+    )
+
+
+class AgentActivitySummaryParams(Params):
+    """Which agent conversations to summarise. Every field narrows."""
+
+    session: str | None = Field(
+        default=None,
+        description=(
+            "A Vogt session (`ses_…`), an engine session id, or an agent's own "
+            "conversation id."
+        ),
+    )
+    project: str | None = Field(
+        default=None,
+        description="Project slug: conversations with calls in or under its root.",
+    )
+    since: datetime | None = Field(
+        default=None, description="Count only calls at or after this time."
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+
+class AgentActivitySessionSummary(Result):
+    """What one agent conversation's calls add up to."""
+
+    agent: str
+    agent_session_id: str
+    vogt_session_id: str | None = None
+    project: str | None = None
+    cwd: str | None = Field(
+        default=None, description="The working directory of its newest call."
+    )
+    first_at: datetime
+    last_at: datetime
+    calls: int
+    errors: int
+    error_rate: float = Field(description="errors / calls, 0..1.")
+    tool_wait_ms: int = Field(
+        description=(
+            "Wall-clock time spent waiting on tool results, summed over calls "
+            "whose result has been read."
+        )
+    )
+    unfinished: int = Field(description="Calls with no result read (yet).")
+    tools: dict[str, int] = Field(description="Calls per tool, most used first.")
+    services: dict[str, int] = Field(description="Calls per service tag.")
+
+
+class AgentActivitySummaryResult(Result):
+    sessions: list[AgentActivitySessionSummary]
+    total: int = Field(
+        description="Rows on this page; `total == limit` means there may be more."
+    )
+    next_offset: int | None = None
+    indexed_at: datetime | None = None
+    detail: str | None = None

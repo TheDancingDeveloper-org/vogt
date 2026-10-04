@@ -20,15 +20,22 @@ from contextlib import suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from vogt.core.agent_activity import WITHHELD
 from vogt.core.clock import Clock, from_iso, to_iso, utc_now
 from vogt.core.entities import DepRef, Observation, Sweep, SweepOutcome
 from vogt.core.ids import IdFactory, new_id
 from vogt.storage.interface import MigrationReport
 from vogt.storage.observed_types import (
+    ActivityBatch,
+    ActivityEventRow,
+    ActivityIndexStats,
+    ActivityQuery,
+    ActivitySessionRow,
     AppendStats,
     DepRefRow,
     PendingObservation,
     PruneReport,
+    TranscriptCursor,
 )
 from vogt.storage.sqlite.connection import DEFAULT_SYNCHRONOUS, connect
 from vogt.storage.sqlite.migrator import DEFAULT_STALE_AFTER, Migrator, table_exists
@@ -639,6 +646,190 @@ class SqliteObservedStore:
                 ),
             )
 
+    # -- agent activity index ----------------------------------------------
+
+    def activity_cursors(self) -> dict[str, TranscriptCursor]:
+        with self._read() as conn:
+            rows = conn.execute("SELECT * FROM agent_activity_files").fetchall()
+        return {
+            str(row["path"]): TranscriptCursor(
+                path=str(row["path"]),
+                agent=str(row["agent"]),
+                offset=int(row["byte_offset"]),
+                size=int(row["size"]),
+                agent_session_id=row["agent_session_id"],
+                cwd=row["cwd"],
+            )
+            for row in rows
+        }
+
+    def index_activity(
+        self, sweep_id: str, batch: ActivityBatch, *, at: datetime
+    ) -> ActivityIndexStats:
+        """Store calls, complete them with results, and move the cursors.
+
+        One transaction, so a cursor never moves past calls that did not
+        persist, and `INSERT OR IGNORE` on (file, call id) makes a re-read of
+        an uncommitted batch harmless."""
+        calls = 0
+        results = 0
+        with self._write() as conn:
+            for call in batch.calls:
+                cursor = conn.execute(
+                    "INSERT OR IGNORE INTO agent_activity (id, sweep_id, "
+                    "source_path, call_id, agent, agent_session_id, cwd, tool, "
+                    "summary, services, withheld, at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        self._id_factory("act"),
+                        sweep_id,
+                        call.source_path,
+                        call.call_id,
+                        call.agent,
+                        call.agent_session_id,
+                        call.cwd,
+                        call.tool,
+                        call.summary,
+                        "," + "".join(f"{tag}," for tag in call.services),
+                        int(call.withheld),
+                        to_iso(call.at),
+                    ),
+                )
+                calls += cursor.rowcount
+            for result in batch.results:
+                cursor = conn.execute(
+                    "UPDATE agent_activity SET error = ?, "
+                    "excerpt = CASE WHEN withheld = 1 AND ? IS NOT NULL "
+                    "THEN ? ELSE ? END, finished_at = ? "
+                    "WHERE source_path = ? AND call_id = ?",
+                    (
+                        int(result.error),
+                        result.excerpt,
+                        WITHHELD,
+                        result.excerpt,
+                        None if result.at is None else to_iso(result.at),
+                        result.source_path,
+                        result.call_id,
+                    ),
+                )
+                results += cursor.rowcount
+            for file_cursor in batch.cursors:
+                conn.execute(
+                    "INSERT INTO agent_activity_files (path, agent, byte_offset, "
+                    "size, agent_session_id, cwd, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                    "ON CONFLICT (path) DO UPDATE SET agent = excluded.agent, "
+                    "byte_offset = excluded.byte_offset, size = excluded.size, "
+                    "agent_session_id = excluded.agent_session_id, "
+                    "cwd = excluded.cwd, updated_at = excluded.updated_at",
+                    (
+                        file_cursor.path,
+                        file_cursor.agent,
+                        file_cursor.offset,
+                        file_cursor.size,
+                        file_cursor.agent_session_id,
+                        file_cursor.cwd,
+                        to_iso(at),
+                    ),
+                )
+        return ActivityIndexStats(calls=calls, results=results)
+
+    def search_activity(
+        self, query: ActivityQuery, *, limit: int, offset: int
+    ) -> list[ActivityEventRow]:
+        where, params = _activity_where(query)
+        with self._read() as conn:
+            rows = conn.execute(
+                "SELECT id, agent, agent_session_id, cwd, tool, summary, "
+                "services, error, excerpt, at, finished_at FROM agent_activity "
+                f"{where} ORDER BY at DESC, id DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+        return [
+            ActivityEventRow(
+                id=str(row["id"]),
+                agent=str(row["agent"]),
+                agent_session_id=str(row["agent_session_id"]),
+                cwd=row["cwd"],
+                tool=str(row["tool"]),
+                summary=str(row["summary"]),
+                services=_tags(row["services"]),
+                error=bool(row["error"]),
+                excerpt=row["excerpt"],
+                at=from_iso(str(row["at"])),
+                finished_at=(
+                    None
+                    if row["finished_at"] is None
+                    else from_iso(str(row["finished_at"]))
+                ),
+            )
+            for row in rows
+        ]
+
+    def summarize_activity(
+        self, query: ActivityQuery, *, limit: int, offset: int
+    ) -> list[ActivitySessionRow]:
+        where, params = _activity_where(query)
+        with self._read() as conn:
+            groups = conn.execute(
+                "SELECT agent_session_id, MIN(agent) AS agent, MIN(at) AS first_at, "
+                "MAX(at) AS last_at, COUNT(*) AS calls, SUM(error) AS errors, "
+                "SUM(finished_at IS NOT NULL) AS finished, "
+                "SUM(CASE WHEN finished_at IS NULL THEN 0 ELSE MAX(0, CAST(ROUND(("
+                "julianday(finished_at) - julianday(at)) * 86400000) AS INTEGER)) "
+                "END) AS wait_ms "
+                f"FROM agent_activity {where} GROUP BY agent_session_id "
+                "ORDER BY last_at DESC, agent_session_id LIMIT ? OFFSET ?",
+                (*params, limit, offset),
+            ).fetchall()
+            if not groups:
+                return []
+            ids = [str(row["agent_session_id"]) for row in groups]
+            marks = ", ".join("?" for _ in ids)
+            joiner = "AND" if where else "WHERE"
+            scoped = f"{where} {joiner} agent_session_id IN ({marks})"
+            tools: dict[str, dict[str, int]] = {}
+            for row in conn.execute(
+                "SELECT agent_session_id, tool, COUNT(*) AS n FROM agent_activity "
+                f"{scoped} GROUP BY agent_session_id, tool",
+                (*params, *ids),
+            ).fetchall():
+                per_tool = tools.setdefault(str(row["agent_session_id"]), {})
+                per_tool[str(row["tool"])] = int(row["n"])
+            services: dict[str, dict[str, int]] = {}
+            for row in conn.execute(
+                "SELECT agent_session_id, services, COUNT(*) AS n FROM agent_activity "
+                f"{scoped} AND services != ',' GROUP BY agent_session_id, services",
+                (*params, *ids),
+            ).fetchall():
+                per_service = services.setdefault(str(row["agent_session_id"]), {})
+                for tag in _tags(row["services"]):
+                    per_service[tag] = per_service.get(tag, 0) + int(row["n"])
+            cwds: dict[str, str | None] = {}
+            for session_id in ids:
+                newest = conn.execute(
+                    "SELECT cwd FROM agent_activity WHERE agent_session_id = ? "
+                    "AND cwd IS NOT NULL ORDER BY at DESC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                cwds[session_id] = None if newest is None else newest["cwd"]
+        return [
+            ActivitySessionRow(
+                agent=str(row["agent"]),
+                agent_session_id=str(row["agent_session_id"]),
+                cwd=cwds.get(str(row["agent_session_id"])),
+                first_at=from_iso(str(row["first_at"])),
+                last_at=from_iso(str(row["last_at"])),
+                calls=int(row["calls"]),
+                errors=int(row["errors"] or 0),
+                finished=int(row["finished"] or 0),
+                wait_ms=int(row["wait_ms"] or 0),
+                tools=_ranked(tools.get(str(row["agent_session_id"]), {})),
+                services=_ranked(services.get(str(row["agent_session_id"]), {})),
+            )
+            for row in groups
+        ]
+
     def has_evidence_tables(self) -> bool:
         """Whether this store has been migrated to hold evidence yet."""
         # The cheap file-exists stat runs every time so a store whose db is
@@ -752,3 +943,65 @@ def _count(conn: sqlite3.Connection, table: str) -> int:
     # `table` is never caller-supplied: every call site passes a literal.
     row = conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()
     return int(row["n"])
+
+
+# -- agent activity --------------------------------------------------------
+
+
+def _like(text: str) -> str:
+    """Escape caller text for a `LIKE … ESCAPE '!'` pattern."""
+    return text.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+
+
+def _tags(stored: object) -> tuple[str, ...]:
+    return tuple(tag for tag in str(stored or "").split(",") if tag)
+
+
+def _ranked(counts: dict[str, int]) -> dict[str, int]:
+    return dict(sorted(counts.items(), key=lambda item: (-item[1], item[0])))
+
+
+def _activity_where(query: ActivityQuery) -> tuple[str, list[object]]:
+    """The WHERE clause for an activity filter; every field narrows."""
+    clauses: list[str] = []
+    params: list[object] = []
+    if query.q:
+        needle = f"%{_like(query.q)}%"
+        clauses.append(
+            "(summary LIKE ? ESCAPE '!' OR tool LIKE ? ESCAPE '!' "
+            "OR excerpt LIKE ? ESCAPE '!')"
+        )
+        params += [needle, needle, needle]
+    if query.service:
+        clauses.append("services LIKE ? ESCAPE '!'")
+        params.append(f"%,{_like(query.service)},%")
+    if query.tool:
+        clauses.append("tool = ?")
+        params.append(query.tool)
+    if query.errors_only:
+        clauses.append("error = 1")
+    if query.since is not None:
+        clauses.append("at >= ?")
+        params.append(to_iso(query.since))
+    if query.until is not None:
+        clauses.append("at < ?")
+        params.append(to_iso(query.until))
+    if query.agent_session_ids is not None:
+        if not query.agent_session_ids:
+            clauses.append("0")
+        else:
+            marks = ", ".join("?" for _ in query.agent_session_ids)
+            clauses.append(f"agent_session_id IN ({marks})")
+            params += list(query.agent_session_ids)
+    if query.cwd_roots is not None:
+        alternatives: list[str] = []
+        for root in query.cwd_roots:
+            trimmed = root.rstrip("/") or "/"
+            prefix = trimmed if trimmed.endswith("/") else trimmed + "/"
+            # `substr` rather than `LIKE`: a path is full of `_`.
+            alternatives.append("(cwd = ? OR substr(cwd, 1, ?) = ?)")
+            params += [trimmed, len(prefix), prefix]
+        clauses.append("(" + " OR ".join(alternatives) + ")" if alternatives else "0")
+    if not clauses:
+        return "", params
+    return "WHERE " + " AND ".join(clauses), params

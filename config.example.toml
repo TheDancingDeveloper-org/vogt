@@ -92,6 +92,18 @@
 # default policy: behaviour
 # forge_token_files = { "github.com" = "/run/secrets/github_token" }
 
+# Agent transcript directories to index, by format — a TOML table `[agent_activity_roots]` with `claude = "~/.claude/projects"` and/or `codex = "~/.codex/sessions"`. Empty, the `agent-activity` collector is not registered and nothing is read: transcripts hold credentials, so indexing them is opt-in. Configured, each sweep reads new transcript lines incrementally into the observed store's activity index, redacting before anything is kept; search it with `agent_activity.search` and `.summary`.
+# default policy: behaviour
+# agent_activity_roots = { claude = "~/.claude/projects", codex = "~/.codex/sessions" }
+
+# The most transcript bytes one sweep reads, newest files first. A first sweep over months of transcripts catches up over several sweeps rather than holding the schedule; the backlog still waiting is in the sweep's stats.
+# default policy: behaviour
+# agent_activity_max_bytes_per_sweep = 33554432
+
+# Extra service tags for the agent activity index, mapping a tag to a case-insensitive regular expression over a tool call's name and input — e.g. `ci = 'ci\.example\.org'`. Merged over the built-in table (github, docker, komodo, infisical, …); an empty pattern removes a built-in tag. Applies to calls indexed after the change.
+# default policy: behaviour
+# agent_activity_services = { ci = 'ci\.example\.org' }
+
 # Where the session engine listens, e.g. `http://127.0.0.1:8910`. The engine is the other half of the merged product: it owns the PTYs a work item's session runs in. Unset means the `session.*` operations report that no engine is configured — absence of the engine costs sessions and nothing else. An exposure value, so it is never guessed: co-located today, its address is still the operator's to state.
 # default policy: exposure
 # engine_url = null

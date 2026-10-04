@@ -307,6 +307,8 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ),
     ("coverage", {}),
     ("observations.list", {"project": "parity-fixture"}),
+    ("agent_activity.search", {"q": "needle", "errors_only": True}),
+    ("agent_activity.summary", {}),
     ("deps", {"project": "parity-fixture"}),
     ("backlog", {"limit": 50}),
     (
