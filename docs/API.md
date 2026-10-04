@@ -86,7 +86,7 @@ project (DESIGN.md §4.1).
 | `work.write` | work-item writes — create, transition, comment |
 | `project.write` | project register/import and project-level writes |
 | `writeback` | exactly `forge.writeback` (arming forge write-back) |
-| `admin` | token minting, actor creation, password logins (`user.*`), and instance ops — `init`, `migrate`, `backup`, `restore`, `clone`, `serve` |
+| `admin` | token minting, actor creation, password logins (`user.*`), and instance ops — `init`, `migrate`, `backup`, `restore`, `clone`, `import`, `serve` |
 
 - The default session scope set is **`read,work.write,project.write,writeback`**
   (`agent_session_scopes`, #726) — everything except `admin`, applied to every
@@ -210,6 +210,21 @@ docker exec <core-container> \
   is every active entry and `inbox_filter` the filter applied (`null` = none).
   The count reads only stored fields, and one Inbox projection serves every
   badge read until the declared revision or the event feed moves (at most 5 s).
+
+## Export and import
+
+| Operation | Surfaces | Scope | What it does |
+|---|---|---|---|
+| `export` | CLI, `POST /api/instance/export`, MCP `export` | `read` | writes the declared entities as JSON (format 2: comments, relations, the initiative link, timestamps, the clone stamp; never a credential) to a path on the core's filesystem; `project` narrows it to one project |
+| `import` | CLI only (local-only, like `restore` and `clone`) | `admin` | merges such a file into this instance; a dry-run report unless `--apply --confirm`, then one audited write; `--strict` refuses any both-sides change |
+
+The result of `import` is the same in a dry run and an apply: `created`,
+`updated`, `conflicted`, `skipped` and `unchanged` totals, a per-entity
+tally (`by_entity`), the baseline it measured change against (`base`,
+`base_source`), and one `changes` entry per entity not left unchanged — with
+`ref` (this instance's) and `incoming_ref` (the export's) for a work item.
+The matching rules and the conflict policy are in
+[`DEPLOYMENT.md` §5](DEPLOYMENT.md#export-and-import-merging-one-instance-into-another).
 
 ## See also
 

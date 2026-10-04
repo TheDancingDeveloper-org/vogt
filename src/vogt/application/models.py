@@ -2436,27 +2436,134 @@ class CloneResult(Result):
 
 class ExportParams(Params):
     destination: str
+    project: str | None = Field(
+        default=None,
+        description=(
+            "Export one project (by slug): its work items with their comments "
+            "and relations, and only the initiatives, labels and actors they "
+            "reference. Omitted, the whole instance is exported."
+        ),
+    )
     reason: Reason
 
 
 class ExportResult(Result):
     path: str
+    export_format_version: int = Field(
+        description="The file's format. 2 carries what an applying import needs."
+    )
+    project: str | None = Field(default=None, description="The scope, if one.")
     projects: int
     work_items: int
+    comments: int = 0
+
+
+ImportAction = Literal["created", "updated", "conflict", "skipped"]
+ImportEntityKind = Literal[
+    "actor", "label", "project", "initiative", "work_item", "relation", "comment"
+]
+
+
+class ImportChange(Result):
+    """One entity the import created, updated, held in conflict, or skipped.
+
+    Entities identical on both sides are counted (`unchanged`), not listed.
+    """
+
+    entity: ImportEntityKind
+    key: str = Field(
+        description=(
+            "The matching identity: slug, label name, identity_ref, work item "
+            "id, comment id, or `from -kind-> to` for a relation."
+        )
+    )
+    action: ImportAction
+    ref: str | None = Field(
+        default=None,
+        description=(
+            "For a work item, its ref here. A created item gets a fresh ref "
+            "from this instance's counter when the import is applied (null in "
+            "a dry run)."
+        ),
+    )
+    incoming_ref: str | None = Field(
+        default=None, description="For a work item, its ref in the export."
+    )
+    fields: list[str] = Field(
+        default_factory=list, description="The fields that differ, if any."
+    )
+    detail: str = ""
+
+
+class ImportTally(Result):
+    created: int = 0
+    updated: int = 0
+    conflict: int = 0
+    skipped: int = 0
+    unchanged: int = 0
 
 
 class ImportParams(Params):
-    source: str
+    """Merge an export into this instance — a dry run unless `apply`."""
+
+    source: str = Field(description="An export file written by `vogt export`.")
+    project: str | None = Field(
+        default=None,
+        description=(
+            "Merge only this project (by slug): its work items, comments and "
+            "relations, and the initiatives, labels and actors they reference."
+        ),
+    )
+    apply: bool = Field(
+        default=False,
+        description=(
+            "Write the merge. Without it the import is a dry run: the same "
+            "report, nothing written."
+        ),
+    )
+    confirm: bool = Field(
+        default=False,
+        description="Required with apply: this writes into the live store.",
+    )
+    strict: bool = Field(
+        default=False,
+        description=(
+            "Fail, writing nothing, if any entity changed on both sides, "
+            "instead of keeping this instance's version and recording the "
+            "incoming one as a conflict comment."
+        ),
+    )
     reason: Reason
 
 
 class ImportResult(Result):
     source: str
-    instance_id: str
+    instance_id: str = Field(description="The instance the export was taken from.")
+    export_format_version: int = Field(
+        description="1 for an export written before applying import existed."
+    )
     projects: int
     work_items: int
     applied: bool
     detail: str
+    project: str | None = Field(default=None, description="The scope, if one.")
+    base: datetime | None = Field(
+        default=None,
+        description=(
+            "The baseline change is measured against: an entity whose "
+            "updated_at is later changed since the two instances last agreed."
+        ),
+    )
+    base_source: str = Field(
+        default="", description="Where the baseline came from, or why there is none."
+    )
+    created: int = 0
+    updated: int = 0
+    conflicted: int = 0
+    skipped: int = 0
+    unchanged: int = 0
+    by_entity: dict[str, ImportTally] = Field(default_factory=dict)
+    changes: list[ImportChange] = Field(default_factory=list)
 
 
 # -- forge module -----------------------------------------------------

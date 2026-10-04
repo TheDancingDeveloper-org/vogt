@@ -220,8 +220,8 @@ def test_export_writes_the_declared_entities(
     assert "observations" not in payload, "evidence is reproducible; it is not export"
 
 
-def test_import_reports_without_applying(populated: AppContext, tmp_path: Path) -> None:
-    """Read-only in v1, and it says so rather than half-merging."""
+def test_import_is_a_dry_run_by_default(populated: AppContext, tmp_path: Path) -> None:
+    """Without --apply the import reports the plan and writes nothing."""
     destination = tmp_path / "export.json"
     export_instance(populated, ExportParams(destination=str(destination), reason=WHY))
 
@@ -229,7 +229,8 @@ def test_import_reports_without_applying(populated: AppContext, tmp_path: Path) 
     result = import_instance(target, ImportParams(source=str(destination), reason=WHY))
     assert result.applied is False
     assert result.work_items == 1
-    assert "conflict policy" in result.detail
+    assert result.created >= 2, "the project and the work item"
+    assert "Dry run" in result.detail
     assert list_work(target, ListWorkParams()).items == []
 
 
