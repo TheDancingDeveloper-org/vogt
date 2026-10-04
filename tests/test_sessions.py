@@ -15,6 +15,7 @@ import json
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from vogt.adapters.engine import EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
@@ -809,6 +810,46 @@ def test_naming_no_model_sends_no_model(
     start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
     assert "model" not in engine.last_spec
     assert "effort" not in engine.last_spec
+    assert "resume" not in engine.last_spec
+
+
+def test_a_resume_reaches_the_engine_and_the_audit(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-833: `resume` names the agent CLI's conversation to continue.
+
+    The engine maps it to `claude --resume` / `codex resume`; Vogt passes it
+    through and records what was asked for on the start's event.
+    """
+    conversation = "0f8fad5b-d9cb-469f-a165-70867728950e"
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", template="claude", resume=conversation, reason=WHY
+        ),
+    )
+    assert engine.last_spec["resume"] == conversation
+    started = [
+        event
+        for event in list_events(wired, ListEventsParams()).events
+        if event.kind == "session.started"
+    ]
+    assert started[-1].summary["resume"] == conversation
+
+
+@pytest.mark.parametrize(
+    "hostile",
+    ["--dangerously-skip-permissions", "-r", "abc def", "a/b", "a;b", "x" * 200, ""],
+)
+def test_a_resume_that_could_become_a_flag_is_refused_before_the_engine(
+    hostile: str, wired: AppContext, engine: StandInEngine
+) -> None:
+    """It becomes argv, so it is refused at the boundary rather than escaped."""
+    with pytest.raises(ValidationError):
+        StartSessionParams(
+            work_item="WI-1", template="claude", resume=hostile, reason=WHY
+        )
+    assert not engine.sent
 
 
 def test_the_model_asked_for_is_recorded_and_read_back(

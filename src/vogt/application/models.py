@@ -2792,10 +2792,27 @@ class StartSessionParams(Params):
         default=None,
         description=(
             "What the session's agent should do, in the user's words. Folded "
-            "into the brief the agent opens with, so 'start a session on X "
-            "and check its containers' opens an agent already asked to check "
-            "them rather than an idle shell. Pair it with `template` (an "
-            "agent, not a plain shell) when the task is something to carry out."
+            "into the brief as its Task section; an agent template (Claude "
+            "Code, Codex, OpenCode) is started with a first prompt telling it "
+            "to read the brief and carry that task out, so 'start a session "
+            "on X and check its containers' opens an agent already checking "
+            "them. A plain shell only gets the brief's path in "
+            "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with "
+            "`template` when it is something to carry out."
+        ),
+    )
+    resume: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9_.][A-Za-z0-9_.-]{0,127}$",
+        description=(
+            "Continue a previous conversation of the template's agent CLI "
+            "instead of starting a new one: its own conversation id, mapped "
+            "to `claude --resume <id>`, `codex resume <id>` or `opencode "
+            "--session <id>`. A Claude Code session Vogt started fresh has "
+            "the engine session id (`engine_session_id`) as its conversation "
+            "id, so a session lost to a restart can be resumed by that. "
+            "Requires `template`; letters, digits and . _ - only, never a "
+            "leading dash."
         ),
     )
     name: str | None = Field(

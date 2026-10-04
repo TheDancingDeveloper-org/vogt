@@ -363,6 +363,7 @@ class EngineClient:
         prompt: str | None = None,
         model: str | None = None,
         effort: str | None = None,
+        resume: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -398,6 +399,10 @@ class EngineClient:
             spec["model"] = model
         if effort:
             spec["effort"] = effort
+        if resume:
+            # The agent CLI's own conversation id; the engine turns it into
+            # that CLI's resume form and refuses a command it cannot tell.
+            spec["resume"] = resume
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 
