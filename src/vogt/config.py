@@ -38,9 +38,7 @@ from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
 
-from pydantic import Field, field_validator
-
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
