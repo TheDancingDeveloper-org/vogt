@@ -16,6 +16,27 @@ use crate::{
     workspace_path,
 };
 
+/// The variable every session finds this engine's own URL in.
+pub(crate) const ENGINE_URL_ENV: &str = "VOGT_ENGINE_URL";
+
+/// The URL a process in this pod reaches the engine at: its bind address,
+/// with a wildcard bind (`0.0.0.0`, `::`) read as loopback, since a session
+/// runs beside the engine. Plain HTTP, because the engine serves no TLS.
+/// `None` for port 0, where the port is chosen at bind time and the configured
+/// address does not name it.
+fn engine_self_url(bind: std::net::SocketAddr) -> Option<String> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+    if bind.port() == 0 {
+        return None;
+    }
+    let ip = match bind.ip() {
+        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    Some(format!("http://{}", SocketAddr::new(ip, bind.port())))
+}
+
 /// A configured session template matched by name (case-insensitive) or,
 /// failing that, by tag — so a caller can say `claude` and reach the template
 /// tagged `claude`. When a tag matches more than one template an `agent`-tagged
@@ -189,6 +210,17 @@ impl SessionRegistry {
                 prompt_files::PROMPT_FILE_ENV.to_string(),
                 path.to_string_lossy().into_owned(),
             ));
+        }
+
+        // Every session is told where this engine is, so an agent in a
+        // terminal opened from the GUI (which vogt-core never saw) can reach
+        // the session APIs without reading engine source. First in the list:
+        // a value the caller or a template sets — vogt-core passes the URL it
+        // reaches the engine at — still has the last word.
+        if let Some(url) = engine_self_url(self.cfg.bind) {
+            spec.env
+                .get_or_insert_with(Vec::new)
+                .insert(0, (ENGINE_URL_ENV.to_string(), url));
         }
 
         // Names need not be unique — duplicates are merely confusing, not invalid.
@@ -367,6 +399,26 @@ fn normalize_session_name(name: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::normalize_session_name;
+
+    #[test]
+    fn the_engine_url_is_its_bind_address_with_wildcards_on_loopback() {
+        let url = |bind: &str| super::engine_self_url(bind.parse().unwrap());
+        assert_eq!(
+            url("0.0.0.0:8910").as_deref(),
+            Some("http://127.0.0.1:8910")
+        );
+        assert_eq!(
+            url("127.0.0.1:9001").as_deref(),
+            Some("http://127.0.0.1:9001")
+        );
+        assert_eq!(url("[::]:8910").as_deref(), Some("http://[::1]:8910"));
+        assert_eq!(
+            url("10.1.2.3:8910").as_deref(),
+            Some("http://10.1.2.3:8910")
+        );
+        // An ephemeral port is not known until bind time.
+        assert_eq!(url("127.0.0.1:0"), None);
+    }
 
     #[test]
     fn trims_session_names() {

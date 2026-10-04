@@ -860,7 +860,14 @@ def build_operations() -> list[Operation[Any, Any]]:
         # need it are the ones that cannot.
         Operation(
             name="session.start",
-            summary="Open a coding session for a work item or a project.",
+            summary=(
+                "Open a coding session (a terminal) for a work item or a "
+                "project. With `template` (e.g. claude) it runs that agent, "
+                "and a `task` is delivered as the agent's first prompt, so it "
+                "starts working instead of opening idle. Returns both ids "
+                "(ses_… and engine_session_id); then poll session_screen "
+                "until `ready`."
+            ),
             scope="work.write",
             mutating=True,
             params_model=StartSessionParams,
@@ -871,7 +878,13 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="session.list",
-            summary="List coding sessions with their live activity state.",
+            summary=(
+                "List coding sessions with their live activity state "
+                "(running / idle / waiting-for-input / exited / errored) and "
+                "`alive`, including sessions opened from the GUI (unlinked, "
+                "engine UUID only). Each row has both ids: `id` (ses_…) and "
+                "`engine_session_id`."
+            ),
             scope="read",
             mutating=False,
             params_model=ListSessionsParams,
@@ -885,7 +898,8 @@ def build_operations() -> list[Operation[Any, Any]]:
             summary=(
                 "Stop a coding session and revoke the token it ran with. "
                 "Takes either id: Vogt's ses_… id or the engine's session UUID "
-                "(an unlinked GUI session is killed, with no token to revoke)."
+                "(an unlinked GUI session is killed, with no token to revoke). "
+                "The process is killed; its screen and log stay readable."
             ),
             scope="work.write",
             mutating=True,
@@ -907,8 +921,10 @@ def build_operations() -> list[Operation[Any, Any]]:
             summary=(
                 "Type into a session: text, then named keys (enter, esc, tab, "
                 "arrows, ctrl-c, ctrl-d, backspace), then Enter if submit. "
-                "Takes either id: ses_… or the engine UUID. Audited (byte "
-                "count and keys, never the text)."
+                "Takes either id: ses_… or the engine UUID. Read "
+                "session_screen first and never send a blind Enter: at a "
+                "menu it accepts whatever is highlighted (dismiss with esc). "
+                "Audited (byte count and keys, never the text)."
             ),
             scope="work.write",
             mutating=True,
@@ -922,9 +938,10 @@ def build_operations() -> list[Operation[Any, Any]]:
             name="session.screen",
             summary=(
                 "Read what a session's terminal shows right now: visible "
-                "lines, cursor, title, activity and readiness. Takes either "
-                "id: ses_… or the engine UUID. Needs an engine with the "
-                "screen route."
+                "lines, cursor, title, activity and readiness. `ready` true "
+                "means the program is waiting for input — wait for it before "
+                "typing. Takes either id: ses_… or the engine UUID. Needs an "
+                "engine with the screen route."
             ),
             scope="read",
             mutating=False,
@@ -995,8 +1012,10 @@ def build_operations() -> list[Operation[Any, Any]]:
         Operation(
             name="session.log_tail",
             summary=(
-                "Read the tail of a session's output log, readable. Takes "
-                "either id: Vogt's ses_… id or the engine's session UUID."
+                "Read the tail of a session's output log, readable — the "
+                "history of what it printed, not its current screen (use "
+                "session_screen for that). Takes either id: Vogt's ses_… id "
+                "or the engine's session UUID."
             ),
             scope="read",
             mutating=False,
