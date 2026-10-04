@@ -174,7 +174,15 @@ COPY engine/deploy/demo-server.mjs /app/demo-server.mjs
 # Trivy gate flags as CRITICAL/HIGH. Removing npm/npx clears every one of those
 # findings without touching anything the demo runtime uses. The slim base still
 # ships npm, so this stays load-bearing.
-RUN chmod 0444 /app/demo-server.mjs \
+#
+# The base is a mirrored tag, and a mirrored tag does not refresh once copied,
+# so Debian security fixes published after the mirror (libpcre2
+# CVE-2026-103111, fixed in 10.42-1+deb12u2) never reach this image on their
+# own. Apply them here so the Trivy gate sees a patched OS layer.
+RUN apt-get update \
+    && apt-get -y --no-install-recommends upgrade \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod 0444 /app/demo-server.mjs \
     && rm -rf /usr/local/lib/node_modules/npm \
               /usr/local/bin/npm \
               /usr/local/bin/npx
