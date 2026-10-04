@@ -238,7 +238,7 @@ jobs:
           build-args: |
             PYTHON_IMAGE=ghcr.io/thedancingdeveloper-org/vogt-base/python:3.13-slim@sha256:ffb752e139c0a19692a43af8d8523b274222dd68eebad5d583b45c2201c6e30a
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
 
       - name: sign the image
         env:
@@ -369,7 +369,7 @@ jobs:
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }}
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:voice-${{ github.ref_name }},mode=max
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
 
       - name: sign the image
         env:
@@ -553,7 +553,7 @@ jobs:
             type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main
           cache-to: type=registry,ref=${{ env.CACHE_IMAGE }}:demo-main,mode=max
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
 
       - name: sign the static demo image
         env:
@@ -738,7 +738,7 @@ jobs:
           # is a re-tag of the smoke-tested bytes rather than a recompile.
           cache-from: type=registry,ref=${{ env.CACHE_IMAGE }}:stack-${{ github.ref_name }}
 
-      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
 
       - name: sign the image
         env:
