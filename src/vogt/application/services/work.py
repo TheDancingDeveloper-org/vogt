@@ -96,12 +96,49 @@ WORK_BRANCH_BOUND_EVENT = "work.branch_bound"
 # -- the linked/unlinked gate ----------------------------------------------
 
 
+#: What still works on an unlinked project, said in every refusal. An agent
+#: that read only "needs a forge-linked project" concluded its native items
+#: could not be commented on or closed either, and kept its status in titles
+#: (WI-879); since #770 they can, so the refusal says so.
+UNLINKED_STILL_WORKS = (
+    "Native items (WI-n) on this project still take comments, transitions "
+    "(including to done) and field edits by ref"
+)
+
+
 def _refuse_unlinked(project: Project, verb: str) -> NotLinked:
-    """The decision-10 refusal, with both ways forward named."""
+    """The decision-10 refusal, with both ways forward and what still works."""
+    local = (
+        "; or pass `local_only: true` to keep a native item in this project"
+        if verb == "work.create"
+        else ""
+    )
     return NotLinked(
         f"{verb} needs a forge-linked project, and {project.slug!r} is not "
         "linked: link it (`forge link`, or re-import through `project "
-        "import`) or publish it (`forge publish`) first"
+        f"import`) or publish it (`forge publish`) first{local}. "
+        f"{UNLINKED_STILL_WORKS}."
+    )
+
+
+def _unlinked_list_detail(view: ReadView, project: Project) -> str | None:
+    """Say what an unlinked project's empty list is hiding, and how to reach it.
+
+    The scoped list answers empty by design (decision 10), but an agent
+    reading only `items: []` learns that its own native items do not exist.
+    Naming the count and a few refs keeps the CTA while pointing at the
+    by-ref path that still works.
+    """
+    work_filter = WorkFilter(project_id=project.id, exclude_terminal=True, limit=5)
+    total = view.count_work_items(work_filter)
+    if total == 0:
+        return None
+    refs = ", ".join(item.ref for item in view.list_work_items(work_filter))
+    return (
+        f"{project.slug!r} is not forge-linked, so its {total} open native "
+        f"item(s) are not listed here (e.g. {refs}). {UNLINKED_STILL_WORKS}: "
+        "work.get, work.comment and work.transition them directly; link or "
+        "publish the project to list them."
     )
 
 
@@ -570,7 +607,11 @@ def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
         )
         if project_row is not None and not upstream.is_linked(project_row):
             return WorkListResult(
-                items=[], total=0, link_state="unlinked", mode=params.mode
+                items=[],
+                total=0,
+                link_state="unlinked",
+                mode=params.mode,
+                detail=_unlinked_list_detail(view, project_row),
             )
         states = tuple(params.states or ())
         work_filter = WorkFilter(

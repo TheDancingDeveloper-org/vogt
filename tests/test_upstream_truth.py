@@ -386,6 +386,10 @@ def test_create_on_an_unlinked_project_is_the_typed_refusal(
     assert "forge link" in message and "publish" in message, (
         "the refusal names both ways forward"
     )
+    # WI-879: and what still works, so an agent does not conclude its native
+    # items cannot be commented on or closed.
+    assert "local_only: true" in message
+    assert "comments, transitions" in message
 
 
 def test_label_writes_refuse_on_an_unlinked_project(
