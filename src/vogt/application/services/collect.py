@@ -30,6 +30,7 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services.views import freshness_of
 from vogt.collectors import CollectorContext, CollectorRegistry, Sweeper
+from vogt.collectors.agent_activity import AgentActivityCollector
 from vogt.collectors.dep_refs import KIND_DEP_REF, KIND_DEP_SCAN
 from vogt.collectors.mirrored_source import (
     KIND_MIRRORED_SOURCE,
@@ -84,7 +85,22 @@ def collector_registry(ctx: AppContext) -> CollectorRegistry:
             registry.add(read_collector)
     if ctx.engine is not None:
         registry.add(SessionOutcomeCollector(ctx.engine, _DeclaredSessions(ctx)))
+    # Off unless an operator names a transcript root: agent transcripts are
+    # sensitive, and an instance that never asked for them must not read them.
+    if ctx.config.agent_activity_roots:
+        registry.add(
+            AgentActivityCollector(
+                ctx.config.agent_activity_roots,
+                budget_bytes=ctx.config.agent_activity_max_bytes_per_sweep,
+                services=ctx.config.agent_activity_services,
+            )
+        )
     return registry
+
+
+def _project_scoped(collector: object) -> bool:
+    """Whether a collector's scope is projects (the transcript index's is not)."""
+    return bool(getattr(collector, "project_scoped", True))
 
 
 class _RegisteredProjects:
@@ -194,6 +210,10 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
     collectors = registry.select(
         tuple(params.collectors or ()), offline_only=params.offline_only
     )
+    if params.project and not params.collectors:
+        # A sweep narrowed to one project is never widened: the transcript
+        # index reads roots, not projects, so it runs only when named.
+        collectors = [c for c in collectors if _project_scoped(c)]
     if not collectors:
         msg = (
             f"no collectors selected (available: {', '.join(registry.names) or 'none'})"
@@ -206,7 +226,12 @@ def sweep(ctx: AppContext, params: SweepParams) -> SweepResult:
     )
     reports = sweeper.run(collectors, projects)
 
-    total_new = sum(report.new for report in reports)
+    # The transcript index writes its own tables, not observations, so what
+    # it indexed never calls for the projections to be rebuilt.
+    indexers = {c.name for c in collectors if not _project_scoped(c)}
+    total_new = sum(
+        report.new for report in reports if report.collector not in indexers
+    )
     try:
         if total_new == 0:
             # Every collector appended nothing (digest dedup), so both

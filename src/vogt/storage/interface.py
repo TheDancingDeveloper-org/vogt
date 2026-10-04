@@ -44,10 +44,16 @@ from vogt.core.entities import (
 from vogt.core.principal import Principal
 from vogt.core.workflow import Workflow
 from vogt.storage.observed_types import (
+    ActivityBatch,
+    ActivityEventRow,
+    ActivityIndexStats,
+    ActivityQuery,
+    ActivitySessionRow,
     AppendStats,
     DepRefRow,
     PendingObservation,
     PruneReport,
+    TranscriptCursor,
 )
 
 
@@ -971,6 +977,35 @@ class ObservedStore(Protocol):
         before: datetime,
         protected_observation_ids: frozenset[str] = frozenset(),
     ) -> PruneReport: ...
+
+    # -- agent activity index (SCHEMA.md §3.4) -------------------------------
+
+    def activity_cursors(self) -> dict[str, TranscriptCursor]:
+        """How far each transcript file has been indexed, by path."""
+        ...
+
+    def index_activity(
+        self, sweep_id: str, batch: ActivityBatch, *, at: datetime
+    ) -> ActivityIndexStats:
+        """Store a batch's calls and results and move its cursors, atomically.
+
+        A call already indexed (same file, same call id) is not stored twice,
+        so a batch re-read after a crash is harmless. A result completes the
+        call it answers, whichever batch that call arrived in."""
+        ...
+
+    def search_activity(
+        self, query: ActivityQuery, *, limit: int, offset: int
+    ) -> list[ActivityEventRow]:
+        """Matching calls, newest first."""
+        ...
+
+    def summarize_activity(
+        self, query: ActivityQuery, *, limit: int, offset: int
+    ) -> list[ActivitySessionRow]:
+        """Per agent conversation, what its matching calls add up to, most
+        recently active first."""
+        ...
 
 
 __all__ = [

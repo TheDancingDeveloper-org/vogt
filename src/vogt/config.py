@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -37,7 +38,7 @@ from pathlib import Path
 from types import UnionType
 from typing import Any, Literal, Union, get_args, get_origin
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic.fields import FieldInfo
 from pydantic_settings import (
     BaseSettings,
@@ -372,6 +373,43 @@ class VogtConfig(BaseSettings):
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )
+    agent_activity_roots: dict[str, Path] = Field(
+        default_factory=dict,
+        description=(
+            "Agent transcript directories to index, by format — a TOML table "
+            '`[agent_activity_roots]` with `claude = "~/.claude/projects"` '
+            'and/or `codex = "~/.codex/sessions"`. Empty, the `agent-activity` '
+            "collector is not registered and nothing is read: transcripts hold "
+            "credentials, so indexing them is opt-in. Configured, each sweep "
+            "reads new transcript lines incrementally into the observed "
+            "store's activity index, redacting before anything is kept; "
+            "search it with `agent_activity.search` and `.summary`."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    agent_activity_max_bytes_per_sweep: int = Field(
+        default=32 * 1024 * 1024,
+        ge=4096,
+        description=(
+            "The most transcript bytes one sweep reads, newest files first. "
+            "A first sweep over months of transcripts catches up over several "
+            "sweeps rather than holding the schedule; the backlog still "
+            "waiting is in the sweep's stats."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
+    agent_activity_services: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Extra service tags for the agent activity index, mapping a tag "
+            "to a case-insensitive regular expression over a tool call's name "
+            "and input — e.g. `ci = 'ci\\.example\\.org'`. Merged over the "
+            "built-in table (github, docker, komodo, infisical, …); an empty "
+            "pattern removes a built-in tag. Applies to calls indexed after "
+            "the change."
+        ),
+        json_schema_extra={"default_policy": "behaviour"},
+    )
     engine_url: str | None = Field(
         default=None,
         description=(
@@ -577,6 +615,29 @@ class VogtConfig(BaseSettings):
         json_schema_extra={"default_policy": "behaviour"},
     )
 
+    @field_validator("agent_activity_roots")
+    @classmethod
+    def _known_transcript_formats(cls, roots: dict[str, Path]) -> dict[str, Path]:
+        unknown = sorted(set(roots) - {"claude", "codex"})
+        if unknown:
+            msg = (
+                f"agent_activity_roots keys must be 'claude' or 'codex', "
+                f"not {', '.join(map(repr, unknown))}"
+            )
+            raise ValueError(msg)
+        return roots
+
+    @field_validator("agent_activity_services")
+    @classmethod
+    def _compilable_service_patterns(cls, patterns: dict[str, str]) -> dict[str, str]:
+        for name, pattern in patterns.items():
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                msg = f"agent_activity_services[{name!r}] is not a valid regex: {exc}"
+                raise ValueError(msg) from exc
+        return patterns
+
     @classmethod
     def settings_customise_sources(
         cls,
@@ -688,7 +749,11 @@ def _default_label(name: str, field: FieldInfo) -> str:
     if field.default_factory is not None:
         if name == "data_dir":
             return "`$XDG_DATA_HOME/vogt`, else `~/.local/share/vogt`"
-        if name == "forge_token_files":
+        if name in (
+            "forge_token_files",
+            "agent_activity_roots",
+            "agent_activity_services",
+        ):
             return "*(empty)*"
         return "computed"  # pragma: no cover - no other factory fields yet
     if name == "import_root":
@@ -812,6 +877,10 @@ def _example_value(field: FieldDoc) -> str:
         # An inline table shows the shape an operator gets wrong — the host is
         # the key, the token *file* the value — where an empty `{}` would not.
         return '{ "github.com" = "/run/secrets/github_token" }'
+    if field.name == "agent_activity_roots":
+        return '{ claude = "~/.claude/projects", codex = "~/.codex/sessions" }'
+    if field.name == "agent_activity_services":
+        return "{ ci = 'ci\\.example\\.org' }"
     if field.name == "public_url":
         # Shown as an example rather than `null`, because an exposure value
         # with no default still has a *shape*, and the shape is the part an

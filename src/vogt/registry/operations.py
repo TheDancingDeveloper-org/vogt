@@ -16,6 +16,10 @@ from vogt.application.models import (
     ActorResult,
     AdoptParams,
     AdoptResult,
+    AgentActivitySearchParams,
+    AgentActivitySearchResult,
+    AgentActivitySummaryParams,
+    AgentActivitySummaryResult,
     AgentCliListParams,
     AgentCliListResult,
     AgentCliUpdateParams,
@@ -979,6 +983,40 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.agent_cli_update,
             route=HttpRoute("POST", "/agent-clis/update"),
             cli=CliBinding(("agent-cli", "update")),
+        ),
+        # -- agent activity index ---------------------------------
+        #
+        # What agents did, read from their transcripts by the opt-in
+        # `agent-activity` collector and redacted before it was stored. Reads
+        # only: the index is built by `sweep`, never written by a caller.
+        Operation(
+            name="agent_activity.search",
+            summary=(
+                "Search the tool calls agents made (from their transcripts, "
+                "redacted): by text, service, tool, errors, time, project or "
+                "session."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=AgentActivitySearchParams,
+            result_model=AgentActivitySearchResult,
+            handler=services.search_agent_activity,
+            route=HttpRoute("GET", "/agent-activity"),
+            cli=CliBinding(("agent-activity", "search")),
+        ),
+        Operation(
+            name="agent_activity.summary",
+            summary=(
+                "Per agent conversation: tool counts, error rate and time spent "
+                "waiting on tools, for a session or a project."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=AgentActivitySummaryParams,
+            result_model=AgentActivitySummaryResult,
+            handler=services.summarize_agent_activity,
+            route=HttpRoute("GET", "/agent-activity/summary"),
+            cli=CliBinding(("agent-activity", "summary")),
         ),
         # -- session history ---------------------------------------
         #

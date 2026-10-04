@@ -33,6 +33,9 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `github_token_file` | `VOGT_GITHUB_TOKEN_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_account_key_file` | `VOGT_FORGE_ACCOUNT_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_token_files` | `VOGT_FORGE_TOKEN_FILES` | map of string to path | *(empty)* | behaviour |
+| `agent_activity_roots` | `VOGT_AGENT_ACTIVITY_ROOTS` | map of string to path | *(empty)* | behaviour |
+| `agent_activity_max_bytes_per_sweep` | `VOGT_AGENT_ACTIVITY_MAX_BYTES_PER_SWEEP` | integer | `33554432` | behaviour |
+| `agent_activity_services` | `VOGT_AGENT_ACTIVITY_SERVICES` | map of string to string | *(empty)* | behaviour |
 | `engine_url` | `VOGT_ENGINE_URL` | string, optional | *(no default — must be set)* | exposure |
 | `session_scratch_project` | `VOGT_SESSION_SCRATCH_PROJECT` | string, optional | *(no default — must be set)* | behaviour |
 | `engine_state_dir` | `VOGT_ENGINE_STATE_DIR` | path, optional | *(no default — must be set)* | behaviour |
@@ -138,6 +141,18 @@ Path to a file holding a urlsafe-base64 Fernet key, used to encrypt per-actor fo
 ### `forge_token_files`
 
 Per-host forge token files, mapping a forge host to a file holding a token for it — a TOML table `[forge_token_files]` with, e.g., `"github.com" = "/run/secrets/github_token"`. This is the general form of `github_token_file`, which stays as the alias for github.com; a host set here wins over the alias. A host absent from this map has no provider registered, which is what keeps its subjects 'not collected' rather than reported as absent — the same honesty rule the single-token field has always followed. Files rather than environment variables or arguments, so a token never appears in a process listing.
+
+### `agent_activity_roots`
+
+Agent transcript directories to index, by format — a TOML table `[agent_activity_roots]` with `claude = "~/.claude/projects"` and/or `codex = "~/.codex/sessions"`. Empty, the `agent-activity` collector is not registered and nothing is read: transcripts hold credentials, so indexing them is opt-in. Configured, each sweep reads new transcript lines incrementally into the observed store's activity index, redacting before anything is kept; search it with `agent_activity.search` and `.summary`.
+
+### `agent_activity_max_bytes_per_sweep`
+
+The most transcript bytes one sweep reads, newest files first. A first sweep over months of transcripts catches up over several sweeps rather than holding the schedule; the backlog still waiting is in the sweep's stats.
+
+### `agent_activity_services`
+
+Extra service tags for the agent activity index, mapping a tag to a case-insensitive regular expression over a tool call's name and input — e.g. `ci = 'ci\.example\.org'`. Merged over the built-in table (github, docker, komodo, infisical, …); an empty pattern removes a built-in tag. Applies to calls indexed after the change.
 
 ### `engine_url`
 
