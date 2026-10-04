@@ -147,8 +147,12 @@ from vogt.application.models import (
     SearchOutputResult,
     ServeParams,
     ServeResult,
+    SessionInputParams,
+    SessionInputResult,
     SessionListResult,
     SessionResult,
+    SessionScreenParams,
+    SessionScreenResult,
     SetPasswordParams,
     SetWriteBackParams,
     StartSessionParams,
@@ -872,7 +876,11 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="session.stop",
-            summary="Stop a coding session and revoke the token it ran with.",
+            summary=(
+                "Stop a coding session and revoke the token it ran with. "
+                "Takes either id: Vogt's ses_… id or the engine's session UUID "
+                "(an unlinked GUI session is killed, with no token to revoke)."
+            ),
             scope="work.write",
             mutating=True,
             params_model=StopSessionParams,
@@ -880,6 +888,45 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.stop_session,
             route=HttpRoute("POST", "/sessions/stop"),
             cli=CliBinding(("session", "stop")),
+        ),
+        # -- driving a session -------------------------------------
+        #
+        # Typing into a terminal is `work.write`, the scope that already
+        # opens and stops one (and that the engine maps to its `sessions`
+        # capability); every call is audited with the byte count and key
+        # names, never the text. Reading the screen is `read`, the same as
+        # reading the output log — both show what the terminal printed.
+        Operation(
+            name="session.input",
+            summary=(
+                "Type into a session: text, then named keys (enter, esc, tab, "
+                "arrows, ctrl-c, ctrl-d, backspace), then Enter if submit. "
+                "Takes either id: ses_… or the engine UUID. Audited (byte "
+                "count and keys, never the text)."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=SessionInputParams,
+            result_model=SessionInputResult,
+            handler=services.session_input,
+            route=HttpRoute("POST", "/sessions/input"),
+            cli=CliBinding(("session", "input")),
+        ),
+        Operation(
+            name="session.screen",
+            summary=(
+                "Read what a session's terminal shows right now: visible "
+                "lines, cursor, title, activity and readiness. Takes either "
+                "id: ses_… or the engine UUID. Needs an engine with the "
+                "screen route."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionScreenParams,
+            result_model=SessionScreenResult,
+            handler=services.session_screen,
+            route=HttpRoute("GET", "/sessions/screen"),
+            cli=CliBinding(("session", "screen")),
         ),
         # -- runtime-pinned agent CLIs ------------------------------
         #
@@ -941,7 +988,10 @@ def build_operations() -> list[Operation[Any, Any]]:
         ),
         Operation(
             name="session.log_tail",
-            summary="Read the tail of a session's output log, readable.",
+            summary=(
+                "Read the tail of a session's output log, readable. Takes "
+                "either id: Vogt's ses_… id or the engine's session UUID."
+            ),
             scope="read",
             mutating=False,
             params_model=LogTailParams,

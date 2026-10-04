@@ -32,6 +32,7 @@ from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    SESSION_INPUT_MAX_BYTES,
     HistoryListParams,
     HistoryListResult,
     HistoryOutputMatch,
@@ -41,8 +42,14 @@ from vogt.application.models import (
     LogTailResult,
     SearchOutputParams,
     SearchOutputResult,
+    SessionInputParams,
+    SessionInputResult,
+    SessionKey,
     SessionListResult,
     SessionResult,
+    SessionScreenCursor,
+    SessionScreenParams,
+    SessionScreenResult,
     SessionSummary,
     StartSessionParams,
     StopSessionParams,
@@ -55,7 +62,7 @@ from vogt.application.services._brief import (
     brief_for_work_item,
 )
 from vogt.application.services.views import why
-from vogt.application.writes import WriteOutcome, audited_write
+from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.core.auth import Scope, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
@@ -66,6 +73,24 @@ SESSION_START = "session.start"
 SESSION_STOP = "session.stop"
 SESSION_STARTED_EVENT = "session.started"
 SESSION_STOPPED_EVENT = "session.stopped"
+SESSION_INPUT = "session.input"
+SESSION_INPUT_EVENT = "session.input"
+
+#: The byte sequence an xterm-compatible terminal sends for each named key.
+#: Arrows are the normal-mode CSI forms (`ESC [ A`), which every TUI this
+#: product drives (shells, Claude Code, Codex) reads.
+SESSION_KEYS: dict[SessionKey, str] = {
+    "enter": "\r",
+    "esc": "\x1b",
+    "tab": "\t",
+    "up": "\x1b[A",
+    "down": "\x1b[B",
+    "right": "\x1b[C",
+    "left": "\x1b[D",
+    "ctrl-c": "\x03",
+    "ctrl-d": "\x04",
+    "backspace": "\x7f",
+}
 
 
 #: What a session's own token may do is one deployment decision, set by
@@ -190,8 +215,15 @@ def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:
     has already forgotten the session, or one that is down, must not leave
     Vogt unable to close its own record. A session Vogt believes is running
     when it is not is the worse of the two wrong answers.
+
+    Either id form is accepted. A session Vogt never linked (started from the
+    GUI) has no record or token to close, so stopping it is the kill alone,
+    still audited against the engine's id.
     """
-    session = _existing(ctx, params.id)
+    target = _target(ctx, params.id)
+    if target.session is None:
+        return _stop_unlinked(ctx, target.engine_session_id, params.reason)
+    session = target.session
     engine = ctx.engine
     killed: bool | None = None
     if engine is not None:
@@ -202,7 +234,7 @@ def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
         del actor
-        current = txn.session_by_id(params.id)
+        current = txn.session_by_id(session.id)
         if current is None:
             msg = f"no session {params.id!r}"
             raise NotFound(msg)
@@ -370,13 +402,16 @@ def log_tail(ctx: AppContext, params: LogTailParams) -> LogTailResult:
 
     A missing log — the id is unknown, or history is off — is an empty result
     (`session_id` null, `engine` null), not an error: "there is no output to
-    show" is an ordinary answer.
+    show" is an ordinary answer. Either id form is accepted; a `ses_…` id
+    Vogt has no record of is `NotFound`, because that is a wrong id rather
+    than a missing log.
     """
     if ctx.engine is None:
         return LogTailResult(engine=_NO_ENGINE)
+    engine_id = _target(ctx, params.id).engine_session_id
     try:
         log = ctx.engine.history_log(
-            params.id, tail_bytes=params.tail_bytes, strip_ansi=params.strip_ansi
+            engine_id, tail_bytes=params.tail_bytes, strip_ansi=params.strip_ansi
         )
     except EngineUnavailable as exc:
         return LogTailResult(engine=str(exc))
@@ -391,7 +426,178 @@ def log_tail(ctx: AppContext, params: LogTailParams) -> LogTailResult:
     )
 
 
+# -- driving a session -----------------------------------------------------
+
+
+def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputResult:
+    """Type into a session: the text, then each named key, then Enter.
+
+    Each part is its own engine write, in that order, so a terminal reading
+    an Esc does not take the bytes after it as an Alt-chord. Audited after
+    the effect (the `audited_action` ordering) with the byte count and key
+    names only: what was typed may be a password, and an audit row is the
+    wrong place to keep one.
+    """
+    reason = writes.validate_reason(params.reason)
+    text = params.text or ""
+    keys = list(params.keys or [])
+    if not text and not keys and not params.submit:
+        msg = "nothing to send: give text, keys, or submit"
+        raise InvalidRequest(msg)
+    size = len(text.encode("utf-8"))
+    if size > SESSION_INPUT_MAX_BYTES:
+        msg = (
+            f"text is {size} bytes; the engine accepts at most "
+            f"{SESSION_INPUT_MAX_BYTES} bytes per write"
+        )
+        raise InvalidRequest(msg)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+
+    writes_in_order: list[tuple[str, bool]] = []
+    if text:
+        writes_in_order.append((text, False))
+    writes_in_order.extend((SESSION_KEYS[key], False) for key in keys)
+    if params.submit:
+        writes_in_order.append(("", True))
+    for chunk, submit in writes_in_order:
+        if not engine.send_input(engine_id, chunk, submit=submit):
+            msg = f"the engine has no live session {params.id!r}"
+            raise NotFound(msg)
+
+    linked = target.session is not None
+    audited_action(
+        ctx,
+        operation=SESSION_INPUT,
+        reason=reason,
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        # Never the text: only how much, and which keys.
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": linked,
+            "bytes": size,
+            "keys": list(keys),
+            "submit": params.submit,
+        },
+        event_kind=SESSION_INPUT_EVENT,
+    )
+    return SessionInputResult(
+        id=params.id,
+        engine_session_id=engine_id,
+        linked=linked,
+        bytes=size,
+        keys=keys,
+        submitted=params.submit,
+    )
+
+
+def session_screen(ctx: AppContext, params: SessionScreenParams) -> SessionScreenResult:
+    """What the session's terminal shows right now, as text lines.
+
+    Needs an engine with the `/screen` route. An engine that predates it
+    answers 404 for a session it does hold; that is reported as the engine
+    lacking the feature — never papered over with the output log, which is a
+    different thing (`session.log_tail`).
+    """
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    screen = engine.session_screen(engine_id)
+    if screen is None:
+        if engine.get_session(engine_id) is not None:
+            msg = (
+                "the session engine does not support screen yet (it has no "
+                "GET /api/sessions/{id}/screen route); upgrade the engine, or "
+                "read the output with session.log_tail"
+            )
+            raise EngineUnavailable(msg)
+        msg = f"the engine has no live session {params.id!r}"
+        raise NotFound(msg)
+    cursor = (
+        None
+        if screen.cursor_row is None or screen.cursor_col is None
+        else SessionScreenCursor(row=screen.cursor_row, col=screen.cursor_col)
+    )
+    return SessionScreenResult(
+        id=params.id,
+        engine_session_id=engine_id,
+        cols=screen.cols,
+        rows=screen.rows,
+        lines=list(screen.lines),
+        cursor=cursor,
+        title=screen.title,
+        activity=screen.activity,
+        alive=screen.alive,
+        ready=screen.ready,
+    )
+
+
+def _stop_unlinked(ctx: AppContext, engine_id: str, reason: str) -> SessionResult:
+    """Stop a session Vogt never linked: the engine kill, audited by its id."""
+    cleaned = writes.validate_reason(reason)
+    engine = _engine(ctx)
+    live = engine.get_session(engine_id)
+    if live is None:
+        msg = f"no session {engine_id!r}"
+        raise NotFound(msg)
+    killed = engine.kill_session(engine_id)
+    audited_action(
+        ctx,
+        operation=SESSION_STOP,
+        reason=cleaned,
+        entity_kind="session",
+        entity_id=engine_id,
+        outcome={"engine_session_id": engine_id, "linked": False},
+        event_kind=SESSION_STOPPED_EVENT,
+        summary={"engine_killed": killed, "linked": False},
+    )
+    summary = _summarize_engine_only(live).model_copy(
+        update={"alive": False if killed else None, "stopped_at": ctx.clock()}
+    )
+    return SessionResult(session=summary)
+
+
 # -- resolution ------------------------------------------------------------
+
+
+class _Target:
+    """A session named by either id form, resolved to the engine's id.
+
+    `session` is Vogt's record when there is one; `None` means the engine id
+    names a session Vogt never linked (started from the GUI), which is still
+    a session the caller may read or drive.
+    """
+
+    def __init__(
+        self, *, engine_session_id: str, session: CodingSession | None
+    ) -> None:
+        self.engine_session_id = engine_session_id
+        self.session = session
+
+
+def _target(ctx: AppContext, session_id: str) -> _Target:
+    """Resolve a `ses_…` id or an engine UUID to the engine's session id.
+
+    A `ses_…` id must be one Vogt recorded — otherwise it is a wrong id and
+    says so. Anything else is the engine's own id, passed through as given
+    and linked to Vogt's record when one exists.
+    """
+    wanted = session_id.strip()
+    if not wanted:
+        msg = "a session id is required (ses_… or the engine's session UUID)"
+        raise InvalidRequest(msg)
+    with ctx.declared.read() as view:
+        if wanted.startswith("ses_"):
+            session = view.session_by_id(wanted)
+            if session is None:
+                msg = f"no session {wanted!r}"
+                raise NotFound(msg)
+            return _Target(engine_session_id=session.engine_session_id, session=session)
+        return _Target(
+            engine_session_id=wanted, session=view.session_by_engine_id(wanted)
+        )
 
 
 class _Subject:
@@ -553,15 +759,6 @@ def _engine(ctx: AppContext) -> EngineClient:
     return ctx.engine
 
 
-def _existing(ctx: AppContext, session_id: str) -> CodingSession:
-    with ctx.declared.read() as view:
-        session = view.session_by_id(session_id)
-    if session is None:
-        msg = f"no session {session_id!r}"
-        raise NotFound(msg)
-    return session
-
-
 def _brief_with_task(brief: str, task: str | None) -> str:
     """Fold an explicit task into the session's brief.
 
@@ -620,10 +817,18 @@ def _session_env(ctx: AppContext, session_id: str, secret: str) -> dict[str, str
     started by hand is. The URL is the one the operator configured for
     clients; unset means the session still runs and simply has no Vogt to
     talk to, which is reported rather than guessed.
+
+    `VOGT_ENGINE_URL` is where this core reaches the engine — in the merged
+    stack the engine on loopback, the same process the session runs under —
+    so an agent that needs a route Vogt does not wrap yet can find it without
+    reading engine source. The core's operations (`session_input`,
+    `session_screen`) remain the recommended way to drive another session.
     """
     env = {"VOGT_HTTP_TOKEN": secret, "VOGT_SESSION_ID": session_id}
     if ctx.config.public_url:
         env["VOGT_URL"] = ctx.config.public_url
+    if ctx.engine is not None:
+        env["VOGT_ENGINE_URL"] = ctx.engine.base_url
     return env
 
 
@@ -737,6 +942,8 @@ __all__ = [
     "list_sessions",
     "log_tail",
     "search_output",
+    "session_input",
+    "session_screen",
     "start_session",
     "stop_session",
 ]

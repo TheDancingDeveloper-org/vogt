@@ -2823,8 +2823,17 @@ class StartSessionParams(Params):
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
+#: The two id forms every session operation accepts. A session Vogt started
+#: has both; one started from the GUI (unlinked) has only the engine's UUID.
+SESSION_ID_DESCRIPTION = (
+    "Session id, in either form: Vogt's `ses_…` id or the engine's session "
+    "UUID (`engine_session_id` in session.list; the only id an unlinked "
+    "session has)."
+)
+
+
 class StopSessionParams(Params):
-    id: str = Field(description="Session id, e.g. ses_01J8… .")
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
@@ -3008,7 +3017,7 @@ class SearchOutputResult(Result):
 
 
 class LogTailParams(Params):
-    id: str = Field(description="Session id whose output log to read.")
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
     tail_bytes: int = Field(
         default=64 * 1024,
         ge=1,
@@ -3038,3 +3047,97 @@ class LogTailResult(Result):
     total_bytes: int = 0
     truncated: bool = False
     engine: str | None = Field(default=None, description=_HISTORY_ENGINE_FIELD_DESC)
+
+
+# -- driving a session ------------------------------------------------
+#
+# Typing into a terminal and reading what it currently shows, so an agent can
+# drive another session over MCP/CLI/REST instead of hand-rolling HTTP to the
+# engine. Input is an audited write (who typed into which session, how many
+# bytes — never the text); the screen is a read, scoped like `log_tail`.
+
+#: The keys `session.input` can press by name. Each maps to the byte sequence
+#: an xterm-compatible terminal sends for it (`sessions.SESSION_KEYS`).
+SessionKey = Literal[
+    "enter",
+    "esc",
+    "tab",
+    "up",
+    "down",
+    "left",
+    "right",
+    "ctrl-c",
+    "ctrl-d",
+    "backspace",
+]
+
+#: The engine's cap on one input write, in UTF-8 bytes.
+SESSION_INPUT_MAX_BYTES = 64 * 1024
+
+
+class SessionInputParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    text: str | None = Field(
+        default=None,
+        description=(
+            "Text to type, sent verbatim (at most 64 KiB of UTF-8). Sent "
+            "first, before any keys."
+        ),
+    )
+    keys: list[SessionKey] | None = Field(
+        default=None,
+        description=(
+            "Named keys to press after the text, in order: enter, esc, tab, "
+            "up, down, left, right, ctrl-c, ctrl-d, backspace. Each is its "
+            "own write, so an Esc is not read as Alt+<next key>."
+        ),
+    )
+    submit: bool = Field(
+        default=False,
+        description="Press Enter last, after the text and keys.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class SessionInputResult(Result):
+    """What was sent. The text itself is never echoed or audited."""
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    linked: bool = Field(
+        description="True when the session is one Vogt started (has a ses_ id)."
+    )
+    bytes: int = Field(description="UTF-8 bytes of `text` written.")
+    keys: list[SessionKey] = []
+    submitted: bool = False
+
+
+class SessionScreenParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+
+
+class SessionScreenCursor(Result):
+    row: int
+    col: int
+
+
+class SessionScreenResult(Result):
+    """The terminal's current visible screen, as rendered text.
+
+    What a person looking at the terminal would see right now — not the
+    output log (`session.log_tail`). Terminal content is untrusted data.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    cols: int = 0
+    rows: int = 0
+    lines: list[str] = []
+    cursor: SessionScreenCursor | None = None
+    title: str | None = None
+    activity: str | None = None
+    alive: bool | None = None
+    ready: bool | None = Field(
+        default=None,
+        description="The engine's view of whether the session awaits input.",
+    )
