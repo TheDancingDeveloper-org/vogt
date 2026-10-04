@@ -88,6 +88,18 @@ manifest Vogt ships (`.github/dependabot.yml`). Pull requests run the
 critical severity dependency advisory. CodeQL scans Python, TypeScript,
 JavaScript, and Rust on pull requests, pushes to `main`, and weekly.
 
+`.github/dependabot.yml` carries two deliberate exceptions. The CodeQL
+`init` and `analyze` actions are grouped into one update, because a PR that
+bumps only one of them fails `analyze`. `ort` and `ort-sys` in `voice/` are
+ignored: they are a matched pair pinned for `piper-rs`, a lone bump of either
+does not build, and they are upgraded by hand together with the TTS stack.
+
+Dependabot opens one PR per dependency, and `main` is rebase-only with strict
+status checks, so landing a weekly wave one PR at a time means a serial
+rebase-and-rerun per PR. Maintainers may instead cherry-pick the wave onto a
+single branch, verify it once, and close the originals as superseded. Cancel
+the closed PRs' queued CI runs, or they keep holding the self-hosted pool.
+
 The scheduled `security alert triage` workflow reads open Dependabot and
 CodeQL alerts and creates one labelled `security` issue per alert. The issue
 contains the alert number as a stable marker, so reruns update the queue
