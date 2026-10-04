@@ -77,7 +77,7 @@ fn test_config() -> Config {
     }
 }
 
-async fn boot() -> (String, tokio::task::JoinHandle<()>) {
+async fn boot() -> (String, ServerGuard) {
     boot_with_config(test_config()).await
 }
 
@@ -88,7 +88,7 @@ async fn boot() -> (String, tokio::task::JoinHandle<()>) {
 /// prod runs). A per-session `scrollback_bytes` override on session-create also
 /// works, but sizing the whole engine keeps each test's intent in one place.
 #[allow(dead_code)] // used by the large-session resume tests
-async fn boot_with(scrollback_bytes: usize) -> (String, tokio::task::JoinHandle<()>) {
+async fn boot_with(scrollback_bytes: usize) -> (String, ServerGuard) {
     boot_with_config(Config {
         scrollback_bytes,
         ..test_config()
@@ -96,7 +96,7 @@ async fn boot_with(scrollback_bytes: usize) -> (String, tokio::task::JoinHandle<
     .await
 }
 
-async fn boot_with_config(cfg: Config) -> (String, tokio::task::JoinHandle<()>) {
+async fn boot_with_config(cfg: Config) -> (String, ServerGuard) {
     let (base, _state, handle) = boot_with_state(cfg).await;
     (base, handle)
 }
@@ -105,7 +105,7 @@ async fn boot_with_config(cfg: Config) -> (String, tokio::task::JoinHandle<()>) 
 /// event bus — the same bus `vogt_core::spawn_event_follower` republishes
 /// vogt-core's events onto — and drive the agent-task trigger watcher
 /// with synthetic core events, without needing a real vogt-core beside it.
-async fn boot_with_state(cfg: Config) -> (String, Arc<AppState>, tokio::task::JoinHandle<()>) {
+async fn boot_with_state(cfg: Config) -> (String, Arc<AppState>, ServerGuard) {
     let (router, state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -113,7 +113,36 @@ async fn boot_with_state(cfg: Config) -> (String, Arc<AppState>, tokio::task::Jo
         let _ = axum::serve(listener, router).await;
     });
     tokio::time::sleep(Duration::from_millis(20)).await;
-    (format!("http://{addr}"), state, handle)
+    let guard = ServerGuard {
+        server: handle,
+        state: Arc::clone(&state),
+    };
+    (format!("http://{addr}"), state, guard)
+}
+
+/// Owns a booted test engine and reaps it when the test ends, however it ends.
+///
+/// Every session child gets a `spawn_blocking` exit waiter blocked in
+/// `child.wait()`, and dropping a `#[tokio::test]` runtime waits for its
+/// blocking pool with no timeout. A test that panics before its trailing
+/// `kill_session` therefore used to hang until the child exited on its own:
+/// an hour for the load sessions (`exec sleep 3600`), forever for `/bin/cat`.
+/// On a slow CI runner that turned a seconds-long assertion failure into a
+/// 45-minute wedged job with no test name in the log. Dropping this guard
+/// SIGKILLs every session the engine still holds, so a failing test fails in
+/// seconds with its own panic message.
+struct ServerGuard {
+    server: tokio::task::JoinHandle<()>,
+    state: Arc<AppState>,
+}
+
+impl Drop for ServerGuard {
+    fn drop(&mut self) {
+        for session in self.state.sessions.live_sessions() {
+            let _ = session.kill();
+        }
+        self.server.abort();
+    }
 }
 
 /// A synthetic vogt-core event on the engine bus, the shape the follower
@@ -3732,6 +3761,26 @@ async fn create_command_session(
         .to_string()
 }
 
+/// How long the load-session helpers wait for the producer. Locally the whole
+/// flood lands in about a second; a contended self-hosted runner has been
+/// measured an order of magnitude slower, and an 8 s deadline failed there.
+const LOAD_DEADLINE: Duration = Duration::from_secs(45);
+
+/// Read only `scrollback_pos`. `tail_bytes=1` keeps each poll from copying,
+/// base64-encoding and JSON-parsing the whole multi-MiB ring every 20 ms,
+/// which on a slow runner competed with the very producer being waited on.
+async fn scrollback_pos(client: &reqwest::Client, base: &str, id: &str) -> u64 {
+    let detail: SessionDetail = client
+        .get(format!("{base}/api/sessions/{id}?tail_bytes=1"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    detail.scrollback_pos
+}
+
 /// Poll `GET /api/sessions/:id` until `scrollback_pos` reaches `target`,
 /// returning the observed position. Fails on a deadline so a session that never
 /// produces enough fails rather than hanging.
@@ -3741,17 +3790,9 @@ async fn poll_scrollback_at_least(
     id: &str,
     target: u64,
 ) -> u64 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + LOAD_DEADLINE;
     loop {
-        let detail: SessionDetail = client
-            .get(format!("{base}/api/sessions/{id}"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let pos = detail.scrollback_pos;
+        let pos = scrollback_pos(client, base, id).await;
         if pos >= target {
             return pos;
         }
@@ -3767,18 +3808,10 @@ async fn poll_scrollback_at_least(
 /// so a test that compares two reattaches resolves both cursors against the
 /// same, stable ring. Returns the settled position.
 async fn wait_until_scrollback_stable(client: &reqwest::Client, base: &str, id: &str) -> u64 {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let deadline = tokio::time::Instant::now() + LOAD_DEADLINE;
     let mut last = u64::MAX;
     loop {
-        let detail: SessionDetail = client
-            .get(format!("{base}/api/sessions/{id}"))
-            .send()
-            .await
-            .unwrap()
-            .json()
-            .await
-            .unwrap();
-        let pos = detail.scrollback_pos;
+        let pos = scrollback_pos(client, base, id).await;
         if pos == last {
             return pos;
         }
@@ -4070,8 +4103,12 @@ async fn lagging_subscriber_recovers_in_band_bounded_and_without_duplicates() {
     let mut ws = ws_attach(&base, &id).await;
     // Do not read at all: the initial snapshot and the live stream both queue
     // in the socket buffer, the outbound task blocks on a full socket, and the
-    // broadcast channel overflows behind it.
+    // broadcast channel overflows behind it. Wait for the producer to finish
+    // rather than a fixed 1.5 s: locally the flood is done well inside that,
+    // but on a slow runner it was not, the channel never overflowed, and the
+    // test saw no resync segment.
     tokio::time::sleep(Duration::from_millis(1500)).await;
+    wait_until_scrollback_stable(&client, &base, &id).await;
     // Resume and drain everything, including the in-band resync.
     let segs = read_segments_until_idle(&mut ws, Duration::from_millis(1500)).await;
 
@@ -7498,7 +7535,7 @@ esac
 
     use std::os::unix::fs::PermissionsExt;
 
-    async fn boot_sandboxed() -> (tempfile::TempDir, String, tokio::task::JoinHandle<()>) {
+    async fn boot_sandboxed() -> (tempfile::TempDir, String, ServerGuard) {
         let (tmp, paths) = sandbox();
         let mut cfg = test_config();
         cfg.agent_clis = paths;
