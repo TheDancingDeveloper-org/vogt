@@ -62,6 +62,7 @@ jobs:
     # Self-hosted, `docker` because it builds and runs the stack. A
     # static selector — dynamic `runs-on` is what the runner-policy gate forbids.
     runs-on: [self-hosted, docker]
+    timeout-minutes: 45
     env:
       # The three compose files: the public base, the engine overlay, and the
       # e2e overlay that mounts the fake-agent and its preset.
@@ -225,6 +226,7 @@ jobs:
   clean-consumer:
     name: published pair pulls anonymously and renders
     runs-on: [self-hosted, docker]
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -269,6 +271,7 @@ jobs:
   custom-image:
     name: the custom-stack example builds and its overlay merges
     runs-on: [self-hosted, docker]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 

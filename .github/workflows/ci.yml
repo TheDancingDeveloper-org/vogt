@@ -60,6 +60,7 @@ jobs:
     # The exposure a public repository creates is closed by requiring approval
     # for fork pull request workflows, not by where a job runs.
     runs-on: [self-hosted]
+    timeout-minutes: 10
     outputs:
       python: ${{ steps.classify.outputs.python }}
       engine: ${{ steps.classify.outputs.engine }}
@@ -165,6 +166,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: [self-hosted]
+    timeout-minutes: 30
     env:
       UV_PYTHON: ${{ matrix.python-version }}
     strategy:
@@ -223,6 +225,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.any == 'true'
     runs-on: [self-hosted]
+    timeout-minutes: 20
     env:
       UV_PYTHON: "3.13"
     steps:
@@ -252,6 +255,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.engine == 'true'
     runs-on: [self-hosted]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -486,6 +490,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.voice == 'true'
     runs-on: [self-hosted]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -546,6 +551,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.mobile == 'true'
     runs-on: [self-hosted]
+    timeout-minutes: 30
     # Pull requests, including fork pull requests, must not receive the dev
     # Firebase secret. They build against the sanitized example.
     steps:
@@ -661,6 +667,7 @@ jobs:
     name: tracked secret hygiene
     needs: changes
     runs-on: [self-hosted]
+    timeout-minutes: 10
     # Check the reviewed tree, not full history: the known pre-#265 exposure
     # still needs an operator-coordinated rewrite decision.
     steps:
@@ -693,6 +700,7 @@ jobs:
     needs: [changes, build, core, engine, voice, android, security]
     if: always()
     runs-on: [self-hosted]
+    timeout-minutes: 10
     steps:
       - name: gate
         env:

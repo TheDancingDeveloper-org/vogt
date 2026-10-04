@@ -142,6 +142,19 @@ by where the pipeline runs. What the tree _does_ enforce:
   full commit SHA. It reports rather than blocks, so it must also be a
   required status check on `main` — another setting to audit alongside the
   approval gate.
+- `runner-policy` also runs `scripts/check_workflow_policy.py`, which fails
+  when a job (other than a reusable-workflow call) has no `timeout-minutes`,
+  so a wedged job releases its runner instead of holding it for GitHub's
+  360-minute default; and when a check in the required list above is not
+  the name of some job that runs on `pull_request` or `merge_group`. A
+  required context with no producer never reports, and every pull request
+  blocks on it. That list is read from this file, so changing the ruleset
+  means changing the list here in the same pull request.
+- The scheduled `runner watchdog` workflow flags any run in progress longer
+  than 150 minutes (above the longest job budget) in one open issue labelled
+  `ci-stuck`, failing while anything is stuck and closing the issue once
+  nothing is. It catches runs whose runner lost contact, which no job
+  timeout ends.
 - Secret-bearing steps (the Android keystore, the Firebase configuration)
   are gated on `github.event_name != 'pull_request'`, and no workflow uses
   `pull_request_target`.
@@ -152,6 +165,23 @@ by where the pipeline runs. What the tree _does_ enforce:
 If the approval setting is ever found disabled, treat every self-hosted runner
 as potentially compromised by fork-submitted code and rotate the credentials
 those runners can reach.
+
+### Reading runner state from an agent session
+
+Agents diagnosing a stalled pool need to list the organisation's self-hosted
+runners and whether each is online or busy (`GET /orgs/{org}/actions/runners`,
+or `gh api orgs/<org>/actions/runners`). A token without the organisation
+permission **Self-hosted runners: read** gets HTTP 403, which is what agent
+sessions have been hitting. The grant is an organisation setting, not
+something the tree can carry: a fine-grained token (or the GitHub App the
+agents act as) needs **Organization permissions → Self-hosted runners →
+Read-only** added by an organisation owner. Read-only is sufficient and is
+the most that should be granted; *Read and write* would let a session
+register or remove runners. Listing workflow runs and jobs, which the
+watchdog does, needs only repository **Actions: read** and is unaffected.
+A classic personal access token can only reach this endpoint through the
+`manage_runners:org` scope, which also grants write; prefer a fine-grained
+token for agent sessions.
 
 ## Mobile Firebase configuration
 

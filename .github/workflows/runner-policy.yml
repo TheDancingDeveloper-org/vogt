@@ -14,6 +14,13 @@
 # tailnet-connected worker, which is closed at the gate by requiring approval
 # for fork pull request workflows rather than by relocating the pipeline.
 #
+# Two further guardrails live in `scripts/check_workflow_policy.py` (tested in
+# tests/test_check_workflow_policy.py): every job carries `timeout-minutes`,
+# so a wedged job releases its runner instead of holding it for GitHub's
+# 360-minute default; and every required status check documented in
+# SECURITY.md is produced by some job on `pull_request`, so a ruleset entry
+# with no producer fails here rather than silently blocking every PR.
+#
 # Reporting is not blocking: `runner-policy` must also be a required status
 # check on `main`, or this reports a red X that anyone can merge past.
 
@@ -27,6 +34,7 @@ on:
 jobs:
   runner-policy:
     runs-on: [self-hosted]
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
@@ -82,3 +90,8 @@ jobs:
           done < <(grep -RnE '^[[:space:]]*(-[[:space:]]*)?uses:' .github/workflows \
                      --include='*.yml' --include='*.yaml')
           [ "$bad" -eq 0 ]
+
+      # stdlib-only on purpose: `python3` is on every pool image (ghcr-retention
+      # and the mobile jobs already rely on it) and no install step is needed.
+      - name: every job has a timeout and every required check a producer
+        run: python3 scripts/check_workflow_policy.py
