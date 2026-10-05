@@ -19,6 +19,81 @@ pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<Sessi
     Json(state.sessions.list())
 }
 
+#[derive(Debug, Deserialize)]
+pub struct WaitQuery {
+    /// `ready` (default), `exited` or `any-change` (`any_change` accepted).
+    pub until: Option<String>,
+    /// Seconds to wait at most; default 120, at most 600.
+    pub timeout_s: Option<u64>,
+}
+
+/// Block until the session is ready for input (or needs a person, or exits),
+/// exits, or changes at all — or the timeout passes — and answer with why
+/// and the screen at that moment. Gated like the screen: `sessions`.
+pub async fn wait_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Query(q): Query<WaitQuery>,
+) -> Result<Json<vogt_engine_contract::SessionWait>> {
+    use vogt_engine_contract::WaitUntil;
+    let until = match q.until.as_deref().map(str::trim) {
+        None | Some("") | Some("ready") => WaitUntil::Ready,
+        Some("exited") => WaitUntil::Exited,
+        Some("any-change") | Some("any_change") => WaitUntil::AnyChange,
+        Some(other) => {
+            return Err(crate::error::ApiError::BadRequest(format!(
+                "until {other:?} is not one of ready, exited, any-change"
+            )))
+        }
+    };
+    let timeout = Duration::from_secs(q.timeout_s.unwrap_or(120));
+    let session = state.sessions.get(id)?;
+    Ok(Json(
+        crate::wait::wait(&state.bus, session, until, timeout).await?,
+    ))
+}
+
+/// Mark the session's agent blocked on a person (with what it needs), or
+/// clear that. The core's `session.report_blocked` / `report_unblocked` call
+/// this; the report rides on the session summary, the screen and a
+/// `session-blocked` event, and blocking sends a push.
+pub async fn set_session_blocked(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<vogt_engine_contract::SetBlocked>,
+) -> Result<Json<SessionSummary>> {
+    let session = state.sessions.get(id)?;
+    let report = if req.blocked {
+        let reason = req.reason.as_deref().map(str::trim).unwrap_or_default();
+        if reason.is_empty() {
+            return Err(crate::error::ApiError::BadRequest(
+                "a blocked report needs a reason".into(),
+            ));
+        }
+        if reason.len() > 2000 || req.items.len() > 20 || req.items.iter().any(|i| i.len() > 500) {
+            return Err(crate::error::ApiError::BadRequest(
+                "a blocked report is at most 2000 bytes of reason and 20 items of 500 bytes".into(),
+            ));
+        }
+        Some(vogt_engine_contract::BlockedReport {
+            reason: reason.to_string(),
+            items: req
+                .items
+                .iter()
+                .map(|i| i.trim().to_string())
+                .filter(|i| !i.is_empty())
+                .collect(),
+            since: time::OffsetDateTime::now_utc()
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default(),
+        })
+    } else {
+        None
+    };
+    session.set_blocked(report, &state.bus)?;
+    Ok(Json(session.summary()))
+}
+
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(spec): Json<SessionSpec>,

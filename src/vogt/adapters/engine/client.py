@@ -84,6 +84,27 @@ class EngineApproval:
 
 
 @dataclass(frozen=True)
+class EngineBlocked:
+    """An agent's own report that it is blocked on a person (engine
+    `BlockedReport`). The text is the agent's: untrusted data."""
+
+    reason: str
+    items: tuple[str, ...] = ()
+    since: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: object) -> EngineBlocked | None:
+        if not isinstance(payload, dict):
+            return None
+        items = payload.get("items")
+        return cls(
+            reason=str(payload.get("reason", "")),
+            items=tuple(str(i) for i in items) if isinstance(items, list) else (),
+            since=_optional_str(payload.get("since")),
+        )
+
+
+@dataclass(frozen=True)
 class EngineSession:
     """One terminal, as the engine describes it.
 
@@ -120,6 +141,8 @@ class EngineSession:
     approval: EngineApproval | None = None
     #: The agent CLI command the session runs, as the engine displays it.
     command: str | None = None
+    #: The agent's blocked report, when it made one.
+    blocked: EngineBlocked | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineSession:
@@ -138,6 +161,7 @@ class EngineSession:
             last_output_at=_optional_str(payload.get("last_output_at")),
             approval=EngineApproval.from_payload(payload.get("approval")),
             command=_optional_str(payload.get("command")),
+            blocked=EngineBlocked.from_payload(payload.get("blocked")),
         )
 
 
@@ -283,6 +307,7 @@ class EngineScreen:
     turn_started_at: str | None = None
     last_output_at: str | None = None
     approval: EngineApproval | None = None
+    blocked: EngineBlocked | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineScreen:
@@ -309,6 +334,29 @@ class EngineScreen:
             turn_started_at=_optional_str(payload.get("turn_started_at")),
             last_output_at=_optional_str(payload.get("last_output_at")),
             approval=EngineApproval.from_payload(payload.get("approval")),
+            blocked=EngineBlocked.from_payload(payload.get("blocked")),
+        )
+
+
+@dataclass(frozen=True)
+class EngineWait:
+    """Why `GET /api/sessions/{id}/wait` returned, and the screen then."""
+
+    outcome: str
+    matched: bool
+    waited_ms: int
+    screen: EngineScreen
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineWait:
+        screen = payload.get("screen")
+        return cls(
+            outcome=str(payload.get("outcome", "")),
+            matched=bool(payload.get("matched", False)),
+            waited_ms=_optional_int(payload.get("waited_ms")) or 0,
+            screen=EngineScreen.from_payload(
+                screen if isinstance(screen, dict) else {}
+            ),
         )
 
 
@@ -678,6 +726,45 @@ class EngineClient:
             return None
         return EngineScreen.from_payload(payload)
 
+    def wait_session(
+        self, session_id: str, *, until: str, timeout_s: int
+    ) -> EngineWait | None:
+        """Block on the engine until the session reaches `until` (`ready`,
+        `exited`, `any-change`) or `timeout_s` passes; `None` on a 404 (an
+        unknown session, or an engine without the route).
+
+        The HTTP timeout is the wait plus a margin, so a wait that runs its
+        full course is answered rather than cut off by the client.
+        """
+        query = urllib.parse.urlencode({"until": until, "timeout_s": timeout_s})
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/wait?{query}",
+            allow_missing=True,
+            timeout=timeout_s + 15,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineWait.from_payload(payload)
+
+    def set_blocked(
+        self,
+        session_id: str,
+        *,
+        blocked: bool,
+        reason: str | None = None,
+        items: list[str] | None = None,
+    ) -> EngineSession | None:
+        """Set or clear a session's blocked report; `None` on a 404."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/blocked",
+            method="POST",
+            payload={"blocked": blocked, "reason": reason, "items": items or []},
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineSession.from_payload(payload)
+
     # -- transport ---------------------------------------------------------
 
     def healthz(self) -> None:
@@ -740,6 +827,7 @@ class EngineClient:
         method: str = "GET",
         payload: dict[str, Any] | None = None,
         allow_missing: bool = False,
+        timeout: int | None = None,
     ) -> dict[str, Any] | list[Any] | None:
         url = f"{self.base_url}{path}"
         headers = {"Accept": "application/json", "User-Agent": USER_AGENT}
@@ -750,7 +838,9 @@ class EngineClient:
             headers["Content-Type"] = "application/json"
             body = json.dumps(payload).encode("utf-8")
 
-        status, response = self._fetch(url, headers, body=body, method=method)
+        status, response = self._fetch(
+            url, headers, body=body, method=method, timeout=timeout
+        )
         if status == 404 and allow_missing:
             return None
         if status in (401, 403):
@@ -779,12 +869,15 @@ class EngineClient:
         *,
         body: bytes | None = None,
         method: str = "GET",
+        timeout: int | None = None,
     ) -> tuple[int, bytes]:
         if self.transport is not None:
             return self.transport(url, headers, body or b"", method)
         request = urllib.request.Request(url, headers=headers, data=body, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=timeout or self.timeout
+            ) as response:
                 return int(response.status), bytes(response.read())
         except urllib.error.HTTPError as exc:  # pragma: no cover - network shape
             return int(exc.code), bytes(exc.read())
@@ -809,7 +902,9 @@ def _engine_error_text(text: str) -> str:
 
 __all__ = [
     "EngineAgentTask",
+    "EngineApproval",
     "EngineArchivedSession",
+    "EngineBlocked",
     "EngineClient",
     "EngineHistoryMatch",
     "EngineHistorySession",
@@ -819,5 +914,6 @@ __all__ = [
     "EngineTaskFinding",
     "EngineTaskRun",
     "EngineUnavailable",
+    "EngineWait",
     "Transport",
 ]

@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from vogt.adapters.engine import EngineUnavailable
-from vogt.adapters.engine.client import EngineApproval
+from vogt.adapters.engine.client import EngineApproval, EngineBlocked
 from vogt.adapters.forge import KIND_CHECK, KIND_NOTIFICATION
 from vogt.adapters.forge.kinds import (
     COLLECTOR_CHECKS,
@@ -501,6 +501,17 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
         try:
             live = ctx.engine.list_sessions()
             for session in live:
+                if session.blocked is not None and session.alive:
+                    entries.append(
+                        _blocked_entry(
+                            ctx,
+                            session.id,
+                            session.name,
+                            session.blocked,
+                            view.session_by_engine_id(session.id),
+                            projects,
+                        )
+                    )
                 if session.activity not in (
                     "waiting-for-input",
                     "awaiting-approval",
@@ -780,6 +791,43 @@ def _drift_entry(
         evidence_snapshot=proposal.evidence_snapshot,
         proposed_change=proposal.proposed_change,
         action=InboxAction(kind="drift", drift_id=proposal.id),
+        **_actor_fields(SYSTEM_ACTOR),
+    )
+
+
+def _blocked_entry(
+    ctx: AppContext,
+    session_id: str,
+    name: str,
+    blocked: EngineBlocked,
+    declared: CodingSession | None,
+    projects: dict[str, Project],
+) -> InboxEntry:
+    """A session whose agent reported it cannot go on without a person.
+
+    One occurrence per report: its key carries the report's time, so a new
+    report after an archived one surfaces again. The text is the agent's —
+    untrusted, shown verbatim.
+    """
+    project = None if declared is None else projects.get(declared.project_id)
+    todo = "; ".join(blocked.items)
+    summary = f"{blocked.reason}{' — to do: ' + todo if todo else ''}"[:1000]
+    return InboxEntry(
+        entry_key=f"agent:session:{session_id}:blocked:{blocked.since or 'unknown'}",
+        source=AGENT_KIND,
+        kind="session.blocked",
+        occurred_at=_when(blocked.since) or ctx.clock(),
+        observed_at=None,
+        title=f"Session {name or session_id} is blocked on you",
+        summary=summary,
+        project_slug=None if project is None else project.slug,
+        session_id=session_id,
+        work_item_ref=None,
+        source_subject_key=session_id,
+        trust_state="unverified",
+        freshness="live",
+        provisional=True,
+        action=InboxAction(kind="session", session_id=session_id),
         **_actor_fields(SYSTEM_ACTOR),
     )
 

@@ -857,6 +857,18 @@ class ProjectBriefResult(Result):
 # -- work ------------------------------------------------------------------
 
 
+class SessionBlocked(Result):
+    """An agent's own report that it is blocked on a person.
+
+    Set with `session.report_blocked`, cleared with `session.report_unblocked`
+    or when the session ends. The text is the agent's: untrusted data.
+    """
+
+    blocker: str = Field(description="What it is blocked on, in its words.")
+    items: list[str] = Field(default=[], description="What the person must do.")
+    since: datetime | None = None
+
+
 class SessionApproval(Result):
     """A permission dialog an agent CLI in the session is showing.
 
@@ -985,6 +997,14 @@ class SessionSummary(Result):
         description=(
             "The permission dialog on screen while activity is "
             "awaiting-approval; null otherwise."
+        ),
+    )
+    blocked: SessionBlocked | None = Field(
+        default=None,
+        description=(
+            "The agent's own report that it is blocked on a person "
+            "(session.report_blocked); null when it is not. Do not re-prompt "
+            "a blocked session: do what it asks, or answer it."
         ),
     )
 
@@ -3568,6 +3588,15 @@ class StartSessionParams(Params):
             "volunteer one for a terminal that runs no agent."
         ),
     )
+    autopilot: bool = Field(
+        default=False,
+        description=(
+            "Tell the agent (in its brief) to keep going: when its next step "
+            "needs no person, carry on with it instead of ending the turn, "
+            "and stop only when it is blocked on a person (reported with "
+            "session_report_blocked) or there is no unblocked work left."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
@@ -3909,6 +3938,92 @@ class SessionScreenResult(Result):
     turn_started_at: datetime | None = None
     last_output_at: datetime | None = None
     approval: SessionApproval | None = None
+    blocked: SessionBlocked | None = None
+
+
+SessionWaitUntil = Literal["ready", "exited", "any_change"]
+
+
+class SessionWaitParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    until: SessionWaitUntil = Field(
+        default="ready",
+        description=(
+            "`ready` (default): until the program is at its prompt — or needs "
+            "a person (a permission dialog, a blocked report) or has exited, "
+            "which also end the wait; `exited`: until the process ends; "
+            "`any_change`: until its activity, blocked state or liveness "
+            "changes at all."
+        ),
+    )
+    timeout_s: int = Field(
+        default=120,
+        ge=1,
+        le=600,
+        description="Seconds to wait at most (1-600). Answers `timeout` then.",
+    )
+
+
+class SessionWaitResult(Result):
+    """Why a wait ended, and the screen at that moment."""
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    outcome: str = Field(
+        description=(
+            "ready / awaiting-approval / blocked / exited / changed / timeout."
+        )
+    )
+    matched: bool = Field(
+        description="True when the outcome is what `until` asked for."
+    )
+    waited_ms: int
+    screen: SessionScreenResult
+
+
+class ReportBlockedParams(Params):
+    """An agent's own report that it cannot go on without a person."""
+
+    id: str | None = Field(
+        default=None,
+        description=(
+            "The blocked session, in either id form. Omit it from inside a "
+            "session Vogt started (its token names the session); otherwise "
+            "pass `$VOGT_ENGINE_SESSION_ID`."
+        ),
+    )
+    blocker: str = Field(
+        min_length=1,
+        max_length=2000,
+        description=(
+            "What you are blocked on, for the person: what they must decide "
+            "or do before you can go on."
+        ),
+    )
+    items: list[str] = Field(
+        default=[],
+        max_length=20,
+        description="The concrete things the person has to do, one per entry.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ReportUnblockedParams(Params):
+    id: str | None = Field(
+        default=None,
+        description=(
+            "The session, in either id form; omit from inside a session Vogt started."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class SessionBlockedResult(Result):
+    id: str
+    engine_session_id: str
+    blocked: SessionBlocked | None = Field(
+        default=None, description="The report now on the session; null once cleared."
+    )
 
 
 # -- agent activity index ---------------------------------------------------

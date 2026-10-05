@@ -21,8 +21,11 @@ from vogt.application.models import (
     ListSessionsParams,
     LogTailParams,
     RegisterProjectParams,
+    ReportBlockedParams,
+    ReportUnblockedParams,
     SessionInputParams,
     SessionScreenParams,
+    SessionWaitParams,
     StartSessionParams,
     StopSessionParams,
 )
@@ -31,12 +34,16 @@ from vogt.application.services import (
     list_sessions,
     log_tail,
     register_project,
+    report_blocked,
+    report_unblocked,
     session_input,
     session_screen,
+    session_wait,
     start_session,
     stop_session,
 )
 from vogt.application.services._brief import DRIVING_OTHER_SESSIONS
+from vogt.core.principal import Principal
 from vogt.errors import InvalidRequest, MissingReason, NotFound
 
 WHY = "drive test"
@@ -57,6 +64,10 @@ class Engine:
         self.extra: dict[str, Any] = {}
         #: The query strings the screen route was asked with.
         self.screen_queries: list[str] = []
+        self.wait_queries: list[str] = []
+        self.wait_supported = True
+        #: The blocked report the engine holds (one for the whole stand-in).
+        self.blocked: dict[str, Any] | None = None
 
     def __call__(
         self,
@@ -85,6 +96,7 @@ class Engine:
                         "cwd": ROOT,
                         "created_at": "2026-01-03T00:00:00Z",
                         "alive": True,
+                        "blocked": self.blocked,
                         **self.extra,
                     }
                     for engine_id in sorted(self.live)
@@ -98,6 +110,47 @@ class Engine:
                 return 404, b""
             if method == "POST" and verb == "input":
                 return 200, b'{"ok":true}'
+            if method == "POST" and verb == "blocked":
+                self.blocked = (
+                    {
+                        "reason": payload.get("reason"),
+                        "items": payload.get("items", []),
+                        "since": "2026-10-05T00:00:00Z",
+                    }
+                    if payload.get("blocked")
+                    else None
+                )
+                return 200, json.dumps(
+                    {
+                        "id": engine_id,
+                        "name": "x",
+                        "activity": "idle",
+                        "cwd": ROOT,
+                        "blocked": self.blocked,
+                    }
+                ).encode()
+            if method == "GET" and verb == "wait":
+                if not self.wait_supported:
+                    return 404, b""
+                self.wait_queries.append(url.partition("?")[2])
+                return 200, json.dumps(
+                    {
+                        "outcome": "awaiting-approval",
+                        "matched": False,
+                        "waited_ms": 1234,
+                        "screen": {
+                            "id": engine_id,
+                            "cols": 80,
+                            "rows": 1,
+                            "lines": ["Do you want to proceed?"],
+                            "cursor": {"row": 0, "col": 0},
+                            "activity": "awaiting-approval",
+                            "alive": True,
+                            "ready": False,
+                            **APPROVAL,
+                        },
+                    }
+                ).encode()
             if method == "POST" and verb == "kill":
                 self.live.discard(engine_id)
                 return 200, b'{"ok":true}'
@@ -396,6 +449,92 @@ def test_session_list_and_inbox_show_a_permission_dialog(
     assert all("asking for approval" in e.title for e in asking)
     assert "Auto-deny in 61s" in asking[0].summary
     assert "docker rm -f x" in asking[0].summary
+
+
+def test_wait_passes_until_and_timeout_and_returns_why(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-874: one call waits on the engine and says why it stopped."""
+    ses_id, engine_id = _started(wired)
+    waited = session_wait(
+        wired, SessionWaitParams(id=ses_id, until="any_change", timeout_s=30)
+    )
+    assert engine.wait_queries[-1] == "until=any-change&timeout_s=30"
+    assert waited.engine_session_id == engine_id
+    assert waited.outcome == "awaiting-approval"
+    assert waited.matched is False
+    assert waited.waited_ms == 1234
+    assert waited.screen.approval is not None
+    assert waited.screen.ready is False
+
+
+def test_wait_on_an_engine_without_the_route_says_so(
+    wired: AppContext, engine: Engine
+) -> None:
+    engine.wait_supported = False
+    with pytest.raises(EngineUnavailable, match="does not support wait yet"):
+        session_wait(wired, SessionWaitParams(id=UNLINKED))
+
+
+def test_wait_bounds_its_timeout() -> None:
+    with pytest.raises(ValueError):
+        SessionWaitParams(id=UNLINKED, timeout_s=601)
+
+
+def test_a_session_reports_itself_blocked_without_naming_itself(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-873: from inside a session Vogt started, the token names it."""
+    ses_id, engine_id = _started(wired)
+    own = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref=f"agent:session:{ses_id}",
+            kind="agent",
+            display_name=f"Session {ses_id}",
+        ),
+    )
+    result = report_blocked(
+        own,
+        ReportBlockedParams(
+            blocker="needs the Telegram bot token",
+            items=["create the bot", "  ", "store the token"],
+            reason="cannot finish MVP1 without it",
+        ),
+    )
+    assert result.id == ses_id and result.engine_session_id == engine_id
+    assert result.blocked is not None
+    assert result.blocked.items == ["create the bot", "store the token"]
+    sent = [row for row in engine.sent if row["path"].endswith("/blocked")][-1]
+    assert sent["body"]["blocked"] is True
+    # It is on the list and in the Inbox, and the write is audited with it.
+    row = next(
+        r for r in list_sessions(wired, ListSessionsParams()).sessions if r.id == ses_id
+    )
+    assert row.blocked is not None
+    assert row.blocked.blocker == "needs the Telegram bot token"
+    entries = list_inbox(wired, InboxListParams()).entries
+    blocked = [e for e in entries if e.kind == "session.blocked"]
+    assert blocked and "blocked on you" in blocked[0].title
+    assert "create the bot" in blocked[0].summary
+    with wired.declared.read() as view:
+        audit = view.list_audit(limit=20)
+    assert any(a.operation == "session.report_blocked" for a in audit)
+    # And cleared.
+    cleared = report_unblocked(own, ReportUnblockedParams(reason="token stored"))
+    assert cleared.blocked is None
+    assert not [
+        e
+        for e in list_inbox(wired, InboxListParams()).entries
+        if e.kind == "session.blocked"
+    ]
+
+
+def test_a_caller_that_is_not_a_session_must_name_one(wired: AppContext) -> None:
+    with pytest.raises(InvalidRequest, match="give `id`"):
+        report_blocked(
+            wired, ReportBlockedParams(blocker="x", reason="testing the refusal")
+        )
 
 
 def test_screen_on_an_engine_without_the_route_says_so(

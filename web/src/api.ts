@@ -50,6 +50,16 @@ export interface SessionSummary {
   last_output_at?: string | null;
   /** Present while `activity` is `awaiting-approval`. */
   approval?: ApprovalPrompt | null;
+  /** The agent's own report that it is blocked on a person. */
+  blocked?: BlockedReport | null;
+}
+
+/** An agent's report that it cannot go on without a person (engine `BlockedReport`). */
+export interface BlockedReport {
+  /** Why, in the agent's words. Untrusted text. */
+  reason: string;
+  items?: string[];
+  since: string;
 }
 
 export interface CreateSessionRequest {
@@ -101,6 +111,7 @@ export type ServerEvent =
   | { type: "session-renamed"; id: string; name: string }
   | { type: "session-killed"; id: string; exit_code: number | null }
   | { type: "activity"; id: string; state: ActivityState; activity_changed_at?: string }
+  | { type: "session-blocked"; id: string; blocked?: BlockedReport | null }
   /**
    * Something changed in vogt-core, republished by the front door.
    *

@@ -235,9 +235,13 @@ The recipe is **start with a task → wait until ready → read → answer → s
    directory follows the conversation. If your `session_start` tool has no
    `resume` parameter, your MCP client is holding a tool list from an older
    server: reconnect it (`/mcp` in Claude Code) rather than working around it.
-2. **Wait until ready.** Call `session_screen` every second or two until
-   `ready` is true: the program is at its prompt. Stop waiting if `alive` turns
-   false (`activity` `exited` or `errored`).
+2. **Wait until ready.** `session_wait` with `until: "ready"` blocks until
+   the program is at its prompt and returns the screen — or returns early
+   with `outcome` `awaiting-approval` (a permission dialog; see below),
+   `blocked` (the agent says it needs a person), `exited`, or `timeout`. One
+   call, no polling; `timeout_s` up to 600. `until: "any_change"` wakes on
+   any change, `"exited"` when it ends. (Polling `session_screen` for
+   `ready` still works on an engine without the wait route.)
 3. **Read.** `session_screen` gives the visible `lines` now; `session_log_tail`
    gives the history of what it printed.
 4. **Answer.** `session_input` types `text`, then presses the named `keys` in
@@ -272,6 +276,24 @@ Rules:
   `last_output_at` (when the terminal last printed). Agent TUIs animate while
   they work, so `running` with a recent `last_output_at` is a long turn; a
   `last_output_at` many minutes old is worth a look.
+
+#### When you, or a session you drive, need a person
+
+If you cannot go on without a person — a decision, a credential, an action
+only they can take — call `session_report_blocked` with `blocker` (what you
+need, in a sentence), `items` (the concrete things to do) and a `reason`,
+then stop. From inside a session Vogt started, omit `id`; otherwise pass
+`$VOGT_ENGINE_SESSION_ID`. It shows as `blocked` on `session_list` and
+`session_screen`, raises an Inbox entry "… is blocked on you" and a push,
+and ends a driver's `session_wait`. Call `session_report_unblocked` once you
+can go on. A driver that sees `blocked` does what it asks, or relays it to
+the operator — it does not re-prompt the agent to "continue".
+
+**Autopilot.** `session_start` with `autopilot: true` adds an Autopilot
+section to the brief: when the agent's next step needs no person, it carries
+on in the same turn instead of ending it to announce the next item, and
+stops only when it is blocked (reported as above) or no unblocked work is
+left. The flag is recorded on the start's audit row.
 
 #### Permission prompts: `awaiting-approval`
 

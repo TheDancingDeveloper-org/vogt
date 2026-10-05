@@ -288,6 +288,39 @@ def test_no_task_leaves_the_brief_untouched(
     assert "## Task" not in engine.last_spec["prompt"]
 
 
+def test_every_brief_says_how_to_report_being_blocked(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-873: the convention is in the brief, not left to be discovered."""
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "session_report_blocked" in engine.last_spec["prompt"]
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "session_report_unblocked" in engine.last_spec["prompt"]
+
+
+def test_autopilot_adds_the_keep_going_convention_and_is_audited(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-878: autopilot tells the agent to carry on until blocked or done."""
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", task="work the backlog", autopilot=True, reason=WHY
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "## Autopilot" in brief
+    assert brief.index("## Autopilot") < brief.index("## Task")
+    started = [
+        event
+        for event in list_events(wired, ListEventsParams()).events
+        if event.kind == "session.started"
+    ]
+    assert started[-1].summary["autopilot"] is True
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "## Autopilot" not in engine.last_spec["prompt"]
+
+
 def test_a_template_is_sent_by_name_for_the_engine_to_expand(
     wired: AppContext, engine: StandInEngine
 ) -> None:

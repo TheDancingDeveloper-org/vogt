@@ -25,6 +25,7 @@ function session(over: Partial<SessionSummary> & { id: string }): SessionSummary
     cwd: over.cwd ?? "/workspace",
     created_at: over.created_at ?? "2026-08-18T08:00:00Z",
     activity_changed_at: over.activity_changed_at,
+    blocked: over.blocked,
   };
 }
 
@@ -40,6 +41,17 @@ describe("activity labels and classes", () => {
     expect(activityLabel("waiting-for-input", null)).toBe("waiting for input");
     expect(activityLabel("idle", null)).toBe("idle");
     expect(activityClass(session({ id: "c", activity: "waiting-for-input" }))).toBe("waiting-for-input");
+  });
+
+  it("says a blocked agent is blocked on you, and ranks it first", () => {
+    const blocked = session({
+      id: "b",
+      activity: "idle",
+      blocked: { reason: "needs a token", since: "2026-10-05T00:00:00Z" },
+    });
+    expect(sessionStateWord(blocked, Date.now())).toMatch(/^blocked on you/);
+    expect(attentionRank(blocked))
+      .toBeLessThan(attentionRank(session({ id: "w", activity: "waiting-for-input" })));
   });
 
   it("names a permission dialog and ranks it above every other state", () => {

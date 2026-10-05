@@ -452,6 +452,27 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {"id": seen["session.start"]["session"]["engine_session_id"]},
     ),
     (
+        "session.wait",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "until": "ready",
+            "timeout_s": 5,
+        },
+    ),
+    (
+        "session.report_blocked",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "blocker": "needs the bot token",
+            "items": ["create the bot", "store its token"],
+            "reason": WHY,
+        },
+    ),
+    (
+        "session.report_unblocked",
+        lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
+    ),
+    (
         "session.stop",
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
@@ -837,6 +858,44 @@ def _stand_in_engine() -> EngineClient:
             return 200, b'{"ok":true}'
         if method == "POST" and url.endswith("/input"):
             return 200, b'{"ok":true}'
+        if method == "POST" and path.endswith("/blocked"):
+            blocked = (
+                {
+                    "reason": spec.get("reason"),
+                    "items": spec.get("items", []),
+                    "since": "2026-10-05T00:00:00Z",
+                }
+                if spec.get("blocked")
+                else None
+            )
+            return 200, json.dumps(
+                {
+                    "id": path.rsplit("/", 2)[-2],
+                    "name": "parity",
+                    "activity": "idle",
+                    "cwd": "/tmp",
+                    "blocked": blocked,
+                }
+            ).encode()
+        if method == "GET" and path.endswith("/wait"):
+            return 200, json.dumps(
+                {
+                    "outcome": "ready",
+                    "matched": True,
+                    "waited_ms": 12,
+                    "screen": {
+                        "id": path.rsplit("/", 2)[-2],
+                        "cols": 80,
+                        "rows": 1,
+                        "lines": ["$ "],
+                        "cursor": {"row": 0, "col": 2},
+                        "title": "bash",
+                        "activity": "idle",
+                        "alive": True,
+                        "ready": True,
+                    },
+                }
+            ).encode()
         if method == "GET" and path.endswith("/screen"):
             return 200, json.dumps(
                 {

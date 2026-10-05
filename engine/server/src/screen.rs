@@ -192,6 +192,7 @@ pub async fn session_screen(
         turn_started_at: summary.turn_started_at,
         last_output_at: summary.last_output_at,
         approval: summary.approval,
+        blocked: summary.blocked,
     })
 }
 

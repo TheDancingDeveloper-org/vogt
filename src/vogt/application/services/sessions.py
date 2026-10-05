@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Any
 
 from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
-from vogt.adapters.engine.client import EngineApproval
+from vogt.adapters.engine.client import EngineApproval, EngineBlocked, EngineScreen
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
@@ -42,9 +42,13 @@ from vogt.application.models import (
     ListSessionsParams,
     LogTailParams,
     LogTailResult,
+    ReportBlockedParams,
+    ReportUnblockedParams,
     SearchOutputParams,
     SearchOutputResult,
     SessionApproval,
+    SessionBlocked,
+    SessionBlockedResult,
     SessionInputParams,
     SessionInputResult,
     SessionKey,
@@ -54,6 +58,8 @@ from vogt.application.models import (
     SessionScreenParams,
     SessionScreenResult,
     SessionSummary,
+    SessionWaitParams,
+    SessionWaitResult,
     StartSessionParams,
     StopSessionParams,
     WhyParams,
@@ -61,6 +67,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import _resolve
 from vogt.application.services._brief import (
+    AUTOPILOT,
     brief_for_project,
     brief_for_work_item,
 )
@@ -126,7 +133,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         template=params.template,
         cwd=subject.cwd,
         env=_session_env(ctx, session_id, credential.secret),
-        brief=_brief_with_task(subject.brief, params.task),
+        brief=_brief_with_task(subject.brief, params.task, autopilot=params.autopilot),
         model=params.model,
         effort=params.effort,
         resume=params.resume,
@@ -217,6 +224,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 # it is what the session was *asked* to resume, the same
                 # standing as `model`.
                 "resume": params.resume,
+                "autopilot": params.autopilot,
             },
         )
 
@@ -535,13 +543,19 @@ def session_screen(ctx: AppContext, params: SessionScreenParams) -> SessionScree
             raise EngineUnavailable(msg)
         msg = f"the engine has no live session {params.id!r}"
         raise NotFound(msg)
+    return _screen_result(params.id, engine_id, screen)
+
+
+def _screen_result(
+    named: str, engine_id: str, screen: EngineScreen
+) -> SessionScreenResult:
     cursor = (
         None
         if screen.cursor_row is None or screen.cursor_col is None
         else SessionScreenCursor(row=screen.cursor_row, col=screen.cursor_col)
     )
     return SessionScreenResult(
-        id=params.id,
+        id=named,
         engine_session_id=engine_id,
         cols=screen.cols,
         rows=screen.rows,
@@ -555,7 +569,138 @@ def session_screen(ctx: AppContext, params: SessionScreenParams) -> SessionScree
         turn_started_at=_parse_engine_timestamp(screen.turn_started_at),
         last_output_at=_parse_engine_timestamp(screen.last_output_at),
         approval=_approval(screen.approval),
+        blocked=_blocked(screen.blocked),
     )
+
+
+def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResult:
+    """Block until the session is ready (or needs a person, or exits), exits,
+    or changes — or the timeout passes — on the engine's own event bus.
+
+    One call replaces a polling loop. The engine does the waiting; this is a
+    read, held open for at most `timeout_s`.
+    """
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    waited = engine.wait_session(
+        engine_id,
+        until=params.until.replace("_", "-"),
+        timeout_s=params.timeout_s,
+    )
+    if waited is None:
+        if engine.get_session(engine_id) is not None:
+            msg = (
+                "the session engine does not support wait yet (it has no "
+                "GET /api/sessions/{id}/wait route); upgrade the engine, or "
+                "poll session.screen"
+            )
+            raise EngineUnavailable(msg)
+        msg = f"the engine has no live session {params.id!r}"
+        raise NotFound(msg)
+    return SessionWaitResult(
+        id=params.id,
+        engine_session_id=engine_id,
+        outcome=waited.outcome,
+        matched=waited.matched,
+        waited_ms=waited.waited_ms,
+        screen=_screen_result(params.id, engine_id, waited.screen),
+    )
+
+
+SESSION_REPORT_BLOCKED = "session.report_blocked"
+SESSION_REPORT_UNBLOCKED = "session.report_unblocked"
+SESSION_BLOCKED_EVENT = "session.blocked"
+SESSION_UNBLOCKED_EVENT = "session.unblocked"
+
+
+def report_blocked(
+    ctx: AppContext, params: ReportBlockedParams
+) -> SessionBlockedResult:
+    """An agent says it cannot go on without a person, and what they must do.
+
+    The report lives on the engine's session (it is live state, gone when the
+    session is), where `session.list`, the screen, `session.wait`, the Inbox
+    and a push all see it. Audited here, after the effect, with the text: the
+    report is meant to be read.
+    """
+    reason = writes.validate_reason(params.reason)
+    items = [item.strip() for item in params.items if item.strip()]
+    return _set_blocked(
+        ctx,
+        params.id,
+        reason=reason,
+        blocker=params.blocker.strip(),
+        items=items,
+    )
+
+
+def report_unblocked(
+    ctx: AppContext, params: ReportUnblockedParams
+) -> SessionBlockedResult:
+    """Clear a session's blocked report: the person acted, or it found a way."""
+    reason = writes.validate_reason(params.reason)
+    return _set_blocked(ctx, params.id, reason=reason, blocker=None, items=[])
+
+
+def _set_blocked(
+    ctx: AppContext,
+    session_id: str | None,
+    *,
+    reason: str,
+    blocker: str | None,
+    items: list[str],
+) -> SessionBlockedResult:
+    engine = _engine(ctx)
+    target = _target(ctx, session_id or _own_session(ctx))
+    engine_id = target.engine_session_id
+    updated = engine.set_blocked(
+        engine_id, blocked=blocker is not None, reason=blocker, items=items
+    )
+    if updated is None:
+        msg = f"the engine has no live session {engine_id!r}"
+        raise NotFound(msg)
+    audited_action(
+        ctx,
+        operation=SESSION_REPORT_BLOCKED
+        if blocker is not None
+        else SESSION_REPORT_UNBLOCKED,
+        reason=reason,
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": target.session is not None,
+            "blocker": blocker,
+            "items": items,
+        },
+        event_kind=SESSION_BLOCKED_EVENT
+        if blocker is not None
+        else SESSION_UNBLOCKED_EVENT,
+    )
+    return SessionBlockedResult(
+        id=target.session.id if target.session is not None else engine_id,
+        engine_session_id=engine_id,
+        blocked=_blocked(updated.blocked),
+    )
+
+
+def _own_session(ctx: AppContext) -> str:
+    """The session a session's own token belongs to, for an omitted `id`.
+
+    A session Vogt started holds a token bound to the actor
+    `agent:session:<ses_…>`, so that actor names it. Any other caller must
+    say which session it means.
+    """
+    ref = ctx.principal.identity_ref
+    prefix = "agent:session:"
+    if ref.startswith(prefix):
+        return ref.removeprefix(prefix)
+    msg = (
+        "give `id`: this caller is not a session Vogt started, so it does not "
+        "name one (inside a session, pass $VOGT_ENGINE_SESSION_ID)"
+    )
+    raise InvalidRequest(msg)
 
 
 def _stop_unlinked(ctx: AppContext, engine_id: str, reason: str) -> SessionResult:
@@ -783,7 +928,7 @@ def _engine(ctx: AppContext) -> EngineClient:
     return ctx.engine
 
 
-def _brief_with_task(brief: str, task: str | None) -> str:
+def _brief_with_task(brief: str, task: str | None, *, autopilot: bool = False) -> str:
     """Fold an explicit task into the session's brief.
 
     The brief is context — the project, or the work item and why it ranks —
@@ -795,6 +940,10 @@ def _brief_with_task(brief: str, task: str | None) -> str:
     the task.
     """
     task = (task or "").strip()
+    if autopilot:
+        # Said in the brief, not enforced: the engine cannot make an agent
+        # keep going, but an agent that was told to will (WI-878).
+        brief = f"{brief.rstrip()}\n\n{AUTOPILOT}"
     if not task:
         return brief
     return f"{brief.rstrip()}\n\n## Task\n\n{task}\n"
@@ -946,7 +1095,18 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "turn_started_at": _parse_engine_timestamp(engine_session.turn_started_at),
         "last_output_at": _parse_engine_timestamp(engine_session.last_output_at),
         "approval": _approval(engine_session.approval),
+        "blocked": _blocked(engine_session.blocked),
     }
+
+
+def _blocked(blocked: EngineBlocked | None) -> SessionBlocked | None:
+    if blocked is None:
+        return None
+    return SessionBlocked(
+        blocker=blocked.reason,
+        items=list(blocked.items),
+        since=_parse_engine_timestamp(blocked.since),
+    )
 
 
 def _summarize_engine_only(engine_session: EngineSession) -> SessionSummary:
@@ -997,9 +1157,12 @@ __all__ = [
     "history_list",
     "list_sessions",
     "log_tail",
+    "report_blocked",
+    "report_unblocked",
     "search_output",
     "session_input",
     "session_screen",
+    "session_wait",
     "start_session",
     "stop_session",
 ]

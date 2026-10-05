@@ -209,6 +209,33 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
     let mut rx = state.bus.subscribe();
     tokio::spawn(async move {
         while let Ok(ev) = rx.recv().await {
+            // An agent reporting itself blocked on a person is the same kind
+            // of interruption as a prompt waiting for input, and rides the
+            // same preference.
+            if let ServerEvent::SessionBlocked {
+                id,
+                blocked: Some(report),
+            } = &ev
+            {
+                let name = state
+                    .sessions
+                    .get(*id)
+                    .map(|s| s.name())
+                    .unwrap_or_else(|_| id.to_string());
+                let title = format!("{name} is blocked on you");
+                let body: String = report.reason.chars().take(200).collect();
+                let data = json!({
+                    "kind": "session-blocked",
+                    "session_id": id.to_string(),
+                    "url": format!("/#/t/{id}"),
+                });
+                let counts = state
+                    .push
+                    .notify(NotificationKind::WaitingForInput, &title, &body, data)
+                    .await;
+                info!(session = %id, ok = counts.ok, fail = counts.fail, queued = counts.queued, "push dispatched");
+                continue;
+            }
             if let ServerEvent::Activity {
                 id,
                 state: act,

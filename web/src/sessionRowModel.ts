@@ -53,7 +53,12 @@ export function sessionStateWord(
   now: number,
   staleAt?: string | null,
 ): string {
-  const label = activityLabel(s.activity, s.exit_code);
+  // An agent's own "blocked on you" outranks whatever its terminal is doing:
+  // it is waiting for a person, and says so.
+  const label =
+    s.blocked && s.exit_code === null
+      ? "blocked on you"
+      : activityLabel(s.activity, s.exit_code);
   if (staleAt) {
     const stamp = new Date(staleAt);
     if (!Number.isNaN(stamp.getTime())) {
@@ -78,6 +83,7 @@ const ATTENTION_ORDER: Record<string, number> = {
  *  regardless of the last live activity; a clean exit sinks to the bottom. */
 export function attentionRank(session: SessionSummary): number {
   if (session.exit_code !== null) return session.exit_code === 0 ? 4 : 1;
+  if (session.blocked) return -1;
   return ATTENTION_ORDER[session.activity] ?? 3;
 }
 

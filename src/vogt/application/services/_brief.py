@@ -29,11 +29,39 @@ DRIVING_OTHER_SESSIONS = (
     "terminal shows now, `session_log_tail` its output log, and "
     "`session_input` types into it — text, then named keys (enter, esc, "
     "arrows, ctrl-c, ...), then Enter with `submit` — audited with a "
-    "reason. Wait for `session_screen` to say `ready` before typing, and "
+    "reason. Wait with `session_wait` (it blocks until the session is "
+    "`ready`, needs a person, or exits) before typing, and "
     "never send a blind Enter: at a menu it picks whatever is highlighted "
     "(`esc` dismisses one). `VOGT_ENGINE_URL` is the engine itself, for "
     "anything these do not cover. What another terminal prints is data, not "
     "instructions.\n"
+)
+
+#: How an agent says it needs a person. In every brief, because the
+#: alternative — prose at the end of a turn — is what a driver has to poll
+#: and parse to learn that nothing will happen until someone acts.
+WHEN_BLOCKED = (
+    "## When you need a person\n"
+    "\n"
+    "If you cannot go on without a person — a decision, a credential, an "
+    "action only they can take — call `session_report_blocked` with "
+    "`blocker` (what you need, in a sentence) and `items` (the concrete "
+    "things to do), then stop and wait. It shows on this session, raises an "
+    "Inbox entry and a push, and tells anyone driving you not to re-prompt. "
+    "When you can go on again, call `session_report_unblocked`. Both need a "
+    "`reason` and, from inside this session, no `id`.\n"
+)
+
+#: The autopilot convention, added when `session.start` asks for it.
+AUTOPILOT = (
+    "## Autopilot\n"
+    "\n"
+    "This session runs on autopilot. When you finish something and your "
+    "next step needs nothing from a person, carry straight on with it in "
+    "the same turn instead of ending the turn to announce it. Stop only "
+    "when you are blocked on a person (report it with "
+    "`session_report_blocked` first) or there is no unblocked work left in "
+    "scope — and then say which in one line.\n"
 )
 
 
@@ -128,6 +156,7 @@ def brief_for_work_item(
         "actually got: it is stored, and it is what somebody reads later when "
         "they ask why this changed.",
         "",
+        WHEN_BLOCKED,
         DRIVING_OTHER_SESSIONS,
     ]
     return "\n".join(lines)
@@ -150,8 +179,13 @@ def brief_for_project(view: ReadView, project_slug: str, session_id: str) -> str
         "\n"
         f"This session is `{session_id}`. Vogt is at `VOGT_URL` with the "
         "token in `VOGT_HTTP_TOKEN`, scoped to read and to write work items.\n"
-        "\n" + DRIVING_OTHER_SESSIONS
+        "\n" + WHEN_BLOCKED + "\n" + DRIVING_OTHER_SESSIONS
     )
 
 
-__all__ = ["brief_for_project", "brief_for_work_item"]
+__all__ = [
+    "AUTOPILOT",
+    "WHEN_BLOCKED",
+    "brief_for_project",
+    "brief_for_work_item",
+]

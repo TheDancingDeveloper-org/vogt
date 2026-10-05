@@ -137,6 +137,62 @@ pub struct SessionSummary {
     /// `awaiting-approval`; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalPrompt>,
+    /// What the session's agent said it is blocked on — a person must act
+    /// before it can go on — from `POST /api/sessions/{id}/blocked`; absent
+    /// when it is not blocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<BlockedReport>,
+}
+
+/// An agent's own report that it cannot go on without a person.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedReport {
+    /// Why, in the agent's words. Untrusted text.
+    pub reason: String,
+    /// What the person has to do, one entry per item.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<String>,
+    /// When it was reported (RFC 3339).
+    pub since: String,
+}
+
+/// `POST /api/sessions/{id}/blocked`: set (`blocked: true`, with a reason) or
+/// clear (`blocked: false`) a session's blocked report.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SetBlocked {
+    pub blocked: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub items: Vec<String>,
+}
+
+/// What `GET /api/sessions/{id}/wait` waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaitUntil {
+    /// The program is at its prompt (`SessionScreen::ready`) — or needs a
+    /// person (a permission dialog, a blocked report) or has exited, which
+    /// end the wait too because no amount of waiting makes it ready.
+    Ready,
+    /// The child has exited.
+    Exited,
+    /// Any change of activity, blocked state or liveness.
+    AnyChange,
+}
+
+/// The answer to `GET /api/sessions/{id}/wait`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWait {
+    /// Why the wait ended: `ready`, `awaiting-approval`, `blocked`,
+    /// `exited`, `changed` or `timeout`.
+    pub outcome: String,
+    /// True when the outcome is what was asked for (`ready` for `ready`,
+    /// `exited` for `exited`, any change for `any-change`).
+    pub matched: bool,
+    pub waited_ms: u64,
+    /// The session's screen at the moment the wait ended.
+    pub screen: SessionScreen,
 }
 
 /// A permission dialog an agent CLI is showing, read off the rendered screen
@@ -195,6 +251,8 @@ pub struct SessionScreen {
     pub last_output_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<BlockedReport>,
 }
 
 /// Zero-based cursor position on a [`SessionScreen`].
@@ -333,6 +391,13 @@ pub enum ServerEvent {
         /// When the current turn began (see `SessionSummary`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_started_at: Option<String>,
+    },
+    /// A session's agent reported itself blocked on a person (`blocked`
+    /// set), or cleared that report (`blocked` absent).
+    SessionBlocked {
+        id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocked: Option<BlockedReport>,
     },
     /// Something changed in vogt-core.
     ///

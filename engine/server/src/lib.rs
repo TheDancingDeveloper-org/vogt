@@ -36,6 +36,7 @@ pub mod sessions;
 pub mod transcripts;
 pub mod vogt_core;
 pub mod vogt_tools;
+pub mod wait;
 pub mod workflow_engine;
 pub mod workspace_path;
 pub mod ws;

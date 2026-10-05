@@ -610,6 +610,17 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   the current terminal screen, rendered, plus up to N (≤ 2000) lines that
   scrolled off its top (see [Reading the screen](#reading-the-screen)). Gated
   like `GET /api/sessions/:id`: the `sessions` capability
+- `GET /api/sessions/:id/wait[?until=ready|exited|any-change&timeout_s=N]`
+  -> `SessionWait` — blocks on the event bus until the session is ready (or
+  needs a person, or exits), exits, or changes, or `timeout_s` (default 120,
+  at most 600) passes; answers with the `outcome` (`ready`,
+  `awaiting-approval`, `blocked`, `exited`, `changed`, `timeout`), whether
+  it `matched`, `waited_ms` and the `screen` then. Requires `sessions`.
+- `POST /api/sessions/:id/blocked` `SetBlocked` -> `SessionSummary` — set
+  (`{"blocked": true, "reason", "items"}`) or clear (`{"blocked": false}`)
+  the agent's "blocked on a person" report, which rides on the summary and
+  screen as `blocked`, publishes a `session-blocked` event and (when set)
+  sends a push. Cleared when the session exits. Requires `sessions`.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability)
 - `POST /api/sessions/:id/kill` -> `OkResponse` (SIGKILL to the child; the
@@ -967,11 +978,15 @@ ready → read → answer → stop.** Over MCP (the core's tools, preferred):
    prompt above, so it begins the task without being typed to. The result
    carries both ids. To continue an earlier conversation instead, pass
    `resume` (see `SessionSpec.resume` above).
-2. **Wait until ready.** Poll `session_screen` until `ready` is true (every
-   second or two is plenty), or stop waiting when `alive` turns false. Over
-   HTTP, watch `GET /api/events` for the session's `activity` event and read
-   `/screen` on `waiting-for-input` or `idle`, as described in
-   [Reading the screen](#reading-the-screen).
+2. **Wait until ready.** `session_wait` (`until: "ready"`, `timeout_s` up
+   to 600) blocks on the engine until `ready` — or until the session needs a
+   person (`outcome` `awaiting-approval` or `blocked`) or exits — and returns
+   the screen; one call replaces a polling loop. Over HTTP, the same is
+   `GET /api/sessions/:id/wait`; or watch `GET /api/events` for the
+   session's `activity` event and read `/screen` on `waiting-for-input` or
+   `idle`, as described in [Reading the screen](#reading-the-screen). A
+   session whose agent reported itself `blocked` is waiting for a person:
+   do what it asks (or answer it), do not re-prompt it.
 3. **Read.** `session_screen.lines` is what the terminal shows now;
    `session_log_tail` is the history of what it printed, for anything that
    has scrolled away.
@@ -2190,6 +2205,9 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.log_tail` | Voice-readable | Available: Read the tail of a session's output log, readable. |
 | `session.input` | Operator-only | Unavailable: The assistant types into terminals with its own engine tool (`send_input`, approval-gated); not offered twice. |
 | `session.screen` | Operator-only | Unavailable: The assistant reads terminals with its own engine tool (`read_session_tail`); for agents over MCP/CLI/REST. |
+| `session.wait` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
+| `session.report_blocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
+| `session.report_unblocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |

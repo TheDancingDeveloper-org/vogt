@@ -527,7 +527,9 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
         if *method == Method::PATCH || *method == Method::DELETE {
             return Some(TokenCapability::Sessions);
         }
-        if *method == Method::POST && (path.ends_with("/kill") || path.ends_with("/input")) {
+        if *method == Method::POST
+            && (path.ends_with("/kill") || path.ends_with("/input") || path.ends_with("/blocked"))
+        {
             return Some(TokenCapability::Sessions);
         }
         // Reading a session's detail ships its full scrollback (routinely

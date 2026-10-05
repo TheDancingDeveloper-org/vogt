@@ -8090,6 +8090,135 @@ async fn a_permission_dialog_reads_awaiting_approval_with_its_command() {
         .unwrap();
 }
 
+/// WI-874: `/wait` answers as soon as the session is ready, on exit, and on
+/// timeout; `any-change` returns on the next state change.
+#[tokio::test]
+async fn wait_returns_on_ready_exit_change_and_timeout() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let get = |url: String| {
+        let client = client.clone();
+        async move {
+            let resp = client.get(url).send().await.unwrap();
+            let status = resp.status();
+            (status, resp.json::<Value>().await.unwrap_or(Value::Null))
+        }
+    };
+
+    // A prompt appears after a moment: the wait blocks, then answers ready.
+    let prompt = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "wait-ready",
+            "command": ["/bin/sh", "-c", "sleep 0.5; printf 'Continue? [y/N]'; sleep 30"],
+        }),
+    )
+    .await;
+    let (status, ready) = get(format!(
+        "{base}/api/sessions/{prompt}/wait?until=ready&timeout_s=20"
+    ))
+    .await;
+    assert_eq!(status, StatusCode::OK, "{ready:?}");
+    assert_eq!(ready["outcome"], "ready", "{ready:?}");
+    assert_eq!(ready["matched"], true);
+    assert_eq!(ready["screen"]["ready"], true);
+    assert!(ready["screen"]["lines"][0]
+        .as_str()
+        .unwrap()
+        .contains("Continue?"));
+
+    // Already ready: answers at once.
+    let (_, again) = get(format!("{base}/api/sessions/{prompt}/wait?timeout_s=20")).await;
+    assert_eq!(again["outcome"], "ready");
+    assert!(again["waited_ms"].as_u64().unwrap() < 5000, "{again:?}");
+
+    // Nothing happens: a short timeout says so.
+    let (_, timed_out) = get(format!(
+        "{base}/api/sessions/{prompt}/wait?until=exited&timeout_s=1"
+    ))
+    .await;
+    assert_eq!(timed_out["outcome"], "timeout");
+    assert_eq!(timed_out["matched"], false);
+
+    // A child that exits ends a wait for it.
+    let short = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "wait-exit", "command": ["/bin/sh", "-c", "sleep 0.5; exit 3"] }),
+    )
+    .await;
+    let (_, exited) = get(format!(
+        "{base}/api/sessions/{short}/wait?until=exited&timeout_s=20"
+    ))
+    .await;
+    assert_eq!(exited["outcome"], "exited", "{exited:?}");
+    assert_eq!(exited["matched"], true);
+    assert_eq!(exited["screen"]["alive"], false);
+
+    // A blocked report ends a wait for ready (a person must act first), and
+    // is on the summary and the screen; clearing it is a change.
+    let blocked = client
+        .post(format!("{base}/api/sessions/{prompt}/blocked"))
+        .json(&json!({ "blocked": true, "reason": "needs the bot token", "items": ["create the bot", " "] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::OK);
+    let summary: Value = blocked.json().await.unwrap();
+    assert_eq!(summary["blocked"]["reason"], "needs the bot token");
+    assert_eq!(summary["blocked"]["items"], json!(["create the bot"]));
+    let (_, on_blocked) = get(format!(
+        "{base}/api/sessions/{prompt}/wait?until=ready&timeout_s=5"
+    ))
+    .await;
+    assert_eq!(on_blocked["outcome"], "blocked");
+    assert_eq!(on_blocked["matched"], false);
+    assert_eq!(
+        on_blocked["screen"]["blocked"]["reason"],
+        "needs the bot token"
+    );
+    let change = tokio::spawn(get(format!(
+        "{base}/api/sessions/{prompt}/wait?until=any-change&timeout_s=20"
+    )));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let cleared = client
+        .post(format!("{base}/api/sessions/{prompt}/blocked"))
+        .json(&json!({ "blocked": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(cleared.status(), StatusCode::OK);
+    let cleared: Value = cleared.json().await.unwrap();
+    assert!(cleared.get("blocked").is_none(), "{cleared:?}");
+    let (_, changed) = change.await.unwrap();
+    assert_eq!(changed["outcome"], "changed", "{changed:?}");
+
+    // Bad input is refused.
+    let (bad_until, _) = get(format!("{base}/api/sessions/{prompt}/wait?until=soon")).await;
+    assert_eq!(bad_until, StatusCode::BAD_REQUEST);
+    let (too_long, _) = get(format!("{base}/api/sessions/{prompt}/wait?timeout_s=601")).await;
+    assert_eq!(too_long, StatusCode::BAD_REQUEST);
+    let no_reason = client
+        .post(format!("{base}/api/sessions/{prompt}/blocked"))
+        .json(&json!({ "blocked": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(no_reason.status(), StatusCode::BAD_REQUEST);
+
+    for id in [prompt, short] {
+        client
+            .delete(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
 /// WI-830: rows a previous engine process left unfinished (killed by a
 /// restart it never drained) are closed out when the next one boots.
 #[tokio::test]
