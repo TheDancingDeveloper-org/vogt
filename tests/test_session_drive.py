@@ -68,6 +68,8 @@ class Engine:
         self.wait_supported = True
         #: The blocked report the engine holds (one for the whole stand-in).
         self.blocked: dict[str, Any] | None = None
+        #: Bodies sent to POST /answer.
+        self.answers: list[dict[str, Any]] = []
 
     def __call__(
         self,
@@ -108,6 +110,24 @@ class Engine:
             verb = parts[4] if len(parts) > 4 else ""
             if engine_id not in self.live:
                 return 404, b""
+            if method == "POST" and verb == "answer":
+                self.answers.append(payload)
+                if payload.get("expect_question") == "stale?":
+                    return 409, json.dumps(
+                        {"error": "the dialog on screen now asks 'x'"}
+                    ).encode()
+                return 200, json.dumps(
+                    {
+                        "question": "Is this a project you trust?",
+                        "kind": "folder-trust",
+                        "chosen": {
+                            "number": payload.get("option") or 1,
+                            "label": "Yes, I trust this folder",
+                            "selected": True,
+                        },
+                        "dismissed": True,
+                    }
+                ).encode()
             if method == "POST" and verb == "input":
                 return 200, b'{"ok":true}'
             if method == "POST" and verb == "blocked":
@@ -618,3 +638,87 @@ def test_a_session_is_told_where_the_engine_is(
     env = dict(create["body"]["env"])
     assert env["VOGT_ENGINE_URL"] == "http://127.0.0.1:8910"
     assert DRIVING_OTHER_SESSIONS in create["body"]["prompt"]
+
+
+# -- session.answer (WI-917) ------------------------------------------------
+
+
+def test_answer_chooses_by_option_and_is_audited(
+    wired: AppContext, engine: Engine
+) -> None:
+    from vogt.application.models import AnswerSessionParams, ListAuditParams
+    from vogt.application.services import answer_session, list_audit
+
+    ses_id, engine_id = _started(wired)
+    result = answer_session(
+        wired,
+        AnswerSessionParams(
+            id=ses_id,
+            option=1,
+            expect_question="Is this a project you trust?",
+            reason=WHY,
+        ),
+    )
+    assert engine.answers == [
+        {"option": 1, "expect_question": "Is this a project you trust?"}
+    ]
+    assert result.kind == "folder-trust"
+    assert result.chosen.number == 1
+    assert result.dismissed is True
+    assert result.engine_session_id == engine_id
+    row = list_audit(wired, ListAuditParams(limit=1)).records[0]
+    assert row.operation == "session.answer"
+
+
+def test_answer_needs_exactly_one_of_option_and_label(wired: AppContext) -> None:
+    from vogt.application.models import AnswerSessionParams
+    from vogt.application.services import answer_session
+
+    ses_id, _ = _started(wired)
+    for params in (
+        AnswerSessionParams(id=ses_id, reason=WHY),
+        AnswerSessionParams(id=ses_id, option=1, label="yes", reason=WHY),
+    ):
+        with pytest.raises(InvalidRequest, match="exactly one"):
+            answer_session(wired, params)
+
+
+def test_a_stale_answer_is_refused_with_the_engines_reason(
+    wired: AppContext, engine: Engine
+) -> None:
+    from vogt.application.models import AnswerSessionParams
+    from vogt.application.services import answer_session
+    from vogt.errors import Conflict
+
+    ses_id, _ = _started(wired)
+    with pytest.raises(Conflict, match="now asks"):
+        answer_session(
+            wired,
+            AnswerSessionParams(
+                id=ses_id, label="yes", expect_question="stale?", reason=WHY
+            ),
+        )
+
+
+def test_the_approval_carries_its_kind_and_menu(
+    wired: AppContext, engine: Engine
+) -> None:
+    ses_id, _ = _started(wired)
+    engine.extra = {
+        "activity": "awaiting-approval",
+        "approval": {
+            "question": "Allow external CLAUDE.md file imports?",
+            "command_excerpt": "",
+            "detected_at": "2026-10-05T00:00:00Z",
+            "kind": "external-imports",
+            "options": [
+                {"number": 1, "label": "Yes, allow external imports", "selected": True},
+                {"number": 2, "label": "No, disable external imports"},
+            ],
+        },
+    }
+    screen = session_screen(wired, SessionScreenParams(id=ses_id))
+    assert screen.approval is not None
+    assert screen.approval.kind == "external-imports"
+    assert [o.number for o in screen.approval.options] == [1, 2]
+    assert screen.approval.options[0].selected is True

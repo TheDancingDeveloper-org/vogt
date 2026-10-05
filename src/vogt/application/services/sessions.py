@@ -43,6 +43,7 @@ from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
     SESSION_INPUT_MAX_BYTES,
+    AnswerSessionParams,
     HibernateSessionParams,
     HistoryListParams,
     HistoryListResult,
@@ -56,7 +57,9 @@ from vogt.application.models import (
     ReportUnblockedParams,
     SearchOutputParams,
     SearchOutputResult,
+    SessionAnswerResult,
     SessionApproval,
+    SessionApprovalOption,
     SessionBlocked,
     SessionBlockedResult,
     SessionHibernation,
@@ -409,6 +412,7 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
             if summary.approval is None
             else summary.approval.question,
             blocker=None if summary.blocked is None else summary.blocked.blocker,
+            approval_kind=None if summary.approval is None else summary.approval.kind,
             last_output_at=summary.last_output_at,
             now=now,
             stall_after=stall_after,
@@ -1115,6 +1119,75 @@ def keep_session_awake(
         )
 
 
+SESSION_ANSWER = "session.answer"
+SESSION_ANSWERED_EVENT = "session.answered"
+
+
+def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswerResult:
+    """Answer the dialog a session shows — a permission request or a
+    startup gate (folder trust, external CLAUDE.md imports, reading outside
+    the working directory) — by option, not by keystrokes.
+
+    The engine reads the menu as it is at that moment and moves the highlight
+    itself, so nothing here counts rows. Audited after the effect with the
+    question, the kind and the option chosen.
+    """
+    reason = writes.validate_reason(params.reason)
+    if (params.option is None) == (params.label is None or not params.label.strip()):
+        msg = "give exactly one of option (a number) or label"
+        raise InvalidRequest(msg)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    answered = engine.answer_session(
+        engine_id,
+        option=params.option,
+        label=None if params.label is None else params.label.strip(),
+        expect_question=params.expect_question,
+    )
+    if answered is None:
+        msg = (
+            f"the engine has no session {params.id!r}, or predates answering "
+            "(no POST /api/sessions/{id}/answer)"
+        )
+        raise NotFound(msg)
+    chosen = answered.get("chosen")
+    chosen = chosen if isinstance(chosen, dict) else {}
+    option = SessionApprovalOption(
+        number=int(chosen.get("number", 0)),
+        label=str(chosen.get("label", "")),
+        selected=True,
+    )
+    question = str(answered.get("question", ""))
+    kind = str(answered.get("kind", "permission"))
+    dismissed = answered.get("dismissed") is True
+    audited_action(
+        ctx,
+        operation=SESSION_ANSWER,
+        reason=reason,
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": target.session is not None,
+            "question": question[:300],
+            "kind": kind,
+            "option": option.number,
+            "label": option.label[:200],
+            "dismissed": dismissed,
+        },
+        event_kind=SESSION_ANSWERED_EVENT,
+    )
+    return SessionAnswerResult(
+        id=params.id,
+        engine_session_id=engine_id,
+        question=question,
+        kind=kind,
+        chosen=option,
+        dismissed=dismissed,
+    )
+
+
 SESSION_REPORT_BLOCKED = "session.report_blocked"
 SESSION_REPORT_UNBLOCKED = "session.report_unblocked"
 SESSION_BLOCKED_EVENT = "session.blocked"
@@ -1588,6 +1661,11 @@ def _approval(approval: EngineApproval | None) -> SessionApproval | None:
     return SessionApproval(
         question=approval.question,
         command_excerpt=approval.command_excerpt,
+        kind=approval.kind,
+        options=[
+            SessionApprovalOption(number=number, label=label, selected=selected)
+            for number, label, selected in approval.options
+        ],
         deadline_seconds=approval.deadline_seconds,
         deadline_at=_parse_engine_timestamp(approval.deadline_at),
         detected_at=_parse_engine_timestamp(approval.detected_at),
@@ -1688,6 +1766,7 @@ def _parse_engine_timestamp(value: str | None) -> datetime | None:
 
 
 __all__ = [
+    "answer_session",
     "hibernate_session",
     "history_list",
     "keep_session_awake",

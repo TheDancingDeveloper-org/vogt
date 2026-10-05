@@ -69,6 +69,9 @@ class EngineApproval:
     detected_at: str
     deadline_seconds: int | None = None
     deadline_at: str | None = None
+    kind: str = "permission"
+    #: `(number, label, selected)` per option, in menu order.
+    options: tuple[tuple[int, str, bool], ...] = ()
 
     @classmethod
     def from_payload(cls, payload: object) -> EngineApproval | None:
@@ -80,6 +83,16 @@ class EngineApproval:
             detected_at=str(payload.get("detected_at", "")),
             deadline_seconds=_optional_int(payload.get("deadline_seconds")),
             deadline_at=_optional_str(payload.get("deadline_at")),
+            kind=str(payload.get("kind") or "permission"),
+            options=tuple(
+                (
+                    int(o.get("number", 0)),
+                    str(o.get("label", "")),
+                    o.get("selected") is True,
+                )
+                for o in payload.get("options") or []
+                if isinstance(o, dict)
+            ),
         )
 
 
@@ -875,6 +888,32 @@ class EngineClient:
         if not isinstance(payload, dict):
             return None
         return EngineSession.from_payload(payload)
+
+    def answer_session(
+        self,
+        session_id: str,
+        *,
+        option: int | None,
+        label: str | None,
+        expect_question: str | None,
+    ) -> dict[str, Any] | None:
+        """Choose an option of the dialog on screen; the engine's
+        `AnswerResult`, or `None` on a 404. A dialog that is gone, changed,
+        or lacks the option is a `Conflict` naming why."""
+        body: dict[str, Any] = {}
+        if option is not None:
+            body["option"] = option
+        if label is not None:
+            body["label"] = label
+        if expect_question is not None:
+            body["expect_question"] = expect_question
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/answer",
+            method="POST",
+            payload=body,
+            allow_missing=True,
+        )
+        return payload if isinstance(payload, dict) else None
 
     # -- hibernation ---------------------------------------------------------
 

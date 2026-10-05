@@ -100,6 +100,7 @@ from vogt.application.services.projects import (
 )
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
+    answer_session,
     hibernate_session,
     history_list,
     keep_session_awake,
@@ -149,6 +150,7 @@ __all__ = [
     "adopt",
     "agent_cli_list",
     "agent_cli_update",
+    "answer_session",
     "archive_inbox",
     "backlog",
     "backup",

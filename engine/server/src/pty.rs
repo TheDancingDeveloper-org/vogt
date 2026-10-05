@@ -245,6 +245,20 @@ impl Session {
             .map(|p| p.to_wire(time::OffsetDateTime::now_utc()))
     }
 
+    /// The dialog on the screen right now, read fresh from a render rather
+    /// than from the last activity pass, so an answer is aimed at what is
+    /// actually showing.
+    pub fn current_dialog(&self) -> Option<crate::approval::Detected> {
+        let (bytes, rows, cols) = self.screen_source(crate::screen::SCREEN_REPLAY_BYTES);
+        let (rendered, scrollback) = crate::screen::render_with_scrollback(
+            &bytes,
+            rows,
+            cols,
+            crate::approval::SCROLLBACK_CONTEXT_LINES,
+        );
+        crate::approval::detect(&rendered.lines, &scrollback)
+    }
+
     /// When the current turn began.
     pub fn turn_started_at(&self) -> Option<time::OffsetDateTime> {
         *self.turn_started_at.lock()
@@ -1117,8 +1131,13 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
             let now = time::OffsetDateTime::now_utc();
             match pending.as_mut() {
                 // The same dialog seen again (its countdown ticking): keep the
-                // first sighting, so the deadline does not slide.
-                Some(p) if p.is_same(&found) => {}
+                // first sighting, so the deadline does not slide — but take the
+                // menu as it is now. A dialog first seen mid-draw has only part
+                // of its menu, and the highlight moves under arrow keys.
+                Some(p) if p.is_same(&found) => {
+                    p.detected.options = found.options;
+                    p.detected.kind = found.kind;
+                }
                 _ => *pending = Some(crate::approval::Pending::new(found, now)),
             }
             ActivityState::AwaitingApproval

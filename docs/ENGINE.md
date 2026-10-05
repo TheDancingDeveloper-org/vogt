@@ -638,6 +638,15 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   `sessions` capability)
 - `GET /api/sessions/:id/attach` — the WebSocket stream (see
   [Attach protocol](#attach-protocol)); a driver does not need it.
+- `POST /api/sessions/:id/answer` `{"option": N | "label": "...",
+  "expect_question"?}` -> `AnswerResult` — choose an option of the dialog on
+  screen: a permission dialog, or a startup gate (`approval.kind`
+  `folder-trust`, `external-imports`, `read-outside-cwd`). The engine
+  re-reads the menu at that moment, moves the highlight from where it is
+  with arrow keys (one write each), presses Enter, and looks again for up to
+  2 s to report `dismissed`. `409` when no dialog is showing, when it no
+  longer asks `expect_question`, when the option is not on the menu, or when
+  a label matches several options. Requires `sessions` (WI-917).
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
@@ -2360,6 +2369,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.wait` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
 | `session.report_blocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `session.report_unblocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
+| `session.answer` | Operator-only | Unavailable: The assistant answers permission dialogs through its own approval flow; for drivers over MCP/CLI/REST. |
 | `session.sweep` | Operator-only | Unavailable: An oversight table of every session's screen; for drivers over MCP/CLI/REST and the GUI board. |
 | `session.hibernate` | Operator-only | Unavailable: Stops a session's processes; for the GUI and for agents over MCP/CLI/REST. |
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
