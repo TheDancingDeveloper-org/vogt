@@ -84,6 +84,27 @@ pub struct LaunchRequest<'a> {
     /// it as the conversation id, so the conversation can later be resumed by
     /// the id every session and history listing already shows.
     pub session_id: Option<Uuid>,
+    /// `default` / `accept-edits` / `bypass` (WI-926).
+    pub permission_mode: Option<&'a str>,
+    /// The deployment's driven-session settings (an `autoMode` policy) to
+    /// hand Claude Code with `--settings`, when it has one.
+    pub settings_file: Option<&'a Path>,
+}
+
+/// A permission posture a session may be started with, as Claude Code's
+/// flags. `None` is the default posture: no flag at all.
+pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
+    match mode.map(str::trim).filter(|m| !m.is_empty()) {
+        None | Some("default") => Ok(None),
+        Some("accept-edits") | Some("accept_edits") => Ok(Some(vec![
+            "--permission-mode".to_string(),
+            "acceptEdits".to_string(),
+        ])),
+        Some("bypass") => Ok(Some(vec!["--dangerously-skip-permissions".to_string()])),
+        Some(other) => Err(ApiError::BadRequest(format!(
+            "permission_mode {other:?} is not one of default, accept-edits, bypass"
+        ))),
+    }
 }
 
 /// The command and the extra environment a session should start with.
@@ -149,7 +170,8 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
     if let Some(value) = resume {
         validate_conversation_id(value)?;
     }
-    let asked = model.is_some() || effort.is_some() || resume.is_some();
+    let permission = permission_flags(req.permission_mode)?;
+    let asked = model.is_some() || effort.is_some() || resume.is_some() || permission.is_some();
 
     let Some(command) = command.filter(|c| !c.is_empty()) else {
         if asked {
@@ -174,6 +196,14 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             )));
         }
         return Ok(Launch::default());
+    }
+    if permission.is_some() && binary != "claude" {
+        // Named rather than dropped: a posture that silently did not apply
+        // is the failure this refusal exists against.
+        return Err(ApiError::BadRequest(format!(
+            "permission_mode is a Claude Code posture; `{binary}` has its own \
+             approval settings in its launcher and is not told one per session"
+        )));
     }
     if binary == "opencode" && effort.is_some() {
         // Named rather than dropped: OpenCode takes a model and has no effort
@@ -206,6 +236,15 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 rewritten.extend(["--resume".to_string(), id.to_string()]);
             } else if let (true, Some(id)) = (bare, req.session_id) {
                 rewritten.extend(["--session-id".to_string(), id.to_string()]);
+            }
+            if let Some(flags) = permission {
+                rewritten.extend(flags);
+            }
+            if let Some(file) = req.settings_file {
+                // The driven-session policy (WI-926): auto-mode rules added to
+                // Claude Code's own through `$defaults`. `=` form, like
+                // `--add-dir`, so it can never take a following positional.
+                rewritten.push(format!("--settings={}", file.display()));
             }
             if let Some(dir) = req.brief_file.and_then(Path::parent) {
                 // The brief lives under the engine's state directory, outside
@@ -805,5 +844,76 @@ mod conversation_tests {
         assert!(conversation(Some(&argv(&["bash"])), Some("x"), id).is_none());
         assert!(conversation(None, None, id).is_none());
         assert!(conversation(Some(&argv(&["claude"])), Some("-bad"), id).is_none());
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    fn cmd(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn postures_map_to_claudes_flags_and_default_adds_none() {
+        assert_eq!(permission_flags(None).unwrap(), None);
+        assert_eq!(permission_flags(Some("default")).unwrap(), None);
+        assert_eq!(
+            permission_flags(Some("accept_edits")).unwrap(),
+            Some(cmd(&["--permission-mode", "acceptEdits"]))
+        );
+        assert_eq!(
+            permission_flags(Some("bypass")).unwrap(),
+            Some(cmd(&["--dangerously-skip-permissions"]))
+        );
+        assert!(permission_flags(Some("yolo")).is_err());
+    }
+
+    #[test]
+    fn the_policy_rides_every_claude_launch_and_a_posture_only_claude() {
+        let policy = Path::new("/usr/local/share/vogt/driven-session-settings.json");
+        let out = launch(
+            Some(&cmd(&["vogt-agent-auth", "run", "--", "claude"])),
+            &LaunchRequest {
+                permission_mode: Some("bypass"),
+                settings_file: Some(policy),
+                ..LaunchRequest::default()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(
+            out.contains(&"--dangerously-skip-permissions".to_string()),
+            "{out:?}"
+        );
+        assert!(
+            out.contains(&format!("--settings={}", policy.display())),
+            "{out:?}"
+        );
+        // Codex and a plain shell are refused a posture, never started plain.
+        for command in [cmd(&["codex"]), cmd(&["bash"])] {
+            let refused = launch(
+                Some(&command),
+                &LaunchRequest {
+                    permission_mode: Some("bypass"),
+                    ..LaunchRequest::default()
+                },
+            );
+            assert!(refused.is_err(), "{command:?}");
+        }
+        // A policy file alone is not an ask: Codex starts without it.
+        assert_eq!(
+            launch(
+                Some(&cmd(&["codex"])),
+                &LaunchRequest {
+                    settings_file: Some(policy),
+                    ..LaunchRequest::default()
+                }
+            )
+            .unwrap(),
+            Launch::default()
+        );
     }
 }

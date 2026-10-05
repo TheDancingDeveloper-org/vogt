@@ -8938,6 +8938,7 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
     cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
         enabled: true,
         default_dir: Some(claude_home.clone()),
+        settings_file: None,
     };
     let state_dir = cfg.state_dir.clone();
     let workspace = cfg.workspace_root.clone();
@@ -9325,4 +9326,69 @@ while True:
         StatusCode::CONFLICT,
         "no dialog left to answer"
     );
+}
+
+/// WI-926: a session started with a posture gets it, keeps it across a wake,
+/// shows it on its summary, and every Claude launch carries the policy file.
+#[tokio::test]
+async fn a_permission_posture_reaches_the_agent_and_survives_a_wake() {
+    let (tmp, mut cfg, stub) = hibernation_sandbox();
+    let policy = tmp.path().join("policy.json");
+    std::fs::write(&policy, br#"{"autoMode":{"allow":["$defaults"]}}"#).unwrap();
+    cfg.agent_onboarding.settings_file = Some(policy.clone());
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "trusted task",
+            "command": [stub.to_string_lossy()],
+            "permission_mode": "bypass",
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["permission_mode"], "bypass");
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    assert!(
+        printed.contains("arg=[--dangerously-skip-permissions]"),
+        "{printed:?}"
+    );
+    assert!(
+        printed.contains(&format!("arg=[--settings={}]", policy.display())),
+        "{printed:?}"
+    );
+
+    client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .send()
+        .await
+        .unwrap();
+    let printed =
+        live_output_containing(&client, &base, &id, &["arg=[--resume]", "helper=["]).await;
+    let woken = &printed[printed.rfind("arg=[--resume]").unwrap()..];
+    assert!(
+        woken.contains("--dangerously-skip-permissions"),
+        "kept on wake: {woken:?}"
+    );
+
+    let refused = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "shell", "permission_mode": "bypass" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
 }

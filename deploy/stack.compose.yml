@@ -133,6 +133,10 @@ services:
       # Flag a session whose process tree holds this much resident memory
       # (`8GiB`). Every session's RSS/CPU is shown regardless.
       ENGINE_SESSION_RSS_WARN: "${ENGINE_SESSION_RSS_WARN:-}"
+      # The driven-session permission policy (a Claude Code settings file
+      # with `autoMode` additions). Unset: the image's, which lists no
+      # autonomous-merge repositories. docs/ENGINE.md, "Permission posture".
+      ENGINE_AGENT_CLAUDE_SETTINGS: "${ENGINE_AGENT_CLAUDE_SETTINGS:-}"
 
       # One value both starts the core and tells the engine where to proxy.
       # Loopback means "the core is ours to run", so the entrypoint supervises

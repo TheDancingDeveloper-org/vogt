@@ -88,6 +88,8 @@ pub struct Session {
     resources: Mutex<Option<vogt_engine_contract::SessionResources>>,
     /// The template it was started from, when one was named.
     template: Mutex<Option<String>>,
+    /// The permission posture, when not the default (WI-926).
+    permission_mode: Mutex<Option<String>>,
 }
 
 impl Session {
@@ -206,7 +208,12 @@ impl Session {
             keep_awake: self.keep_awake(),
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
+            permission_mode: self.permission_mode.lock().clone(),
         }
+    }
+
+    pub fn set_permission_mode(&self, mode: Option<String>) {
+        *self.permission_mode.lock() = mode;
     }
 
     pub fn set_template(&self, template: Option<String>) {
@@ -776,6 +783,7 @@ pub fn spawn(
         last_input: Mutex::new(None),
         resources: Mutex::new(None),
         template: Mutex::new(None),
+        permission_mode: Mutex::new(None),
     });
 
     spawn_reader_thread(

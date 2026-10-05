@@ -1472,6 +1472,7 @@ impl AgentTaskRegistry {
             model: None,
             effort: None,
             resume: None,
+            permission_mode: None,
             cols: Some(100),
             rows: Some(30),
             scrollback_bytes: None,
