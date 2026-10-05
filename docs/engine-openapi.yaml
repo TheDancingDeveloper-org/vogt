@@ -321,6 +321,47 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SessionScreen" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/replies:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: An opencode session's last assistant replies, from opencode's own store.
+      description: >-
+        Claude Code and Codex write transcripts the core reads itself; opencode
+        keeps one SQLite database that also holds its credentials, so the
+        engine opens it read-only and returns this session's assistant text
+        and nothing else (WI-931). Empty `replies` for a session that is not
+        opencode or whose conversation id is not known yet. Unredacted: the
+        core redacts before showing it.
+      operationId: getSessionReplies
+      x-capability: sessions
+      parameters:
+        - name: n
+          in: query
+          required: false
+          description: How many of the latest replies, oldest first.
+          schema: { type: integer, minimum: 1, maximum: 20, default: 1 }
+      responses:
+        "200":
+          description: The replies.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agent, conversation_id, replies]
+                properties:
+                  agent: { type: string, nullable: true, enum: [opencode, null] }
+                  conversation_id: { type: string, nullable: true }
+                  replies:
+                    type: array
+                    items:
+                      type: object
+                      required: [text]
+                      properties:
+                        text: { type: string }
+                        at: { type: string, format: date-time, nullable: true }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/sessions/{id}/wait:
     parameters:
       - $ref: "#/components/parameters/SessionId"

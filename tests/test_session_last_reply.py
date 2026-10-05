@@ -430,3 +430,70 @@ def test_without_a_transcript_the_command_line_and_the_ask_answer() -> None:
     assert (
         nothing.model is None and nothing.model_basis is None and nothing.agent is None
     )
+
+
+# -- opencode, read through the engine (WI-931) --------------------------------
+
+
+class OpencodeEngine(Engine):
+    """An engine whose session runs opencode: no transcript file anywhere, the
+    replies come from the engine's `/replies` route."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.command = "vogt-agent-auth run -- opencode"
+        self.replies_asked: list[str] = []
+
+    def __call__(
+        self, url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
+    ) -> tuple[int, bytes]:
+        path = url.split("?", 1)[0].removeprefix("http://127.0.0.1:8910")
+        if path == f"/api/sessions/{ENGINE_ID}/replies":
+            self.replies_asked.append(url.split("?", 1)[1])
+            return 200, json.dumps(
+                {
+                    "agent": "opencode",
+                    "conversation_id": "ses_abc123",
+                    "replies": [
+                        {"text": "first answer", "at": "2026-10-05T01:00:00Z"},
+                        {
+                            "text": "done; token=ghp_" + "a" * 36,
+                            "at": "2026-10-05T01:01:00Z",
+                        },
+                    ],
+                }
+            ).encode()
+        status, payload = super().__call__(url, headers, body, method)
+        if status == 200 and path.startswith("/api/sessions"):
+            data = json.loads(payload)
+            for row in data if isinstance(data, list) else [data.get("summary", data)]:
+                row["conversation"] = {"agent": "opencode", "id": "ses_abc123"}
+            payload = json.dumps(data).encode()
+        return status, payload
+
+
+def test_an_opencode_sessions_replies_come_from_the_engine_redacted(
+    instance: AppContext,
+) -> None:
+    engine = OpencodeEngine()
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+        # No transcript roots at all: opencode does not need them.
+        config=instance.config.model_copy(update={"session_transcript_roots": {}}),
+    )
+    result = last_reply(ctx, SessionLastReplyParams(id=ENGINE_ID, n=2))
+    assert result.agent == "opencode"
+    assert result.conversation_id == "ses_abc123"
+    assert [m.text.split(";")[0] for m in result.messages] == ["first answer", "done"]
+    assert "ghp_" + "a" * 36 not in result.messages[-1].text, (
+        "redacted like a transcript"
+    )
+    assert engine.replies_asked == ["n=2"]
+
+    rows = list_sessions(ctx, ListSessionsParams()).sessions
+    excerpt = next(
+        r for r in rows if r.engine_session_id == ENGINE_ID
+    ).last_reply_excerpt
+    assert excerpt is not None and excerpt.startswith("done;")
+    assert "ghp_" + "a" * 36 not in excerpt

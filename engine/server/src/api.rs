@@ -319,6 +319,48 @@ pub async fn get_session_screen(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RepliesQuery {
+    /// How many of the latest replies (default 1, at most 20).
+    pub n: Option<usize>,
+}
+
+/// `GET /api/sessions/{id}/replies` — an opencode session's last assistant
+/// replies, read from opencode's own store (WI-931). Claude Code and Codex
+/// write transcripts the core reads itself; opencode keeps one database that
+/// also holds its credentials, so the engine reads the session's assistant
+/// text out of it and nothing else. `replies` is empty for a session that is
+/// not opencode, or whose conversation is not known yet. Unredacted: the
+/// core redacts before showing it, as it does a transcript.
+pub async fn get_session_replies(
+    Path(id): Path<Uuid>,
+    Query(q): Query<RepliesQuery>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>> {
+    let conversation = match state.sessions.hibernated_screen(id) {
+        Some((_, _, _, summary)) => summary.conversation,
+        None => state.sessions.get(id)?.conversation(),
+    };
+    let n = q.n.unwrap_or(1).clamp(1, crate::opencode::MAX_REPLIES);
+    let Some(conversation) = conversation.filter(|c| c.agent == "opencode") else {
+        return Ok(Json(
+            serde_json::json!({ "agent": null, "conversation_id": null, "replies": [] }),
+        ));
+    };
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_default();
+    let replies =
+        crate::opencode::last_replies(&crate::opencode::db_path(&home), &conversation.id, n)
+            .await
+            .unwrap_or_default();
+    Ok(Json(serde_json::json!({
+        "agent": "opencode",
+        "conversation_id": conversation.id,
+        "replies": replies,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SweepQuery {
     /// How many non-blank screen lines each row carries (default 8, at
     /// most 40; 0 for none).

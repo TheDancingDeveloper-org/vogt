@@ -276,6 +276,15 @@ impl SessionRegistry {
             Creating::Fresh(Origin::AgentTask) => None,
             _ => agent_cli::conversation(base_command.as_deref(), spec.resume.as_deref(), id),
         };
+        // opencode mints its own conversation id, so a fresh opencode session
+        // is found in opencode's store once it has started (WI-930).
+        let capture_opencode = conversation.is_none()
+            && matches!(creating, Creating::Fresh(Origin::Api))
+            && base_command
+                .as_deref()
+                .and_then(agent_cli::agent_name)
+                .as_deref()
+                == Some("opencode");
         if let Some(path) = prompt_file.as_ref() {
             // The child is told *where* the brief is, never handed the text.
             // A work item's brief runs to paragraphs of prose: as an argument
@@ -417,6 +426,9 @@ impl SessionRegistry {
             self.records.insert(id, record);
         }
         self.sessions.insert(session.id, Arc::clone(&session));
+        if capture_opencode {
+            self.capture_opencode_conversation(&session);
+        }
         // Provisional history row: written at spawn with `ended_at` and
         // `exit_code` NULL, so a long-lived session that is later SIGKILLed on
         // redeploy (never running `exit`) is still visible in the History tab.
@@ -572,6 +584,80 @@ impl SessionRegistry {
     /// by itself or was killed — forgets its record, so it is not recovered
     /// as hibernated at the next boot. One that is hibernating, or that exits
     /// because the engine is shutting down, keeps it.
+    /// Find a fresh opencode session's conversation id in opencode's store
+    /// and record it on the session and its hibernation record, so it can be
+    /// resumed, hibernated and recovered after a redeploy (WI-930). See
+    /// `crate::opencode` for how the session is told apart from others.
+    fn capture_opencode_conversation(&self, session: &Arc<Session>) {
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let db = crate::opencode::db_path(&home);
+        let records = Arc::clone(&self.records);
+        let state_dir = self.cfg.state_dir.clone();
+        let session = Arc::clone(session);
+        let since_ms = (session.created_at.unix_timestamp_nanos() / 1_000_000) as i64;
+        tokio::spawn(async move {
+            let deadline = std::time::Instant::now() + crate::opencode::CAPTURE_FOR;
+            while std::time::Instant::now() < deadline && session.is_alive() {
+                tokio::time::sleep(crate::opencode::CAPTURE_EVERY).await;
+                let claimed: Vec<String> = records
+                    .iter()
+                    .filter(|r| *r.key() != session.id)
+                    .filter_map(|r| {
+                        r.conversation
+                            .as_ref()
+                            .filter(|c| c.agent == "opencode")
+                            .map(|c| c.id.clone())
+                    })
+                    .collect();
+                let Some((found, basis)) = crate::opencode::find_session(
+                    &db,
+                    session.id,
+                    &session.cwd,
+                    since_ms,
+                    &claimed,
+                )
+                .await
+                else {
+                    continue;
+                };
+                if !agent_cli::is_conversation_id(&found) {
+                    tracing::warn!(session = %session.id, "opencode session id is not a usable conversation id");
+                    return;
+                }
+                let conversation = vogt_engine_contract::AgentConversation {
+                    agent: "opencode".to_string(),
+                    id: found.clone(),
+                };
+                session.set_conversation(Some(conversation.clone()));
+                if let Some(mut record) = records.get_mut(&session.id) {
+                    record.conversation = Some(conversation);
+                    if let Err(e) = hibernation::write(&state_dir, &record) {
+                        tracing::warn!(session = %session.id, error = %e, "could not write the session's hibernation record");
+                    }
+                }
+                tracing::info!(
+                    target: "vogt::launch",
+                    event = "launch.conversation",
+                    session_id = %session.id,
+                    agent = "opencode",
+                    conversation_id = %found,
+                    basis = basis.as_str(),
+                    "agent conversation captured"
+                );
+                return;
+            }
+            tracing::info!(
+                target: "vogt::launch",
+                event = "launch.conversation",
+                session_id = %session.id,
+                agent = "opencode",
+                "opencode conversation not found; the session cannot be resumed or hibernated"
+            );
+        });
+    }
+
     fn exit_hook(&self) -> crate::pty::ExitHook {
         let records = Arc::clone(&self.records);
         let shutting_down = Arc::clone(&self.shutting_down);

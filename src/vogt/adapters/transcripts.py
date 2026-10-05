@@ -336,6 +336,17 @@ def _cut(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def reply(text: str, at: datetime | None) -> Reply:
+    """A reply from somewhere other than a transcript file (opencode's store,
+    read by the engine), redacted and cut the same way."""
+    return Reply(text=_cut(redact(text), MAX_MESSAGE_CHARS), at=at)
+
+
+def excerpt(text: str) -> str:
+    """The one-line list excerpt of a reply's (redacted) text."""
+    return _cut(" ".join(text.split()), EXCERPT_CHARS)
+
+
 # -- excerpts for lists ----------------------------------------------------
 
 _EXCERPTS: dict[tuple[str, int, int], str | None] = {}

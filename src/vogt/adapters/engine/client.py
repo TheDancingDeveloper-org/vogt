@@ -882,6 +882,27 @@ class EngineClient:
             return None
         return EngineScreen.from_payload(payload)
 
+    def session_replies(
+        self, session_id: str, *, n: int = 1
+    ) -> tuple[str | None, list[tuple[str, str | None]]] | None:
+        """An opencode session's last `n` assistant replies, read by the engine
+        from opencode's own store (WI-931): `(conversation_id, [(text, at)])`,
+        oldest first, unredacted. `None` on a 404 (an unknown session, or an
+        engine without the route); an empty list for any other agent.
+        """
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/replies?n={int(n)}",
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        replies = payload.get("replies")
+        found: list[tuple[str, str | None]] = []
+        for reply in replies if isinstance(replies, list) else []:
+            if isinstance(reply, dict) and isinstance(reply.get("text"), str):
+                found.append((reply["text"], _optional_str(reply.get("at"))))
+        return _optional_str(payload.get("conversation_id")), found
+
     def wait_session(
         self, session_id: str, *, until: str, timeout_s: int
     ) -> EngineWait | None:
