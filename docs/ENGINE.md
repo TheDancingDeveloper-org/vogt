@@ -1106,7 +1106,33 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   redeploy therefore leaves the agent sessions listed and wakeable, not
   gone.
 - **`keep_awake`** pins a session. The pin is kept in its record and shown
-  on its summary.
+  on its summary. A pinned session is never hibernated by policy, and if the
+  engine finds it hibernated at boot (after a shutdown or a crash), it wakes
+  it by itself. With a core, the engine does this through vogt-core's
+  `session.wake`, using the stack secret, so a linked session gets a fresh
+  token. The core may still be starting, so the engine retries for a few
+  minutes. Pin a driver or oversight session, and it comes back after a
+  redeploy by itself.
+- **Policy** (`hibernate_policy.rs`) is off unless configured.
+  `ENGINE_HIBERNATE_IDLE_AFTER` (`2h`, `30m`, or seconds) hibernates an agent
+  session that has had no input or output for that long.
+  `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` (`2GiB`, `512M`, or bytes)
+  hibernates the quietest eligible session while the pod's available memory
+  is below it, one session per minute. Available memory is the cgroup
+  `memory.max` minus `memory.current` when the pod has a limit, otherwise
+  (and never more than) the host's `MemAvailable`. Both settings keep every
+  exemption, and the watcher logs each one:
+  - the session cannot be hibernated at all (see above);
+  - it is pinned awake;
+  - a turn is `running`, or it is `awaiting-approval`;
+  - it is `blocked` on a person;
+  - a shell process (`bash`, `sh`, …) runs *below* the agent CLI, meaning a
+    tool call or a background job is at work. The agent's MCP servers are not
+    shells, and a wrapper shell that launched the CLI sits above it, so
+    neither counts.
+
+  A hook that keeps a turn going reads as `running` and is exempt. A value
+  that does not parse stops the engine at startup.
 
 ### Attach protocol
 

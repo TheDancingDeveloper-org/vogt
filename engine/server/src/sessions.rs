@@ -468,6 +468,17 @@ impl SessionRegistry {
         Err(ApiError::NotFound)
     }
 
+    /// Hibernated sessions pinned awake: what the engine wakes at boot.
+    pub fn hibernated_keep_awake(&self) -> Vec<Uuid> {
+        self.records
+            .iter()
+            .filter(|r| {
+                r.keep_awake && r.hibernation.is_some() && !self.sessions.contains_key(r.key())
+            })
+            .map(|r| *r.key())
+            .collect()
+    }
+
     /// Whether the engine knows this session at all, live or hibernated.
     pub fn knows(&self, id: Uuid) -> bool {
         self.sessions.contains_key(&id) || self.records.contains_key(&id)

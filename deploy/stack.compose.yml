@@ -50,6 +50,12 @@ services:
     # entrypoint deliberately does *not* adopt a supervision framework, and
     # this is the half of that decision the compose owns.
     init: true
+    # On SIGTERM the engine hibernates every agent session (stops its process
+    # tree after a 5 s grace for the CLI to flush) and archives the rest,
+    # so a redeploy leaves sessions listed and wakeable. Docker's default
+    # 10 s is tight for that; this is the room it gets before SIGKILL. A
+    # SIGKILL still loses nothing listed: the records are written at spawn.
+    stop_grace_period: 30s
 
     # The engine is the only way in. The core listens on loopback
     # *inside* the container and is never published — the entrypoint enforces
@@ -116,6 +122,14 @@ services:
       # ENGINE_FCM_SERVICE_ACCOUNT_FILE=/run/secrets/fcm_service_account in
       # `.env`. ENGINE_FCM_SERVICE_ACCOUNT_JSON is deliberately never set here.
       ENGINE_FCM_SERVICE_ACCOUNT_FILE: "${ENGINE_FCM_SERVICE_ACCOUNT_FILE:-}"
+
+      # ── Session hibernation (off unless set) ───────────────────────────────
+      # Hibernate an idle agent session — stop its processes, keep it listed,
+      # wake it by resuming its conversation — after this long quiet (`2h`),
+      # and/or the quietest one while the pod's available memory is below a
+      # size (`2GiB`). docs/ENGINE.md, "Hibernation".
+      ENGINE_HIBERNATE_IDLE_AFTER: "${ENGINE_HIBERNATE_IDLE_AFTER:-}"
+      ENGINE_HIBERNATE_MEMAVAILABLE_BELOW: "${ENGINE_HIBERNATE_MEMAVAILABLE_BELOW:-}"
 
       # One value both starts the core and tells the engine where to proxy.
       # Loopback means "the core is ours to run", so the entrypoint supervises

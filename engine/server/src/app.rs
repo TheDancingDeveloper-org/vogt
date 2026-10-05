@@ -267,6 +267,8 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // daily schedule, so `history.db` and the raw `session-logs/` cannot
     // grow without bound. A no-op when history is disabled or the horizon is 0.
     spawn_history_retention_sweeper(Arc::clone(&state));
+    crate::hibernate_policy::spawn_watcher(Arc::clone(&state));
+    crate::hibernate_policy::spawn_boot_wake(Arc::clone(&state));
 
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.
     let public = Router::new()
