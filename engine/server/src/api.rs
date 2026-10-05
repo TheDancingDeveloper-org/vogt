@@ -371,12 +371,22 @@ pub async fn events_stream(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
     let rx = state.bus.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|res| match res {
+    let bus = state.bus.clone();
+    let stream = BroadcastStream::new(rx).filter_map(move |res| match res {
         Ok(ev) => match serde_json::to_string(&ev) {
             Ok(json) => Some(Ok(Event::default().data(json))),
             Err(_) => None,
         },
-        Err(_) => None, // lagging receiver — skip
+        // A slow client fell behind and missed events. The stream goes on,
+        // but the client is told, in band, so it can re-read what it shows
+        // rather than trust state built from a stream with a hole in it
+        // (WI-920).
+        Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
+            bus.note_lag("sse-events", skipped);
+            Some(Ok(Event::default().data(
+                serde_json::json!({ "type": "lagged", "skipped": skipped }).to_string(),
+            )))
+        }
     });
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
@@ -506,6 +516,9 @@ pub struct OperationalStatus {
     pub agent_tasks: AgentTaskStorageStatus,
     pub auth_broker: AuthBrokerStatus,
     pub storage: ServerStorageStatus,
+    /// Event subscribers that have fallen behind since start, by name, with
+    /// how often and how many events they missed (WI-920). Empty is healthy.
+    pub event_lag: std::collections::BTreeMap<&'static str, crate::events::LagCount>,
 }
 
 #[derive(Debug, Serialize)]
@@ -556,6 +569,7 @@ pub async fn operational_status(
         source_sha: crate::product::SOURCE_SHA,
         release_url: crate::product::release_url(),
         session_count: state.sessions.list().len(),
+        event_lag: state.bus.lags(),
         push_subscription_count: state.push.list().len(),
         gui_process_count: state.gui.count_alive(),
         gui_stream_configured: state.config.gui_stream_url.is_some(),

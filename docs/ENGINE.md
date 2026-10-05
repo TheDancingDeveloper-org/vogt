@@ -1276,7 +1276,14 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   exit_code?, duration_ms, retries, branch?, final_sha?, files_changed?,
   insertions?, deletions?, cost_usd?}`), each tagged by `type`. The
   stream carries a `:ka` keep-alive comment every 15 seconds while nothing
-  else is happening. A client should treat the accepted response and every
+  else is happening. A client that falls more than the bus's buffer behind
+  receives `{"type":"lagged","skipped":N}` in band and the stream goes on: it
+  missed N events, so whatever it built from the stream should be read
+  again (the PWA's session store refetches). Every internal subscriber
+  carries on the same way, so the push watcher, `session_wait` and the
+  agent-task watchers lose the skipped events, never the subscription. Lags
+  are counted per subscriber in `/api/status` → `event_lag` (WI-920).
+  A client should treat the accepted response and every
   frame, comment included, as proof the front door is alive — a quiet
   session emits no event for as long as it runs — and presume a stream
   dead after about three missed keep-alives, reconnecting without backoff:

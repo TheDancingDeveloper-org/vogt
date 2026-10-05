@@ -208,7 +208,17 @@ pub async fn flush_digests(State(state): State<Arc<AppState>>) -> Json<DispatchC
 pub fn spawn_activity_watcher(state: Arc<AppState>) {
     let mut rx = state.bus.subscribe();
     tokio::spawn(async move {
-        while let Ok(ev) = rx.recv().await {
+        loop {
+            // A lag used to end this loop — `while let Ok(..)` — and with it
+            // every push for the life of the process, silently (WI-920). A
+            // lag now costs the events it skipped and nothing more.
+            let Some(ev) = state
+                .bus
+                .recv_or_skip(&mut rx, "push-activity-watcher")
+                .await
+            else {
+                break;
+            };
             // An agent reporting itself blocked on a person is the same kind
             // of interruption as a prompt waiting for input, and rides the
             // same preference.
@@ -375,7 +385,10 @@ pub fn spawn_vogt_drift_watcher(state: Arc<AppState>) {
                 // Lagged means this task fell behind a burst and lost events.
                 // Not a reason to stop watching, and what was lost is drift
                 // proposals that stay open in the inbox regardless.
-                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Lagged(skipped)) => {
+                    state.bus.note_lag("push-drift-watcher", skipped);
+                    continue;
+                }
                 Err(RecvError::Closed) => return,
             }
 

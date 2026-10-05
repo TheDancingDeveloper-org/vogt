@@ -869,7 +869,7 @@ impl AgentTaskRegistry {
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(skipped, "agent task run watcher lagged");
+                        bus.note_lag("agent-task-run-watcher", skipped);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
@@ -912,7 +912,7 @@ impl AgentTaskRegistry {
                         // fires, and the no-storm rule already accepts a missed
                         // fire (a paused engine misses them too); losing a few
                         // under a burst is the same trade, not a reason to stop.
-                        tracing::warn!(skipped, "agent task trigger watcher lagged");
+                        bus.note_lag("agent-task-trigger-watcher", skipped);
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }

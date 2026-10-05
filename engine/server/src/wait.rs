@@ -124,10 +124,13 @@ pub async fn wait(
                 return Err(ApiError::Internal("the event bus closed".into()));
             }
             // Missed events: the session's state is the truth, not the gap.
-            Ok(Err(RecvError::Lagged(_))) => match until {
-                WaitUntil::AnyChange => Some(Outcome::Changed),
-                _ => check(&session, until).await?,
-            },
+            Ok(Err(RecvError::Lagged(skipped))) => {
+                bus.note_lag("session-wait", skipped);
+                match until {
+                    WaitUntil::AnyChange => Some(Outcome::Changed),
+                    _ => check(&session, until).await?,
+                }
+            }
             Ok(Ok(event)) if concerns(&event, session.id) => match until {
                 WaitUntil::AnyChange => Some(if session.is_alive() {
                     Outcome::Changed
