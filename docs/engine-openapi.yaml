@@ -248,6 +248,68 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SessionScreen" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/wait:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: Wait, server-side, until the session is ready, exits or changes.
+      description: >-
+        Blocks on the engine's event bus (the one `/api/events` streams) and
+        answers once the session reaches `until` — `ready` (the default; also
+        ends on `awaiting-approval`, a blocked report, or exit, because no
+        amount of waiting makes those ready), `exited`, or `any-change` (any
+        activity, blocked-state or liveness change after the call) — or when
+        `timeout_s` passes. Answers at once when the condition already holds.
+        Replaces polling `/screen`.
+      operationId: waitSession
+      x-capability: sessions
+      parameters:
+        - name: until
+          in: query
+          required: false
+          schema: { type: string, enum: [ready, exited, any-change], default: ready }
+        - name: timeout_s
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 600, default: 120 }
+      responses:
+        "200":
+          description: Why the wait ended, and the screen then.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionWait" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/blocked:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Set or clear the agent's "blocked on a person" report.
+      description: >-
+        `{"blocked": true, "reason": "...", "items": [...]}` records the
+        report (reason required, at most 2000 bytes; at most 20 items of 500
+        bytes; blank items dropped); `{"blocked": false}` clears it. The
+        report rides on the summary and the screen, publishes a
+        `session-blocked` event, and blocking sends a push. Cleared when the
+        session exits; `409` to block an exited session. vogt-core's
+        `session.report_blocked` / `report_unblocked` call this, audited.
+      operationId: setSessionBlocked
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetBlocked" }
+      responses:
+        "200":
+          description: The session after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/sessions/{id}/kill:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -415,6 +477,34 @@ components:
           format: date-time
           description: When the PTY last produced output; absent before the first byte.
         approval: { $ref: "#/components/schemas/ApprovalPrompt" }
+        blocked: { $ref: "#/components/schemas/BlockedReport" }
+    BlockedReport:
+      type: object
+      required: [reason, since]
+      description: An agent's own report that it cannot go on without a person. Untrusted text.
+      properties:
+        reason: { type: string }
+        items: { type: array, items: { type: string } }
+        since: { type: string, format: date-time }
+    SetBlocked:
+      type: object
+      required: [blocked]
+      properties:
+        blocked: { type: boolean }
+        reason: { type: string, description: Required when `blocked` is true. }
+        items: { type: array, items: { type: string } }
+    SessionWait:
+      type: object
+      required: [outcome, matched, waited_ms, screen]
+      properties:
+        outcome:
+          type: string
+          enum: [ready, awaiting-approval, blocked, exited, changed, timeout]
+        matched:
+          type: boolean
+          description: The outcome is what `until` asked for.
+        waited_ms: { type: integer }
+        screen: { $ref: "#/components/schemas/SessionScreen" }
     ApprovalPrompt:
       type: object
       required: [question, command_excerpt, detected_at]
@@ -487,6 +577,7 @@ components:
         turn_started_at: { type: string, format: date-time, description: As on SessionSummary. }
         last_output_at: { type: string, format: date-time, description: As on SessionSummary. }
         approval: { $ref: "#/components/schemas/ApprovalPrompt" }
+        blocked: { $ref: "#/components/schemas/BlockedReport" }
     SessionSpec:
       type: object
       required: [name]
@@ -586,6 +677,13 @@ components:
             activity_changed_at: { type: string, format: date-time }
             approval: { $ref: "#/components/schemas/ApprovalPrompt" }
             turn_started_at: { type: string, format: date-time }
+        - type: object
+          required: [type, id]
+          description: The agent reported itself blocked (`blocked` set) or cleared it (absent).
+          properties:
+            type: { const: session-blocked }
+            id: { type: string, format: uuid }
+            blocked: { $ref: "#/components/schemas/BlockedReport" }
     AuthCheck:
       type: object
       required: [ok, version, product_version, storage, identity]

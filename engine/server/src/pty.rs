@@ -71,6 +71,8 @@ pub struct Session {
     last_output_at: Mutex<Option<time::OffsetDateTime>>,
     /// The permission dialog on screen, while `awaiting-approval`.
     approval: Mutex<Option<crate::approval::Pending>>,
+    /// The agent's own report that it is blocked on a person.
+    blocked: Mutex<Option<vogt_engine_contract::BlockedReport>>,
 }
 
 impl Session {
@@ -139,7 +141,34 @@ impl Session {
             turn_started_at: self.turn_started_at.lock().map(format_rfc3339),
             last_output_at: self.last_output_at.lock().map(format_rfc3339),
             approval: self.approval_prompt(),
+            blocked: self.blocked(),
         }
+    }
+
+    /// What the session's agent reported it is blocked on, if anything.
+    pub fn blocked(&self) -> Option<vogt_engine_contract::BlockedReport> {
+        self.blocked.lock().clone()
+    }
+
+    /// Record (or, with `None`, clear) the agent's blocked report and
+    /// announce the change. Refused for a session whose child has exited:
+    /// nothing is left to unblock.
+    pub fn set_blocked(
+        &self,
+        report: Option<vogt_engine_contract::BlockedReport>,
+        bus: &EventBus,
+    ) -> Result<()> {
+        if !self.is_alive() && report.is_some() {
+            return Err(ApiError::Conflict(
+                "the session has exited; there is nothing to block".into(),
+            ));
+        }
+        *self.blocked.lock() = report.clone();
+        bus.publish(ServerEvent::SessionBlocked {
+            id: self.id,
+            blocked: report,
+        });
+        Ok(())
     }
 
     /// The permission dialog on screen, as the wire shows it, with the
@@ -646,6 +675,7 @@ pub fn spawn(
         turn_started_at: Mutex::new(Some(created_at)),
         last_output_at: Mutex::new(None),
         approval: Mutex::new(None),
+        blocked: Mutex::new(None),
     });
 
     spawn_reader_thread(
@@ -1029,6 +1059,10 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
         }
         if new != ActivityState::AwaitingApproval {
             *session.approval.lock() = None;
+        }
+        // An exited agent is blocked on nobody.
+        if new.is_terminal() {
+            *session.blocked.lock() = None;
         }
         *a = new;
         *session.activity_since.lock() = Instant::now();

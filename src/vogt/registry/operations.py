@@ -151,6 +151,8 @@ from vogt.application.models import (
     RelateWorkParams,
     RemoveUserParams,
     RemoveUserResult,
+    ReportBlockedParams,
+    ReportUnblockedParams,
     RestoreParams,
     RestoreResult,
     RevokeSuppressionParams,
@@ -161,12 +163,15 @@ from vogt.application.models import (
     SearchOutputResult,
     ServeParams,
     ServeResult,
+    SessionBlockedResult,
     SessionInputParams,
     SessionInputResult,
     SessionListResult,
     SessionResult,
     SessionScreenParams,
     SessionScreenResult,
+    SessionWaitParams,
+    SessionWaitResult,
     SetPasswordParams,
     SetWriteBackParams,
     StartSessionParams,
@@ -995,6 +1000,60 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.session_screen,
             route=HttpRoute("GET", "/sessions/screen"),
             cli=CliBinding(("session", "screen")),
+        ),
+        Operation(
+            name="session.wait",
+            summary=(
+                "Wait for a session instead of polling it: blocks (up to "
+                "timeout_s, max 600) until it is ready for input — or needs a "
+                "person (awaiting-approval, blocked) or exits — or, with "
+                "until=exited / any_change, until it exits or changes at all. "
+                "Returns why (`outcome`, `matched`) and the screen then. "
+                "Takes either id."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionWaitParams,
+            result_model=SessionWaitResult,
+            handler=services.session_wait,
+            route=HttpRoute("GET", "/sessions/wait"),
+            cli=CliBinding(("session", "wait")),
+        ),
+        # An agent saying it cannot go on without a person. `work.write`, the
+        # scope a session's own token holds, because it is the agent's own
+        # report about its own session; audited with the text, which is meant
+        # to be read.
+        Operation(
+            name="session.report_blocked",
+            summary=(
+                "Report that this session's agent is blocked on a person: "
+                "what it needs (`blocker`) and the concrete `items` to do. "
+                "Shown on session_list/session_screen, raised in the Inbox "
+                "and pushed; drivers stop re-prompting. Omit `id` from inside "
+                "a session Vogt started. Clear with session_report_unblocked."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=ReportBlockedParams,
+            result_model=SessionBlockedResult,
+            handler=services.report_blocked,
+            route=HttpRoute("POST", "/sessions/blocked"),
+            cli=CliBinding(("session", "blocked")),
+        ),
+        Operation(
+            name="session.report_unblocked",
+            summary=(
+                "Clear a session's blocked report once the person has acted "
+                "(or the agent found a way on). Omit `id` from inside a "
+                "session Vogt started."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=ReportUnblockedParams,
+            result_model=SessionBlockedResult,
+            handler=services.report_unblocked,
+            route=HttpRoute("POST", "/sessions/unblocked"),
+            cli=CliBinding(("session", "unblocked")),
         ),
         # -- runtime-pinned agent CLIs ------------------------------
         #

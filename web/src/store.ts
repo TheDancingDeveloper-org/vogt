@@ -334,6 +334,14 @@ export function startEventStream(): void {
         case "activity":
           updateActivity(ev.id, ev.state, ev.activity_changed_at);
           break;
+        case "session-blocked":
+          setStore(
+            produce((s) => {
+              const sess = s.sessions[ev.id];
+              if (sess) sess.blocked = ev.blocked ?? null;
+            }),
+          );
+          break;
         case "vogt-changed":
           // The Vogt surfaces subscribe to this themselves; the session store
           // has no opinion about a work item. Recorded here so the switch is

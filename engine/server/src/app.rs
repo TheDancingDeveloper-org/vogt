@@ -289,6 +289,8 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/sessions/{id}/screen", get(api::get_session_screen))
         .route("/api/sessions/{id}/kill", post(api::kill_session))
         .route("/api/sessions/{id}/input", post(api::session_input))
+        .route("/api/sessions/{id}/wait", get(api::wait_session))
+        .route("/api/sessions/{id}/blocked", post(api::set_session_blocked))
         .route("/api/assistant/message", post(assistant_api::message))
         .route(
             "/api/assistant/actions/{id}",

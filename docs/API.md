@@ -159,6 +159,15 @@ session the core started; `session.list` shows both (`id`,
 `engine_session_id`), and every core `session.*` operation accepts either. A
 session opened from the GUI is unlinked and has only the UUID.
 
+`session.wait` blocks (up to `timeout_s`, at most 600) until a session is
+ready — or needs a person, or exits — or, with `until`, until it exits or
+changes at all, and returns why with the screen: one call instead of a
+polling loop. `session.report_blocked` / `session.report_unblocked`
+(`work.write`, audited) let an agent say it is blocked on a person; the report
+shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
+`session.blocked` entry and a push. `session.start` takes `autopilot` (see
+[`AGENT_GUIDE.md`](AGENT_GUIDE.md)).
+
 Rows of `session.list` and `session.screen` carry the engine's live
 `turn_started_at` (when the agent last went to work from rest) and
 `last_output_at` (when the terminal last printed), which tell a long turn
