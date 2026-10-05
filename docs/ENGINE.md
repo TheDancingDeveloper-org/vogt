@@ -1270,7 +1270,8 @@ sets `resources.over_threshold` on any session at or over it. The core's
 
 A session's launch explains itself in the engine log and on `/metrics`
 (WI-927). Every line carries an `event=` field to filter on in Loki, for
-example `{container="vogt-prod", job="docker/engine"} |= "event=launch."`.
+example `{container="vogt-prod", job="docker/engine"} |= "event=\"launch."` (string
+fields are logged quoted: `event="launch.report"`).
 
 | `event=` | Level | When | Fields |
 |---|---|---|---|
