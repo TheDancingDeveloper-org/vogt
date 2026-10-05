@@ -19,6 +19,18 @@
 //! to …?", Codex's "Would you like to run the following command?" / "Allow
 //! command?") and a numbered option line below it (`❯ 1. Yes`, `› 1. Yes,
 //! proceed`). Either alone is ordinary output.
+//!
+//! Claude Code also stops at **startup gates** that are not permission
+//! dialogs but stall a session just the same (WI-917): folder trust ("Do you
+//! trust the files in this folder?" / "Is this a project you created or one
+//! you trust?"), approval of a `CLAUDE.md` that imports files from outside
+//! the directory ("Allow external CLAUDE.md file imports?"), and reading
+//! outside the working directories. They are recognised the same way —
+//! question plus numbered menu — and reported with a `kind`, so a driver can
+//! tell a trust gate from a command approval. Every dialog carries its
+//! enumerated `options`, with the highlighted one marked, so it can be
+//! answered by choice (`POST /api/sessions/{id}/answer`) rather than by
+//! counting arrow presses.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -33,7 +45,7 @@ const BORDER: &[char] = &[
 /// because a TUI may position words with cursor moves rather than spaces.
 static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
     regex::bytes::Regex::new(
-        r"(?i)do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*command|automatically\s*den|requires\s*approval",
+        r"(?i)do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*command|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director",
     )
     .expect("approval prefilter compiles")
 });
@@ -42,7 +54,7 @@ static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
 /// line of the rendered screen.
 static QUESTION: Lazy<Regex> = Lazy::new(|| {
     Regex::new(
-        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|.*\brequires approval\b.*)$",
+        r"(?i)^(?:do you want to (?:proceed|make this edit|make these edits|create|run|allow|delete|overwrite|fetch|use|write|execute|apply)\b.*\?|would you like to (?:run|make|apply|allow)\b.*\?|allow (?:command|this command|edit|tool)\b.*\??|.*\brequires approval\b.*|do you trust the files in this folder\??|.*\bis this a project you (?:created or one you )?trust\b.*\??|allow external claude\.md(?: file)? imports\??)$",
     )
     .expect("approval question regex compiles")
 });
@@ -50,6 +62,18 @@ static QUESTION: Lazy<Regex> = Lazy::new(|| {
 /// A numbered menu option, with or without the selection glyph.
 static OPTION: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"^(?:[❯›>▸]\s*)?1\.\s+\S").expect("option regex compiles"));
+
+/// Any numbered menu option: the highlight glyph, the number, the label.
+static ANY_OPTION: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?:([❯›>▸])\s*)?(\d{1,2})\.\s+(\S.*?)\s*$").expect("option regex compiles")
+});
+
+/// Text that makes a permission dialog a read outside the working
+/// directories rather than any other tool call.
+static READ_OUTSIDE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?i)outside\s+(?:of\s+)?(?:the\s+)?(?:current\s+)?working\s+director|read\s+(?:files?\s+)?outside")
+        .expect("read-outside regex compiles")
+});
 
 /// "…automatically deny this request in 90s", "auto-deny in 1m".
 static DEADLINE: Lazy<Regex> = Lazy::new(|| {
@@ -64,6 +88,29 @@ const MAX_CONTEXT_LINES: usize = 40;
 /// The excerpt is cut at this many characters.
 const MAX_EXCERPT_CHARS: usize = 4000;
 
+/// One numbered choice in a dialog's menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuOption {
+    pub number: u32,
+    pub label: String,
+    /// The highlight is on it: Enter alone would choose it.
+    pub selected: bool,
+}
+
+/// What kind of dialog it is, as the wire names it.
+pub fn kind_of(question: &str, excerpt: &str) -> &'static str {
+    let q = question.to_ascii_lowercase();
+    if q.contains("trust") {
+        "folder-trust"
+    } else if q.contains("external claude.md") {
+        "external-imports"
+    } else if READ_OUTSIDE.is_match(question) || READ_OUTSIDE.is_match(excerpt) {
+        "read-outside-cwd"
+    } else {
+        "permission"
+    }
+}
+
 /// A permission dialog read off the screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detected {
@@ -75,6 +122,11 @@ pub struct Detected {
     /// Seconds until the CLI answers "no" by itself, when it shows a
     /// countdown.
     pub deadline_seconds: Option<u32>,
+    /// `permission`, `folder-trust`, `external-imports` or
+    /// `read-outside-cwd`.
+    pub kind: &'static str,
+    /// The menu, in order.
+    pub options: Vec<MenuOption>,
 }
 
 /// How many scrollback lines are rendered above the screen when reading a
@@ -118,6 +170,17 @@ impl Pending {
             deadline_seconds,
             deadline_at: self.deadline_at.map(rfc3339),
             detected_at: rfc3339(self.detected_at),
+            kind: self.detected.kind.to_string(),
+            options: self
+                .detected
+                .options
+                .iter()
+                .map(|o| vogt_engine_contract::ApprovalOption {
+                    number: o.number,
+                    label: o.label.clone(),
+                    selected: o.selected,
+                })
+                .collect(),
         }
     }
 }
@@ -209,11 +272,49 @@ pub fn detect(visible: &[String], scrollback: &[String]) -> Option<Detected> {
             })
         });
 
+    // The menu: consecutive numbered lines from the first option, a blank
+    // or wrapped line between them tolerated, numbering in sequence.
+    let mut options: Vec<MenuOption> = Vec::new();
+    for line in all[opt..].iter().take(24) {
+        let line = strip(line).trim();
+        if let Some(c) = ANY_OPTION.captures(line) {
+            let number: u32 = c[2].parse().unwrap_or(0);
+            if number as usize != options.len() + 1 {
+                break;
+            }
+            options.push(MenuOption {
+                number,
+                label: c[3].to_string(),
+                selected: c.get(1).is_some(),
+            });
+        } else if !options.is_empty()
+            && !line.is_empty()
+            && !line.starts_with(char::is_alphanumeric)
+        {
+            break;
+        }
+    }
+
+    let kind = kind_of(&question, &command_excerpt);
     Some(Detected {
         question,
         command_excerpt,
         deadline_seconds,
+        kind,
+        options,
     })
+}
+
+/// The arrow presses, then Enter, that choose `target` in `options` from
+/// whichever is highlighted now (the first, when none is marked). `None`
+/// when there is no such option.
+pub fn keys_to_choose(options: &[MenuOption], target: u32) -> Option<String> {
+    let to = options.iter().position(|o| o.number == target)?;
+    let from = options.iter().position(|o| o.selected).unwrap_or(0);
+    let step = if to >= from { "\x1b[B" } else { "\x1b[A" };
+    let mut keys = step.repeat(to.abs_diff(from));
+    keys.push('\r');
+    Some(keys)
 }
 
 #[cfg(test)]
@@ -329,6 +430,8 @@ mod tests {
             question: "Do you want to proceed?".into(),
             command_excerpt: "rm -rf x".into(),
             deadline_seconds: Some(90),
+            kind: "permission",
+            options: Vec::new(),
         };
         let seen = time::OffsetDateTime::UNIX_EPOCH;
         let pending = Pending::new(found.clone(), seen);
@@ -348,6 +451,73 @@ mod tests {
             ..found
         };
         assert!(!pending.is_same(&other));
+    }
+
+    #[test]
+    fn startup_gates_are_dialogs_with_a_kind_and_their_options() {
+        let trust = lines(
+            "Accessing workspace:\n\
+             /home/sprooty/Working/Active/vogt\n\
+             \n\
+             Quick safety check: Is this a project you created or one you trust?\n\
+             \n\
+             ❯ 1. Yes, I trust this folder\n\
+               2. No, exit\n\
+             \n\
+             Enter to confirm · Esc to cancel",
+        );
+        let d = detect(&trust, &[]).expect("trust gate detected");
+        assert_eq!(d.kind, "folder-trust");
+        assert_eq!(d.options.len(), 2);
+        assert!(d.options[0].selected && !d.options[1].selected);
+        assert_eq!(d.options[1].label, "No, exit");
+
+        let imports = lines(
+            "Allow external CLAUDE.md file imports?\n\
+             This project's CLAUDE.md imports files outside the current working directory.\n\
+               1. Yes, allow external imports\n\
+             ❯ 2. No, disable external imports",
+        );
+        let d = detect(&imports, &[]).expect("imports gate detected");
+        assert_eq!(d.kind, "external-imports");
+        assert!(d.options[1].selected);
+
+        let read = lines(
+            "Read file\n\
+             Claude requested permissions to read from /home/x/.local/share/brief.md,\n\
+             which is outside the current working directories.\n\
+             Do you want to proceed?\n\
+             ❯ 1. Yes\n\
+               2. Yes, allow reading from share/ during this session\n\
+               3. No, and tell Claude what to do differently (esc)",
+        );
+        let d = detect(&read, &[]).expect("read gate detected");
+        assert_eq!(d.kind, "read-outside-cwd");
+        assert_eq!(d.options.len(), 3);
+
+        let bash = detect(
+            &lines("Bash command\n  ls\nDo you want to proceed?\n❯ 1. Yes\n  2. No"),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(bash.kind, "permission");
+    }
+
+    #[test]
+    fn choosing_an_option_moves_from_the_highlight() {
+        let menu = |selected: u32| {
+            (1..=3)
+                .map(|n| MenuOption {
+                    number: n,
+                    label: format!("o{n}"),
+                    selected: n == selected,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys_to_choose(&menu(1), 1).unwrap(), "\r");
+        assert_eq!(keys_to_choose(&menu(1), 3).unwrap(), "\x1b[B\x1b[B\r");
+        assert_eq!(keys_to_choose(&menu(3), 2).unwrap(), "\x1b[A\r");
+        assert_eq!(keys_to_choose(&menu(1), 4), None);
     }
 
     #[test]

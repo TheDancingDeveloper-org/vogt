@@ -10,7 +10,13 @@ import { Component, For, Show, createEffect, createSignal, onCleanup, onMount, o
 import { sessionsStore } from "./store";
 import { SafeSnippet } from "./SafeSnippet";
 import { formatBytes } from "./sessionRowModel";
-import { VogtUnavailable, sweepSessions, type SessionSweepResult, type SessionSweepRow } from "./vogtApi";
+import {
+  VogtUnavailable,
+  answerSessionInVogt,
+  sweepSessions,
+  type SessionSweepResult,
+  type SessionSweepRow,
+} from "./vogtApi";
 
 interface Props {
   onError?: (message: string) => void;
@@ -188,6 +194,31 @@ const Oversight: Component<Props> = (props) => {
                 </span>
               </div>
               <p class="oversight-reason">{row.attention_reason}</p>
+              <Show when={row.attention === "approval" && row.session.approval?.options?.length ? row.session.approval : null}>
+                {(approval) => (
+                  <div class="oversight-answers" role="group" aria-label={`Answer: ${approval().question}`}>
+                    <For each={approval().options ?? []}>
+                      {(option) => (
+                        <button
+                          type="button"
+                          class={option.selected ? "oversight-answer oversight-answer--selected" : "oversight-answer"}
+                          onClick={async () => {
+                            try {
+                              await answerSessionInVogt(row.session.engine_session_id, option.number, approval().question);
+                              void refresh();
+                            } catch (error) {
+                              props.onError?.(`answer failed: ${(error as Error).message}`);
+                              void refresh();
+                            }
+                          }}
+                        >
+                          {option.number}. {option.label}
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                )}
+              </Show>
               <Show when={row.session.last_reply_excerpt}>
                 {(excerpt) => (
                   <p class="oversight-excerpt" title="The agent's latest reply">

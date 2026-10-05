@@ -75,3 +75,35 @@ describe("Oversight", () => {
     expect(ago(null, now)).toBeNull();
   });
 });
+
+describe("answering from the board", () => {
+  it("offers the dialog's options and answers by number with the question", async () => {
+    const approvalRow = ROW({
+      attention: "approval",
+      attention_reason: "stopped at a startup gate (folder trust): Trust?",
+      session: {
+        ...ROW({}).session,
+        approval: {
+          question: "Trust?",
+          kind: "folder-trust",
+          options: [
+            { number: 1, label: "Yes, I trust this folder", selected: true },
+            { number: 2, label: "No, exit" },
+          ],
+        },
+      },
+    });
+    vi.spyOn(vogtApi, "sweepSessions").mockResolvedValue({
+      rows: [approvalRow],
+      counts: { total: 1, needs_you: 1 },
+      swept_at: new Date().toISOString(),
+      engine: null,
+    });
+    const answer = vi
+      .spyOn(vogtApi, "answerSessionInVogt")
+      .mockResolvedValue({ dismissed: true, chosen: { number: 2, label: "No, exit" } });
+    render(() => <Oversight />);
+    fireEvent.click(await screen.findByText("2. No, exit"));
+    await waitFor(() => expect(answer).toHaveBeenCalledWith("uuid-1", 2, "Trust?"));
+  });
+});

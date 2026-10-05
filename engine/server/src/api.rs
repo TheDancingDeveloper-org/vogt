@@ -145,6 +145,102 @@ pub async fn keep_session_awake(
     Ok(Json(state.sessions.set_keep_awake(id, req.keep_awake)?))
 }
 
+/// Choose one option of the dialog on screen (WI-917): a permission
+/// dialog or a startup gate. The engine reads the menu as it is now, moves
+/// the highlight to the option with arrow keys, presses Enter, and looks
+/// again to report whether the dialog went away. `409` when no dialog is
+/// showing, when it no longer asks `expect_question`, or when the option is
+/// not on its menu.
+pub async fn answer_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<vogt_engine_contract::AnswerRequest>,
+) -> Result<Json<vogt_engine_contract::AnswerResult>> {
+    use crate::error::ApiError;
+    let session = state.sessions.get(id)?;
+    let reading = Arc::clone(&session);
+    let dialog = tokio::task::spawn_blocking(move || reading.current_dialog())
+        .await
+        .map_err(|e| ApiError::Internal(format!("read the screen: {e}")))?
+        .ok_or_else(|| ApiError::Conflict("no dialog is showing on this session".into()))?;
+    if let Some(expected) = req.expect_question.as_deref() {
+        if dialog.question.trim() != expected.trim() {
+            return Err(ApiError::Conflict(format!(
+                "the dialog on screen now asks {:?}, not {expected:?}; nothing was sent",
+                dialog.question
+            )));
+        }
+    }
+    let menu: Vec<String> = dialog
+        .options
+        .iter()
+        .map(|o| format!("{}. {}", o.number, o.label))
+        .collect();
+    let chosen = match (req.option, req.label.as_deref()) {
+        (Some(n), _) => dialog.options.iter().find(|o| o.number == n),
+        (None, Some(label)) => {
+            let needle = label.trim().to_lowercase();
+            let hits: Vec<_> = dialog
+                .options
+                .iter()
+                .filter(|o| o.label.to_lowercase().contains(&needle))
+                .collect();
+            if hits.len() > 1 {
+                return Err(ApiError::Conflict(format!(
+                    "{label:?} matches more than one option: {}",
+                    menu.join(" | ")
+                )));
+            }
+            hits.first().copied()
+        }
+        (None, None) => {
+            return Err(ApiError::BadRequest(
+                "give option (a number) or label".into(),
+            ));
+        }
+    }
+    .cloned()
+    .ok_or_else(|| {
+        ApiError::Conflict(format!(
+            "no such option on the dialog; it offers: {}",
+            menu.join(" | ")
+        ))
+    })?;
+    let keys = crate::approval::keys_to_choose(&dialog.options, chosen.number)
+        .ok_or_else(|| ApiError::Conflict("the option is not on the menu".into()))?;
+    // Arrows one write each, then Enter: a TUI reading a burst can merge an
+    // escape sequence with what follows it.
+    for key in keys.split_inclusive(['A', 'B', '\r']) {
+        session
+            .write_input(key.as_bytes())
+            .map_err(|e| ApiError::Pty(format!("write input: {e}")))?;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+    let mut dismissed = false;
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let reading = Arc::clone(&session);
+        let still = tokio::task::spawn_blocking(move || reading.current_dialog())
+            .await
+            .ok()
+            .flatten();
+        if still.is_none_or(|d| d.question != dialog.question) {
+            dismissed = true;
+            break;
+        }
+    }
+    Ok(Json(vogt_engine_contract::AnswerResult {
+        question: dialog.question,
+        kind: dialog.kind.to_string(),
+        chosen: vogt_engine_contract::ApprovalOption {
+            number: chosen.number,
+            label: chosen.label,
+            selected: true,
+        },
+        dismissed,
+    }))
+}
+
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(spec): Json<SessionSpec>,

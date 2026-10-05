@@ -69,3 +69,13 @@ def test_the_order_puts_what_needs_a_person_first() -> None:
         "waiting",
         "stalled",
     ]
+
+
+def test_a_startup_gate_is_named_as_one() -> None:
+    attention, reason = verdict(
+        activity="awaiting-approval",
+        approval_question="Is this a project you created or one you trust?",
+        approval_kind="folder-trust",
+    )
+    assert attention == "approval"
+    assert reason.startswith("stopped at a startup gate (folder trust)")
