@@ -180,6 +180,20 @@ shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
 `session.blocked` entry and a push. `session.start` takes `autopilot` (see
 [`AGENT_GUIDE.md`](AGENT_GUIDE.md)).
 
+Rows of `session.list` and `session.sweep` carry `running`. It holds the
+agent, model and reasoning effort the session is actually running, each with
+its basis:
+
+- `transcript`: what Claude Code or Codex recorded for its latest turn, so
+  a model the CLI defaulted to, or one switched mid-session, is the one shown;
+- `command`: a `--model`, `--effort`, `-m` or `-c model_reasoning_effort=`
+  flag;
+- `asked`: what `session.start` asked for.
+
+The row's own `model` and `effort` stay what was asked. An unknown is null,
+never guessed. `template` is also filled in for an unlinked session when the
+engine knows it.
+
 Rows of `session.list` and `session.sweep` carry `resources`: the RSS, CPU
 (percent of one core over the last ~10 s) and process count of the session's
 whole process tree, as the engine last sampled them, with `over_threshold`

@@ -123,6 +123,7 @@ import {
   holdRailOrder,
   sessionActivityAge,
   sessionStateWord,
+  sessionRuntimeHint,
   sortSessionsForRail,
 } from "./sessionRowModel";
 import { railSections, setRailSection } from "./railSections";
@@ -1666,7 +1667,7 @@ const App: Component = () => {
                     e.preventDefault();
                     setOpenMenuId(s.id);
                   }}
-                  title={`${s.name}\ncwd: ${s.cwd}`}
+                  title={`${s.name}\ncwd: ${s.cwd}${sessionRuntimeHint(s) ? `\n${sessionRuntimeHint(s)}` : ""}`}
                 >
                   <span class={`activity-dot ${activityClass(s)}${belledSessions().has(s.id) ? " bell" : ""}`} title={activityLabel(s.activity, s.exit_code)} />
                   <div class="session-row-body">

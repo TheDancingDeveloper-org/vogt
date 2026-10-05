@@ -993,6 +993,13 @@ export interface SessionSweepRow {
     last_output_at?: string | null;
     turn_started_at?: string | null;
     last_reply_excerpt?: string | null;
+    running?: {
+      agent?: string | null;
+      model?: string | null;
+      model_basis?: string | null;
+      effort?: string | null;
+      effort_basis?: string | null;
+    } | null;
     approval?: {
       question: string;
       kind?: string;

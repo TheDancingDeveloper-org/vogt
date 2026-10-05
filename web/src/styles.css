@@ -11896,3 +11896,4 @@ a.vogt-projects-tag:hover {
 .oversight-answers { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .oversight-answer { font-size: 12px; text-align: left; overflow-wrap: anywhere; }
 .oversight-answer--selected { border-color: var(--activity-waiting); }
+.oversight-runtime { font-size: 12px; color: var(--fg-muted); font-family: var(--font-mono, monospace); }

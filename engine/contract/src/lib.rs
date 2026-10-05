@@ -161,6 +161,11 @@ pub struct SessionSummary {
     /// Pinned awake: never hibernated by policy, and woken at boot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_awake: bool,
+    /// The session template it was started from, by the name the caller
+    /// gave (`claude`, `Codex (protected)`), when one was named (WI-919).
+    /// Absent for a session started with an explicit command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     /// What the session's process tree holds, as last sampled (WI-916).
     /// Absent until the first sample, for a hibernated or exited session,
     /// and off Linux.
