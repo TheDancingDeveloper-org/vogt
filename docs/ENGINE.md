@@ -1274,9 +1274,15 @@ which is the front door. Unset, nothing listens.
 | `vogt_session_starts_total` | counter | `origin`, `outcome` |
 | `vogt_session_launch_secret_reads_total` | counter | `mode`, `outcome` |
 
-Every label set is fixed by the code, never a session id or name. The p95 of
-a usable launch is
-`histogram_quantile(0.95, sum by (le) (rate(vogt_session_first_output_seconds_bucket[30m])))`.
+Every label set is fixed by the code, never a session id or name. For a
+session the launch wrapper starts, "usable" is its handover, so the p95 to
+watch is
+`histogram_quantile(0.95, sum by (le) (rate(vogt_session_launch_seconds_bucket[30m])))`.
+First output can come earlier than that (the wrapper prints as it goes), so
+`vogt_session_first_output_seconds` is the measure for `direct` sessions.
+
+The engine logs without colour when its stdout is not a terminal, so these
+`key=value` fields reach the log pipeline intact.
 
 ### Attach protocol
 
