@@ -92,11 +92,28 @@ pub struct Session {
     permission_mode: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
     stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
+    /// What runs first in the session: `agent-auth` when the launch wrapper
+    /// does (and will report its own stages), `direct` otherwise (WI-927).
+    launcher: &'static str,
+    /// The first byte of output has been seen and its timing recorded.
+    first_output_seen: AtomicBool,
+    /// The launch wrapper's report was accepted; a second is refused.
+    launch_reported: AtomicBool,
 }
 
 impl Session {
     pub fn name(&self) -> String {
         self.name.lock().clone()
+    }
+
+    /// `agent-auth` or `direct` (see the field).
+    pub fn launcher(&self) -> &'static str {
+        self.launcher
+    }
+
+    /// Claim the session's one launch report. True the first time only.
+    pub fn mark_launch_reported(&self) -> bool {
+        !self.launch_reported.swap(true, Ordering::AcqRel)
     }
 
     pub fn activity(&self) -> ActivityState {
@@ -817,6 +834,13 @@ pub fn spawn(
         template: Mutex::new(None),
         permission_mode: Mutex::new(None),
         stop: Mutex::new(None),
+        launcher: if spawning_agent_auth_helper {
+            "agent-auth"
+        } else {
+            "direct"
+        },
+        first_output_seen: AtomicBool::new(false),
+        launch_reported: AtomicBool::new(false),
     });
 
     spawn_reader_thread(
@@ -866,6 +890,12 @@ fn spawn_reader_thread(
                         let pos = pos_after - n as u64;
                         *session.last_output.lock() = Some(Instant::now());
                         *session.last_output_at.lock() = Some(time::OffsetDateTime::now_utc());
+                        if !session.first_output_seen.swap(true, Ordering::AcqRel) {
+                            crate::launch::record_first_output(
+                                &session,
+                                session.spawned_at.elapsed(),
+                            );
+                        }
 
                         if let Some(log) = history_log.as_mut() {
                             if let Err(e) = log.write_all(&data) {

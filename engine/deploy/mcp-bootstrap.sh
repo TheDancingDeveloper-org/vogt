@@ -26,6 +26,35 @@ unset _vogt_endpoint
 readonly VOGT_WRAPPER="/usr/local/bin/vogt-mcp"
 readonly VOGT_SRC="${VOGT_SRC:-$HOME/Working/Active/apps/vogt}"
 
+# Whether Claude Code already runs `name` with `command` (and `arg`, when
+# given), read straight from its config (WI-927). `claude mcp get` answers the
+# same question but starts node and health-checks the server, ~0.7 s a call,
+# and this script asks it several times on every session launch. Only a "yes"
+# is trusted: anything else (no jq, no file, a project-scope .mcp.json, a stale
+# entry) falls through to the CLI path below, which is unchanged.
+claude_runs() {
+    local name="$1" command="$2" arg="${3:-}" config="$HOME/.claude.json"
+    command -v jq >/dev/null 2>&1 && [[ -f "$config" ]] || return 1
+    jq -e --arg n "$name" --arg c "$command" --arg a "$arg" --arg cwd "$PWD" '
+        [.mcpServers[$n]?, .projects[$cwd].mcpServers[$n]?]
+        | map(select(. != null))
+        | length > 0 and all(.command == $c
+            and ($a == "" or ((.args // []) | index($a)) != null))' \
+        "$config" >/dev/null 2>&1
+}
+
+# Whether `name` appears in no Claude Code config this session can see: user
+# or local scope in ~/.claude.json, or the project's .mcp.json. Lets an
+# unwanted read-only server be skipped without asking the CLI to look for it.
+claude_lacks() {
+    local name="$1" config="$HOME/.claude.json"
+    command -v jq >/dev/null 2>&1 && [[ -f "$config" ]] || return 1
+    jq -e --arg n "$name" --arg cwd "$PWD" '
+        (.mcpServers[$n]? == null) and (.projects[$cwd].mcpServers[$n]? == null)' \
+        "$config" >/dev/null 2>&1 || return 1
+    [[ ! -f "$PWD/.mcp.json" ]] || ! grep -qF "\"$name\"" "$PWD/.mcp.json"
+}
+
 install_vogt_bridge() {
     # Vogt is not on PyPI, so the image cannot install the bridge at build
     # time. The workspace checkout is the only source. When vogt goes public
@@ -52,8 +81,9 @@ install_vogt_codex() {
     # check pins whatever URL was current when the client was first registered,
     # so a moved endpoint keeps failing to hand-shake and re-running changes
     # nothing.
-    if codex mcp get vogt >/dev/null 2>&1; then
-        if codex mcp get vogt 2>/dev/null | grep -qF "$VOGT_ENDPOINT"; then
+    local registered
+    if registered="$(codex mcp get vogt 2>/dev/null)"; then
+        if grep -qF "$VOGT_ENDPOINT" <<<"$registered"; then
             return 0
         fi
         codex mcp remove vogt >/dev/null 2>&1 || return 0
@@ -70,6 +100,7 @@ install_vogt_claude() {
     # into a new image) leaves a stale `command` that Claude fails to spawn
     # (`ENOENT`), and re-running never heals it. Mirror the codex branch:
     # replace the registration unless its command already is the current wrapper.
+    claude_runs vogt "$VOGT_WRAPPER" && return 0
     if claude mcp get vogt >/dev/null 2>&1; then
         if claude mcp get vogt 2>/dev/null | grep -qF "$VOGT_WRAPPER"; then
             return 0
@@ -161,6 +192,7 @@ readonly_claude() {
     local name="$1" arg="$2"
     command -v claude >/dev/null 2>&1 || return 0
     if [[ "$3" != "yes" ]]; then
+        claude_lacks "$name" && return 0
         if claude mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER"; then
             claude mcp remove --scope user "$name" >/dev/null 2>&1 || true
         fi
@@ -168,6 +200,7 @@ readonly_claude() {
     fi
     # Claude Code hands a stdio server the session's own environment, so the
     # registration needs no `-e`: an `-e TOKEN=...` would store the value.
+    claude_runs "$name" "$READONLY_WRAPPER" "$arg" && return 0
     if claude mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER"; then
         return 0
     fi

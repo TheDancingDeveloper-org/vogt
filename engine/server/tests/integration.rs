@@ -77,6 +77,7 @@ fn test_config() -> Config {
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
+        metrics_bind: None,
     }
 }
 
@@ -9480,4 +9481,131 @@ async fn a_requested_stop_is_stopped_and_a_crash_is_still_errored() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// WI-927: a session's launch wrapper reports its stages to the engine, which
+/// accepts the report once, from that session's own broker token only, and
+/// keeps the timings as metrics — the real `report_launch` from
+/// `agent-auth.sh`, not a hand-built request.
+#[tokio::test]
+async fn a_launch_report_from_the_wrapper_is_accepted_once_and_measured() {
+    if std::process::Command::new("jq")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: the launch report is built with jq");
+        return;
+    }
+    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../deploy/agent-auth.sh");
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let launch = format!(
+        "source '{}'; begin_launch shell; launch_stage login 12 ok; \
+         PROJECT_MODE[p-1]=bulk; PROJECT_MS[p-1]=40; PROJECT_OUTCOME[p-1]=ok; \
+         PROJECT_NAMES[p-1]='GH:GITHUB_PAT:1 X:MISSING_ONE:0'; \
+         launch_stage bootstrap 250 ok; report_launch ok; echo reported-$?; sleep 30",
+        script.display()
+    );
+    let id = client
+        .post(format!("{base}/api/sessions"))
+        // The harness binds an ephemeral port, so the broker's advertised
+        // loopback address (from the configured bind) is pointed at it here.
+        .json(&json!({
+            "name": "launch-report",
+            "command": ["/bin/bash", "-c", launch],
+            "env": [["VOGT_ENGINE_BROKER_URL", base]],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    live_output_containing(&client, &base, &id, &["reported-0"]).await;
+
+    // Accepted: the session's one report is now claimed.
+    let session = state.sessions.get(id.parse().unwrap()).unwrap();
+    assert!(
+        !session.mark_launch_reported(),
+        "the wrapper's report should have been accepted"
+    );
+    let text = vogt_engine_server::metrics::metrics().render();
+    for expected in [
+        "vogt_session_launch_seconds_count{command=\"shell\",outcome=\"ok\"}",
+        "vogt_session_launch_stage_seconds_count{stage=\"login\"}",
+        "vogt_session_launch_stage_seconds_count{stage=\"secrets\"}",
+        "vogt_session_launch_stage_seconds_count{stage=\"bootstrap\"}",
+        "vogt_session_launch_secret_reads_total{mode=\"bulk\",outcome=\"ok\"}",
+        "vogt_session_first_output_seconds_count{launcher=\"direct\"}",
+        "vogt_session_starts_total{origin=\"api\",outcome=\"ok\"}",
+    ] {
+        assert!(text.contains(expected), "missing {expected} in\n{text}");
+    }
+
+    // Nobody else can report: no token, or a token the engine never issued.
+    let anonymous = reqwest::Client::new();
+    for bearer in [None, Some("not-a-broker-token")] {
+        let mut request = anonymous
+            .post(format!("{base}/api/agent-auth/launch-report"))
+            .json(&json!({ "outcome": "ok", "total_ms": 1 }));
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+/// WI-927: `/metrics` is served on its own listener, never on the API port.
+#[tokio::test]
+async fn metrics_are_served_on_their_own_listener_only() {
+    let (base, _h) = boot().await;
+    // The API port answers /metrics with the GUI shell, never the metrics.
+    let on_api = reqwest::Client::new()
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(
+        !on_api.contains("vogt_session_"),
+        "the API port must not serve /metrics"
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, vogt_engine_server::metrics::router())
+            .await
+            .unwrap()
+    });
+    let response = reqwest::get(format!("http://{addr}/metrics"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("text/plain; version=0.0.4"));
+    let body = response.text().await.unwrap();
+    assert!(
+        body.contains("# TYPE vogt_session_first_output_seconds histogram"),
+        "{body}"
+    );
 }

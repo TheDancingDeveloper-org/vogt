@@ -419,6 +419,10 @@ pub struct Config {
     /// summary (`resources`). Unset flags nothing; usage is reported either
     /// way.
     pub session_rss_warn_bytes: Option<u64>,
+    /// `ENGINE_METRICS_ADDR` (`0.0.0.0:9464`): where `GET /metrics` is
+    /// served, on a listener of its own (`crate::metrics`). Unset, nothing
+    /// listens.
+    pub metrics_bind: Option<SocketAddr>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -873,6 +877,14 @@ pub fn load(
                     ))
                 })?)
             }
+            _ => None,
+        },
+        metrics_bind: match engine_env("ENGINE_METRICS_ADDR") {
+            Ok(v) if !v.trim().is_empty() => Some(v.trim().parse().map_err(|_| {
+                ApiError::Config(format!(
+                    "ENGINE_METRICS_ADDR={v:?} is not an address like 0.0.0.0:9464"
+                ))
+            })?),
             _ => None,
         },
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")

@@ -115,6 +115,79 @@ AGENT_AUTH_WRITABLE_VARS=""
 # names no manifest entry aliases nothing, and must not do so in silence.
 GH_TOKEN_ALIASED=0
 
+# Launch timing (WI-927). A session launch is `run`/`shell`; each stage of it
+# is timed here and reported once, at handover or at `die`, to the engine
+# (`POST /api/agent-auth/launch-report`), which logs it per stage, audits the
+# secret names read, and keeps the durations as metrics. Values never enter
+# any of it.
+LAUNCH_REPORTING=0
+LAUNCH_COMMAND=""
+LAUNCH_T0=""
+# One JSON object per finished stage, newline-separated; assembled by jq.
+LAUNCH_STAGES=""
+# A launch slower than this says so in the session itself.
+readonly SLOW_LAUNCH_MS=5000
+# Each project's secrets, fetched once per launch (`prefetch_project`):
+# project id -> {name: value} as JSON. Held in memory only, never written out.
+declare -A PROJECT_SECRETS=()
+# Per project: how it was fetched (`bulk`, or `cli` one secret at a time),
+# how long that took, and which names were read from it — for the report.
+declare -A PROJECT_MODE=() PROJECT_MS=() PROJECT_OUTCOME=() PROJECT_NAMES=()
+
+# Microseconds since the epoch, from bash's own clock (no fork).
+now_us() {
+    local t="${EPOCHREALTIME/./}"
+    printf '%s' "${t/,/}"
+}
+
+# Milliseconds since a `now_us` stamp.
+ms_since() {
+    printf '%s' $(( ($(now_us) - $1) / 1000 ))
+}
+
+# Record one finished stage for the report.
+launch_stage() {
+    command -v jq >/dev/null 2>&1 || return 0
+    LAUNCH_STAGES+="$(jq -nc --arg stage "$1" --argjson ms "$2" --arg outcome "$3" \
+        '{stage: $stage, ms: $ms, outcome: $outcome}')"$'\n'
+}
+
+# Send the launch report to the engine. Best-effort and short: the broker is
+# on loopback, and a launch must never wait on, or fail because of, its own
+# telemetry. Without a broker (not an engine session) there is no one to tell.
+report_launch() {
+    local outcome="$1" error="${2:-}" total_ms stages p body
+    [[ -n "$LAUNCH_T0" ]] || return 0
+    total_ms="$(ms_since "$LAUNCH_T0")"
+    # Said in the session too when it was slow, so the person waiting sees why.
+    if (( total_ms >= SLOW_LAUNCH_MS )); then
+        printf 'agent-auth: launch took %d.%ds; the engine log (vogt::launch) has each stage\n' \
+            $(( total_ms / 1000 )) $(( total_ms % 1000 / 100 )) >&2
+    fi
+    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" && -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || return 0
+    command -v jq >/dev/null 2>&1 || return 0
+    command -v curl >/dev/null 2>&1 || return 0
+    for p in "${!PROJECT_MODE[@]}"; do
+        LAUNCH_STAGES+="$(jq -nc --arg project "$p" --arg mode "${PROJECT_MODE[$p]}" \
+            --argjson ms "${PROJECT_MS[$p]:-0}" --arg outcome "${PROJECT_OUTCOME[$p]:-ok}" \
+            --arg names "${PROJECT_NAMES[$p]:-}" \
+            '{stage: "secrets", project: $project, mode: $mode, ms: $ms, outcome: $outcome,
+              secrets: ($names | split(" ") | map(select(length > 0) | split(":")
+                        | {var: .[0], name: .[1], found: (.[2] == "1")}))}')"$'\n'
+    done
+    stages="$(printf '%s' "$LAUNCH_STAGES" | jq -sc '.')" || return 0
+    body="$(jq -nc --arg outcome "$outcome" --arg error "${error:0:300}" \
+        --arg command "$LAUNCH_COMMAND" --argjson total_ms "$total_ms" \
+        --argjson stages "$stages" \
+        '{outcome: $outcome, command: $command, total_ms: $total_ms, stages: $stages}
+         + (if $error == "" then {} else {error: $error} end)')" || return 0
+    curl -sS --max-time 2 -o /dev/null -X POST \
+        -H @<(printf 'Authorization: Bearer %s\n' "$VOGT_ENGINE_BROKER_TOKEN") \
+        -H 'Content-Type: application/json' --data-binary @- \
+        "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/launch-report" <<<"$body" \
+        >/dev/null 2>&1 || true
+}
+
 # Record a granted credential variable name for the breadcrumb. Names only:
 # no value ever leaves this helper through it.
 grant_var() {
@@ -159,6 +232,11 @@ EOF
 
 die() {
     printf 'vogt-agent-auth: %s\n' "$*" >&2
+    # A launch that fails still says how far it got and why (WI-927).
+    if [[ "$LAUNCH_REPORTING" == "1" ]]; then
+        LAUNCH_REPORTING=0
+        report_launch failed "$*"
+    fi
     exit 1
 }
 
@@ -231,6 +309,78 @@ get_secret() {
         --env "$INFISICAL_ENV" \
         --token "$access_token" \
         --plain --silent
+}
+
+# Every secret in one project, as a JSON object {name: value}, in ONE request
+# (WI-927). The pluggable read half for a launch, beside `get_secret` for a
+# single late fetch.
+#
+# Why not `get_secret` per entry: each `infisical` CLI run spends ~650 ms after
+# the API has answered, sending usage telemetry to the vendor over the public
+# internet, and has no switch to stop it. A launch made fifteen such calls in
+# series — ~10 s on a good day, 85–145 s when that egress was slow — before
+# the session's shell or agent could start. The CLI's own `secrets get`
+# already downloads the whole project to return one value; this is the same
+# request (`GET /api/v4/secrets`, references expanded, imports included), made
+# once. The token goes in a header read from a file descriptor, never argv.
+get_project_secrets() {
+    local access_token="$1" project_id="$2" base
+    command -v curl >/dev/null 2>&1 || return 1
+    command -v jq >/dev/null 2>&1 || return 1
+    base="${INFISICAL_API_URL%/}"
+    base="${base%/api}"
+    curl -sS --fail --max-time 20 \
+        -H @<(printf 'Authorization: Bearer %s\n' "$access_token") \
+        --get "$base/api/v4/secrets" \
+        --data-urlencode "projectId=$project_id" \
+        --data-urlencode "environment=$INFISICAL_ENV" \
+        --data-urlencode "secretPath=/" \
+        --data "expandSecretReferences=true&includeImports=true&recursive=false" \
+        2>/dev/null \
+    | jq -ce '
+        # Imported secrets first, so the project'"'"'s own keys win, as in the CLI.
+        [((.imports // [])[] | .secrets // [])[], (.secrets // [])[]]
+        | map(select(.secretValueHidden != true))
+        | reduce .[] as $s ({}; .[$s.secretKey] = $s.secretValue)'
+}
+
+# Fetch a project once per launch, in this shell (not a subshell, so the
+# cache and the timing survive), falling back to per-secret CLI reads when the
+# bulk request is not possible here. Never fails: a project that cannot be
+# read leaves each lookup empty, and the manifest's own required/optional
+# rule decides what that means.
+prefetch_project() {
+    local access_token="$1" project="$2" started json
+    [[ -n "${PROJECT_MODE[$project]:-}" ]] && return 0
+    started="$(now_us)"
+    if json="$(get_project_secrets "$access_token" "$project")"; then
+        PROJECT_SECRETS[$project]="$json"
+        PROJECT_MODE[$project]=bulk
+        PROJECT_OUTCOME[$project]=ok
+    else
+        PROJECT_MODE[$project]=cli
+        PROJECT_OUTCOME[$project]=bulk-failed
+    fi
+    PROJECT_MS[$project]="$(ms_since "$started")"
+}
+
+# Resolve one secret into the shell variable named by $1 (assigned, not
+# exported). From the project's prefetched JSON when there is one; otherwise
+# one CLI read, timed into the project's total.
+resolve_secret() {
+    local _into="$1" _token="$2" _project="$3" _name="$4" _var="$5" _value _started _found=0
+    prefetch_project "$_token" "$_project"
+    if [[ "${PROJECT_MODE[$_project]}" == "bulk" ]]; then
+        _value="$(jq -r --arg n "$_name" 'if has($n) then .[$n] else empty end' \
+            <<<"${PROJECT_SECRETS[$_project]}")"
+    else
+        _started="$(now_us)"
+        _value="$(get_secret "$_token" "$_project" "$_name" || true)"
+        PROJECT_MS[$_project]=$(( ${PROJECT_MS[$_project]:-0} + $(ms_since "$_started") ))
+    fi
+    [[ -n "$_value" ]] && _found=1
+    PROJECT_NAMES[$_project]+="${PROJECT_NAMES[$_project]:+ }$_var:$_name:$_found"
+    printf -v "$_into" '%s' "$_value"
 }
 
 # Write one secret value, reading the value from stdin (never argv — this is the
@@ -444,7 +594,7 @@ load_manifest_secrets() {
             AGENT_AUTH_ONDEMAND_VARS+="${AGENT_AUTH_ONDEMAND_VARS:+ }$var"
             continue
         fi
-        value="$(get_secret "$access_token" "$project" "$name" || true)"
+        resolve_secret value "$access_token" "$project" "$name" "$var"
         if [[ -z "$value" ]] && ! flags_contain "${flag:-}" optional; then
             die "Infisical secret $name is missing or empty"
         fi
@@ -467,8 +617,13 @@ load_manifest_secrets() {
 load_agent_environment() {
     require_identity
     require_command infisical
-    local access_token
-    access_token="$(mint_access_token)" || die "Infisical universal-auth login failed"
+    local access_token started
+    started="$(now_us)"
+    access_token="$(mint_access_token)" || {
+        launch_stage login "$(ms_since "$started")" failed
+        die "Infisical universal-auth login failed"
+    }
+    launch_stage login "$(ms_since "$started")" ok
 
     # Retired release-automation names whose values are revoked. If they are
     # inherited they masquerade as a GitHub credential and every `gh` call
@@ -505,7 +660,8 @@ load_agent_environment() {
         # Deliberately unguarded on emptiness: absent is a supported state —
         # an instance may not be deployed yet — and `check` reports that as
         # `skip`, never as success and never as failure.
-        VOGT_HTTP_TOKEN="$(get_secret "$access_token" "$TOKEN_PROJECT_ID" "$VOGT_SECRET_NAME" || true)"
+        resolve_secret VOGT_HTTP_TOKEN "$access_token" "$TOKEN_PROJECT_ID" \
+            "$VOGT_SECRET_NAME" VOGT_HTTP_TOKEN
         export VOGT_HTTP_TOKEN
     else
         unset VOGT_HTTP_TOKEN 2>/dev/null || true
@@ -521,7 +677,9 @@ load_agent_environment() {
     fi
 
     # Register Vogt with the agent clients present in the image.
+    started="$(now_us)"
     /usr/local/bin/vogt-mcp-bootstrap
+    launch_stage bootstrap "$(ms_since "$started")" ok
 
     export GIT_ASKPASS=/usr/local/bin/vogt-git-askpass
     export GIT_TERMINAL_PROMPT=0
@@ -652,6 +810,14 @@ check_access() {
     fi
 }
 
+# The start of a session launch: from here to the handover is what the
+# launch report measures.
+begin_launch() {
+    LAUNCH_COMMAND="$1"
+    LAUNCH_T0="$(now_us)"
+    LAUNCH_REPORTING=1
+}
+
 main() {
     case "${1:-}" in
         check)
@@ -661,12 +827,16 @@ main() {
             shift
             [[ "${1:-}" == "--" ]] && shift
             [[ $# -gt 0 ]] || die "run requires a command"
+            begin_launch run
             load_agent_environment
+            report_launch ok
             trap cleanup_auth_artifacts EXIT
             "$@"
             ;;
         shell)
+            begin_launch shell
             load_agent_environment
+            report_launch ok
             trap cleanup_auth_artifacts EXIT
             "${SHELL:-/bin/bash}" -l
             ;;

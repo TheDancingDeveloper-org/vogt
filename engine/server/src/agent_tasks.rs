@@ -5184,6 +5184,7 @@ mod tests {
             hibernation: crate::hibernate_policy::Policy::default(),
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,
+            metrics_bind: None,
         }
     }
 

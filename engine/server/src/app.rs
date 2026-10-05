@@ -449,7 +449,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // `secret_broker::store`. The engine bearer does not open either.
     let broker_routes = Router::new()
         .route(secret_broker::FETCH_ROUTE, post(secret_broker::fetch))
-        .route(secret_broker::STORE_ROUTE, post(secret_broker::store));
+        .route(secret_broker::STORE_ROUTE, post(secret_broker::store))
+        // The launch wrapper's report of its own stages (WI-927): the same
+        // caller and the same per-session token as the broker.
+        .route(crate::launch::REPORT_ROUTE, post(crate::launch::report));
 
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
@@ -592,9 +595,13 @@ fn build_cors(origins: &[String]) -> CorsLayer {
 
 pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     let bind = cfg.bind;
+    let metrics_bind = cfg.metrics_bind;
     let (router, state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(addr = %bind, "vogt-engine listening");
+    if let Some(addr) = metrics_bind {
+        crate::metrics::spawn_listener(addr);
+    }
     // Graceful shutdown: the engine had no shutdown path, so every
     // redeploy SIGKILLed the PTYs and nothing was archived. Kubernetes/compose
     // send SIGTERM with a grace window before the KILL; we use it to drain every

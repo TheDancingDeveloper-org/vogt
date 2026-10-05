@@ -321,6 +321,12 @@ impl SessionRegistry {
         }
 
         // Names need not be unique — duplicates are merely confusing, not invalid.
+        let launch_origin = match &creating {
+            Creating::Fresh(Origin::Api) => crate::launch::Origin::Api,
+            Creating::Fresh(Origin::AgentTask) => crate::launch::Origin::AgentTask,
+            Creating::Wake(_) => crate::launch::Origin::Wake,
+        };
+        let spawn_started = std::time::Instant::now();
         let spawned = pty::spawn(
             id,
             &spec,
@@ -336,6 +342,13 @@ impl SessionRegistry {
             },
             self.bus.clone(),
             self.history.clone(),
+        );
+        crate::launch::record_start(
+            launch_origin,
+            spawned.as_ref().map(|s| s.session.as_ref()),
+            &spec.name,
+            spec.template.as_deref(),
+            spawn_started.elapsed(),
         );
         let spawned = match spawned {
             Ok(spawned) => spawned,
