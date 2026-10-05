@@ -1157,6 +1157,21 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   A hook that keeps a turn going reads as `running` and is exempt. A value
   that does not parse stops the engine at startup.
 
+#### Resource use
+
+Every 10 s the engine reads `/proc/*/stat` once and sums, for each live
+session, the subtree below its PTY child. The figures are resident memory,
+CPU used since the previous sample (in percent of one core, so a busy tree
+can read above 100), and process count. The result rides on the summary as
+`resources` and goes out as one `session-resources` event per round. This is
+visibility only, not a limit (WI-916; enforcement is WI-895). It lets you see
+which session holds the memory from Vogt itself, before the host's OOM killer
+chooses. RSS counts shared pages once per process, so a tree that shares a
+lot reads high. A process that double-forks away to init is no longer
+counted, the same as in `ps --forest`. `ENGINE_SESSION_RSS_WARN` (`8GiB`)
+sets `resources.over_threshold` on any session at or over it. The core's
+`session.list` takes `order: "rss"` to put the heaviest first.
+
 ### Attach protocol
 
 `GET /api/sessions/:id/attach` — WebSocket upgrade. It sits outside the bearer
@@ -1249,7 +1264,8 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
 - `GET /api/events` -> `text/event-stream` of `ServerEvent`, one JSON object
   per `data:` line. Variants are `session-created`, `session-renamed`,
   `session-killed`, `session-hibernated` (`{id, trigger}`), `session-woken`
-  (`{id}`), `activity` (`{id, state, activity_changed_at}`; `state`
+  (`{id}`), `session-resources` (`{samples: [{id, resources}]}`, every
+  10 s while sessions run; see [Resource use](#resource-use)), `activity` (`{id, state, activity_changed_at}`; `state`
   is one of the activity states above, `exited`/`errored` once the child has
   exited),
   `vogt.changed`, and the agent-task steering

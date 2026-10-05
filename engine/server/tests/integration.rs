@@ -76,6 +76,7 @@ fn test_config() -> Config {
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
+        session_rss_warn_bytes: None,
     }
 }
 
@@ -9075,4 +9076,59 @@ async fn the_sweep_returns_every_session_with_its_screen_tail_in_one_call() {
             .status(),
         StatusCode::BAD_REQUEST
     );
+}
+
+#[tokio::test]
+async fn a_sessions_process_tree_is_measured_and_rides_on_its_summary() {
+    use vogt_engine_server::resources::Sampler;
+
+    let (tmp, cfg, _stub) = hibernation_sandbox();
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // A tree of three: the stub, a child holding ~32 MiB, and a sleeper.
+    let script = "#!/bin/sh\nsleep 300 &\n\
+                  python3 -c 'import time; b=bytearray(32<<20); time.sleep(300)' &\n\
+                  printf 'helper=[%s]\\n> ' \"$!\"\nwait\n";
+    let ids = start_stub_agents(
+        &client,
+        &base,
+        &tmp.path().join("agents"),
+        &[("heavy", script)],
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut events = state.bus.subscribe();
+    let mut sampler = Sampler::new(Some(16 << 20));
+    sampler.run_once(&state).await;
+
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = listed.iter().find(|s| s["id"] == ids[0].as_str()).unwrap();
+    let resources = &row["resources"];
+    assert!(
+        resources["rss_bytes"].as_u64().unwrap() >= 32 << 20,
+        "{resources}"
+    );
+    assert!(resources["processes"].as_u64().unwrap() >= 3, "{resources}");
+    assert_eq!(resources["over_threshold"], true);
+    let event = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Ok(ServerEvent::SessionResources { samples }) = events.recv().await {
+                return samples;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(event.iter().any(|s| s.id.to_string() == ids[0]));
 }

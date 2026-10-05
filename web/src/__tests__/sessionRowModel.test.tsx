@@ -145,3 +145,20 @@ describe("holdRailOrder (frozen rail while a menu is open)", () => {
     expect(holdRailOrder(previous, current).map((s) => s.id)).toEqual(["b", "c"]);
   });
 });
+
+describe("resource words", () => {
+  it("formats memory the way a person reads it and marks a heavy session", async () => {
+    const { formatBytes, sessionResourceWord, sessionStateWord } = await import("../sessionRowModel");
+    expect(formatBytes(512 * 1024 ** 2)).toBe("512 MiB");
+    expect(formatBytes(1.25 * 1024 ** 3)).toBe("1.3 GiB");
+    expect(formatBytes(50 * 1024 ** 3)).toBe("50 GiB");
+    const heavy = {
+      ...session({ id: "h", activity: "running" }),
+      resources: { rss_bytes: 50 * 1024 ** 3, cpu_pct: 380.4, processes: 9, sampled_at: "x", over_threshold: true },
+    };
+    expect(sessionResourceWord(heavy)).toBe("⚠ 50 GiB · 380% CPU");
+    expect(sessionStateWord(heavy, 0)).toContain("⚠ 50 GiB");
+    expect(sessionResourceWord({ ...heavy, activity: "hibernated" })).toBeNull();
+    expect(sessionResourceWord(session({ id: "n" }))).toBeNull();
+  });
+});

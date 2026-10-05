@@ -130,6 +130,9 @@ services:
       # size (`2GiB`). docs/ENGINE.md, "Hibernation".
       ENGINE_HIBERNATE_IDLE_AFTER: "${ENGINE_HIBERNATE_IDLE_AFTER:-}"
       ENGINE_HIBERNATE_MEMAVAILABLE_BELOW: "${ENGINE_HIBERNATE_MEMAVAILABLE_BELOW:-}"
+      # Flag a session whose process tree holds this much resident memory
+      # (`8GiB`). Every session's RSS/CPU is shown regardless.
+      ENGINE_SESSION_RSS_WARN: "${ENGINE_SESSION_RSS_WARN:-}"
 
       # One value both starts the core and tells the engine where to proxy.
       # Loopback means "the core is ours to run", so the entrypoint supervises

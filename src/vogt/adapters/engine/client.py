@@ -151,6 +151,8 @@ class EngineSession:
     hibernation: EngineHibernation | None = None
     #: Pinned awake: never hibernated by the engine's policy.
     keep_awake: bool = False
+    #: The process tree's last resource sample (WI-916).
+    resources: EngineResources | None = None
 
     @property
     def hibernated(self) -> bool:
@@ -180,6 +182,35 @@ class EngineSession:
             conversation_id=_optional_str(conversation.get("id")),
             hibernation=EngineHibernation.from_payload(payload.get("hibernation")),
             keep_awake=payload.get("keep_awake") is True,
+            resources=EngineResources.from_payload(payload.get("resources")),
+        )
+
+
+@dataclass(frozen=True)
+class EngineResources:
+    """What a session's process tree held at the engine's last sample."""
+
+    rss_bytes: int
+    cpu_pct: float
+    processes: int
+    sampled_at: str
+    over_threshold: bool = False
+
+    @classmethod
+    def from_payload(cls, payload: object) -> EngineResources | None:
+        if not isinstance(payload, dict):
+            return None
+        rss = payload.get("rss_bytes")
+        cpu = payload.get("cpu_pct")
+        procs = payload.get("processes")
+        if not isinstance(rss, int):
+            return None
+        return cls(
+            rss_bytes=rss,
+            cpu_pct=float(cpu) if isinstance(cpu, (int, float)) else 0.0,
+            processes=procs if isinstance(procs, int) else 0,
+            sampled_at=str(payload.get("sampled_at", "")),
+            over_threshold=payload.get("over_threshold") is True,
         )
 
 

@@ -11887,3 +11887,8 @@ a.vogt-projects-tag:hover {
   max-width: 100%;
   white-space: pre;
 }
+
+.oversight-controls { display: flex; align-items: center; gap: 12px; }
+.oversight-controls label { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+.oversight-resources { font-size: 12px; font-variant-numeric: tabular-nums; color: var(--fg-muted); }
+.oversight-resources--over { color: var(--activity-errored); font-weight: 600; }

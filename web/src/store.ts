@@ -334,6 +334,16 @@ export function startEventStream(): void {
         case "activity":
           updateActivity(ev.id, ev.state, ev.activity_changed_at);
           break;
+        case "session-resources":
+          setStore(
+            produce((s) => {
+              for (const sample of ev.samples) {
+                const sess = s.sessions[sample.id];
+                if (sess) sess.resources = sample.resources;
+              }
+            }),
+          );
+          break;
         case "session-hibernated":
         case "session-woken":
           // The summary changes shape (hibernation, alive, exit code), so

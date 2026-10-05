@@ -9,6 +9,7 @@
 import { Component, For, Show, createEffect, createSignal, onCleanup, onMount, on } from "solid-js";
 import { sessionsStore } from "./store";
 import { SafeSnippet } from "./SafeSnippet";
+import { formatBytes } from "./sessionRowModel";
 import { VogtUnavailable, sweepSessions, type SessionSweepResult, type SessionSweepRow } from "./vogtApi";
 
 interface Props {
@@ -47,6 +48,14 @@ const Oversight: Component<Props> = (props) => {
   const [problem, setProblem] = createSignal<string | null>(null);
   const [loading, setLoading] = createSignal(false);
   const [now, setNow] = createSignal(Date.now());
+  const [heaviestFirst, setHeaviestFirst] = createSignal(false);
+  const rows = () => {
+    const all = result()?.rows ?? [];
+    if (!heaviestFirst()) return all;
+    return [...all].sort(
+      (a, b) => (b.session.resources?.rss_bytes ?? -1) - (a.session.resources?.rss_bytes ?? -1),
+    );
+  };
   let inFlight: AbortController | null = null;
 
   const refresh = async () => {
@@ -125,9 +134,19 @@ const Oversight: Component<Props> = (props) => {
             </Show>
           </p>
         </div>
-        <button type="button" onClick={() => void refresh()} disabled={loading()}>
-          Refresh
-        </button>
+        <div class="oversight-controls">
+          <label>
+            <input
+              type="checkbox"
+              checked={heaviestFirst()}
+              onChange={(event) => setHeaviestFirst(event.currentTarget.checked)}
+            />
+            Heaviest first
+          </label>
+          <button type="button" onClick={() => void refresh()} disabled={loading()}>
+            Refresh
+          </button>
+        </div>
       </header>
       <Show when={problem()}>
         {(message) => <p class="oversight-problem" role="status">{message()}</p>}
@@ -136,7 +155,7 @@ const Oversight: Component<Props> = (props) => {
         <p class="oversight-empty">No live or hibernated sessions.</p>
       </Show>
       <ol class="oversight-rows">
-        <For each={result()?.rows ?? []}>
+        <For each={rows()}>
           {(row) => (
             <li class={`oversight-row oversight-row--${row.attention}`}>
               <div class="oversight-row-head">
@@ -152,6 +171,17 @@ const Oversight: Component<Props> = (props) => {
                 </button>
                 <Show when={row.session.work_item}>
                   {(ref) => <a class="oversight-ref" href={`#/w/${ref()}`}>{ref()}</a>}
+                </Show>
+                <Show when={row.session.resources}>
+                  {(r) => (
+                    <span
+                      class={`oversight-resources${r().over_threshold ? " oversight-resources--over" : ""}`}
+                      title={`${r().processes} processes`}
+                    >
+                      {r().over_threshold ? "⚠ " : ""}
+                      {formatBytes(r().rss_bytes)} · {Math.round(r().cpu_pct)}% CPU
+                    </span>
+                  )}
                 </Show>
                 <span class="oversight-when">
                   {ago(row.session.last_output_at, now()) ?? ""}
