@@ -107,3 +107,29 @@ describe("answering from the board", () => {
     await waitFor(() => expect(answer).toHaveBeenCalledWith("uuid-1", 2, "Trust?"));
   });
 });
+
+describe("what a session is running", () => {
+  it("words the resolved runtime, falling back to the template", async () => {
+    const { runtimeWord } = await import("../Oversight");
+    const base = ROW({}).session;
+    expect(
+      runtimeWord({ ...base, running: { agent: "codex", model: "gpt-5.6", effort: "high" } }),
+    ).toBe("codex · gpt-5.6 · effort high");
+    expect(runtimeWord({ ...base, template: "Shell" })).toBe("Shell");
+    expect(runtimeWord(base)).toBeNull();
+    const { sessionRuntimeHint } = await import("../sessionRowModel");
+    expect(
+      sessionRuntimeHint({
+        id: "x",
+        name: "x",
+        activity: "idle",
+        exit_code: null,
+        scrollback_bytes: 0,
+        cwd: "/w",
+        created_at: "",
+        template: "claude",
+        command: "vogt-agent-auth run -- claude --model claude-opus-5-5",
+      }),
+    ).toBe("template claude · claude · model claude-opus-5-5");
+  });
+});

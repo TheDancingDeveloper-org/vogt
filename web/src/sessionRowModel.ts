@@ -66,6 +66,23 @@ export function sessionResourceWord(s: SessionSummary): string | null {
   return r.cpu_pct >= 1 ? `${memory} · ${Math.round(r.cpu_pct)}% CPU` : memory;
 }
 
+/** "template claude · codex · model gpt-5.6", from what the engine knows:
+ *  the template it was started from and the agent and model on its command
+ *  line. The model an agent actually ran is the core's to resolve from its
+ *  transcript (`session.list` → `running`, shown on the Oversight board). */
+export function sessionRuntimeHint(s: SessionSummary): string | null {
+  const words = (s.command ?? "").split(/\s+/);
+  const agent = words.map((w) => w.split("/").pop() ?? "").find((w) => ["claude", "codex", "opencode"].includes(w));
+  const flag = words.findIndex((w) => w === "--model" || w === "-m");
+  const model = flag >= 0 ? words[flag + 1] : words.find((w) => w.startsWith("--model="))?.slice(8);
+  const parts = [
+    s.template ? `template ${s.template}` : null,
+    agent ?? null,
+    model ? `model ${model}` : null,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(" · ") : null;
+}
+
 /** The row's state word beside the dot: "waiting for input · 40s",
  *  "running · 6m". Colour is never the only signal, so this line exists
  *  whether or not the age is known. */

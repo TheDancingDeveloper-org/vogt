@@ -38,6 +38,18 @@ const ATTENTION_LABEL: Record<SessionSweepRow["attention"], string> = {
 };
 
 /** "3 min ago", "just now", or null when the time is absent or unreadable. */
+/** "claude · claude-opus-5-5 · effort high", from the resolved runtime and
+ *  template; null when nothing is known. */
+export function runtimeWord(session: SessionSweepRow["session"]): string | null {
+  const r = session.running;
+  const parts = [
+    r?.agent ?? session.template ?? null,
+    r?.model ?? null,
+    r?.effort ? `effort ${r.effort}` : null,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length ? parts.join(" · ") : null;
+}
+
 export function ago(iso: string | null | undefined, now: number): string | null {
   if (!iso) return null;
   const at = Date.parse(iso);
@@ -177,6 +189,20 @@ const Oversight: Component<Props> = (props) => {
                 </button>
                 <Show when={row.session.work_item}>
                   {(ref) => <a class="oversight-ref" href={`#/w/${ref()}`}>{ref()}</a>}
+                </Show>
+                <Show when={runtimeWord(row.session)}>
+                  {(word) => (
+                    <span
+                      class="oversight-runtime"
+                      title={[
+                        row.session.template ? `template ${row.session.template}` : null,
+                        row.session.running?.model_basis ? `model from ${row.session.running.model_basis}` : null,
+                        row.session.running?.effort_basis ? `effort from ${row.session.running.effort_basis}` : null,
+                      ].filter(Boolean).join(" · ")}
+                    >
+                      {word()}
+                    </span>
+                  )}
                 </Show>
                 <Show when={row.session.resources}>
                   {(r) => (

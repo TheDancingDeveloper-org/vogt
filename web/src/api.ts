@@ -65,6 +65,8 @@ export interface SessionSummary {
   keep_awake?: boolean;
   /** The process tree's last resource sample (engine `SessionResources`). */
   resources?: SessionResources | null;
+  /** The template it was started from, when one was named. */
+  template?: string | null;
 }
 
 /** What a session's process tree holds, sampled every ~10 s by the engine. */

@@ -40,6 +40,8 @@ from vogt.core.agent_activity import redact
 
 #: The most of a transcript's tail read looking for replies.
 TAIL_BYTES = 4 * 1024 * 1024
+#: How much of a transcript's end is read for the model it runs.
+RUNTIME_TAIL_BYTES = 256 * 1024
 #: One message is cut here; a reply longer than this is rare and the head is
 #: what a driver needs.
 MAX_MESSAGE_CHARS = 20_000
@@ -363,10 +365,61 @@ def last_reply_excerpt(transcript: Transcript) -> str | None:
     return excerpt
 
 
+# -- the model a conversation is running ------------------------------------
+
+_RUNTIMES: dict[tuple[str, int, int], tuple[str | None, str | None]] = {}
+_RUNTIMES_MAX = 512
+
+
+def runtime(transcript: Transcript) -> tuple[str | None, str | None]:
+    """The model (and, for Codex, the reasoning effort) the conversation's
+    latest turn ran on, as the agent CLI recorded it — the resolved value,
+    whatever the session was started with. Claude Code writes `model` on
+    every assistant message; Codex writes `model` and `effort` in each
+    `turn_context`. Cached like the excerpt."""
+    try:
+        stat = transcript.path.stat()
+    except OSError:
+        return (None, None)
+    key = (str(transcript.path), stat.st_mtime_ns, stat.st_size)
+    with _EXCERPTS_LOCK:
+        if key in _RUNTIMES:
+            return _RUNTIMES[key]
+    # The model is on every assistant message (every Codex turn), so a
+    # short tail holds the latest one.
+    lines = _tail_lines(transcript.path, RUNTIME_TAIL_BYTES)
+    model: str | None = None
+    effort: str | None = None
+    for entry in _parsed(lines):
+        if transcript.agent == "claude":
+            message = entry.get("message")
+            if entry.get("type") == "assistant" and isinstance(message, dict):
+                found = message.get("model")
+                # Claude Code writes `<synthetic>` on messages it made up
+                # itself (an interruption notice); that is no model.
+                if isinstance(found, str) and found and not found.startswith("<"):
+                    model = found
+        elif entry.get("type") == "turn_context":
+            payload = entry.get("payload")
+            if isinstance(payload, dict):
+                if isinstance(payload.get("model"), str):
+                    model = str(payload["model"])
+                for name in ("effort", "reasoning_effort", "model_reasoning_effort"):
+                    if isinstance(payload.get(name), str):
+                        effort = str(payload[name])
+    found_runtime = (model, effort)
+    with _EXCERPTS_LOCK:
+        if len(_RUNTIMES) >= _RUNTIMES_MAX:
+            _RUNTIMES.clear()
+        _RUNTIMES[key] = found_runtime
+    return found_runtime
+
+
 def clear_excerpt_cache() -> None:
     """Forget every cached excerpt (tests)."""
     with _EXCERPTS_LOCK:
         _EXCERPTS.clear()
+        _RUNTIMES.clear()
 
 
 def excerpt_cache_size() -> int:
@@ -385,4 +438,5 @@ __all__ = [
     "last_replies",
     "last_reply_excerpt",
     "named_ids",
+    "runtime",
 ]

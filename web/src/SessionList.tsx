@@ -15,6 +15,7 @@ import {
   activityClass,
   activityLabel,
   sessionStateWord,
+  sessionRuntimeHint,
   sortSessionsByAttention,
 } from "./sessionRowModel";
 
@@ -46,7 +47,7 @@ export const SessionList: Component<Props> = (props) => {
                 class={`session-row ${activityClass(session)}${session.exit_code === null && (session.activity === "waiting-for-input" || session.activity === "awaiting-approval") ? " waiting" : ""}${sessionsStore.ready && !isConnected() ? " session-row--stale" : ""}`}
                 href={`#/t/${session.id}`}
                 aria-label={`${session.name}, ${activityLabel(session.activity, session.exit_code)}`}
-                title={`${session.name}\ncwd: ${session.cwd}`}
+                title={`${session.name}\ncwd: ${session.cwd}${sessionRuntimeHint(session) ? `\n${sessionRuntimeHint(session)}` : ""}`}
               >
                 <span
                   class={`activity-dot ${activityClass(session)}`}

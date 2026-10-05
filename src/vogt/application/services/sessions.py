@@ -73,6 +73,7 @@ from vogt.application.models import (
     SessionReply,
     SessionResources,
     SessionResult,
+    SessionRuntime,
     SessionScreenCursor,
     SessionScreenParams,
     SessionScreenResult,
@@ -96,7 +97,7 @@ from vogt.application.services._brief import (
 )
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
-from vogt.core import delivery, oversight
+from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
@@ -510,18 +511,26 @@ def _rows(
         live_session = live.get(summary.engine_session_id)
         if live_session is None or not (live_session.alive or live_session.hibernated):
             continue
-        excerpt = _excerpt(ctx, live_session, templates.get(summary.engine_session_id))
-        if excerpt is not None:
-            summaries[index] = summary.model_copy(
-                update={"last_reply_excerpt": excerpt}
-            )
+        template = templates.get(summary.engine_session_id) or live_session.template
+        found = _transcript(ctx, live_session, template)
+        update: dict[str, Any] = {
+            "running": _running(found, live_session, summary),
+        }
+        if summary.template is None and live_session.template:
+            # An unlinked session's template is the engine's to report.
+            update["template"] = live_session.template
+        if found is not None:
+            excerpt = transcripts.last_reply_excerpt(found)
+            if excerpt is not None:
+                update["last_reply_excerpt"] = excerpt
+        summaries[index] = summary.model_copy(update=update)
     return summaries
 
 
-def _excerpt(
+def _transcript(
     ctx: AppContext, engine_session: EngineSession, template: str | None
-) -> str | None:
-    """The latest reply's excerpt, when the conversation id is known.
+) -> transcripts.Transcript | None:
+    """The transcript a session's conversation is in, when its id is known.
 
     Only the id-based lookups — a list must stay cheap and must not guess
     which of two agents in one directory a session is.
@@ -529,7 +538,7 @@ def _excerpt(
     roots = ctx.config.session_transcript_roots
     if not roots:
         return None
-    found = transcripts.find(
+    return transcripts.find(
         roots,
         engine_session_id=engine_session.id,
         command=engine_session.command,
@@ -538,7 +547,33 @@ def _excerpt(
         started_at=None,
         allow_cwd_guess=False,
     )
-    return None if found is None else transcripts.last_reply_excerpt(found)
+
+
+def _running(
+    found: transcripts.Transcript | None,
+    engine_session: EngineSession,
+    summary: SessionSummary,
+) -> SessionRuntime | None:
+    """What the session is actually running (WI-919): the transcript's latest
+    turn, else the command's flags, else what was asked."""
+    model, effort = (None, None) if found is None else transcripts.runtime(found)
+    resolved = runtime.resolve(
+        command=engine_session.command,
+        conversation_agent=engine_session.conversation_agent,
+        transcript_model=model,
+        transcript_effort=effort,
+        asked_model=summary.model,
+        asked_effort=summary.effort,
+    )
+    if resolved.agent is None and resolved.model is None and resolved.effort is None:
+        return None
+    return SessionRuntime(
+        agent=resolved.agent,
+        model=resolved.model,
+        model_basis=resolved.model_basis,
+        effort=resolved.effort,
+        effort_basis=resolved.effort_basis,
+    )
 
 
 def last_reply(

@@ -326,3 +326,107 @@ def test_reading_is_off_with_no_roots(instance: AppContext) -> None:
 def test_an_unknown_session_is_not_found(wired: AppContext) -> None:
     with pytest.raises(NotFound):
         last_reply(wired, SessionLastReplyParams(id="ses_nope"))
+
+
+# -- what a session is running (WI-919) ---------------------------------------
+
+
+def test_the_list_says_which_model_the_conversation_actually_ran(
+    wired: AppContext, tmp_path: Path
+) -> None:
+    from vogt.application.models import ListSessionsParams
+    from vogt.application.services import list_sessions
+
+    started = start_session(
+        wired, StartSessionParams(project="vogt", template="claude", reason=WHY)
+    )
+    _write_claude(
+        tmp_path / "claude",
+        ENGINE_ID,
+        [
+            _claude_line("a", "first"),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {
+                        "id": "b",
+                        "model": "claude-opus-5-5",
+                        "content": [{"type": "text", "text": "second"}],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"id": "c", "model": "<synthetic>", "content": []},
+                }
+            ),
+        ],
+    )
+    row = next(
+        s
+        for s in list_sessions(wired, ListSessionsParams()).sessions
+        if s.id == started.session.id
+    )
+    assert row.model is None, "nothing was asked for"
+    assert row.running is not None
+    assert row.running.agent == "claude"
+    assert row.running.model == "claude-opus-5-5"
+    assert row.running.model_basis == "transcript"
+    assert row.template == "claude"
+
+
+def test_codex_records_model_and_effort_per_turn(tmp_path: Path) -> None:
+    conversation = "0199aaaa-bbbb-4ccc-8ddd-eeeeeeeeeeef"
+    path = tmp_path / f"rollout-{conversation}.jsonl"
+    path.write_text(
+        "\n".join(
+            json.dumps(e)
+            for e in [
+                {
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.5", "effort": "low"},
+                },
+                {
+                    "type": "turn_context",
+                    "payload": {"model": "gpt-5.6", "effort": "high"},
+                },
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    found = transcripts.Transcript(
+        agent="codex", path=path, conversation_id=conversation, basis="resume-id"
+    )
+    assert transcripts.runtime(found) == ("gpt-5.6", "high")
+
+
+def test_without_a_transcript_the_command_line_and_the_ask_answer() -> None:
+    from vogt.core.runtime import from_command, resolve
+
+    flags = from_command(
+        "vogt-agent-auth run -- codex -m gpt-5.6 -c model_reasoning_effort=xhigh"
+    )
+    assert (flags.agent, flags.model, flags.effort) == ("codex", "gpt-5.6", "xhigh")
+    resolved = resolve(
+        command="claude --session-id x --effort high",
+        conversation_agent=None,
+        transcript_model=None,
+        transcript_effort=None,
+        asked_model="claude-sonnet-5-5",
+        asked_effort=None,
+    )
+    assert (resolved.model, resolved.model_basis) == ("claude-sonnet-5-5", "asked")
+    assert (resolved.effort, resolved.effort_basis) == ("high", "command")
+    nothing = resolve(
+        command="bash",
+        conversation_agent=None,
+        transcript_model=None,
+        transcript_effort=None,
+        asked_model=None,
+        asked_effort=None,
+    )
+    assert (
+        nothing.model is None and nothing.model_basis is None and nothing.agent is None
+    )
