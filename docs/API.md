@@ -213,6 +213,20 @@ Enter was pressed, by `submit` or as one of the `keys`. `delivery` is:
 returns without watching. A refused input (no such session, or a session
 that cannot be woken) is an error, not a `delivery` value.
 
+`session.start` takes `permission_mode`:
+
+- `default`: Claude Code's own mode (auto) plus the deployment's
+  driven-session policy. Routine work, including merging its own green PR
+  in a listed repository, proceeds. Prod-mutating, destructive,
+  shared-resource and secret-exposing actions are denied.
+- `accept_edits`: file edits are accepted and everything else asks.
+- `bypass`: no permission checks, for one trusted task. Only a person may
+  grant it; an agent caller gets `403 bypass_refused`. It is recorded on the
+  `session.started` event.
+
+The posture shows on session rows as `permission_mode`. See
+[`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture).
+
 `session.answer` (`work.write`, audited) answers the dialog a session
 shows. The session must be `awaiting-approval`, which covers permission
 dialogs and the startup gates `folder-trust`, `external-imports` and

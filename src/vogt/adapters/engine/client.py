@@ -168,6 +168,8 @@ class EngineSession:
     resources: EngineResources | None = None
     #: The template it was started from, by the name given (WI-919).
     template: str | None = None
+    #: The permission posture, when not the default (WI-926).
+    permission_mode: str | None = None
 
     @property
     def hibernated(self) -> bool:
@@ -199,6 +201,7 @@ class EngineSession:
             keep_awake=payload.get("keep_awake") is True,
             resources=EngineResources.from_payload(payload.get("resources")),
             template=_optional_str(payload.get("template")),
+            permission_mode=_optional_str(payload.get("permission_mode")),
         )
 
 
@@ -631,6 +634,7 @@ class EngineClient:
         model: str | None = None,
         effort: str | None = None,
         resume: str | None = None,
+        permission_mode: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -670,6 +674,10 @@ class EngineClient:
             # The agent CLI's own conversation id; the engine turns it into
             # that CLI's resume form and refuses a command it cannot tell.
             spec["resume"] = resume
+        if permission_mode and permission_mode != "default":
+            # Sent only when not the default, so a default start is the
+            # request this client has always made.
+            spec["permission_mode"] = permission_mode.replace("_", "-")
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 

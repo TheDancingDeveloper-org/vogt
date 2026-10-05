@@ -1191,3 +1191,95 @@ def test_history_reads_report_a_dead_engine_not_an_error(
     tail = log_tail(dead, LogTailParams(id="x"))
     assert tail.session_id is None
     assert tail.engine is not None and "not answering" in tail.engine
+
+
+# -- permission posture (WI-926) -----------------------------------------------
+
+
+def _last_started_summary(ctx: AppContext) -> dict[str, Any]:
+    with ctx.declared.read() as view:
+        events = view.list_events(after=0, limit=500)
+    started = [e for e in events if e.kind == "session.started"]
+    return dict(started[-1].summary)
+
+
+def test_the_default_posture_sends_nothing_and_is_audited_as_default(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert "permission_mode" not in engine.last_spec
+    assert _last_started_summary(wired)["permission_mode"] == "default"
+
+
+def test_a_person_can_grant_one_task_a_posture_and_it_is_on_the_record(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1", template="claude", permission_mode="bypass", reason=WHY
+        ),
+    )
+    assert engine.last_spec["permission_mode"] == "bypass"
+    assert _last_started_summary(wired)["permission_mode"] == "bypass"
+    start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1",
+            template="claude",
+            permission_mode="accept_edits",
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["permission_mode"] == "accept-edits"
+
+
+def test_an_agent_cannot_start_a_bypassed_session(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Not even the overseeing runner: a child without permission checks
+    would let any agent escape its own guardrails by proxy."""
+    from vogt.core.principal import Principal
+    from vogt.errors import BypassRefused
+
+    agent = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref="agent:session:ses_runner",
+            kind="agent",
+            display_name="Session ses_runner",
+        ),
+    )
+    starts_before = len(engine.sent)
+    with pytest.raises(BypassRefused, match="only be granted by a person"):
+        start_session(
+            agent,
+            StartSessionParams(
+                work_item="WI-1",
+                template="claude",
+                permission_mode="bypass",
+                reason=WHY,
+            ),
+        )
+    assert len(engine.sent) == starts_before, "nothing reached the engine"
+    # The other postures stay open to agents.
+    start_session(
+        agent,
+        StartSessionParams(
+            work_item="WI-1",
+            template="claude",
+            permission_mode="accept_edits",
+            reason=WHY,
+        ),
+    )
+
+
+def test_every_brief_says_a_denial_is_reported_not_routed_around(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    start_session(
+        wired, StartSessionParams(work_item="WI-1", autopilot=True, reason=WHY)
+    )
+    prompt = engine.last_spec["prompt"]
+    assert "A permission denial is one of these" in prompt
+    assert "never routed around" in prompt

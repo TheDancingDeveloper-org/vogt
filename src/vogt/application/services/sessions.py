@@ -101,7 +101,7 @@ from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
-from vogt.errors import Conflict, InvalidRequest, NotFound, VogtError
+from vogt.errors import BypassRefused, Conflict, InvalidRequest, NotFound, VogtError
 from vogt.storage.interface import ReadView, WriteTxn
 
 SESSION_START = "session.start"
@@ -151,6 +151,17 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # Vogt never records. Keep the cleaned value for both the entity and the
     # audit row so they cannot disagree about whitespace.
     reason = writes.validate_reason(params.reason)
+    if params.permission_mode == "bypass" and ctx.principal.kind == "agent":
+        # Full bypass is a person's grant for one trusted task (WI-926). An
+        # agent — the overseeing runner included — that could start a child
+        # without permission checks would escape its own guardrails by proxy.
+        msg = (
+            "permission_mode=bypass can only be granted by a person, not by "
+            f"an agent ({ctx.principal.identity_ref}); start the session from "
+            "the GUI or the CLI, or use the default posture and report the "
+            "denied action as blocked"
+        )
+        raise BypassRefused(msg)
     engine = _engine(ctx)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
@@ -168,6 +179,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         model=params.model,
         effort=params.effort,
         resume=params.resume,
+        permission_mode=params.permission_mode,
     )
 
     # A resumed conversation is started by the engine in the directory its
@@ -256,6 +268,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 # standing as `model`.
                 "resume": params.resume,
                 "autopilot": params.autopilot,
+                # Named on the audit row: who started an unguarded session,
+                # and why, is what an operator looks for afterwards.
+                "permission_mode": params.permission_mode,
             },
         )
 
@@ -1640,6 +1655,7 @@ def _start_on_engine(
     model: str | None = None,
     effort: str | None = None,
     resume: str | None = None,
+    permission_mode: str | None = None,
 ) -> EngineSession:
     return engine.create_session(
         prompt=brief,
@@ -1661,6 +1677,7 @@ def _start_on_engine(
         model=model,
         effort=effort,
         resume=resume,
+        permission_mode=permission_mode,
     )
 
 
@@ -1785,6 +1802,7 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "keep_awake": engine_session.keep_awake,
         "conversation_id": engine_session.conversation_id,
         "resources": _resources(engine_session.resources),
+        "permission_mode": engine_session.permission_mode,
     }
 
 

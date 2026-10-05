@@ -46,6 +46,18 @@ class Conflict(VogtError):
     http_status = 409
 
 
+class BypassRefused(VogtError):
+    """An agent asked to start a session with every permission check off.
+
+    Full bypass is a person's decision for one trusted task (WI-926). An
+    agent that could grant it to a child would escape its own guardrails by
+    proxy, so the refusal is by who is asking, not by what they hold.
+    """
+
+    code = "bypass_refused"
+    http_status = 403
+
+
 class InvalidRequest(VogtError):
     """The request is structurally valid but semantically wrong."""
 

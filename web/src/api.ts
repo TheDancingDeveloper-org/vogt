@@ -67,6 +67,9 @@ export interface SessionSummary {
   resources?: SessionResources | null;
   /** The template it was started from, when one was named. */
   template?: string | null;
+  /** The permission posture when not the default: `accept-edits` or
+   *  `bypass` (no permission checks) (WI-926). */
+  permission_mode?: string | null;
 }
 
 /** What a session's process tree holds, sampled every ~10 s by the engine. */
