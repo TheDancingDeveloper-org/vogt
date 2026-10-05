@@ -68,6 +68,7 @@ services:
         INSTALL_AI_CLIENTS: "${VOGT_INSTALL_AI_CLIENTS:-false}"
         CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
         CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
+        OPENCODE_VERSION: "${VOGT_OPENCODE_VERSION:-}"
     image: vogt-engine:local
     restart: unless-stopped
     # tini as PID 1 reaps the processes agent sessions leave behind.
@@ -145,6 +146,7 @@ services:
       # `docs/DEPLOYMENT.md` has the details, including rollback.
       VOGT_CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
       VOGT_CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
+      VOGT_OPENCODE_VERSION: "${VOGT_OPENCODE_VERSION:-}"
 
     secrets:
       - vogt_core_token

@@ -191,6 +191,7 @@ services:
       # floating pin is a deliberate opt-in. See DEPLOYMENT.md.
       VOGT_CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
       VOGT_CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
+      VOGT_OPENCODE_VERSION: "${VOGT_OPENCODE_VERSION:-}"
       VOGT_AGENT_CLI_ALLOW_DIST_TAGS: "${VOGT_AGENT_CLI_ALLOW_DIST_TAGS:-}"
 
     # Named volumes, not host binds. Docker seeds a fresh named volume from the
