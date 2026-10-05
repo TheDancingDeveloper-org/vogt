@@ -459,15 +459,36 @@ class SqliteDeclaredStore:
             _rollback_quietly(conn)
             conn.close()
 
-    def touch_token(self, token_id: str, *, at: datetime) -> None:
-        """Record that a token was used, for the operator's benefit."""
+    def touch_token(
+        self, token_id: str, *, at: datetime, expires_at: datetime | None = None
+    ) -> None:
+        """Record that a token was used, for the operator's benefit, and
+        slide a session's expiry when asked (WI-924). The expiry only moves
+        out, and only on a token that is neither revoked nor already expired:
+        a renewal racing a revocation must not resurrect it."""
         conn = self._open_initialized()
         try:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(
-                "UPDATE tokens SET last_used_at = ? WHERE id = ?",
-                (to_iso(at), token_id),
-            )
+            if expires_at is None:
+                conn.execute(
+                    "UPDATE tokens SET last_used_at = ? WHERE id = ?",
+                    (to_iso(at), token_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE tokens SET last_used_at = ?, "
+                    "expires_at = CASE WHEN revoked_at IS NULL "
+                    "AND expires_at IS NOT NULL AND expires_at > ? "
+                    "AND expires_at < ? THEN ? ELSE expires_at END "
+                    "WHERE id = ?",
+                    (
+                        to_iso(at),
+                        to_iso(at),
+                        to_iso(expires_at),
+                        to_iso(expires_at),
+                        token_id,
+                    ),
+                )
             conn.execute("COMMIT")
         except BaseException:
             _rollback_quietly(conn)

@@ -675,9 +675,12 @@ class VogtConfig(BaseSettings):
         le=3650,
         description=(
             "How long a session minted by a password login (`auth.login`) "
-            "stays valid. A session is a token like any other — revocable by "
-            "`auth.logout` or `token.revoke` — with this expiry attached, so a "
-            "browser or phone that is lost stops working on its own."
+            "stays valid without being used. The expiry slides: once less than "
+            "half of it is left, an authenticated request extends it to this "
+            "many days from then, so a device in regular use stays signed in. "
+            "A session is a token like any other — revocable by `auth.logout` "
+            "or `token.revoke` — so a browser or phone that is lost, or simply "
+            "left unused for this long, stops working on its own."
         ),
         json_schema_extra={"default_policy": "behaviour"},
     )

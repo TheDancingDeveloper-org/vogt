@@ -799,7 +799,12 @@ class DeclaredStore(Protocol):
         """
         ...
 
-    def touch_token(self, token_id: str, *, at: datetime) -> None: ...
+    def touch_token(
+        self, token_id: str, *, at: datetime, expires_at: datetime | None = None
+    ) -> None:
+        """Record that a token was used at `at`. With `expires_at`, also move
+        a live, unrevoked token's expiry out to it — never in."""
+        ...
 
     def prune_auth_decisions(
         self, *, allow_before: datetime, deny_before: datetime

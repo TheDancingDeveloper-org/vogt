@@ -12,9 +12,26 @@ import androidx.appcompat.app.AppCompatActivity;
 
 /** Local entry point, also available with Back when a server is unreachable. */
 public class ServerActivity extends AppCompatActivity {
+    /**
+     * Whether a fresh launch should go straight to the saved server rather
+     * than ask for one again (WI-924). Only a first creation with a usable
+     * saved origin forwards: a restored instance (the system rebuilding the
+     * task) is already under the activity it forwarded to, and the user who
+     * came Back here to change servers is not created again, only resumed.
+     */
+    static boolean shouldForward(String savedOrigin, boolean restored) {
+        return !restored && ServerAddress.normalize(savedOrigin) != null;
+    }
+
     @Override
     public void onCreate(Bundle state) {
         super.onCreate(state);
+        // Stay as the task's root, under MainActivity, so Android Back from
+        // the app still returns here to change servers.
+        if (shouldForward(getSharedPreferences("server", MODE_PRIVATE).getString("origin", ""),
+                state != null)) {
+            startActivity(new Intent(this, MainActivity.class));
+        }
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
         int pad = Math.round(24 * getResources().getDisplayMetrics().density);

@@ -12,12 +12,20 @@
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
+        <!--
+            No launchMode="singleTask" here (WI-924). This is the task's root
+            and the launcher entry, and a singleTask root destroys every
+            activity above it whenever a launcher intent arrives: reopening
+            the app from its icon or a notification tore down MainActivity
+            and its signed-in WebView, leaving the user at "Connect to Vogt"
+            on every return. With the standard mode, Android brings the
+            existing task forward unchanged.
+        -->
         <activity
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|navigation"
             android:name=".ServerActivity"
             android:label="@string/title_activity_main"
             android:theme="@style/AppTheme.NoActionBar"
-            android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:exported="true">
 
