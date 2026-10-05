@@ -295,6 +295,40 @@ impl VogtCore {
         Ok((events, next))
     }
 
+    /// POST one core operation on the engine's own behalf, with the
+    /// deployment's `vogt_core_token` — like `events_after`, no caller asked,
+    /// so there is no identity to map. `path` is under the core's `/api`.
+    /// `Err` names why: no token, unreachable, or the core's status.
+    pub async fn post_json(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<(), String> {
+        let token = self
+            .fallback_token
+            .as_deref()
+            .ok_or("no vogt_core_token is configured for this front door")?;
+        let url = format!("{}{CORE_API_PREFIX}{path}", self.base);
+        let response = self
+            .client
+            .post(&url)
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .json(body)
+            .timeout(Duration::from_secs(60))
+            .send()
+            .await
+            .map_err(|e| terse(&e).to_string())?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        let said = response.text().await.unwrap_or_default();
+        Err(format!(
+            "the core answered {status}: {}",
+            said.chars().take(300).collect::<String>()
+        ))
+    }
+
     /// Forward one request to `upstream_path`, streaming both ways.
     ///
     /// `inject` is the core token to present as this request's credential, or

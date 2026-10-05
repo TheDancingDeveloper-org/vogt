@@ -57,6 +57,7 @@ fn test_config() -> Config {
         vogt_engine_state_dir: None,
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
+        hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
     }
 }
 
