@@ -278,6 +278,10 @@ Rules:
   answers with a clear "does not support screen yet" error; nothing falls back
   to the log silently. `scrollback_lines: N` (up to 2000) adds the N lines
   that scrolled off the top, for a reply or a command taller than the screen.
+- **Overseeing many sessions:** `session_sweep` returns every session in
+  one call, most urgent first (`approval`, `blocked`, `waiting`, `stalled`,
+  …). Each row carries its reason, last reply excerpt and the tail of its
+  screen. Act on the top rows, then sweep again, or `session_wait` on one.
 - **Hibernated sessions** (`activity: "hibernated"`) have had their
   processes stopped to free memory. Their screen is the last one they
   showed, and their conversation is intact. `session_input` wakes one by

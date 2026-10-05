@@ -114,6 +114,7 @@ from vogt.application.services.sessions import (
     session_wait,
     start_session,
     stop_session,
+    sweep_sessions,
     wake_session,
 )
 from vogt.application.services.taxonomy import (
@@ -251,6 +252,7 @@ __all__ = [
     "summarize_agent_activity",
     "suppress",
     "sweep",
+    "sweep_sessions",
     "transition_project",
     "transition_work",
     "unlink_forge_account",

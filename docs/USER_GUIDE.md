@@ -234,6 +234,15 @@ regains focus. A session's row menu also offers **Open files here** and **Git
 here**, which jump to that session's working directory in the file tree and the
 Git tab.
 
+**Oversight** (`#/oversight`, a Sessions tool) shows every live and
+hibernated session in one table, ordered by who needs you. A permission
+dialog comes first, then an agent blocked on a person, then one waiting at
+its prompt, then a turn that has gone silent, then the rest. Each row says
+why it is placed where it is, and shows the agent's latest reply and the
+last lines of its screen. Click a name to open its terminal. The table
+refreshes every ten seconds and on any session event. Agents driving
+sessions read the same table with `session_sweep`.
+
 An agent session can be **hibernated** to free the memory it holds. Its
 processes stop, and it stays in the list with a hollow dot and its last screen.
 Use **Hibernate** in its row menu, or let the deployment's idle policy do it.

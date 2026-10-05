@@ -26,7 +26,7 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from vogt.adapters import transcripts
@@ -36,6 +36,7 @@ from vogt.adapters.engine.client import (
     EngineBlocked,
     EngineHibernation,
     EngineScreen,
+    EngineSweepEntry,
 )
 from vogt.application import writes
 from vogt.application.context import AppContext
@@ -70,10 +71,13 @@ from vogt.application.models import (
     SessionScreenParams,
     SessionScreenResult,
     SessionSummary,
+    SessionSweepResult,
+    SessionSweepRow,
     SessionWaitParams,
     SessionWaitResult,
     StartSessionParams,
     StopSessionParams,
+    SweepSessionsParams,
     WakeSessionParams,
     WhyParams,
     WhyResult,
@@ -86,6 +90,7 @@ from vogt.application.services._brief import (
 )
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
+from vogt.core import oversight
 from vogt.core.auth import Scope, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
@@ -334,7 +339,105 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
             live = {row.id: row for row in ctx.engine.list_sessions()}
         except EngineUnavailable as exc:
             detail = str(exc)
+    summaries = _rows(ctx, params, live, detail)
+    return SessionListResult(sessions=summaries, engine=detail)
 
+
+def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweepResult:
+    """Every live and hibernated session at once, for a driver overseeing
+    them: the `session.list` row (activity, turn timing, last reply excerpt,
+    blocked, approval), the tail of its screen, and where it belongs in an
+    attention order — one call instead of a `session_screen` per session.
+
+    Two round trips at most whatever the session count: one to the engine
+    (which renders every screen concurrently) and the transcript reads the
+    list already makes. With no engine, or one that cannot be asked, the
+    table is empty and `engine` says why: a session table built from Vogt's
+    links alone would present stale liveness as current.
+    """
+    now = ctx.clock()
+    stall_after = timedelta(minutes=params.stall_after_minutes)
+    if ctx.engine is None:
+        return SessionSweepResult(
+            rows=[],
+            counts={"total": 0, "needs_you": 0},
+            swept_at=now,
+            engine="no session engine is configured (VOGT_ENGINE_URL is unset)",
+        )
+    try:
+        entries = ctx.engine.sweep_sessions(screen_lines=params.screen_lines)
+        if entries is None:
+            # An engine that predates the sweep route: the same table, from
+            # the list, without screens.
+            entries = [
+                EngineSweepEntry(session=row)
+                for row in ctx.engine.list_sessions()
+                if row.alive or row.hibernated
+            ]
+    except EngineUnavailable as exc:
+        return SessionSweepResult(
+            rows=[], counts={"total": 0, "needs_you": 0}, swept_at=now, engine=str(exc)
+        )
+    live = {entry.session.id: entry.session for entry in entries}
+    tails = {entry.session.id: entry for entry in entries}
+    summaries = _rows(
+        ctx,
+        ListSessionsParams(project=params.project, limit=500),
+        live,
+        None,
+    )
+    rows: list[SessionSweepRow] = []
+    for summary in summaries:
+        entry = tails.get(summary.engine_session_id)
+        if entry is None:
+            # Vogt's link to a session the engine no longer runs: not a row
+            # of a table of what is running.
+            continue
+        verdict = oversight.classify(
+            activity=summary.activity,
+            alive=summary.alive,
+            ready=entry.ready,
+            approval_question=None
+            if summary.approval is None
+            else summary.approval.question,
+            blocker=None if summary.blocked is None else summary.blocked.blocker,
+            last_output_at=summary.last_output_at,
+            now=now,
+            stall_after=stall_after,
+        )
+        rows.append(
+            SessionSweepRow(
+                attention=verdict.attention,
+                attention_reason=verdict.reason,
+                session=summary,
+                screen_tail=list(entry.screen_tail),
+                ready=entry.ready,
+            )
+        )
+    rows.sort(
+        key=lambda row: (
+            oversight.ORDER.get(row.attention, 99),  # type: ignore[call-overload]
+            -(row.session.last_output_at or now).timestamp(),
+        )
+    )
+    counts: dict[str, int] = {"total": len(rows), "needs_you": 0}
+    for row in rows:
+        counts[row.attention] = counts.get(row.attention, 0) + 1
+        if row.attention in oversight.NEEDS_YOU:
+            counts["needs_you"] += 1
+    return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
+
+
+def _rows(
+    ctx: AppContext,
+    params: ListSessionsParams,
+    live: dict[str, EngineSession],
+    detail: str | None,
+) -> list[SessionSummary]:
+    """The rows `session.list` and `session.sweep` share: Vogt's links joined
+    with what the engine reported (`live`, empty when `detail` says why it
+    could not be asked), unlinked engine sessions appended, and reply
+    excerpts read from the agents' transcripts."""
     with ctx.declared.read() as view:
         project_id = (
             None
@@ -399,7 +502,7 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
             summaries[index] = summary.model_copy(
                 update={"last_reply_excerpt": excerpt}
             )
-    return SessionListResult(sessions=summaries, engine=detail)
+    return summaries
 
 
 def _excerpt(
@@ -1578,5 +1681,6 @@ __all__ = [
     "session_wait",
     "start_session",
     "stop_session",
+    "sweep_sessions",
     "wake_session",
 ]

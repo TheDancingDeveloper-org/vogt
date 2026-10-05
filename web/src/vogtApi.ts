@@ -86,6 +86,7 @@ export const ROUTES = {
   "session.hibernate": "/sessions/hibernate",
   "session.wake": "/sessions/wake",
   "session.keep_awake": "/sessions/keep-awake",
+  "session.sweep": "/sessions/sweep",
 } as const;
 
 export type VogtOperation = keyof typeof ROUTES;
@@ -971,6 +972,43 @@ export const listSessions = (
     "GET",
     signal,
   );
+
+/** One row of `session.sweep`: a session and where it sits in the
+ *  oversight order (WI-915). Screen text is untrusted terminal output. */
+export interface SessionSweepRow {
+  attention:
+    | "approval"
+    | "blocked"
+    | "waiting"
+    | "stalled"
+    | "running"
+    | "idle"
+    | "hibernated"
+    | "exited"
+    | "unknown";
+  attention_reason: string;
+  session: SessionSummary & {
+    linked?: boolean;
+    last_output_at?: string | null;
+    turn_started_at?: string | null;
+    last_reply_excerpt?: string | null;
+  };
+  screen_tail: string[];
+  ready?: boolean | null;
+}
+
+export interface SessionSweepResult {
+  rows: SessionSweepRow[];
+  counts: Record<string, number>;
+  swept_at: string;
+  engine?: string | null;
+}
+
+/** Every live and hibernated session, most urgent first. */
+export const sweepSessions = (
+  params: { screen_lines?: number; project?: string } = {},
+  signal?: AbortSignal,
+) => call<SessionSweepResult>("session.sweep", params, "GET", signal);
 
 // -- writes, each carrying the reason its view collected --------------------
 

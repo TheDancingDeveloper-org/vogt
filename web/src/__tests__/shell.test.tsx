@@ -182,6 +182,7 @@ describe("a pasted link opens the surface it names", () => {
       ["Audit", "#/audit"],
       ["Sessions", "#/sessions"],
       ["Git", "#/g"],
+      ["Oversight", "#/oversight"],
       ["History", "#/history"],
       ["Tasks", "#/tasks"],
     ]);

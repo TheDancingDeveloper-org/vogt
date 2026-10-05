@@ -47,6 +47,7 @@ export const SessionTools: Component<Props> = (props) => (
     <span>Tools</span>
     <a href="#/sessions" aria-current={!props.currentTool ? "page" : undefined}>Overview</a>
     <a href="#/g" aria-current={props.currentTool === "git" ? "page" : undefined}>Git</a>
+    <a href="#/oversight" aria-current={props.currentTool === "oversight" ? "page" : undefined}>Oversight</a>
     <a href="#/history" aria-current={props.currentTool === "history" ? "page" : undefined}>History</a>
     <a href="#/tasks" aria-current={props.currentTool === "tasks" ? "page" : undefined}>Tasks</a>
     <Show when={props.guiEnabled}>

@@ -421,6 +421,7 @@ SCRIPT: list[tuple[str, StepParams]] = [
         {"project": "parity-project", "reason": WHY},
     ),
     ("session.list", {}),
+    ("session.sweep", {"screen_lines": 4}),
     # History reads, driven against the same stand-in engine: parity
     # proves the three surfaces agree on the engine's canned answers.
     ("session.history_list", {}),
@@ -976,6 +977,8 @@ def _stand_in_engine() -> EngineClient:
                     "ready": True,
                 }
             ).encode()
+        if method == "GET" and path.endswith("/api/sessions/sweep"):
+            return 200, b"[]"
         if method == "GET" and url.endswith("/api/sessions"):
             return 200, b"[]"
         # Session history. Canned, deterministic rows so the three

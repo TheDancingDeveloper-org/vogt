@@ -219,6 +219,37 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/sweep:
+    get:
+      tags: [sessions]
+      summary: Every session at once, each with the tail of its screen.
+      description: >-
+        Lists live and hibernated sessions (and exited ones with
+        `include_exited=true`). Each row carries its summary, the last
+        `screen_lines` (default 8, at most 40) non-blank lines of its rendered
+        screen (the kept screen for a hibernated session), and `ready`.
+        Screens are rendered concurrently. This is the oversight table in one
+        request; vogt-core's `session.sweep` orders it by attention.
+      operationId: sweepSessions
+      x-capability: sessions
+      parameters:
+        - { name: screen_lines, in: query, schema: { type: integer, minimum: 0, maximum: 40 } }
+        - { name: include_exited, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: One entry per session.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [summary]
+                  properties:
+                    summary: { $ref: "#/components/schemas/SessionSummary" }
+                    screen_tail: { type: array, items: { type: string } }
+                    ready: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
   /api/sessions/{id}/screen:
     parameters:
       - $ref: "#/components/parameters/SessionId"
