@@ -124,6 +124,7 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | What it may do. Everything in the pod can read the file, so this is the blast radius. |
 | `VOGT_HOOKS_REQUIRED` | no | `false` | Whether a missing lifecycle hook bundle is fatal. |
 | `ENGINE_FCM_SERVICE_ACCOUNT_FILE` | no | — | Set to `/run/secrets/fcm_service_account` after placing `deploy/fcm-service-account.json` to enable native push. Web push needs nothing. |
+| `ENGINE_SESSION_RSS_WARN` | no | off | Flag any session whose process tree's resident memory reaches this (`8GiB`). Usage is shown either way; this only marks the heavy ones. |
 | `ENGINE_HIBERNATE_IDLE_AFTER` | no | off | Hibernate an agent session quiet this long (`2h`, `30m`): its processes stop, it stays listed, and a wake resumes its conversation ([`ENGINE.md`, "Hibernation"](ENGINE.md#hibernation)). Sessions running a turn, at a permission dialog, blocked on a person, running a tool shell or pinned awake are exempt. |
 | `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` | no | off | While the pod's available memory is below this (`2GiB`), hibernate the quietest eligible session, one a minute, with the same exemptions. |
 | `ENGINE_ASSISTANT_STT_*`, `ENGINE_ASSISTANT_TTS_*` | no | the sidecar | Repoint speech at any OpenAI-compatible audio endpoint; a cloud provider wants `ENGINE_ASSISTANT_TTS_FORMAT=mp3`. |

@@ -180,6 +180,12 @@ shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
 `session.blocked` entry and a push. `session.start` takes `autopilot` (see
 [`AGENT_GUIDE.md`](AGENT_GUIDE.md)).
 
+Rows of `session.list` and `session.sweep` carry `resources`: the RSS, CPU
+(percent of one core over the last ~10 s) and process count of the session's
+whole process tree, as the engine last sampled them, with `over_threshold`
+past the deployment's `ENGINE_SESSION_RSS_WARN`. `session.list` with
+`order: "rss"` lists the heaviest first.
+
 `session.sweep` (`read`) is the oversight table, built in one call. It has a
 row for every live and hibernated session, ordered by who needs attention:
 `approval`, `blocked`, `waiting` (at its prompt, wanting the next

@@ -992,6 +992,12 @@ export interface SessionSweepRow {
     last_output_at?: string | null;
     turn_started_at?: string | null;
     last_reply_excerpt?: string | null;
+    resources?: {
+      rss_bytes: number;
+      cpu_pct: number;
+      processes: number;
+      over_threshold?: boolean;
+    } | null;
   };
   screen_tail: string[];
   ready?: boolean | null;

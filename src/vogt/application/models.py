@@ -895,6 +895,23 @@ class SessionApproval(Result):
 # because `WorkResult` carries it: a work item's view shows what is
 # running for it, and a forward reference would leave the model
 # incomplete until something remembered to rebuild it.
+class SessionResources(Result):
+    """What a session's process tree holds, as the engine last sampled it."""
+
+    rss_bytes: int = Field(
+        description="Resident memory summed over the session's process tree."
+    )
+    cpu_pct: float = Field(
+        description="CPU over the last sampling interval, in percent of one core."
+    )
+    processes: int
+    sampled_at: datetime | None = None
+    over_threshold: bool = Field(
+        default=False,
+        description="At or over the deployment's ENGINE_SESSION_RSS_WARN.",
+    )
+
+
 class SessionHibernation(Result):
     """When and why a session was hibernated."""
 
@@ -1051,6 +1068,15 @@ class SessionSummary(Result):
         description=(
             "Pinned awake (session.keep_awake): never hibernated by policy. "
             "None when the engine could not be asked."
+        ),
+    )
+    resources: SessionResources | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: RSS, CPU and process count of the "
+            "session's process tree, sampled every few seconds. Null before "
+            "the first sample, for a hibernated or exited session, or when "
+            "the engine cannot sample."
         ),
     )
     conversation_id: str | None = Field(
@@ -3750,6 +3776,14 @@ class KeepSessionAwakeParams(Params):
 
 class ListSessionsParams(Params):
     project: str | None = Field(default=None, description="Project slug.")
+    order: Literal["started", "rss"] = Field(
+        default="started",
+        description=(
+            "`started` (default): newest first, Vogt's links then unlinked "
+            "sessions. `rss`: heaviest process tree first, to find the "
+            "session holding the memory."
+        ),
+    )
     work_item: str | None = Field(default=None, description="Work item ref.")
     include_stopped: bool = Field(
         default=False, description="Include sessions Vogt has already stopped."
