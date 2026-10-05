@@ -1233,6 +1233,51 @@ counted, the same as in `ps --forest`. `ENGINE_SESSION_RSS_WARN` (`8GiB`)
 sets `resources.over_threshold` on any session at or over it. The core's
 `session.list` takes `order: "rss"` to put the heaviest first.
 
+#### Launch timing, logs and metrics
+
+A session's launch explains itself in the engine log and on `/metrics`
+(WI-927). Every line carries an `event=` field to filter on in Loki, for
+example `{container="vogt-prod", job="docker/engine"} |= "event=launch."`.
+
+| `event=` | Level | When | Fields |
+|---|---|---|---|
+| `session.start` | info, or warn on failure (audit) | every session the engine starts | `session_id`, `name`, `template`, `origin` (`api`, `agent-task`, `wake`), `launcher`, `spawn_ms`, `outcome`, `error` |
+| `launch.first_output` | info, or warn at 10 s or more | the session's first byte of output | `session_id`, `name`, `launcher`, `first_output_ms` |
+| `launch.stage` | info | each stage the launch wrapper reports | `session_id`, `stage` (`login`, `secrets`, `bootstrap`), `ms`, `outcome`, and for `secrets` the `project` and `mode` |
+| `launch.secrets` | info (audit) | each secret project the launch read | `session_id`, `project`, `mode`, `ms`, `count`, `missing`, `secrets` (`VAR=SECRET_NAME` pairs, never a value) |
+| `launch.report` | info, or warn when failed or 10 s or more | the wrapper hands over, or fails | `session_id`, `name`, `command`, `outcome`, `total_ms`, `error` |
+
+`launcher` is `agent-auth` when the launch wrapper runs first, and `direct`
+otherwise. The wrapper (`vogt-agent-auth run`/`shell`) times its own stages
+and sends one report at handover, or at its failure, to `POST
+/api/agent-auth/launch-report`. That route sits beside the secret broker, and
+the session authenticates to it with its broker token. It is accepted once per
+session; a second report gets 409. A launch that took 5 s or more also says so
+in the session itself.
+
+The wrapper reads each secret project with **one** request. It does not run
+the vendor CLI once per secret: each CLI run spent about 650 ms on the
+vendor's telemetry after the API had answered. Fifteen such runs made a
+launch take 10 s on a good day and 85–145 s when that egress was slow. A
+project the bulk request cannot read falls back to the per-secret CLI, and
+the report says so (`mode=cli`).
+
+`ENGINE_METRICS_ADDR` (`0.0.0.0:9464`) serves `GET /metrics`, in the
+Prometheus text format, on a listener of its own. It is never on the API port,
+which is the front door. Unset, nothing listens.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `vogt_session_first_output_seconds` | histogram | `launcher` |
+| `vogt_session_launch_seconds` | histogram | `command`, `outcome` |
+| `vogt_session_launch_stage_seconds` | histogram | `stage` |
+| `vogt_session_starts_total` | counter | `origin`, `outcome` |
+| `vogt_session_launch_secret_reads_total` | counter | `mode`, `outcome` |
+
+Every label set is fixed by the code, never a session id or name. The p95 of
+a usable launch is
+`histogram_quantile(0.95, sum by (le) (rate(vogt_session_first_output_seconds_bucket[30m])))`.
+
 ### Attach protocol
 
 `GET /api/sessions/:id/attach` — WebSocket upgrade. It sits outside the bearer

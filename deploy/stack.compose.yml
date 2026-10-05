@@ -133,6 +133,11 @@ services:
       # Flag a session whose process tree holds this much resident memory
       # (`8GiB`). Every session's RSS/CPU is shown regardless.
       ENGINE_SESSION_RSS_WARN: "${ENGINE_SESSION_RSS_WARN:-}"
+      # Serve Prometheus metrics (session launch latency) on a listener of
+      # its own (`0.0.0.0:9464`). Unset, nothing listens. The port is not
+      # published here; route it to your scraper. docs/ENGINE.md, "Launch
+      # timing, logs and metrics".
+      ENGINE_METRICS_ADDR: "${ENGINE_METRICS_ADDR:-}"
       # The driven-session permission policy (a Claude Code settings file
       # with `autoMode` additions). Unset: the image's, which lists no
       # autonomous-merge repositories. docs/ENGINE.md, "Permission posture".

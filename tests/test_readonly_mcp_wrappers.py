@@ -288,3 +288,74 @@ def test_bootstrap_registers_only_servers_whose_token_is_present(
     second = bootstrap({"GITEA_HOST": "https://f", "GITEA_MCP_TOKEN": "y"})
     assert "github-ro" not in second
     assert "forgejo-ro" in second
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="the fast path reads with jq")
+def test_bootstrap_reads_existing_claude_registrations_without_the_cli(
+    tmp_path: Path,
+) -> None:
+    """WI-927: on every session launch the bootstrap used to ask `claude mcp
+    get` (node start-up plus a server health check, ~0.7 s each) whether
+    each server was registered. When ~/.claude.json already says so, it must
+    not start the CLI at all."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    calls = tmp_path / "claude-calls"
+    claude = bindir / "claude"
+    claude.write_text(f'#!/bin/sh\necho "$*" >> {calls}\nexit 1\n', encoding="utf-8")
+    claude.chmod(0o755)
+    for name in ("github-mcp-server", "gitea-mcp"):
+        (bindir / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        (bindir / name).chmod(0o755)
+    wrapper = bindir / "vogt-readonly-mcp"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+
+    def stdio(command: str, *args: str) -> dict[str, Any]:
+        return {"type": "stdio", "command": command, "args": list(args), "env": {}}
+
+    config = {
+        "mcpServers": {
+            "vogt": stdio("/usr/local/bin/vogt-mcp"),
+            "github-ro": stdio(str(wrapper), "github"),
+            "forgejo-ro": stdio(str(wrapper), "gitea"),
+        }
+    }
+    (tmp_path / ".claude.json").write_text(json.dumps(config), encoding="utf-8")
+    proc = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "VOGT_SRC": str(tmp_path / "absent"),
+            "VOGT_READONLY_MCP_WRAPPER": str(wrapper),
+            # github and forgejo wanted; grafana not (no token) and absent.
+            "GITHUB_MCP_TOKEN": "x",
+            "GITEA_HOST": "https://f",
+            "GITEA_MCP_TOKEN": "y",
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert not calls.exists(), calls.read_text(encoding="utf-8")
+
+    # A stale command is still reconciled through the CLI.
+    config["mcpServers"]["vogt"] = stdio("/old/mydevenv2-vogt-mcp")
+    (tmp_path / ".claude.json").write_text(json.dumps(config), encoding="utf-8")
+    subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "VOGT_SRC": str(tmp_path / "absent"),
+            "VOGT_READONLY_MCP_WRAPPER": str(wrapper),
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert "mcp get vogt" in calls.read_text(encoding="utf-8")

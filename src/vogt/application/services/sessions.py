@@ -102,7 +102,10 @@ from vogt.core.auth import Scope, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
 from vogt.errors import BypassRefused, Conflict, InvalidRequest, NotFound, VogtError
+from vogt.observability import logger
 from vogt.storage.interface import ReadView, WriteTxn
+
+_LOG = logger("sessions")
 
 SESSION_START = "session.start"
 SESSION_STOP = "session.stop"
@@ -169,17 +172,44 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     session_scopes = _session_scopes(ctx)
     credential = issue(session_scopes)
 
-    started = _start_on_engine(
-        engine,
-        name=params.name or subject.default_name,
-        template=params.template,
-        cwd=subject.cwd,
-        env=_session_env(ctx, session_id, credential.secret),
-        brief=_brief_with_task(subject.brief, params.task, autopilot=params.autopilot),
-        model=params.model,
-        effort=params.effort,
-        resume=params.resume,
-        permission_mode=params.permission_mode,
+    # How long the engine took to accept the session (WI-927): on the audit
+    # row, and logged, so a slow or refused start is attributable afterwards.
+    # A refusal raises before any audit write, so it is logged here; the
+    # engine audits its own side (`event=session.start`) either way.
+    spawn_started = time.monotonic()
+    try:
+        started = _start_on_engine(
+            engine,
+            name=params.name or subject.default_name,
+            template=params.template,
+            cwd=subject.cwd,
+            env=_session_env(ctx, session_id, credential.secret),
+            brief=_brief_with_task(
+                subject.brief, params.task, autopilot=params.autopilot
+            ),
+            model=params.model,
+            effort=params.effort,
+            resume=params.resume,
+            permission_mode=params.permission_mode,
+        )
+    except VogtError as error:
+        _LOG.warning(
+            "session.start failed session_id=%s template=%s "
+            "engine_spawn_ms=%d error=%s",
+            session_id,
+            params.template,
+            int((time.monotonic() - spawn_started) * 1000),
+            error.code,
+        )
+        raise
+    engine_spawn_ms = int((time.monotonic() - spawn_started) * 1000)
+    _LOG.info(
+        "session.start session_id=%s engine_session_id=%s template=%s "
+        "engine_spawn_ms=%d",
+        session_id,
+        started.id,
+        params.template,
+        engine_spawn_ms,
     )
 
     # A resumed conversation is started by the engine in the directory its
@@ -271,6 +301,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 # Named on the audit row: who started an unguarded session,
                 # and why, is what an operator looks for afterwards.
                 "permission_mode": params.permission_mode,
+                # How long the engine took to start it (WI-927); the launch
+                # inside it is timed by the engine's own launch report.
+                "engine_spawn_ms": engine_spawn_ms,
             },
         )
 
