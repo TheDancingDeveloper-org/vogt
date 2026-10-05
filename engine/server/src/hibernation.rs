@@ -127,6 +127,12 @@ pub fn dir(state_dir: &Path) -> PathBuf {
     state_dir.join("sessions")
 }
 
+// Path safety: every file name here is built from a parsed `Uuid`, whose
+// textual form is 36 characters of hex digits and dashes — no separator, no
+// `..` — joined onto the engine's own configured `state_dir`. CodeQL's
+// `rust/path-injection` reads the route's `{id}` as a user-provided path and
+// cannot model the `Uuid` parse as the barrier it is (see the same note in
+// `workspace_path.rs`).
 fn record_path(state_dir: &Path, id: Uuid) -> PathBuf {
     dir(state_dir).join(format!("{id}.json"))
 }
