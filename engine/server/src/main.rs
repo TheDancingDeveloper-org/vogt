@@ -35,6 +35,11 @@ async fn main() -> ExitCode {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .with_target(false)
+        // Colour only for a person at a terminal. Under a container runtime
+        // stdout is a pipe into the log pipeline, where escape codes split
+        // every `key=value` and a filter like `|= "event=launch.report"`
+        // (docs/ENGINE.md) matches nothing (WI-927).
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .compact()
         .init();
 
