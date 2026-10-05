@@ -344,6 +344,11 @@ export function startEventStream(): void {
             }),
           );
           break;
+        case "lagged":
+          // This stream missed events; the list it maintains may be wrong
+          // anywhere, so read it whole again.
+          void refreshSessions();
+          break;
         case "session-hibernated":
         case "session-woken":
           // The summary changes shape (hibernation, alive, exit code), so
