@@ -165,13 +165,18 @@ pub async fn session_screen(
     session: Arc<Session>,
     scrollback_lines: usize,
 ) -> Result<SessionScreen> {
+    // The live state is read *before* the bytes are copied: the state was
+    // computed from output already in the ring, so the render includes the
+    // output that state describes. Read after, a `waiting-for-input` that
+    // arrived mid-render could be paired with a screen that does not yet
+    // show its prompt.
+    let summary = session.summary();
     let (bytes, rows, cols) = session.screen_source(SCREEN_REPLAY_BYTES);
     let (rendered, scrollback) = tokio::task::spawn_blocking(move || {
         render_with_scrollback(&bytes, rows, cols, scrollback_lines)
     })
     .await
     .map_err(|e| ApiError::Internal(format!("render screen: {e}")))?;
-    let summary = session.summary();
     let ready = is_ready(summary.activity, summary.alive, &rendered.lines);
     Ok(SessionScreen {
         id: session.id,
