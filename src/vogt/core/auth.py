@@ -22,7 +22,7 @@ import hashlib
 import hmac
 import secrets
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Literal
 
 Scope = Literal["read", "work.write", "project.write", "admin", "writeback"]
@@ -200,6 +200,30 @@ def parse_scopes(raw: str) -> tuple[Scope, ...]:
 
 def is_expired(expires_at: datetime | None, *, now: datetime) -> bool:
     return expires_at is not None and expires_at <= now
+
+
+def renewed_expiry(
+    *,
+    kind: str,
+    expires_at: datetime | None,
+    now: datetime,
+    ttl: timedelta,
+) -> datetime | None:
+    """The later expiry a session token in use earns, or None for no change.
+
+    A password login's session token slides (WI-924): once less than half its
+    lifetime is left, an authenticated request extends it to a full `ttl`
+    from now. A device in regular use stays signed in; one unused for `ttl`
+    still stops working on its own, which was the reason sessions expire at
+    all. API and agent tokens keep whatever expiry they were issued with —
+    they are not a person's sign-in, and sliding them would quietly make an
+    expiring token permanent.
+    """
+    if kind != "session" or expires_at is None or expires_at <= now:
+        return None
+    if expires_at - now > ttl / 2:
+        return None
+    return now + ttl
 
 
 # -- passwords ---------------------------------------------------------------

@@ -11,8 +11,9 @@ failing is throttled before its password is even checked.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterator
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -50,9 +51,11 @@ from vogt.application.services.auth import (
 from vogt.core.auth import (
     AuthDecisionCode,
     hash_password,
+    hash_token,
     normalise_username,
     verify_password,
 )
+from vogt.core.entities import Token
 from vogt.errors import Conflict, InvalidRequest, LoginThrottled, NotFound
 
 WHY = "login test"
@@ -437,3 +440,98 @@ def test_a_wrong_password_over_http_is_401_and_a_throttle_is_429(
     res = authed.post("/api/auth/login", json={"username": "ada", "password": PASSWORD})
     assert res.status_code == 429
     assert res.json()["error"]["code"] == "login_throttled"
+
+
+# -- a session in use stays signed in (WI-924) ------------------------------
+
+
+class _Clock:
+    """A clock a test moves by hand, to cross the session's lifetime."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def __call__(self) -> datetime:
+        return self.now
+
+
+def _token(ctx: AppContext, secret: str) -> Token:
+    with ctx.declared.read() as view:
+        found = view.token_by_hash(hash_token(secret))
+    assert found is not None
+    return found
+
+
+def test_a_session_in_regular_use_slides_and_is_never_signed_out(
+    instance: AppContext, ada: str
+) -> None:
+    """The phone the operator opens every day must not be signed out a fixed
+    30 days after it signed in: past half its lifetime a request renews it."""
+    ttl = timedelta(days=instance.config.session_ttl_days)
+    clock = _Clock(datetime(2026, 10, 1, tzinfo=UTC))
+    ctx = dataclasses.replace(instance, clock=clock)
+    secret = login(ctx, LoginParams(username="Ada", password=PASSWORD)).secret
+    first_expiry = _token(ctx, secret).expires_at
+    assert first_expiry == clock.now + ttl
+
+    # Early in its life a request changes nothing about the expiry.
+    clock.now += ttl / 4
+    authenticate(ctx, bearer=secret)
+    assert _token(ctx, secret).expires_at == first_expiry
+
+    # Past half its life it renews to a full ttl from now...
+    clock.now += ttl / 2
+    authenticate(ctx, bearer=secret)
+    renewed = _token(ctx, secret).expires_at
+    assert renewed == clock.now + ttl
+
+    # ...so used every few weeks, it outlives the original expiry by far.
+    for _ in range(4):
+        clock.now += ttl * 0.6
+        assert authenticate(ctx, bearer=secret).principal.identity_ref == "human:ada"
+    assert clock.now > first_expiry + ttl
+
+
+def test_an_unused_session_still_expires_and_a_revoked_one_is_not_revived(
+    instance: AppContext, ada: str
+) -> None:
+    ttl = timedelta(days=instance.config.session_ttl_days)
+    clock = _Clock(datetime(2026, 10, 1, tzinfo=UTC))
+    ctx = dataclasses.replace(instance, clock=clock)
+    idle = login(ctx, LoginParams(username="Ada", password=PASSWORD)).secret
+    clock.now += ttl + timedelta(minutes=1)
+    with pytest.raises(Unauthenticated):
+        authenticate(ctx, bearer=idle)
+
+    revoked = login(ctx, LoginParams(username="Ada", password=PASSWORD)).secret
+    before = _token(ctx, revoked).expires_at
+    clock.now += ttl * 0.75
+    ctx.declared.touch_token(
+        _token(ctx, revoked).id, at=clock.now, expires_at=clock.now + ttl
+    )
+    assert _token(ctx, revoked).expires_at == clock.now + ttl, "live: extended"
+    with ctx.declared.write() as txn:
+        txn.revoke_token(_token(ctx, revoked).id, reason="test", at=clock.now)
+    extended = _token(ctx, revoked).expires_at
+    ctx.declared.touch_token(
+        _token(ctx, revoked).id, at=clock.now, expires_at=clock.now + ttl * 2
+    )
+    assert _token(ctx, revoked).expires_at == extended, "revoked: never moved"
+    assert before is not None
+
+
+def test_only_a_login_session_slides() -> None:
+    from vogt.core.auth import renewed_expiry
+
+    now = datetime(2026, 10, 1, tzinfo=UTC)
+    ttl = timedelta(days=30)
+    near = now + timedelta(days=10)
+    assert (
+        renewed_expiry(kind="session", expires_at=near, now=now, ttl=ttl) == now + ttl
+    )
+    assert renewed_expiry(kind="api", expires_at=near, now=now, ttl=ttl) is None
+    assert renewed_expiry(kind="session", expires_at=None, now=now, ttl=ttl) is None
+    far = now + timedelta(days=20)
+    assert renewed_expiry(kind="session", expires_at=far, now=now, ttl=ttl) is None
+    gone = now - timedelta(seconds=1)
+    assert renewed_expiry(kind="session", expires_at=gone, now=now, ttl=ttl) is None

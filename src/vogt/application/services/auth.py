@@ -53,6 +53,7 @@ from vogt.core.auth import (
     issue,
     normalise_username,
     parse_scopes,
+    renewed_expiry,
     verify_password,
 )
 from vogt.core.entities import Actor, AuthDecision, PasswordCredential, Token
@@ -165,8 +166,22 @@ def authenticate(
     # against the value already loaded above (no extra read, no process state
     # that could collide across instances or tests).
     now = ctx.clock()
-    if token.last_used_at is None or now - token.last_used_at >= _TOUCH_DEBOUNCE:
-        ctx.declared.touch_token(token.id, at=now)
+    # A password login's session slides while it is in use (WI-924), so a
+    # phone used every day is not signed out a fixed 30 days after it signed
+    # in. Renewal rides the same write as the last-used stamp, and is due at
+    # most once per half-lifetime, so it adds no writes of its own.
+    renewal = renewed_expiry(
+        kind=token.kind,
+        expires_at=token.expires_at,
+        now=now,
+        ttl=timedelta(days=ctx.config.session_ttl_days),
+    )
+    if (
+        renewal is not None
+        or token.last_used_at is None
+        or now - token.last_used_at >= _TOUCH_DEBOUNCE
+    ):
+        ctx.declared.touch_token(token.id, at=now, expires_at=renewal)
     return Authenticated(
         principal=Principal(
             identity_ref=actor.identity_ref,
