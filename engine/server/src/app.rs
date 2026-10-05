@@ -291,6 +291,12 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route("/api/sessions/{id}/input", post(api::session_input))
         .route("/api/sessions/{id}/wait", get(api::wait_session))
         .route("/api/sessions/{id}/blocked", post(api::set_session_blocked))
+        .route("/api/sessions/{id}/hibernate", post(api::hibernate_session))
+        .route("/api/sessions/{id}/wake", post(api::wake_session))
+        .route(
+            "/api/sessions/{id}/keep-awake",
+            post(api::keep_session_awake),
+        )
         .route("/api/assistant/message", post(assistant_api::message))
         .route(
             "/api/assistant/actions/{id}",
@@ -592,7 +598,11 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     axum::serve(listener, router)
         .with_graceful_shutdown(async move {
             shutdown_signal().await;
-            tracing::info!("shutdown signal received; draining live sessions to history");
+            tracing::info!("shutdown signal received; hibernating and draining live sessions");
+            // Hibernate first: a redeploy then leaves every agent session
+            // listed and wakeable (WI-912). What cannot be hibernated is
+            // archived to history as before.
+            drain_state.sessions.hibernate_for_shutdown().await;
             drain_state.sessions.drain_to_history().await;
         })
         .await

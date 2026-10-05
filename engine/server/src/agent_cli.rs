@@ -269,6 +269,38 @@ pub fn agent_name(command: &[String]) -> Option<String> {
     KNOWN.contains(&binary.as_str()).then_some(binary)
 }
 
+/// The agent conversation a session started with `command` runs, when its
+/// id is known before the CLI says anything: the one it resumes, or — for a
+/// bare Claude Code launch, which [`launch`] pins with `--session-id` — the
+/// engine's own id for the session. `None` for anything else, including a
+/// fresh Codex or OpenCode session, whose id the CLI mints itself: resuming
+/// by a guess could continue somebody else's conversation.
+pub fn conversation(
+    command: Option<&[String]>,
+    resume: Option<&str>,
+    session_id: Uuid,
+) -> Option<vogt_engine_contract::AgentConversation> {
+    let command = command.filter(|c| !c.is_empty())?;
+    let (binary_idx, binary) = agent_binary(command);
+    if !KNOWN.contains(&binary.as_str()) {
+        return None;
+    }
+    if let Some(id) = trimmed(resume) {
+        // A malformed id is refused by `launch` before anything spawns;
+        // here it is simply not a conversation the engine can name.
+        return is_conversation_id(id).then(|| vogt_engine_contract::AgentConversation {
+            agent: binary,
+            id: id.to_string(),
+        });
+    }
+    (binary == "claude" && binary_idx + 1 == command.len()).then(|| {
+        vogt_engine_contract::AgentConversation {
+            agent: binary,
+            id: session_id.to_string(),
+        }
+    })
+}
+
 /// Whether `value` is a well-formed conversation id (see
 /// [`validate_conversation_id`]), for callers that use one as a file name.
 pub fn is_conversation_id(value: &str) -> bool {
@@ -726,5 +758,40 @@ mod tests {
             .unwrap()
             .env
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod conversation_tests {
+    use super::conversation;
+    use uuid::Uuid;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn a_bare_claude_runs_the_engines_id_and_a_resume_runs_its_own() {
+        let id = Uuid::new_v4();
+        let wrapped = argv(&["vogt-agent-auth", "run", "--", "claude"]);
+        let found = conversation(Some(&wrapped), None, id).unwrap();
+        assert_eq!((found.agent.as_str(), found.id), ("claude", id.to_string()));
+
+        let resumed = conversation(Some(&wrapped), Some("abc-123"), id).unwrap();
+        assert_eq!(resumed.id, "abc-123");
+        let codex = conversation(Some(&argv(&["codex"])), Some("r1"), id).unwrap();
+        assert_eq!((codex.agent.as_str(), codex.id.as_str()), ("codex", "r1"));
+    }
+
+    #[test]
+    fn an_unknown_id_is_none_not_a_guess() {
+        let id = Uuid::new_v4();
+        // Codex mints its own id; a claude with arguments of its own may
+        // carry `--continue` or a session id the engine did not pin.
+        assert!(conversation(Some(&argv(&["codex"])), None, id).is_none());
+        assert!(conversation(Some(&argv(&["claude", "--continue"])), None, id).is_none());
+        assert!(conversation(Some(&argv(&["bash"])), Some("x"), id).is_none());
+        assert!(conversation(None, None, id).is_none());
+        assert!(conversation(Some(&argv(&["claude"])), Some("-bad"), id).is_none());
     }
 }

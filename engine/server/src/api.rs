@@ -94,6 +94,57 @@ pub async fn set_session_blocked(
     Ok(Json(session.summary()))
 }
 
+/// Stop the session's process tree and keep it listed as hibernated
+/// (WI-912). `409` with the reason when it cannot be: no conversation to
+/// resume (unless `allow_shell`), an agent-task run, or already exited.
+pub async fn hibernate_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<vogt_engine_contract::HibernateRequest>>,
+) -> Result<Json<SessionSummary>> {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    Ok(Json(
+        state
+            .sessions
+            .hibernate(
+                id,
+                req.reason,
+                vogt_engine_contract::HibernateTrigger::Manual,
+                req.allow_shell,
+            )
+            .await?,
+    ))
+}
+
+/// Start a hibernated session again under the same id, resuming its agent
+/// conversation; a live one is returned as it is.
+pub async fn wake_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    body: Option<Json<vogt_engine_contract::WakeRequest>>,
+) -> Result<Json<SessionSummary>> {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    if let Some(env) = req.env.as_ref() {
+        if env.len() > 64 || env.iter().any(|(k, v)| k.len() > 256 || v.len() > 8192) {
+            return Err(crate::error::ApiError::BadRequest(
+                "wake env is at most 64 variables, names of 256 bytes and values of 8 KiB".into(),
+            ));
+        }
+    }
+    let session = state.sessions.wake(id, req).await?;
+    Ok(Json(session.summary()))
+}
+
+/// Pin a session awake (never hibernated by policy, woken at boot), or
+/// unpin it.
+pub async fn keep_session_awake(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<vogt_engine_contract::KeepAwakeRequest>,
+) -> Result<Json<SessionSummary>> {
+    Ok(Json(state.sessions.set_keep_awake(id, req.keep_awake)?))
+}
+
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(spec): Json<SessionSpec>,
@@ -116,6 +167,19 @@ pub async fn get_session(
     Path(id): Path<Uuid>,
     Query(q): Query<SessionDetailQuery>,
 ) -> Result<Json<SessionDetail>> {
+    if let Some((bytes, _, _, summary)) = state.sessions.hibernated_screen(id) {
+        // What a hibernated session kept of its output stands in for the
+        // scrollback; there is no live position past it.
+        let bytes = match q.tail_bytes {
+            Some(limit) if bytes.len() > limit => bytes.slice(bytes.len() - limit..),
+            _ => bytes,
+        };
+        return Ok(Json(SessionDetail {
+            summary,
+            scrollback_pos: bytes.len() as u64,
+            scrollback_base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }));
+    }
     let s = state.sessions.get(id)?;
     let (snap, pos) = match q.tail_bytes {
         Some(limit) => s.snapshot_tail(limit),
@@ -140,7 +204,6 @@ pub async fn get_session_screen(
     Path(id): Path<Uuid>,
     Query(q): Query<ScreenQuery>,
 ) -> Result<Json<SessionScreen>> {
-    let s = state.sessions.get(id)?;
     let lines = q.scrollback_lines.unwrap_or(0);
     if lines > crate::screen::MAX_SCROLLBACK_LINES {
         return Err(crate::error::ApiError::BadRequest(format!(
@@ -148,6 +211,14 @@ pub async fn get_session_screen(
             crate::screen::MAX_SCROLLBACK_LINES
         )));
     }
+    // A hibernated session shows the screen it had when it stopped, and
+    // reading it does not wake it.
+    if let Some((bytes, rows, cols, summary)) = state.sessions.hibernated_screen(id) {
+        return Ok(Json(
+            crate::screen::kept_screen(id, bytes, rows, cols, summary, lines).await?,
+        ));
+    }
+    let s = state.sessions.get(id)?;
     Ok(Json(crate::screen::session_screen(s, lines).await?))
 }
 

@@ -73,6 +73,17 @@ pub struct Session {
     approval: Mutex<Option<crate::approval::Pending>>,
     /// The agent's own report that it is blocked on a person.
     blocked: Mutex<Option<vogt_engine_contract::BlockedReport>>,
+    /// The agent conversation this session runs, when its id is known
+    /// (set by the registry right after spawn).
+    conversation: Mutex<Option<vogt_engine_contract::AgentConversation>>,
+    /// Pinned awake (see `SessionSummary::keep_awake`).
+    keep_awake: AtomicBool,
+    /// Set as the session is being hibernated: the exit that follows is not
+    /// the session ending, so its record is kept and its history row says
+    /// `hibernated`.
+    hibernating: AtomicBool,
+    /// When input was last written to the PTY.
+    last_input: Mutex<Option<Instant>>,
 }
 
 impl Session {
@@ -116,6 +127,50 @@ impl Session {
         self.command.clone()
     }
 
+    /// `created_at`, as the wire spells it.
+    pub fn created_at_rfc3339(&self) -> String {
+        format_rfc3339(self.created_at)
+    }
+
+    /// The child's pid, while the platform reported one.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid
+    }
+
+    pub fn conversation(&self) -> Option<vogt_engine_contract::AgentConversation> {
+        self.conversation.lock().clone()
+    }
+
+    pub fn set_conversation(&self, conversation: Option<vogt_engine_contract::AgentConversation>) {
+        *self.conversation.lock() = conversation;
+    }
+
+    pub fn keep_awake(&self) -> bool {
+        self.keep_awake.load(Ordering::Acquire)
+    }
+
+    pub fn set_keep_awake(&self, keep: bool) {
+        self.keep_awake.store(keep, Ordering::Release);
+    }
+
+    pub fn is_hibernating(&self) -> bool {
+        self.hibernating.load(Ordering::Acquire)
+    }
+
+    pub fn mark_hibernating(&self) {
+        self.hibernating.store(true, Ordering::Release);
+    }
+
+    /// How long since anything happened in the terminal: the last input,
+    /// the last output, or the spawn, whichever is latest.
+    pub fn quiet_for(&self) -> std::time::Duration {
+        let latest = [*self.last_input.lock(), *self.last_output.lock()]
+            .into_iter()
+            .flatten()
+            .fold(self.spawned_at, |a, b| a.max(b));
+        latest.elapsed()
+    }
+
     /// Last `n` bytes of scrollback (or fewer if the buffer holds less).
     pub fn tail(&self, n: usize) -> Bytes {
         Bytes::copy_from_slice(self.scrollback.lock().tail(n))
@@ -142,6 +197,9 @@ impl Session {
             last_output_at: self.last_output_at.lock().map(format_rfc3339),
             approval: self.approval_prompt(),
             blocked: self.blocked(),
+            conversation: self.conversation(),
+            hibernation: None,
+            keep_awake: self.keep_awake(),
         }
     }
 
@@ -274,6 +332,7 @@ impl Session {
     }
 
     pub fn write_input(&self, data: &[u8]) -> std::io::Result<()> {
+        *self.last_input.lock() = Some(Instant::now());
         let mut w = self.writer.lock();
         w.write_all(data)?;
         w.flush()
@@ -342,7 +401,14 @@ pub struct SpawnDefaults<'a> {
     /// The session's credential for the on-demand secret broker, or
     /// `None` when the deployment declares nothing to broker.
     pub secret_broker: Option<crate::secret_broker::BrokerGrant>,
+    /// Called once the child has exited and its output is drained, after
+    /// `SessionKilled` is published. The registry uses it to forget the
+    /// hibernation record of a session that ended (rather than hibernated).
+    pub on_exit: Option<ExitHook>,
 }
+
+/// See [`SpawnDefaults::on_exit`].
+pub type ExitHook = Box<dyn FnOnce(&Session) + Send + 'static>;
 
 fn command_display(spec: &SessionSpec, defaults: &SpawnDefaults<'_>) -> String {
     if let Some(argv) = spec.command.as_ref().filter(|argv| !argv.is_empty()) {
@@ -676,6 +742,10 @@ pub fn spawn(
         last_output_at: Mutex::new(None),
         approval: Mutex::new(None),
         blocked: Mutex::new(None),
+        conversation: Mutex::new(None),
+        keep_awake: AtomicBool::new(false),
+        hibernating: AtomicBool::new(false),
+        last_input: Mutex::new(None),
     });
 
     spawn_reader_thread(
@@ -687,7 +757,13 @@ pub fn spawn(
         history_log,
         runtime.clone(),
     )?;
-    spawn_exit_waiter(Arc::clone(&session), bus.clone(), history.clone(), runtime);
+    spawn_exit_waiter(
+        Arc::clone(&session),
+        bus.clone(),
+        history.clone(),
+        runtime,
+        defaults.on_exit,
+    );
     spawn_activity_watcher(Arc::clone(&session), bus);
 
     Ok(SpawnedSession { session })
@@ -758,6 +834,7 @@ fn spawn_exit_waiter(
     bus: EventBus,
     history: Option<Arc<SessionHistory>>,
     runtime: tokio::runtime::Handle,
+    on_exit: Option<ExitHook>,
 ) {
     tokio::task::spawn_blocking(move || {
         let mut child = match session.child.lock().take() {
@@ -790,6 +867,9 @@ fn spawn_exit_waiter(
             id: session.id,
             exit_code: Some(code),
         });
+        if let Some(hook) = on_exit {
+            hook(&session);
+        }
         try_spawn_archive(&session, history, &runtime);
     });
 }
@@ -835,7 +915,11 @@ fn try_spawn_archive(
             cwd: Some(session.cwd.clone()),
             command: session.command.clone(),
             scrollback_bytes,
-            end_reason: Some(crate::history::END_EXITED),
+            end_reason: Some(if session.is_hibernating() {
+                crate::history::END_HIBERNATED
+            } else {
+                crate::history::END_EXITED
+            }),
         };
 
         if let Err(e) = history

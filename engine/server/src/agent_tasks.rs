@@ -1280,7 +1280,7 @@ impl AgentTaskRegistry {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let live = prompt_files::session_id_from_prompt_file(name.as_ref())
-                .is_some_and(|id| self.sessions.get(id).is_ok());
+                .is_some_and(|id| self.sessions.knows(id));
             if !live {
                 remove_session_prompt_with_tally(&entry_path, tally)?;
             }
@@ -1458,7 +1458,7 @@ impl AgentTaskRegistry {
         }
 
         let session_name = format!("[Task] {}", task.name);
-        let session = self.sessions.create(SessionSpec {
+        let session = self.sessions.create_for_task(SessionSpec {
             name: session_name.clone(),
             command: Some(command),
             template: None,

@@ -36,6 +36,10 @@ The engine owns the *doing*:
 - **Activity state.** Each session carries `idle` / `running` /
   `waiting-for-input` / `errored`, derived from output heuristics and published
   on a server-wide SSE stream.
+- **Hibernation.** An agent session can have its process tree stopped to free
+  memory and be woken later, under the same id, by resuming its conversation.
+  The record that makes this possible is written at spawn, so sessions also
+  survive an engine restart ([Hibernation](#hibernation)).
 - **Agent tasks.** A durable scheduled-agent registry — `manual`, `interval`,
   UTC `daily`, plus **event triggers** that fire runs from vogt-core's own
   state (a work-item transition, a raised drift proposal, a new observation, a
@@ -634,6 +638,11 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   `sessions` capability)
 - `GET /api/sessions/:id/attach` — the WebSocket stream (see
   [Attach protocol](#attach-protocol)); a driver does not need it.
+- `POST /api/sessions/:id/hibernate` `{"reason"?, "allow_shell"?}` ->
+  `SessionSummary`, `POST /api/sessions/:id/wake` `{"env"?, "cols"?,
+  "rows"?}` -> `SessionSummary`, and `POST /api/sessions/:id/keep-awake`
+  `{"keep_awake": bool}` -> `SessionSummary` — see
+  [Hibernation](#hibernation). Each requires `sessions`.
 
 The 64 KiB input cap mirrors `ws::MAX_INPUT_BYTES`, so the same paste is
 accepted or refused whichever transport carries it. Over the cap is `400` on
@@ -1041,6 +1050,64 @@ curl -s -H "$AUTH" -H 'content-type: application/json' \
 curl -s -H "$AUTH" -X POST "$VOGT_ENGINE_URL/api/sessions/$ID/kill"
 ```
 
+#### Hibernation
+
+An idle agent session holds a few hundred MiB in its CLI and its MCP
+servers. Its conversation is already on disk in the agent CLI's own
+transcript. Hibernating it stops the process tree and keeps the rest, so it
+can be started again later by resuming the same conversation under the same
+engine id (WI-912; the design is `docs/design/session-hibernation.md`).
+
+- **The record.** Every session started through `POST /api/sessions` has a
+  record at `state_dir/sessions/<id>.json` (mode 0600) from the moment it
+  spawns. The record holds the name, the template, the command as the
+  template expanded it, the directory, the model and effort, the agent
+  conversation, the brief file and `keep_awake`. It also holds the
+  template's and caller's environment *with every secret removed*: anything
+  `is_secret_env` matches, including `VOGT_HTTP_TOKEN` and the broker
+  token. A session that ends (it exits, is killed or is deleted) forgets its
+  record. Agent-task runs have none.
+- **What can hibernate.** Only a session whose agent conversation id the
+  engine knows. That is a bare Claude Code launch, whose conversation is
+  pinned to the session id (`--session-id`), or any agent started with
+  `resume`. The summary's `conversation` names it. A fresh Codex or OpenCode
+  session mints its own id, and the engine does not guess it. A shell
+  hibernates only with `allow_shell`, and wakes as a fresh process in the
+  same directory (`hibernation.resumable: false`). An agent-task run is
+  never hibernated. A refusal is `409` with the reason.
+- **Hibernate.** The engine writes the last 256 KiB of output and the
+  terminal size beside the record. It then sends `SIGTERM` to the child's
+  process group and to every descendant found before the signal, waits up
+  to 5 s, and `SIGKILL`s whatever is left. The plain kill signals only the
+  child, which can leave MCP servers running. The session stays in
+  `GET /api/sessions` with `activity: "hibernated"`, `alive: false` and a
+  `hibernation` object (`at`, `trigger`, `reason`, `resumable`). Its history
+  row ends with `end_reason: "hibernated"`, and its broker grant is revoked.
+- **While hibernated.** `GET /api/sessions/:id` and `/screen` serve the kept
+  output, and reading them does not wake the session; `ready` is false.
+  Attach replays the same output and then sends `{"type":"hibernated"}` (see
+  [Attach protocol](#attach-protocol)). Input, wait, resize and `blocked`
+  answer `409` with a hint to wake the session. `kill` and `DELETE` forget
+  it, along with its record, kept screen and brief.
+- **Wake.** The session is respawned under the same id, with the recorded
+  command, directory, model and environment, plus `resume` of its
+  conversation. No brief prompt is sent, because the conversation has
+  already read its brief, but `VOGT_ENGINE_AGENT_TASK_PROMPT_FILE` still
+  points at the brief file. `env` from the request is set on top. The
+  record holds no secrets, so this is how a caller hands a woken session its
+  credentials: vogt-core's `session.wake` mints a new `VOGT_HTTP_TOKEN`. The
+  engine mints a new broker grant. The history row and log continue.
+  Waking a live session returns it unchanged.
+- **Restarts.** On `SIGTERM` the engine hibernates every session it can
+  (`trigger: "shutdown"`) before the history drain. At boot, every record
+  without a process becomes a hibernated session. A record the engine never
+  got to hibernate (a `SIGKILL`, a crash) comes back as
+  `trigger: "recovered"`, with its screen taken from the history log. A
+  redeploy therefore leaves the agent sessions listed and wakeable, not
+  gone.
+- **`keep_awake`** pins a session. The pin is kept in its record and shown
+  on its summary.
+
 ### Attach protocol
 
 `GET /api/sessions/:id/attach` — WebSocket upgrade. It sits outside the bearer
@@ -1085,7 +1152,15 @@ Server text control frames:
 {"type":"snapshot-done"}
 {"type":"pong","id":1,"pos":123}
 {"type":"lag","note":"client too slow; reattach"}
+{"type":"hibernated"}
 ```
+
+`hibernated` follows `snapshot-done` when the session is hibernated. The
+snapshot was its kept output (always `reset`, whatever `resume_from` said).
+Nothing live follows, and the server closes with code 1000. Attaching never
+wakes a session, because the PWA pre-warms panes. Wake it with
+`POST /api/sessions/:id/wake` and attach again cold: the woken process's
+output starts at position 0.
 
 A `pong` echoes the `ping.id` and carries `pos`: the absolute byte offset the
 server has **actually streamed to that socket**, not `total_written`. The pong
@@ -1124,7 +1199,8 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
 
 - `GET /api/events` -> `text/event-stream` of `ServerEvent`, one JSON object
   per `data:` line. Variants are `session-created`, `session-renamed`,
-  `session-killed`, `activity` (`{id, state, activity_changed_at}`; `state`
+  `session-killed`, `session-hibernated` (`{id, trigger}`), `session-woken`
+  (`{id}`), `activity` (`{id, state, activity_changed_at}`; `state`
   is one of the activity states above, `exited`/`errored` once the child has
   exited),
   `vogt.changed`, and the agent-task steering

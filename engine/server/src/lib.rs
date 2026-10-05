@@ -20,6 +20,7 @@ pub mod files;
 pub mod gates;
 pub mod git;
 pub mod gui;
+pub mod hibernation;
 pub mod history;
 pub mod history_api;
 pub mod observability;

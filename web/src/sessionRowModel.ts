@@ -76,6 +76,8 @@ const ATTENTION_ORDER: Record<string, number> = {
   errored: 1,
   running: 2,
   idle: 3,
+  // Asleep until somebody wakes it: below everything that is running.
+  hibernated: 4,
   exited: 4,
 };
 

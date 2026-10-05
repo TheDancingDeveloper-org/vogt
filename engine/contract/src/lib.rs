@@ -9,6 +9,11 @@ use uuid::Uuid;
 /// once a session's child has exited its activity is one of these two and
 /// never goes back, whatever late output the PTY reader still drains
 /// afterwards.
+///
+/// `hibernated` is neither: the session's process tree was stopped to free
+/// its memory, and the engine keeps what it needs to start it again by
+/// resuming the same agent conversation under the same id
+/// (`POST /api/sessions/{id}/wake`). Not alive, and not finished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ActivityState {
@@ -23,6 +28,8 @@ pub enum ActivityState {
     Errored,
     /// The child exited with code 0. Not alive.
     Exited,
+    /// Stopped to free memory and kept to be woken (see the enum's doc).
+    Hibernated,
 }
 
 impl ActivityState {
@@ -34,6 +41,7 @@ impl ActivityState {
             ActivityState::AwaitingApproval => "⚠",
             ActivityState::Errored => "✗",
             ActivityState::Exited => "■",
+            ActivityState::Hibernated => "◌",
         }
     }
 
@@ -142,6 +150,88 @@ pub struct SessionSummary {
     /// when it is not blocked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<BlockedReport>,
+    /// The agent conversation this session runs, when the engine knows its
+    /// id: the one it was resumed from, or the engine's own id pinned on a
+    /// fresh Claude Code launch. What a wake resumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation: Option<AgentConversation>,
+    /// Set while the session is hibernated: when, why, and by what.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hibernation: Option<Hibernation>,
+    /// Pinned awake: never hibernated by policy, and woken at boot.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep_awake: bool,
+}
+
+/// An agent CLI and its own id for a conversation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentConversation {
+    /// `claude`, `codex` or `opencode`.
+    pub agent: String,
+    pub id: String,
+}
+
+/// What stopped a session to free its memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HibernateTrigger {
+    /// Asked for (`POST /api/sessions/{id}/hibernate`).
+    Manual,
+    /// The idle policy.
+    Idle,
+    /// Memory pressure.
+    Memory,
+    /// The engine was shutting down.
+    Shutdown,
+    /// Found at boot without a process: the engine stopped without the
+    /// chance to hibernate it (a SIGKILL, a crash).
+    Recovered,
+}
+
+/// A hibernated session's record of when and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hibernation {
+    /// RFC 3339.
+    pub at: String,
+    pub trigger: HibernateTrigger,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Whether a wake resumes the agent conversation (`true`) or starts a
+    /// fresh shell in the same directory (`false`, a shell hibernated on
+    /// request).
+    pub resumable: bool,
+}
+
+/// `POST /api/sessions/{id}/hibernate`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HibernateRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Hibernate a session with no agent conversation to resume (a shell).
+    /// It wakes as a fresh process in the same directory, with the last
+    /// screen kept for reading. Off unless asked for.
+    #[serde(default)]
+    pub allow_shell: bool,
+}
+
+/// `POST /api/sessions/{id}/wake`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WakeRequest {
+    /// Variables to set on top of the ones recorded at hibernation. The
+    /// record never holds a secret, so this is how a caller hands a woken
+    /// session its credentials again (vogt-core: `VOGT_HTTP_TOKEN`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<Vec<(String, String)>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cols: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u16>,
+}
+
+/// `POST /api/sessions/{id}/keep-awake`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeepAwakeRequest {
+    pub keep_awake: bool,
 }
 
 /// An agent's own report that it cannot go on without a person.
@@ -391,6 +481,16 @@ pub enum ServerEvent {
         /// When the current turn began (see `SessionSummary`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_started_at: Option<String>,
+    },
+    /// A session was hibernated: its process tree is gone, the session is
+    /// still listed (`activity: hibernated`) and can be woken.
+    SessionHibernated {
+        id: Uuid,
+        trigger: HibernateTrigger,
+    },
+    /// A hibernated session was started again under the same id.
+    SessionWoken {
+        id: Uuid,
     },
     /// A session's agent reported itself blocked on a person (`blocked`
     /// set), or cleared that report (`blocked` absent).
@@ -746,6 +846,10 @@ pub enum ServerControl {
         #[serde(default)]
         note: String,
     },
+    /// Sent after the snapshot when the session is hibernated: the snapshot
+    /// was its last screen, nothing live follows, and the server closes.
+    /// The client offers to wake it.
+    Hibernated,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,7 +1,11 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use dashmap::DashMap;
 use uuid::Uuid;
+use vogt_engine_contract::{ActivityState, HibernateTrigger, Hibernation};
 
 use crate::secret_broker::SecretBroker;
 
@@ -10,6 +14,7 @@ use crate::{
     config::Config,
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
+    hibernation::{self, Record},
     history::{ArchiveRecord, SessionHistory},
     prompt_files,
     pty::{self, Session, SessionSpec, SessionSummary, SpawnDefaults},
@@ -81,19 +86,51 @@ pub struct SessionRegistry {
     /// lifetime: issued as the session is created, revoked as it is
     /// forgotten.
     secret_broker: Arc<SecretBroker>,
+    /// Every session's hibernation record, live or hibernated, mirrored from
+    /// `state_dir/sessions` (see `hibernation`). A session is hibernated when
+    /// its record says so and it has no live entry in `sessions`.
+    records: Arc<DashMap<Uuid, Record>>,
+    /// One lock per session, held across a hibernate or a wake, so two of
+    /// them for one session never interleave.
+    transitions: DashMap<Uuid, Arc<tokio::sync::Mutex<()>>>,
+    /// Set once the engine is shutting down: from then on an exit is the
+    /// engine stopping, never a session ending, and keeps its record.
+    shutting_down: Arc<AtomicBool>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
 
+/// Which sessions a hibernation may take, and how a session was created.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// `POST /api/sessions`, or vogt-core.
+    Api,
+    /// An agent-task run: its runner watches the session and reads its
+    /// conclusion from it, so it is never hibernated or recorded.
+    AgentTask,
+}
+
+/// What `SessionRegistry::create_inner` is doing.
+enum Creating {
+    Fresh(Origin),
+    /// Starting a hibernated session again under its own id.
+    Wake(Box<Record>),
+}
+
 impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
         let secret_broker = Arc::new(SecretBroker::new(&cfg));
+        let records = Arc::new(DashMap::new());
+        recover_records(&cfg.state_dir, history.as_deref(), &records);
         Self {
             cfg,
             bus,
             history,
             sessions: DashMap::new(),
             secret_broker,
+            records,
+            transitions: DashMap::new(),
+            shutting_down: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -101,7 +138,17 @@ impl SessionRegistry {
         &self.secret_broker
     }
 
-    pub fn create(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+    pub fn create(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+        self.create_inner(spec, Creating::Fresh(Origin::Api))
+    }
+
+    /// A session for an agent-task run: like [`Self::create`], but never
+    /// recorded for hibernation — the run's runner owns its lifetime.
+    pub fn create_for_task(&self, spec: SessionSpec) -> Result<Arc<Session>> {
+        self.create_inner(spec, Creating::Fresh(Origin::AgentTask))
+    }
+
+    fn create_inner(&self, mut spec: SessionSpec, creating: Creating) -> Result<Arc<Session>> {
         spec.name = normalize_session_name(&spec.name)?;
         // Expand a template name into a command before anything downstream
         // reads `command`. Only when the caller gave no explicit command —
@@ -128,6 +175,12 @@ impl SessionRegistry {
                 }
             }
         }
+        // What a hibernation record keeps: the command and environment as
+        // the template and caller gave them, before the engine adds its own
+        // launch arguments and variables (a wake adds those again).
+        let base_command = spec.command.clone();
+        let base_env = spec.env.clone().unwrap_or_default();
+
         // A resumed conversation starts where it ran, not where the caller
         // would have opened a fresh session: `claude --resume <id>` only finds
         // a conversation from the directory its transcript is keyed under,
@@ -161,7 +214,10 @@ impl SessionRegistry {
         // below can be named for the session it belongs to, so the file
         // exists before the child does, and so the agent's launch can name
         // both.
-        let id = Uuid::new_v4();
+        let id = match &creating {
+            Creating::Wake(record) => record.id,
+            Creating::Fresh(_) => Uuid::new_v4(),
+        };
         let brief = spec
             .prompt
             .as_deref()
@@ -203,9 +259,20 @@ impl SessionRegistry {
                 id,
                 text,
             )?),
-            // A brief that is absent, empty, or all whitespace is no brief:
-            // the child is left exactly as it was before this field existed.
-            None => None,
+            // A woken session is pointed at the brief it was first started
+            // with, if that file is still there, but not told to read it
+            // again: the conversation it resumes already has.
+            None => match &creating {
+                Creating::Wake(record) => record.brief_file.clone().filter(|p| p.is_file()),
+                // A brief that is absent, empty, or all whitespace is no
+                // brief: the child is left exactly as it was before this
+                // field existed.
+                Creating::Fresh(_) => None,
+            },
+        };
+        let conversation = match &creating {
+            Creating::Fresh(Origin::AgentTask) => None,
+            _ => agent_cli::conversation(base_command.as_deref(), spec.resume.as_deref(), id),
         };
         if let Some(path) = prompt_file.as_ref() {
             // The child is told *where* the brief is, never handed the text.
@@ -245,6 +312,7 @@ impl SessionRegistry {
                 scrollback_bytes: self.cfg.scrollback_bytes,
                 activity_idle_after_ms: self.cfg.activity_idle_after_ms,
                 secret_broker: self.secret_broker.grant(id),
+                on_exit: Some(self.exit_hook()),
             },
             self.bus.clone(),
             self.history.clone(),
@@ -255,14 +323,50 @@ impl SessionRegistry {
                 // A grant for a child that never started is a live token for
                 // nobody; forget it with the rest of the failed spawn.
                 self.secret_broker.revoke(id);
-                // No child means nothing will ever read the brief.
-                if prompt_file.is_some() {
+                // No child means nothing will ever read the brief — unless it
+                // is a woken session's, which stays with its record.
+                if prompt_file.is_some() && matches!(creating, Creating::Fresh(_)) {
                     prompt_files::remove_session_prompt(&self.cfg.state_dir, id);
                 }
                 return Err(e);
             }
         };
         let session = spawned.session;
+        session.set_conversation(conversation.clone());
+
+        // The record is written before the session is listed, so there is no
+        // moment at which the engine runs a hibernatable session it would
+        // forget on a SIGKILL. A failed write is logged, not fatal: the
+        // session runs; it is only not recoverable.
+        let record = match creating {
+            Creating::Fresh(Origin::AgentTask) => None,
+            Creating::Fresh(Origin::Api) => {
+                let mut record = Record::new(id, session.name(), session.created_at_rfc3339());
+                record.template = spec.template.clone();
+                record.command = base_command;
+                record.cwd = Some(session.cwd.clone());
+                record.env = hibernation::without_secrets(&base_env);
+                record.model = spec.model.clone();
+                record.effort = spec.effort.clone();
+                record.conversation = conversation;
+                record.brief_file = prompt_file.clone();
+                Some(record)
+            }
+            Creating::Wake(record) => {
+                let mut record = *record;
+                record.hibernation = None;
+                record.name = session.name();
+                session.set_keep_awake(record.keep_awake);
+                hibernation::remove_screen(&self.cfg.state_dir, id);
+                Some(record)
+            }
+        };
+        if let Some(record) = record {
+            if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
+                tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+            }
+            self.records.insert(id, record);
+        }
         self.sessions.insert(session.id, Arc::clone(&session));
         // Provisional history row: written at spawn with `ended_at` and
         // `exit_code` NULL, so a long-lived session that is later SIGKILLed on
@@ -347,11 +451,294 @@ impl SessionRegistry {
         }
     }
 
+    /// A live (or exited, still listed) session. A hibernated one is a
+    /// `409` naming the way to wake it, so every route that needs a process
+    /// — input, wait, resize, blocked — says why it cannot act rather than
+    /// that the session does not exist.
     pub fn get(&self, id: Uuid) -> Result<Arc<Session>> {
-        self.sessions
+        if let Some(s) = self.sessions.get(&id) {
+            return Ok(Arc::clone(s.value()));
+        }
+        if self.is_hibernated(id) {
+            return Err(ApiError::Conflict(format!(
+                "session {id} is hibernated: its process was stopped to free memory. \
+                 Wake it (POST /api/sessions/{id}/wake, or vogt's session.wake) first"
+            )));
+        }
+        Err(ApiError::NotFound)
+    }
+
+    /// Whether the engine knows this session at all, live or hibernated.
+    pub fn knows(&self, id: Uuid) -> bool {
+        self.sessions.contains_key(&id) || self.records.contains_key(&id)
+    }
+
+    pub fn is_hibernated(&self, id: Uuid) -> bool {
+        !self.sessions.contains_key(&id)
+            && self
+                .records
+                .get(&id)
+                .is_some_and(|r| r.hibernation.is_some())
+    }
+
+    /// A hibernated session's summary, or `None` when it is not hibernated.
+    pub fn hibernated_summary(&self, id: Uuid) -> Option<SessionSummary> {
+        if self.sessions.contains_key(&id) {
+            return None;
+        }
+        let record = self.records.get(&id)?;
+        let screen_len = hibernation::read_screen(&self.cfg.state_dir, id).len() as u64;
+        hibernated_summary(&record, screen_len)
+    }
+
+    /// A hibernated session's kept output and the size to render it at,
+    /// with its summary.
+    pub fn hibernated_screen(&self, id: Uuid) -> Option<(bytes::Bytes, u16, u16, SessionSummary)> {
+        if self.sessions.contains_key(&id) {
+            return None;
+        }
+        let record = self.records.get(&id)?.clone();
+        let bytes = hibernation::read_screen(&self.cfg.state_dir, id);
+        let summary = hibernated_summary(&record, bytes.len() as u64)?;
+        Some((
+            bytes::Bytes::from(bytes),
+            record.rows.unwrap_or(24),
+            record.cols.unwrap_or(80),
+            summary,
+        ))
+    }
+
+    /// The hook a session's exit waiter calls: a session that ended — exited
+    /// by itself or was killed — forgets its record, so it is not recovered
+    /// as hibernated at the next boot. One that is hibernating, or that exits
+    /// because the engine is shutting down, keeps it.
+    fn exit_hook(&self) -> crate::pty::ExitHook {
+        let records = Arc::clone(&self.records);
+        let shutting_down = Arc::clone(&self.shutting_down);
+        let state_dir = self.cfg.state_dir.clone();
+        Box::new(move |session: &Session| {
+            if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
+                return;
+            }
+            records.remove(&session.id);
+            hibernation::remove(&state_dir, session.id);
+        })
+    }
+
+    fn transition_lock(&self, id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+        Arc::clone(
+            self.transitions
+                .entry(id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .value(),
+        )
+    }
+
+    /// Why a live session cannot be hibernated, or `None` when it can.
+    pub fn hibernate_refusal(&self, session: &Session, allow_shell: bool) -> Option<String> {
+        if !session.is_alive() {
+            return Some("the session has exited; there is nothing to hibernate".into());
+        }
+        let Some(record) = self.records.get(&session.id) else {
+            return Some(
+                "the session is an agent-task run, which its runner watches; it is never \
+                 hibernated"
+                    .into(),
+            );
+        };
+        if record.conversation.is_none() && !allow_shell {
+            return Some(
+                "the engine does not know an agent conversation to resume for this session \
+                 (a shell, or an agent CLI whose conversation id it did not pin — a fresh \
+                 Codex or OpenCode session); pass allow_shell to hibernate it anyway, and \
+                 it will wake as a fresh process in the same directory"
+                    .into(),
+            );
+        }
+        None
+    }
+
+    /// Stop a live session's process tree and keep it listed as hibernated,
+    /// to be woken later by resuming its agent conversation under the same
+    /// id. Hibernating a hibernated session returns it unchanged.
+    pub async fn hibernate(
+        &self,
+        id: Uuid,
+        reason: Option<String>,
+        trigger: HibernateTrigger,
+        allow_shell: bool,
+    ) -> Result<SessionSummary> {
+        let lock = self.transition_lock(id);
+        let _held = lock.lock().await;
+        let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) else {
+            return self.hibernated_summary(id).ok_or(ApiError::NotFound);
+        };
+        if let Some(refusal) = self.hibernate_refusal(&session, allow_shell) {
+            return Err(ApiError::Conflict(refusal));
+        }
+        let mut record = self
+            .records
             .get(&id)
-            .map(|s| Arc::clone(s.value()))
-            .ok_or(ApiError::NotFound)
+            .map(|r| r.clone())
+            .ok_or(ApiError::NotFound)?;
+
+        // The screen and the record are written before anything is stopped:
+        // a failure here leaves the session running and says so.
+        let (screen, rows, cols) = session.screen_source(hibernation::SCREEN_BYTES);
+        record.name = session.name();
+        record.keep_awake = session.keep_awake();
+        record.rows = Some(rows);
+        record.cols = Some(cols);
+        record.hibernation = Some(Hibernation {
+            at: now_rfc3339(),
+            trigger,
+            reason: reason
+                .map(|r| r.trim().chars().take(500).collect::<String>())
+                .filter(|r| !r.is_empty()),
+            resumable: record.conversation.is_some(),
+        });
+        hibernation::write_screen(&self.cfg.state_dir, id, &screen)
+            .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
+            .map_err(|e| ApiError::Internal(format!("write the hibernation record: {e}")))?;
+        session.mark_hibernating();
+        self.records.insert(id, record);
+
+        match session.pid() {
+            Some(pid) => {
+                let watched = Arc::clone(&session);
+                hibernation::stop_tree(pid, hibernation::STOP_GRACE, move || !watched.is_alive())
+                    .await
+            }
+            None => {
+                let _ = session.kill();
+            }
+        }
+        // The exit waiter records the exit; give it a moment so the history
+        // row it writes is the one that says `hibernated`.
+        for _ in 0..40 {
+            if !session.is_alive() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        self.sessions.remove(&id);
+        self.secret_broker.revoke(id);
+        self.bus
+            .publish(ServerEvent::SessionHibernated { id, trigger });
+        tracing::info!(session = %id, ?trigger, "session hibernated");
+        self.hibernated_summary(id).ok_or(ApiError::NotFound)
+    }
+
+    /// Start a hibernated session again, under the same id, by resuming its
+    /// agent conversation in the directory it ran in. `env` is set on top of
+    /// the recorded environment (which holds no secrets). Waking a live
+    /// session returns it as it is.
+    pub async fn wake(
+        &self,
+        id: Uuid,
+        req: vogt_engine_contract::WakeRequest,
+    ) -> Result<Arc<Session>> {
+        let lock = self.transition_lock(id);
+        let _held = lock.lock().await;
+        if let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) {
+            if session.is_alive() {
+                return Ok(session);
+            }
+            return Err(ApiError::Conflict(
+                "the session has exited; start a new one (session_start with resume) instead"
+                    .into(),
+            ));
+        }
+        let record = self
+            .records
+            .get(&id)
+            .map(|r| r.clone())
+            .filter(|r| r.hibernation.is_some())
+            .ok_or(ApiError::NotFound)?;
+        let mut env = record.env.clone();
+        env.extend(req.env.unwrap_or_default());
+        let spec = SessionSpec {
+            name: record.name.clone(),
+            command: record.command.clone(),
+            template: record.template.clone(),
+            cwd: record.cwd.clone(),
+            env: Some(env),
+            prompt: None,
+            model: record.model.clone(),
+            effort: record.effort.clone(),
+            resume: record.conversation.as_ref().map(|c| c.id.clone()),
+            cols: req.cols.or(record.cols),
+            rows: req.rows.or(record.rows),
+            scrollback_bytes: None,
+        };
+        let session = self.create_inner(spec, Creating::Wake(Box::new(record)))?;
+        self.bus.publish(ServerEvent::SessionWoken { id });
+        tracing::info!(session = %id, "session woken");
+        Ok(session)
+    }
+
+    /// Pin a session awake (or unpin it), live or hibernated.
+    pub fn set_keep_awake(&self, id: Uuid, keep: bool) -> Result<SessionSummary> {
+        let live = self.sessions.get(&id).map(|s| Arc::clone(s.value()));
+        if let Some(session) = live.as_ref() {
+            session.set_keep_awake(keep);
+        }
+        let updated = self.records.get_mut(&id).map(|mut record| {
+            record.keep_awake = keep;
+            record.clone()
+        });
+        match (&live, updated) {
+            (_, Some(record)) => {
+                if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
+                    tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+                }
+            }
+            (Some(_), None) => {}
+            (None, None) => return Err(ApiError::NotFound),
+        }
+        match live {
+            Some(session) => Ok(session.summary()),
+            None => self.hibernated_summary(id).ok_or(ApiError::NotFound),
+        }
+    }
+
+    /// Hibernate every live session that can be, as the engine shuts down,
+    /// so a redeploy leaves them listed and wakeable rather than gone. From
+    /// here on no exit forgets a record. Sessions that cannot be hibernated
+    /// (shells, agent-task runs) are left to the history drain.
+    pub async fn hibernate_for_shutdown(&self) {
+        self.shutting_down.store(true, Ordering::Release);
+        let candidates: Vec<Uuid> = self
+            .live_sessions()
+            .into_iter()
+            .filter(|s| self.hibernate_refusal(s, false).is_none())
+            .map(|s| s.id)
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        tracing::info!(
+            count = candidates.len(),
+            "hibernating live sessions for shutdown"
+        );
+        let results = futures_util::future::join_all(candidates.into_iter().map(|id| async move {
+            (
+                id,
+                self.hibernate(
+                    id,
+                    Some("the engine was shutting down".into()),
+                    HibernateTrigger::Shutdown,
+                    false,
+                )
+                .await,
+            )
+        }))
+        .await;
+        for (id, result) in results {
+            if let Err(e) = result {
+                tracing::warn!(session = %id, error = %e, "could not hibernate a session for shutdown; its record stays for recovery");
+            }
+        }
     }
 
     /// Live session handles, for internal watchers (idle-stall, phrase
@@ -369,6 +756,17 @@ impl SessionRegistry {
             .iter()
             .map(|kv| kv.value().summary())
             .collect();
+        let hibernated: Vec<Uuid> = self
+            .records
+            .iter()
+            .filter(|r| r.hibernation.is_some() && !self.sessions.contains_key(r.key()))
+            .map(|r| *r.key())
+            .collect();
+        out.extend(
+            hibernated
+                .into_iter()
+                .filter_map(|id| self.hibernated_summary(id)),
+        );
         out.sort_by_key(|s| s.created_at.clone());
         out
     }
@@ -384,9 +782,20 @@ impl SessionRegistry {
     }
 
     pub fn rename(&self, id: Uuid, new_name: String) -> Result<()> {
-        let s = self.get(id)?;
         let new_name = normalize_session_name(&new_name)?;
-        s.rename(new_name.clone());
+        let live = self.sessions.get(&id).map(|s| Arc::clone(s.value()));
+        if live.is_none() && !self.records.contains_key(&id) {
+            return Err(ApiError::NotFound);
+        }
+        if let Some(s) = live {
+            s.rename(new_name.clone());
+        }
+        if let Some(mut record) = self.records.get_mut(&id) {
+            record.name = new_name.clone();
+            if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
+                tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+            }
+        }
         self.bus
             .publish(ServerEvent::SessionRenamed { id, name: new_name });
         Ok(())
@@ -394,19 +803,28 @@ impl SessionRegistry {
 
     /// Sends SIGKILL to the child but keeps the session in the registry so
     /// callers can still inspect scrollback. Use `remove` to forget it entirely.
+    ///
+    /// A hibernated session has no process to kill; killing it means it is
+    /// not to come back, so it is forgotten — record, kept screen and brief.
     pub fn kill(&self, id: Uuid) -> Result<()> {
+        if self.is_hibernated(id) {
+            return self.remove(id);
+        }
         let s = self.get(id)?;
         s.kill()?;
         Ok(())
     }
 
     pub fn remove(&self, id: Uuid) -> Result<()> {
-        let s = self
-            .sessions
-            .remove(&id)
-            .map(|(_, v)| v)
-            .ok_or(ApiError::NotFound)?;
-        let _ = s.kill();
+        let live = self.sessions.remove(&id).map(|(_, v)| v);
+        let recorded = self.records.remove(&id).is_some();
+        hibernation::remove(&self.cfg.state_dir, id);
+        if live.is_none() && !recorded {
+            return Err(ApiError::NotFound);
+        }
+        if let Some(s) = live {
+            let _ = s.kill();
+        }
         // Forgetting the session forgets its leave to ask the broker.
         self.secret_broker.revoke(id);
         // The brief outlives the child on purpose — a killed session is still
@@ -419,6 +837,88 @@ impl SessionRegistry {
         prompt_files::remove_session_prompt(&self.cfg.state_dir, id);
         Ok(())
     }
+}
+
+fn now_rfc3339() -> String {
+    time::OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap_or_default()
+}
+
+/// A hibernated record as the wire lists it.
+fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSummary> {
+    let hibernation = record.hibernation.clone()?;
+    Some(SessionSummary {
+        id: record.id,
+        name: record.name.clone(),
+        activity: ActivityState::Hibernated,
+        exit_code: None,
+        alive: false,
+        scrollback_bytes: screen_bytes,
+        cwd: record.cwd.clone().unwrap_or_default(),
+        command: record.command.as_ref().map(|argv| argv.join(" ")),
+        created_at: record.created_at.clone(),
+        activity_changed_at: hibernation.at.clone(),
+        turn_started_at: None,
+        last_output_at: None,
+        approval: None,
+        blocked: None,
+        conversation: record.conversation.clone(),
+        hibernation: Some(hibernation),
+        keep_awake: record.keep_awake,
+    })
+}
+
+/// Load the records left in `state_dir` and turn every one without a process
+/// — at boot that is all of them — into a hibernated session. One the engine
+/// had already hibernated keeps its trigger; one it never got to (a SIGKILL,
+/// a crash) is `recovered`, with its screen taken from the history log when
+/// there is one. A record with no conversation to resume that was not
+/// hibernated on purpose (a shell the engine lost) is forgotten.
+fn recover_records(
+    state_dir: &std::path::Path,
+    history: Option<&SessionHistory>,
+    records: &DashMap<Uuid, Record>,
+) {
+    for mut record in hibernation::load_all(state_dir) {
+        let id = record.id;
+        if record.hibernation.is_none() {
+            if record.conversation.is_none() {
+                hibernation::remove(state_dir, id);
+                continue;
+            }
+            record.hibernation = Some(Hibernation {
+                at: now_rfc3339(),
+                trigger: HibernateTrigger::Recovered,
+                reason: Some("the engine stopped without hibernating it".into()),
+                resumable: true,
+            });
+            if hibernation::read_screen(state_dir, id).is_empty() {
+                if let Some(tail) = history.and_then(|h| log_tail(&h.log_path(id))) {
+                    let _ = hibernation::write_screen(state_dir, id, &tail);
+                }
+            }
+            if let Err(e) = hibernation::write(state_dir, &record) {
+                tracing::warn!(session = %id, error = %e, "could not update a recovered session record");
+            }
+            tracing::info!(session = %id, name = %record.name, "recovered a session as hibernated");
+        }
+        records.insert(id, record);
+    }
+}
+
+/// The last `SCREEN_BYTES` of a session's raw output log.
+fn log_tail(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let max = hibernation::SCREEN_BYTES as u64;
+    if len > max {
+        file.seek(SeekFrom::Start(len - max)).ok()?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).ok()?;
+    Some(buf)
 }
 
 fn normalize_session_name(name: &str) -> Result<String> {
