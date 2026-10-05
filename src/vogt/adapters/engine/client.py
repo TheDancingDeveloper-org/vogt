@@ -143,11 +143,25 @@ class EngineSession:
     command: str | None = None
     #: The agent's blocked report, when it made one.
     blocked: EngineBlocked | None = None
+    #: The agent conversation the session runs, when the engine knows its id
+    #: (what a wake resumes): the agent CLI and its own id.
+    conversation_agent: str | None = None
+    conversation_id: str | None = None
+    #: Set while the session is hibernated (`activity` `hibernated`).
+    hibernation: EngineHibernation | None = None
+    #: Pinned awake: never hibernated by the engine's policy.
+    keep_awake: bool = False
+
+    @property
+    def hibernated(self) -> bool:
+        return self.activity == "hibernated"
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineSession:
         exit_code = payload.get("exit_code")
         alive = payload.get("alive")
+        conversation = payload.get("conversation")
+        conversation = conversation if isinstance(conversation, dict) else {}
         return cls(
             id=str(payload.get("id", "")),
             name=str(payload.get("name", "")),
@@ -162,6 +176,36 @@ class EngineSession:
             approval=EngineApproval.from_payload(payload.get("approval")),
             command=_optional_str(payload.get("command")),
             blocked=EngineBlocked.from_payload(payload.get("blocked")),
+            conversation_agent=_optional_str(conversation.get("agent")),
+            conversation_id=_optional_str(conversation.get("id")),
+            hibernation=EngineHibernation.from_payload(payload.get("hibernation")),
+            keep_awake=payload.get("keep_awake") is True,
+        )
+
+
+@dataclass(frozen=True)
+class EngineHibernation:
+    """When and why the engine hibernated a session (engine `Hibernation`).
+
+    `trigger` is `manual`, `idle`, `memory`, `shutdown` or `recovered` (found
+    at the engine's boot without a process). `resumable` is false only for
+    a shell hibernated on request, which wakes as a fresh process.
+    """
+
+    at: str
+    trigger: str
+    resumable: bool = True
+    reason: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: object) -> EngineHibernation | None:
+        if not isinstance(payload, dict):
+            return None
+        return cls(
+            at=str(payload.get("at", "")),
+            trigger=str(payload.get("trigger", "")),
+            resumable=payload.get("resumable") is not False,
+            reason=_optional_str(payload.get("reason")),
         )
 
 
@@ -765,6 +809,66 @@ class EngineClient:
             return None
         return EngineSession.from_payload(payload)
 
+    # -- hibernation ---------------------------------------------------------
+
+    def hibernate_session(
+        self, session_id: str, *, reason: str | None = None, allow_shell: bool = False
+    ) -> EngineSession | None:
+        """Stop the session's process tree, keeping it listed to wake later.
+
+        `None` on a 404 (an unknown session, or an engine that predates
+        hibernation). A session the engine cannot hibernate — no agent
+        conversation to resume, an agent-task run, already exited — is a
+        `Conflict` carrying the engine's reason.
+        """
+        body: dict[str, Any] = {"allow_shell": allow_shell}
+        if reason:
+            body["reason"] = reason
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/hibernate",
+            method="POST",
+            payload=body,
+            allow_missing=True,
+            # The engine gives the agent a few seconds to exit cleanly.
+            timeout=self.timeout + 10,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineSession.from_payload(payload)
+
+    def wake_session(
+        self, session_id: str, *, env: dict[str, str] | None = None
+    ) -> EngineSession | None:
+        """Start a hibernated session again under its own id, resuming its
+        conversation, with `env` set on top of what the engine recorded (which
+        never holds a secret). A live session comes back as it is. `None` on
+        a 404.
+        """
+        body: dict[str, Any] = {}
+        if env:
+            body["env"] = [[key, value] for key, value in env.items()]
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/wake",
+            method="POST",
+            payload=body,
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineSession.from_payload(payload)
+
+    def keep_awake(self, session_id: str, *, keep_awake: bool) -> EngineSession | None:
+        """Pin a session awake (or unpin it); `None` on a 404."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/keep-awake",
+            method="POST",
+            payload={"keep_awake": keep_awake},
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineSession.from_payload(payload)
+
     # -- transport ---------------------------------------------------------
 
     def healthz(self) -> None:
@@ -856,6 +960,11 @@ class EngineClient:
             # act on; "answered 400" would leave them guessing at it.
             said = _engine_error_text(response.decode("utf-8", errors="replace"))
             raise InvalidRequest(said or f"the {self.label} refused {method} {path}")
+        if status == 409:
+            # The session is not in a state that allows this — hibernated,
+            # exited, not hibernatable — and the engine says which.
+            said = _engine_error_text(response.decode("utf-8", errors="replace"))
+            raise Conflict(said or f"the {self.label} refused {method} {path} (409)")
         if status >= 400:
             msg = f"the {self.label} answered {status} for {method} {path}"
             raise EngineUnavailable(msg)

@@ -131,10 +131,13 @@ token for the session's existing actor, revokes the old one, and calls the
 engine wake with `VOGT_HTTP_TOKEN` in `env`. Attribution is unchanged: the
 same actor, under a new credential. The core also wakes implicitly:
 
+Hibernating through the core (`session.hibernate`) also revokes the
+session's token. Nothing runs to hold it while the session sleeps.
+
 | Call on a hibernated session | Behaviour |
 | --- | --- |
 | `session_input` | wake, wait for `ready` (bounded), then type |
-| `session_wait` | wake, then wait as asked |
+| `session_wait` | **no wake**: it is a `read`-scope operation, and waking spawns a process and mints a token. It answers at once with `outcome: "hibernated"` and the kept screen |
 | `session_screen`, `session_log_tail`, `session_last_reply` | **no wake**; served from the record or transcript, marked `hibernated` |
 | `session_stop` | delete the record (and revoke the token, as today) |
 | GUI attach | **no wake**; replays the stored screen, then a `{"type":"hibernated"}` frame; the pane shows *Hibernated — tap to wake*, which calls `session.wake` |
@@ -248,7 +251,9 @@ before slice 3 lands.
    The product default is off.
 2. **Opening a pane does not wake** (tap to wake). The issue proposed wake on
    open; pre-warmed panes make that a mass wake.
-3. **`session_screen` does not wake**; `session_input` and `session_wait` do.
+3. **Reads do not wake.** `session_screen` and `session_wait` (both
+   `read` scope) report the hibernated state; `session_input` and
+   `session.wake` (`work.write`) wake.
 4. **Blocked-on-operator sessions are exempt** indefinitely, as the issue
    says. Alternative: hibernate them after a longer threshold (e.g. 24 h),
    since a resume loses nothing.
