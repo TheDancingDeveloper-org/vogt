@@ -207,6 +207,14 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             } else if let (true, Some(id)) = (bare, req.session_id) {
                 rewritten.extend(["--session-id".to_string(), id.to_string()]);
             }
+            if let Some(dir) = req.brief_file.and_then(Path::parent) {
+                // The brief lives under the engine's state directory, outside
+                // the session's working directory, and reading it there would
+                // stop a fresh session at a permission prompt before it began
+                // (WI-912). `--add-dir` is variadic: the `=` form takes one
+                // value, so the positional prompt after it stays a prompt.
+                rewritten.push(format!("--add-dir={}", dir.display()));
+            }
             // Positional, and last: `claude [options] [prompt]`.
             if let Some(prompt) = prompt {
                 rewritten.push(prompt);
@@ -598,8 +606,12 @@ mod tests {
             &out[4..8],
             &cmd(&["--model", "claude-opus-4-5", "--effort", "high"])[..]
         );
-        assert!(out[8].contains(BRIEF));
-        assert_eq!(out.len(), 9);
+        assert!(
+            out[8].starts_with("--add-dir="),
+            "the brief's directory, `=` form, so it takes one value: {out:?}"
+        );
+        assert!(out[9].contains(BRIEF));
+        assert_eq!(out.len(), 10);
     }
 
     #[test]

@@ -410,6 +410,10 @@ pub struct Config {
     /// `ENGINE_HIBERNATE_IDLE_AFTER` or `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW`
     /// is set (`hibernate_policy`).
     pub hibernation: crate::hibernate_policy::Policy,
+    /// Answering Claude Code's per-directory trust questions before a
+    /// session starts (`claude_config`). On unless
+    /// `ENGINE_AGENT_QUIET_ONBOARDING=0`; off in a hand-built config.
+    pub agent_onboarding: crate::claude_config::Onboarding,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -855,6 +859,7 @@ pub fn load(
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         hibernation: hibernation_policy_from_env()?,
+        agent_onboarding: crate::claude_config::Onboarding::from_env(),
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
             .ok()
             .map(|value| value.trim().to_string())

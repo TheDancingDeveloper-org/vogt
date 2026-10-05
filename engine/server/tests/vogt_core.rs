@@ -206,6 +206,7 @@ fn base_config() -> Config {
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
+        agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
     }
 }
 
