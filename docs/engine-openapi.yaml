@@ -475,6 +475,9 @@ components:
             The agent CLI's own conversation id to continue (`claude --resume`,
             `codex resume`, `opencode --session`). A fresh Claude Code session
             the engine started has its engine session id as its conversation id.
+            For `claude` and `codex` the session starts in the directory the
+            conversation's transcript records, when that is inside the
+            workspace, instead of `cwd`.
         cols: { type: integer }
         rows: { type: integer }
         scrollback_bytes: { type: integer }

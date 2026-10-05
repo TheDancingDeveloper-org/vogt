@@ -32,6 +32,7 @@ pub mod screen;
 pub mod scrollback;
 pub mod secret_broker;
 pub mod sessions;
+pub mod transcripts;
 pub mod vogt_core;
 pub mod vogt_tools;
 pub mod workflow_engine;
