@@ -24,10 +24,15 @@ import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "engine" / "deploy" / "agent-auth.sh"
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("jq") is None or shutil.which("curl") is None,
-    reason="the bulk read uses curl and jq",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not SCRIPT.exists(), reason="the engine tree is absent (core-only run)"
+    ),
+    pytest.mark.skipif(
+        shutil.which("jq") is None or shutil.which("curl") is None,
+        reason="the bulk read uses curl and jq",
+    ),
+]
 
 
 def _secret(key: str, value: str, *, hidden: bool = False) -> dict[str, Any]:
@@ -100,6 +105,7 @@ def _resolve(api_url: str, lookups: str, tmp_path: Path) -> str:
     )
     cli.chmod(0o755)
     script = f"""
+        set -e
         source {SCRIPT}
         INFISICAL_API_URL={api_url}/api
         {lookups}
