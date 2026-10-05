@@ -159,6 +159,18 @@ session the core started; `session.list` shows both (`id`,
 `engine_session_id`), and every core `session.*` operation accepts either. A
 session opened from the GUI is unlinked and has only the UUID.
 
+`session.last_reply` reads the last `n` (1-20) assistant messages of the
+agent conversation a session runs, from the agent's own transcript under
+`session_transcript_roots` (by default `~/.claude/projects` and
+`~/.codex/sessions` of the user the core runs as), redacted with the agent
+activity redactor. The conversation is found by an id the session's command
+names (`--session-id`, `--resume`, `codex resume`), by the engine session id
+(a Claude Code session the engine started), or — for this read only — as the
+newest transcript in the session's directory since it started (`basis:
+"cwd"`). `session.list` rows carry `last_reply_excerpt` (~300 characters of
+the latest reply, id-based lookups only, cached by the transcript's size and
+modification time). No transcript is `detail`, not an error.
+
 `session.wait` blocks (up to `timeout_s`, at most 600) until a session is
 ready — or needs a person, or exits — or, with `until`, until it exits or
 changes at all, and returns why with the screen: one call instead of a

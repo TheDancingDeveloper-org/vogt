@@ -987,9 +987,12 @@ ready → read → answer → stop.** Over MCP (the core's tools, preferred):
    `idle`, as described in [Reading the screen](#reading-the-screen). A
    session whose agent reported itself `blocked` is waiting for a person:
    do what it asks (or answer it), do not re-prompt it.
-3. **Read.** `session_screen.lines` is what the terminal shows now;
-   `session_log_tail` is the history of what it printed, for anything that
-   has scrolled away.
+3. **Read.** `session_last_reply` returns the agent's last replies whole
+   and current, from its own Claude Code / Codex transcript (redacted), and
+   is the best read of what an agent *said*; `session_screen.lines` is what
+   the terminal shows now (`scrollback_lines` for more); `session_log_tail`
+   is the raw history of what it printed. `session_list` carries a
+   `last_reply_excerpt` for each live agent session.
 4. **Answer.** `session_input` with `text` and `submit: true` to type a
    follow-up; `keys: ["esc"]` to dismiss a menu or dialog; `keys: ["down",
    "enter"]` to pick an option. Then go back to step 2.
@@ -2205,6 +2208,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.log_tail` | Voice-readable | Available: Read the tail of a session's output log, readable. |
 | `session.input` | Operator-only | Unavailable: The assistant types into terminals with its own engine tool (`send_input`, approval-gated); not offered twice. |
 | `session.screen` | Operator-only | Unavailable: The assistant reads terminals with its own engine tool (`read_session_tail`); for agents over MCP/CLI/REST. |
+| `session.last_reply` | Operator-only | Unavailable: The assistant reads terminals with its own engine tool (`read_session_tail`); for agents over MCP/CLI/REST. |
 | `session.wait` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
 | `session.report_blocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `session.report_unblocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |

@@ -242,8 +242,14 @@ The recipe is **start with a task → wait until ready → read → answer → s
    call, no polling; `timeout_s` up to 600. `until: "any_change"` wakes on
    any change, `"exited"` when it ends. (Polling `session_screen` for
    `ready` still works on an engine without the wait route.)
-3. **Read.** `session_screen` gives the visible `lines` now; `session_log_tail`
-   gives the history of what it printed.
+3. **Read.** `session_last_reply` (`n` up to 20) gives the agent's last
+   replies whole, from its own transcript, redacted — better than the screen,
+   which cuts a long reply at its edge. `basis` says how the conversation was
+   found (`session-id`, `resume-id`, `engine-id`, or `cwd` — a guess when two
+   agents share a directory). `session_screen` gives the visible `lines` now;
+   `session_log_tail` the raw history. `session_list` shows each live agent
+   session's `last_reply_excerpt`, so you can pick which to act on without
+   prompting every one.
 4. **Answer.** `session_input` types `text`, then presses the named `keys` in
    order (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`,
    `ctrl-d`, `backspace`), then Enter if `submit`. A menu or dialog: `keys:

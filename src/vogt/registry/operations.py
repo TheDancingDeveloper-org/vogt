@@ -166,6 +166,8 @@ from vogt.application.models import (
     SessionBlockedResult,
     SessionInputParams,
     SessionInputResult,
+    SessionLastReplyParams,
+    SessionLastReplyResult,
     SessionListResult,
     SessionResult,
     SessionScreenParams,
@@ -1000,6 +1002,22 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.session_screen,
             route=HttpRoute("GET", "/sessions/screen"),
             cli=CliBinding(("session", "screen")),
+        ),
+        Operation(
+            name="session.last_reply",
+            summary=(
+                "Read the last N replies of a session's agent (Claude Code or "
+                "Codex) from its own transcript — whole, current and "
+                "redacted, unlike the screen. Says how the conversation was "
+                "found (`basis`). Takes either id."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionLastReplyParams,
+            result_model=SessionLastReplyResult,
+            handler=services.last_reply,
+            route=HttpRoute("GET", "/sessions/last-reply"),
+            cli=CliBinding(("session", "last-reply")),
         ),
         Operation(
             name="session.wait",

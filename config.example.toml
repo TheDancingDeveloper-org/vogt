@@ -112,6 +112,10 @@
 # default policy: behaviour
 # agent_activity_roots = { claude = "~/.claude/projects", codex = "~/.codex/sessions" }
 
+# Where `session.last_reply` and the `last_reply_excerpt` in `session.list` look for a session's own agent transcript, by format (`claude`, `codex`). Read on request only — the last few assistant messages of the conversation a session runs, redacted — never indexed. The defaults are the agents' own directories under the home of the user the core runs as, which in the all-in-one stack is the user its sessions run as; a missing directory makes the reply honestly unavailable. An empty table turns both off.
+# default policy: behaviour
+# session_transcript_roots = { claude = "~/.claude/projects", codex = "~/.codex/sessions" }
+
 # The most transcript bytes one sweep reads, newest files first. A first sweep over months of transcripts catches up over several sweeps rather than holding the schedule; the backlog still waiting is in the sweep's stats.
 # default policy: behaviour
 # agent_activity_max_bytes_per_sweep = 33554432
