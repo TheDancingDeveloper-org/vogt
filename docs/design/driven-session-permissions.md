@@ -84,12 +84,17 @@ Three postures, in order of preference:
   per project, because the estate facts are the same for every session on a
   stack. A per-template override can come later if a stack needs one.
 
-## Operator decisions
+## Operator decisions (2026-10-05)
 
-1. **Which repositories are autonomous-merge repositories**: the list goes in
-   the deployment's policy file. Suggested: the estate repos agents work on,
-   such as arr-diskwarden and indexarr/ops.
-2. **Who may grant `bypass`**: implemented as `admin` scope. The alternative
-   is any `work.write` caller, which would let an agent escalate its children.
-3. **Where the estate file lives**: in the ops overlay of the stack (beside
-   `estate.overlay.yml`), mounted, and named by `ENGINE_AGENT_CLAUDE_SETTINGS`.
+1. **Autonomous-merge repositories**: TheDancingDeveloper-org/arr-diskwarden,
+   TheDancingDeveloper-org/vogt and indexarr/ops. These are listed in the
+   estate's policy file, not in the shipped default, which stays *none
+   configured*.
+2. **Who may grant `bypass`**: a person only. Every agent is refused,
+   the oversight runner included (as implemented).
+3. **Where the estate policy lives**: the ops overlay. Each vogt stack has
+   `personal/<stack>/driven-session-settings.json`, mounted read-only at
+   `/run/vogt/driven-session-settings.json` and named by
+   `ENGINE_AGENT_CLAUDE_SETTINGS` (indexarr/ops PR #23). It also names the
+   estate's secret store (Infisical), deploy path (Komodo) and sensitive
+   targets (the Node B prod stacks), so those keep gating.
