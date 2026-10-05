@@ -79,6 +79,7 @@ export function sessionRuntimeHint(s: SessionSummary): string | null {
     s.template ? `template ${s.template}` : null,
     agent ?? null,
     model ? `model ${model}` : null,
+    s.permission_mode ? `permissions ${s.permission_mode}` : null,
   ].filter((part): part is string => Boolean(part));
   return parts.length ? parts.join(" · ") : null;
 }

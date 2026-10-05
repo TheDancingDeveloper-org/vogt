@@ -1110,6 +1110,14 @@ class SessionSummary(Result):
             "None when the engine could not be asked."
         ),
     )
+    permission_mode: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the permission posture when it is not the "
+            "default — `accept-edits`, or `bypass` (no permission checks). "
+            "Null is the default posture."
+        ),
+    )
     running: SessionRuntime | None = Field(
         default=None,
         description=(
@@ -3676,6 +3684,19 @@ class StartSessionParams(Params):
             "them. A plain shell only gets the brief's path in "
             "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with "
             "`template` when it is something to carry out."
+        ),
+    )
+    permission_mode: Literal["default", "accept_edits", "bypass"] = Field(
+        default="default",
+        description=(
+            "The agent's permission posture. `default`: Claude Code's own "
+            "mode (auto) with the deployment's driven-session policy — "
+            "routine safe work proceeds, prod-mutating, destructive, "
+            "shared-resource and secret-exposing actions are denied. "
+            "`accept_edits`: file edits auto-accepted, everything else asks. "
+            "`bypass`: no permission checks at all, for one trusted task — "
+            "only a person may grant it (an agent is refused), and it is "
+            "audited. Claude Code templates only."
         ),
     )
     resume: str | None = Field(

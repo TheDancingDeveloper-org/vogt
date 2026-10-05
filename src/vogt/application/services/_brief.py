@@ -53,6 +53,11 @@ WHEN_BLOCKED = (
     "Inbox entry and a push, and tells anyone driving you not to re-prompt. "
     "When you can go on again, call `session_report_unblocked`. Both need a "
     "`reason` and, from inside this session, no `id`.\n"
+    "\n"
+    "A permission denial is one of these. When the permission check refuses "
+    "an action, do not retry it, rephrase it, or reach the same result "
+    "another way: report yourself blocked, naming the action, the denial "
+    "and what a person would need to do, and stop.\n"
 )
 
 #: The autopilot convention, added when `session.start` asks for it.
@@ -63,8 +68,9 @@ AUTOPILOT = (
     "next step needs nothing from a person, carry straight on with it in "
     "the same turn instead of ending the turn to announce it. Stop only "
     "when you are blocked on a person (report it with "
-    "`session_report_blocked` first) or there is no unblocked work left in "
-    "scope — and then say which in one line.\n"
+    "`session_report_blocked` first) — a denied action counts, and is never "
+    "routed around — or there is no unblocked work left in scope, and then "
+    "say which in one line.\n"
 )
 
 

@@ -284,6 +284,14 @@ Rules:
   answers with a clear "does not support screen yet" error; nothing falls back
   to the log silently. `scrollback_lines: N` (up to 2000) adds the N lines
   that scrolled off the top, for a reply or a command taller than the screen.
+- **Permission denials:** a driven Claude Code session runs with
+  permission checks. Routine work proceeds, and so does merging your own
+  green PR in a repository the deployment lists. Anything prod-mutating,
+  destructive, touching shared resources or exposing a secret is denied. Do
+  not retry a denied action or reach its result another way. Report it with
+  `session_report_blocked`: the action, the denial, and what a person would
+  need to do. Starting a session with `permission_mode: "bypass"` is a
+  person's decision; an agent asking for it is refused.
 - **Overseeing many sessions:** `session_sweep` returns every session in
   one call, most urgent first (`approval`, `blocked`, `waiting`, `stalled`,
   …). Each row carries its reason, last reply excerpt and the tail of its

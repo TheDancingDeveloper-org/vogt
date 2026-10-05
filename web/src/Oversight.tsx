@@ -190,6 +190,16 @@ const Oversight: Component<Props> = (props) => {
                 <Show when={row.session.work_item}>
                   {(ref) => <a class="oversight-ref" href={`#/w/${ref()}`}>{ref()}</a>}
                 </Show>
+                <Show when={row.session.permission_mode}>
+                  {(mode) => (
+                    <span
+                      class={`oversight-posture${mode() === "bypass" ? " oversight-posture--bypass" : ""}`}
+                      title={mode() === "bypass" ? "Started with no permission checks" : "Edits auto-accepted"}
+                    >
+                      {mode() === "bypass" ? "⚠ no permission checks" : mode()}
+                    </span>
+                  )}
+                </Show>
                 <Show when={runtimeWord(row.session)}>
                   {(word) => (
                     <span

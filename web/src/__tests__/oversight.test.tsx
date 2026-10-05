@@ -133,3 +133,16 @@ describe("what a session is running", () => {
     ).toBe("template claude · claude · model claude-opus-5-5");
   });
 });
+
+describe("permission posture", () => {
+  it("marks a session started without permission checks", async () => {
+    vi.spyOn(vogtApi, "sweepSessions").mockResolvedValue({
+      rows: [ROW({ session: { ...ROW({}).session, permission_mode: "bypass" } })],
+      counts: { total: 1, needs_you: 0 },
+      swept_at: new Date().toISOString(),
+      engine: null,
+    });
+    render(() => <Oversight />);
+    expect(await screen.findByText("⚠ no permission checks")).toBeTruthy();
+  });
+});
