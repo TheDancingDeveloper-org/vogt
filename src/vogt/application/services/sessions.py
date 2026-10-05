@@ -297,7 +297,11 @@ def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:
     killed: bool | None = None
     if engine is not None:
         try:
-            killed = engine.kill_session(session.engine_session_id)
+            killed = engine.kill_session(
+                session.engine_session_id,
+                reason=params.reason,
+                by=ctx.principal.identity_ref,
+            )
         except EngineUnavailable:
             killed = None
 
@@ -1406,7 +1410,9 @@ def _stop_unlinked(ctx: AppContext, engine_id: str, reason: str) -> SessionResul
     if live is None:
         msg = f"no session {engine_id!r}"
         raise NotFound(msg)
-    killed = engine.kill_session(engine_id)
+    killed = engine.kill_session(
+        engine_id, reason=cleaned, by=ctx.principal.identity_ref
+    )
     audited_action(
         ctx,
         operation=SESSION_STOP,
@@ -1803,6 +1809,8 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "conversation_id": engine_session.conversation_id,
         "resources": _resources(engine_session.resources),
         "permission_mode": engine_session.permission_mode,
+        "stopped_by": engine_session.stopped_by,
+        "stop_reason": engine_session.stop_reason,
     }
 
 

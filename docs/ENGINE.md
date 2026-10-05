@@ -627,9 +627,12 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   sends a push. Cleared when the session exits. Requires `sessions`.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability)
-- `POST /api/sessions/:id/kill` -> `OkResponse` (SIGKILL to the child; the
-  session stays in the registry so its scrollback is still readable, which is
-  what makes this different from `DELETE`. Requires the `sessions` capability)
+- `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `OkResponse`
+  (SIGKILL to the child; the session stays in the registry so its
+  scrollback is still readable, which is what makes this different from
+  `DELETE`. The optional body is recorded before the kill, and the exit then
+  reads `stopped` rather than `errored`. Requires the `sessions`
+  capability)
 - `POST /api/sessions/:id/input` `{"text": "...", "submit": bool}` -> `OkResponse`
   (writes verbatim to PTY stdin, 64 KiB cap, `submit` appends `\r`; requires
   the `sessions` capability)
@@ -872,8 +875,8 @@ readable — until it is deleted, so a caller that wants running sessions
 filters on `alive`, never on presence in the list. An engine that predates
 the field omits it; read it then as `exit_code == null`.
 
-`activity` has two terminal states, which are facts, and three live states,
-which are a *heuristic*:
+`activity` has three terminal states, which are facts, and three live
+states, which are a *heuristic*:
 
 ```text
 live (alive: true)
@@ -883,13 +886,22 @@ live (alive: true)
   new output, no prompt       -> running
 
 terminal (alive: false, never changes again)
+  a stop was requested, then any exit -> stopped
   child exits with 0          -> exited
   child exits with non-0      -> errored
 ```
 
 - `exited` — the child exited with code 0. Terminal.
-- `errored` — the child exited non-zero (a kill is a signal, which reports as
-  non-zero). Terminal.
+- `stopped` — someone asked the session to stop
+  (`POST /api/sessions/:id/kill`, vogt's `session.stop`) and it then exited,
+  whatever its code (WI-913). The stop is recorded before the signal, and
+  the summary's `stop` says `by`, `reason` and `at`. History records
+  `end_reason: stopped`. Terminal.
+- `errored` — the child exited non-zero **without** a requested stop. A
+  signal from outside the engine (the OOM killer, a `kill` in a shell)
+  counts, because it can be a real failure. Agents that fan out child
+  sessions and reap them with `session.stop` leave `stopped` rows, so a crash
+  still stands out. Terminal.
   Once either is set the activity never changes again: output the PTY reader
   drains after the exit cannot move it back to a live state (before WI-830 it
   could, which is how a stopped session read `running` forever).

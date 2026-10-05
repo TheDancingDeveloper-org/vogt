@@ -1283,3 +1283,39 @@ def test_every_brief_says_a_denial_is_reported_not_routed_around(
     prompt = engine.last_spec["prompt"]
     assert "A permission denial is one of these" in prompt
     assert "never routed around" in prompt
+
+
+# -- a requested stop is not a crash (WI-913) ----------------------------------
+
+
+def test_stopping_tells_the_engine_who_and_why_so_the_exit_reads_stopped(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    stop_session(
+        wired, StopSessionParams(id=result.session.id, reason="answer ingested")
+    )
+    kill = next(r for r in engine.sent if r["url"].endswith("/kill"))
+    assert kill["body"] == {
+        "reason": "answer ingested",
+        "by": wired.principal.identity_ref,
+    }
+
+
+def test_a_stopped_row_carries_who_stopped_it(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    from vogt.adapters.engine.client import EngineSession
+
+    row = EngineSession.from_payload(
+        {
+            "id": "eng-9",
+            "name": "child",
+            "activity": "stopped",
+            "alive": False,
+            "exit_code": 137,
+            "cwd": ROOT,
+            "stop": {"by": "agent:session:ses_parent", "reason": "ingested", "at": "x"},
+        }
+    )
+    assert (row.stopped_by, row.stop_reason) == ("agent:session:ses_parent", "ingested")

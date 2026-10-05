@@ -855,10 +855,19 @@ impl SessionRegistry {
     /// A hibernated session has no process to kill; killing it means it is
     /// not to come back, so it is forgotten — record, kept screen and brief.
     pub fn kill(&self, id: Uuid) -> Result<()> {
+        self.stop(id, vogt_engine_contract::StopRequest::default())
+    }
+
+    /// Stop a session on request: record who asked and why, then kill it,
+    /// so its exit reads `stopped` rather than `errored` (WI-913).
+    pub fn stop(&self, id: Uuid, request: vogt_engine_contract::StopRequest) -> Result<()> {
         if self.is_hibernated(id) {
             return self.remove(id);
         }
         let s = self.get(id)?;
+        if s.is_alive() {
+            s.request_stop(request);
+        }
         s.kill()?;
         Ok(())
     }
@@ -917,6 +926,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         resources: None,
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),
+        stop: None,
     })
 }
 

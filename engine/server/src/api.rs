@@ -421,11 +421,16 @@ pub async fn delete_session(
     Ok(Json(OkResponse::new(true)))
 }
 
+/// SIGKILL the child, recording the stop first: an optional
+/// `{"reason", "by"}` body says why and who, and the exit then reads
+/// `stopped` instead of `errored` (WI-913).
 pub async fn kill_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    body: Option<Json<vogt_engine_contract::StopRequest>>,
 ) -> Result<Json<OkResponse>> {
-    state.sessions.kill(id)?;
+    let request = body.map(|Json(r)| r).unwrap_or_default();
+    state.sessions.stop(id, request)?;
     Ok(Json(OkResponse::new(true)))
 }
 
