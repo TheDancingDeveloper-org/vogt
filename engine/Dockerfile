@@ -297,6 +297,7 @@ LABEL org.opencontainers.image.title="vogt-stack" \
 ARG INSTALL_AI_CLIENTS
 ARG CODEX_VERSION
 ARG CLAUDE_CODE_VERSION
+ARG OPENCODE_VERSION
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
@@ -342,15 +343,21 @@ RUN set -eu; \
     . /usr/local/share/vogt/agent-versions.env; \
     codex_version="${CODEX_VERSION:-${VOGT_CODEX_VERSION}}"; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
-    printf 'codex=%s\nclaude-code=%s\n' \
-        "$codex_version" "$claude_code_version" \
+    opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
+    printf 'codex=%s\nclaude-code=%s\nopencode=%s\n' \
+        "$codex_version" "$claude_code_version" "$opencode_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
-    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\n' \
+    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\n' \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         pkgs="$pkgs @openai/codex@${codex_version}"; \
         pkgs="$pkgs @anthropic-ai/claude-code@${claude_code_version}"; \
+        pkgs="$pkgs opencode-ai@${opencode_version}"; \
+        # The pod base's unpinned copy (its `curl | bash` installer) is
+        # replaced by the pinned package; npm refuses to overwrite a file it
+        # does not own (WI-929).
+        rm -f /usr/local/bin/opencode; \
     fi; \
     if [ -n "$pkgs" ]; then \
         npm install -g --prefix=/usr/local $pkgs; \
@@ -358,6 +365,8 @@ RUN set -eu; \
     && if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
         /usr/local/bin/claude --version | grep -qF "$claude_code_version" \
         || { echo "claude is not $claude_code_version — a stub install" >&2; exit 1; } \
+        && /usr/local/bin/opencode --version | grep -qF "$opencode_version" \
+        || { echo "opencode is not $opencode_version — the platform binary did not install" >&2; exit 1; } \
         && install -d /usr/local/libexec \
         && codex_target="$(readlink -f /usr/local/bin/codex)" \
         && ln -s "$codex_target" /usr/local/libexec/codex-real \
@@ -387,6 +396,9 @@ RUN set -eu; \
 # the runtime pin the entrypoint applies — `vogt-agent-cli-install` is
 # the only sanctioned writer of a non-image copy.
 ENV DISABLE_UPDATES=1
+# opencode's own self-update, for the same reason (WI-929): it would otherwise
+# walk past the pin from inside a session.
+ENV OPENCODE_DISABLE_AUTOUPDATE=1
 
 # Read-only MCP servers an agent may be given (docs/ENGINE.md §4): GitHub,
 # Grafana and Gitea/Forgejo. Exact release versions, each tarball checked

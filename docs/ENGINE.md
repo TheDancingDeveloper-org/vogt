@@ -123,8 +123,8 @@ repository root is a separate build rather than a stage of this one: it is
 the hardened input this image lifts its core from, not something to deploy on
 its own (`DEPLOYMENT.md`).
 
-Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `codex`
-and `claude` CLIs at the Renovate-pinned versions in
+Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `codex`,
+`claude` and `opencode` CLIs at the Renovate-pinned versions in
 `engine/agent-versions.env`; it is off by default for a local build and on in
 the published image. That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described

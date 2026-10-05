@@ -130,7 +130,7 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_HIBERNATE_IDLE_AFTER` | no | off | Hibernate an agent session quiet this long (`2h`, `30m`): its processes stop, it stays listed, and a wake resumes its conversation ([`ENGINE.md`, "Hibernation"](ENGINE.md#hibernation)). Sessions running a turn, at a permission dialog, blocked on a person, running a tool shell or pinned awake are exempt. |
 | `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` | no | off | While the pod's available memory is below this (`2GiB`), hibernate the quietest eligible session, one a minute, with the same exemptions. |
 | `ENGINE_ASSISTANT_STT_*`, `ENGINE_ASSISTANT_TTS_*` | no | the sidecar | Repoint speech at any OpenAI-compatible audio endpoint; a cloud provider wants `ENGINE_ASSISTANT_TTS_FORMAT=mp3`. |
-| `VOGT_CLAUDE_CODE_VERSION`, `VOGT_CODEX_VERSION` | no | the baked version | An exact version is installed at start into `engine-agent-clis` and preferred over the image's copy. `latest`/`stable` are refused unless `VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1`. |
+| `VOGT_CLAUDE_CODE_VERSION`, `VOGT_CODEX_VERSION`, `VOGT_OPENCODE_VERSION` | no | the baked version | An exact version is installed at start into `engine-agent-clis` and preferred over the image's copy. `latest`/`stable` are refused unless `VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1`. |
 
 Two prefixes, two processes. **`VOGT_*`** is read by the core; every setting
 is in [`CONFIG.md`](CONFIG.md), and precedence is command line, then
