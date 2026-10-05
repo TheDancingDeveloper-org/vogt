@@ -912,6 +912,29 @@ class SessionApproval(Result):
 # because `WorkResult` carries it: a work item's view shows what is
 # running for it, and a forward reference would leave the model
 # incomplete until something remembered to rebuild it.
+class SessionRuntime(Result):
+    """The agent, model and effort a session is running, each with where
+    that came from."""
+
+    agent: str | None = Field(
+        default=None, description="claude / codex / opencode, from the command."
+    )
+    model: str | None = None
+    model_basis: str | None = Field(
+        default=None,
+        description=(
+            "transcript (what the CLI recorded for its latest turn: the model "
+            "actually used) / command (a --model flag) / asked (session.start's "
+            "model). Null with `model` when none says."
+        ),
+    )
+    effort: str | None = None
+    effort_basis: str | None = Field(
+        default=None,
+        description="transcript (Codex records it) / command / asked.",
+    )
+
+
 class SessionResources(Result):
     """What a session's process tree holds, as the engine last sampled it."""
 
@@ -1085,6 +1108,15 @@ class SessionSummary(Result):
         description=(
             "Pinned awake (session.keep_awake): never hibernated by policy. "
             "None when the engine could not be asked."
+        ),
+    )
+    running: SessionRuntime | None = Field(
+        default=None,
+        description=(
+            "The agent, model and reasoning effort the session is actually "
+            "running, resolved from its transcript, its command line, or what "
+            "it was started with — `model`/`effort` above are only what was "
+            "asked. Live and hibernated sessions."
         ),
     )
     resources: SessionResources | None = Field(

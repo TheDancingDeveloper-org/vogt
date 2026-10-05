@@ -664,6 +664,9 @@ components:
           type: boolean
           description: Pinned awake; absent when false.
         resources: { $ref: "#/components/schemas/SessionResources" }
+        template:
+          type: string
+          description: The session template it was started from, by the name given; absent for an explicit command.
     SessionResources:
       type: object
       required: [rss_bytes, cpu_pct, processes, sampled_at]

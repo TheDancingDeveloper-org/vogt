@@ -86,6 +86,8 @@ pub struct Session {
     last_input: Mutex<Option<Instant>>,
     /// The process tree's last resource sample (`resources`).
     resources: Mutex<Option<vogt_engine_contract::SessionResources>>,
+    /// The template it was started from, when one was named.
+    template: Mutex<Option<String>>,
 }
 
 impl Session {
@@ -203,7 +205,12 @@ impl Session {
             hibernation: None,
             keep_awake: self.keep_awake(),
             resources: self.resources.lock().clone(),
+            template: self.template.lock().clone(),
         }
+    }
+
+    pub fn set_template(&self, template: Option<String>) {
+        *self.template.lock() = template;
     }
 
     pub fn set_resources(&self, resources: Option<vogt_engine_contract::SessionResources>) {
@@ -768,6 +775,7 @@ pub fn spawn(
         hibernating: AtomicBool::new(false),
         last_input: Mutex::new(None),
         resources: Mutex::new(None),
+        template: Mutex::new(None),
     });
 
     spawn_reader_thread(

@@ -351,6 +351,13 @@ impl SessionRegistry {
         };
         let session = spawned.session;
         session.set_conversation(conversation.clone());
+        session.set_template(
+            spec.template
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .map(str::to_string),
+        );
 
         // The record is written before the session is listed, so there is no
         // moment at which the engine runs a hibernatable session it would
@@ -896,6 +903,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         hibernation: Some(hibernation),
         keep_awake: record.keep_awake,
         resources: None,
+        template: record.template.clone(),
     })
 }
 

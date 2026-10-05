@@ -166,6 +166,8 @@ class EngineSession:
     keep_awake: bool = False
     #: The process tree's last resource sample (WI-916).
     resources: EngineResources | None = None
+    #: The template it was started from, by the name given (WI-919).
+    template: str | None = None
 
     @property
     def hibernated(self) -> bool:
@@ -196,6 +198,7 @@ class EngineSession:
             hibernation=EngineHibernation.from_payload(payload.get("hibernation")),
             keep_awake=payload.get("keep_awake") is True,
             resources=EngineResources.from_payload(payload.get("resources")),
+            template=_optional_str(payload.get("template")),
         )
 
 
