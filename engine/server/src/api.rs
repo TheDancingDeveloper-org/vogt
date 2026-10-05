@@ -206,11 +206,11 @@ pub async fn answer_session(
             menu.join(" | ")
         ))
     })?;
-    let keys = crate::approval::keys_to_choose(&dialog.options, chosen.number)
+    let keys = crate::approval::keys_to_choose(&dialog.options, chosen.number, dialog.horizontal)
         .ok_or_else(|| ApiError::Conflict("the option is not on the menu".into()))?;
     // Arrows one write each, then Enter: a TUI reading a burst can merge an
     // escape sequence with what follows it.
-    for key in keys.split_inclusive(['A', 'B', '\r']) {
+    for key in keys.split_inclusive(['A', 'B', 'C', 'D', '\r']) {
         session
             .write_input(key.as_bytes())
             .map_err(|e| ApiError::Pty(format!("write input: {e}")))?;
