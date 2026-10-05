@@ -337,6 +337,48 @@ async fn authenticate(
     }
 }
 
+/// The attach exchange for a hibernated session: a full snapshot of its kept
+/// output, `snapshot-done`, `hibernated`, and a normal close.
+async fn send_hibernated(socket: &mut WebSocket, id: Uuid, bytes: bytes::Bytes) {
+    let frames = [ServerControl::SnapshotStart {
+        session_id: Some(id),
+        scrollback_bytes: bytes.len() as u64,
+        scrollback_pos: bytes.len() as u64,
+        reset: true,
+    }];
+    for frame in frames {
+        if socket
+            .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let end = (offset + SNAPSHOT_CHUNK).min(bytes.len());
+        if socket
+            .send(Message::Binary(bytes.slice(offset..end)))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        offset = end;
+    }
+    for frame in [ServerControl::SnapshotDone, ServerControl::Hibernated] {
+        if socket
+            .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+            .await
+            .is_err()
+        {
+            return;
+        }
+    }
+    close_with(socket, 1000, "hibernated").await;
+}
+
 async fn handle_socket(
     mut socket: WebSocket,
     state: Arc<AppState>,
@@ -347,6 +389,14 @@ async fn handle_socket(
         return;
     };
 
+    // A hibernated session replays the screen it kept, then says so and
+    // closes: there is nothing live to stream, and attaching must not wake
+    // it — the PWA pre-warms panes, so attach-to-wake would bring back every
+    // hibernated session the first time anybody opened the GUI.
+    if let Some((bytes, _, _, _)) = state.sessions.hibernated_screen(id) {
+        send_hibernated(&mut socket, id, bytes).await;
+        return;
+    }
     let session = match state.sessions.get(id) {
         Ok(s) => s,
         Err(_) => {

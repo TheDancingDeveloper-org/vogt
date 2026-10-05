@@ -2385,6 +2385,11 @@ textarea {
 .activity-dot.done {
   background: var(--activity-done);
 }
+/* Hibernated: no process, kept to be woken — a hollow ring of the idle colour. */
+.activity-dot.hibernated {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--activity-idle);
+}
 /* A PTY bell rang while this session was unfocused: ring the dot until opened. */
 .activity-dot.bell {
   box-shadow: 0 0 0 2px var(--activity-waiting);

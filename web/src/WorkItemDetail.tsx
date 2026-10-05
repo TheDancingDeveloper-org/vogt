@@ -373,7 +373,11 @@ function liveness(session: SessionSummary, engineNote: string | null): Liveness 
 function isLive(session: SessionSummary): boolean {
   if (session.stopped_at) return false;
   if (session.activity) {
-    return session.activity !== "errored" && session.activity !== "exited";
+    return (
+      session.activity !== "errored" &&
+      session.activity !== "exited" &&
+      session.activity !== "hibernated"
+    );
   }
   return session.alive === true;
 }

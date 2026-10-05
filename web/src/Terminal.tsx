@@ -178,6 +178,12 @@ const TerminalView: Component<Props> = (props) => {
   let pingId = 0;
   let destroyed = false;
   let sessionGone = false;
+  /**
+   * The engine said the session is hibernated: the snapshot was its kept
+   * screen and the socket closes. Reconnecting would replay the same screen
+   * forever, so the pane waits for the session to be woken instead.
+   */
+  let hibernated = false;
   // Render-then-park gate (WI-170). A pane parked before its first attach still
   // runs one attach+snapshot so its scrollback is rendered, then parks — set on
   // the first snapshot-done (or short-circuited for a deferred-cache pane, which
@@ -1091,7 +1097,8 @@ const TerminalView: Component<Props> = (props) => {
               }
             | { type: "snapshot-done" }
             | { type: "pong"; id: number; pos: number }
-            | { type: "lag"; note?: string };
+            | { type: "lag"; note?: string }
+            | { type: "hibernated" };
           if (ctrl.type === "snapshot-start") {
             replay?.cancel();
             replay = createReplayQueue(
@@ -1150,6 +1157,10 @@ const TerminalView: Component<Props> = (props) => {
               initialAttachDone = true;
               if (isParked()) parkSocket();
             });
+          } else if (ctrl.type === "hibernated") {
+            hibernated = true;
+            setReconnectView(null);
+            setStatusText("Hibernated — wake the session to continue");
           } else if (ctrl.type === "lag") {
             term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
             setStatusText("Reattaching terminal...");
@@ -1191,6 +1202,10 @@ const TerminalView: Component<Props> = (props) => {
       if (ws !== socket) return;
       stopWatchdog();
       if (socketParked || isParked()) return;
+      if (hibernated) {
+        ws = null;
+        return;
+      }
       // Write the [disconnected] marker once at the start of the outage, not on
       // every retry, and never through appendToCache — it is a live hint, not
       // part of the replayable scrollback.
@@ -1272,6 +1287,17 @@ const TerminalView: Component<Props> = (props) => {
     if (!readyToConnect()) return;
     if (isParked()) parkSocket();
     else resumeSocket();
+  });
+
+  // A woken session starts a new process whose output begins at 0: attach
+  // again cold once the store says it is no longer hibernated.
+  createEffect(() => {
+    const activity = sessionsStore.sessions[props.sessionId]?.activity;
+    if (!hibernated || !activity || activity === "hibernated") return;
+    hibernated = false;
+    outputPosition = undefined;
+    setStatusText("Loading terminal...");
+    if (!destroyed && !isParked()) connect();
   });
 
   onCleanup(() => {

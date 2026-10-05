@@ -334,6 +334,12 @@ export function startEventStream(): void {
         case "activity":
           updateActivity(ev.id, ev.state, ev.activity_changed_at);
           break;
+        case "session-hibernated":
+        case "session-woken":
+          // The summary changes shape (hibernation, alive, exit code), so
+          // read it again rather than patch it field by field.
+          void refreshSessions();
+          break;
         case "session-blocked":
           setStore(
             produce((s) => {

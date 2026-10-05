@@ -19,7 +19,12 @@ export type ActivityState =
   /** An agent CLI is showing a permission dialog; see `approval`. */
   | "awaiting-approval"
   | "errored"
-  | "exited";
+  | "exited"
+  /**
+   * Stopped to free memory; kept to be woken by resuming its conversation
+   * under the same id. Not alive, not finished. See `hibernation`.
+   */
+  | "hibernated";
 
 /** A permission dialog an agent CLI is showing (engine `ApprovalPrompt`). */
 export interface ApprovalPrompt {
@@ -52,6 +57,27 @@ export interface SessionSummary {
   approval?: ApprovalPrompt | null;
   /** The agent's own report that it is blocked on a person. */
   blocked?: BlockedReport | null;
+  /** The agent conversation this session runs, when the engine knows its id. */
+  conversation?: AgentConversation | null;
+  /** Set while `activity` is `hibernated`. */
+  hibernation?: Hibernation | null;
+  /** Pinned awake: never hibernated by policy. */
+  keep_awake?: boolean;
+}
+
+/** An agent CLI and its own id for a conversation (engine `AgentConversation`). */
+export interface AgentConversation {
+  agent: string;
+  id: string;
+}
+
+/** When and why a session was hibernated (engine `Hibernation`). */
+export interface Hibernation {
+  at: string;
+  trigger: "manual" | "idle" | "memory" | "shutdown" | "recovered";
+  reason?: string | null;
+  /** False for a shell, which wakes as a fresh process. */
+  resumable: boolean;
 }
 
 /** An agent's report that it cannot go on without a person (engine `BlockedReport`). */
@@ -112,6 +138,8 @@ export type ServerEvent =
   | { type: "session-killed"; id: string; exit_code: number | null }
   | { type: "activity"; id: string; state: ActivityState; activity_changed_at?: string }
   | { type: "session-blocked"; id: string; blocked?: BlockedReport | null }
+  | { type: "session-hibernated"; id: string; trigger: Hibernation["trigger"] }
+  | { type: "session-woken"; id: string }
   /**
    * Something changed in vogt-core, republished by the front door.
    *
