@@ -169,7 +169,10 @@ names (`--session-id`, `--resume`, `codex resume`), by the engine session id
 newest transcript in the session's directory since it started (`basis:
 "cwd"`). `session.list` rows carry `last_reply_excerpt` (~300 characters of
 the latest reply, id-based lookups only, cached by the transcript's size and
-modification time). No transcript is `detail`, not an error.
+modification time). No transcript is `detail`, not an error. An opencode
+session keeps no transcript file: its replies are read by the engine from
+opencode's own store (`GET /api/sessions/{id}/replies`, which the store's
+credentials never leave) and redacted the same way, with `agent: "opencode"`.
 
 `session.wait` blocks (up to `timeout_s`, at most 600) until a session is
 ready — or needs a person, or exits — or, with `until`, until it exits or

@@ -575,8 +575,39 @@ def _rows(
             excerpt = transcripts.last_reply_excerpt(found)
             if excerpt is not None:
                 update["last_reply_excerpt"] = excerpt
+        elif live_session.conversation_agent == "opencode":
+            excerpt = _opencode_excerpt(ctx, live_session.id)
+            if excerpt is not None:
+                update["last_reply_excerpt"] = excerpt
         summaries[index] = summary.model_copy(update=update)
     return summaries
+
+
+def _opencode_replies(
+    ctx: AppContext, engine_session_id: str, n: int
+) -> tuple[str | None, list[transcripts.Reply]] | None:
+    """An opencode session's replies, from the engine (WI-931): opencode keeps
+    no transcript file, and its store holds credentials the core is not
+    given. Redacted here, as a transcript's are."""
+    if ctx.engine is None:
+        return None
+    try:
+        found = ctx.engine.session_replies(engine_session_id, n=n)
+    except EngineUnavailable:
+        return None
+    if found is None:
+        return None
+    conversation_id, replies = found
+    return conversation_id, [
+        transcripts.reply(text, _parse_engine_timestamp(at)) for text, at in replies
+    ]
+
+
+def _opencode_excerpt(ctx: AppContext, engine_session_id: str) -> str | None:
+    found = _opencode_replies(ctx, engine_session_id, 1)
+    if not found or not found[1]:
+        return None
+    return transcripts.excerpt(found[1][-1].text)
 
 
 def _transcript(
@@ -646,6 +677,21 @@ def last_reply(
         raise NotFound(msg)
     roots = ctx.config.session_transcript_roots
     result = SessionLastReplyResult(id=params.id, engine_session_id=engine_id)
+    if engine_session is not None and engine_session.conversation_agent == "opencode":
+        opencode = _opencode_replies(ctx, engine_id, params.n)
+        if opencode is not None:
+            conversation_id, replies = opencode
+            return result.model_copy(
+                update={
+                    "agent": "opencode",
+                    "conversation_id": conversation_id,
+                    "basis": "engine-id",
+                    "messages": [SessionReply(text=r.text, at=r.at) for r in replies],
+                    "detail": None
+                    if replies
+                    else "opencode has no assistant reply yet",
+                }
+            )
     if not roots:
         return result.model_copy(
             update={"detail": "session_transcript_roots is empty: reading is off"}

@@ -743,9 +743,16 @@ already show. A session lost to a redeploy is resumed with
 the id it resumed (no `--session-id` is added), and a command that carries
 arguments of its own after `claude` is not pinned, because Claude Code refuses
 `--session-id` next to a `--continue` or `--session-id` it already has. Codex
-and OpenCode cannot be told an id at launch, so their conversation ids are
-not knowable to the engine; find them with `codex resume` (its picker) or
-`opencode session list` inside the pod.
+and OpenCode cannot be told an id at launch. Codex's is not knowable to the
+engine; find it with `codex resume` (its picker) inside the pod. OpenCode's
+is **captured** after launch (WI-930): the engine reads opencode's own store
+(`$XDG_DATA_HOME/opencode/opencode.db`, read-only) for the session whose first
+prompt names this engine session's brief, which tells apart several sessions
+started in one directory at once. A session started with no brief takes the
+newest opencode session in its directory since it spawned that no other
+session holds; that is a guess, logged as `basis=directory`. The capture is
+logged as `event=launch.conversation`, and the summary's `conversation` then
+names it.
 
 **Where a resumed conversation starts.** Claude Code and Codex key a
 conversation to the directory it ran in, and `claude --resume <id>` finds it
@@ -1154,8 +1161,10 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
 - **What can hibernate.** Only a session whose agent conversation id the
   engine knows. That is a bare Claude Code launch, whose conversation is
   pinned to the session id (`--session-id`), or any agent started with
-  `resume`. The summary's `conversation` names it. A fresh Codex or OpenCode
-  session mints its own id, and the engine does not guess it. A shell
+  `resume`. The summary's `conversation` names it. A fresh OpenCode session
+  can hibernate once its id is captured (a few seconds after launch; see
+  "Which conversation id a session has"). A fresh Codex session mints its own id, and the
+  engine does not guess it. A shell
   hibernates only with `allow_shell`, and wakes as a fresh process in the
   same directory (`hibernation.resumable: false`). An agent-task run is
   never hibernated. A refusal is `409` with the reason.
