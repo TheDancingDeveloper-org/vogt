@@ -37,7 +37,6 @@ const ATTENTION_LABEL: Record<SessionSweepRow["attention"], string> = {
   unknown: "Unknown",
 };
 
-/** "3 min ago", "just now", or null when the time is absent or unreadable. */
 /** "claude · claude-opus-5-5 · effort high", from the resolved runtime and
  *  template; null when nothing is known. */
 export function runtimeWord(session: SessionSweepRow["session"]): string | null {
@@ -50,6 +49,7 @@ export function runtimeWord(session: SessionSweepRow["session"]): string | null 
   return parts.length ? parts.join(" · ") : null;
 }
 
+/** "3 min ago", "just now", or null when the time is absent or unreadable. */
 export function ago(iso: string | null | undefined, now: number): string | null {
   if (!iso) return null;
   const at = Date.parse(iso);
