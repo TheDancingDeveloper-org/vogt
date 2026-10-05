@@ -89,6 +89,7 @@ from vogt.application.models import (
     ForgeReposResult,
     GetProjectParams,
     GetWorkParams,
+    HibernateSessionParams,
     HistoryListParams,
     HistoryListResult,
     ImportParams,
@@ -107,6 +108,7 @@ from vogt.application.models import (
     InitResult,
     IssueTokenParams,
     IssueTokenResult,
+    KeepSessionAwakeParams,
     LabelListResult,
     LabelResult,
     ListActorsParams,
@@ -196,6 +198,7 @@ from vogt.application.models import (
     UserListParams,
     UserListResult,
     UserResult,
+    WakeSessionParams,
     WhoamiParams,
     WhoamiResult,
     WhyParams,
@@ -985,6 +988,61 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.session_input,
             route=HttpRoute("POST", "/sessions/input"),
             cli=CliBinding(("session", "input")),
+        ),
+        # Hibernation: `work.write`, like stopping and typing. Waking spawns a
+        # process and mints the session a new token, so it is a write too —
+        # which is why `session.wait` (a `read`) reports a hibernated session
+        # rather than waking it.
+        Operation(
+            name="session.hibernate",
+            summary=(
+                "Hibernate a session: stop its processes to free their memory, "
+                "keep it listed (activity `hibernated`, with its last screen), "
+                "and revoke its token. session_wake (or session_input, which "
+                "wakes it) resumes the same agent conversation under the same "
+                "id. Only for a session whose conversation id the engine knows "
+                "(Claude Code started by Vogt, or any resume); a shell needs "
+                "allow_shell and wakes fresh. Takes either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=HibernateSessionParams,
+            result_model=SessionResult,
+            handler=services.hibernate_session,
+            route=HttpRoute("POST", "/sessions/hibernate"),
+            cli=CliBinding(("session", "hibernate")),
+        ),
+        Operation(
+            name="session.wake",
+            summary=(
+                "Wake a hibernated session: start it again under the same id, "
+                "resuming its agent conversation in the directory it ran in, "
+                "with a new token for the same actor. A live session is "
+                "returned as it is. session_input wakes one by itself; wait "
+                "for ready (session_wait) before typing after this. Takes "
+                "either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=WakeSessionParams,
+            result_model=SessionResult,
+            handler=services.wake_session,
+            route=HttpRoute("POST", "/sessions/wake"),
+            cli=CliBinding(("session", "wake")),
+        ),
+        Operation(
+            name="session.keep_awake",
+            summary=(
+                "Pin a session awake so the engine's idle policy never "
+                "hibernates it (keep_awake=true), or unpin it. Takes either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=KeepSessionAwakeParams,
+            result_model=SessionResult,
+            handler=services.keep_session_awake,
+            route=HttpRoute("POST", "/sessions/keep-awake"),
+            cli=CliBinding(("session", "keep-awake")),
         ),
         Operation(
             name="session.screen",

@@ -895,6 +895,26 @@ class SessionApproval(Result):
 # because `WorkResult` carries it: a work item's view shows what is
 # running for it, and a forward reference would leave the model
 # incomplete until something remembered to rebuild it.
+class SessionHibernation(Result):
+    """When and why a session was hibernated."""
+
+    at: datetime | None = None
+    trigger: str = Field(
+        description=(
+            "manual / idle / memory / shutdown (the engine was stopping) / "
+            "recovered (found at the engine's boot without a process)."
+        )
+    )
+    reason: str | None = None
+    resumable: bool = Field(
+        default=True,
+        description=(
+            "False for a shell hibernated with allow_shell: it wakes as a fresh "
+            "process in the same directory, not where it left off."
+        ),
+    )
+
+
 class SessionSummary(Result):
     """One session, as Vogt knows it and as the engine currently reports it.
 
@@ -1015,6 +1035,30 @@ class SessionSummary(Result):
             "agent sessions whose conversation id is known). Null for a "
             "shell, or when no transcript is found. session.last_reply has "
             "the whole message."
+        ),
+    )
+    hibernation: SessionHibernation | None = Field(
+        default=None,
+        description=(
+            "Set while the session is hibernated (activity `hibernated`): its "
+            "processes were stopped to free memory and it is kept to be woken "
+            "by resuming its conversation (session.wake, or session.input, "
+            "which wakes it). Null otherwise."
+        ),
+    )
+    keep_awake: bool | None = Field(
+        default=None,
+        description=(
+            "Pinned awake (session.keep_awake): never hibernated by policy. "
+            "None when the engine could not be asked."
+        ),
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        description=(
+            "The agent CLI's own id for the conversation this session runs, "
+            "when the engine knows it — what a wake resumes, and what "
+            "session.start's `resume` takes."
         ),
     )
 
@@ -3624,6 +3668,31 @@ class StopSessionParams(Params):
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
+class HibernateSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    allow_shell: bool = Field(
+        default=False,
+        description=(
+            "Hibernate a session that has no agent conversation to resume (a "
+            "shell). It wakes as a fresh process in the same directory."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class WakeSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class KeepSessionAwakeParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    keep_awake: bool = Field(
+        description="True pins the session awake; false lets policy hibernate it."
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
 class ListSessionsParams(Params):
     project: str | None = Field(default=None, description="Project slug.")
     work_item: str | None = Field(default=None, description="Work item ref.")
@@ -3884,6 +3953,15 @@ class SessionInputParams(Params):
         description="Press Enter last, after the text and keys.",
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+    wake_timeout_s: int = Field(
+        default=120,
+        ge=1,
+        le=600,
+        description=(
+            "When the session is hibernated, it is woken first and the input "
+            "waits until it is ready, for at most this many seconds."
+        ),
+    )
 
 
 class SessionInputResult(Result):
@@ -3897,6 +3975,10 @@ class SessionInputResult(Result):
     bytes: int = Field(description="UTF-8 bytes of `text` written.")
     keys: list[SessionKey] = []
     submitted: bool = False
+    woke: bool = Field(
+        default=False,
+        description="True when the session was hibernated and was woken first.",
+    )
 
 
 class SessionScreenParams(Params):
@@ -3981,7 +4063,10 @@ class SessionWaitResult(Result):
     engine_session_id: str
     outcome: str = Field(
         description=(
-            "ready / awaiting-approval / blocked / exited / changed / timeout."
+            "ready / awaiting-approval / blocked / exited / changed / timeout "
+            "/ hibernated (the session is hibernated: nothing will happen "
+            "until it is woken, so the wait returns at once with its kept "
+            "screen; session.wake or session.input wakes it)."
         )
     )
     matched: bool = Field(

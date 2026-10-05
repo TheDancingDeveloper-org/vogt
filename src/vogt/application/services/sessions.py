@@ -31,15 +31,22 @@ from typing import Any
 
 from vogt.adapters import transcripts
 from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
-from vogt.adapters.engine.client import EngineApproval, EngineBlocked, EngineScreen
+from vogt.adapters.engine.client import (
+    EngineApproval,
+    EngineBlocked,
+    EngineHibernation,
+    EngineScreen,
+)
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
     SESSION_INPUT_MAX_BYTES,
+    HibernateSessionParams,
     HistoryListParams,
     HistoryListResult,
     HistoryOutputMatch,
     HistorySessionRow,
+    KeepSessionAwakeParams,
     ListSessionsParams,
     LogTailParams,
     LogTailResult,
@@ -50,6 +57,7 @@ from vogt.application.models import (
     SessionApproval,
     SessionBlocked,
     SessionBlockedResult,
+    SessionHibernation,
     SessionInputParams,
     SessionInputResult,
     SessionKey,
@@ -66,6 +74,7 @@ from vogt.application.models import (
     SessionWaitResult,
     StartSessionParams,
     StopSessionParams,
+    WakeSessionParams,
     WhyParams,
     WhyResult,
 )
@@ -89,6 +98,12 @@ SESSION_STARTED_EVENT = "session.started"
 SESSION_STOPPED_EVENT = "session.stopped"
 SESSION_INPUT = "session.input"
 SESSION_INPUT_EVENT = "session.input"
+SESSION_HIBERNATE = "session.hibernate"
+SESSION_HIBERNATED_EVENT = "session.hibernated"
+SESSION_WAKE = "session.wake"
+SESSION_WOKEN_EVENT = "session.woken"
+SESSION_KEEP_AWAKE = "session.keep_awake"
+SESSION_KEEP_AWAKE_EVENT = "session.keep_awake"
 
 #: The byte sequence an xterm-compatible terminal sends for each named key.
 #: Arrows are the normal-mode CSI forms (`ESC [ A`), which every TUI this
@@ -358,7 +373,12 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
         unfiltered = project_id is None and work_item_id is None
         if unfiltered and params.offset == 0:
             for engine_session in live.values():
-                if not engine_session.alive and not params.include_stopped:
+                # A hibernated session is asleep, not stopped: listed always.
+                if (
+                    not engine_session.alive
+                    and not engine_session.hibernated
+                    and not params.include_stopped
+                ):
                     continue
                 if view.session_by_engine_id(engine_session.id) is None:
                     summaries.append(_summarize_engine_only(engine_session))
@@ -372,7 +392,7 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
     # cannot be had is a null, never an error.
     for index, summary in enumerate(summaries):
         live_session = live.get(summary.engine_session_id)
-        if live_session is None or not live_session.alive:
+        if live_session is None or not (live_session.alive or live_session.hibernated):
             continue
         excerpt = _excerpt(ctx, live_session, templates.get(summary.engine_session_id))
         if excerpt is not None:
@@ -593,10 +613,32 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     writes_in_order.extend((SESSION_KEYS[key], False) for key in keys)
     if params.submit:
         writes_in_order.append(("", True))
-    for chunk, submit in writes_in_order:
-        if not engine.send_input(engine_id, chunk, submit=submit):
-            msg = f"the engine has no live session {params.id!r}"
-            raise NotFound(msg)
+    woke = False
+    try:
+        _send_all(engine, engine_id, params.id, writes_in_order)
+    except Conflict:
+        # The engine refuses input to a hibernated session. Typing into one
+        # is asking for it back: wake it — resuming its conversation, with a
+        # new token — wait until it is at its prompt, then type. Anything
+        # else the engine refused stays refused.
+        current = engine.get_session(engine_id)
+        if current is None or not current.hibernated:
+            raise
+        _wake(ctx, engine, target, f"woken to deliver input: {reason}")
+        woke = True
+        waited = engine.wait_session(
+            engine_id, until="ready", timeout_s=params.wake_timeout_s
+        )
+        if waited is None or waited.outcome != "ready":
+            outcome = "no answer" if waited is None else waited.outcome
+            msg = (
+                f"woke session {params.id!r}, but it was not ready for input "
+                f"within {params.wake_timeout_s}s ({outcome}); nothing was "
+                "typed. Read session_screen — it may be showing a dialog — "
+                "then retry"
+            )
+            raise Conflict(msg) from None
+        _send_all(engine, engine_id, params.id, writes_in_order)
 
     linked = target.session is not None
     audited_action(
@@ -612,6 +654,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             "bytes": size,
             "keys": list(keys),
             "submit": params.submit,
+            "woke": woke,
         },
         event_kind=SESSION_INPUT_EVENT,
     )
@@ -622,7 +665,17 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         bytes=size,
         keys=keys,
         submitted=params.submit,
+        woke=woke,
     )
+
+
+def _send_all(
+    engine: EngineClient, engine_id: str, named: str, chunks: list[tuple[str, bool]]
+) -> None:
+    for chunk, submit in chunks:
+        if not engine.send_input(engine_id, chunk, submit=submit):
+            msg = f"the engine has no live session {named!r}"
+            raise NotFound(msg)
 
 
 def session_screen(ctx: AppContext, params: SessionScreenParams) -> SessionScreenResult:
@@ -687,11 +740,27 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
-    waited = engine.wait_session(
-        engine_id,
-        until=params.until.replace("_", "-"),
-        timeout_s=params.timeout_s,
-    )
+    try:
+        waited = engine.wait_session(
+            engine_id,
+            until=params.until.replace("_", "-"),
+            timeout_s=params.timeout_s,
+        )
+    except Conflict:
+        # Nothing happens in a hibernated session until somebody wakes it,
+        # and a wait is a read: it does not wake it. Say so at once, with
+        # the screen it kept, rather than holding the caller to a timeout.
+        screen = engine.session_screen(engine_id)
+        if screen is None or screen.activity != "hibernated":
+            raise
+        return SessionWaitResult(
+            id=params.id,
+            engine_session_id=engine_id,
+            outcome="hibernated",
+            matched=False,
+            waited_ms=0,
+            screen=_screen_result(params.id, engine_id, screen),
+        )
     if waited is None:
         if engine.get_session(engine_id) is not None:
             msg = (
@@ -710,6 +779,229 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
         waited_ms=waited.waited_ms,
         screen=_screen_result(params.id, engine_id, waited.screen),
     )
+
+
+# -- hibernation -----------------------------------------------------------
+
+
+def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> SessionResult:
+    """Stop a session's processes to free their memory, keeping it listed.
+
+    The engine keeps what it needs to start the session again by resuming its
+    agent conversation under the same id (`session.wake`). The session's
+    token is revoked: nothing runs to hold it, and a wake mints a new one.
+    Audited after the effect, the `audited_action` ordering, because the
+    effect is the engine's.
+    """
+    reason = writes.validate_reason(params.reason)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    if target.session is not None and target.session.stopped_at is not None:
+        msg = f"session {params.id!r} was stopped; there is nothing to hibernate"
+        raise Conflict(msg)
+    hibernated = engine.hibernate_session(
+        engine_id, reason=reason, allow_shell=params.allow_shell
+    )
+    if hibernated is None:
+        msg = (
+            f"the engine has no session {params.id!r}, or predates hibernation "
+            "(no POST /api/sessions/{id}/hibernate)"
+        )
+        raise NotFound(msg)
+    outcome: dict[str, Any] = {
+        "engine_session_id": engine_id,
+        "linked": target.session is not None,
+        "allow_shell": params.allow_shell,
+        "resumable": None
+        if hibernated.hibernation is None
+        else hibernated.hibernation.resumable,
+    }
+    if target.session is None:
+        audited_action(
+            ctx,
+            operation=SESSION_HIBERNATE,
+            reason=reason,
+            entity_kind="session",
+            entity_id=engine_id,
+            outcome=outcome,
+            event_kind=SESSION_HIBERNATED_EVENT,
+        )
+        return SessionResult(session=_summarize_engine_only(hibernated))
+    session = target.session
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
+        del actor
+        current = txn.session_by_id(session.id)
+        if current is None:
+            msg = f"no session {params.id!r}"
+            raise NotFound(msg)
+        now = ctx.clock()
+        revoked = [
+            token.id
+            for token in txn.tokens_for_actor(current.actor_id)
+            if txn.revoke_token(token.id, reason=f"hibernated: {reason}", at=now)
+        ]
+        return WriteOutcome(
+            result=SessionResult(
+                session=_summarize(txn, current, engine_session=hibernated)
+            ),
+            entity_kind="session",
+            entity_id=current.id,
+            payload=_audited_payload(current),
+            event_kind=SESSION_HIBERNATED_EVENT,
+            summary={**outcome, "tokens_revoked": len(revoked)},
+        )
+
+    return audited_write(ctx, operation=SESSION_HIBERNATE, reason=reason, body=body)
+
+
+def wake_session(ctx: AppContext, params: WakeSessionParams) -> SessionResult:
+    """Start a hibernated session again: the same id, the same conversation.
+
+    A live session is returned as it is — waking is idempotent, so a caller
+    that is not sure need not check first.
+    """
+    reason = writes.validate_reason(params.reason)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    return _wake(ctx, engine, target, reason)
+
+
+def _wake(
+    ctx: AppContext, engine: EngineClient, target: _Target, reason: str
+) -> SessionResult:
+    """Wake `target` if it is hibernated; its summary either way.
+
+    For a session Vogt started, a new token is minted for the session's own
+    actor and handed to the woken process — the engine never stores one —
+    and every older token of that actor is revoked in the same write. The
+    attribution is unchanged: the same actor, a new credential. As at start,
+    the process starts before the declared write: the new token is only a
+    hash in a row that does not exist yet until the write lands.
+    """
+    engine_id = target.engine_session_id
+    current = engine.get_session(engine_id)
+    if current is None:
+        msg = f"the engine has no session {engine_id!r}"
+        raise NotFound(msg)
+    session = target.session
+    if not current.hibernated:
+        if not current.alive:
+            msg = (
+                f"session {engine_id!r} has exited, not hibernated; start a new "
+                "one (session_start, with resume to continue its conversation)"
+            )
+            raise Conflict(msg)
+        if session is None:
+            return SessionResult(session=_summarize_engine_only(current))
+        with ctx.declared.read() as view:
+            return SessionResult(
+                session=_summarize(view, session, engine_session=current)
+            )
+
+    if session is None:
+        woken = engine.wake_session(engine_id)
+        if woken is None:
+            msg = f"the engine has no session {engine_id!r}"
+            raise NotFound(msg)
+        audited_action(
+            ctx,
+            operation=SESSION_WAKE,
+            reason=reason,
+            entity_kind="session",
+            entity_id=engine_id,
+            outcome={"engine_session_id": engine_id, "linked": False},
+            event_kind=SESSION_WOKEN_EVENT,
+        )
+        return SessionResult(session=_summarize_engine_only(woken))
+
+    if session.stopped_at is not None:
+        msg = f"session {session.id!r} was stopped; start a new one instead"
+        raise Conflict(msg)
+    scopes = _session_scopes(ctx)
+    credential = issue(scopes)
+    woken = engine.wake_session(
+        engine_id, env=_session_env(ctx, session.id, credential.secret)
+    )
+    if woken is None:
+        msg = f"the engine has no session {engine_id!r}"
+        raise NotFound(msg)
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
+        del actor
+        row = txn.session_by_id(session.id)
+        holder = None if row is None else txn.actor_by_id(row.actor_id)
+        if row is None or holder is None:
+            msg = f"no session {session.id!r}"
+            raise NotFound(msg)
+        now = ctx.clock()
+        revoked = [
+            token.id
+            for token in txn.tokens_for_actor(row.actor_id)
+            if txn.revoke_token(
+                token.id, reason=f"superseded on wake: {reason}", at=now
+            )
+        ]
+        txn.insert_token(
+            Token(
+                id=ctx.id_factory("tok"),
+                actor_id=holder.id,
+                actor_identity_ref=holder.identity_ref,
+                name=f"session {row.id}",
+                scopes=list(scopes),
+                created_at=now,
+                expires_at=None,
+            ),
+            token_hash=credential.token_hash,
+        )
+        return WriteOutcome(
+            result=SessionResult(session=_summarize(txn, row, engine_session=woken)),
+            entity_kind="session",
+            entity_id=row.id,
+            payload=_audited_payload(row),
+            event_kind=SESSION_WOKEN_EVENT,
+            summary={
+                "engine_session_id": engine_id,
+                "conversation_id": current.conversation_id,
+                "tokens_revoked": len(revoked),
+            },
+        )
+
+    return audited_write(ctx, operation=SESSION_WAKE, reason=reason, body=body)
+
+
+def keep_session_awake(
+    ctx: AppContext, params: KeepSessionAwakeParams
+) -> SessionResult:
+    """Pin a session awake, so policy never hibernates it — or unpin it."""
+    reason = writes.validate_reason(params.reason)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    updated = engine.keep_awake(engine_id, keep_awake=params.keep_awake)
+    if updated is None:
+        msg = f"the engine has no session {params.id!r}, or predates hibernation"
+        raise NotFound(msg)
+    audited_action(
+        ctx,
+        operation=SESSION_KEEP_AWAKE,
+        reason=reason,
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": target.session is not None,
+            "keep_awake": params.keep_awake,
+        },
+        event_kind=SESSION_KEEP_AWAKE_EVENT,
+    )
+    if target.session is None:
+        return SessionResult(session=_summarize_engine_only(updated))
+    with ctx.declared.read() as view:
+        return SessionResult(
+            session=_summarize(view, target.session, engine_session=updated)
+        )
 
 
 SESSION_REPORT_BLOCKED = "session.report_blocked"
@@ -1200,7 +1492,21 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "last_output_at": _parse_engine_timestamp(engine_session.last_output_at),
         "approval": _approval(engine_session.approval),
         "blocked": _blocked(engine_session.blocked),
+        "hibernation": _hibernation(engine_session.hibernation),
+        "keep_awake": engine_session.keep_awake,
+        "conversation_id": engine_session.conversation_id,
     }
+
+
+def _hibernation(hibernation: EngineHibernation | None) -> SessionHibernation | None:
+    if hibernation is None:
+        return None
+    return SessionHibernation(
+        at=_parse_engine_timestamp(hibernation.at),
+        trigger=hibernation.trigger,
+        reason=hibernation.reason,
+        resumable=hibernation.resumable,
+    )
 
 
 def _blocked(blocked: EngineBlocked | None) -> SessionBlocked | None:
@@ -1258,7 +1564,9 @@ def _parse_engine_timestamp(value: str | None) -> datetime | None:
 
 
 __all__ = [
+    "hibernate_session",
     "history_list",
+    "keep_session_awake",
     "last_reply",
     "list_sessions",
     "log_tail",
@@ -1270,4 +1578,5 @@ __all__ = [
     "session_wait",
     "start_session",
     "stop_session",
+    "wake_session",
 ]

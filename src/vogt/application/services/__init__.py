@@ -100,7 +100,9 @@ from vogt.application.services.projects import (
 )
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
+    hibernate_session,
     history_list,
+    keep_session_awake,
     last_reply,
     list_sessions,
     log_tail,
@@ -112,6 +114,7 @@ from vogt.application.services.sessions import (
     session_wait,
     start_session,
     stop_session,
+    wake_session,
 )
 from vogt.application.services.taxonomy import (
     create_actor,
@@ -175,6 +178,7 @@ __all__ = [
     "get_preferences",
     "get_project",
     "get_work",
+    "hibernate_session",
     "history_list",
     "import_forge_repo",
     "import_instance",
@@ -184,6 +188,7 @@ __all__ = [
     "install_status",
     "instance_diagnostics",
     "issue_token",
+    "keep_session_awake",
     "last_reply",
     "link_forge_account",
     "link_project",
@@ -253,6 +258,7 @@ __all__ = [
     "update_initiative",
     "update_project",
     "update_work",
+    "wake_session",
     "whoami",
     "why",
 ]
