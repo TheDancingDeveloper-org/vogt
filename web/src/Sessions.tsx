@@ -165,7 +165,8 @@ const Sessions: Component<Props> = (props) => {
   const waiting = createMemo(() =>
     sessions().filter(
       (session) =>
-        session.exit_code === null && session.activity === "waiting-for-input",
+        session.exit_code === null &&
+        (session.activity === "waiting-for-input" || session.activity === "awaiting-approval"),
     ),
   );
   const displayedRows = createMemo(() => {

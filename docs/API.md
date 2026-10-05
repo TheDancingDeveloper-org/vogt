@@ -159,6 +159,15 @@ session the core started; `session.list` shows both (`id`,
 `engine_session_id`), and every core `session.*` operation accepts either. A
 session opened from the GUI is unlinked and has only the UUID.
 
+Rows of `session.list` and `session.screen` carry the engine's live
+`turn_started_at` (when the agent last went to work from rest) and
+`last_output_at` (when the terminal last printed), which tell a long turn
+from a hung one; and, while `activity` is `awaiting-approval` (an agent CLI's
+permission dialog), an `approval` with the `question`, the `command_excerpt`
+and `deadline_seconds` before the CLI denies by itself. Such a session is an
+Inbox entry "… is asking for approval". `session.screen` takes
+`scrollback_lines` (0–2000) for the history above the screen.
+
 The step-by-step recipe (start with a task, wait until ready, read, answer
 menus, stop), the activity states and the safety rules are in
 [`ENGINE.md`, "Driving a session"](ENGINE.md#driving-a-session).

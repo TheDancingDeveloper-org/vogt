@@ -43,7 +43,7 @@ export const SessionList: Component<Props> = (props) => {
           {(session) => (
             <li>
               <a
-                class={`session-row ${activityClass(session)}${session.exit_code === null && session.activity === "waiting-for-input" ? " waiting" : ""}${sessionsStore.ready && !isConnected() ? " session-row--stale" : ""}`}
+                class={`session-row ${activityClass(session)}${session.exit_code === null && (session.activity === "waiting-for-input" || session.activity === "awaiting-approval") ? " waiting" : ""}${sessionsStore.ready && !isConnected() ? " session-row--stale" : ""}`}
                 href={`#/t/${session.id}`}
                 aria-label={`${session.name}, ${activityLabel(session.activity, session.exit_code)}`}
                 title={`${session.name}\ncwd: ${session.cwd}`}

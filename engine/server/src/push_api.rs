@@ -198,18 +198,34 @@ pub async fn flush_digests(State(state): State<Arc<AppState>>) -> Json<DispatchC
 }
 
 /// Spawn the background task that watches the event bus and pushes a
-/// notification when any session transitions to `waiting-for-input` or
-/// `errored`.
+/// notification when any session transitions to `waiting-for-input`,
+/// `awaiting-approval` or `errored`.
+///
+/// A permission dialog rides the `waiting-for-input` preference (it is the
+/// most urgent kind of waiting: the agent CLI denies by itself when its
+/// countdown runs out), with its own title and the command it asks about in
+/// the body, so the person can answer before the deadline.
 pub fn spawn_activity_watcher(state: Arc<AppState>) {
     let mut rx = state.bus.subscribe();
     tokio::spawn(async move {
         while let Ok(ev) = rx.recv().await {
-            if let ServerEvent::Activity { id, state: act, .. } = ev {
+            if let ServerEvent::Activity {
+                id,
+                state: act,
+                approval,
+                ..
+            } = ev
+            {
                 let (kind, verb, data_kind) = match act {
                     ActivityState::WaitingForInput => (
                         NotificationKind::WaitingForInput,
                         "is waiting for input",
                         "waiting-for-input",
+                    ),
+                    ActivityState::AwaitingApproval => (
+                        NotificationKind::WaitingForInput,
+                        "needs approval",
+                        "awaiting-approval",
                     ),
                     ActivityState::Errored => (NotificationKind::Errored, "errored", "errored"),
                     _ => continue,
@@ -220,7 +236,10 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
                     .map(|s| s.name())
                     .unwrap_or_else(|| id.to_string());
                 let title = format!("{name} {verb}");
-                let body = "Tap to open the session in Vogt.";
+                let approval_body = approval.as_ref().map(approval_push_body);
+                let body = approval_body
+                    .as_deref()
+                    .unwrap_or("Tap to open the session in Vogt.");
                 let data = json!({
                     "kind": data_kind,
                     "session_id": id.to_string(),
@@ -231,6 +250,25 @@ pub fn spawn_activity_watcher(state: Arc<AppState>) {
             }
         }
     });
+}
+
+/// A push body for a permission dialog: the deadline, when there is one, and
+/// the first lines of what it asks about, short enough for a lock screen.
+pub fn approval_push_body(approval: &vogt_engine_contract::ApprovalPrompt) -> String {
+    let what: String = approval
+        .command_excerpt
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+        .chars()
+        .take(160)
+        .collect();
+    match approval.deadline_seconds {
+        Some(secs) => format!("Auto-deny in {secs}s. {what}"),
+        None => what,
+    }
 }
 
 /// The core event kinds worth a phone interruption.
@@ -504,6 +542,8 @@ mod tests {
             id: uuid::Uuid::nil(),
             state: ActivityState::WaitingForInput,
             activity_changed_at: String::new(),
+            approval: None,
+            turn_started_at: None,
         }));
     }
 }

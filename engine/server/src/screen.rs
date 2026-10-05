@@ -48,10 +48,47 @@ pub struct Rendered {
 
 /// Replay `bytes` into a fresh `rows` x `cols` terminal and read it back.
 pub fn render(bytes: &[u8], rows: u16, cols: u16) -> Rendered {
+    render_with_scrollback(bytes, rows, cols, 0).0
+}
+
+/// The most scrollback lines a caller may ask for with the screen.
+pub const MAX_SCROLLBACK_LINES: usize = 2000;
+
+/// [`render`], plus up to `scrollback_lines` lines that scrolled off the top
+/// of the screen, oldest first — the context a driver needs when a dialog's
+/// command, or an agent's reply, is taller than the screen. Bounded by what
+/// the replayed tail produced.
+pub fn render_with_scrollback(
+    bytes: &[u8],
+    rows: u16,
+    cols: u16,
+    scrollback_lines: usize,
+) -> (Rendered, Vec<String>) {
     let rows = rows.max(1);
     let cols = cols.max(1);
-    let mut parser = vt100::Parser::new_with_callbacks(rows, cols, 0, TitleCapture::default());
+    let keep = scrollback_lines.min(MAX_SCROLLBACK_LINES);
+    let mut parser = vt100::Parser::new_with_callbacks(rows, cols, keep, TitleCapture::default());
     parser.process(bytes);
+    let mut history = Vec::new();
+    if keep > 0 {
+        // The view at offset `off` starts at history line `len - off`; read
+        // it a screenful at a time, oldest first, then put the screen back.
+        let screen = parser.screen_mut();
+        screen.set_scrollback(usize::MAX);
+        let mut off = screen.scrollback();
+        while off > 0 {
+            screen.set_scrollback(off);
+            let take = off.min(rows as usize);
+            history.extend(
+                screen
+                    .rows(0, cols)
+                    .take(take)
+                    .map(|row| row.trim_end().to_string()),
+            );
+            off -= take;
+        }
+        screen.set_scrollback(0);
+    }
     let screen = parser.screen();
     let mut lines: Vec<String> = screen
         .rows(0, cols)
@@ -64,13 +101,16 @@ pub fn render(bytes: &[u8], rows: u16, cols: u16) -> Rendered {
         .title
         .clone()
         .filter(|t| !t.trim().is_empty());
-    Rendered {
-        rows,
-        cols,
-        lines,
-        cursor: ScreenCursor { row, col },
-        title,
-    }
+    (
+        Rendered {
+            rows,
+            cols,
+            lines,
+            cursor: ScreenCursor { row, col },
+            title,
+        },
+        history,
+    )
 }
 
 /// Whether the screen shows an input prompt an agent TUI or REPL draws when
@@ -103,6 +143,9 @@ pub fn shows_prompt(lines: &[String]) -> bool {
 }
 
 /// Whether a driver can type now. See [`SessionScreen::ready`].
+///
+/// A session `awaiting-approval` is not ready: it is at a permission dialog,
+/// where typed text and Enter answer the dialog rather than reach the agent.
 pub fn is_ready(activity: ActivityState, alive: bool, lines: &[String]) -> bool {
     if !alive {
         return false;
@@ -114,17 +157,22 @@ pub fn is_ready(activity: ActivityState, alive: bool, lines: &[String]) -> bool 
     }
 }
 
-/// Render a session's current screen. The replay runs on the blocking pool
-/// (it is CPU-bound over up to [`SCREEN_REPLAY_BYTES`]), and a panic inside
-/// the emulator on hostile output fails this one request, not the engine.
-pub async fn session_screen(session: Arc<Session>) -> Result<SessionScreen> {
+/// Render a session's current screen, with up to `scrollback_lines` lines of
+/// history above it. The replay runs on the blocking pool (it is CPU-bound
+/// over up to [`SCREEN_REPLAY_BYTES`]), and a panic inside the emulator on
+/// hostile output fails this one request, not the engine.
+pub async fn session_screen(
+    session: Arc<Session>,
+    scrollback_lines: usize,
+) -> Result<SessionScreen> {
     let (bytes, rows, cols) = session.screen_source(SCREEN_REPLAY_BYTES);
-    let rendered = tokio::task::spawn_blocking(move || render(&bytes, rows, cols))
-        .await
-        .map_err(|e| ApiError::Internal(format!("render screen: {e}")))?;
-    let activity = session.activity();
-    let alive = session.is_alive();
-    let ready = is_ready(activity, alive, &rendered.lines);
+    let (rendered, scrollback) = tokio::task::spawn_blocking(move || {
+        render_with_scrollback(&bytes, rows, cols, scrollback_lines)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("render screen: {e}")))?;
+    let summary = session.summary();
+    let ready = is_ready(summary.activity, summary.alive, &rendered.lines);
     Ok(SessionScreen {
         id: session.id,
         cols: rendered.cols,
@@ -132,9 +180,13 @@ pub async fn session_screen(session: Arc<Session>) -> Result<SessionScreen> {
         lines: rendered.lines,
         cursor: rendered.cursor,
         title: rendered.title,
-        activity,
-        alive,
+        activity: summary.activity,
+        alive: summary.alive,
         ready,
+        scrollback,
+        turn_started_at: summary.turn_started_at,
+        last_output_at: summary.last_output_at,
+        approval: summary.approval,
     })
 }
 
@@ -169,6 +221,21 @@ mod tests {
         let r = render(bytes, 3, 20);
         assert!(r.lines.iter().all(|l| !l.contains("1. Yes")), "{r:?}");
         assert_eq!(r.lines[0], "ready>");
+    }
+
+    #[test]
+    fn scrollback_lines_come_back_oldest_first() {
+        let bytes = b"one\r\ntwo\r\nthree\r\nfour\r\nfive";
+        let (r, history) = render_with_scrollback(bytes, 2, 10, 100);
+        assert_eq!(r.lines, vec!["four", "five"]);
+        assert_eq!(history, vec!["one", "two", "three"]);
+        // Bounded by what was asked for: the most recent lines are kept.
+        let (_, two) = render_with_scrollback(bytes, 2, 10, 2);
+        assert_eq!(two, vec!["two", "three"]);
+        // None asked for, none returned — the plain render is unchanged.
+        let (plain, none) = render_with_scrollback(bytes, 2, 10, 0);
+        assert!(none.is_empty());
+        assert_eq!(plain, render(bytes, 2, 10));
     }
 
     #[test]

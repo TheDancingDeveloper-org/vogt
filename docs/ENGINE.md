@@ -599,8 +599,9 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
 - `GET /api/sessions/:id[?tail_bytes=N]` -> `SessionDetail` — the raw
   scrollback, base64. Requires the `sessions` capability, because scrollback
   routinely holds pasted secrets.
-- `GET /api/sessions/:id/screen` -> `SessionScreen` — the current terminal
-  screen, rendered (see [Reading the screen](#reading-the-screen)). Gated
+- `GET /api/sessions/:id/screen[?scrollback_lines=N]` -> `SessionScreen` —
+  the current terminal screen, rendered, plus up to N (≤ 2000) lines that
+  scrolled off its top (see [Reading the screen](#reading-the-screen)). Gated
   like `GET /api/sessions/:id`: the `sessions` capability
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
   `sessions` capability)
@@ -875,7 +876,51 @@ stripped. This route instead answers with what the terminal shows now:
   lowest ten non-blank lines, box border stripped, starts with a prompt glyph
   (`>`, `❯`, `›`, `>>>`) — Claude Code's input box, Codex's composer, a REPL.
   `running` is never ready, because those TUIs keep drawing their input box
-  while they work.
+  while they work; nor is `awaiting-approval`, where typing answers a dialog.
+- `scrollback` — with `?scrollback_lines=N`, up to N lines that scrolled off
+  the top of the screen, oldest first (bounded by the replayed 1 MiB). Absent
+  otherwise.
+- `turn_started_at`, `last_output_at`, `approval` — as in `SessionSummary`
+  (below).
+
+**Turn timing.** `SessionSummary`, the screen and the `activity` event carry
+`turn_started_at` — when the session last went `running` from `idle` or
+`waiting-for-input` (or was spawned); an answered permission dialog continues
+the same turn — and `last_output_at`, when the PTY last printed. A long turn
+has a recent `last_output_at` (agent TUIs animate while they work); a hung one
+has `running` long gone stale, or an old `last_output_at`.
+
+**Permission dialogs (`awaiting-approval`).** Claude Code and Codex stop and
+ask before a command or edit their permission rules do not allow, and Claude
+Code denies by itself when a countdown runs out. The engine recognises such a
+dialog on the *rendered* screen — a question line ("Do you want to
+proceed?", "Do you want to make this edit to …?", "Would you like to run the
+following command?", "Allow command?") with a numbered option (`❯ 1. Yes`,
+`› 1. Yes, proceed`) under it — and reports `activity: "awaiting-approval"`
+with an `approval`:
+
+```json
+{
+  "question": "Do you want to proceed?",
+  "command_excerpt": "Bash command\nsh -c 'docker stop x && docker rm -f x'\nStop and remove the test container",
+  "deadline_seconds": 61,
+  "deadline_at": "2026-10-05T00:18:00Z",
+  "detected_at": "2026-10-05T00:16:30Z"
+}
+```
+
+`command_excerpt` is read from the screen and the scrollback above it, so a
+command taller than the screen arrives whole (up to ~4000 characters).
+`deadline_seconds` is computed at read time from the first sighting. The
+check runs in the PTY reader only when the raw tail mentions a dialog (a cheap
+prefilter), and then renders the screen to confirm it, so a dialog that was
+answered and redrawn over is not reported from text lingering in the tail
+(`engine/server/src/approval.rs`). Entering the state publishes an `activity`
+event carrying `approval`, sends a push (on the `waiting-for-input`
+preference, titled "… needs approval", with the deadline and command in the
+body), and vogt-core's Inbox shows the session as "asking for approval". To
+answer: read the excerpt, then `session.input` the option's number (or arrows
+and `enter`), or `esc` to decline.
 
 The engine keeps no terminal emulator of its own. The screen is rendered per
 request by replaying the last 1 MiB of the session's scrollback ring — the
@@ -885,7 +930,8 @@ boundary — into a `vt100` grid at the PTY's current size
 would see, and costs one bounded replay on the blocking pool per call.
 
 **Readiness for a driver.** Watch `GET /api/events` for the `activity` event
-of your session: `waiting-for-input` is the push signal that a prompt is up.
+of your session: `waiting-for-input` is the push signal that a prompt is up,
+and `awaiting-approval` that a permission dialog needs an answer.
 An agent TUI whose prompt the tail patterns do not recognise reaches `idle`
 instead; on `activity` → `idle`, read `/screen` and check `ready`. An
 `activity` of `exited`/`errored` (or a `session-killed` event) means the

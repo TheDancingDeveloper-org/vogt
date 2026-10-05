@@ -28,6 +28,8 @@ export function activityLabel(s: ActivityState, exit: number | null): string {
   switch (s) {
     case "waiting-for-input":
       return "waiting for input";
+    case "awaiting-approval":
+      return "needs approval";
     default:
       return s;
   }
@@ -63,6 +65,8 @@ export function sessionStateWord(
 }
 
 const ATTENTION_ORDER: Record<string, number> = {
+  // A permission dialog denies itself on a countdown: first of all.
+  "awaiting-approval": -1,
   "waiting-for-input": 0,
   errored: 1,
   running: 2,

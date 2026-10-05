@@ -64,6 +64,13 @@ pub struct Session {
     history_log_path: Option<PathBuf>,
     reader_done: AtomicBool,
     archive_started: AtomicBool,
+    /// Wall-clock start of the current turn (see
+    /// `SessionSummary::turn_started_at`).
+    turn_started_at: Mutex<Option<time::OffsetDateTime>>,
+    /// Wall-clock time of the last PTY output.
+    last_output_at: Mutex<Option<time::OffsetDateTime>>,
+    /// The permission dialog on screen, while `awaiting-approval`.
+    approval: Mutex<Option<crate::approval::Pending>>,
 }
 
 impl Session {
@@ -129,7 +136,24 @@ impl Session {
             command: self.command.clone(),
             created_at: format_rfc3339(self.created_at),
             activity_changed_at: format_rfc3339(*self.activity_changed_at.lock()),
+            turn_started_at: self.turn_started_at.lock().map(format_rfc3339),
+            last_output_at: self.last_output_at.lock().map(format_rfc3339),
+            approval: self.approval_prompt(),
         }
+    }
+
+    /// The permission dialog on screen, as the wire shows it, with the
+    /// countdown computed now.
+    pub fn approval_prompt(&self) -> Option<vogt_engine_contract::ApprovalPrompt> {
+        self.approval
+            .lock()
+            .as_ref()
+            .map(|p| p.to_wire(time::OffsetDateTime::now_utc()))
+    }
+
+    /// When the current turn began.
+    pub fn turn_started_at(&self) -> Option<time::OffsetDateTime> {
+        *self.turn_started_at.lock()
     }
 
     /// Snapshot scrollback plus the byte position immediately after the
@@ -618,6 +642,10 @@ pub fn spawn(
         history_log_path,
         reader_done: AtomicBool::new(false),
         archive_started: AtomicBool::new(false),
+        // A session starts running, so its first turn starts with it.
+        turn_started_at: Mutex::new(Some(created_at)),
+        last_output_at: Mutex::new(None),
+        approval: Mutex::new(None),
     });
 
     spawn_reader_thread(
@@ -660,6 +688,7 @@ fn spawn_reader_thread(
                         };
                         let pos = pos_after - n as u64;
                         *session.last_output.lock() = Some(Instant::now());
+                        *session.last_output_at.lock() = Some(time::OffsetDateTime::now_utc());
 
                         if let Some(log) = history_log.as_mut() {
                             if let Err(e) = log.write_all(&data) {
@@ -919,13 +948,64 @@ fn wake_activity_watcher(session: &Session) {
     session.activity_notify.notify_one();
 }
 
+/// How much of the raw tail is scanned for a possible permission dialog. The
+/// dialog's question and its countdown sit at the bottom of the screen, so a
+/// redraw of them is always recent output.
+const APPROVAL_SCAN_BYTES: usize = 4096;
+
 fn compute_activity(session: &Arc<Session>) -> ActivityState {
     let tail = {
         let sb = session.scrollback.lock();
-        sb.tail(2048).to_vec()
+        sb.tail(APPROVAL_SCAN_BYTES).to_vec()
     };
     let last = *session.last_output.lock();
-    classify(last, &tail, session.idle_after_ms, session.exit_code())
+    let classify_from = tail.len().saturating_sub(2048);
+    let state = classify(
+        last,
+        &tail[classify_from..],
+        session.idle_after_ms,
+        session.exit_code(),
+    );
+    if state.is_terminal() {
+        *session.approval.lock() = None;
+        return state;
+    }
+    // A permission dialog overrides whatever the tail heuristics said: its
+    // countdown keeps redrawing (so it reads `running`) and its menu ends in
+    // `❯ 1.` (so it reads `waiting-for-input`), and either way a driver must
+    // answer it rather than type at it. Confirmed on the rendered screen —
+    // only rendered when the raw tail mentions a dialog — so one that was
+    // answered and redrawn over is not reported from text lingering in the
+    // tail.
+    let detected = if crate::approval::mentions_approval(&strip_ansi(&tail)) {
+        let (bytes, rows, cols) = session.screen_source(crate::screen::SCREEN_REPLAY_BYTES);
+        let (rendered, scrollback) = crate::screen::render_with_scrollback(
+            &bytes,
+            rows,
+            cols,
+            crate::approval::SCROLLBACK_CONTEXT_LINES,
+        );
+        crate::approval::detect(&rendered.lines, &scrollback)
+    } else {
+        None
+    };
+    let mut pending = session.approval.lock();
+    match detected {
+        Some(found) => {
+            let now = time::OffsetDateTime::now_utc();
+            match pending.as_mut() {
+                // The same dialog seen again (its countdown ticking): keep the
+                // first sighting, so the deadline does not slide.
+                Some(p) if p.is_same(&found) => {}
+                _ => *pending = Some(crate::approval::Pending::new(found, now)),
+            }
+            ActivityState::AwaitingApproval
+        }
+        None => {
+            *pending = None;
+            state
+        }
+    }
 }
 
 /// Store and announce a new activity state.
@@ -941,15 +1021,48 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
     let mut a = session.activity.lock();
     let new = crate::activity::exit_state(session.exit_code()).unwrap_or(new);
     if *a != new {
+        let now = time::OffsetDateTime::now_utc();
+        // A turn starts when the session goes to work from rest; a permission
+        // dialog in the middle of a turn, answered, resumes the same turn.
+        if begins_turn(*a, new) {
+            *session.turn_started_at.lock() = Some(now);
+        }
+        if new != ActivityState::AwaitingApproval {
+            *session.approval.lock() = None;
+        }
         *a = new;
         *session.activity_since.lock() = Instant::now();
-        *session.activity_changed_at.lock() = time::OffsetDateTime::now_utc();
-        let activity_changed_at = format_rfc3339(*session.activity_changed_at.lock());
+        *session.activity_changed_at.lock() = now;
+        let activity_changed_at = format_rfc3339(now);
         bus.publish(ServerEvent::Activity {
             id: session.id,
             state: new,
             activity_changed_at,
+            approval: session.approval_prompt(),
+            turn_started_at: session.turn_started_at().map(format_rfc3339),
         });
+    }
+}
+
+/// Whether moving from `old` to `new` starts a new turn.
+fn begins_turn(old: ActivityState, new: ActivityState) -> bool {
+    new == ActivityState::Running
+        && matches!(old, ActivityState::Idle | ActivityState::WaitingForInput)
+}
+
+#[cfg(test)]
+mod turn_tests {
+    use super::{begins_turn, ActivityState::*};
+
+    #[test]
+    fn a_turn_starts_from_rest_and_survives_a_permission_dialog() {
+        assert!(begins_turn(Idle, Running));
+        assert!(begins_turn(WaitingForInput, Running));
+        // Answering a permission dialog continues the same turn.
+        assert!(!begins_turn(AwaitingApproval, Running));
+        assert!(!begins_turn(Running, Running));
+        assert!(!begins_turn(Running, Idle));
+        assert!(!begins_turn(Idle, AwaitingApproval));
     }
 }
 

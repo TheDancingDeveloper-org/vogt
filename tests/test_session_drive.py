@@ -17,6 +17,8 @@ import pytest
 from vogt.adapters.engine import EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    InboxListParams,
+    ListSessionsParams,
     LogTailParams,
     RegisterProjectParams,
     SessionInputParams,
@@ -25,6 +27,8 @@ from vogt.application.models import (
     StopSessionParams,
 )
 from vogt.application.services import (
+    list_inbox,
+    list_sessions,
     log_tail,
     register_project,
     session_input,
@@ -49,6 +53,10 @@ class Engine:
         self.counter = 0
         #: False models an engine that predates `GET /api/sessions/{id}/screen`.
         self.screen_supported = True
+        #: Extra fields the engine adds to every screen and listed session.
+        self.extra: dict[str, Any] = {}
+        #: The query strings the screen route was asked with.
+        self.screen_queries: list[str] = []
 
     def __call__(
         self,
@@ -67,6 +75,21 @@ class Engine:
             return 200, json.dumps(
                 {"id": engine_id, "name": "x", "activity": "running", "cwd": ROOT}
             ).encode()
+        if method == "GET" and path == "/api/sessions":
+            return 200, json.dumps(
+                [
+                    {
+                        "id": engine_id,
+                        "name": "x",
+                        "activity": self.extra.get("activity", "running"),
+                        "cwd": ROOT,
+                        "created_at": "2026-01-03T00:00:00Z",
+                        "alive": True,
+                        **self.extra,
+                    }
+                    for engine_id in sorted(self.live)
+                ]
+            ).encode()
         parts = path.split("/")  # ['', 'api', 'sessions', id, verb?]
         if len(parts) >= 4 and parts[2] == "sessions":
             engine_id = parts[3]
@@ -81,6 +104,7 @@ class Engine:
             if method == "GET" and verb == "screen":
                 if not self.screen_supported:
                     return 404, b""
+                self.screen_queries.append(url.partition("?")[2])
                 return 200, json.dumps(
                     {
                         "id": engine_id,
@@ -92,6 +116,7 @@ class Engine:
                         "activity": "idle",
                         "alive": True,
                         "ready": True,
+                        **self.extra,
                     }
                 ).encode()
             if method == "GET" and verb == "":
@@ -314,6 +339,63 @@ def test_screen_maps_the_engine_contract(wired: AppContext) -> None:
     assert screen.activity == "idle"
     assert screen.alive is True
     assert screen.ready is True
+
+
+APPROVAL = {
+    "activity": "awaiting-approval",
+    "ready": False,
+    "turn_started_at": "2026-10-05T00:00:00Z",
+    "last_output_at": "2026-10-05T00:17:00Z",
+    "approval": {
+        "question": "Do you want to proceed?",
+        "command_excerpt": "Bash command\nsh -c 'docker rm -f x'",
+        "deadline_seconds": 61,
+        "deadline_at": "2026-10-05T00:18:00Z",
+        "detected_at": "2026-10-05T00:16:30Z",
+    },
+}
+
+
+def test_screen_carries_the_approval_turn_timing_and_scrollback(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-877 / WI-875: a permission dialog and the turn's timing reach the
+    caller, and `scrollback_lines` is passed to the engine."""
+    engine.extra = {**APPROVAL, "scrollback": ["older", "lines"]}
+    ses_id, _ = _started(wired)
+    screen = session_screen(wired, SessionScreenParams(id=ses_id, scrollback_lines=40))
+    assert engine.screen_queries[-1] == "scrollback_lines=40"
+    assert screen.activity == "awaiting-approval"
+    assert screen.ready is False
+    assert screen.scrollback == ["older", "lines"]
+    assert screen.approval is not None
+    assert screen.approval.question == "Do you want to proceed?"
+    assert "docker rm -f x" in screen.approval.command_excerpt
+    assert screen.approval.deadline_seconds == 61
+    assert screen.turn_started_at is not None
+    assert screen.last_output_at is not None
+    assert screen.last_output_at > screen.turn_started_at
+    # No scrollback asked for: no query sent, so an older engine is unaffected.
+    session_screen(wired, SessionScreenParams(id=ses_id))
+    assert engine.screen_queries[-1] == ""
+
+
+def test_session_list_and_inbox_show_a_permission_dialog(
+    wired: AppContext, engine: Engine
+) -> None:
+    engine.extra = dict(APPROVAL)
+    _started(wired)
+    rows = list_sessions(wired, ListSessionsParams()).sessions
+    assert rows and all(row.activity == "awaiting-approval" for row in rows)
+    approval = rows[0].approval
+    assert approval is not None and approval.deadline_seconds == 61
+    assert rows[0].turn_started_at is not None
+    entries = list_inbox(wired, InboxListParams()).entries
+    asking = [e for e in entries if e.kind == "session.attention"]
+    assert asking, "a permission dialog is an Inbox entry"
+    assert all("asking for approval" in e.title for e in asking)
+    assert "Auto-deny in 61s" in asking[0].summary
+    assert "docker rm -f x" in asking[0].summary
 
 
 def test_screen_on_an_engine_without_the_route_says_so(

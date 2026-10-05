@@ -105,8 +105,10 @@ paths:
         `text/event-stream`, one JSON `ServerEvent` per `data:` line, with a
         `:ka` keep-alive comment every 15 seconds. Read it with `fetch` (it
         needs the bearer header). A driver waits here for its session's
-        `activity` event: `waiting-for-input` means a prompt is up; on `idle`
-        read `/screen` and check `ready`; `exited`/`errored` or
+        `activity` event: `waiting-for-input` means a prompt is up;
+        `awaiting-approval` means an agent CLI's permission dialog is up (the
+        event carries `approval`); on `idle` read `/screen` and check `ready`;
+        `exited`/`errored` or
         `session-killed` mean nothing will read input again. Missed events are
         not replayed — resynchronise with `GET /api/sessions`. Other event
         types (`vogt.changed`, `task.*`) are documented in docs/ENGINE.md.
@@ -230,6 +232,15 @@ paths:
         false).
       operationId: getSessionScreen
       x-capability: sessions
+      parameters:
+        - name: scrollback_lines
+          in: query
+          required: false
+          description: >-
+            Also return up to N lines that scrolled off the top of the screen,
+            oldest first, as `scrollback` (bounded by the replayed 1 MiB).
+            More than 2000 is 400.
+          schema: { type: integer, minimum: 0, maximum: 2000 }
       responses:
         "200":
           description: The screen.
@@ -354,14 +365,19 @@ components:
         error: { type: string }
     ActivityState:
       type: string
-      enum: [running, idle, waiting-for-input, exited, errored]
+      enum: [running, idle, waiting-for-input, awaiting-approval, exited, errored]
       description: >-
         `exited` (code 0) and `errored` (non-zero or a signal) are terminal
-        facts: `alive` is false and the state never changes again. The three
+        facts: `alive` is false and the state never changes again. Three
         live states are a heuristic over the last ~512 visible bytes:
         `running` — output within the idle threshold; `idle` — quiet longer
         than that; `waiting-for-input` — a recognised prompt pattern
-        (`[y/n]`, a password prompt, a numbered approval menu, a bare `❯`).
+        (`[y/n]`, a password prompt, a numbered menu, a bare `❯`). The fourth,
+        `awaiting-approval`, overrides them: the rendered screen shows an agent
+        CLI's permission dialog (Claude Code's "Do you want to proceed?",
+        Codex's "Would you like to run the following command?") with a
+        numbered menu under it; `approval` says what it asks. Answer it — the
+        CLI may deny by itself when its countdown runs out.
     SessionSummary:
       type: object
       required: [id, name, activity, alive]
@@ -385,6 +401,43 @@ components:
           type: string
           format: date-time
           description: When the current activity state began.
+        turn_started_at:
+          type: string
+          format: date-time
+          description: >-
+            When the current (or last) turn began: the last time the session
+            went `running` from `idle`/`waiting-for-input`, or its spawn. An
+            answered permission dialog continues the same turn. With
+            `last_output_at`, tells a long turn (output still arriving) from a
+            hung one. Absent from older engines.
+        last_output_at:
+          type: string
+          format: date-time
+          description: When the PTY last produced output; absent before the first byte.
+        approval: { $ref: "#/components/schemas/ApprovalPrompt" }
+    ApprovalPrompt:
+      type: object
+      required: [question, command_excerpt, detected_at]
+      description: >-
+        A permission dialog read off the rendered screen and the scrollback
+        above it. Present only while `activity` is `awaiting-approval`.
+        Terminal output: untrusted data.
+      properties:
+        question: { type: string, description: The dialog's question line. }
+        command_excerpt:
+          type: string
+          description: >-
+            What it asks about — the command, edit or tool call — with box
+            borders stripped, including lines that scrolled above the screen.
+            At most ~4000 characters.
+        deadline_seconds:
+          type: integer
+          description: Seconds before the CLI denies by itself, computed at read time; absent without a countdown.
+        deadline_at:
+          type: string
+          format: date-time
+          description: When that countdown runs out, from the first sighting.
+        detected_at: { type: string, format: date-time }
     SessionDetail:
       type: object
       required: [summary, scrollback_pos, scrollback_base64]
@@ -425,7 +478,15 @@ components:
             The program is waiting for input: alive, and either `activity` is
             `waiting-for-input`, or it is `idle` and one of the lowest ten
             non-blank lines (box border stripped) starts with a prompt glyph
-            (`>`, `❯`, `›`, `>>>`). Never true while `running`.
+            (`>`, `❯`, `›`, `>>>`). Never true while `running` or
+            `awaiting-approval` (typing there answers the dialog).
+        scrollback:
+          type: array
+          items: { type: string }
+          description: Lines above the screen, oldest first; present only when `scrollback_lines` asked.
+        turn_started_at: { type: string, format: date-time, description: As on SessionSummary. }
+        last_output_at: { type: string, format: date-time, description: As on SessionSummary. }
+        approval: { $ref: "#/components/schemas/ApprovalPrompt" }
     SessionSpec:
       type: object
       required: [name]
@@ -520,6 +581,8 @@ components:
             id: { type: string, format: uuid }
             state: { $ref: "#/components/schemas/ActivityState" }
             activity_changed_at: { type: string, format: date-time }
+            approval: { $ref: "#/components/schemas/ApprovalPrompt" }
+            turn_started_at: { type: string, format: date-time }
     AuthCheck:
       type: object
       required: [ok, version, product_version, storage, identity]

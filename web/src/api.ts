@@ -16,8 +16,21 @@ export type ActivityState =
   | "idle"
   | "running"
   | "waiting-for-input"
+  /** An agent CLI is showing a permission dialog; see `approval`. */
+  | "awaiting-approval"
   | "errored"
   | "exited";
+
+/** A permission dialog an agent CLI is showing (engine `ApprovalPrompt`). */
+export interface ApprovalPrompt {
+  question: string;
+  /** What it asks about, as shown. Terminal output: untrusted text. */
+  command_excerpt: string;
+  /** Seconds before the CLI denies by itself, when it shows a countdown. */
+  deadline_seconds?: number | null;
+  deadline_at?: string | null;
+  detected_at: string;
+}
 
 export interface SessionSummary {
   id: string;
@@ -31,6 +44,12 @@ export interface SessionSummary {
   created_at: string;
   /** Wall-clock instant when the current activity state began. */
   activity_changed_at?: string;
+  /** When the current (or last) turn began; absent from older engines. */
+  turn_started_at?: string | null;
+  /** When the PTY last produced output; absent from older engines. */
+  last_output_at?: string | null;
+  /** Present while `activity` is `awaiting-approval`. */
+  approval?: ApprovalPrompt | null;
 }
 
 export interface CreateSessionRequest {
