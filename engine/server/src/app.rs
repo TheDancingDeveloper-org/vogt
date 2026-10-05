@@ -288,6 +288,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
                 .patch(api::rename_session)
                 .delete(api::delete_session),
         )
+        .route("/api/sessions/sweep", get(api::sweep_sessions))
         .route("/api/sessions/{id}/screen", get(api::get_session_screen))
         .route("/api/sessions/{id}/kill", post(api::kill_session))
         .route("/api/sessions/{id}/input", post(api::session_input))

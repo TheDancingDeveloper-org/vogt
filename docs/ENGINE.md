@@ -638,6 +638,12 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   `sessions` capability)
 - `GET /api/sessions/:id/attach` — the WebSocket stream (see
   [Attach protocol](#attach-protocol)); a driver does not need it.
+- `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
+  `SessionSweepEntry[]` — every live and hibernated session (exited ones
+  only when asked) with the last N (default 8, at most 40) non-blank lines
+  of its screen and `ready`, rendered concurrently: the oversight table in
+  one request (WI-915). The core's `session.sweep` builds on it. Requires
+  `sessions`.
 - `POST /api/sessions/:id/hibernate` `{"reason"?, "allow_shell"?}` ->
   `SessionSummary`, `POST /api/sessions/:id/wake` `{"env"?, "cols"?,
   "rows"?}` -> `SessionSummary`, and `POST /api/sessions/:id/keep-awake`
@@ -2331,6 +2337,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.wait` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
 | `session.report_blocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `session.report_unblocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
+| `session.sweep` | Operator-only | Unavailable: An oversight table of every session's screen; for drivers over MCP/CLI/REST and the GUI board. |
 | `session.hibernate` | Operator-only | Unavailable: Stops a session's processes; for the GUI and for agents over MCP/CLI/REST. |
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
 | `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |

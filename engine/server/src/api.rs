@@ -223,6 +223,82 @@ pub async fn get_session_screen(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SweepQuery {
+    /// How many non-blank screen lines each row carries (default 8, at
+    /// most 40; 0 for none).
+    pub screen_lines: Option<usize>,
+    /// Include sessions whose process has exited (default false).
+    #[serde(default)]
+    pub include_exited: bool,
+}
+
+/// Every session at once, each with the tail of its screen: the oversight
+/// table a driver otherwise builds one `/screen` call at a time (WI-915).
+/// Live and hibernated sessions; exited ones only when asked. Screens are
+/// rendered concurrently on the blocking pool. Gated like `/screen`.
+pub async fn sweep_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<SweepQuery>,
+) -> Result<Json<Vec<vogt_engine_contract::SessionSweepEntry>>> {
+    let lines = q.screen_lines.unwrap_or(8);
+    if lines > 40 {
+        return Err(crate::error::ApiError::BadRequest(
+            "screen_lines is at most 40".into(),
+        ));
+    }
+    let wanted: Vec<SessionSummary> = state
+        .sessions
+        .list()
+        .into_iter()
+        .filter(|s| {
+            s.alive
+                || q.include_exited
+                || s.activity == vogt_engine_contract::ActivityState::Hibernated
+        })
+        .collect();
+    let rows = futures_util::future::join_all(wanted.into_iter().map(|summary| {
+        let state = Arc::clone(&state);
+        async move {
+            let screen = if lines == 0 {
+                None
+            } else if let Some((bytes, rows, cols, kept)) =
+                state.sessions.hibernated_screen(summary.id)
+            {
+                crate::screen::kept_screen(summary.id, bytes, rows, cols, kept, 0)
+                    .await
+                    .ok()
+            } else {
+                match state.sessions.get(summary.id) {
+                    Ok(session) => crate::screen::session_screen(session, 0).await.ok(),
+                    Err(_) => None,
+                }
+            };
+            let (screen_tail, ready) = match screen {
+                Some(screen) => {
+                    let mut tail: Vec<String> = screen
+                        .lines
+                        .into_iter()
+                        .rev()
+                        .filter(|l| !l.trim().is_empty())
+                        .take(lines)
+                        .collect();
+                    tail.reverse();
+                    (tail, screen.ready)
+                }
+                None => (Vec::new(), false),
+            };
+            vogt_engine_contract::SessionSweepEntry {
+                summary,
+                screen_tail,
+                ready,
+            }
+        }
+    }))
+    .await;
+    Ok(Json(rows))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ScreenQuery {
     pub scrollback_lines: Option<usize>,
 }

@@ -210,6 +210,29 @@ class EngineHibernation:
 
 
 @dataclass(frozen=True)
+class EngineSweepEntry:
+    """One row of `GET /api/sessions/sweep`: a session and its screen's tail."""
+
+    session: EngineSession
+    screen_tail: tuple[str, ...] = ()
+    ready: bool = False
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineSweepEntry:
+        summary = payload.get("summary")
+        tail = payload.get("screen_tail")
+        return cls(
+            session=EngineSession.from_payload(
+                summary if isinstance(summary, dict) else {}
+            ),
+            screen_tail=tuple(str(line) for line in tail)
+            if isinstance(tail, list)
+            else (),
+            ready=payload.get("ready") is True,
+        )
+
+
+@dataclass(frozen=True)
 class EngineArchivedSession:
     """One terminal that has ended, as the engine's history records it.
 
@@ -607,6 +630,19 @@ class EngineClient:
         payload = self._call("/api/sessions")
         rows = payload if isinstance(payload, list) else []
         return [EngineSession.from_payload(row) for row in rows]
+
+    def sweep_sessions(self, *, screen_lines: int = 8) -> list[EngineSweepEntry] | None:
+        """Every live and hibernated session with its screen's last lines,
+        in one request; `None` from an engine that predates the route."""
+        payload = self._call(
+            f"/api/sessions/sweep?screen_lines={screen_lines}", allow_missing=True
+        )
+        if payload is None:
+            return None
+        rows = payload if isinstance(payload, list) else []
+        return [
+            EngineSweepEntry.from_payload(row) for row in rows if isinstance(row, dict)
+        ]
 
     def get_session(self, session_id: str) -> EngineSession | None:
         """One session, or `None` if the engine has forgotten it.

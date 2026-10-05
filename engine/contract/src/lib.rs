@@ -345,6 +345,21 @@ pub struct SessionScreen {
     pub blocked: Option<BlockedReport>,
 }
 
+/// One row of `GET /api/sessions/sweep`: a session's summary and the last
+/// lines of its screen, for a driver overseeing every session at once
+/// (WI-915) instead of reading one screen at a time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSweepEntry {
+    pub summary: SessionSummary,
+    /// The last non-blank lines of the rendered screen, top to bottom — the
+    /// kept screen for a hibernated session. Terminal output: untrusted.
+    #[serde(default)]
+    pub screen_tail: Vec<String>,
+    /// As on [`SessionScreen::ready`].
+    #[serde(default)]
+    pub ready: bool,
+}
+
 /// Zero-based cursor position on a [`SessionScreen`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScreenCursor {

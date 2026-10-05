@@ -16,6 +16,7 @@ export type SessionTool =
   | "editor"
   | "git"
   | "history"
+  | "oversight"
   | "tasks"
   | "gui"
   | "assistant";
@@ -80,6 +81,9 @@ export function describeRoute(
   }
   if (pathname === "/history") {
     return { kind: "tool", place: "sessions", tool: "history" };
+  }
+  if (pathname === "/oversight") {
+    return { kind: "tool", place: "sessions", tool: "oversight" };
   }
   if (pathname === "/tasks") {
     return { kind: "tool", place: "sessions", tool: "tasks" };
@@ -176,6 +180,7 @@ const TOOL_TITLES: Record<SessionTool, string> = {
   editor: "Editor",
   git: "Git",
   history: "History",
+  oversight: "Oversight",
   tasks: "Tasks",
   gui: "GUI stream",
   assistant: "Assistant",

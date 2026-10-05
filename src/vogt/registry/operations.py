@@ -174,6 +174,7 @@ from vogt.application.models import (
     SessionResult,
     SessionScreenParams,
     SessionScreenResult,
+    SessionSweepResult,
     SessionWaitParams,
     SessionWaitResult,
     SetPasswordParams,
@@ -187,6 +188,7 @@ from vogt.application.models import (
     SuppressParams,
     SweepParams,
     SweepResult,
+    SweepSessionsParams,
     TokenListResult,
     TokenResult,
     TransitionProjectParams,
@@ -993,6 +995,25 @@ def build_operations() -> list[Operation[Any, Any]]:
         # process and mints the session a new token, so it is a write too —
         # which is why `session.wait` (a `read`) reports a hibernated session
         # rather than waking it.
+        Operation(
+            name="session.sweep",
+            summary=(
+                "Oversee every session at once: one row per live or "
+                "hibernated session with its activity, turn timing, last "
+                "reply excerpt, blocked report, permission dialog and the "
+                "last lines of its screen, ordered by who needs attention "
+                "(approval, blocked, waiting, stalled, running, idle, "
+                "hibernated) with the reason. Use this instead of "
+                "session_screen per session."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SweepSessionsParams,
+            result_model=SessionSweepResult,
+            handler=services.sweep_sessions,
+            route=HttpRoute("GET", "/sessions/sweep"),
+            cli=CliBinding(("session", "sweep")),
+        ),
         Operation(
             name="session.hibernate",
             summary=(
