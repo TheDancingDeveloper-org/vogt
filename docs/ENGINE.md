@@ -778,7 +778,24 @@ The "Teach auto mode about your environment?" dialog has no variable. Its
 only off switch is `autoModeEnvSetup.dismissed` in Claude Code's global config
 (what "Don't show again" writes), so the pod entrypoint sets that flag in
 `${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json` at boot, before any session can
-run Claude Code; `ENGINE_AGENT_QUIET_ONBOARDING=0` skips it. Spinner tips are
+run Claude Code; `ENGINE_AGENT_QUIET_ONBOARDING=0` skips it.
+
+Claude Code also asks two questions once per working directory: whether to
+trust the folder, and whether to allow a `CLAUDE.md` that imports files from
+outside it. Before each Claude session starts (or wakes), the engine
+records both answers for the session's `cwd` in that same config, under
+`projects["<cwd>"]`: `hasTrustDialogAccepted`,
+`hasClaudeMdExternalIncludesApproved` and
+`hasClaudeMdExternalIncludesWarningShown`. The `cwd` is always inside
+`workspace_root`, which the operator trusts by deploying it. The write is
+atomic and best effort: a config that does not parse is left alone. It
+honours a `CLAUDE_CONFIG_DIR` in the session's env, and
+`ENGINE_AGENT_QUIET_ONBOARDING=0` skips it as well. A session started with a
+brief also gets `--add-dir=<the brief's directory>`. The brief sits under
+`state_dir`, outside the working directory, and without that flag reading it
+would stop at a permission prompt. The `=` form matters because `--add-dir`
+is variadic: the separate form would take the first prompt as a second
+directory. A woken session is sent neither the brief nor the flag. Spinner tips are
 left on: they are text, not a prompt, and wait for no answer. A dialog
 Claude Code adds later can still appear; a driver dismisses one with `Esc`
 (sent as `\u001b` over `/input`), or picks an option with the arrow keys and

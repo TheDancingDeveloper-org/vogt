@@ -300,6 +300,24 @@ impl SessionRegistry {
                 .insert(0, (ENGINE_URL_ENV.to_string(), url));
         }
 
+        // Claude Code asks, per directory, whether to trust it and whether to
+        // allow a CLAUDE.md that imports from outside it. Answer both before
+        // it starts, so a woken or driven session does not sit at a modal.
+        if base_command
+            .as_deref()
+            .and_then(agent_cli::agent_name)
+            .as_deref()
+            == Some("claude")
+        {
+            let cwd = spec
+                .cwd
+                .clone()
+                .unwrap_or_else(|| self.cfg.default_cwd.to_string_lossy().into_owned());
+            self.cfg
+                .agent_onboarding
+                .prepare(spec.env.as_deref().unwrap_or_default(), &cwd);
+        }
+
         // Names need not be unique — duplicates are merely confusing, not invalid.
         let spawned = pty::spawn(
             id,

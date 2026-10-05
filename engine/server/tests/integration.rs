@@ -75,6 +75,7 @@ fn test_config() -> Config {
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
+        agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
     }
 }
 
@@ -8927,4 +8928,73 @@ async fn a_session_pinned_awake_wakes_by_itself_after_a_restart() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test]
+async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readable() {
+    let (tmp, mut cfg, stub) = hibernation_sandbox();
+    let claude_home = tmp.path().join("claude-home");
+    cfg.agent_onboarding = vogt_engine_server::claude_config::Onboarding {
+        enabled: true,
+        default_dir: Some(claude_home.clone()),
+    };
+    let state_dir = cfg.state_dir.clone();
+    let workspace = cfg.workspace_root.clone();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "trusted",
+            "prompt": "## Task\n\nDo it.\n",
+            "command": [stub.to_string_lossy()],
+            "cwd": workspace.to_string_lossy(),
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    let brief_dir = state_dir.join("agent-task-prompts").join("sessions");
+    assert!(
+        printed.contains(&format!(
+            "arg=[--add-dir={}]\r\narg=[Vogt started",
+            brief_dir.display()
+        )),
+        "the brief's directory is added in the `=` form, right before the prompt: {printed:?}"
+    );
+
+    let config: Value =
+        serde_json::from_slice(&std::fs::read(claude_home.join(".claude.json")).unwrap()).unwrap();
+    let project = &config["projects"][workspace.to_string_lossy().as_ref()];
+    assert_eq!(project["hasTrustDialogAccepted"], true, "{config}");
+    assert_eq!(
+        project["hasClaudeMdExternalIncludesApproved"], true,
+        "{config}"
+    );
+
+    // A wake resumes; it neither re-sends the brief nor needs its directory.
+    client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .send()
+        .await
+        .unwrap();
+    let printed =
+        live_output_containing(&client, &base, &id, &["arg=[--resume]", "helper=["]).await;
+    let woken = &printed[printed.rfind("arg=[--resume]").unwrap()..];
+    assert!(
+        !woken.contains("--add-dir") && !woken.contains("Vogt started"),
+        "{woken:?}"
+    );
 }
