@@ -426,7 +426,12 @@ impl SessionRegistry {
                 let mut record = Record::new(id, session.name(), session.created_at_rfc3339());
                 record.template = spec.template.clone();
                 record.command = base_command;
-                record.cwd = Some(session.cwd.clone());
+                // Only a directory the caller chose. The engine's default can
+                // sit outside the workspace (`~` on the pods), and a wake that
+                // replayed it as a requested `cwd` was refused for escaping
+                // the workspace root; with none recorded, a wake starts in the
+                // default again.
+                record.cwd = spec.cwd.clone();
                 record.env = hibernation::without_secrets(&base_env);
                 record.model = spec.model.clone();
                 record.effort = spec.effort.clone();
@@ -832,7 +837,12 @@ impl SessionRegistry {
             name: record.name.clone(),
             command: record.command.clone(),
             template: record.template.clone(),
-            cwd: record.cwd.clone(),
+            // A record from before the line above names the default
+            // directory itself; that too means "the default".
+            cwd: record
+                .cwd
+                .clone()
+                .filter(|c| std::path::Path::new(c) != self.cfg.default_cwd),
             env: Some(env),
             prompt: None,
             model: record.model.clone(),
