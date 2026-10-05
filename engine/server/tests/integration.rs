@@ -7847,7 +7847,8 @@ async fn an_exited_session_reports_a_terminal_state_and_not_alive() {
     assert_eq!(row["alive"], true, "{row:?}");
     assert!(row["exit_code"].is_null());
 
-    // A stopped (killed) session is not alive either.
+    // A stopped (killed) session is not alive either, and reads `stopped`
+    // whatever its exit code (WI-913).
     client
         .post(format!("{base}/api/sessions/{live}/kill"))
         .send()
@@ -7855,10 +7856,7 @@ async fn an_exited_session_reports_a_terminal_state_and_not_alive() {
         .unwrap();
     let row = wait_for_session_row(&client, &base, &live, |s| !s["exit_code"].is_null()).await;
     assert_eq!(row["alive"], false, "{row:?}");
-    assert!(
-        row["activity"] == "errored" || row["activity"] == "exited",
-        "{row:?}"
-    );
+    assert_eq!(row["activity"], "stopped", "{row:?}");
 
     // History records the exit and why it ended.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
