@@ -254,7 +254,13 @@ The recipe is **start with a task → wait until ready → read → answer → s
 4. **Answer.** `session_input` types `text`, then presses the named `keys` in
    order (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`,
    `ctrl-d`, `backspace`), then Enter if `submit`. A menu or dialog: `keys:
-   ["esc"]` to dismiss it, or arrows then `enter` to choose. Then wait again.
+   ["esc"]` to dismiss it, or arrows then `enter` to choose. When Enter is
+   pressed (`submit`, or `enter` among the `keys`), the result says what
+   became of the input in `delivery`: `delivered` means a turn started;
+   `queued` means it waits behind a running turn; `unconfirmed` means
+   nothing showed within about 2 s, so read the screen. `typed` means no
+   Enter, and the text sits in the input box. `delivery_evidence` says how
+   that was judged. Then wait again.
 5. **Stop.** `session_stop` kills the process (and revokes the token of a
    session Vogt started). Its screen and log stay readable.
 

@@ -26,6 +26,7 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -95,7 +96,7 @@ from vogt.application.services._brief import (
 )
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
-from vogt.core import oversight
+from vogt.core import delivery, oversight
 from vogt.core.auth import Scope, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
@@ -728,6 +729,20 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     writes_in_order.extend((SESSION_KEYS[key], False) for key in keys)
     if params.submit:
         writes_in_order.append(("", True))
+    # Enter by either route is a submit: `keys: ["enter"]` used to report
+    # `submitted: false` (WI-918).
+    submitted = params.submit or "enter" in keys
+    confirming = submitted and params.confirm
+    before: str | None = None
+    if confirming:
+        # What the agent was doing as the input arrived decides between
+        # "starts a turn" and "waits behind one". A failed read only costs
+        # the judgement its first clue.
+        try:
+            seen = engine.get_session(engine_id)
+        except EngineUnavailable:
+            seen = None
+        before = None if seen is None else seen.activity
     woke = False
     try:
         _send_all(engine, engine_id, params.id, writes_in_order)
@@ -753,7 +768,15 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
                 "then retry"
             )
             raise Conflict(msg) from None
+        # Freshly woken and at its prompt: nothing was running.
+        before = "waiting-for-input"
         _send_all(engine, engine_id, params.id, writes_in_order)
+
+    verdict = (
+        _confirm_delivery(engine, engine_id, before)
+        if confirming
+        else delivery.judge(submitted=submitted, before=None, after=[])
+    )
 
     linked = target.session is not None
     audited_action(
@@ -769,6 +792,8 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             "bytes": size,
             "keys": list(keys),
             "submit": params.submit,
+            "submitted": submitted,
+            "delivery": verdict.delivery,
             "woke": woke,
         },
         event_kind=SESSION_INPUT_EVENT,
@@ -779,9 +804,49 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         linked=linked,
         bytes=size,
         keys=keys,
-        submitted=params.submit,
+        submitted=submitted,
+        delivery=verdict.delivery,
+        delivery_evidence=verdict.evidence,
         woke=woke,
     )
+
+
+#: How long `session.input` watches for what became of a submitted input:
+#: up to `_CONFIRM_READS` screen reads, `_CONFIRM_PAUSE_S` apart. A module
+#: value so tests can make it instant.
+_CONFIRM_READS = 10
+_CONFIRM_PAUSE_S = 0.2
+
+
+def _pause(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _confirm_delivery(
+    engine: EngineClient, engine_id: str, before: str | None
+) -> delivery.Verdict:
+    """Read the session a few times after a submit and judge, stopping at
+    the first decisive read. An engine that cannot be read leaves the
+    judgement to what was seen before."""
+    observed: list[delivery.Observation] = []
+    verdict = delivery.judge(submitted=True, before=before, after=observed)
+    if verdict.delivery != "unconfirmed":
+        return verdict
+    for _ in range(_CONFIRM_READS):
+        _pause(_CONFIRM_PAUSE_S)
+        try:
+            screen = engine.session_screen(engine_id)
+        except EngineUnavailable:
+            break
+        if screen is None:
+            break
+        observed.append(
+            delivery.Observation(activity=screen.activity, lines=screen.lines)
+        )
+        verdict = delivery.judge(submitted=True, before=before, after=observed)
+        if verdict.delivery != "unconfirmed":
+            break
+    return verdict
 
 
 def _send_all(
