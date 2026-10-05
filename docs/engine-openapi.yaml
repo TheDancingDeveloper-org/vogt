@@ -621,6 +621,23 @@ components:
         keep_awake:
           type: boolean
           description: Pinned awake; absent when false.
+        resources: { $ref: "#/components/schemas/SessionResources" }
+    SessionResources:
+      type: object
+      required: [rss_bytes, cpu_pct, processes, sampled_at]
+      description: >-
+        The last sample of the session's process tree (the PTY child and
+        everything below it), taken every 10 s from /proc. This is visibility,
+        not a limit. Absent before the first sample, for a hibernated or
+        exited session, and off Linux.
+      properties:
+        rss_bytes: { type: integer, description: Resident memory summed over the tree. }
+        cpu_pct: { type: number, description: CPU over the last interval, percent of one core. }
+        processes: { type: integer }
+        sampled_at: { type: string, format: date-time }
+        over_threshold:
+          type: boolean
+          description: At or over ENGINE_SESSION_RSS_WARN; absent when false.
     AgentConversation:
       type: object
       required: [agent, id]

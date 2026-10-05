@@ -35,6 +35,7 @@ from vogt.adapters.engine.client import (
     EngineApproval,
     EngineBlocked,
     EngineHibernation,
+    EngineResources,
     EngineScreen,
     EngineSweepEntry,
 )
@@ -66,6 +67,7 @@ from vogt.application.models import (
     SessionLastReplyResult,
     SessionListResult,
     SessionReply,
+    SessionResources,
     SessionResult,
     SessionScreenCursor,
     SessionScreenParams,
@@ -340,6 +342,12 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
         except EngineUnavailable as exc:
             detail = str(exc)
     summaries = _rows(ctx, params, live, detail)
+    if params.order == "rss":
+        # Stable: sessions with no sample keep their order, after the
+        # measured ones.
+        summaries.sort(
+            key=lambda s: (1, 0) if s.resources is None else (0, -s.resources.rss_bytes)
+        )
     return SessionListResult(sessions=summaries, engine=detail)
 
 
@@ -1598,7 +1606,20 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "hibernation": _hibernation(engine_session.hibernation),
         "keep_awake": engine_session.keep_awake,
         "conversation_id": engine_session.conversation_id,
+        "resources": _resources(engine_session.resources),
     }
+
+
+def _resources(resources: EngineResources | None) -> SessionResources | None:
+    if resources is None:
+        return None
+    return SessionResources(
+        rss_bytes=resources.rss_bytes,
+        cpu_pct=resources.cpu_pct,
+        processes=resources.processes,
+        sampled_at=_parse_engine_timestamp(resources.sampled_at),
+        over_threshold=resources.over_threshold,
+    )
 
 
 def _hibernation(hibernation: EngineHibernation | None) -> SessionHibernation | None:

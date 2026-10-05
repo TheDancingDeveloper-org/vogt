@@ -45,6 +45,27 @@ export function sessionActivityAge(s: SessionSummary, now: number): string | nul
   return formatAgo(now - changed);
 }
 
+/** "512 MiB", "1.2 GiB": a byte count the way a person reads memory. */
+export function formatBytes(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = bytes;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value >= 10 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`;
+}
+
+/** "1.2 GiB · 35% CPU", with a warning mark past the deployment's
+ *  threshold; null before the engine has sampled the session. */
+export function sessionResourceWord(s: SessionSummary): string | null {
+  const r = s.resources;
+  if (!r || s.exit_code !== null || s.activity === "hibernated") return null;
+  const memory = `${r.over_threshold ? "⚠ " : ""}${formatBytes(r.rss_bytes)}`;
+  return r.cpu_pct >= 1 ? `${memory} · ${Math.round(r.cpu_pct)}% CPU` : memory;
+}
+
 /** The row's state word beside the dot: "waiting for input · 40s",
  *  "running · 6m". Colour is never the only signal, so this line exists
  *  whether or not the age is known. */
@@ -66,7 +87,8 @@ export function sessionStateWord(
     }
   }
   const age = sessionActivityAge(s, now);
-  return age ? `${label} · ${age}` : label;
+  const resources = sessionResourceWord(s);
+  return [label, age, resources].filter(Boolean).join(" · ");
 }
 
 const ATTENTION_ORDER: Record<string, number> = {

@@ -63,6 +63,19 @@ export interface SessionSummary {
   hibernation?: Hibernation | null;
   /** Pinned awake: never hibernated by policy. */
   keep_awake?: boolean;
+  /** The process tree's last resource sample (engine `SessionResources`). */
+  resources?: SessionResources | null;
+}
+
+/** What a session's process tree holds, sampled every ~10 s by the engine. */
+export interface SessionResources {
+  rss_bytes: number;
+  /** Percent of one core over the last interval; above 100 on several cores. */
+  cpu_pct: number;
+  processes: number;
+  sampled_at: string;
+  /** At or over the deployment's ENGINE_SESSION_RSS_WARN. */
+  over_threshold?: boolean;
 }
 
 /** An agent CLI and its own id for a conversation (engine `AgentConversation`). */
@@ -140,6 +153,7 @@ export type ServerEvent =
   | { type: "session-blocked"; id: string; blocked?: BlockedReport | null }
   | { type: "session-hibernated"; id: string; trigger: Hibernation["trigger"] }
   | { type: "session-woken"; id: string }
+  | { type: "session-resources"; samples: { id: string; resources: SessionResources }[] }
   /**
    * Something changed in vogt-core, republished by the front door.
    *

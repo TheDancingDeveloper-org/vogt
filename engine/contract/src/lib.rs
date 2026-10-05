@@ -161,6 +161,38 @@ pub struct SessionSummary {
     /// Pinned awake: never hibernated by policy, and woken at boot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_awake: bool,
+    /// What the session's process tree holds, as last sampled (WI-916).
+    /// Absent until the first sample, for a hibernated or exited session,
+    /// and off Linux.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<SessionResources>,
+}
+
+/// One sample of a session's process tree: the PTY child and every process
+/// below it, read from `/proc`. Visibility, not a limit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionResources {
+    /// Resident memory summed over the tree. Shared pages are counted once
+    /// per process, so this over-states a tree that shares a lot; it is the
+    /// figure `ps` and the OOM killer's per-process view add up to.
+    pub rss_bytes: u64,
+    /// CPU over the last sampling interval, in percent of one core (a busy
+    /// tree on four cores reads up to 400).
+    pub cpu_pct: f32,
+    /// Processes in the tree.
+    pub processes: u32,
+    /// RFC 3339.
+    pub sampled_at: String,
+    /// `rss_bytes` is at or over the deployment's `ENGINE_SESSION_RSS_WARN`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub over_threshold: bool,
+}
+
+/// One session's entry in a `session-resources` event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionResourcesSample {
+    pub id: Uuid,
+    pub resources: SessionResources,
 }
 
 /// An agent CLI and its own id for a conversation.
@@ -506,6 +538,11 @@ pub enum ServerEvent {
     /// A hibernated session was started again under the same id.
     SessionWoken {
         id: Uuid,
+    },
+    /// A new resource sample for every live session, once per sampling
+    /// interval (WI-916). Carries only the sessions it measured.
+    SessionResources {
+        samples: Vec<SessionResourcesSample>,
     },
     /// A session's agent reported itself blocked on a person (`blocked`
     /// set), or cleared that report (`blocked` absent).

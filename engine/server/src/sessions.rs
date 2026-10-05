@@ -895,6 +895,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         conversation: record.conversation.clone(),
         hibernation: Some(hibernation),
         keep_awake: record.keep_awake,
+        resources: None,
     })
 }
 

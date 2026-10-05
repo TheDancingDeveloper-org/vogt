@@ -84,6 +84,8 @@ pub struct Session {
     hibernating: AtomicBool,
     /// When input was last written to the PTY.
     last_input: Mutex<Option<Instant>>,
+    /// The process tree's last resource sample (`resources`).
+    resources: Mutex<Option<vogt_engine_contract::SessionResources>>,
 }
 
 impl Session {
@@ -200,7 +202,12 @@ impl Session {
             conversation: self.conversation(),
             hibernation: None,
             keep_awake: self.keep_awake(),
+            resources: self.resources.lock().clone(),
         }
+    }
+
+    pub fn set_resources(&self, resources: Option<vogt_engine_contract::SessionResources>) {
+        *self.resources.lock() = resources;
     }
 
     /// What the session's agent reported it is blocked on, if anything.
@@ -746,6 +753,7 @@ pub fn spawn(
         keep_awake: AtomicBool::new(false),
         hibernating: AtomicBool::new(false),
         last_input: Mutex::new(None),
+        resources: Mutex::new(None),
     });
 
     spawn_reader_thread(

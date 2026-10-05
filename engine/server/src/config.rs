@@ -414,6 +414,11 @@ pub struct Config {
     /// session starts (`claude_config`). On unless
     /// `ENGINE_AGENT_QUIET_ONBOARDING=0`; off in a hand-built config.
     pub agent_onboarding: crate::claude_config::Onboarding,
+    /// `ENGINE_SESSION_RSS_WARN` (`8GiB`): a session whose process tree's
+    /// resident memory reaches this is flagged `over_threshold` on its
+    /// summary (`resources`). Unset flags nothing; usage is reported either
+    /// way.
+    pub session_rss_warn_bytes: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -860,6 +865,16 @@ pub fn load(
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         hibernation: hibernation_policy_from_env()?,
         agent_onboarding: crate::claude_config::Onboarding::from_env(),
+        session_rss_warn_bytes: match engine_env("ENGINE_SESSION_RSS_WARN") {
+            Ok(v) if !v.trim().is_empty() => {
+                Some(crate::hibernate_policy::parse_size(&v).ok_or_else(|| {
+                    ApiError::Config(format!(
+                        "ENGINE_SESSION_RSS_WARN={v:?} is not a size like 8GiB or 512M"
+                    ))
+                })?)
+            }
+            _ => None,
+        },
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
             .ok()
             .map(|value| value.trim().to_string())

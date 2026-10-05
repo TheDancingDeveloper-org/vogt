@@ -155,3 +155,34 @@ def test_no_engine_is_said_not_rendered_as_nothing_running(
     result = sweep_sessions(ctx, SweepSessionsParams())
     assert result.rows == []
     assert result.engine is not None and "VOGT_ENGINE_URL" in result.engine
+
+
+def test_resources_ride_on_the_row_and_list_can_put_the_heaviest_first(
+    wired: AppContext, engine: Engine
+) -> None:
+    from vogt.application.models import ListSessionsParams
+    from vogt.application.services import list_sessions
+
+    light, light_engine = _start(wired)
+    heavy, heavy_engine = _start(wired)
+    unmeasured, _ = _start(wired)
+    sample = {"cpu_pct": 12.5, "processes": 6, "sampled_at": "2026-10-05T00:00:00Z"}
+    engine.rows[light_engine]["resources"] = {**sample, "rss_bytes": 300 << 20}
+    engine.rows[heavy_engine]["resources"] = {
+        **sample,
+        "rss_bytes": 50 << 30,
+        "over_threshold": True,
+    }
+
+    rows = list_sessions(wired, ListSessionsParams(order="rss")).sessions
+    assert [row.id for row in rows] == [heavy, light, unmeasured]
+    assert rows[0].resources is not None
+    assert rows[0].resources.rss_bytes == 50 << 30
+    assert rows[0].resources.over_threshold is True
+    assert rows[2].resources is None
+
+    swept = sweep_sessions(wired, SweepSessionsParams())
+    by_id = {row.session.id: row.session for row in swept.rows}
+    light_resources = by_id[light].resources
+    assert light_resources is not None
+    assert light_resources.processes == 6
