@@ -4101,6 +4101,14 @@ class SessionInputParams(Params):
         description="Press Enter last, after the text and keys.",
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+    confirm: bool = Field(
+        default=True,
+        description=(
+            "When Enter is pressed, watch the session for up to ~2 s and say "
+            "whether the input was delivered (a turn started) or queued "
+            "behind a running turn. False returns at once (`unconfirmed`)."
+        ),
+    )
     wake_timeout_s: int = Field(
         default=120,
         ge=1,
@@ -4122,7 +4130,21 @@ class SessionInputResult(Result):
     )
     bytes: int = Field(description="UTF-8 bytes of `text` written.")
     keys: list[SessionKey] = []
-    submitted: bool = False
+    submitted: bool = Field(
+        default=False,
+        description="Enter was pressed — by `submit` or as one of the `keys`.",
+    )
+    delivery: str = Field(
+        default="unconfirmed",
+        description=(
+            "typed (no Enter: the text sits in the input) / delivered (a turn "
+            "started) / queued (behind a running turn) / unconfirmed (sent; "
+            "nothing observable yet). A refused input is an error, not a value."
+        ),
+    )
+    delivery_evidence: str = Field(
+        default="", description="What `delivery` was judged from."
+    )
     woke: bool = Field(
         default=False,
         description="True when the session was hibernated and was woken first.",
