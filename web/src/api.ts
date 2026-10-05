@@ -153,6 +153,9 @@ export type ServerEvent =
   | { type: "session-blocked"; id: string; blocked?: BlockedReport | null }
   | { type: "session-hibernated"; id: string; trigger: Hibernation["trigger"] }
   | { type: "session-woken"; id: string }
+  /** Not a bus event: this connection fell behind and missed `skipped`
+   *  events. Whatever was built from the stream may be out of date. */
+  | { type: "lagged"; skipped: number }
   | { type: "session-resources"; samples: { id: string; resources: SessionResources }[] }
   /**
    * Something changed in vogt-core, republished by the front door.

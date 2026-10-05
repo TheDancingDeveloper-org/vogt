@@ -9132,3 +9132,79 @@ async fn a_sessions_process_tree_is_measured_and_rides_on_its_summary() {
     .unwrap();
     assert!(event.iter().any(|s| s.id.to_string() == ids[0]));
 }
+
+/// WI-920: a client that falls behind the event stream is told so in band,
+/// the stream keeps going, and the lag is on record in `/api/status`.
+#[tokio::test]
+async fn a_lagging_event_stream_is_told_and_keeps_going() {
+    let (base, state, _h) = boot_with_state(test_config()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let mut response = client
+        .get(format!("{base}/api/events"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // Large events, published while nothing reads the response: the socket
+    // fills, the stream stops being polled, and its receiver falls more than
+    // the bus's capacity behind.
+    let padding = "x".repeat(16 * 1024);
+    for seq in 0..2000 {
+        state.bus.publish(ServerEvent::VogtChanged {
+            kind: "test.burst".into(),
+            entity_kind: "work_item".into(),
+            entity_id: "WI-1".into(),
+            seq,
+            summary: json!({ "padding": padding }),
+        });
+    }
+    let mut seen = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while !seen.contains("\"type\":\"lagged\"") {
+        let chunk = tokio::time::timeout_at(deadline, response.chunk())
+            .await
+            .expect("the lagged notice never arrived")
+            .unwrap()
+            .expect("the stream ended");
+        // Keep only a tail: the burst is tens of megabytes.
+        seen.push_str(&String::from_utf8_lossy(&chunk));
+        if seen.len() > 64 * 1024 {
+            seen = seen[seen.len() - 64 * 1024..].to_string();
+        }
+    }
+    // The stream is still alive after the lag.
+    state.bus.publish(ServerEvent::SessionRenamed {
+        id: uuid::Uuid::nil(),
+        name: "after the lag".into(),
+    });
+    let mut after = String::new();
+    while !after.contains("after the lag") {
+        let chunk = tokio::time::timeout_at(deadline, response.chunk())
+            .await
+            .expect("nothing arrived after the lag")
+            .unwrap()
+            .expect("the stream ended");
+        after.push_str(&String::from_utf8_lossy(&chunk));
+        if after.len() > 64 * 1024 {
+            after = after[after.len() - 64 * 1024..].to_string();
+        }
+    }
+    let status: Value = client
+        .get(format!("{base}/api/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        status["event_lag"]["sse-events"]["events_skipped"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "{status}"
+    );
+}
