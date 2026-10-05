@@ -74,6 +74,7 @@ fn test_config() -> Config {
         vogt_engine_state_dir: None,
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
+        hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
     }
 }
 
@@ -8726,4 +8727,204 @@ async fn attaching_to_a_hibernated_session_replays_its_screen_and_does_not_wake_
         .unwrap();
     let row = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
     assert_eq!(row["activity"], "hibernated", "attach must not wake it");
+}
+
+/// Start one stub agent per `(name, script)` in the hibernation sandbox and
+/// return their ids once each has printed `helper=[`.
+async fn start_stub_agents(
+    client: &reqwest::Client,
+    base: &str,
+    bin: &std::path::Path,
+    agents: &[(&str, &str)],
+) -> Vec<String> {
+    let mut ids = Vec::new();
+    for (name, script) in agents {
+        // Each stub is named `claude` (that is how the engine tells an agent
+        // CLI), in a directory of its own.
+        let dir = bin.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let stub = dir.join("claude");
+        std::fs::write(&stub, script).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({ "name": name, "command": [stub.to_string_lossy()] }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    for id in &ids {
+        live_output_containing(client, base, id, &["helper=["]).await;
+    }
+    ids
+}
+
+#[tokio::test]
+async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
+    use vogt_engine_server::hibernate_policy::{exemption, run_once, Policy};
+
+    let (tmp, cfg, _stub) = hibernation_sandbox();
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let quiet = "#!/bin/sh\nsleep 300 &\nprintf 'helper=[%s]\\n> ' \"$!\"\nwait\n";
+    // A tool call in progress: a shell below the agent.
+    let tooling = "#!/bin/sh\nsh -c 'sleep 300' &\nprintf 'helper=[%s]\\n> ' \"$!\"\nwait\n";
+    // A turn that keeps printing.
+    let busy = "#!/bin/sh\nprintf 'helper=[0]\\n'\nwhile :; do printf .; sleep 0.05; done\n";
+    let ids = start_stub_agents(
+        &client,
+        &base,
+        &tmp.path().join("agents"),
+        &[
+            ("quiet", quiet),
+            ("pinned", quiet),
+            ("blocked", quiet),
+            ("tooling", tooling),
+            ("busy", busy),
+        ],
+    )
+    .await;
+    let [quiet_id, pinned, blocked, tooling_id, busy_id] = [0, 1, 2, 3, 4].map(|i| ids[i].clone());
+    let ok = client
+        .post(format!("{base}/api/sessions/{pinned}/keep-awake"))
+        .json(&json!({ "keep_awake": true }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(ok, StatusCode::OK);
+    let ok = client
+        .post(format!("{base}/api/sessions/{blocked}/blocked"))
+        .json(&json!({ "blocked": true, "reason": "needs the operator" }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(ok, StatusCode::OK);
+    // Long enough for the quiet ones to settle at idle (200 ms here).
+    tokio::time::sleep(Duration::from_millis(900)).await;
+
+    let why = |id: &str| {
+        let session = state.sessions.get(id.parse().unwrap()).unwrap();
+        exemption(&state.sessions, &session)
+    };
+    assert_eq!(why(&quiet_id), None);
+    assert_eq!(why(&pinned).as_deref(), Some("pinned awake"));
+    assert_eq!(why(&blocked).as_deref(), Some("blocked on a person"));
+    assert!(
+        why(&tooling_id).is_some_and(|w| w.contains("shell is running below the agent")),
+        "{:?}",
+        why(&tooling_id)
+    );
+    assert_eq!(why(&busy_id).as_deref(), Some("a turn is running"));
+
+    run_once(
+        &state.sessions,
+        &Policy {
+            idle_after: Some(Duration::from_millis(500)),
+            memavailable_below: None,
+        },
+    )
+    .await;
+
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let activity = |id: &str| {
+        listed
+            .iter()
+            .find(|s| s["id"] == id)
+            .map(|s| s["activity"].as_str().unwrap().to_string())
+            .unwrap()
+    };
+    assert_eq!(activity(&quiet_id), "hibernated");
+    let row = listed
+        .iter()
+        .find(|s| s["id"] == quiet_id.as_str())
+        .unwrap();
+    assert_eq!(row["hibernation"]["trigger"], "idle");
+    for id in [&pinned, &blocked, &tooling_id, &busy_id] {
+        assert_ne!(activity(id), "hibernated", "{id} should have been exempt");
+    }
+}
+
+#[tokio::test]
+async fn a_session_pinned_awake_wakes_by_itself_after_a_restart() {
+    let (_tmp, cfg, stub) = hibernation_sandbox();
+    let (base, state, guard) = boot_with_state(cfg.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let mut ids = Vec::new();
+    for name in ["the driver", "a worker"] {
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({ "name": name, "command": [stub.to_string_lossy()] }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    for id in &ids {
+        live_output_containing(&client, &base, id, &["helper=["]).await;
+    }
+    client
+        .post(format!("{base}/api/sessions/{}/keep-awake", ids[0]))
+        .json(&json!({ "keep_awake": true }))
+        .send()
+        .await
+        .unwrap();
+    state.sessions.hibernate_for_shutdown().await;
+    drop(guard);
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let listed: Vec<Value> = client
+            .get(format!("{base}/api/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let activity = |id: &str| {
+            listed
+                .iter()
+                .find(|s| s["id"] == id)
+                .map(|s| s["activity"].as_str().unwrap().to_string())
+        };
+        if activity(&ids[0]).as_deref() != Some("hibernated") {
+            assert_eq!(
+                activity(&ids[1]).as_deref(),
+                Some("hibernated"),
+                "only the pinned one wakes"
+            );
+            let driver = listed.iter().find(|s| s["id"] == ids[0].as_str()).unwrap();
+            assert_eq!(driver["alive"], true);
+            assert_eq!(driver["keep_awake"], true, "the pin survives the wake");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the pinned session never woke"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }

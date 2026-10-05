@@ -406,6 +406,10 @@ pub struct Config {
     /// from the same `VOGT_AGENT_CLI_*` variables the shell half honours, so
     /// the engine and the entrypoint agree by construction.
     pub agent_clis: crate::agent_clis::AgentCliPaths,
+    /// When the engine hibernates sessions by itself (WI-912): off unless
+    /// `ENGINE_HIBERNATE_IDLE_AFTER` or `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW`
+    /// is set (`hibernate_policy`).
+    pub hibernation: crate::hibernate_policy::Policy,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -850,6 +854,7 @@ pub fn load(
             .filter(|s| !s.trim().is_empty()),
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
+        hibernation: hibernation_policy_from_env()?,
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
             .ok()
             .map(|value| value.trim().to_string())
@@ -1031,6 +1036,39 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>> {
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
     }
+}
+
+/// `ENGINE_HIBERNATE_IDLE_AFTER` (`2h`, `30m`, seconds) and
+/// `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` (`2GiB`, `512M`, bytes). Unset or
+/// empty is off; a value that does not parse is a startup error, not a policy
+/// quietly left off.
+fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
+    use crate::hibernate_policy::{parse_duration, parse_size, Policy};
+    let read = |name: &str| match engine_env(name) {
+        Ok(v) if !v.trim().is_empty() => Ok(Some(v)),
+        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
+    };
+    let idle_after = match read("ENGINE_HIBERNATE_IDLE_AFTER")? {
+        None => None,
+        Some(v) => Some(parse_duration(&v).ok_or_else(|| {
+            ApiError::Config(format!(
+                "ENGINE_HIBERNATE_IDLE_AFTER={v:?} is not a duration like 2h, 30m or 7200"
+            ))
+        })?),
+    };
+    let memavailable_below = match read("ENGINE_HIBERNATE_MEMAVAILABLE_BELOW")? {
+        None => None,
+        Some(v) => Some(parse_size(&v).ok_or_else(|| {
+            ApiError::Config(format!(
+                "ENGINE_HIBERNATE_MEMAVAILABLE_BELOW={v:?} is not a size like 2GiB or 512M"
+            ))
+        })?),
+    };
+    Ok(Policy {
+        idle_after,
+        memavailable_below,
+    })
 }
 
 fn parse_u64_env(name: &str) -> Result<Option<u64>> {
