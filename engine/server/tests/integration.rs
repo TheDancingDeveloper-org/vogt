@@ -9662,3 +9662,59 @@ async fn a_stopped_opencode_session_is_stopped_not_errored() {
     let row = wait_for_session_row(&client, &base, crashed, |s| s["exit_code"] == json!(7)).await;
     assert_eq!(row["activity"], "errored", "{row:?}");
 }
+
+/// A session started with no `cwd` runs in the engine's default directory,
+/// which on the pods is `~`, outside the workspace root. Hibernating it
+/// recorded that directory and waking it replayed it as a requested `cwd`,
+/// which was refused ("path escapes workspace_root"): every GUI or template
+/// session hibernated for good. Found validating WI-912 on vogt-dev.
+#[tokio::test]
+async fn a_session_in_the_default_directory_outside_the_workspace_wakes() {
+    let (tmp, mut cfg, stub) = hibernation_sandbox();
+    let home = tmp.path().join("home");
+    let workspace = tmp.path().join("ws");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
+    cfg.default_cwd = home.clone();
+    cfg.workspace_root = workspace.canonicalize().unwrap();
+    let (base, _state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "home", "command": [stub.to_string_lossy()] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["cwd"], home.to_string_lossy().as_ref());
+    live_output_containing(&client, &base, &id, &["helper=["]).await;
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        hibernated.status(),
+        StatusCode::OK,
+        "{:?}",
+        hibernated.text().await
+    );
+    let woken = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let status = woken.status();
+    let body: Value = woken.json().await.unwrap();
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let row = wait_for_session_row(&client, &base, &id, |s| s["alive"] == json!(true)).await;
+    assert_eq!(row["cwd"], home.to_string_lossy().as_ref(), "{row:?}");
+}
