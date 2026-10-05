@@ -4,6 +4,7 @@ pub mod agent_clis;
 pub mod agent_tasks;
 pub mod api;
 pub mod app;
+pub mod approval;
 pub mod assets;
 pub mod assistant;
 pub mod assistant_api;

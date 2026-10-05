@@ -7933,9 +7933,21 @@ async fn session_screen_renders_the_visible_grid() {
         .collect();
     assert_eq!(
         keys,
-        ["activity", "alive", "cols", "cursor", "id", "lines", "ready", "rows", "title"]
-            .into_iter()
-            .collect(),
+        [
+            "activity",
+            "alive",
+            "cols",
+            "cursor",
+            "id",
+            "last_output_at",
+            "lines",
+            "ready",
+            "rows",
+            "title",
+            "turn_started_at",
+        ]
+        .into_iter()
+        .collect(),
         "{screen:?}"
     );
     assert_eq!(screen["id"], id);
@@ -7966,6 +7978,110 @@ async fn session_screen_renders_the_visible_grid() {
         .await
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+}
+
+/// WI-877: a permission dialog on screen reads `awaiting-approval`, with the
+/// command it asks about (even the part above the screen) and its countdown,
+/// on the screen, the list and the event; `ready` is false. WI-875: turn
+/// timing is reported. The screen can carry scrollback on request.
+#[tokio::test]
+async fn a_permission_dialog_reads_awaiting_approval_with_its_command() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    // Ten rows: the dialog's title and the first line of the command scroll
+    // off the top, the question and its menu stay on screen.
+    let script = "printf 'earlier output\\r\\n────────────\\r\\nBash command\\r\\n\\r\\n  rm -rf /tmp/vogt-approval-test &&\\r\\n  docker rm -f approval-test\\r\\n  clean up\\r\\n\\r\\n'; \
+                  for i in 1 2 3 4 5; do printf 'context line %s\\r\\n' $i; done; \
+                  printf 'Do you want to proceed?\\r\\n❯ 1. Yes\\r\\n  2. No\\r\\nClaude will automatically deny this request in 90s'; sleep 30";
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "approval",
+            "cols": 60,
+            "rows": 10,
+            "command": ["/bin/sh", "-c", script],
+        }),
+    )
+    .await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let screen = loop {
+        let screen: Value = client
+            .get(format!(
+                "{base}/api/sessions/{id}/screen?scrollback_lines=50"
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if screen["activity"] == "awaiting-approval" {
+            break screen;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never awaiting-approval: {screen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        screen["ready"], false,
+        "a dialog is not a prompt to type at"
+    );
+    let approval = &screen["approval"];
+    assert_eq!(approval["question"], "Do you want to proceed?");
+    let excerpt = approval["command_excerpt"].as_str().unwrap();
+    assert!(
+        excerpt.contains("rm -rf /tmp/vogt-approval-test"),
+        "the command above the screen is read from the scrollback: {excerpt}"
+    );
+    assert!(excerpt.contains("docker rm -f approval-test"), "{excerpt}");
+    assert!(!excerpt.contains("earlier output"), "{excerpt}");
+    let secs = approval["deadline_seconds"].as_u64().unwrap();
+    assert!((80..=90).contains(&secs), "{approval:?}");
+    assert!(approval["deadline_at"].is_string(), "{approval:?}");
+    assert!(screen["turn_started_at"].is_string(), "{screen:?}");
+    assert!(screen["last_output_at"].is_string(), "{screen:?}");
+    let scrollback = screen["scrollback"].as_array().unwrap();
+    assert!(
+        scrollback.iter().any(|l| l == "earlier output"),
+        "{scrollback:?}"
+    );
+
+    // The list says the same.
+    let list: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = list.iter().find(|s| s["id"] == id).unwrap();
+    assert_eq!(row["activity"], "awaiting-approval");
+    assert_eq!(row["approval"]["question"], "Do you want to proceed?");
+
+    // An over-large scrollback request is refused, not truncated silently.
+    let too_many = client
+        .get(format!(
+            "{base}/api/sessions/{id}/screen?scrollback_lines=5000"
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_many.status(), StatusCode::BAD_REQUEST);
 
     client
         .delete(format!("{base}/api/sessions/{id}"))

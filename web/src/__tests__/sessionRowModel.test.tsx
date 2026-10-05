@@ -41,6 +41,13 @@ describe("activity labels and classes", () => {
     expect(activityLabel("idle", null)).toBe("idle");
     expect(activityClass(session({ id: "c", activity: "waiting-for-input" }))).toBe("waiting-for-input");
   });
+
+  it("names a permission dialog and ranks it above every other state", () => {
+    expect(activityLabel("awaiting-approval", null)).toBe("needs approval");
+    expect(activityClass(session({ id: "p", activity: "awaiting-approval" }))).toBe("awaiting-approval");
+    expect(attentionRank(session({ id: "p", activity: "awaiting-approval" })))
+      .toBeLessThan(attentionRank(session({ id: "w", activity: "waiting-for-input" })));
+  });
 });
 
 describe("sessionStateWord", () => {

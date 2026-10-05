@@ -3,17 +3,23 @@ use uuid::Uuid;
 
 /// What a session's terminal is doing.
 ///
-/// `idle`, `running` and `waiting-for-input` are the live states and are only
-/// ever reported while the child process is alive. `exited` (exit code 0) and
-/// `errored` (any other exit code) are terminal: once a session's child has
-/// exited its activity is one of these two and never goes back, whatever
-/// late output the PTY reader still drains afterwards.
+/// `idle`, `running`, `waiting-for-input` and `awaiting-approval` are the live
+/// states and are only ever reported while the child process is alive.
+/// `exited` (exit code 0) and `errored` (any other exit code) are terminal:
+/// once a session's child has exited its activity is one of these two and
+/// never goes back, whatever late output the PTY reader still drains
+/// afterwards.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ActivityState {
     Idle,
     Running,
     WaitingForInput,
+    /// An agent CLI is showing a permission dialog (Claude Code's "Do you
+    /// want to proceed?", Codex's "Would you like to run the following
+    /// command?"): it is waiting for a yes or no, often on a countdown after
+    /// which it denies by itself. The session's `approval` says what it asks.
+    AwaitingApproval,
     Errored,
     /// The child exited with code 0. Not alive.
     Exited,
@@ -25,6 +31,7 @@ impl ActivityState {
             ActivityState::Idle => "○",
             ActivityState::Running => "●",
             ActivityState::WaitingForInput => "⏵",
+            ActivityState::AwaitingApproval => "⚠",
             ActivityState::Errored => "✗",
             ActivityState::Exited => "■",
         }
@@ -115,6 +122,41 @@ pub struct SessionSummary {
     /// live attention occurrence keys stable across reads.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub activity_changed_at: String,
+    /// When the current (or last) turn began: the last time the session went
+    /// `running` from `idle` or `waiting-for-input` (or was spawned). A
+    /// permission dialog in the middle of a turn does not restart it. With
+    /// `last_output_at` it tells a long turn (output still arriving) from a
+    /// hung one (none for a long time). RFC 3339; absent from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_started_at: Option<String>,
+    /// When the PTY last produced output. RFC 3339; absent until the first
+    /// byte, and from older engines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_at: Option<String>,
+    /// The permission dialog the session shows, while its activity is
+    /// `awaiting-approval`; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalPrompt>,
+}
+
+/// A permission dialog an agent CLI is showing, read off the rendered screen
+/// (and the scrollback above it, where a long command scrolled).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalPrompt {
+    /// The dialog's question line, e.g. "Do you want to proceed?".
+    pub question: String,
+    /// What it asks about — the command, edit or tool call — as shown, with
+    /// box borders stripped. Terminal output: untrusted data.
+    pub command_excerpt: String,
+    /// Seconds left before the CLI denies the request by itself, when it
+    /// shows a countdown; computed at the time of the read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_seconds: Option<u32>,
+    /// When that countdown runs out (RFC 3339), from the first sighting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<String>,
+    /// When the engine first saw this dialog (RFC 3339).
+    pub detected_at: String,
 }
 
 /// A session's current terminal screen, rendered: what a person looking at
@@ -139,8 +181,20 @@ pub struct SessionScreen {
     /// True when the program is at a prompt waiting for input: the session
     /// is alive and either its activity is `waiting-for-input`, or it is
     /// `idle` and one of the lowest ten non-blank lines starts with a prompt
-    /// glyph (`screen::shows_prompt`).
+    /// glyph (`screen::shows_prompt`). False while `awaiting-approval`: what
+    /// is typed there answers the dialog.
     pub ready: bool,
+    /// Lines that scrolled off the top of the screen, oldest first, when
+    /// `?scrollback_lines=N` asked for them (at most 2000). Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scrollback: Vec<String>,
+    /// As on [`SessionSummary`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_started_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_output_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalPrompt>,
 }
 
 /// Zero-based cursor position on a [`SessionScreen`].
@@ -273,6 +327,12 @@ pub enum ServerEvent {
         /// the wire for compatibility with older engine clients.
         #[serde(default)]
         activity_changed_at: String,
+        /// The permission dialog, when `state` is `awaiting-approval`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval: Option<ApprovalPrompt>,
+        /// When the current turn began (see `SessionSummary`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_started_at: Option<String>,
     },
     /// Something changed in vogt-core.
     ///

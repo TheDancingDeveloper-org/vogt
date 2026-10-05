@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from vogt.adapters.engine import EngineUnavailable
+from vogt.adapters.engine.client import EngineApproval
 from vogt.adapters.forge import KIND_CHECK, KIND_NOTIFICATION
 from vogt.adapters.forge.kinds import (
     COLLECTOR_CHECKS,
@@ -500,7 +501,11 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
         try:
             live = ctx.engine.list_sessions()
             for session in live:
-                if session.activity not in ("waiting-for-input", "errored"):
+                if session.activity not in (
+                    "waiting-for-input",
+                    "awaiting-approval",
+                    "errored",
+                ):
                     continue
                 declared = view.session_by_engine_id(session.id)
                 entries.append(
@@ -512,6 +517,7 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                         session.activity_changed_at,
                         declared,
                         projects,
+                        approval=session.approval,
                     )
                 )
         except EngineUnavailable:
@@ -786,8 +792,27 @@ def _session_entry(
     activity_changed_at: str | None,
     declared: CodingSession | None,
     projects: dict[str, Project],
+    *,
+    approval: EngineApproval | None = None,
 ) -> InboxEntry:
     project = None if declared is None else projects.get(declared.project_id)
+    label = name or session_id
+    if activity == "awaiting-approval":
+        # A permission dialog denies itself on a countdown: say what it asks
+        # and how long is left, so it can be answered from the Inbox row.
+        title = f"Session {label} is asking for approval"
+        what = "" if approval is None else " ".join(approval.command_excerpt.split())
+        left = (
+            ""
+            if approval is None or approval.deadline_seconds is None
+            else f" Auto-deny in {approval.deadline_seconds}s."
+        )
+        summary = (
+            f"{approval.question if approval else 'Permission dialog.'}{left} {what}"
+        )[:1000].strip()
+    else:
+        title = f"Session {label} needs attention"
+        summary = f"Session is {activity}."
     return InboxEntry(
         entry_key=(
             f"agent:session:{session_id}:{activity}:{activity_changed_at or 'unknown'}"
@@ -796,8 +821,8 @@ def _session_entry(
         kind="session.attention",
         occurred_at=_when(activity_changed_at) or ctx.clock(),
         observed_at=None,
-        title=f"Session {name or session_id} needs attention",
-        summary=f"Session is {activity}.",
+        title=title,
+        summary=summary,
         project_slug=None if project is None else project.slug,
         session_id=session_id,
         work_item_ref=None,

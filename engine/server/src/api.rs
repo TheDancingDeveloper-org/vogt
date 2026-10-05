@@ -57,12 +57,28 @@ pub async fn get_session(
 /// cursor, title, and whether the program is ready for input. Gated like
 /// `GET /api/sessions/{id}` (the `sessions` capability), since it is a read
 /// of live output.
+///
+/// `?scrollback_lines=N` (at most 2000) adds the N lines that scrolled off
+/// the top of the screen, oldest first, as `scrollback`.
 pub async fn get_session_screen(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    Query(q): Query<ScreenQuery>,
 ) -> Result<Json<SessionScreen>> {
     let s = state.sessions.get(id)?;
-    Ok(Json(crate::screen::session_screen(s).await?))
+    let lines = q.scrollback_lines.unwrap_or(0);
+    if lines > crate::screen::MAX_SCROLLBACK_LINES {
+        return Err(crate::error::ApiError::BadRequest(format!(
+            "scrollback_lines is at most {}",
+            crate::screen::MAX_SCROLLBACK_LINES
+        )));
+    }
+    Ok(Json(crate::screen::session_screen(s, lines).await?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScreenQuery {
+    pub scrollback_lines: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

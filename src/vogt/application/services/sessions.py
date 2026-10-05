@@ -27,8 +27,10 @@ Three rules this module exists to keep:
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
+from vogt.adapters.engine.client import EngineApproval
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
@@ -42,6 +44,7 @@ from vogt.application.models import (
     LogTailResult,
     SearchOutputParams,
     SearchOutputResult,
+    SessionApproval,
     SessionInputParams,
     SessionInputResult,
     SessionKey,
@@ -515,7 +518,7 @@ def session_screen(ctx: AppContext, params: SessionScreenParams) -> SessionScree
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
-    screen = engine.session_screen(engine_id)
+    screen = engine.session_screen(engine_id, scrollback_lines=params.scrollback_lines)
     if screen is None:
         if engine.get_session(engine_id) is not None:
             msg = (
@@ -542,6 +545,10 @@ def session_screen(ctx: AppContext, params: SessionScreenParams) -> SessionScree
         activity=screen.activity,
         alive=screen.alive,
         ready=screen.ready,
+        scrollback=list(screen.scrollback),
+        turn_started_at=_parse_engine_timestamp(screen.turn_started_at),
+        last_output_at=_parse_engine_timestamp(screen.last_output_at),
+        approval=_approval(screen.approval),
     )
 
 
@@ -909,7 +916,31 @@ def _summarize(
         alive=(engine_session is not None and engine_session.alive)
         if engine_asked
         else None,
+        **_live_fields(engine_session),
     )
+
+
+def _approval(approval: EngineApproval | None) -> SessionApproval | None:
+    if approval is None:
+        return None
+    return SessionApproval(
+        question=approval.question,
+        command_excerpt=approval.command_excerpt,
+        deadline_seconds=approval.deadline_seconds,
+        deadline_at=_parse_engine_timestamp(approval.deadline_at),
+        detected_at=_parse_engine_timestamp(approval.detected_at),
+    )
+
+
+def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
+    """The engine's live turn timing and permission dialog, for a summary."""
+    if engine_session is None:
+        return {}
+    return {
+        "turn_started_at": _parse_engine_timestamp(engine_session.turn_started_at),
+        "last_output_at": _parse_engine_timestamp(engine_session.last_output_at),
+        "approval": _approval(engine_session.approval),
+    }
 
 
 def _summarize_engine_only(engine_session: EngineSession) -> SessionSummary:
@@ -938,6 +969,7 @@ def _summarize_engine_only(engine_session: EngineSession) -> SessionSummary:
         # The engine has it and was asked; whether its process still runs is
         # the engine's own answer.
         alive=engine_session.alive,
+        **_live_fields(engine_session),
     )
 
 

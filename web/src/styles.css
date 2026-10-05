@@ -2370,10 +2370,14 @@ textarea {
   background: var(--activity-running);
   animation: pulse 1.2s ease-in-out infinite;
 }
-.activity-dot.waiting-for-input {
+.activity-dot.waiting-for-input,
+.activity-dot.awaiting-approval {
   background: var(--activity-waiting);
   box-shadow: 0 0 6px var(--activity-waiting);
   animation: pulse 0.7s ease-in-out infinite;
+}
+.activity-dot.awaiting-approval {
+  box-shadow: 0 0 0 2px var(--activity-errored), 0 0 6px var(--activity-waiting);
 }
 .activity-dot.errored {
   background: var(--activity-errored);
@@ -2398,6 +2402,7 @@ textarea {
 @media (prefers-reduced-motion: reduce) {
   .activity-dot.running,
   .activity-dot.waiting-for-input,
+  .activity-dot.awaiting-approval,
   .activity-dot.bell,
   .rail-attention-dot {
     animation: none;
@@ -11445,6 +11450,7 @@ a.vogt-projects-tag:hover {
   .session-row .state { font-size: 12px; }
   .session-row .state--running { color: var(--activity-running); }
   .session-row .state--waiting-for-input { color: var(--activity-waiting); }
+  .session-row .state--awaiting-approval { color: var(--activity-waiting); font-weight: 600; }
   .session-row .state--errored { color: var(--activity-errored); }
   .session-row .state--done { color: var(--activity-done); }
   .session-row .cwd { display: inline; color: var(--activity-idle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; direction: ltr; }

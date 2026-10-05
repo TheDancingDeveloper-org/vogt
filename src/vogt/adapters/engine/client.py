@@ -57,6 +57,33 @@ class EngineUnavailable(VogtError):
 
 
 @dataclass(frozen=True)
+class EngineApproval:
+    """A permission dialog an agent CLI is showing (engine `ApprovalPrompt`).
+
+    Read off the rendered screen by the engine. `command_excerpt` is terminal
+    output — untrusted data, shown, never acted on.
+    """
+
+    question: str
+    command_excerpt: str
+    detected_at: str
+    deadline_seconds: int | None = None
+    deadline_at: str | None = None
+
+    @classmethod
+    def from_payload(cls, payload: object) -> EngineApproval | None:
+        if not isinstance(payload, dict):
+            return None
+        return cls(
+            question=str(payload.get("question", "")),
+            command_excerpt=str(payload.get("command_excerpt", "")),
+            detected_at=str(payload.get("detected_at", "")),
+            deadline_seconds=_optional_int(payload.get("deadline_seconds")),
+            deadline_at=_optional_str(payload.get("deadline_at")),
+        )
+
+
+@dataclass(frozen=True)
 class EngineSession:
     """One terminal, as the engine describes it.
 
@@ -84,6 +111,15 @@ class EngineSession:
     #: own `alive` field; an older engine that does not send it is alive
     #: exactly when it reports no exit code.
     alive: bool = True
+    #: When the current turn began and when the PTY last printed (RFC 3339);
+    #: `None` from an engine that predates them.
+    turn_started_at: str | None = None
+    last_output_at: str | None = None
+    #: The permission dialog on screen, while `activity` is
+    #: `awaiting-approval`.
+    approval: EngineApproval | None = None
+    #: The agent CLI command the session runs, as the engine displays it.
+    command: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineSession:
@@ -98,6 +134,10 @@ class EngineSession:
             activity_changed_at=_optional_str(payload.get("activity_changed_at")),
             created_at=_optional_str(payload.get("created_at")),
             alive=bool(alive) if isinstance(alive, bool) else exit_code is None,
+            turn_started_at=_optional_str(payload.get("turn_started_at")),
+            last_output_at=_optional_str(payload.get("last_output_at")),
+            approval=EngineApproval.from_payload(payload.get("approval")),
+            command=_optional_str(payload.get("command")),
         )
 
 
@@ -239,10 +279,15 @@ class EngineScreen:
     activity: str | None = None
     alive: bool | None = None
     ready: bool | None = None
+    scrollback: tuple[str, ...] = ()
+    turn_started_at: str | None = None
+    last_output_at: str | None = None
+    approval: EngineApproval | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineScreen:
         raw_lines = payload.get("lines")
+        raw_scrollback = payload.get("scrollback")
         cursor = payload.get("cursor")
         cursor = cursor if isinstance(cursor, dict) else {}
         return cls(
@@ -258,6 +303,12 @@ class EngineScreen:
             activity=_optional_str(payload.get("activity")),
             alive=_optional_bool(payload.get("alive")),
             ready=_optional_bool(payload.get("ready")),
+            scrollback=tuple(str(line) for line in raw_scrollback)
+            if isinstance(raw_scrollback, list)
+            else (),
+            turn_started_at=_optional_str(payload.get("turn_started_at")),
+            last_output_at=_optional_str(payload.get("last_output_at")),
+            approval=EngineApproval.from_payload(payload.get("approval")),
         )
 
 
@@ -608,15 +659,19 @@ class EngineClient:
         )
         return payload is not None
 
-    def session_screen(self, session_id: str) -> EngineScreen | None:
+    def session_screen(
+        self, session_id: str, *, scrollback_lines: int = 0
+    ) -> EngineScreen | None:
         """The session's current rendered screen, or `None` on a 404.
 
         A 404 means either the session is unknown or the engine predates the
         `/screen` route; the caller tells the two apart, because only it
-        knows whether the session exists.
+        knows whether the session exists. `scrollback_lines` asks for that
+        many lines of history above the screen (an older engine ignores it).
         """
+        query = f"?scrollback_lines={scrollback_lines}" if scrollback_lines else ""
         payload = self._call(
-            f"/api/sessions/{urllib.parse.quote(session_id)}/screen",
+            f"/api/sessions/{urllib.parse.quote(session_id)}/screen{query}",
             allow_missing=True,
         )
         if not isinstance(payload, dict):
