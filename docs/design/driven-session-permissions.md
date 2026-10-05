@@ -98,3 +98,32 @@ Three postures, in order of preference:
    `ENGINE_AGENT_CLAUDE_SETTINGS` (indexarr/ops PR #23). It also names the
    estate's secret store (Infisical), deploy path (Komodo) and sensitive
    targets (the Node B prod stacks), so those keep gating.
+
+## opencode (WI-932, 2026-10-05)
+
+The postures above were Claude Code only. A driven opencode session stalled
+at "Access external directory" with nobody to answer. To stop that,
+javascan's operator edited the **shared** `~/.config/opencode/opencode.jsonc`
+to allow every tool, `bash` included, for every opencode session on the pod,
+including ones a person starts. That is the blanket bypass this design
+rejects, applied globally.
+
+opencode reads an inline config from `OPENCODE_CONFIG_CONTENT` and layers it
+over the user's own, for that process only. The engine uses it for each
+session's posture:
+- **default:** the deployment's opencode policy
+  (`ENGINE_AGENT_OPENCODE_CONFIG`; the image ships
+  `engine/deploy/driven-session-opencode.json`). Routine tools are allowed.
+  Destructive, shared-resource and secret-exposing commands are **denied**
+  rather than asked, because a prompt nobody answers is the stall this
+  exists to end, and a denial is reported.
+- **accept-edits:** edits allowed, the rest asks.
+- **bypass:** everything allowed, a person's grant only.
+
+opencode matches command patterns rather than judging context, so its list
+is coarser than Claude Code's classifier. The shipped default denies `gh pr
+merge` outright, matching "no autonomous-merge repositories configured". A
+deployment that lists repositories allows it in its own file. Once this is
+deployed, the shared config's blanket `"bash": "allow"` is overridden for
+every engine-launched session, and can be removed so that sessions a person
+starts by hand ask again.

@@ -43,6 +43,11 @@ pub struct Onboarding {
     /// file, passed to every engine-launched Claude session with
     /// `--settings`. See [`settings_file_from`].
     pub settings_file: Option<PathBuf>,
+    /// The opencode half of that policy (WI-932): an opencode config whose
+    /// `permission` block every engine-launched opencode session gets in the
+    /// default posture, as `OPENCODE_CONFIG_CONTENT`. Read and checked once,
+    /// at start. See [`opencode_config_from`].
+    pub opencode_config: Option<String>,
 }
 
 /// `ENGINE_AGENT_CLAUDE_SETTINGS`, read: a path names a deployment's own
@@ -60,6 +65,64 @@ pub fn settings_file_from(value: Option<&str>) -> Option<PathBuf> {
 /// Where the image installs the default driven-session policy.
 pub const IMAGE_SETTINGS_FILE: &str = "/usr/local/share/vogt/driven-session-settings.json";
 
+/// Where the image installs the default opencode driven-session policy.
+pub const IMAGE_OPENCODE_CONFIG: &str = "/usr/local/share/vogt/driven-session-opencode.json";
+
+/// The permission values opencode accepts. Anything else makes opencode
+/// refuse its whole configuration and fail to start, so a policy with one is
+/// not handed to any session.
+const OPENCODE_ACTIONS: &[&str] = &["allow", "ask", "deny"];
+
+/// `ENGINE_AGENT_OPENCODE_CONFIG`, read like `ENGINE_AGENT_CLAUDE_SETTINGS`
+/// (a path, empty for the image's, `off`), and loaded: the file's text when it
+/// is a JSON object whose `permission` values opencode would accept, else
+/// `None` with a warning. A broken policy must not stop every opencode session
+/// from starting.
+pub fn opencode_config_from(value: Option<&str>) -> Option<String> {
+    let path = match value.map(str::trim) {
+        Some("off") => return None,
+        Some(path) if !path.is_empty() => PathBuf::from(path),
+        _ => PathBuf::from(IMAGE_OPENCODE_CONFIG),
+    };
+    let text = std::fs::read_to_string(&path).ok()?;
+    match check_opencode_config(&text) {
+        Ok(()) => Some(text),
+        Err(why) => {
+            tracing::warn!(path = %path.display(), reason = %why, "opencode driven-session policy ignored");
+            None
+        }
+    }
+}
+
+/// Why opencode would refuse this config, if it would.
+pub fn check_opencode_config(text: &str) -> std::result::Result<(), String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;
+    let permission = value
+        .as_object()
+        .ok_or("not a JSON object")?
+        .get("permission");
+    let Some(permission) = permission else {
+        return Ok(());
+    };
+    let ok = |v: &serde_json::Value| v.as_str().is_some_and(|s| OPENCODE_ACTIONS.contains(&s));
+    let rules = permission
+        .as_object()
+        .ok_or("`permission` is not an object")?;
+    for (tool, rule) in rules {
+        let valid = match rule {
+            serde_json::Value::Object(patterns) => patterns.values().all(ok),
+            other => ok(other),
+        };
+        if !valid {
+            return Err(format!(
+                "permission.{tool}: every value must be one of allow, ask, deny"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Onboarding {
     /// On unless `ENGINE_AGENT_QUIET_ONBOARDING=0`.
     pub fn from_env() -> Self {
@@ -71,6 +134,11 @@ impl Onboarding {
                 .map(PathBuf::from),
             settings_file: settings_file_from(
                 std::env::var("ENGINE_AGENT_CLAUDE_SETTINGS")
+                    .ok()
+                    .as_deref(),
+            ),
+            opencode_config: opencode_config_from(
+                std::env::var("ENGINE_AGENT_OPENCODE_CONFIG")
                     .ok()
                     .as_deref(),
             ),
@@ -215,6 +283,7 @@ mod tests {
             enabled: true,
             default_dir: Some(PathBuf::from("/home/pod")),
             settings_file: None,
+            opencode_config: None,
         };
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())];
         assert_eq!(
@@ -225,5 +294,35 @@ mod tests {
             onboarding.config_path(&[]),
             Some(PathBuf::from("/home/pod/.claude.json"))
         );
+    }
+
+    #[test]
+    fn the_shipped_opencode_policy_is_one_opencode_accepts() {
+        let shipped = include_str!("../../deploy/driven-session-opencode.json");
+        assert_eq!(check_opencode_config(shipped), Ok(()));
+        assert_eq!(
+            check_opencode_config(crate::agent_cli::OPENCODE_BYPASS),
+            Ok(())
+        );
+        assert_eq!(
+            check_opencode_config(crate::agent_cli::OPENCODE_ACCEPT_EDITS),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn an_opencode_policy_opencode_would_refuse_is_never_handed_out() {
+        assert!(check_opencode_config(r#"{"permission":{"bash":"maybe"}}"#).is_err());
+        assert!(check_opencode_config(r#"{"permission":{"bash":{"*":"yes"}}}"#).is_err());
+        assert!(check_opencode_config("not json").is_err());
+        assert!(check_opencode_config("[]").is_err());
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = tmp.path().join("bad.json");
+        std::fs::write(&bad, r#"{"permission":{"edit":"sometimes"}}"#).unwrap();
+        assert_eq!(opencode_config_from(bad.to_str()), None);
+        let good = tmp.path().join("good.json");
+        std::fs::write(&good, r#"{"permission":{"edit":"allow"}}"#).unwrap();
+        assert!(opencode_config_from(good.to_str()).is_some());
+        assert_eq!(opencode_config_from(Some("off")), None);
     }
 }

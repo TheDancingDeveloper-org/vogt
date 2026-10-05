@@ -142,6 +142,10 @@ services:
       # with `autoMode` additions). Unset: the image's, which lists no
       # autonomous-merge repositories. docs/ENGINE.md, "Permission posture".
       ENGINE_AGENT_CLAUDE_SETTINGS: "${ENGINE_AGENT_CLAUDE_SETTINGS:-}"
+      # Its opencode half: a config with a `permission` block, given to every
+      # engine-launched opencode session (OPENCODE_CONFIG_CONTENT). Unset:
+      # the image's, which denies destructive and secret-exposing commands.
+      ENGINE_AGENT_OPENCODE_CONFIG: "${ENGINE_AGENT_OPENCODE_CONFIG:-}"
 
       # One value both starts the core and tells the engine where to proxy.
       # Loopback means "the core is ours to run", so the entrypoint supervises

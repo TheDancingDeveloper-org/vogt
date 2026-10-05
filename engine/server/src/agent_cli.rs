@@ -89,6 +89,29 @@ pub struct LaunchRequest<'a> {
     /// The deployment's driven-session settings (an `autoMode` policy) to
     /// hand Claude Code with `--settings`, when it has one.
     pub settings_file: Option<&'a Path>,
+    /// The deployment's opencode driven-session policy (an opencode config
+    /// with a `permission` block), for the default posture (WI-932).
+    pub opencode_config: Option<&'a str>,
+}
+
+/// opencode's `accept-edits` posture: file work is allowed, everything else
+/// asks, like Claude Code's `acceptEdits`. Every key is named because a key
+/// left out falls through to the user's own opencode config.
+pub const OPENCODE_ACCEPT_EDITS: &str = r#"{"permission":{"read":"allow","edit":"allow","write":"allow","glob":"allow","grep":"allow","list":"allow","lsp":"allow","todowrite":"allow","question":"allow","task":"ask","skill":"ask","bash":"ask","webfetch":"ask","websearch":"ask","external_directory":"ask","doom_loop":"ask"}}"#;
+
+/// opencode's `bypass` posture: nothing asked, nothing refused. A person's
+/// grant only (the core refuses it to agents, WI-926).
+pub const OPENCODE_BYPASS: &str = r#"{"permission":{"read":"allow","edit":"allow","write":"allow","glob":"allow","grep":"allow","list":"allow","lsp":"allow","todowrite":"allow","question":"allow","task":"allow","skill":"allow","bash":"allow","webfetch":"allow","websearch":"allow","external_directory":"allow","doom_loop":"allow"}}"#;
+
+/// The `OPENCODE_CONFIG_CONTENT` an opencode session starts with for a
+/// posture: the deployment's policy in the default posture (none when it has
+/// none), the fixed configs above otherwise.
+pub fn opencode_posture(mode: Option<&str>, policy: Option<&str>) -> Option<String> {
+    match mode.map(str::trim).filter(|m| !m.is_empty()) {
+        Some("bypass") => Some(OPENCODE_BYPASS.to_string()),
+        Some("accept-edits") | Some("accept_edits") => Some(OPENCODE_ACCEPT_EDITS.to_string()),
+        _ => policy.map(str::to_string),
+    }
 }
 
 /// A permission posture a session may be started with, as Claude Code's
@@ -197,12 +220,12 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
         }
         return Ok(Launch::default());
     }
-    if permission.is_some() && binary != "claude" {
+    if permission.is_some() && binary == "codex" {
         // Named rather than dropped: a posture that silently did not apply
         // is the failure this refusal exists against.
         return Err(ApiError::BadRequest(format!(
-            "permission_mode is a Claude Code posture; `{binary}` has its own \
-             approval settings in its launcher and is not told one per session"
+            "permission_mode is applied to Claude Code and opencode; `{binary}` has \
+             its own approval settings in its launcher and is not told one per session"
         )));
     }
     if binary == "opencode" && effort.is_some() {
@@ -298,6 +321,12 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             // OpenCode's positional is a project directory, not a prompt.
             if let Some(prompt) = prompt {
                 rewritten.extend(["--prompt".to_string(), prompt]);
+            }
+            // The posture (WI-932), per session and layered over the user's
+            // own config rather than written into it: an unattended session
+            // must not stall at "Access external directory".
+            if let Some(config) = opencode_posture(req.permission_mode, req.opencode_config) {
+                env.push(("OPENCODE_CONFIG_CONTENT".to_string(), config));
             }
         }
         _ => unreachable!("checked against KNOWN above"),
@@ -809,6 +838,66 @@ mod tests {
             .unwrap()
             .env
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod opencode_posture_tests {
+    use super::*;
+
+    fn env_of(mode: Option<&str>, policy: Option<&str>) -> Option<String> {
+        let command = vec![
+            "vogt-agent-auth".into(),
+            "run".into(),
+            "--".into(),
+            "opencode".into(),
+        ];
+        launch(
+            Some(&command),
+            &LaunchRequest {
+                permission_mode: mode,
+                opencode_config: policy,
+                ..LaunchRequest::default()
+            },
+        )
+        .unwrap()
+        .env
+        .into_iter()
+        .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+        .map(|(_, v)| v)
+    }
+
+    #[test]
+    fn a_driven_opencode_session_gets_its_posture_per_session() {
+        let policy = r#"{"permission":{"bash":{"*":"allow","git push --force*":"deny"}}}"#;
+        assert_eq!(env_of(None, Some(policy)).as_deref(), Some(policy));
+        assert_eq!(
+            env_of(Some("default"), Some(policy)).as_deref(),
+            Some(policy)
+        );
+        assert_eq!(env_of(None, None), None, "no policy, nothing added");
+        assert_eq!(
+            env_of(Some("bypass"), Some(policy)).as_deref(),
+            Some(OPENCODE_BYPASS)
+        );
+        assert_eq!(
+            env_of(Some("accept_edits"), None).as_deref(),
+            Some(OPENCODE_ACCEPT_EDITS)
+        );
+    }
+
+    #[test]
+    fn codex_is_still_not_told_a_posture() {
+        let command = vec!["codex".to_string()];
+        let err = launch(
+            Some(&command),
+            &LaunchRequest {
+                permission_mode: Some("bypass"),
+                ..LaunchRequest::default()
+            },
+        )
+        .expect_err("codex has no per-session posture");
+        assert!(err.to_string().contains("codex"), "{err}");
     }
 }
 
