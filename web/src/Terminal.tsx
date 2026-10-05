@@ -12,6 +12,7 @@ import { readClipboardText, writeClipboardText } from "./clipboard";
 import { decodeOsc52 } from "./terminalClipboard";
 import { terminalContextMenuAction } from "./terminalContextMenu";
 import { sessionsStore } from "./store";
+import { wakeSession } from "./sessionHibernation";
 import { getTheme, TERMINAL_THEME_EVENT } from "./terminalThemes";
 import {
   formatTerminalInputLimit,
@@ -184,6 +185,21 @@ const TerminalView: Component<Props> = (props) => {
    * forever, so the pane waits for the session to be woken instead.
    */
   let hibernated = false;
+  /** What the hibernated overlay shows: `asleep` offers the wake button. */
+  const [hibernatedView, setHibernatedView] = createSignal<
+    null | { state: "asleep" } | { state: "waking" } | { state: "failed"; message: string }
+  >(null);
+
+  async function wakeFromPane() {
+    setHibernatedView({ state: "waking" });
+    try {
+      await wakeSession(props.sessionId);
+      // The store hears `session-woken`, the activity leaves `hibernated`,
+      // and the effect below attaches again.
+    } catch (error) {
+      setHibernatedView({ state: "failed", message: (error as Error).message });
+    }
+  }
   // Render-then-park gate (WI-170). A pane parked before its first attach still
   // runs one attach+snapshot so its scrollback is rendered, then parks — set on
   // the first snapshot-done (or short-circuited for a deferred-cache pane, which
@@ -1160,7 +1176,8 @@ const TerminalView: Component<Props> = (props) => {
           } else if (ctrl.type === "hibernated") {
             hibernated = true;
             setReconnectView(null);
-            setStatusText("Hibernated — wake the session to continue");
+            setStatusText(null);
+            setHibernatedView({ state: "asleep" });
           } else if (ctrl.type === "lag") {
             term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
             setStatusText("Reattaching terminal...");
@@ -1295,6 +1312,7 @@ const TerminalView: Component<Props> = (props) => {
     const activity = sessionsStore.sessions[props.sessionId]?.activity;
     if (!hibernated || !activity || activity === "hibernated") return;
     hibernated = false;
+    setHibernatedView(null);
     outputPosition = undefined;
     setStatusText("Loading terminal...");
     if (!destroyed && !isParked()) connect();
@@ -1400,7 +1418,29 @@ const TerminalView: Component<Props> = (props) => {
             </div>
           )}
         </Show>
-        <Show when={!reconnectView() && statusText()}>
+        <Show when={hibernatedView()}>
+          {(view) => (
+            <div class="terminal-status-overlay terminal-hibernated-overlay" role="status">
+              <span class="terminal-hibernated-line">
+                {view().state === "waking"
+                  ? "Waking: resuming the conversation…"
+                  : "Hibernated: its processes were stopped to free memory. The conversation is kept."}
+              </span>
+              <Show when={view().state === "failed" ? (view() as { message: string }).message : null}>
+                {(message) => <span class="terminal-hibernated-error">Wake failed: {message()}</span>}
+              </Show>
+              <button
+                type="button"
+                class="terminal-reconnect-retry terminal-wake"
+                disabled={view().state === "waking"}
+                onClick={() => void wakeFromPane()}
+              >
+                Wake session
+              </button>
+            </div>
+          )}
+        </Show>
+        <Show when={!reconnectView() && !hibernatedView() && statusText()}>
           {(text) => <div class="terminal-status-overlay">{text()}</div>}
         </Show>
         <Show when={showCopyChip()}>

@@ -832,6 +832,15 @@ export const api = {
     req<OkResponse>("PATCH", `/api/sessions/${id}`, { name }),
   killSession: (id: string) =>
     req<OkResponse>("POST", `/api/sessions/${id}/kill`),
+  /** The engine's own hibernation routes; see `sessionHibernation.ts`, which
+   *  prefers vogt-core's audited operations and falls back to these only
+   *  when there is no core. */
+  hibernateSession: (id: string, reason?: string) =>
+    req<SessionSummary>("POST", `/api/sessions/${id}/hibernate`, { reason }, undefined, "long"),
+  wakeSession: (id: string) =>
+    req<SessionSummary>("POST", `/api/sessions/${id}/wake`, {}, undefined, "long"),
+  keepSessionAwake: (id: string, keepAwake: boolean) =>
+    req<SessionSummary>("POST", `/api/sessions/${id}/keep-awake`, { keep_awake: keepAwake }),
   deleteSession: (id: string) =>
     req<OkResponse>("DELETE", `/api/sessions/${id}`),
   health: (signal?: AbortSignal) =>
