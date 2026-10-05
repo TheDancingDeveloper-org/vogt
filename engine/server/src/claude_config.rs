@@ -39,7 +39,26 @@ pub struct Onboarding {
     /// not set `CLAUDE_CONFIG_DIR` itself: the engine's `CLAUDE_CONFIG_DIR`,
     /// else `$HOME`.
     pub default_dir: Option<PathBuf>,
+    /// The driven-session permission policy (WI-926): a Claude Code settings
+    /// file, passed to every engine-launched Claude session with
+    /// `--settings`. See [`settings_file_from`].
+    pub settings_file: Option<PathBuf>,
 }
+
+/// `ENGINE_AGENT_CLAUDE_SETTINGS`, read: a path names a deployment's own
+/// policy; unset or empty means the image's, when it is there (Compose
+/// passes an unset `.env` value as empty, so empty must not mean off); `off`
+/// turns the policy off.
+pub fn settings_file_from(value: Option<&str>) -> Option<PathBuf> {
+    match value.map(str::trim) {
+        Some("off") => None,
+        Some(path) if !path.is_empty() => Some(PathBuf::from(path)),
+        _ => Some(PathBuf::from(IMAGE_SETTINGS_FILE)).filter(|p| p.is_file()),
+    }
+}
+
+/// Where the image installs the default driven-session policy.
+pub const IMAGE_SETTINGS_FILE: &str = "/usr/local/share/vogt/driven-session-settings.json";
 
 impl Onboarding {
     /// On unless `ENGINE_AGENT_QUIET_ONBOARDING=0`.
@@ -50,6 +69,11 @@ impl Onboarding {
             default_dir: std::env::var_os("CLAUDE_CONFIG_DIR")
                 .or_else(|| std::env::var_os("HOME"))
                 .map(PathBuf::from),
+            settings_file: settings_file_from(
+                std::env::var("ENGINE_AGENT_CLAUDE_SETTINGS")
+                    .ok()
+                    .as_deref(),
+            ),
         }
     }
 
@@ -175,10 +199,22 @@ mod tests {
     }
 
     #[test]
+    fn the_policy_setting_reads_a_path_off_or_the_image_default() {
+        assert_eq!(
+            settings_file_from(Some("/srv/policy.json")),
+            Some(PathBuf::from("/srv/policy.json"))
+        );
+        assert_eq!(settings_file_from(Some("off")), None);
+        // Unset and empty mean the same: the image's file, when it exists.
+        assert_eq!(settings_file_from(Some("")), settings_file_from(None));
+    }
+
+    #[test]
     fn the_session_config_dir_wins() {
         let onboarding = Onboarding {
             enabled: true,
             default_dir: Some(PathBuf::from("/home/pod")),
+            settings_file: None,
         };
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())];
         assert_eq!(

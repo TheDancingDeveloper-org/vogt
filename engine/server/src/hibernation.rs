@@ -71,6 +71,10 @@ pub struct Record {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
+    /// The permission posture it was started with, kept so a wake does not
+    /// quietly change it (WI-926).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     /// What a wake resumes. `None` only for a shell hibernated on request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<AgentConversation>,
@@ -104,6 +108,7 @@ impl Record {
             env: Vec::new(),
             model: None,
             effort: None,
+            permission_mode: None,
             conversation: None,
             brief_file: None,
             keep_awake: false,

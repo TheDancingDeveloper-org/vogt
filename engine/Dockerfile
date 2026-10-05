@@ -306,6 +306,10 @@ ARG CLAUDE_CODE_VERSION
 # ~/Working.
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
 COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
+# The driven-session permission policy (WI-926): auto-mode rules every
+# engine-launched Claude session gets with --settings. A deployment replaces it
+# with ENGINE_AGENT_CLAUDE_SETTINGS (docs/ENGINE.md, "Permission posture").
+COPY engine/deploy/driven-session-settings.json /usr/local/share/vogt/driven-session-settings.json
 # The pin below is the *baked baseline*. A deployment may name a different
 # version per tool at runtime (`VOGT_CLAUDE_CODE_VERSION` and friends in the
 # container's environment; `agent-clis.tools`, written below, is the

@@ -94,6 +94,12 @@ pub struct SessionSpec {
     /// becomes argv.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<String>,
+    /// The agent's permission posture (WI-926): `default` (absent) keeps the
+    /// CLI's own mode with the deployment's driven-session policy;
+    /// `accept-edits` auto-accepts file edits; `bypass` skips every
+    /// permission check. Claude Code only; refused for anything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,6 +167,10 @@ pub struct SessionSummary {
     /// Pinned awake: never hibernated by policy, and woken at boot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_awake: bool,
+    /// The permission posture it was started with, when not the default
+    /// (`accept-edits`, `bypass`) (WI-926).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     /// The session template it was started from, by the name the caller
     /// gave (`claude`, `Codex (protected)`), when one was named (WI-919).
     /// Absent for a session started with an explicit command.

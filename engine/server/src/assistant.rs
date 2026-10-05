@@ -2189,6 +2189,7 @@ mod tests {
                 model: None,
                 effort: None,
                 resume: None,
+                permission_mode: None,
                 cols: Some(80),
                 rows: Some(24),
                 scrollback_bytes: None,

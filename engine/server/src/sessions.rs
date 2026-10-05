@@ -240,6 +240,8 @@ impl SessionRegistry {
                 resume: spec.resume.as_deref(),
                 brief_file: brief_path.as_deref(),
                 session_id: Some(id),
+                permission_mode: spec.permission_mode.as_deref(),
+                settings_file: self.cfg.agent_onboarding.settings_file.as_deref(),
             },
         )?;
         if let Some(rewritten) = launch.command {
@@ -351,6 +353,14 @@ impl SessionRegistry {
         };
         let session = spawned.session;
         session.set_conversation(conversation.clone());
+        // The posture as the wire names it, `None` for the default one.
+        let posture = spec
+            .permission_mode
+            .as_deref()
+            .map(str::trim)
+            .map(|m| m.replace('_', "-"))
+            .filter(|m| !m.is_empty() && m != "default");
+        session.set_permission_mode(posture.clone());
         session.set_template(
             spec.template
                 .as_deref()
@@ -373,6 +383,7 @@ impl SessionRegistry {
                 record.env = hibernation::without_secrets(&base_env);
                 record.model = spec.model.clone();
                 record.effort = spec.effort.clone();
+                record.permission_mode = posture.clone();
                 record.conversation = conversation;
                 record.brief_file = prompt_file.clone();
                 Some(record)
@@ -702,6 +713,7 @@ impl SessionRegistry {
             prompt: None,
             model: record.model.clone(),
             effort: record.effort.clone(),
+            permission_mode: record.permission_mode.clone(),
             resume: record.conversation.as_ref().map(|c| c.id.clone()),
             cols: req.cols.or(record.cols),
             rows: req.rows.or(record.rows),
@@ -904,6 +916,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         keep_awake: record.keep_awake,
         resources: None,
         template: record.template.clone(),
+        permission_mode: record.permission_mode.clone(),
     })
 }
 

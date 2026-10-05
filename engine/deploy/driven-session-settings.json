@@ -1,0 +1,13 @@
+{
+  "autoMode": {
+    "environment": [
+      "$defaults",
+      "**Driven session**: this agent runs in a terminal started and driven by Vogt, usually with no person watching. A denied action is not retried or worked around: the agent reports itself blocked (session_report_blocked) and a person or the overseeing driver decides.",
+      "**Autonomous-merge repositories**: none configured. A deployment lists here, by full name (owner/repo on its forge), the repositories where an agent may merge its own pull requests once their required checks pass."
+    ],
+    "allow": [
+      "$defaults",
+      "Own Green PR Merge: Merging a pull request that the agent itself opened for its current task, in a repository listed under Autonomous-merge repositories in Environment, after the repository's required checks have passed — using the forge's ordinary merge (e.g. `gh pr merge <n> --rebase|--squash|--merge`, optionally `--delete-branch`). This clears Merge Without Review for that case only. It never covers `--admin`, force or bypass options, merging someone else's pull request, a repository not listed, or a pull request whose checks are failing or pending; those stay blocked."
+    ]
+  }
+}

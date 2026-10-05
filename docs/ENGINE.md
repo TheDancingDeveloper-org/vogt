@@ -1082,6 +1082,46 @@ curl -s -H "$AUTH" -H 'content-type: application/json' \
 curl -s -H "$AUTH" -X POST "$VOGT_ENGINE_URL/api/sessions/$ID/kill"
 ```
 
+#### Permission posture
+
+A driven session usually has no person watching it, so its permission
+checks decide what it can finish on its own (WI-926; the design is
+`docs/design/driven-session-permissions.md`).
+
+- **Default.** No posture flag is passed, so Claude Code runs in its own
+  default mode. On a pod that has accepted auto mode, that is **auto**: a
+  classifier judges each action against built-in rules, and a block is a
+  denial, with no dialog. Every engine-launched Claude session also gets the
+  deployment's **driven-session policy** with `--settings=<file>`. This is an
+  `autoMode` section whose `environment` and `allow` lists start with
+  `"$defaults"`, so they add to Claude Code's rules and replace none. The
+  image ships `/usr/local/share/vogt/driven-session-settings.json`:
+  - it states that the session is driven, and that a denied action is
+    reported, never routed around;
+  - it adds one exception, **Own Green PR Merge**: merging a pull request
+    the agent opened for its task, in a repository listed under
+    `Autonomous-merge repositories`, after its required checks pass, with
+    the plain merge command. `--admin` and force options, other people's PRs,
+    unlisted repositories and red or pending checks stay blocked.
+
+  The shipped list is *none configured*, so the image changes nothing until
+  a deployment names its repositories. `ENGINE_AGENT_CLAUDE_SETTINGS` points
+  at a deployment's own file, which is where estate facts belong: secret
+  stores, deploy targets, sensitive hosts. Empty means the image's policy;
+  `off` turns the policy off. Prod-mutating, destructive, shared-resource and secret-exposing
+  actions keep their built-in rules and stay denied.
+- **`permission_mode` on `POST /api/sessions`**: `accept-edits` maps to
+  `--permission-mode acceptEdits` (edits accepted, everything else asks).
+  `bypass` maps to `--dangerously-skip-permissions` (no checks). Claude Code
+  only: anything else is `400`, as is a posture on a plain shell. The posture
+  shows on the summary (`permission_mode`, absent for the default), is kept
+  in the hibernation record, and is reapplied on wake. vogt-core grants
+  `bypass` only to a person; an agent asking for it is refused.
+- **Denials go to a person.** Auto mode draws no dialog for a denied
+  action, so `session.answer` has nothing to answer. The brief tells every
+  agent to report a denial with `session_report_blocked` and stop. It then
+  shows as `blocked` in the Inbox and on the Oversight board.
+
 #### Hibernation
 
 An idle agent session holds a few hundred MiB in its CLI and its MCP
