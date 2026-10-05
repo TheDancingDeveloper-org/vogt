@@ -759,7 +759,14 @@ mod tests {
         );
         assert_eq!(required_capability(&Method::GET, "/api/sessions"), None);
         // Hibernation changes a terminal as much as a kill does.
-        for verb in ["hibernate", "wake", "keep-awake", "kill", "input", "blocked"] {
+        for verb in [
+            "hibernate",
+            "wake",
+            "keep-awake",
+            "kill",
+            "input",
+            "blocked",
+        ] {
             assert_eq!(
                 required_capability(&Method::POST, &format!("/api/sessions/abc123/{verb}")),
                 Some(TokenCapability::Sessions),
