@@ -101,6 +101,7 @@ from vogt.application.services.projects import (
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
     history_list,
+    last_reply,
     list_sessions,
     log_tail,
     report_blocked,
@@ -183,6 +184,7 @@ __all__ = [
     "install_status",
     "instance_diagnostics",
     "issue_token",
+    "last_reply",
     "link_forge_account",
     "link_project",
     "list_actors",

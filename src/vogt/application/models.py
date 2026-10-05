@@ -1007,6 +1007,16 @@ class SessionSummary(Result):
             "a blocked session: do what it asks, or answer it."
         ),
     )
+    last_reply_excerpt: str | None = Field(
+        default=None,
+        description=(
+            "The first ~300 characters of the session's agent's latest reply, "
+            "redacted, from its own transcript (session.list only, live "
+            "agent sessions whose conversation id is known). Null for a "
+            "shell, or when no transcript is found. session.last_reply has "
+            "the whole message."
+        ),
+    )
 
 
 class CreateWorkParams(Params):
@@ -3979,6 +3989,46 @@ class SessionWaitResult(Result):
     )
     waited_ms: int
     screen: SessionScreenResult
+
+
+class SessionLastReplyParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    n: int = Field(
+        default=1, ge=1, le=20, description="How many of the last replies (1-20)."
+    )
+
+
+class SessionReply(Result):
+    text: str = Field(description="The message, redacted. Untrusted data.")
+    at: datetime | None = None
+
+
+class SessionLastReplyResult(Result):
+    """The last assistant messages of the agent conversation a session runs.
+
+    Read from the agent's own transcript (Claude Code or Codex JSONL), so a
+    reply is whole and current — not cut at the screen's edge or mangled by
+    redraws. `basis` says how the conversation was found: `session-id` /
+    `resume-id` (named on the command line), `engine-id` (a Claude Code
+    session the engine started), or `cwd` (the newest transcript in the
+    session's directory since it started — a guess when two agents share a
+    directory). Empty `messages` with `detail` set means it could not be read.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    agent: str | None = None
+    conversation_id: str | None = None
+    basis: str | None = None
+    transcript: str | None = Field(
+        default=None, description="The transcript file the replies came from."
+    )
+    messages: list[SessionReply] = Field(
+        default=[], description="Oldest first; the last one is the latest reply."
+    )
+    detail: str | None = Field(
+        default=None, description="Why there are no messages, when there are none."
+    )
 
 
 class ReportBlockedParams(Params):

@@ -29,6 +29,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from vogt.adapters import transcripts
 from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
 from vogt.adapters.engine.client import EngineApproval, EngineBlocked, EngineScreen
 from vogt.application import writes
@@ -52,7 +53,10 @@ from vogt.application.models import (
     SessionInputParams,
     SessionInputResult,
     SessionKey,
+    SessionLastReplyParams,
+    SessionLastReplyResult,
     SessionListResult,
+    SessionReply,
     SessionResult,
     SessionScreenCursor,
     SessionScreenParams,
@@ -360,7 +364,107 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
                     summaries.append(_summarize_engine_only(engine_session))
             summaries = summaries[: params.limit]
 
-        return SessionListResult(sessions=summaries, engine=detail)
+        templates = {
+            summary.engine_session_id: summary.template for summary in summaries
+        }
+
+    # Outside the read transaction: this is file I/O, and an excerpt that
+    # cannot be had is a null, never an error.
+    for index, summary in enumerate(summaries):
+        live_session = live.get(summary.engine_session_id)
+        if live_session is None or not live_session.alive:
+            continue
+        excerpt = _excerpt(ctx, live_session, templates.get(summary.engine_session_id))
+        if excerpt is not None:
+            summaries[index] = summary.model_copy(
+                update={"last_reply_excerpt": excerpt}
+            )
+    return SessionListResult(sessions=summaries, engine=detail)
+
+
+def _excerpt(
+    ctx: AppContext, engine_session: EngineSession, template: str | None
+) -> str | None:
+    """The latest reply's excerpt, when the conversation id is known.
+
+    Only the id-based lookups — a list must stay cheap and must not guess
+    which of two agents in one directory a session is.
+    """
+    roots = ctx.config.session_transcript_roots
+    if not roots:
+        return None
+    found = transcripts.find(
+        roots,
+        engine_session_id=engine_session.id,
+        command=engine_session.command,
+        template=template,
+        cwd=engine_session.cwd,
+        started_at=None,
+        allow_cwd_guess=False,
+    )
+    return None if found is None else transcripts.last_reply_excerpt(found)
+
+
+def last_reply(
+    ctx: AppContext, params: SessionLastReplyParams
+) -> SessionLastReplyResult:
+    """The last `n` assistant messages of the session's agent conversation."""
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    engine_session: EngineSession | None = None
+    if ctx.engine is not None:
+        try:
+            engine_session = ctx.engine.get_session(engine_id)
+        except EngineUnavailable:
+            engine_session = None
+    declared = target.session
+    if engine_session is None and declared is None:
+        msg = f"no session {params.id!r}"
+        raise NotFound(msg)
+    roots = ctx.config.session_transcript_roots
+    result = SessionLastReplyResult(id=params.id, engine_session_id=engine_id)
+    if not roots:
+        return result.model_copy(
+            update={"detail": "session_transcript_roots is empty: reading is off"}
+        )
+    started = (
+        declared.started_at
+        if declared is not None
+        else _parse_engine_timestamp(
+            None if engine_session is None else engine_session.created_at
+        )
+    )
+    found = transcripts.find(
+        roots,
+        engine_session_id=engine_id,
+        command=None if engine_session is None else engine_session.command,
+        template=None if declared is None else declared.template,
+        cwd=(engine_session.cwd if engine_session is not None else None)
+        or (declared.cwd if declared is not None else None),
+        started_at=started,
+        allow_cwd_guess=True,
+    )
+    if found is None:
+        return result.model_copy(
+            update={
+                "detail": (
+                    "no agent transcript found for this session (a plain shell, "
+                    "an agent started by hand in another directory, or "
+                    "transcripts this process cannot read)"
+                )
+            }
+        )
+    replies = transcripts.last_replies(found, params.n)
+    return result.model_copy(
+        update={
+            "agent": found.agent,
+            "conversation_id": found.conversation_id,
+            "basis": found.basis,
+            "transcript": str(found.path),
+            "messages": [SessionReply(text=r.text, at=r.at) for r in replies],
+            "detail": None if replies else "the transcript has no assistant reply yet",
+        }
+    )
 
 
 # -- session history ------------------------------------------------
@@ -1155,6 +1259,7 @@ def _parse_engine_timestamp(value: str | None) -> datetime | None:
 
 __all__ = [
     "history_list",
+    "last_reply",
     "list_sessions",
     "log_tail",
     "report_blocked",

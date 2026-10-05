@@ -263,7 +263,12 @@ def config(data_dir: Path) -> VogtConfig:
     knob is available in production (`VOGT_SQLITE_SYNCHRONOUS`), and the
     storage layer behaves identically either way.
     """
-    return VogtConfig(data_dir=data_dir, sqlite_synchronous="off")
+    # `session_transcript_roots` off: a test must never read the running
+    # user's own agent transcripts; the tests that exercise them point it at
+    # a temporary directory.
+    return VogtConfig(
+        data_dir=data_dir, sqlite_synchronous="off", session_transcript_roots={}
+    )
 
 
 @pytest.fixture

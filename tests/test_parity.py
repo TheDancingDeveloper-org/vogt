@@ -452,6 +452,10 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {"id": seen["session.start"]["session"]["engine_session_id"]},
     ),
     (
+        "session.last_reply",
+        lambda seen: {"id": seen["session.start"]["session"]["id"], "n": 2},
+    ),
+    (
         "session.wait",
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
@@ -996,6 +1000,8 @@ def _fresh(
             import_root=root / "imported",
             forge_account_key_file=_forge_key_file(root),
             github_token_file=token_file,
+            # Never the running user's own agent transcripts.
+            session_transcript_roots={},
         ),
         principal=TEST_PRINCIPAL,
         clock=StepClock(),
