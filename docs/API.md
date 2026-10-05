@@ -186,6 +186,19 @@ whole process tree, as the engine last sampled them, with `over_threshold`
 past the deployment's `ENGINE_SESSION_RSS_WARN`. `session.list` with
 `order: "rss"` lists the heaviest first.
 
+`session.input` reports what became of the input. `submitted` is true when
+Enter was pressed, by `submit` or as one of the `keys`. `delivery` is:
+
+- `typed`: no Enter;
+- `delivered`: a turn started after it;
+- `queued`: a turn was already running, or the agent shows its
+  queued-message hint;
+- `unconfirmed`: nothing observable within about 2 s.
+
+`delivery_evidence` gives the reason. With `confirm: false`, the call
+returns without watching. A refused input (no such session, or a session
+that cannot be woken) is an error, not a `delivery` value.
+
 `session.answer` (`work.write`, audited) answers the dialog a session
 shows. The session must be `awaiting-approval`, which covers permission
 dialogs and the startup gates `folder-trust`, `external-imports` and

@@ -334,3 +334,12 @@ def fresh_process_caches() -> Iterator[None]:
     yield
     RESOLVER.clear()
     clear_badge_cache()
+
+
+@pytest.fixture(autouse=True)
+def _instant_input_confirmation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`session.input` watches a submitted input for ~2 s of real time; tests
+    judge the same reads without waiting for them."""
+    from vogt.application.services import sessions
+
+    monkeypatch.setattr(sessions, "_pause", lambda _seconds: None)

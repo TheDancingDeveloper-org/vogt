@@ -299,7 +299,10 @@ def test_typing_into_a_hibernated_session_wakes_it_first(
     engine.sent.clear()
 
     result = session_input(
-        wired, SessionInputParams(id=ses_id, text="go on", submit=True, reason=WHY)
+        wired,
+        SessionInputParams(
+            id=ses_id, text="go on", submit=True, confirm=False, reason=WHY
+        ),
     )
 
     assert result.woke is True
