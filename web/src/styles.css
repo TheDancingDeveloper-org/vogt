@@ -2562,6 +2562,19 @@ textarea {
 .terminal-reconnect-queued {
   color: var(--activity-warning);
 }
+.terminal-hibernated-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  max-width: min(28rem, calc(100% - 24px));
+  /* The base overlay lets clicks through to the terminal; this one has a
+     button. */
+  pointer-events: auto;
+}
+.terminal-hibernated-error {
+  color: var(--activity-errored);
+}
 .terminal-reconnect-retry {
   padding: 2px 8px;
   font-size: 12px;

@@ -234,6 +234,16 @@ regains focus. A session's row menu also offers **Open files here** and **Git
 here**, which jump to that session's working directory in the file tree and the
 Git tab.
 
+An agent session can be **hibernated** to free the memory it holds. Its
+processes stop, and it stays in the list with a hollow dot and its last screen.
+Use **Hibernate** in its row menu, or let the deployment's idle policy do it.
+**Wake** (in the row menu, or the *Wake session* button on its pane) starts it
+again by resuming the same conversation in the same place. Opening the pane
+does not wake it. **Keep awake** pins a session: the idle policy never
+hibernates it, and after a restart it wakes by itself. Only agent sessions
+whose conversation can be resumed get these entries (Claude Code sessions,
+and any session started to continue a conversation).
+
 | Surface | Link | What it is |
 |---|---|---|
 | **Board** | `#/board` | Work items in columns. The columns *are* the workflow's states, read from the server — not written down anywhere in the client. |

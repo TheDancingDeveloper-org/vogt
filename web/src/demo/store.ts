@@ -442,6 +442,7 @@ export class DemoStore {
     if (path === "/sessions" && method === "GET") return json({ sessions: this.sessionsForVogt(), engine: "browser-simulated terminal sessions" });
     if (path === "/sessions" && method === "POST") { const id = `demo-new-${this.state.next_id++}`; const row = { id, name: String(body.name ?? "Demo work session"), activity: "idle", exit_code: null, scrollback_bytes: 131072, cwd: String(body.cwd ?? "/Working/orbit"), created_at: this.now(), activity_changed_at: this.now() }; this.state.sessions[id] = row; this.audit("session.start", "session", id, String(body.reason)); this.changed("session.started", "session", id); return json({ session: this.sessionsForVogt().find((session) => session.engine_session_id === id) }); }
     if (path === "/sessions/stop") { const row = this.state.sessions[String(body.id)]; if (row) row.exit_code = 0; this.audit("session.stop", "session", String(body.id), String(body.reason)); this.changed("session.stopped", "session", String(body.id)); return json({ session: this.sessionsForVogt().find((session) => session.engine_session_id === body.id) }); }
+    if (["/sessions/hibernate", "/sessions/wake", "/sessions/keep-awake"].includes(path)) return refusal("The demo's terminals are simulated in the browser: there is no process to hibernate or wake.");
     return json({ error: { code: "demo.unhandled", message: `No demo responder for ${method} ${path}` } }, { status: 404 });
   }
 

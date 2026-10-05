@@ -16,6 +16,7 @@ const WRITES = new Set([
   "work.create", "work.transition", "work.comment", "work.update",
   "drift.resolve", "inbox.archive", "inbox.snooze", "inbox.restore",
   "suppress", "work.adopt", "session.start", "session.stop", "auth.logout",
+  "session.hibernate", "session.wake", "session.keep_awake",
 ]);
 
 describe("public demo contracts", () => {
