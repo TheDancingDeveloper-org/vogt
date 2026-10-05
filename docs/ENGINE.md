@@ -2288,6 +2288,9 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.wait` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
 | `session.report_blocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `session.report_unblocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
+| `session.hibernate` | Operator-only | Unavailable: Stops a session's processes; for the GUI and for agents over MCP/CLI/REST. |
+| `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
+| `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |

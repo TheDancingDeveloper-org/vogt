@@ -238,7 +238,8 @@ The recipe is **start with a task → wait until ready → read → answer → s
 2. **Wait until ready.** `session_wait` with `until: "ready"` blocks until
    the program is at its prompt and returns the screen — or returns early
    with `outcome` `awaiting-approval` (a permission dialog; see below),
-   `blocked` (the agent says it needs a person), `exited`, or `timeout`. One
+   `blocked` (the agent says it needs a person), `exited`, `hibernated`
+   (asleep: wake it, see below), or `timeout`. One
    call, no polling; `timeout_s` up to 600. `until: "any_change"` wakes on
    any change, `"exited"` when it ends. (Polling `session_screen` for
    `ready` still works on an engine without the wait route.)
@@ -277,6 +278,16 @@ Rules:
   answers with a clear "does not support screen yet" error; nothing falls back
   to the log silently. `scrollback_lines: N` (up to 2000) adds the N lines
   that scrolled off the top, for a reply or a command taller than the screen.
+- **Hibernated sessions** (`activity: "hibernated"`) have had their
+  processes stopped to free memory. Their screen is the last one they
+  showed, and their conversation is intact. `session_input` wakes one by
+  itself before typing; `session_wake` wakes one without typing. Either way,
+  it resumes the same conversation under the same id. `session_wait` returns
+  at once with `outcome: "hibernated"` rather than waiting, and reading the
+  screen never wakes anything. To free memory from a session you are done
+  with for now but may come back to, use `session_hibernate` rather than
+  `session_stop`. `session_keep_awake` pins one that must never be
+  hibernated, such as a long-running driver.
 - **Long turn or hung?** `session_list` and `session_screen` carry
   `turn_started_at` (when the agent last went to work from rest) and
   `last_output_at` (when the terminal last printed). Agent TUIs animate while

@@ -180,6 +180,21 @@ shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
 `session.blocked` entry and a push. `session.start` takes `autopilot` (see
 [`AGENT_GUIDE.md`](AGENT_GUIDE.md)).
 
+`session.hibernate` (`work.write`, audited) stops a session's processes to
+free their memory and revokes its token. The session stays listed with
+`activity: "hibernated"`, a `hibernation` (`at`, `trigger`, `reason`,
+`resumable`) and its last screen. `session.wake` starts it again under the
+same id by resuming its agent conversation (`conversation_id`). It mints a
+new token for the same actor and revokes the old one. `session.input` on a
+hibernated session wakes it, waits until it is ready (`wake_timeout_s`,
+default 120) and then types; the result says `woke`. `session.screen` and
+`session.wait` never wake: a wait answers at once with `outcome:
+"hibernated"` and the kept screen. `session.keep_awake` pins a session
+against the engine's idle policy. Only a session whose conversation id the
+engine knows can hibernate: Claude Code started by Vogt, or any `resume`. A
+shell needs `allow_shell`, and wakes as a fresh shell. The engine side is
+[`ENGINE.md`, "Hibernation"](ENGINE.md#hibernation).
+
 Rows of `session.list` and `session.screen` carry the engine's live
 `turn_started_at` (when the agent last went to work from rest) and
 `last_output_at` (when the terminal last printed), which tell a long turn

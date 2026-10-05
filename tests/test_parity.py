@@ -476,6 +476,25 @@ SCRIPT: list[tuple[str, StepParams]] = [
         "session.report_unblocked",
         lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
     ),
+    # Hibernation, against the same stand-in engine: hibernate, pin, then
+    # wake — which takes the real path (a new token for the session's actor)
+    # because the stand-in remembers it is asleep.
+    (
+        "session.hibernate",
+        lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
+    ),
+    (
+        "session.keep_awake",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "keep_awake": True,
+            "reason": WHY,
+        },
+    ),
+    (
+        "session.wake",
+        lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
+    ),
     (
         "session.stop",
         lambda seen: {
@@ -839,6 +858,29 @@ def _stand_in_engine() -> EngineClient:
     to do with the surfaces.
     """
     counter = itertools.count(1)
+    #: Sessions the stand-in has hibernated, so a wake takes its real path.
+    asleep: set[str] = set()
+
+    def summary(engine_id: str) -> dict[str, object]:
+        return {
+            "id": engine_id,
+            "name": "parity",
+            "activity": "hibernated" if engine_id in asleep else "idle",
+            "alive": engine_id not in asleep,
+            "cwd": "/tmp",
+            "conversation": {"agent": "claude", "id": engine_id},
+            **(
+                {
+                    "hibernation": {
+                        "at": "2026-10-05T00:00:00Z",
+                        "trigger": "manual",
+                        "resumable": True,
+                    }
+                }
+                if engine_id in asleep
+                else {}
+            ),
+        }
 
     def transport(
         url: str,
@@ -860,6 +902,26 @@ def _stand_in_engine() -> EngineClient:
             ).encode()
         if method == "POST" and url.endswith("/kill"):
             return 200, b'{"ok":true}'
+        if method == "POST" and path.endswith("/hibernate"):
+            engine_id = path.rsplit("/", 2)[-2]
+            asleep.add(engine_id)
+            return 200, json.dumps(summary(engine_id)).encode()
+        if method == "POST" and path.endswith("/wake"):
+            engine_id = path.rsplit("/", 2)[-2]
+            asleep.discard(engine_id)
+            return 200, json.dumps(summary(engine_id)).encode()
+        if method == "POST" and path.endswith("/keep-awake"):
+            return 200, json.dumps(
+                {**summary(path.rsplit("/", 2)[-2]), "keep_awake": spec["keep_awake"]}
+            ).encode()
+        if (
+            method == "GET"
+            and "/api/sessions/eng-" in path
+            and "/" not in path.rsplit("/api/sessions/", 1)[1]
+        ):
+            return 200, json.dumps(
+                {"summary": summary(path.rsplit("/", 1)[-1])}
+            ).encode()
         if method == "POST" and url.endswith("/input"):
             return 200, b'{"ok":true}'
         if method == "POST" and path.endswith("/blocked"):
