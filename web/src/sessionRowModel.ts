@@ -15,6 +15,8 @@ import { formatAgo } from "./viewAge";
  *  code into `done`/`errored` rather than leaving it on the live-activity
  *  vocabulary. */
 export function activityClass(s: SessionSummary): string {
+  // A requested stop exits non-zero (a kill) but is not a crash (WI-913).
+  if (s.activity === "stopped") return "stopped";
   if (s.exit_code !== null) {
     return s.exit_code === 0 ? "done" : "errored";
   }
@@ -24,6 +26,7 @@ export function activityClass(s: SessionSummary): string {
 /** The session's activity as a word, exit code first so a finished session
  *  reads as finished rather than as whatever it was doing when it stopped. */
 export function activityLabel(s: ActivityState, exit: number | null): string {
+  if (s === "stopped") return "stopped";
   if (exit !== null) return exit === 0 ? "exited (0)" : `errored (${exit})`;
   switch (s) {
     case "waiting-for-input":
@@ -80,6 +83,7 @@ export function sessionRuntimeHint(s: SessionSummary): string | null {
     agent ?? null,
     model ? `model ${model}` : null,
     s.permission_mode ? `permissions ${s.permission_mode}` : null,
+    s.stop ? `stopped${s.stop.by ? ` by ${s.stop.by}` : ""}${s.stop.reason ? `: ${s.stop.reason}` : ""}` : null,
   ].filter((part): part is string => Boolean(part));
   return parts.length ? parts.join(" · ") : null;
 }
@@ -118,6 +122,7 @@ const ATTENTION_ORDER: Record<string, number> = {
   idle: 3,
   // Asleep until somebody wakes it: below everything that is running.
   hibernated: 4,
+  stopped: 4,
   exited: 4,
 };
 

@@ -1110,6 +1110,16 @@ class SessionSummary(Result):
             "None when the engine could not be asked."
         ),
     )
+    stopped_by: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: who asked the session to stop, when it was "
+            "stopped on request (activity `stopped`)."
+        ),
+    )
+    stop_reason: str | None = Field(
+        default=None, description="Live from the engine: why it was stopped."
+    )
     permission_mode: str | None = Field(
         default=None,
         description=(

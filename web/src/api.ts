@@ -24,7 +24,10 @@ export type ActivityState =
    * Stopped to free memory; kept to be woken by resuming its conversation
    * under the same id. Not alive, not finished. See `hibernation`.
    */
-  | "hibernated";
+  | "hibernated"
+  /** Exited because someone asked it to stop (WI-913); see `stop`. Not a
+   *  crash: `errored` is kept for exits nobody asked for. */
+  | "stopped";
 
 /** A permission dialog an agent CLI is showing (engine `ApprovalPrompt`). */
 export interface ApprovalPrompt {
@@ -67,6 +70,8 @@ export interface SessionSummary {
   resources?: SessionResources | null;
   /** The template it was started from, when one was named. */
   template?: string | null;
+  /** Who asked it to stop, and why, when it was stopped on request. */
+  stop?: { by?: string | null; reason?: string | null; at: string } | null;
   /** The permission posture when not the default: `accept-edits` or
    *  `bypass` (no permission checks) (WI-926). */
   permission_mode?: string | null;

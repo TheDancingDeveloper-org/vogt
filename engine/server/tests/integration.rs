@@ -9417,3 +9417,69 @@ async fn a_permission_posture_reaches_the_agent_and_survives_a_wake() {
         .unwrap();
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
 }
+
+/// WI-913: a session stopped on request reads `stopped` with who and why;
+/// one that dies by itself still reads `errored`.
+#[tokio::test]
+async fn a_requested_stop_is_stopped_and_a_crash_is_still_errored() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let start = |name: &'static str, command: Vec<&'static str>| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({ "name": name, "command": command }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let reaped = start("reaped child", vec!["/bin/sh", "-c", "sleep 300"]).await;
+    let crashed = start("crashing child", vec!["/bin/sh", "-c", "sleep 0.2; exit 3"]).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let killed = client
+        .post(format!("{base}/api/sessions/{reaped}/kill"))
+        .json(&json!({ "reason": "answer ingested", "by": "agent:session:ses_parent" }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(killed, StatusCode::OK);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let listed: Vec<Value> = client
+            .get(format!("{base}/api/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let row = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap().clone();
+        let (r, c) = (row(&reaped), row(&crashed));
+        if r["alive"] == false && c["alive"] == false {
+            assert_eq!(r["activity"], "stopped", "{r}");
+            assert_eq!(r["stop"]["reason"], "answer ingested");
+            assert_eq!(r["stop"]["by"], "agent:session:ses_parent");
+            assert!(r["stop"]["at"].as_str().is_some_and(|a| !a.is_empty()));
+            assert_eq!(c["activity"], "errored", "a crash stays a crash: {c}");
+            assert!(c.get("stop").is_none());
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never exited: {r} {c}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}

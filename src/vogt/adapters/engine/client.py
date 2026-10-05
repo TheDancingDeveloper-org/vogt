@@ -170,6 +170,9 @@ class EngineSession:
     template: str | None = None
     #: The permission posture, when not the default (WI-926).
     permission_mode: str | None = None
+    #: Who asked the session to stop, and why (WI-913).
+    stopped_by: str | None = None
+    stop_reason: str | None = None
 
     @property
     def hibernated(self) -> bool:
@@ -202,6 +205,12 @@ class EngineSession:
             resources=EngineResources.from_payload(payload.get("resources")),
             template=_optional_str(payload.get("template")),
             permission_mode=_optional_str(payload.get("permission_mode")),
+            stopped_by=_optional_str((payload.get("stop") or {}).get("by"))
+            if isinstance(payload.get("stop"), dict)
+            else None,
+            stop_reason=_optional_str((payload.get("stop") or {}).get("reason"))
+            if isinstance(payload.get("stop"), dict)
+            else None,
         )
 
 
@@ -716,12 +725,24 @@ class EngineClient:
         summary = payload.get("summary", payload)
         return EngineSession.from_payload(summary)
 
-    def kill_session(self, session_id: str) -> bool:
-        """Stop a session. `False` when the engine no longer had it."""
+    def kill_session(
+        self, session_id: str, *, reason: str | None = None, by: str | None = None
+    ) -> bool:
+        """Stop a session. `False` when the engine no longer had it.
+
+        `reason` and `by` are recorded on the engine's session before the
+        kill, so the exit reads `stopped` (with who and why) rather than
+        `errored` (WI-913).
+        """
+        body: dict[str, Any] = {}
+        if reason:
+            body["reason"] = reason
+        if by:
+            body["by"] = by
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/kill",
             method="POST",
-            payload={},
+            payload=body,
             allow_missing=True,
         )
         return payload is not None

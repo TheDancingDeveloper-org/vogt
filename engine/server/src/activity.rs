@@ -108,6 +108,19 @@ pub fn exit_state(exit_code: Option<i32>) -> Option<ActivityState> {
     }
 }
 
+/// The terminal state of an exited child, knowing whether a stop was asked
+/// for (WI-913): a requested stop is `stopped` whatever the code — killing
+/// an agent makes it exit non-zero or by signal, and that is the request
+/// working, not a crash. A signal from anywhere else (the OOM killer, a
+/// person's `kill -9` outside the engine) stays `errored`: it can be a real
+/// failure, and nothing recorded says otherwise.
+pub fn terminal_state(exit_code: Option<i32>, stop_requested: bool) -> Option<ActivityState> {
+    match exit_state(exit_code) {
+        Some(_) if stop_requested => Some(ActivityState::Stopped),
+        other => other,
+    }
+}
+
 /// Decide the next activity state given time of last output, a tail snapshot
 /// of scrollback, and the child's exit code if it has exited.
 ///
@@ -184,6 +197,19 @@ mod tests {
         let s = classify(Some(Instant::now()), b"Continue? [y/N]", 1500, Some(0));
         assert_eq!(s, ActivityState::Exited);
         assert_eq!(exit_state(None), None);
+        // WI-913: a requested stop is `stopped` whatever the code; anything
+        // else non-zero stays `errored`, and a live child has no terminal state.
+        assert_eq!(
+            terminal_state(Some(137), true),
+            Some(ActivityState::Stopped)
+        );
+        assert_eq!(terminal_state(Some(0), true), Some(ActivityState::Stopped));
+        assert_eq!(
+            terminal_state(Some(137), false),
+            Some(ActivityState::Errored)
+        );
+        assert_eq!(terminal_state(None, true), None);
+        assert!(ActivityState::Stopped.is_terminal());
     }
 
     #[test]

@@ -79,6 +79,8 @@ def classify(
         return Verdict("hibernated", "hibernated to free memory; wake it to continue")
     if activity is None or alive is None:
         return Verdict("unknown", "the engine could not be asked")
+    if activity == "stopped":
+        return Verdict("exited", "stopped on request")
     if not alive:
         return Verdict("exited", f"its process ended ({activity})")
     if approval_question or activity == "awaiting-approval":

@@ -30,6 +30,12 @@ pub enum ActivityState {
     Exited,
     /// Stopped to free memory and kept to be woken (see the enum's doc).
     Hibernated,
+    /// The child exited because someone asked it to stop
+    /// (`POST /api/sessions/{id}/kill`, vogt's `session.stop`), whatever its
+    /// exit code (WI-913). Terminal, like `exited`; `errored` is kept for a
+    /// non-zero exit nobody asked for, so a crash stands out from routine
+    /// reaping. The summary's `stop` says who and why.
+    Stopped,
 }
 
 impl ActivityState {
@@ -42,12 +48,16 @@ impl ActivityState {
             ActivityState::Errored => "✗",
             ActivityState::Exited => "■",
             ActivityState::Hibernated => "◌",
+            ActivityState::Stopped => "□",
         }
     }
 
     /// Whether this state is one only an exited session reports.
     pub fn is_terminal(self) -> bool {
-        matches!(self, ActivityState::Exited | ActivityState::Errored)
+        matches!(
+            self,
+            ActivityState::Exited | ActivityState::Errored | ActivityState::Stopped
+        )
     }
 }
 
@@ -167,6 +177,10 @@ pub struct SessionSummary {
     /// Pinned awake: never hibernated by policy, and woken at boot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_awake: bool,
+    /// Set when someone asked the session to stop: who, when and why. The
+    /// exit that follows reads `stopped`, not `errored` (WI-913).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<StopRequest>,
     /// The permission posture it was started with, when not the default
     /// (`accept-edits`, `bypass`) (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -208,6 +222,20 @@ pub struct SessionResources {
 pub struct SessionResourcesSample {
     pub id: Uuid,
     pub resources: SessionResources,
+}
+
+/// A request to stop a session: `POST /api/sessions/{id}/kill`'s optional
+/// body, and what the summary carries afterwards.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopRequest {
+    /// Who asked (vogt-core sends the caller's identity).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// RFC 3339; set by the engine.
+    #[serde(default)]
+    pub at: String,
 }
 
 /// An agent CLI and its own id for a conversation.

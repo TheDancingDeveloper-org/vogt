@@ -213,6 +213,12 @@ Enter was pressed, by `submit` or as one of the `keys`. `delivery` is:
 returns without watching. A refused input (no such session, or a session
 that cannot be woken) is an error, not a `delivery` value.
 
+A session stopped through `session.stop` reads `activity: "stopped"`, with
+`stopped_by` and `stop_reason` on its row, whatever its exit code. The core
+passes the caller's identity and reason to the engine before the kill.
+`errored` means a non-zero exit nobody asked for, so routinely reaped child
+sessions no longer look like crashes (WI-913).
+
 `session.start` takes `permission_mode`:
 
 - `default`: Claude Code's own mode (auto) plus the deployment's

@@ -162,3 +162,18 @@ describe("resource words", () => {
     expect(sessionResourceWord(session({ id: "n" }))).toBeNull();
   });
 });
+
+describe("a session stopped on request (WI-913)", () => {
+  it("reads stopped, not errored, despite its non-zero exit", async () => {
+    const { sessionRuntimeHint } = await import("../sessionRowModel");
+    const reaped = {
+      ...session({ id: "r", activity: "stopped", exit_code: 137 }),
+      stop: { by: "agent:session:ses_parent", reason: "answer ingested", at: "x" },
+    };
+    expect(activityClass(reaped)).toBe("stopped");
+    expect(activityLabel("stopped", 137)).toBe("stopped");
+    expect(sessionRuntimeHint(reaped)).toContain("stopped by agent:session:ses_parent: answer ingested");
+    // A crash is still a crash.
+    expect(activityClass(session({ id: "c", activity: "errored", exit_code: 3 }))).toBe("errored");
+  });
+});

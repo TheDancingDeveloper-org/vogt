@@ -90,6 +90,8 @@ pub struct Session {
     template: Mutex<Option<String>>,
     /// The permission posture, when not the default (WI-926).
     permission_mode: Mutex<Option<String>>,
+    /// Who asked this session to stop, and why, when someone did (WI-913).
+    stop: Mutex<Option<vogt_engine_contract::StopRequest>>,
 }
 
 impl Session {
@@ -209,7 +211,37 @@ impl Session {
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
+            stop: self.stop.lock().clone(),
         }
+    }
+
+    /// Record that the session was asked to stop, before anything signals
+    /// it, so the exit that follows reads `stopped` (WI-913). The first
+    /// request wins: a second kill of a stopping session does not rewrite
+    /// who stopped it.
+    pub fn request_stop(&self, mut request: vogt_engine_contract::StopRequest) {
+        let mut stop = self.stop.lock();
+        if stop.is_none() {
+            request.at = format_rfc3339(time::OffsetDateTime::now_utc());
+            request.reason = request
+                .reason
+                .map(|r| r.trim().chars().take(500).collect::<String>())
+                .filter(|r| !r.is_empty());
+            request.by = request
+                .by
+                .map(|b| b.trim().chars().take(200).collect::<String>())
+                .filter(|b| !b.is_empty());
+            *stop = Some(request);
+        }
+    }
+
+    pub fn stop_requested(&self) -> bool {
+        self.stop.lock().is_some()
+    }
+
+    /// `exited` / `errored` / `stopped`, once the child has exited.
+    fn terminal_state(&self) -> Option<ActivityState> {
+        crate::activity::terminal_state(self.exit_code(), self.stop_requested())
     }
 
     pub fn set_permission_mode(&self, mode: Option<String>) {
@@ -784,6 +816,7 @@ pub fn spawn(
         resources: Mutex::new(None),
         template: Mutex::new(None),
         permission_mode: Mutex::new(None),
+        stop: Mutex::new(None),
     });
 
     spawn_reader_thread(
@@ -955,6 +988,8 @@ fn try_spawn_archive(
             scrollback_bytes,
             end_reason: Some(if session.is_hibernating() {
                 crate::history::END_HIBERNATED
+            } else if session.stop_requested() {
+                crate::history::END_STOPPED
             } else {
                 crate::history::END_EXITED
             }),
@@ -1120,7 +1155,7 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     );
     if state.is_terminal() {
         *session.approval.lock() = None;
-        return state;
+        return session.terminal_state().unwrap_or(state);
     }
     // A permission dialog overrides whatever the tail heuristics said: its
     // countdown keeps redrawing (so it reads `running`) and its menu ends in
@@ -1176,7 +1211,7 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
 /// see the transitions in the order they were stored.
 fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &EventBus) {
     let mut a = session.activity.lock();
-    let new = crate::activity::exit_state(session.exit_code()).unwrap_or(new);
+    let new = session.terminal_state().unwrap_or(new);
     if *a != new {
         let now = time::OffsetDateTime::now_utc();
         // A turn starts when the session goes to work from rest; a permission

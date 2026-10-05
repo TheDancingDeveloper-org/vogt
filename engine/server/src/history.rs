@@ -58,6 +58,9 @@ pub const END_ENGINE_RESTART: &str = "engine-restart";
 /// The session was hibernated (WI-912): its process stopped, the session
 /// did not end, and a wake continues this same row and log.
 pub const END_HIBERNATED: &str = "hibernated";
+/// The session was stopped on request (WI-913): killed through the engine's
+/// kill route or vogt's `session.stop`, whatever its exit code.
+pub const END_STOPPED: &str = "stopped";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {

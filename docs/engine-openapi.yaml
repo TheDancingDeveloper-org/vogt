@@ -482,11 +482,22 @@ paths:
       tags: [sessions]
       summary: SIGKILL the child; the session stays listed and readable.
       description: >-
-        The session then reads `alive` false and `activity` `errored` (a
-        signal is a non-zero exit). Use `DELETE` to forget it. A hibernated
-        session has no process: killing it forgets it, record and all.
+        The stop is recorded first, with the optional `reason` and `by`.
+        The session then reads `alive` false and `activity` `stopped`, with
+        `stop` on its summary: a requested stop is not a crash (WI-913). Use
+        `DELETE` to forget it. A hibernated session has no process: killing
+        it forgets it, record and all.
       operationId: killSession
       x-capability: sessions
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, description: Why; at most 500 characters are kept. }
+                by: { type: string, description: Who asked; vogt-core sends the caller's identity. }
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -603,7 +614,7 @@ components:
         error: { type: string }
     ActivityState:
       type: string
-      enum: [running, idle, waiting-for-input, awaiting-approval, exited, errored, hibernated]
+      enum: [running, idle, waiting-for-input, awaiting-approval, exited, errored, hibernated, stopped]
       description: >-
         `hibernated`: the process tree was stopped to free memory, and the
         session is kept so it can be woken (`POST /api/sessions/{id}/wake`).
