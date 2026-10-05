@@ -8779,7 +8779,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
     // A tool call in progress: a shell below the agent.
     let tooling = "#!/bin/sh\nsh -c 'sleep 300' &\nprintf 'helper=[%s]\\n> ' \"$!\"\nwait\n";
     // A turn that keeps printing.
-    let busy = "#!/bin/sh\nprintf 'helper=[0]\\n'\nwhile :; do printf .; sleep 0.05; done\n";
+    let busy = "#!/bin/sh\nprintf 'helper=[0]\\n'\nwhile :; do printf .; sleep 0.02; done\n";
     let ids = start_stub_agents(
         &client,
         &base,
@@ -8810,13 +8810,29 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
         .unwrap()
         .status();
     assert_eq!(ok, StatusCode::OK);
-    // Long enough for the quiet ones to settle at idle (200 ms here).
-    tokio::time::sleep(Duration::from_millis(900)).await;
-
     let why = |id: &str| {
         let session = state.sessions.get(id.parse().unwrap()).unwrap();
         exemption(&state.sessions, &session)
     };
+    // Until the quiet ones settle at idle (200 ms here), the quiet one has
+    // been quiet past the policy's 500 ms, and the busy one is seen running; a loaded runner can take longer than any fixed sleep.
+    let settled = || {
+        why(&quiet_id).is_none()
+            && state
+                .sessions
+                .get(quiet_id.parse().unwrap())
+                .unwrap()
+                .quiet_for()
+                >= Duration::from_millis(700)
+            && why(&pinned).as_deref() == Some("pinned awake")
+            && why(&blocked).as_deref() == Some("blocked on a person")
+            && why(&tooling_id).is_some_and(|w| w.contains("shell is running below the agent"))
+            && why(&busy_id).as_deref() == Some("a turn is running")
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !settled() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     assert_eq!(why(&quiet_id), None);
     assert_eq!(why(&pinned).as_deref(), Some("pinned awake"));
     assert_eq!(why(&blocked).as_deref(), Some("blocked on a person"));
@@ -9100,11 +9116,20 @@ async fn a_sessions_process_tree_is_measured_and_rides_on_its_summary() {
         &[("heavy", script)],
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
     let mut events = state.bus.subscribe();
     let mut sampler = Sampler::new(Some(16 << 20));
-    sampler.run_once(&state).await;
+    // Until the child has allocated its 32 MiB; a loaded runner is slow to
+    // start python.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        sampler.run_once(&state).await;
+        let session = state.sessions.get(ids[0].parse().unwrap()).unwrap();
+        let rss = session.summary().resources.map_or(0, |r| r.rss_bytes);
+        if rss >= 32 << 20 || std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 
     let listed: Vec<Value> = client
         .get(format!("{base}/api/sessions"))
