@@ -41,7 +41,7 @@ Before changing files here:
 | CI pipeline | `.github/workflows/ci.yml` (fmt/clippy/test, PWA typecheck and tests, Android shell) and `.github/workflows/build.yml` (the merged image, cosign-signed, to GHCR). |
 | Image | built from `engine/Dockerfile` with the repository root as context; `engine/Dockerfile.pod` is the toolchain base it starts from (`docs/ENGINE.md` §3) |
 | Runtime port(s) | `8910/tcp` (HTTP API + WebSocket attach + SSE; PWA served from same port; `/api/vogt` and `/mcp` proxied to the core) |
-| DB / state | No database. Sessions in-memory; agent tasks, push subscriptions and the assistant log persisted under `state_dir` (JSON and SQLite). |
+| DB / state | No database. Live sessions in memory, each with a hibernation record (`state_dir/sessions/<id>.json`, no secrets) that lets it be hibernated and survive a restart (`docs/ENGINE.md`, Hibernation); agent tasks, push subscriptions and the assistant log persisted under `state_dir` (JSON and SQLite). |
 | Secrets used at runtime | `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — the **stack secret** the core adopted at `init`: the engine recognises it as the core's own identity (`vogt-core`), follows the core's event feed with it, and lends it to the break-glass token; optional `ENGINE_TOKEN`, a static **break-glass** bearer with full capability and no actor of its own; optional `ENGINE_FCM_SERVICE_ACCOUNT_JSON` for native FCM; optional `ENGINE_ASSISTANT_API_KEY` and the speech keys (`docs/ENGINE.md` §6). The engine holds no token table: every other bearer is a core token it resolves by asking the core (`engine/server/src/core_auth.rs`). VAPID keys are generated and persisted under `state_dir`. |
 
 ## 2. Architecture
