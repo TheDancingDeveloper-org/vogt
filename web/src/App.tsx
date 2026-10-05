@@ -70,6 +70,7 @@ import {
   openGitTab,
   openGuiTab,
   openHistoryTab,
+  openOversightTab,
   openTasksTab,
   openTerminalTab,
   renameTab,
@@ -159,6 +160,7 @@ const Projects = lazy(() => import("./Projects"));
 const WorkItemDetail = lazy(() => import("./WorkItemDetail"));
 const SetupSteps = lazy(() => import("./SetupSteps"));
 const History = lazy(() => import("./History"));
+const Oversight = lazy(() => import("./Oversight"));
 const KeyboardShortcuts = lazy(() => import("./KeyboardShortcuts"));
 const Settings = lazy(() => import("./Settings"));
 const TemplateSelector = lazy(() => import("./TemplateSelector"));
@@ -452,6 +454,7 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "git") return `/g/${encodeURIComponent(tab.repo)}`;
   if (tab.kind === "gui") return "/gui";
   if (tab.kind === "history") return "/history";
+  if (tab.kind === "oversight") return "/oversight";
   if (tab.kind === "workitem") return `/w/${encodeURIComponent(tab.ref)}`;
   if (tab.kind === "assistant") return "/assistant";
   return "/tasks";
@@ -941,6 +944,8 @@ const App: Component = () => {
       openGitTab("");
     } else if (path === "/gui") {
       if (guiEnabled()) openGuiTab();
+    } else if (path === "/oversight") {
+      openOversightTab();
     } else if (path === "/history") {
       openHistoryTab();
     } else if (path === "/tasks") {
@@ -978,6 +983,7 @@ const App: Component = () => {
         "/sessions": "Sessions",
         "/g": "Git",
         "/history": "History",
+        "/oversight": "Oversight",
         "/tasks": "Tasks",
         "/gui": "GUI stream",
         "/assistant": "Assistant",
@@ -1336,6 +1342,7 @@ const App: Component = () => {
         `git:${decodeURIComponent(params.path ?? "")}` === tabId) ||
       (location.pathname === "/gui" && tabId === "gui") ||
       (location.pathname === "/history" && tabId === "history") ||
+      (location.pathname === "/oversight" && tabId === "oversight") ||
       (location.pathname === "/tasks" && tabId === "tasks") ||
       ((location.pathname === "/assistant" || location.pathname.startsWith("/assistant/")) &&
         tabId === "assistant") ||
@@ -1590,10 +1597,11 @@ const App: Component = () => {
               <span class="places-group-label">Machine</span>
               <a
                 class={currentPlace("sessions") ? "active" : ""}
-                aria-current={currentPlace("sessions") && !["git", "history", "tasks", "gui", "assistant"].includes(currentTool() ?? "") ? "page" : undefined}
+                aria-current={currentPlace("sessions") && !["git", "history", "oversight", "tasks", "gui", "assistant"].includes(currentTool() ?? "") ? "page" : undefined}
                 href="#/sessions"
               ><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
               <a class={isCurrentTool(routeOutcome(), "git") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "git") ? "page" : undefined} href="#/g">Git</a>
+              <a class={isCurrentTool(routeOutcome(), "oversight") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "oversight") ? "page" : undefined} href="#/oversight">Oversight</a>
               <a class={isCurrentTool(routeOutcome(), "history") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "history") ? "page" : undefined} href="#/history">History</a>
               <a class={isCurrentTool(routeOutcome(), "tasks") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "tasks") ? "page" : undefined} href="#/tasks">Tasks</a>
               <Show when={guiEnabled()}><a class={isCurrentTool(routeOutcome(), "gui") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "gui") ? "page" : undefined} href="#/gui">GUI stream</a></Show>
@@ -2145,6 +2153,15 @@ const App: Component = () => {
                     <GuiTab
                       streamUrl={publicCfg()?.gui_stream_url ?? null}
                       onError={(msg) => showToast(msg, { kind: "error" })}
+                    />
+                  </Show>
+                  <Show when={t.kind === "oversight"}>
+                    <Oversight
+                      onError={(msg) => showToast(msg, { kind: "error" })}
+                      onOpenSession={(sessionId, label) => {
+                        openTerminalTab(sessionId, label);
+                        navigate(`/t/${sessionId}`);
+                      }}
                     />
                   </Show>
                   <Show when={t.kind === "history"}>

@@ -8,6 +8,7 @@ export type Tab =
   | { id: string; kind: "git"; repo: string; label: string }
   | { id: string; kind: "gui"; label: string }
   | { id: string; kind: "history"; label: string }
+  | { id: string; kind: "oversight"; label: string }
   | { id: string; kind: "tasks"; label: string; dirty?: boolean }
   | { id: string; kind: "assistant"; label: string }
   | { id: string; kind: "workitem"; ref: string; label: string };
@@ -82,6 +83,7 @@ function normalizeTab(value: unknown): Tab | null {
       };
     case "gui":
     case "history":
+    case "oversight":
     case "assistant":
       if (typeof raw.label !== "string") return null;
       return {
@@ -347,6 +349,25 @@ export function openGitTab(repo: string): Tab {
   }
   const label = `git: ${repo.split("/").pop() || repo || "(root)"}`;
   const tab: Tab = { id, kind: "git", repo, label };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+export function openOversightTab(): Tab {
+  const id = "oversight";
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "oversight", label: "Oversight" };
   setStore(
     produce((s) => {
       s.tabs.push(tab);

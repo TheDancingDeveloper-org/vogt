@@ -180,6 +180,16 @@ shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
 `session.blocked` entry and a push. `session.start` takes `autopilot` (see
 [`AGENT_GUIDE.md`](AGENT_GUIDE.md)).
 
+`session.sweep` (`read`) is the oversight table, built in one call. It has a
+row for every live and hibernated session, ordered by who needs attention:
+`approval`, `blocked`, `waiting` (at its prompt, wanting the next
+instruction), `stalled` (running, but silent for `stall_after_minutes`,
+default 10), `running`, `idle`, `hibernated`. Each row carries the reason,
+the full `session.list` row (turn timing, `last_reply_excerpt`, `blocked`,
+`approval`) and the last `screen_lines` lines of its screen. `counts` gives
+the rows per class and `needs_you`. Use it instead of a `session_screen` per
+session.
+
 `session.hibernate` (`work.write`, audited) stops a session's processes to
 free their memory and revokes its token. The session stays listed with
 `activity: "hibernated"`, a `hibernation` (`at`, `trigger`, `reason`,

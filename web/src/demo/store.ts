@@ -442,6 +442,22 @@ export class DemoStore {
     if (path === "/sessions" && method === "GET") return json({ sessions: this.sessionsForVogt(), engine: "browser-simulated terminal sessions" });
     if (path === "/sessions" && method === "POST") { const id = `demo-new-${this.state.next_id++}`; const row = { id, name: String(body.name ?? "Demo work session"), activity: "idle", exit_code: null, scrollback_bytes: 131072, cwd: String(body.cwd ?? "/Working/orbit"), created_at: this.now(), activity_changed_at: this.now() }; this.state.sessions[id] = row; this.audit("session.start", "session", id, String(body.reason)); this.changed("session.started", "session", id); return json({ session: this.sessionsForVogt().find((session) => session.engine_session_id === id) }); }
     if (path === "/sessions/stop") { const row = this.state.sessions[String(body.id)]; if (row) row.exit_code = 0; this.audit("session.stop", "session", String(body.id), String(body.reason)); this.changed("session.stopped", "session", String(body.id)); return json({ session: this.sessionsForVogt().find((session) => session.engine_session_id === body.id) }); }
+    if (path === "/sessions/sweep") {
+      // The same order and reasons the core gives, over the simulated sessions.
+      const verdict = (activity: string, alive: boolean): [string, string] =>
+        !alive ? ["exited", "its process ended"]
+          : activity === "awaiting-approval" ? ["approval", "showing a permission dialog"]
+            : activity === "waiting-for-input" ? ["waiting", "at its prompt, waiting for the next instruction"]
+              : activity === "running" ? ["running", "working"] : ["idle", "resting"];
+      const order = ["approval", "blocked", "waiting", "stalled", "running", "idle", "hibernated", "exited"];
+      const rows = this.sessionsForVogt().filter((session) => session.alive).map((session) => {
+        const [attention, attention_reason] = verdict(String(session.activity), Boolean(session.alive));
+        return { attention, attention_reason, session, screen_tail: ["(simulated terminal)"], ready: attention === "waiting" };
+      }).sort((a, b) => order.indexOf(a.attention) - order.indexOf(b.attention));
+      const counts: Record<string, number> = { total: rows.length, needs_you: rows.filter((row) => ["approval", "blocked", "waiting"].includes(row.attention)).length };
+      for (const row of rows) counts[row.attention] = (counts[row.attention] ?? 0) + 1;
+      return json({ rows, counts, swept_at: this.now(), engine: null });
+    }
     if (["/sessions/hibernate", "/sessions/wake", "/sessions/keep-awake"].includes(path)) return refusal("The demo's terminals are simulated in the browser: there is no process to hibernate or wake.");
     return json({ error: { code: "demo.unhandled", message: `No demo responder for ${method} ${path}` } }, { status: 404 });
   }

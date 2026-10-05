@@ -8998,3 +8998,81 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         "{woken:?}"
     );
 }
+
+#[tokio::test]
+async fn the_sweep_returns_every_session_with_its_screen_tail_in_one_call() {
+    let (tmp, cfg, _stub) = hibernation_sandbox();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let quiet = "#!/bin/sh\nsleep 300 &\nprintf 'line one\\n\\nhelper=[%s]\\n> ' \"$!\"\nwait\n";
+    let ids = start_stub_agents(
+        &client,
+        &base,
+        &tmp.path().join("agents"),
+        &[("awake", quiet), ("asleep", quiet)],
+    )
+    .await;
+    client
+        .post(format!("{base}/api/sessions/{}/hibernate", ids[1]))
+        .send()
+        .await
+        .unwrap();
+    let ended: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "ended", "command": ["/bin/sh", "-c", "true"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let rows: Vec<Value> = client
+        .get(format!("{base}/api/sessions/sweep?screen_lines=2"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids_seen: Vec<&str> = rows
+        .iter()
+        .map(|r| r["summary"]["id"].as_str().unwrap())
+        .collect();
+    assert!(ids_seen.contains(&ids[0].as_str()) && ids_seen.contains(&ids[1].as_str()));
+    assert!(
+        !ids_seen.contains(&ended["id"].as_str().unwrap()),
+        "exited is left out"
+    );
+    for row in &rows {
+        let tail: Vec<&str> = row["screen_tail"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l.as_str().unwrap())
+            .collect();
+        assert_eq!(tail.len(), 2, "{row}");
+        assert!(
+            tail[0].starts_with("helper=["),
+            "blank lines skipped: {tail:?}"
+        );
+    }
+    let asleep = rows
+        .iter()
+        .find(|r| r["summary"]["id"] == ids[1].as_str())
+        .unwrap();
+    assert_eq!(asleep["summary"]["activity"], "hibernated");
+    assert_eq!(
+        client
+            .get(format!("{base}/api/sessions/sweep?screen_lines=41"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}

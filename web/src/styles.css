@@ -11793,3 +11793,97 @@ a.vogt-projects-tag:hover {
   .files-place .file-tree-more-actions button { min-height: 40px; font-size: 13px; }
   .files-place .file-tree-more-actions { min-width: 160px; }
 }
+
+/* ── Oversight board (WI-915) ─────────────────────────────────────────── */
+.oversight {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  overflow: auto;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+}
+.oversight-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.oversight-header h2 { margin: 0; }
+.oversight-summary { margin: 4px 0 0; color: var(--fg-muted); }
+.oversight-problem { color: var(--activity-errored); margin: 0; }
+.oversight-empty { color: var(--fg-muted); margin: 0; }
+.oversight-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.oversight-row {
+  border: 1px solid var(--bg-tab);
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-elev);
+  min-width: 0;
+}
+.oversight-row--approval,
+.oversight-row--blocked,
+.oversight-row--waiting { border-left-color: var(--activity-waiting); }
+.oversight-row--stalled { border-left-color: var(--activity-errored); }
+.oversight-row--running { border-left-color: var(--activity-running); }
+.oversight-row--idle,
+.oversight-row--hibernated,
+.oversight-row--exited { border-left-color: var(--activity-idle); }
+.oversight-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.oversight-badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg-tab);
+}
+.oversight-name {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--fg);
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.oversight-name:hover { text-decoration: underline; }
+.oversight-ref { font-size: 12px; }
+.oversight-when { margin-left: auto; font-size: 12px; color: var(--fg-muted); }
+.oversight-reason { margin: 6px 0 0; }
+.oversight-excerpt {
+  margin: 6px 0 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.oversight-screen {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-x: auto;
+  max-width: 100%;
+  white-space: pre;
+}

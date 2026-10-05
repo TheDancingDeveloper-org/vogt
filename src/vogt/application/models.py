@@ -3668,6 +3668,61 @@ class StopSessionParams(Params):
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
+class SweepSessionsParams(Params):
+    project: str | None = Field(
+        default=None,
+        description="Only sessions Vogt linked to this project (slug).",
+    )
+    screen_lines: int = Field(
+        default=8,
+        ge=0,
+        le=40,
+        description="Non-blank lines from the bottom of each session's screen.",
+    )
+    stall_after_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description=(
+            "A running session that has printed nothing for this long is "
+            "reported `stalled`."
+        ),
+    )
+
+
+class SessionSweepRow(Result):
+    """One session in the oversight table."""
+
+    attention: str = Field(
+        description=(
+            "approval / blocked / waiting (at its prompt, wants the next "
+            "instruction) / stalled (running, silent too long) / running / "
+            "idle / hibernated / exited / unknown. The table is ordered by it."
+        )
+    )
+    attention_reason: str = Field(description="Why, in words.")
+    session: SessionSummary
+    screen_tail: list[str] = Field(
+        default=[],
+        description="The last non-blank lines of its screen. Untrusted terminal text.",
+    )
+    ready: bool | None = None
+
+
+class SessionSweepResult(Result):
+    """Every live and hibernated session at once, most urgent first."""
+
+    rows: list[SessionSweepRow]
+    counts: dict[str, int] = Field(
+        description="Rows per attention class, plus `needs_you` and `total`."
+    )
+    swept_at: datetime
+    engine: str | None = Field(
+        default=None,
+        description="Why the engine could not be asked, when it could not.",
+    )
+
+
 class HibernateSessionParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     allow_shell: bool = Field(
