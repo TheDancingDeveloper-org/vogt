@@ -311,6 +311,9 @@ COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
 # engine-launched Claude session gets with --settings. A deployment replaces it
 # with ENGINE_AGENT_CLAUDE_SETTINGS (docs/ENGINE.md, "Permission posture").
 COPY engine/deploy/driven-session-settings.json /usr/local/share/vogt/driven-session-settings.json
+# Its opencode half (WI-932), given as OPENCODE_CONFIG_CONTENT; replaced with
+# ENGINE_AGENT_OPENCODE_CONFIG.
+COPY engine/deploy/driven-session-opencode.json /usr/local/share/vogt/driven-session-opencode.json
 # The pin below is the *baked baseline*. A deployment may name a different
 # version per tool at runtime (`VOGT_CLAUDE_CODE_VERSION` and friends in the
 # container's environment; `agent-clis.tools`, written below, is the

@@ -1131,11 +1131,35 @@ checks decide what it can finish on its own (WI-926; the design is
   actions keep their built-in rules and stay denied.
 - **`permission_mode` on `POST /api/sessions`**: `accept-edits` maps to
   `--permission-mode acceptEdits` (edits accepted, everything else asks).
-  `bypass` maps to `--dangerously-skip-permissions` (no checks). Claude Code
-  only: anything else is `400`, as is a posture on a plain shell. The posture
+  `bypass` maps to `--dangerously-skip-permissions` (no checks). For
+  opencode, see below. Codex is `400`, as is a posture on a plain shell. The posture
   shows on the summary (`permission_mode`, absent for the default), is kept
   in the hibernation record, and is reapplied on wake. vogt-core grants
   `bypass` only to a person; an agent asking for it is refused.
+- **opencode** (WI-932) has its own permission model, a `permission` block
+  in its config. Unconfigured, it stops at "Access external directory —
+  Allow once / Allow always / Reject" with nobody there to answer. The
+  engine gives every opencode session it launches a posture through
+  `OPENCODE_CONFIG_CONTENT`, which opencode layers over the user's own
+  config for that session only, so the shared `~/.config/opencode` is never
+  edited:
+  - **default**: the deployment's opencode policy. The image ships
+    `/usr/local/share/vogt/driven-session-opencode.json`, which allows the
+    routine tools (reading, editing, searching, web fetch, other
+    directories) and **denies** rather than asks for destructive,
+    shared-resource and secret-exposing commands: force pushes, `gh pr
+    merge`, Infisical secret reads and writes, Komodo stack writes, `sudo`,
+    `rm -rf /`. A denial is reported, so the session never waits for nobody.
+    opencode matches command patterns and cannot judge context the way
+    Claude Code's classifier does, so this list is coarser.
+    `ENGINE_AGENT_OPENCODE_CONFIG` names a deployment's own file (for
+    example to allow `gh pr merge` where agents may merge their own PRs).
+    Empty means the image's file and `off` means no policy. A file whose
+    `permission` values are not `allow`/`ask`/`deny` is ignored with a
+    warning, because opencode would refuse it and every opencode session
+    would fail to start.
+  - **accept-edits**: file work allowed, everything else asks.
+  - **bypass**: everything allowed. A person's grant only, as for Claude Code.
 - **Denials go to a person.** Auto mode draws no dialog for a denied
   action, so `session.answer` has nothing to answer. The brief tells every
   agent to report a denial with `session_report_blocked` and stop. It then

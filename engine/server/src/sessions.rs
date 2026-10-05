@@ -242,6 +242,7 @@ impl SessionRegistry {
                 session_id: Some(id),
                 permission_mode: spec.permission_mode.as_deref(),
                 settings_file: self.cfg.agent_onboarding.settings_file.as_deref(),
+                opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
             },
         )?;
         if let Some(rewritten) = launch.command {
