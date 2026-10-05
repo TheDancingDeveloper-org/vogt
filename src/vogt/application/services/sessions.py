@@ -132,6 +132,12 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
         resume=params.resume,
     )
 
+    # A resumed conversation is started by the engine in the directory its
+    # transcript records, which may be below or beside the project root
+    # (WI-871). Record where it actually runs; every other session runs at
+    # the registry's root, which is what the engine reports back anyway.
+    cwd = started.cwd if params.resume and started.cwd else subject.cwd
+
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
         del actor
         now = ctx.clock()
@@ -161,7 +167,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             project_id=subject.project_id,
             work_item_id=subject.work_item_id,
             actor_id=holder.id,
-            cwd=subject.cwd,
+            cwd=cwd,
             template=params.template,
             model=params.model,
             effort=params.effort,
@@ -198,7 +204,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 "work_item": subject.work_item_ref,
                 "branch": declared_branch,
                 "project": subject.project_slug,
-                "cwd": subject.cwd,
+                "cwd": cwd,
                 # Named in the audit summary because a spoken request that
                 # resolved to the scratch project asked for neither, and a row
                 # saying only which project it opened in would read as though

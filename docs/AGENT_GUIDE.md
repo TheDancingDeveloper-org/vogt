@@ -229,7 +229,12 @@ The recipe is **start with a task → wait until ready → read → answer → s
    task goes into the brief as its `## Task` section, and the agent starts on a
    first prompt telling it to read the brief and carry the task out. You do not
    type the task in. Without `template` you get a plain shell, which does
-   nothing until typed into. `resume` continues an earlier conversation.
+   nothing until typed into. `resume` continues an earlier conversation, and
+   the session starts in the directory that conversation ran in (from its
+   transcript), so give the project it belongs to or any project — the
+   directory follows the conversation. If your `session_start` tool has no
+   `resume` parameter, your MCP client is holding a tool list from an older
+   server: reconnect it (`/mcp` in Claude Code) rather than working around it.
 2. **Wait until ready.** Call `session_screen` every second or two until
    `ready` is true: the program is at its prompt. Stop waiting if `alive` turns
    false (`activity` `exited` or `errored`).
@@ -297,7 +302,10 @@ write agent settings.
 
 **HTTP fallback.** Every session has `VOGT_ENGINE_URL` (the engine) and, when
 Vogt started it, `VOGT_HTTP_TOKEN` (which carries the engine's `sessions`
-capability). The engine's session routes take only the UUID and are specified
+and `vogt-write` capabilities). A `403 … lacks the VogtWrite capability` on a
+Vogt write names the identity the token resolved to: if it is the stack secret
+or a token without `work.write`, the variable holds the wrong credential — use
+the session's own token or the MCP tools. The engine's session routes take only the UUID and are specified
 in [`engine-openapi.yaml`](engine-openapi.yaml); the same recipe over `curl` is
 in [`ENGINE.md`, "Driving a session"](ENGINE.md#driving-a-session). Input sent
 that way is not in Vogt's audit log, so prefer the tools.

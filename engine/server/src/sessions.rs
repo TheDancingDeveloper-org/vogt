@@ -128,6 +128,16 @@ impl SessionRegistry {
                 }
             }
         }
+        // A resumed conversation starts where it ran, not where the caller
+        // would have opened a fresh session: `claude --resume <id>` only finds
+        // a conversation from the directory its transcript is keyed under,
+        // which is often not a registered project root (`~/Working`, a
+        // worktree) (WI-871). The transcript's own record of that directory
+        // wins when it is inside the workspace; otherwise the caller's cwd is
+        // kept and the CLI reports the conversation as not found.
+        if let Some(dir) = self.resume_cwd(&spec) {
+            spec.cwd = Some(dir);
+        }
         // Resolve client-supplied cwd against workspace_root. Reject anything
         // that escapes the workspace via `..` so a stray API call can't spawn
         // a shell with cwd=/etc.
@@ -285,6 +295,35 @@ impl SessionRegistry {
             name: session.name(),
         });
         Ok(session)
+    }
+
+    /// The workspace directory a resumed agent conversation ran in, read from
+    /// its transcript under `$HOME`, or `None` when there is no resume, the
+    /// command is not an agent CLI with readable transcripts, the transcript
+    /// cannot be found, or its directory is not inside the workspace.
+    fn resume_cwd(&self, spec: &SessionSpec) -> Option<String> {
+        let id = spec.resume.as_deref().map(str::trim)?;
+        // Used as a file name below, so only a well-formed id is looked up;
+        // a malformed one is refused with its reason by `agent_cli::launch`.
+        if !agent_cli::is_conversation_id(id) {
+            return None;
+        }
+        let agent = agent_cli::agent_name(spec.command.as_deref()?)?;
+        let home = std::path::PathBuf::from(std::env::var_os("HOME")?);
+        let dir = crate::transcripts::conversation_cwd(&agent, id, &home)?;
+        let dir = dir.to_str()?;
+        match workspace_path::resolve_existing_allow_absolute(&self.cfg.workspace_root, dir) {
+            Ok(canon) => Some(canon.to_string_lossy().into_owned()),
+            Err(e) => {
+                tracing::info!(
+                    resume = %id,
+                    transcript_cwd = %dir,
+                    error = %e,
+                    "resumed conversation's directory is not usable; keeping the requested cwd"
+                );
+                None
+            }
+        }
     }
 
     /// Archive every live session to history before the process exits.

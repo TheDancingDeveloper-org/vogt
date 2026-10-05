@@ -77,6 +77,9 @@ class StandInEngine:
         #: When set, POST /api/sessions is refused with this reason (400),
         #: the way the engine refuses an effort with no agent CLI to take it.
         self.refuse_start: str | None = None
+        #: When set, a start that carries `resume` answers with this cwd — the
+        #: engine starting a resumed conversation where its transcript ran.
+        self.resume_cwd: str | None = None
 
     def __call__(
         self,
@@ -99,7 +102,11 @@ class StandInEngine:
                     "id": engine_id,
                     "name": payload.get("name", ""),
                     "activity": "running",
-                    "cwd": payload.get("cwd", ""),
+                    "cwd": (
+                        self.resume_cwd
+                        if self.resume_cwd and payload.get("resume")
+                        else payload.get("cwd", "")
+                    ),
                     "exit_code": None,
                 }
             ).encode()
@@ -888,6 +895,32 @@ def test_a_resume_reaches_the_engine_and_the_audit(
         if event.kind == "session.started"
     ]
     assert started[-1].summary["resume"] == conversation
+
+
+def test_a_resumed_session_records_where_the_engine_started_it(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-871: a resumed conversation runs in its transcript's directory.
+
+    The engine moves it there when the transcript records one inside the
+    workspace; Vogt records the directory it actually runs in, not the
+    project root it asked for.
+    """
+    engine.resume_cwd = "/srv/elsewhere/worktree"
+    result = start_session(
+        wired,
+        StartSessionParams(
+            work_item="WI-1",
+            template="claude",
+            resume="0f8fad5b-d9cb-469f-a165-70867728950e",
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["cwd"] == ROOT, "Vogt still asks for the project root"
+    assert result.session.cwd == "/srv/elsewhere/worktree"
+    # A fresh session is unaffected by the stand-in's override.
+    fresh = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    assert fresh.session.cwd == ROOT
 
 
 @pytest.mark.parametrize(

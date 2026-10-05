@@ -474,8 +474,15 @@ section that documents it.
   `502` an optional upstream did not answer, `503` the core could not be
   asked about a credential. The gate's refusals use the same shape:
   `unauthorized: no bearer token`, `unauthorized: the bearer token is not
-  valid here`, `forbidden: this credential lacks the <X> capability`, and
-  `vogt-core is unavailable, so this credential cannot be checked: <detail>`.
+  valid here`, `forbidden: <who the credential is>; it lacks the <X>
+  capability, which <scope> grants`, and `vogt-core is unavailable, so this
+  credential cannot be checked: <detail>`. The `403` names the identity the
+  bearer resolved to and its scopes, or says it is the stack secret — which
+  holds `sessions` but never `vogt-write`, so a process holding it can type
+  into sessions but cannot `POST /api/vogt/sessions`. A pod session's own
+  `VOGT_HTTP_TOKEN` is a core token with `agent_session_scopes` (by default
+  `work.write`, so `vogt-write`); a `403` on a Vogt write from inside a session
+  means the variable holds some other credential (WI-871).
 - A feature that is not provisioned answers `404` rather than `501` or `503`:
   the assistant with no API key. The feature is invisible rather than
   advertised-but-broken. The Vogt front
@@ -701,6 +708,17 @@ arguments of its own after `claude` is not pinned, because Claude Code refuses
 and OpenCode cannot be told an id at launch, so their conversation ids are
 not knowable to the engine; find them with `codex resume` (its picker) or
 `opencode session list` inside the pod.
+
+**Where a resumed conversation starts.** Claude Code and Codex key a
+conversation to the directory it ran in, and `claude --resume <id>` finds it
+only from there — often not a registered project root (a parent folder, a
+worktree). For `claude` and `codex`, the engine looks the id up in the
+transcript under `$HOME` (`~/.claude/projects/*/<id>.jsonl`, or
+`~/.codex/sessions/**/rollout-*-<id>.jsonl`), reads the `cwd` it records, and
+starts the session there instead of the requested `cwd` — but only when that
+directory exists inside `workspace_root`; otherwise the requested `cwd` is kept
+(`engine/server/src/transcripts.rs`). The session summary's `cwd` reports
+where it actually started, and vogt-core records that.
 
 The brief's text is not passed to the child. The engine writes it to
 `state_dir/agent-task-prompts/sessions/<session-id>.md` before the PTY is

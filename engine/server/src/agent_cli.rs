@@ -259,6 +259,22 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
     Ok(Launch { command, env })
 }
 
+/// The agent CLI a command runs (`claude`, `codex`, `opencode`), when it is
+/// one this engine knows, wrapped or not.
+pub fn agent_name(command: &[String]) -> Option<String> {
+    if command.is_empty() {
+        return None;
+    }
+    let (_, binary) = agent_binary(command);
+    KNOWN.contains(&binary.as_str()).then_some(binary)
+}
+
+/// Whether `value` is a well-formed conversation id (see
+/// [`validate_conversation_id`]), for callers that use one as a file name.
+pub fn is_conversation_id(value: &str) -> bool {
+    validate_conversation_id(value).is_ok()
+}
+
 fn trimmed(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|v| !v.is_empty())
 }

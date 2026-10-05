@@ -411,7 +411,7 @@ pub async fn require_bearer(
                 StatusCode::FORBIDDEN,
                 &request_id,
                 None,
-                &format!("forbidden: this credential lacks the {required:?} capability"),
+                &capability_refusal(&access, required),
             ));
         }
     }
@@ -601,6 +601,34 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     None
 }
 
+/// The 403 message for a credential that lacks `required`: which identity
+/// the credential resolved to, what it holds, and what would grant the
+/// capability. "lacks the VogtWrite capability" alone sent a driver looking
+/// for a missing grant on a token that was simply the wrong one (WI-871).
+pub fn capability_refusal(access: &AuthorizedIdentity, required: TokenCapability) -> String {
+    let who = if access.name == STACK_SECRET_NAME {
+        "this credential is the stack secret (vogt-core's own identity), which \
+         may drive sessions and read history but never writes to Vogt through \
+         the front door; use a core token instead (a session's own \
+         VOGT_HTTP_TOKEN, or one issued with `vogt token issue`)"
+            .to_string()
+    } else if access.scopes.is_empty() {
+        format!("this credential ({}) carries no core scopes", access.name)
+    } else {
+        format!(
+            "this credential resolves to {} with scopes [{}]",
+            access.name,
+            access.scopes.join(", ")
+        )
+    };
+    let grant = match required {
+        TokenCapability::GuiControl | TokenCapability::AgentClisWrite => "the admin scope",
+        TokenCapability::PushWrite => "any core scope (read or above)",
+        _ => "the work.write or project.write scope (or admin)",
+    };
+    format!("forbidden: {who}; it lacks the {required:?} capability, which {grant} grants")
+}
+
 /// A refusal with the one body shape every engine error has —
 /// `{"error": "<message>"}` — so a client reads a 401 from the gate the same
 /// way it reads one from a handler.
@@ -629,6 +657,40 @@ mod tests {
 
     fn scopes(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn identity(name: &str, scopes_held: &[&str]) -> AuthorizedIdentity {
+        AuthorizedIdentity {
+            name: name.to_string(),
+            capabilities: capabilities_for_scopes(&scopes(scopes_held)),
+            scopes: scopes(scopes_held),
+            core_bearer: None,
+            mutating_requests_per_minute: 60,
+        }
+    }
+
+    #[test]
+    fn a_capability_refusal_names_the_identity_and_the_grant() {
+        let reader = capability_refusal(
+            &identity("agent:vogt-sessions", &["read"]),
+            TokenCapability::VogtWrite,
+        );
+        assert!(reader.contains("agent:vogt-sessions"), "{reader}");
+        assert!(reader.contains("[read]"), "{reader}");
+        assert!(reader.contains("VogtWrite"), "{reader}");
+        assert!(reader.contains("work.write"), "{reader}");
+        // The stack secret is named as what it is, with the way forward.
+        let stack = capability_refusal(
+            &identity(STACK_SECRET_NAME, &[]),
+            TokenCapability::VogtWrite,
+        );
+        assert!(stack.contains("stack secret"), "{stack}");
+        assert!(stack.contains("VOGT_HTTP_TOKEN"), "{stack}");
+        let gui = capability_refusal(
+            &identity("human:ada", &["work.write"]),
+            TokenCapability::GuiControl,
+        );
+        assert!(gui.contains("admin scope"), "{gui}");
     }
 
     #[test]

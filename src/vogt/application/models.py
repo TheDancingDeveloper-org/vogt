@@ -3539,6 +3539,9 @@ class StartSessionParams(Params):
             "--session <id>`. A Claude Code session Vogt started fresh has "
             "the engine session id (`engine_session_id`) as its conversation "
             "id, so a session lost to a restart can be resumed by that. "
+            "The engine starts a resumed conversation in the directory its "
+            "transcript records (when inside the workspace), so one begun "
+            "under a worktree or a parent folder resumes from any project. "
             "Requires `template`; letters, digits and . _ - only, never a "
             "leading dash."
         ),
