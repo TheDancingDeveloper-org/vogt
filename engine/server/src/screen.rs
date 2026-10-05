@@ -196,6 +196,40 @@ pub async fn session_screen(
     })
 }
 
+/// Render the screen a hibernated session kept: `bytes` is the tail of its
+/// output when it stopped, `rows`×`cols` the size it had. Never `ready` —
+/// nothing is there to type into until it is woken.
+pub async fn kept_screen(
+    id: uuid::Uuid,
+    bytes: bytes::Bytes,
+    rows: u16,
+    cols: u16,
+    summary: vogt_engine_contract::SessionSummary,
+    scrollback_lines: usize,
+) -> Result<SessionScreen> {
+    let (rendered, scrollback) = tokio::task::spawn_blocking(move || {
+        render_with_scrollback(&bytes, rows, cols, scrollback_lines)
+    })
+    .await
+    .map_err(|e| ApiError::Internal(format!("render screen: {e}")))?;
+    Ok(SessionScreen {
+        id,
+        cols: rendered.cols,
+        rows: rendered.rows,
+        lines: rendered.lines,
+        cursor: rendered.cursor,
+        title: rendered.title,
+        activity: summary.activity,
+        alive: false,
+        ready: false,
+        scrollback,
+        turn_started_at: None,
+        last_output_at: None,
+        approval: None,
+        blocked: None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

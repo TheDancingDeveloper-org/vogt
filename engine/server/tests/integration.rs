@@ -8303,3 +8303,427 @@ async fn startup_closes_out_history_rows_left_unfinished_by_a_restart() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Hibernation (WI-912)
+// ---------------------------------------------------------------------------
+
+/// Poll a live session's scrollback until it holds every `expected` string.
+async fn live_output_containing(
+    client: &reqwest::Client,
+    base: &str,
+    id: &str,
+    expected: &[&str],
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let detail: SessionDetail = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let snapshot = base64::engine::general_purpose::STANDARD
+            .decode(detail.scrollback_base64.as_bytes())
+            .unwrap();
+        let printed = String::from_utf8_lossy(&snapshot).into_owned();
+        if expected.iter().all(|want| printed.contains(want)) {
+            return printed;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "session {id} never printed {expected:?}; got {printed:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A sandbox whose `bin/claude` stands in for Claude Code: it prints its
+/// arguments and two variables, starts a long-lived child of its own (an MCP
+/// server's stand-in) and reports its pid, then waits at a prompt.
+fn hibernation_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("claude");
+    std::fs::write(
+        &stub,
+        "#!/bin/sh\nfor a in \"$@\"; do printf 'arg=[%s]\\n' \"$a\"; done\n\
+         printf 'token=[%s] keep=[%s]\\n' \"$VOGT_HTTP_TOKEN\" \"$KEEP\"\n\
+         sleep 300 &\nprintf 'helper=[%s]\\n' \"$!\"\nprintf '> '\nwait\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    (tmp, cfg, stub)
+}
+
+fn pid_alive(pid: i32) -> bool {
+    // A zombie still answers kill(0); count it as gone.
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    match stat.rfind(')') {
+        Some(at) => !stat[at + 2..].starts_with('Z'),
+        None => false,
+    }
+}
+
+fn printed_value(printed: &str, key: &str) -> String {
+    let start = printed.rfind(&format!("{key}=[")).unwrap() + key.len() + 2;
+    let end = start + printed[start..].find(']').unwrap();
+    printed[start..end].to_string()
+}
+
+#[tokio::test]
+async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversation() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    let state_dir = cfg.state_dir.clone();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "sleepy agent",
+            "prompt": "## Task\n\nDo the thing.\n",
+            "command": [stub.to_string_lossy()],
+            "env": [["VOGT_HTTP_TOKEN", "first-secret"], ["KEEP", "kept"]],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["conversation"]["agent"], "claude");
+    assert_eq!(created["conversation"]["id"], id.as_str());
+    let printed = live_output_containing(&client, &base, &id, &["helper=[", "> "]).await;
+    assert!(
+        printed.contains(&format!("arg=[--session-id]\r\narg=[{id}]")),
+        "{printed:?}"
+    );
+    let helper: i32 = printed_value(&printed, "helper").parse().unwrap();
+    assert!(pid_alive(helper));
+
+    // The record exists from the start, and holds no secret.
+    let record_path = state_dir.join("sessions").join(format!("{id}.json"));
+    let record = std::fs::read_to_string(&record_path).unwrap();
+    assert!(!record.contains("first-secret"), "{record}");
+    assert!(record.contains("\"KEEP\""), "{record}");
+
+    // Hibernate: the whole tree goes, the session stays listed.
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "reason": "idle for a test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+    let hibernated: Value = hibernated.json().await.unwrap();
+    assert_eq!(hibernated["activity"], "hibernated");
+    assert_eq!(hibernated["alive"], false);
+    assert_eq!(hibernated["hibernation"]["trigger"], "manual");
+    assert_eq!(hibernated["hibernation"]["reason"], "idle for a test");
+    assert_eq!(hibernated["hibernation"]["resumable"], true);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!pid_alive(helper), "the agent's child should be gone");
+
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
+    assert_eq!(row["activity"], "hibernated");
+
+    // Its last screen is still readable, and reading it does not wake it.
+    let screen: Value = client
+        .get(format!("{base}/api/sessions/{id}/screen"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(screen["activity"], "hibernated");
+    assert_eq!(screen["ready"], false);
+    let lines = screen["lines"].as_array().unwrap();
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.as_str().unwrap().contains("keep=[kept]")),
+        "{screen}"
+    );
+
+    // Input is refused with the way to wake it.
+    let typed = client
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(typed.status(), StatusCode::CONFLICT);
+    assert!(typed.text().await.unwrap().contains("wake"));
+
+    // Wake under the same id, resuming the conversation, with a new token,
+    // without being told to read the brief again.
+    let woken = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({ "env": [["VOGT_HTTP_TOKEN", "second-secret"]] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::OK);
+    let woken: Value = woken.json().await.unwrap();
+    assert_eq!(woken["id"], id.as_str());
+    assert_eq!(woken["alive"], true);
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    assert!(
+        printed.contains(&format!("arg=[--resume]\r\narg=[{id}]")),
+        "{printed:?}"
+    );
+    assert!(!printed.contains("--session-id"), "{printed:?}");
+    assert!(
+        !printed.contains("Vogt started this session"),
+        "{printed:?}"
+    );
+    assert!(
+        printed.contains("token=[second-secret] keep=[kept]"),
+        "{printed:?}"
+    );
+    let record = std::fs::read_to_string(&record_path).unwrap();
+    assert!(
+        !record.contains("second-secret") && !record.contains("\"hibernation\""),
+        "{record}"
+    );
+
+    // Killing it ends it: the record goes, so a restart will not bring it back.
+    let killed = client
+        .post(format!("{base}/api/sessions/{id}/kill"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(killed.status(), StatusCode::OK);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while record_path.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the record outlived the kill"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    drop(tmp);
+}
+
+#[tokio::test]
+async fn a_shell_hibernates_only_when_asked_and_wakes_fresh() {
+    let (_tmp, cfg, _stub) = hibernation_sandbox();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "plain shell" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert!(created.get("conversation").is_none());
+
+    let refused = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert!(refused.text().await.unwrap().contains("allow_shell"));
+
+    let hibernated: Value = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "allow_shell": true }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(hibernated["hibernation"]["resumable"], false);
+
+    let woken: Value = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(woken["alive"], true);
+    assert_eq!(woken["id"], id.as_str());
+}
+
+#[tokio::test]
+async fn sessions_survive_an_engine_restart_as_hibernated() {
+    let (_tmp, cfg, stub) = hibernation_sandbox();
+    let state_dir = cfg.state_dir.clone();
+
+    // A graceful shutdown hibernates every agent session it can.
+    let (base, state, guard) = boot_with_state(cfg.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "survivor", "command": [stub.to_string_lossy()] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    live_output_containing(&client, &base, &id, &["helper=["]).await;
+    state.sessions.hibernate_for_shutdown().await;
+    drop(guard);
+
+    // An engine that died without hibernating leaves its write-ahead record:
+    // stand one in for a session the engine never got to.
+    let lost = uuid::Uuid::new_v4();
+    std::fs::write(
+        state_dir.join("sessions").join(format!("{lost}.json")),
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "id": lost,
+            "name": "lost in a SIGKILL",
+            "created_at": "2026-10-05T00:00:00Z",
+            "command": [stub.to_string_lossy()],
+            "conversation": { "agent": "claude", "id": lost },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let find = |want: &str| {
+        listed
+            .iter()
+            .find(|s| s["id"] == want)
+            .unwrap_or_else(|| panic!("{want} not listed in {listed:?}"))
+            .clone()
+    };
+    let survivor = find(&id);
+    assert_eq!(survivor["activity"], "hibernated");
+    assert_eq!(survivor["hibernation"]["trigger"], "shutdown");
+    let recovered = find(&lost.to_string());
+    assert_eq!(recovered["hibernation"]["trigger"], "recovered");
+
+    let woken: Value = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(woken["alive"], true);
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    assert!(
+        printed.contains(&format!("arg=[--resume]\r\narg=[{id}]")),
+        "{printed:?}"
+    );
+}
+
+#[tokio::test]
+async fn attaching_to_a_hibernated_session_replays_its_screen_and_does_not_wake_it() {
+    let (_tmp, cfg, stub) = hibernation_sandbox();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "attach me", "command": [stub.to_string_lossy()] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    live_output_containing(&client, &base, &id, &["helper=["]).await;
+    let status = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, StatusCode::OK);
+
+    let ws_url = format!(
+        "{}/api/sessions/{id}/attach",
+        base.replacen("http://", "ws://", 1)
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.unwrap();
+    ws.send(Message::Text(
+        json!({ "type": "auth", "token": TEST_TOKEN })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let mut texts = Vec::new();
+    let mut bytes = Vec::new();
+    while let Some(Ok(msg)) = ws.next().await {
+        match msg {
+            Message::Text(t) => texts.push(t.to_string()),
+            Message::Binary(b) => bytes.extend_from_slice(&b),
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+    assert!(
+        texts.iter().any(|t| t.contains("snapshot-start")),
+        "{texts:?}"
+    );
+    assert!(
+        texts.last().unwrap().contains("\"hibernated\""),
+        "{texts:?}"
+    );
+    assert!(String::from_utf8_lossy(&bytes).contains("helper=["));
+
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
+    assert_eq!(row["activity"], "hibernated", "attach must not wake it");
+}

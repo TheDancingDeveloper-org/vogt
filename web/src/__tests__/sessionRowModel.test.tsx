@@ -62,6 +62,17 @@ describe("activity labels and classes", () => {
   });
 });
 
+describe("hibernated sessions", () => {
+  it("keep their own class and word, and sink below everything running", () => {
+    const asleep = session({ id: "h", activity: "hibernated" });
+    expect(activityClass(asleep)).toBe("hibernated");
+    expect(activityLabel("hibernated", null)).toBe("hibernated");
+    expect(attentionRank(asleep)).toBeGreaterThan(
+      attentionRank(session({ id: "i", activity: "idle" })),
+    );
+  });
+});
+
 describe("sessionStateWord", () => {
   const now = Date.parse("2026-08-18T08:01:00Z");
 

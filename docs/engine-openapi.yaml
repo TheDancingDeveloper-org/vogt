@@ -310,6 +310,98 @@ paths:
               schema: { $ref: "#/components/schemas/SessionSummary" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/hibernate:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Stop the session's process tree; keep it listed to wake later.
+      description: >-
+        Writes the session's last screen and its hibernation record (no
+        secrets), sends `SIGTERM` to the process group and every descendant,
+        and `SIGKILL`s what is left after 5 s. The session stays listed under
+        the same id with `activity` `hibernated` and a `hibernation` object,
+        and a `session-hibernated` event is published. Only a session with a
+        known agent conversation can be hibernated: a bare Claude Code launch
+        (its id is the session id) or any agent started with `resume`.
+        Otherwise this is `409` with the reason, unless `allow_shell` is set,
+        in which case the session wakes as a fresh process in the same
+        directory. Agent-task runs are never hibernated. Hibernating a
+        hibernated session returns it unchanged. Body optional.
+      operationId: hibernateSession
+      x-capability: sessions
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HibernateRequest" }
+      responses:
+        "200":
+          description: The hibernated session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/wake:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Start a hibernated session again, resuming its conversation.
+      description: >-
+        Respawns the session under the same id with the recorded command,
+        directory, model and environment, plus `resume` of its agent
+        conversation. It sends no brief prompt: the conversation has already
+        read its brief. `env` is set on top of the recorded environment.
+        The record holds no secrets, so this is how a caller gives the
+        session its credentials back. vogt-core's `session.wake` passes a
+        newly minted `VOGT_HTTP_TOKEN`. Waking a live session returns it
+        unchanged; a session that has exited is `409`. Publishes
+        `session-woken`. Body optional.
+      operationId: wakeSession
+      x-capability: sessions
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WakeRequest" }
+      responses:
+        "200":
+          description: The live session.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/keep-awake:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Pin a session awake, or unpin it.
+      description: >-
+        A pinned session (`keep_awake` on its summary) is never hibernated by
+        policy. Live or hibernated; the pin is kept in its record.
+      operationId: keepSessionAwake
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [keep_awake]
+              properties:
+                keep_awake: { type: boolean }
+      responses:
+        "200":
+          description: The session after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/sessions/{id}/kill:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -318,7 +410,8 @@ paths:
       summary: SIGKILL the child; the session stays listed and readable.
       description: >-
         The session then reads `alive` false and `activity` `errored` (a
-        signal is a non-zero exit). Use `DELETE` to forget it.
+        signal is a non-zero exit). Use `DELETE` to forget it. A hibernated
+        session has no process: killing it forgets it, record and all.
       operationId: killSession
       x-capability: sessions
       responses:
@@ -372,7 +465,9 @@ paths:
         chunks, `snapshot-done`, then live output. Client binary frames (and
         text frames that are not control messages) go to PTY stdin; control
         frames are `resize` and `ping`. Close codes: 4408 no auth frame within
-        five seconds, 4401 bad auth, 4404 no such session. The full protocol
+        five seconds, 4401 bad auth, 4404 no such session. A hibernated
+        session replays its kept output, sends `{"type":"hibernated"}` after
+        `snapshot-done` and closes with 1000; attaching never wakes it. The full protocol
         is in docs/ENGINE.md, "Attach protocol". Agents should not need it:
         `/screen` and `/input` cover driving.
       operationId: attachSession
@@ -414,6 +509,14 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: >-
+        The session is not in a state that allows this: for example, it is
+        hibernated (wake it first), it has exited, or it cannot be hibernated.
+        The error says which.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
   schemas:
     OkResponse:
       type: object
@@ -427,8 +530,12 @@ components:
         error: { type: string }
     ActivityState:
       type: string
-      enum: [running, idle, waiting-for-input, awaiting-approval, exited, errored]
+      enum: [running, idle, waiting-for-input, awaiting-approval, exited, errored, hibernated]
       description: >-
+        `hibernated`: the process tree was stopped to free memory, and the
+        session is kept so it can be woken (`POST /api/sessions/{id}/wake`).
+        `alive` is false. It is not finished: a wake resumes the same agent
+        conversation under the same id.
         `exited` (code 0) and `errored` (non-zero or a signal) are terminal
         facts: `alive` is false and the state never changes again. Three
         live states are a heuristic over the last ~512 visible bytes:
@@ -478,6 +585,55 @@ components:
           description: When the PTY last produced output; absent before the first byte.
         approval: { $ref: "#/components/schemas/ApprovalPrompt" }
         blocked: { $ref: "#/components/schemas/BlockedReport" }
+        conversation: { $ref: "#/components/schemas/AgentConversation" }
+        hibernation: { $ref: "#/components/schemas/Hibernation" }
+        keep_awake:
+          type: boolean
+          description: Pinned awake; absent when false.
+    AgentConversation:
+      type: object
+      required: [agent, id]
+      description: >-
+        The agent conversation a session runs, when the engine knows its id:
+        the id it was resumed from, or the session id itself for a fresh
+        Claude Code launch. It is what a wake resumes.
+      properties:
+        agent: { type: string, enum: [claude, codex, opencode] }
+        id: { type: string }
+    Hibernation:
+      type: object
+      required: [at, trigger, resumable]
+      properties:
+        at: { type: string, format: date-time }
+        trigger:
+          type: string
+          enum: [manual, idle, memory, shutdown, recovered]
+          description: >-
+            `shutdown`: hibernated as the engine stopped. `recovered`: found
+            at boot without a process, because the engine stopped without the
+            chance to hibernate it.
+        reason: { type: string }
+        resumable:
+          type: boolean
+          description: False for a shell hibernated with `allow_shell`, which wakes fresh.
+    HibernateRequest:
+      type: object
+      properties:
+        reason: { type: string, description: At most 500 characters are kept. }
+        allow_shell: { type: boolean, default: false }
+    WakeRequest:
+      type: object
+      properties:
+        env:
+          type: array
+          description: "`[name, value]` pairs set on top of the recorded environment (at most 64)."
+          items:
+            type: array
+            items: { type: string }
+            minItems: 2
+            maxItems: 2
+        cols: { type: integer }
+        rows: { type: integer }
     BlockedReport:
       type: object
       required: [reason, since]

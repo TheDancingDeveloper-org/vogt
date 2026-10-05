@@ -55,6 +55,9 @@ pub struct SessionMetadata {
 pub const END_EXITED: &str = "exited";
 pub const END_ENGINE_SHUTDOWN: &str = "engine-shutdown";
 pub const END_ENGINE_RESTART: &str = "engine-restart";
+/// The session was hibernated (WI-912): its process stopped, the session
+/// did not end, and a wake continues this same row and log.
+pub const END_HIBERNATED: &str = "hibernated";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
