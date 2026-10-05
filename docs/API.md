@@ -186,6 +186,14 @@ whole process tree, as the engine last sampled them, with `over_threshold`
 past the deployment's `ENGINE_SESSION_RSS_WARN`. `session.list` with
 `order: "rss"` lists the heaviest first.
 
+`session.answer` (`work.write`, audited) answers the dialog a session
+shows. The session must be `awaiting-approval`, which covers permission
+dialogs and the startup gates `folder-trust`, `external-imports` and
+`read-outside-cwd` (`approval.kind`). Choose by `option` (number) or
+`label`, with `expect_question` so a dialog that changed is refused. The
+engine moves the highlight itself and reports `dismissed`. `approval.options`
+on the list, screen and sweep rows lists the menu.
+
 `session.sweep` (`read`) is the oversight table, built in one call. It has a
 row for every live and hibernated session, ordered by who needs attention:
 `approval`, `blocked`, `waiting` (at its prompt, wanting the next

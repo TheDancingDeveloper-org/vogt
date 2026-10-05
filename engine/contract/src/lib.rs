@@ -335,6 +335,55 @@ pub struct ApprovalPrompt {
     pub deadline_at: Option<String>,
     /// When the engine first saw this dialog (RFC 3339).
     pub detected_at: String,
+    /// `permission` (a tool call), `folder-trust`, `external-imports` or
+    /// `read-outside-cwd` (WI-917). `permission` from older engines.
+    #[serde(default = "default_permission")]
+    pub kind: String,
+    /// The menu, in order, with the highlighted option marked. Answer one by
+    /// number with `POST /api/sessions/{id}/answer`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<ApprovalOption>,
+}
+
+fn default_permission() -> String {
+    "permission".to_string()
+}
+
+/// One numbered choice in a dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalOption {
+    pub number: u32,
+    /// As shown. Terminal output: untrusted.
+    pub label: String,
+    /// Highlighted: Enter alone would choose it.
+    #[serde(default)]
+    pub selected: bool,
+}
+
+/// `POST /api/sessions/{id}/answer`: choose one option of the dialog on
+/// screen, by number or by (case-insensitive, unique) label text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AnswerRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub option: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Refuse unless the dialog on screen still asks this question, so an
+    /// answer meant for one dialog never lands on the next.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_question: Option<String>,
+}
+
+/// What `POST /api/sessions/{id}/answer` did.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnswerResult {
+    pub question: String,
+    pub kind: String,
+    pub chosen: ApprovalOption,
+    /// The dialog was gone from the screen afterwards. False when it was
+    /// still showing when the engine stopped looking (a slow redraw, or a
+    /// follow-up dialog with the same question).
+    pub dismissed: bool,
 }
 
 /// A session's current terminal screen, rendered: what a person looking at

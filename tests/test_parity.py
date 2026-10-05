@@ -453,6 +453,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {"id": seen["session.start"]["session"]["engine_session_id"]},
     ),
     (
+        "session.answer",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "option": 1,
+            "reason": WHY,
+        },
+    ),
+    (
         "session.last_reply",
         lambda seen: {"id": seen["session.start"]["session"]["id"], "n": 2},
     ),
@@ -922,6 +930,15 @@ def _stand_in_engine() -> EngineClient:
         ):
             return 200, json.dumps(
                 {"summary": summary(path.rsplit("/", 1)[-1])}
+            ).encode()
+        if method == "POST" and path.endswith("/answer"):
+            return 200, json.dumps(
+                {
+                    "question": "Is this a project you trust?",
+                    "kind": "folder-trust",
+                    "chosen": {"number": 1, "label": "Yes", "selected": True},
+                    "dismissed": True,
+                }
             ).encode()
         if method == "POST" and url.endswith("/input"):
             return 200, b'{"ok":true}'

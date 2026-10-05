@@ -24,6 +24,7 @@ from vogt.application.models import (
     AgentCliListResult,
     AgentCliUpdateParams,
     AgentCliUpdateResult,
+    AnswerSessionParams,
     AuditListResult,
     AuthDecisionListParams,
     AuthDecisionListResult,
@@ -165,6 +166,7 @@ from vogt.application.models import (
     SearchOutputResult,
     ServeParams,
     ServeResult,
+    SessionAnswerResult,
     SessionBlockedResult,
     SessionInputParams,
     SessionInputResult,
@@ -1064,6 +1066,25 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.keep_session_awake,
             route=HttpRoute("POST", "/sessions/keep-awake"),
             cli=CliBinding(("session", "keep-awake")),
+        ),
+        Operation(
+            name="session.answer",
+            summary=(
+                "Answer the dialog a session shows (activity awaiting-approval) "
+                "by choice: `option` (its number) or `label` (unique text of "
+                "it). Works for permission dialogs and startup gates (folder "
+                "trust, external CLAUDE.md imports, reading outside the "
+                "working directory); the engine moves the highlight itself. "
+                "Pass expect_question = approval.question so a stale answer "
+                "is refused. Audited. Takes either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=AnswerSessionParams,
+            result_model=SessionAnswerResult,
+            handler=services.answer_session,
+            route=HttpRoute("POST", "/sessions/answer"),
+            cli=CliBinding(("session", "answer")),
         ),
         Operation(
             name="session.screen",

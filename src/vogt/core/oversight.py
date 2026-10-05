@@ -48,6 +48,14 @@ ORDER: dict[Attention, int] = {
 NEEDS_YOU: frozenset[Attention] = frozenset({"approval", "blocked", "waiting"})
 
 
+#: Startup gates an agent CLI stops at before any work (WI-917), as words.
+GATES: dict[str, str] = {
+    "folder-trust": "folder trust",
+    "external-imports": "external CLAUDE.md imports",
+    "read-outside-cwd": "read outside the working directory",
+}
+
+
 @dataclass(frozen=True)
 class Verdict:
     attention: Attention
@@ -61,6 +69,7 @@ def classify(
     ready: bool | None,
     approval_question: str | None,
     blocker: str | None,
+    approval_kind: str | None = None,
     last_output_at: datetime | None,
     now: datetime,
     stall_after: timedelta,
@@ -73,6 +82,11 @@ def classify(
     if not alive:
         return Verdict("exited", f"its process ended ({activity})")
     if approval_question or activity == "awaiting-approval":
+        gate = GATES.get(approval_kind or "")
+        if gate and approval_question:
+            return Verdict(
+                "approval", f"stopped at a startup gate ({gate}): {approval_question}"
+            )
         return Verdict(
             "approval",
             f"asking for approval: {approval_question}"

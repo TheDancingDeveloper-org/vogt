@@ -9208,3 +9208,121 @@ async fn a_lagging_event_stream_is_told_and_keeps_going() {
         "{status}"
     );
 }
+
+/// WI-917: a startup gate shows as `awaiting-approval` with its kind and
+/// options, and is answered by choice, not by counting arrow presses.
+#[tokio::test]
+async fn a_trust_gate_is_reported_with_its_options_and_answered_by_choice() {
+    let (tmp, cfg, _stub) = hibernation_sandbox();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // A menu that redraws its highlight on arrows and reports the choice.
+    let gate = tmp.path().join("gate.py");
+    std::fs::write(
+        &gate,
+        r#"import sys, termios, tty, os
+opts = ["Yes, I trust this folder", "No, exit"]
+sel = 0
+def draw():
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.write("Quick safety check: Is this a project you created or one you trust?\r\n\r\n")
+    for i, o in enumerate(opts):
+        sys.stdout.write(("❯ " if i == sel else "  ") + f"{i+1}. {o}\r\n")
+    sys.stdout.flush()
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+draw()
+buf = b""
+while True:
+    buf += os.read(fd, 16)
+    while buf:
+        if buf.startswith(b"\x1b[B"):
+            sel = min(sel + 1, len(opts) - 1); buf = buf[3:]; draw()
+        elif buf.startswith(b"\x1b[A"):
+            sel = max(sel - 1, 0); buf = buf[3:]; draw()
+        elif buf.startswith(b"\r"):
+            sys.stdout.write("\x1b[2J\x1b[H" + f"chose {sel+1}\r\n> ")
+            sys.stdout.flush()
+            os.read(fd, 1)
+            sys.exit(0)
+        elif buf.startswith(b"\x1b") and len(buf) < 3:
+            break
+        else:
+            buf = buf[1:]
+"#,
+    )
+    .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "gated", "command": ["python3", gate.to_string_lossy()] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // It reads as awaiting-approval, with the gate's kind and its menu.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let approval = loop {
+        let screen: Value = client
+            .get(format!("{base}/api/sessions/{id}/screen"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if screen["activity"] == "awaiting-approval" {
+            break screen["approval"].clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never awaiting-approval: {screen}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert_eq!(approval["kind"], "folder-trust", "{approval}");
+    assert_eq!(approval["options"][1]["label"], "No, exit");
+    assert_eq!(approval["options"][0]["selected"], true);
+
+    // A stale question is refused and nothing is typed.
+    let stale = client
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 2, "expect_question": "Do you want to proceed?" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+    // Answer by label: the engine moves down one and presses Enter.
+    let answered: Value = client
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "label": "no, exit" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(answered["chosen"]["number"], 2, "{answered}");
+    assert_eq!(answered["kind"], "folder-trust");
+    assert_eq!(answered["dismissed"], true, "{answered}");
+    live_output_containing(&client, &base, &id, &["chose 2"]).await;
+
+    let none = client
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        none.status(),
+        StatusCode::CONFLICT,
+        "no dialog left to answer"
+    );
+}

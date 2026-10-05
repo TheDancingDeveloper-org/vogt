@@ -87,6 +87,7 @@ export const ROUTES = {
   "session.wake": "/sessions/wake",
   "session.keep_awake": "/sessions/keep-awake",
   "session.sweep": "/sessions/sweep",
+  "session.answer": "/sessions/answer",
 } as const;
 
 export type VogtOperation = keyof typeof ROUTES;
@@ -992,6 +993,11 @@ export interface SessionSweepRow {
     last_output_at?: string | null;
     turn_started_at?: string | null;
     last_reply_excerpt?: string | null;
+    approval?: {
+      question: string;
+      kind?: string;
+      options?: { number: number; label: string; selected?: boolean }[];
+    } | null;
     resources?: {
       rss_bytes: number;
       cpu_pct: number;
@@ -1009,6 +1015,19 @@ export interface SessionSweepResult {
   swept_at: string;
   engine?: string | null;
 }
+
+/** Answer a session's dialog by option, refused if it changed (WI-917). */
+export const answerSessionInVogt = (
+  id: string,
+  option: number,
+  expectQuestion: string,
+  reason = "answered from the Oversight board",
+) =>
+  call<{ dismissed: boolean; chosen: { number: number; label: string } }>(
+    "session.answer",
+    { id, option, expect_question: expectQuestion, reason },
+    "POST",
+  );
 
 /** Every live and hibernated session, most urgent first. */
 export const sweepSessions = (

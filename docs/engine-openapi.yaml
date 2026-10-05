@@ -219,6 +219,48 @@ paths:
       responses:
         "200": { $ref: "#/components/responses/Ok" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/answer:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Choose an option of the dialog on screen.
+      description: >-
+        Works for a permission dialog or a startup gate (`approval.kind`:
+        `folder-trust`, `external-imports`, `read-outside-cwd`). The engine
+        re-reads the menu, moves the highlight from where it is to the chosen
+        option, presses Enter, and reports whether the dialog went away.
+        Choose by `option` (number) or `label` (unique, case-insensitive
+        text). With `expect_question`, the answer is refused if the dialog
+        asks something else now.
+      operationId: answerSession
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                option: { type: integer, minimum: 1 }
+                label: { type: string }
+                expect_question: { type: string }
+      responses:
+        "200":
+          description: What was chosen.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [question, kind, chosen, dismissed]
+                properties:
+                  question: { type: string }
+                  kind: { type: string }
+                  chosen: { $ref: "#/components/schemas/ApprovalOption" }
+                  dismissed: { type: boolean }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/sessions/sweep:
     get:
       tags: [sessions]
@@ -638,6 +680,13 @@ components:
         over_threshold:
           type: boolean
           description: At or over ENGINE_SESSION_RSS_WARN; absent when false.
+    ApprovalOption:
+      type: object
+      required: [number, label]
+      properties:
+        number: { type: integer }
+        label: { type: string, description: As shown; untrusted terminal text. }
+        selected: { type: boolean, description: Where the highlight is. }
     AgentConversation:
       type: object
       required: [agent, id]
@@ -718,6 +767,14 @@ components:
         Terminal output: untrusted data.
       properties:
         question: { type: string, description: The dialog's question line. }
+        kind:
+          type: string
+          enum: [permission, folder-trust, external-imports, read-outside-cwd]
+          description: A tool-call permission dialog, or one of Claude Code's startup gates.
+        options:
+          type: array
+          items: { $ref: "#/components/schemas/ApprovalOption" }
+          description: The menu, in order. Answer with POST /api/sessions/{id}/answer.
         command_excerpt:
           type: string
           description: >-
