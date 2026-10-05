@@ -127,6 +127,7 @@ import {
 import { railSections, setRailSection } from "./railSections";
 import { setExpanded } from "./fileTreeState";
 import { demoManifest, resetDemoData } from "./runtimeTransport";
+import { hibernateSession, setKeepAwake, wakeSession } from "./sessionHibernation";
 
 // -- what the first screen does not have to carry -----------
 //
@@ -1112,6 +1113,22 @@ const App: Component = () => {
     }
   };
 
+  const onHibernation = async (
+    s: SessionSummary,
+    action: "hibernate" | "wake" | "pin" | "unpin",
+  ) => {
+    try {
+      if (action === "hibernate") await hibernateSession(s.id);
+      else if (action === "wake") await wakeSession(s.id);
+      else await setKeepAwake(s.id, action === "pin");
+      // The summary changes shape; read it again rather than wait for the
+      // event (keep-awake publishes none).
+      void refreshSessions();
+    } catch (e) {
+      showToast(`${action} failed: ${(e as Error).message}`, { kind: "error" });
+    }
+  };
+
   const onRenameSession = async (s: SessionSummary) => {
     const name = await promptUser("Rename session", s.name);
     if (!name || name === s.name) return;
@@ -1722,6 +1739,42 @@ const App: Component = () => {
                       void onRenameSession(s);
                     }}
                   >Rename</button>
+                  <Show when={s.activity === "hibernated"}>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-label={`Wake ${s.name}`}
+                      onClick={() => {
+                        setOpenMenuId(null);
+                        void onHibernation(s, "wake");
+                      }}
+                    >Wake</button>
+                  </Show>
+                  <Show when={s.conversation && s.exit_code === null && s.activity !== "hibernated"}>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      aria-label={`Hibernate ${s.name}`}
+                      title="Stop its processes to free memory; wake it later into the same conversation"
+                      onClick={() => {
+                        setOpenMenuId(null);
+                        void onHibernation(s, "hibernate");
+                      }}
+                    >Hibernate</button>
+                  </Show>
+                  <Show when={s.conversation && s.exit_code === null}>
+                    <button
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={s.keep_awake === true}
+                      aria-label={`Keep ${s.name} awake`}
+                      title="Never hibernate it by policy, and wake it after a restart"
+                      onClick={() => {
+                        setOpenMenuId(null);
+                        void onHibernation(s, s.keep_awake ? "unpin" : "pin");
+                      }}
+                    >{s.keep_awake ? "✓ Keep awake" : "Keep awake"}</button>
+                  </Show>
                   <div class="row-menu-list-sep" role="separator" />
                   <button
                     type="button"

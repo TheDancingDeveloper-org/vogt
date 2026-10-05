@@ -1,6 +1,8 @@
 # Session hibernation (WI-912)
 
-Status: **proposed**. Slices land behind this note. Where this note and
+Status: **implemented in slices**: #835 (engine mechanism), #836 (core
+operations), #837 (policy, boot wake), #838 (startup prompts), and the PWA
+slice after them. Each slice lands behind this note. Where this note and
 [`ENGINE.md`](../ENGINE.md) disagree, `ENGINE.md` describes what exists.
 
 ## Problem
@@ -225,8 +227,9 @@ stays.
 - Core (registry, so CLI/REST/MCP): `session.hibernate`, `session.wake`,
   `session.keep_awake`. Each is audited with a reason; hibernate and wake
   record the trigger. `session.list` rows carry `hibernated` details.
-- PWA: hibernated rail badge, last screen with a *Tap to wake* bar, and a
-  keep-awake toggle in the row menu.
+- PWA: a hollow rail dot, the last screen with a *Wake session* button,
+  and Hibernate / Wake / Keep awake in the row menu. These call the core,
+  falling back to the engine routes when there is no core.
 - Docs: `ENGINE.md` §5, `API.md`, `AGENT_GUIDE.md`, `engine-openapi.yaml`.
 
 ## Slices

@@ -83,6 +83,9 @@ export const ROUTES = {
   "session.list": "/sessions",
   "session.start": "/sessions",
   "session.stop": "/sessions/stop",
+  "session.hibernate": "/sessions/hibernate",
+  "session.wake": "/sessions/wake",
+  "session.keep_awake": "/sessions/keep-awake",
 } as const;
 
 export type VogtOperation = keyof typeof ROUTES;
@@ -1111,6 +1114,22 @@ export const startSession = (
 
 export const stopSession = (id: string, reason: string) =>
   call<{ session: SessionSummary }>("session.stop", { id, reason }, "POST");
+
+/** Hibernate a session through the core (audited; revokes its token). */
+export const hibernateSessionInVogt = (id: string, reason: string) =>
+  call<{ session: SessionSummary }>("session.hibernate", { id, reason }, "POST");
+
+/** Wake a hibernated session through the core, which mints it a new token. */
+export const wakeSessionInVogt = (id: string, reason: string) =>
+  call<{ session: SessionSummary }>("session.wake", { id, reason }, "POST");
+
+/** Pin a session awake (or unpin it) through the core. */
+export const keepSessionAwakeInVogt = (id: string, keepAwake: boolean, reason: string) =>
+  call<{ session: SessionSummary }>(
+    "session.keep_awake",
+    { id, keep_awake: keepAwake, reason },
+    "POST",
+  );
 
 /**
  * Revoke the session this browser holds, at the core. The local half — the
