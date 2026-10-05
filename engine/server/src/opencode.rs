@@ -211,6 +211,86 @@ pub async fn last_replies(db: &Path, id: &str, n: usize) -> Option<Vec<Reply>> {
     Some(replies)
 }
 
+/// How long the list of models opencode can run is trusted.
+const MODELS_FOR: Duration = Duration::from_secs(300);
+/// How long `opencode models` may take before the check is skipped.
+const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
+
+static MODELS: std::sync::Mutex<Option<(std::time::Instant, Vec<String>)>> =
+    std::sync::Mutex::new(None);
+
+/// The `provider/model` ids opencode can run here, from `opencode models`,
+/// cached for five minutes. `None` when they cannot be listed, in which case
+/// nothing is refused on their account.
+pub fn known_models() -> Option<Vec<String>> {
+    if let Some((at, models)) = MODELS.lock().ok()?.as_ref() {
+        if at.elapsed() < MODELS_FOR {
+            return Some(models.clone());
+        }
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(
+            std::process::Command::new("opencode")
+                .arg("models")
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output(),
+        );
+    });
+    let output = rx.recv_timeout(MODELS_TIMEOUT).ok()?.ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let models: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| l.contains('/') && !l.contains(' '))
+        .map(str::to_string)
+        .collect();
+    if models.is_empty() {
+        return None;
+    }
+    *MODELS.lock().ok()? = Some((std::time::Instant::now(), models.clone()));
+    Some(models)
+}
+
+/// Why opencode could not run `model`, given the models it can (WI-935): an
+/// unknown model otherwise fails inside the TUI, after launch, with an
+/// opaque error. The refusal names the near matches.
+pub fn check_model(model: &str, known: &[String]) -> std::result::Result<(), String> {
+    if known.iter().any(|m| m == model) {
+        return Ok(());
+    }
+    let provider = model.split('/').next().unwrap_or_default();
+    let tail = model
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mut near: Vec<&str> = known
+        .iter()
+        .filter(|m| {
+            m.starts_with(&format!("{provider}/"))
+                || (!tail.is_empty() && m.to_ascii_lowercase().contains(&tail))
+        })
+        .map(String::as_str)
+        .collect();
+    near.truncate(12);
+    Err(if near.is_empty() {
+        format!(
+            "opencode cannot run model {model:?}: it is not among the {} models its \
+             configured providers offer (`opencode models` lists them)",
+            known.len()
+        )
+    } else {
+        format!(
+            "opencode cannot run model {model:?}; models it can run that look close: {}",
+            near.join(", ")
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,5 +446,27 @@ mod tests {
         assert!(last_replies(&tmp.path().join("absent.db"), "x", 1)
             .await
             .is_none());
+    }
+
+    #[test]
+    fn an_unknown_opencode_model_is_refused_with_its_near_matches() {
+        let known: Vec<String> = [
+            "theclawbay/grok-4.7",
+            "theclawbay/gpt-5.6",
+            "openrouter/x/grok-4.7",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(check_model("theclawbay/grok-4.7", &known), Ok(()));
+        let err = check_model("theclawbay/grok-4.8", &known).unwrap_err();
+        assert!(
+            err.contains("theclawbay/grok-4.7") && err.contains("theclawbay/gpt-5.6"),
+            "{err}"
+        );
+        let err = check_model("nowhere/grok-4.7", &known).unwrap_err();
+        assert!(err.contains("openrouter/x/grok-4.7"), "{err}");
+        let err = check_model("nowhere/unheard-of", &known).unwrap_err();
+        assert!(err.contains("not among the 3 models"), "{err}");
     }
 }

@@ -9610,3 +9610,55 @@ async fn metrics_are_served_on_their_own_listener_only() {
         "{body}"
     );
 }
+
+/// WI-934: `stopped` is keyed on the stop request, not on the CLI, so a
+/// stopped opencode session reads `stopped` too, and one that dies on its
+/// own still reads `errored`.
+#[tokio::test]
+async fn a_stopped_opencode_session_is_stopped_not_errored() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    // A stand-in named `opencode`, so the engine treats it as that CLI.
+    let opencode = tmp.path().join("opencode");
+    std::fs::write(
+        &opencode,
+        "#!/bin/sh\n[ \"$1\" = crash ] && { sleep 0.2; exit 7; }\nsleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let mut ids = Vec::new();
+    for args in [vec![], vec!["crash"]] {
+        let mut command = vec![opencode.to_string_lossy().to_string()];
+        command.extend(args.iter().map(|a| a.to_string()));
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({ "name": "opencode", "command": command }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    let (stopped, crashed) = (&ids[0], &ids[1]);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let status = client
+        .post(format!("{base}/api/sessions/{stopped}/kill"))
+        .json(&json!({ "reason": "packet done", "by": "agent:session:ses_driver" }))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(status, StatusCode::OK);
+    let row = wait_for_session_row(&client, &base, stopped, |s| !s["exit_code"].is_null()).await;
+    assert_eq!(row["activity"], "stopped", "{row:?}");
+    assert_eq!(row["stop"]["reason"], "packet done", "{row:?}");
+    let row = wait_for_session_row(&client, &base, crashed, |s| s["exit_code"] == json!(7)).await;
+    assert_eq!(row["activity"], "errored", "{row:?}");
+}

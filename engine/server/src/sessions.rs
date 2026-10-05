@@ -256,6 +256,30 @@ impl SessionRegistry {
             spec.env = Some(env);
         }
 
+        // An opencode model the CLI cannot run fails inside its TUI, after
+        // launch; refuse it here with the models it can (WI-935). Skipped
+        // when the list cannot be had: a lister fault must not stop a launch.
+        if let (Some("opencode"), Some(model)) = (
+            base_command
+                .as_deref()
+                .and_then(agent_cli::agent_name)
+                .as_deref(),
+            spec.model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty()),
+        ) {
+            match crate::opencode::known_models() {
+                Some(known) => {
+                    crate::opencode::check_model(model, &known).map_err(ApiError::BadRequest)?
+                }
+                None => tracing::info!(
+                    model,
+                    "opencode models could not be listed; the model is not checked"
+                ),
+            }
+        }
+
         let prompt_file = match brief {
             Some(text) => Some(prompt_files::write_session_prompt(
                 &self.cfg.state_dir,
