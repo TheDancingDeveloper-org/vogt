@@ -523,23 +523,17 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path == "/api/sessions" && *method == Method::POST {
         return Some(TokenCapability::Sessions);
     }
+    // Everything under a session's own path needs `sessions`, whatever the
+    // method. A write — kill, input, blocked, hibernate, wake, keep-awake —
+    // changes a terminal. A read ships its scrollback or screen, which
+    // routinely hold pasted secrets: a zero-capability "readonly" token must
+    // not read every live session's transcript. Written as one rule rather
+    // than an allowlist of verbs, because the allowlist was how
+    // `/hibernate` and `/wake` first shipped ungated. The WS attach (also a
+    // read of live output) is registered outside this gate and authenticates
+    // itself.
     if path.starts_with("/api/sessions/") {
-        if *method == Method::PATCH || *method == Method::DELETE {
-            return Some(TokenCapability::Sessions);
-        }
-        if *method == Method::POST
-            && (path.ends_with("/kill") || path.ends_with("/input") || path.ends_with("/blocked"))
-        {
-            return Some(TokenCapability::Sessions);
-        }
-        // Reading a session's detail ships its full scrollback (routinely
-        // pasted secrets), so it needs the sessions capability too: a
-        // zero-capability "readonly" token must not read every live session's
-        // transcript. The WS attach (also a read of live output) is
-        // registered outside this gate and is unaffected here.
-        if *method == Method::GET {
-            return Some(TokenCapability::Sessions);
-        }
+        return Some(TokenCapability::Sessions);
     }
     // Reading the durable interaction log is scope-gated even though it is a
     // GET: it is a cross-conversation record attributable to
@@ -764,6 +758,14 @@ mod tests {
             Some(TokenCapability::AgentTasksWrite)
         );
         assert_eq!(required_capability(&Method::GET, "/api/sessions"), None);
+        // Hibernation changes a terminal as much as a kill does.
+        for verb in ["hibernate", "wake", "keep-awake", "kill", "input", "blocked"] {
+            assert_eq!(
+                required_capability(&Method::POST, &format!("/api/sessions/abc123/{verb}")),
+                Some(TokenCapability::Sessions),
+                "{verb}"
+            );
+        }
         // A session's detail read ships its scrollback, so it is gated.
         assert_eq!(
             required_capability(&Method::GET, "/api/sessions/abc123"),
