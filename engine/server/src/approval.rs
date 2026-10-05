@@ -45,7 +45,7 @@ const BORDER: &[char] = &[
 /// because a TUI may position words with cursor moves rather than spaces.
 static MENTIONS: Lazy<regex::bytes::Regex> = Lazy::new(|| {
     regex::bytes::Regex::new(
-        r"(?i)do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*command|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director",
+        r"(?i)permission\s*required|always\s*allow|allow\s*once|do\s*you\s*want\s*to|would\s*you\s*like\s*to\s*(?:run|make|apply|allow)|allow\s*command|automatically\s*den|requires\s*approval|trust\s*the\s*files|project\s*you\s*(?:created|trust)|external\s*claude\.md|outside\s*(?:of\s*)?(?:the\s*)?(?:current\s*)?working\s*director",
     )
     .expect("approval prefilter compiles")
 });
@@ -81,6 +81,18 @@ static DEADLINE: Lazy<Regex> = Lazy::new(|| {
         r"(?i)auto(?:matically)?[\s-]*(?:den(?:y|ied|ies)|reject\w*)\D{0,60}?(\d{1,5})\s*(seconds?|secs?|s|minutes?|mins?|m)\b",
     )
     .expect("deadline regex compiles")
+});
+
+/// opencode's dialog title (WI-933): "△ Permission required", and the
+/// follow-up "△ Always allow" that "Allow always" opens.
+static OPENCODE_TITLE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(?:△\s*)?(Permission required|Always allow)$").expect("opencode title compiles")
+});
+
+/// opencode's button row: horizontal buttons, then its key hints.
+static OPENCODE_BUTTONS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(Allow once\s{2,}Allow always\s{2,}Reject|Confirm\s{2,}Cancel)\b")
+        .expect("opencode buttons compile")
 });
 
 /// At most this many lines above the question are read for the command.
@@ -127,6 +139,9 @@ pub struct Detected {
     pub kind: &'static str,
     /// The menu, in order.
     pub options: Vec<MenuOption>,
+    /// The options are buttons side by side (opencode): Left/Right move the
+    /// highlight, not Up/Down.
+    pub horizontal: bool,
 }
 
 /// How many scrollback lines are rendered above the screen when reading a
@@ -214,6 +229,82 @@ fn is_rule(line: &str) -> bool {
 /// screen, with a numbered option within the next eight lines; the command
 /// excerpt may reach up into the scrollback.
 pub fn detect(visible: &[String], scrollback: &[String]) -> Option<Detected> {
+    detect_numbered(visible, scrollback).or_else(|| detect_opencode(visible))
+}
+
+/// opencode's permission dialog (WI-933), read off the screen:
+///
+/// ```text
+/// △ Permission required
+///   ← Access external directory /etc
+/// Patterns
+/// - /etc/*
+///  Allow once   Allow always   Reject         ⇆ select  enter confirm
+/// ```
+///
+/// and the "△ Always allow … Confirm  Cancel" that "Allow always" opens. The
+/// buttons sit side by side with the first highlighted when it opens; the
+/// highlight is a colour the text screen does not carry, so the first is
+/// taken as selected, which is what a dialog the driver has not touched
+/// shows.
+fn detect_opencode(visible: &[String]) -> Option<Detected> {
+    let title_at = visible
+        .iter()
+        .rposition(|line| OPENCODE_TITLE.is_match(strip(line).trim()))?;
+    let title = OPENCODE_TITLE.captures(strip(&visible[title_at]).trim())?[1].to_string();
+    let after = &visible[title_at + 1..];
+    let buttons_rel = after
+        .iter()
+        .take(24)
+        .position(|line| OPENCODE_BUTTONS.is_match(strip(line).trim()))?;
+    let row = strip(&after[buttons_rel]).trim();
+    let captured = OPENCODE_BUTTONS.captures(row)?;
+    let labels: Vec<&str> = captured
+        .get(1)?
+        .as_str()
+        .split("  ")
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let body: Vec<String> = after[..buttons_rel]
+        .iter()
+        .map(|l| strip(l).trim().trim_start_matches('←').trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let question = match title.as_str() {
+        // "← Access external directory /etc": what is being asked.
+        "Permission required" => body.first().cloned().unwrap_or(title.clone()),
+        _ => format!("{title}: {}", body.first().cloned().unwrap_or_default()),
+    };
+    let mut command_excerpt = body.join("\n");
+    if command_excerpt.chars().count() > MAX_EXCERPT_CHARS {
+        command_excerpt = command_excerpt.chars().take(MAX_EXCERPT_CHARS).collect();
+        command_excerpt.push('…');
+    }
+    let kind = if question.to_ascii_lowercase().contains("external directory") {
+        "read-outside-cwd"
+    } else {
+        "permission"
+    };
+    Some(Detected {
+        question,
+        command_excerpt,
+        deadline_seconds: None,
+        kind,
+        options: labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| MenuOption {
+                number: i as u32 + 1,
+                label: (*label).to_string(),
+                selected: i == 0,
+            })
+            .collect(),
+        horizontal: true,
+    })
+}
+
+fn detect_numbered(visible: &[String], scrollback: &[String]) -> Option<Detected> {
     let q_visible = visible
         .iter()
         .rposition(|line| QUESTION.is_match(strip(line).trim()))?;
@@ -302,16 +393,23 @@ pub fn detect(visible: &[String], scrollback: &[String]) -> Option<Detected> {
         deadline_seconds,
         kind,
         options,
+        horizontal: false,
     })
 }
 
 /// The arrow presses, then Enter, that choose `target` in `options` from
-/// whichever is highlighted now (the first, when none is marked). `None`
-/// when there is no such option.
-pub fn keys_to_choose(options: &[MenuOption], target: u32) -> Option<String> {
+/// whichever is highlighted now (the first, when none is marked). Down/Up
+/// for a menu, Right/Left for side-by-side buttons. `None` when there is no
+/// such option.
+pub fn keys_to_choose(options: &[MenuOption], target: u32, horizontal: bool) -> Option<String> {
     let to = options.iter().position(|o| o.number == target)?;
     let from = options.iter().position(|o| o.selected).unwrap_or(0);
-    let step = if to >= from { "\x1b[B" } else { "\x1b[A" };
+    let step = match (horizontal, to >= from) {
+        (false, true) => "\x1b[B",
+        (false, false) => "\x1b[A",
+        (true, true) => "\x1b[C",
+        (true, false) => "\x1b[D",
+    };
     let mut keys = step.repeat(to.abs_diff(from));
     keys.push('\r');
     Some(keys)
@@ -432,6 +530,7 @@ mod tests {
             deadline_seconds: Some(90),
             kind: "permission",
             options: Vec::new(),
+            horizontal: false,
         };
         let seen = time::OffsetDateTime::UNIX_EPOCH;
         let pending = Pending::new(found.clone(), seen);
@@ -514,10 +613,15 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        assert_eq!(keys_to_choose(&menu(1), 1).unwrap(), "\r");
-        assert_eq!(keys_to_choose(&menu(1), 3).unwrap(), "\x1b[B\x1b[B\r");
-        assert_eq!(keys_to_choose(&menu(3), 2).unwrap(), "\x1b[A\r");
-        assert_eq!(keys_to_choose(&menu(1), 4), None);
+        assert_eq!(keys_to_choose(&menu(1), 1, false).unwrap(), "\r");
+        assert_eq!(
+            keys_to_choose(&menu(1), 3, false).unwrap(),
+            "\x1b[B\x1b[B\r"
+        );
+        assert_eq!(keys_to_choose(&menu(3), 2, false).unwrap(), "\x1b[A\r");
+        assert_eq!(keys_to_choose(&menu(1), 3, true).unwrap(), "\x1b[C\x1b[C\r");
+        assert_eq!(keys_to_choose(&menu(3), 2, true).unwrap(), "\x1b[D\r");
+        assert_eq!(keys_to_choose(&menu(1), 4, false), None);
     }
 
     #[test]
@@ -525,5 +629,61 @@ mod tests {
         assert!(mentions_approval(b"Doyouwanttoproceed?"));
         assert!(mentions_approval(b"will automatically deny this request"));
         assert!(!mentions_approval(b"compiling vogt v0.7.4"));
+    }
+
+    /// WI-933: opencode's dialogs, as its screen renders them (captured from a
+    /// real session on 2026-10-05).
+    #[test]
+    fn opencode_permission_dialogs_are_read_with_their_buttons() {
+        let screen = lines(
+            "  ┃  Use your read tool to read the file /etc/hostname.\n\
+             \x20    ⠙ Read /etc/hostname\n\
+             \x20    ▣  Build · DeepSeek V4.1 Flash\n\
+             \x20 ┃\n\
+             \x20 ┃  △ Permission required\n\
+             \x20 ┃    ← Access external directory /etc\n\
+             \x20 ┃\n\
+             \x20 ┃  Patterns\n\
+             \x20 ┃\n\
+             \x20 ┃  - /etc/*\n\
+             \x20 ┃\n\
+             \x20 ┃   Allow once   Allow always   Reject                ctrl+f fullscreen  ⇆ select  enter confirm\n\
+             \x20 ┃",
+        );
+        let found = detect(&screen, &[]).expect("opencode's dialog is a dialog");
+        assert_eq!(found.question, "Access external directory /etc");
+        assert_eq!(found.kind, "read-outside-cwd");
+        assert!(found.horizontal);
+        assert!(
+            found.command_excerpt.contains("- /etc/*"),
+            "{}",
+            found.command_excerpt
+        );
+        let labels: Vec<&str> = found.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Allow once", "Allow always", "Reject"]);
+        assert!(found.options[0].selected);
+        assert_eq!(
+            keys_to_choose(&found.options, 3, found.horizontal).unwrap(),
+            "\x1b[C\x1b[C\r"
+        );
+        assert!(mentions_approval(b"Permission required Allow once"));
+
+        let confirm = lines(
+            "  ┃  △ Always allow\n\
+             \x20 ┃\n\
+             \x20 ┃  This will allow the following patterns until OpenCode is restarted\n\
+             \x20 ┃\n\
+             \x20 ┃  - /etc/*\n\
+             \x20 ┃\n\
+             \x20 ┃   Confirm   Cancel                     ⇆ select  enter confirm",
+        );
+        let found = detect(&confirm, &[]).expect("the follow-up is a dialog too");
+        assert!(found.question.starts_with("Always allow: This will allow"));
+        let labels: Vec<&str> = found.options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, ["Confirm", "Cancel"]);
+
+        // opencode's ordinary screen is not a dialog.
+        let idle = lines("  ┃  Build · DeepSeek\n  ┃  > ask anything");
+        assert_eq!(detect(&idle, &[]), None);
     }
 }
