@@ -85,7 +85,8 @@ pub struct LaunchRequest<'a> {
     /// it as the conversation id, so the conversation can later be resumed by
     /// the id every session and history listing already shows.
     pub session_id: Option<Uuid>,
-    /// `default` / `accept-edits` / `bypass` (WI-926).
+    /// `default` / `accept-edits` / `bypass` (WI-926). Klaudia takes
+    /// `default` and `bypass` only.
     pub permission_mode: Option<&'a str>,
     /// The deployment's driven-session settings (an `autoMode` policy) to
     /// hand Claude Code with `--settings`, when it has one.
@@ -230,6 +231,24 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             "permission_mode is applied to Claude Code, opencode and Klaudia; `{binary}` has \
              its own approval settings in its launcher and is not told one per session"
         )));
+    }
+    if binary == "klaudia"
+        && matches!(
+            req.permission_mode.map(str::trim),
+            Some("accept-edits") | Some("accept_edits")
+        )
+    {
+        // Klaudia has no accept-edits mode: its `acceptEdits` is now an alias
+        // for `autonomous` (its default — finish the task, ask only before
+        // changing the machine), which is looser than "edits yes, everything
+        // else asks". A posture applied as a different one is the failure
+        // the Codex refusal above exists against, so it is refused by name.
+        return Err(ApiError::BadRequest(
+            "klaudia has no accept-edits posture (its acceptEdits is an alias \
+             for its default autonomous mode); start it with the default \
+             posture, or ask a person for bypass"
+                .into(),
+        ));
     }
     if binary == "klaudia" && effort.is_some() {
         // Named rather than dropped, as for opencode: Klaudia takes a model
@@ -1057,7 +1076,6 @@ mod permission_tests {
                 model: Some("grok-4.7"),
                 brief_file: Some(brief),
                 session_id: Some(id),
-                permission_mode: Some("accept-edits"),
                 ..LaunchRequest::default()
             },
         )
@@ -1076,7 +1094,8 @@ mod permission_tests {
                 &id.to_string(),
             ])
         );
-        assert_eq!(command[8..10], cmd(&["--permission-mode", "acceptEdits"]));
+        // The default posture is Klaudia's own: no flag.
+        assert!(!command.iter().any(|a| a.starts_with("--permission-mode")));
         // The brief pointer goes to the TUI as its first message, never as
         // the positional prompt Klaudia would answer headless and exit on.
         assert_eq!(
@@ -1152,6 +1171,16 @@ mod permission_tests {
         )
         .unwrap_err();
         assert!(refused.to_string().contains("klaudia"), "{refused}");
+        // accept-edits would silently become Klaudia's autonomous mode.
+        let refused = launch(
+            Some(&cmd(&["klaudia"])),
+            &LaunchRequest {
+                permission_mode: Some("accept-edits"),
+                ..LaunchRequest::default()
+            },
+        )
+        .unwrap_err();
+        assert!(refused.to_string().contains("accept-edits"), "{refused}");
     }
 
     #[test]
