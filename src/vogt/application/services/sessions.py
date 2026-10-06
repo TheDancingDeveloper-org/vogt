@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from vogt.adapters import transcripts
@@ -100,7 +101,7 @@ from vogt.application.services._brief import (
 from vogt.application.services.views import why
 from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.core import delivery, oversight, runtime
-from vogt.core.auth import Scope, issue, parse_scopes
+from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
 from vogt.errors import (
@@ -1402,6 +1403,33 @@ SESSION_TOKEN = "session.token"
 ENGINE_SESSION_ACTOR_PREFIX = "agent:engine:"
 
 
+def _is_engine_credential(ctx: AppContext) -> bool:
+    """Whether the caller is the session engine: the actor its credential is
+    bound to by configuration, or the very token it shares with this core
+    (the stack secret, `bootstrap_core_token_file`).
+
+    The second matters because a stack secret first issued by hand keeps
+    whatever actor it was issued to: adoption is idempotent on the secret's
+    hash and does not rebind it. On the estate that actor is a person, so a
+    check on the actor alone refused the engine (found validating WI-926 on
+    vogt-dev).
+    """
+    if ctx.principal.identity_ref == ctx.config.bootstrap_core_token_actor:
+        return True
+    configured = ctx.config.bootstrap_core_token_file
+    if ctx.token is None or configured is None:
+        return False
+    try:
+        secret = Path(configured).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not secret:
+        return False
+    with ctx.declared.read() as view:
+        row = view.token_by_hash(hash_token(secret))
+    return row is not None and row.revoked_at is None and row.id == ctx.token.id
+
+
 def engine_session_token(
     ctx: AppContext, params: EngineSessionTokenParams
 ) -> EngineSessionTokenResult:
@@ -1419,7 +1447,7 @@ def engine_session_token(
     `session.start` does not already grant any `work.write` caller.
     """
     reason = writes.validate_reason(params.reason)
-    if ctx.principal.identity_ref != ctx.config.bootstrap_core_token_actor:
+    if not _is_engine_credential(ctx):
         msg = (
             "session.token is called by the session engine for the agents it "
             f"starts, not by {ctx.principal.identity_ref}"
