@@ -220,7 +220,7 @@ Path to a file holding the brokered agent token adopted at `init` — the sessio
 
 ### `bootstrap_agent_token_actor`
 
-Identity the adopted agent token is bound to, created if absent. Audit rows name it, so it should say this stack's sessions acted — not a person, and not something shared with another instance.
+Identity the adopted agent token is bound to, created if absent. Audit rows name it, so it should say this stack's sessions acted — not a person, and not something shared with another instance. It must be an agent: every session's agent presents this token, and bound to a person it would count as that person (granting `bypass`, writing as them), so an existing person here fails start-up (WI-926).
 
 ### `session_ttl_days`
 
