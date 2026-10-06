@@ -35,11 +35,7 @@
 #   npm       source is an npm package; `npm install -g --prefix` per version.
 #   go-dist   source is a Go release mirror (https://go.dev/dl); the version's
 #             linux tarball, checked against the sha256 the mirror's own
-#             release index gives for it (WI-951). The prefix is a GOROOT.
-#   go-src    source is a git repository of a Go program whose main package
-#             is `./cmd/<binary>`; the version is a full commit id, fetched
-#             alone and built with the `go` on PATH, CGO off (WI-950). The
-#             prefix records `source` (`<repository>@<commit>`). Codex is the one exception in *shape*: it gets no `bin/`
+#             release index gives for it (WI-951). The prefix is a GOROOT. Codex is the one exception in *shape*: it gets no `bin/`
 # link because `/usr/local/bin/codex` is the codex-full-access wrapper, which
 # itself prefers `codex/current/bin/codex` when it exists, so the image's entry
 # point and PATH lookup agree without a second copy of the bypass flags.
@@ -186,12 +182,6 @@ smoke_check() {
     local tool="$1" version="$2" prefix="$3" binary output
     binary="$(binary_for "$tool")"
     [[ -x "$prefix/bin/$binary" ]] || { log "$prefix/bin/$binary is missing or not executable"; return 1; }
-    if [[ "$(kind_for "$tool")" == "go-src" ]]; then
-        # A program built from a commit names its own release, not the
-        # commit: a clean `--version` is the check.
-        output="$("$prefix/bin/$binary" --version 2>&1)" || { log "$binary --version failed: ${output:-<no output>}"; return 1; }
-        return 0
-    fi
     if [[ "$(kind_for "$tool")" == "go-dist" ]]; then
         # `go version`, not `--version`, and it names itself `go<version>`.
         output="$("$prefix/bin/$binary" version 2>&1)" || { log "$binary version failed: ${output:-<no output>}"; return 1; }
@@ -274,42 +264,6 @@ sys.exit(1)
     return "$status"
 }
 
-# Build one commit of a Go program from its repository into `prefix/bin`.
-# Only that commit is fetched; modules land in a cache on the volume, so the
-# next build of a nearby commit is mostly offline.
-install_go_src() {
-    local tool="$1" version="$2" prefix="$3" source binary src build_log
-    source="$(package_for "$tool")"
-    binary="$(binary_for "$tool")"
-    command -v go >/dev/null 2>&1 || { log "no go on PATH to build $tool"; return 1; }
-    src="$prefix.src"
-    build_log="$prefix.log"
-    rm -rf "$src"
-    if ! { git init -q "$src" \
-            && git -C "$src" fetch -q --depth 1 "$source" "$version" \
-            && git -C "$src" checkout -q --detach FETCH_HEAD; } >"$build_log" 2>&1; then
-        log "could not fetch $source at $version; $(tail -n 3 "$build_log" | tr '\n' ' ')"
-        rm -rf "$src" "$build_log"
-        return 1
-    fi
-    if [[ "$(git -C "$src" rev-parse HEAD)" != "$version" ]]; then
-        log "$source gave $(git -C "$src" rev-parse HEAD) for $version"
-        rm -rf "$src" "$build_log"
-        return 1
-    fi
-    mkdir -p "$prefix/bin" "$root/.gomodcache"
-    log "building $tool $version from $source with $(go version | cut -d' ' -f3)"
-    if ! (cd "$src" && CGO_ENABLED=0 GOFLAGS=-mod=readonly \
-            GOMODCACHE="$root/.gomodcache" GOCACHE="$src.gocache" \
-            go build -trimpath -o "$prefix/bin/$binary" "./cmd/$binary") >"$build_log" 2>&1; then
-        log "go build failed; $(tail -n 5 "$build_log" | tr '\n' ' ')"
-        rm -rf "$src" "$src.gocache" "$build_log"
-        return 1
-    fi
-    printf '%s@%s\n' "$source" "$version" > "$prefix/source"
-    rm -rf "$src" "$src.gocache" "$build_log"
-}
-
 # Fetch `version` of `tool` into the fresh directory `prefix`, by its kind.
 fetch_into() {
     local tool="$1" version="$2" prefix="$3" package log_file
@@ -328,9 +282,6 @@ fetch_into() {
         go-dist)
             log "installing Go $version into $root/$tool/$version"
             install_go_dist "$tool" "$version" "$prefix"
-            ;;
-        go-src)
-            install_go_src "$tool" "$version" "$prefix"
             ;;
         *)
             log "'$(kind_for "$tool")' is not a kind of tool this installer knows"
@@ -360,9 +311,6 @@ main() {
             fi
             if [[ "$kind" == "go-dist" ]]; then
                 version="$(go_latest "$package" 2>/dev/null | tr -d '[:space:]')"
-            elif [[ "$kind" == "go-src" ]]; then
-                # The repository's default branch, as it is now.
-                version="$(git ls-remote "$package" HEAD 2>/dev/null | cut -f1 | tr -d '[:space:]')"
             else
                 version="$(npm view "$package@$requested" version 2>/dev/null | tail -n 1 | tr -d '[:space:]')"
             fi
@@ -370,14 +318,7 @@ main() {
             log "$tool $requested resolves to $version"
             ;;
         *)
-            if [[ "$kind" == "go-src" ]]; then
-                # A commit, in full: a short id is a prefix a later commit can
-                # share, and a branch or tag can move under the pin.
-                if [[ ! "$requested" =~ ^[0-9a-f]{40}$ ]]; then
-                    die "'$requested' is not a full commit id (40 hex characters) or 'image'; $tool is built from a commit" 64
-                fi
-                version="$requested"
-            elif [[ ! "$requested" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
+            if [[ ! "$requested" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.+-]+)?$ ]]; then
                 die "'$requested' is not an exact version (like 2.1.261), 'image', or an allowed dist-tag" 64
             fi
             version="$requested"

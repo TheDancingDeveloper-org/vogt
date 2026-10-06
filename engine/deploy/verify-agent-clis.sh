@@ -135,17 +135,6 @@ check_go_dist() {
     [ "$actual" = "$expected" ] || report "$binary is ${actual:-unknown} at $prefix, expected pin $expected"
 }
 
-# A Go program built from a commit records which (WI-950). Only a runtime
-# build carries the record; the image's copy is the image's pin.
-check_go_src() {
-    local expected="$1" tool="$2" record actual
-    [ -n "$expected" ] || return 0
-    record="$root/$tool/current/source"
-    [ -L "$root/$tool/current" ] && [ -r "$record" ] || return 0
-    actual="$(sed -n 's/.*@//p' "$record" | head -n 1)"
-    [ "$actual" = "$expected" ] || report "$tool was built from ${actual:-unknown}, expected pin $expected"
-}
-
 # Every tool the image knows (`agent-clis.tools`: tool, source, binary, env
 # var, kind), so adding one to the image adds it here without an edit.
 if [[ -r "$tools_table" ]]; then
@@ -155,7 +144,6 @@ if [[ -r "$tools_table" ]]; then
         case "${kind:-npm}" in
             npm) check_package "$package" "$(expected_version "$tool")" "$tool" "$binary" ;;
             go-dist) check_go_dist "$(expected_version "$tool")" "$tool" "$binary" ;;
-            go-src) check_go_src "$(expected_version "$tool")" "$tool" ;;
         esac
     done < "$tools_table"
 else
