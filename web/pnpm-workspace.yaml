@@ -3,6 +3,15 @@ overrides:
   # GHSA-p98j-92pf-mc4p: `monaco-editor` pins dompurify 3.4.8 transitively;
   # 3.4.13–3.4.15 leave detached-subtree handlers armed. Patched in 3.4.16.
   dompurify: '>=3.4.16'
+  # GHSA-p6vx-979v-rg4c (critical) and GHSA-jp82-f5mq-hwhp (high), 2026-10-06:
+  # solid-js 1.9.15 (the latest 1.x) pins seroval ~1.5.4; only the 2.0 RCs
+  # move. seroval is solid-js's SSR serializer and this is a client-only SPA,
+  # but `pnpm audit` gates every PR. seroval-plugins follows it (its peer range
+  # is seroval ^1.0).
+  seroval: '^1.6.8'
+  seroval-plugins: '^1.6.8'
+  # GHSA (high), 2026-10-06: source-map-js <1.2.2, via vite/postcss (dev tooling).
+  source-map-js: '>=1.2.2'
   # GHSA-c83g-rgw3-j3cx and GHSA-73wf-gq98-2v4g: prototype write and uncaught
   # crash via untrusted `browserslist-stats.json`. Reached only transitively —
   # `vite-plugin-solid` -> `@babel/core` -> `@babel/helper-compilation-targets`
