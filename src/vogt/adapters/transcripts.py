@@ -3,7 +3,9 @@
 A driver reading another agent's terminal gets the visible screen
 (`session.screen`) or the raw output log, where replies are cut off,
 scrolled away or mangled by redraws. Claude Code and Codex already write
-every reply, whole, to a JSONL transcript per conversation. This module
+every reply, whole, to a JSONL transcript per conversation, and so does
+Klaudia, in Claude Code's own line format under `~/.klaudia/sessions`
+(WI-950). This module
 finds the transcript a session's conversation is in and reads its last
 assistant messages back (WI-872), and keeps a cheap one-line excerpt of the
 latest one for session lists (WI-876).
@@ -58,6 +60,11 @@ _UUID_TAIL = re.compile(
 _CODEX_RESUME = re.compile(r"\bcodex\s+resume\s+'?([A-Za-z0-9_.-]+)")
 
 
+#: Agents whose transcripts are Claude Code's JSONL, filed per directory as
+#: `<root>/<claude_key(cwd)>/<conversation>.jsonl`.
+CLAUDE_FORMAT = frozenset({"claude", "klaudia"})
+
+
 @dataclass(frozen=True)
 class Transcript:
     """Where a session's conversation is written."""
@@ -81,6 +88,8 @@ class Reply:
 def agent_of(command: str | None, template: str | None) -> tuple[str, ...]:
     """Which transcript formats to look in, most likely first."""
     hint = f"{command or ''} {template or ''}".lower()
+    if "klaudia" in hint:
+        return ("klaudia",)
     if "codex" in hint:
         return ("codex",)
     if "claude" in hint:
@@ -141,7 +150,7 @@ def find(
 
 
 def _by_id(agent: str, root: Path, conversation_id: str) -> Path | None:
-    if agent == "claude":
+    if agent in CLAUDE_FORMAT:
         name = f"{conversation_id}.jsonl"
         for entry in _entries(root):
             candidate = entry / name
@@ -159,7 +168,7 @@ def _by_cwd(
     agent: str, root: Path, cwd: str, started_at: datetime | None
 ) -> Transcript | None:
     since = started_at.timestamp() if started_at is not None else 0.0
-    if agent == "claude":
+    if agent in CLAUDE_FORMAT:
         directory = root / claude_key(cwd)
         if not directory.is_dir():
             return None
@@ -233,7 +242,7 @@ def _mtime(path: Path) -> float:
 def last_replies(transcript: Transcript, n: int) -> list[Reply]:
     """The last `n` assistant messages, oldest first, redacted."""
     lines = _tail_lines(transcript.path, TAIL_BYTES)
-    if transcript.agent == "claude":
+    if transcript.agent in CLAUDE_FORMAT:
         messages = _claude_messages(lines)
     else:
         messages = _codex_messages(lines)
@@ -402,7 +411,7 @@ def runtime(transcript: Transcript) -> tuple[str | None, str | None]:
     model: str | None = None
     effort: str | None = None
     for entry in _parsed(lines):
-        if transcript.agent == "claude":
+        if transcript.agent in CLAUDE_FORMAT:
             message = entry.get("message")
             if entry.get("type") == "assistant" and isinstance(message, dict):
                 found = message.get("model")

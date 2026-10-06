@@ -199,6 +199,7 @@ services:
       VOGT_CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
       VOGT_OPENCODE_VERSION: "${VOGT_OPENCODE_VERSION:-}"
       VOGT_GO_VERSION: "${VOGT_GO_VERSION:-}"
+      VOGT_KLAUDIA_VERSION: "${VOGT_KLAUDIA_VERSION:-}"
       VOGT_AGENT_CLI_ALLOW_DIST_TAGS: "${VOGT_AGENT_CLI_ALLOW_DIST_TAGS:-}"
 
     # Named volumes, not host binds. Docker seeds a fresh named volume from the

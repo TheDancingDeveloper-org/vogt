@@ -331,6 +331,7 @@ ARG INSTALL_AI_CLIENTS
 ARG CODEX_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
+ARG KLAUDIA_VERSION
 # --prefix=/usr/local (not the ambient $NPM_CONFIG_PREFIX, which points at
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
@@ -380,10 +381,12 @@ RUN set -eu; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
     go_version="$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"; \
-    printf 'codex=%s\nclaude-code=%s\nopencode=%s\ngo=%s\n' \
-        "$codex_version" "$claude_code_version" "$opencode_version" "$go_version" \
+    klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
+    printf 'codex=%s\nclaude-code=%s\nopencode=%s\ngo=%s\nklaudia=%s\n' \
+        "$codex_version" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
-    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\n' \
+    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
+        "$VOGT_KLAUDIA_SOURCE" \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
@@ -407,6 +410,27 @@ RUN set -eu; \
         && codex_target="$(readlink -f /usr/local/bin/codex)" \
         && ln -s "$codex_target" /usr/local/libexec/codex-real \
         && ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
+    fi
+
+# Klaudia (WI-950), built from the pinned commit with the pinned Go: no
+# registry publishes it. Its own layer, so a Klaudia pin moves without
+# reinstalling the npm CLIs above. Only that commit is fetched, the build
+# must reproduce it exactly (`-mod=readonly`, `-trimpath`, CGO off), and the
+# module and build caches are dropped so the image carries the binary alone.
+RUN set -eu; \
+    if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+        . /usr/local/share/vogt/agent-versions.env; \
+        klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
+        git init -q /tmp/klaudia; \
+        git -C /tmp/klaudia fetch -q --depth 1 "$VOGT_KLAUDIA_SOURCE" "$klaudia_version"; \
+        git -C /tmp/klaudia checkout -q --detach FETCH_HEAD; \
+        test "$(git -C /tmp/klaudia rev-parse HEAD)" = "$klaudia_version"; \
+        (cd /tmp/klaudia && CGO_ENABLED=0 GOFLAGS=-mod=readonly \
+            GOMODCACHE=/tmp/gomod GOCACHE=/tmp/gocache \
+            go build -trimpath -o /usr/local/bin/klaudia ./cmd/klaudia); \
+        GOMODCACHE=/tmp/gomod go clean -modcache; \
+        rm -rf /tmp/klaudia /tmp/gomod /tmp/gocache; \
+        /usr/local/bin/klaudia --version; \
     fi
 
 # The pin above is the contract, so the CLI must not undo it at runtime.
