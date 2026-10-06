@@ -321,6 +321,48 @@ def test_autopilot_adds_the_keep_going_convention_and_is_audited(
     assert "## Autopilot" not in engine.last_spec["prompt"]
 
 
+def test_autopilot_reaches_the_engine_and_is_on_by_default_for_an_agent_task(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-949: the engine keeps an autopilot session awake and re-prompts it,
+    so it has to be told; a session started to work something through is
+    on autopilot unless asked otherwise."""
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", template="opencode", task="work the backlog", reason=WHY
+        ),
+    )
+    assert engine.last_spec.get("autopilot") is True
+    brief = engine.last_spec["prompt"]
+    assert "## Autopilot" in brief
+    assert "`AUTOPILOT: DONE`" in brief, "the line the engine stops nudging on"
+
+    # Explicitly off wins over the default.
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            template="opencode",
+            task="one question",
+            autopilot=False,
+            reason=WHY,
+        ),
+    )
+    assert "autopilot" not in engine.last_spec
+    assert "## Autopilot" not in engine.last_spec["prompt"]
+
+    # No task, or no agent: nothing to work through, so off by default.
+    start_session(
+        wired, StartSessionParams(project="vogt", template="claude", reason=WHY)
+    )
+    assert "autopilot" not in engine.last_spec
+    start_session(
+        wired, StartSessionParams(project="vogt", task="look around", reason=WHY)
+    )
+    assert "autopilot" not in engine.last_spec
+
+
 def test_a_template_is_sent_by_name_for_the_engine_to_expand(
     wired: AppContext, engine: StandInEngine
 ) -> None:

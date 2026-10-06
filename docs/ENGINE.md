@@ -1265,10 +1265,44 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   - a shell process (`bash`, `sh`, …) runs *below* the agent CLI, meaning a
     tool call or a background job is at work. The agent's MCP servers are not
     shells, and a wrapper shell that launched the CLI sits above it, so
-    neither counts.
+    neither counts;
+  - for the idle trigger only, it is on **autopilot** (below): the pause at
+    the end of each of its turns is exactly the quiet the idle trigger looks
+    for. Memory pressure can still take it.
 
   A hook that keeps a turn going reads as `running` and is exempt. A value
   that does not parse stops the engine at startup.
+
+#### Autopilot
+
+A session started with `autopilot: true` (`SessionSpec`; vogt-core sets it
+from `session.start`, on by default for an agent template given a task) is
+meant to work through a backlog unattended (WI-949). Its brief tells the
+agent to carry on to the next item and, when nothing unblocked is left, to
+end its reply with a line reading exactly `AUTOPILOT: DONE`. Agents still
+stop: opencode ends a *run* at every natural stop of the model, and any
+agent may stop to announce its next step. So the engine re-drives it
+(`autopilot.rs`):
+
+- a Claude Code, Codex or opencode session on autopilot that is at its
+  prompt (`ready`, below), not blocked on a person, and quiet for
+  `ENGINE_AUTOPILOT_NUDGE_AFTER` (default `60s`) is sent a one-line "carry
+  on" and Enter, logged as `event=autopilot.nudge`, and counted on the
+  summary as `autopilot_nudges`;
+- a line reading `AUTOPILOT: DONE` among the last lines of its screen turns
+  its autopilot off for good (`event=autopilot.done`), as does reaching
+  `ENGINE_AUTOPILOT_MAX_NUDGES` (default 100; `event=autopilot.capped`).
+  `0` never nudges, leaving autopilot as the idle exemption alone;
+- Klaudia is never nudged: it runs its own goal loop.
+
+The summary's `autopilot` reads `false` once it is off. A nudge is input, so
+it restarts the quiet clock and nudges cannot stack up.
+
+**When opencode is `ready`.** opencode draws no prompt glyph, so `ready`
+recognises its composer separately: the `┃` bar closed by a `╹▀` footer near
+the bottom of the screen, with no `esc interrupt` (which it shows only while a
+turn runs). Without this, an opencode session was never `ready`, and a driver
+waiting for it to be (`GET /wait?until=ready`) only ever timed out.
 
 #### Resource use
 

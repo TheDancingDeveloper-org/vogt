@@ -130,6 +130,8 @@ services:
       # size (`2GiB`). docs/ENGINE.md, "Hibernation".
       ENGINE_HIBERNATE_IDLE_AFTER: "${ENGINE_HIBERNATE_IDLE_AFTER:-}"
       ENGINE_HIBERNATE_MEMAVAILABLE_BELOW: "${ENGINE_HIBERNATE_MEMAVAILABLE_BELOW:-}"
+      ENGINE_AUTOPILOT_NUDGE_AFTER: "${ENGINE_AUTOPILOT_NUDGE_AFTER:-}"
+      ENGINE_AUTOPILOT_MAX_NUDGES: "${ENGINE_AUTOPILOT_MAX_NUDGES:-}"
       # Flag a session whose process tree holds this much resident memory
       # (`8GiB`). Every session's RSS/CPU is shown regardless.
       ENGINE_SESSION_RSS_WARN: "${ENGINE_SESSION_RSS_WARN:-}"

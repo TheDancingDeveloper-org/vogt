@@ -85,6 +85,9 @@ pub struct Record {
     pub brief_file: Option<PathBuf>,
     #[serde(default)]
     pub keep_awake: bool,
+    /// On autopilot (WI-949); a wake keeps it on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autopilot: bool,
     /// Set while hibernated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernation: Option<Hibernation>,
@@ -112,6 +115,7 @@ impl Record {
             conversation: None,
             brief_file: None,
             keep_awake: false,
+            autopilot: false,
             hibernation: None,
             rows: None,
             cols: None,

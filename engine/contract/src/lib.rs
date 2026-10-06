@@ -110,6 +110,13 @@ pub struct SessionSpec {
     /// permission check. Claude Code only; refused for anything else.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Keep the agent working through its backlog unattended (WI-949): the
+    /// idle policy leaves the session alone, and when the agent stops at its
+    /// prompt without reporting itself blocked, the engine tells it to carry
+    /// on — until it prints `AUTOPILOT: DONE` or the deployment's nudge cap
+    /// is reached. vogt-core sets it from `session.start`'s `autopilot`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autopilot: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +184,14 @@ pub struct SessionSummary {
     /// Pinned awake: never hibernated by policy, and woken at boot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub keep_awake: bool,
+    /// On autopilot (WI-949, see `SessionSpec::autopilot`): exempt from the
+    /// idle policy and re-prompted when it stops with work left. Cleared by
+    /// the engine when the agent says it is done or the nudge cap is reached.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub autopilot: bool,
+    /// How many times the engine has told this session to carry on.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub autopilot_nudges: u32,
     /// Set when someone asked the session to stop: who, when and why. The
     /// exit that follows reads `stopped`, not `errored` (WI-913).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -898,6 +913,10 @@ pub struct GitStatus {
     pub behind: u32,
     #[serde(default)]
     pub entries: Vec<StatusEntry>,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 fn default_true() -> bool {

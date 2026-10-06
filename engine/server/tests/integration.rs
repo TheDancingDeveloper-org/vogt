@@ -75,6 +75,7 @@ fn test_config() -> Config {
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
+        autopilot: vogt_engine_server::autopilot::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         metrics_bind: None,
@@ -9843,4 +9844,157 @@ async fn an_engine_started_agent_session_gets_its_own_credential() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// WI-949: a driven opencode session on autopilot works through a backlog
+/// unattended. The stand-in draws opencode's own idle composer (the `┃` bar
+/// and `╹▀` footer, no prompt glyph), takes one backlog item per line of
+/// input, and prints `AUTOPILOT: DONE` after the last. Nothing in this test
+/// types into it: every item after the start is the engine's nudge.
+#[tokio::test]
+async fn an_autopilot_opencode_session_advances_through_its_backlog_unattended() {
+    use std::os::unix::fs::PermissionsExt;
+    const ITEMS: usize = 3;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("done.log");
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let opencode = bin.join("opencode");
+    std::fs::write(
+        &opencode,
+        format!(
+            r#"#!/usr/bin/env bash
+box() {{ printf '  ┃\r\n  ┃  Ask anything…\r\n  ┃\r\n  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀\r\n   tab agents  ctrl+p commands\r\n'; }}
+n=0
+box
+while IFS= read -r _; do
+  n=$((n+1))
+  echo "item $n" >> '{log}'
+  printf '     ▣  Build · stand-in · item %s done\r\n' "$n"
+  if [ "$n" -ge {ITEMS} ]; then printf '     AUTOPILOT: DONE\r\n'; fi
+  box
+done
+"#,
+            log = log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut cfg = test_config();
+    cfg.autopilot = vogt_engine_server::autopilot::Policy {
+        nudge_after: Duration::from_millis(600),
+        max_nudges: 10,
+    };
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "backlog",
+            "command": [opencode.display().to_string()],
+            "autopilot": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["autopilot"], true);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let summary = loop {
+        let detail: Value = client
+            .get(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let summary = detail["summary"].clone();
+        if summary.get("autopilot").is_none() {
+            break summary;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "autopilot never finished: {summary}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let done = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        done.lines().count(),
+        ITEMS,
+        "one item per nudge, and none after DONE: {done:?}"
+    );
+    assert_eq!(summary["autopilot_nudges"], ITEMS as u64);
+
+    // Done is final: no further nudge however long it sits there.
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    let done = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(done.lines().count(), ITEMS);
+}
+
+/// A session blocked on a person is never nudged, autopilot or not.
+#[tokio::test]
+async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let log = tmp.path().join("input.log");
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let opencode = bin.join("opencode");
+    std::fs::write(
+        &opencode,
+        format!(
+            "#!/usr/bin/env bash\nprintf '  ┃\\r\\n  ╹▀▀▀▀▀▀▀▀\\r\\n'\nwhile IFS= read -r line; do echo x >> '{}'; done\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&opencode, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cfg = test_config();
+    cfg.autopilot = vogt_engine_server::autopilot::Policy {
+        nudge_after: Duration::from_millis(400),
+        max_nudges: 10,
+    };
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "blocked",
+            "command": [opencode.display().to_string()],
+            "autopilot": true,
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let status = client
+        .post(format!("{base}/api/sessions/{id}/blocked"))
+        .json(&json!({"blocked": true, "reason": "needs a person"}))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert!(status.is_success());
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert!(
+        std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+        "a blocked session was nudged"
+    );
 }

@@ -1110,6 +1110,19 @@ class SessionSummary(Result):
             "None when the engine could not be asked."
         ),
     )
+    autopilot: bool | None = Field(
+        default=None,
+        description=(
+            "On autopilot (WI-949): the engine re-prompts it when it stops "
+            "with work left and its idle policy leaves it awake. Turns false "
+            "once the agent prints `AUTOPILOT: DONE` or the engine's nudge "
+            "cap is reached. None when the engine could not be asked."
+        ),
+    )
+    autopilot_nudges: int | None = Field(
+        default=None,
+        description="How many times the engine has told it to carry on.",
+    )
     stopped_by: str | None = Field(
         default=None,
         description=(
@@ -3748,13 +3761,17 @@ class StartSessionParams(Params):
             "volunteer one for a terminal that runs no agent."
         ),
     )
-    autopilot: bool = Field(
-        default=False,
+    autopilot: bool | None = Field(
+        default=None,
         description=(
-            "Tell the agent (in its brief) to keep going: when its next step "
-            "needs no person, carry on with it instead of ending the turn, "
-            "and stop only when it is blocked on a person (reported with "
-            "session_report_blocked) or there is no unblocked work left."
+            "Keep the agent working unattended: its brief tells it to carry "
+            "on when its next step needs no person, stopping only when it is "
+            "blocked on a person (reported with session_report_blocked) or "
+            "no unblocked work is left (then it prints `AUTOPILOT: DONE`). "
+            "The engine also re-prompts it whenever it stops at its prompt "
+            "with work left, and its idle policy leaves it awake. Omitted "
+            "means on for an agent template started with a `task`, off "
+            "otherwise; `false` turns it off."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")

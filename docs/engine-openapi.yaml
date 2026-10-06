@@ -715,6 +715,12 @@ components:
         keep_awake:
           type: boolean
           description: Pinned awake; absent when false.
+        autopilot:
+          type: boolean
+          description: On autopilot (WI-949) — exempt from the idle policy and re-prompted at its prompt until it prints `AUTOPILOT: DONE`; absent when false.
+        autopilot_nudges:
+          type: integer
+          description: How many times the engine has told it to carry on; absent when none.
         resources: { $ref: "#/components/schemas/SessionResources" }
         template:
           type: string
@@ -950,6 +956,15 @@ components:
             For `claude` and `codex` the session starts in the directory the
             conversation's transcript records, when that is inside the
             workspace, instead of `cwd`.
+        autopilot:
+          type: boolean
+          default: false
+          description: >-
+            Keep the agent working unattended (WI-949): exempt from the idle
+            hibernation trigger, and re-prompted when it stops at its prompt
+            without reporting itself blocked, until it prints a line reading
+            `AUTOPILOT: DONE` or `ENGINE_AUTOPILOT_MAX_NUDGES` is reached. Kept
+            in the hibernation record.
         cols: { type: integer }
         rows: { type: integer }
         scrollback_bytes: { type: integer }

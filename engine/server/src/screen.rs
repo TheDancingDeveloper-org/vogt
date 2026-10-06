@@ -121,7 +121,15 @@ pub fn render_with_scrollback(
 ///
 /// Only consulted when the session is `idle`: these TUIs keep drawing their
 /// input box while they work, so the glyph alone does not mean "ready".
+///
+/// opencode draws no prompt glyph at all, so it has its own test
+/// ([`shows_opencode_prompt`]); without it an opencode session was never
+/// `ready` and a driver waiting for it never re-prompted it (WI-949).
 pub fn shows_prompt(lines: &[String]) -> bool {
+    shows_glyph_prompt(lines) || shows_opencode_prompt(lines)
+}
+
+fn shows_glyph_prompt(lines: &[String]) -> bool {
     const BORDER: &[char] = &['│', '┃', '║', '|', ' ', '\u{a0}'];
     lines
         .iter()
@@ -140,6 +148,30 @@ pub fn shows_prompt(lines: &[String]) -> bool {
                 None => false,
             }
         })
+}
+
+/// Whether the screen shows opencode's input box with no turn running.
+///
+/// opencode (1.18) draws its composer as a heavy left bar (`┃`) closed by a
+/// `╹▀▀▀` footer, both idle and while it works; what differs is the status
+/// line under the box, which says `esc interrupt` (beside a spinner) only
+/// while a turn runs. So: the bar and its footer near the bottom of the
+/// screen, and no `esc interrupt` among those lines.
+pub fn shows_opencode_prompt(lines: &[String]) -> bool {
+    let tail: Vec<&str> = lines
+        .iter()
+        .rev()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .take(10)
+        .collect();
+    let footer = tail.iter().any(|l| {
+        l.strip_prefix('╹')
+            .is_some_and(|rest| rest.starts_with('▀'))
+    });
+    let bar = tail.iter().any(|l| l.starts_with('┃'));
+    let working = tail.iter().any(|l| l.contains("esc interrupt"));
+    footer && bar && !working
 }
 
 /// Whether a driver can type now. See [`SessionScreen::ready`].
@@ -308,6 +340,58 @@ mod tests {
         assert!(!shows_prompt(&["compiling foo v0.1.0".to_string()]));
         assert!(!shows_prompt(&["->x".to_string()]));
         assert!(!shows_prompt(&[]));
+    }
+
+    fn screen(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    /// The three screens opencode 1.18.31 drew in a 120x40 PTY (2026-10-06),
+    /// trimmed to their bottom: a fresh session, one whose run has ended, and
+    /// one mid-run.
+    #[test]
+    fn opencode_is_ready_at_its_idle_box_and_not_while_a_turn_runs() {
+        let fresh = screen(&[
+            "                       ┃",
+            "                       ┃  Ask anything… \"What is the tech stack of this project?\"",
+            "                       ┃",
+            "                       ┃  Build · DeepSeek V4.1 Flash OpenRouter",
+            "                       ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "                                     tab agents  ctrl+p commands",
+            "",
+            "  ~/Working/Active/javascan  ⊙ 2 MCP /status    1.18.31",
+        ]);
+        let finished = screen(&[
+            "  ┃  Reply with the single word hi. Do not use tools.",
+            "  ┃",
+            "     hi",
+            "     ▣  Build · DeepSeek V4.1 Flash · 3.8s",
+            "  ┃",
+            "  ┃",
+            "  ┃",
+            "  ┃  Build · DeepSeek V4.1 Flash OpenRouter",
+            "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "   ~/Working/Active/javascan          36.4K (3%) · $0. ctrl+p",
+            "   commands",
+        ]);
+        let running = screen(&[
+            "  ┃  Write a 400 word essay about tea. Do not use tools.",
+            "  ┃",
+            "     ▣  Build · DeepSeek V4.1 Flash",
+            "  ┃",
+            "  ┃",
+            "  ┃",
+            "  ┃  Build · DeepSeek V4.1 Flash OpenRouter",
+            "  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀",
+            "   ⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                 tab agents  ctrl+p commands",
+        ]);
+        assert!(shows_prompt(&fresh));
+        assert!(shows_prompt(&finished));
+        assert!(!shows_prompt(&running), "a running turn is not ready");
+        assert!(is_ready(ActivityState::Idle, true, &finished));
+        assert!(!is_ready(ActivityState::Running, true, &finished));
+        // A bar with no footer is just a box-drawing character in output.
+        assert!(!shows_opencode_prompt(&screen(&["┃ some table cell"])));
     }
 
     #[test]
