@@ -241,7 +241,7 @@ pub struct StopRequest {
 /// An agent CLI and its own id for a conversation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentConversation {
-    /// `claude`, `codex` or `opencode`.
+    /// `claude`, `codex`, `opencode` or `klaudia`.
     pub agent: String,
     pub id: String,
 }

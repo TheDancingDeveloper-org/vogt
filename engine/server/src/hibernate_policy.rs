@@ -51,7 +51,7 @@ impl Policy {
 const TICK: Duration = Duration::from_secs(60);
 
 /// Agent CLIs, as `/proc/<pid>/comm` names them.
-const AGENTS: &[&str] = &["claude", "codex", "opencode"];
+const AGENTS: &[&str] = &["claude", "codex", "opencode", "klaudia"];
 
 /// A shell below the agent is a tool call or a background job at work.
 const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "fish", "ksh"];

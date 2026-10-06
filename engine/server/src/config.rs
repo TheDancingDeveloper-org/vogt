@@ -171,6 +171,24 @@ impl SessionTemplate {
                 match_path_prefixes: vec![],
                 tags: vec!["agent".to_string(), "opencode".to_string()],
             },
+            // Klaudia (WI-950): a Go coding agent with its own goal loop
+            // (`/goal run`), driven in its TUI like the three above.
+            SessionTemplate {
+                name: "Klaudia (protected)".to_string(),
+                description: "Klaudia through agent-auth".to_string(),
+                command: Some(vec![
+                    "vogt-agent-auth".to_string(),
+                    "run".to_string(),
+                    "--".to_string(),
+                    "klaudia".to_string(),
+                ]),
+                cwd: None,
+                env: vec![],
+                default_name: Some("{repo_name}-klaudia-{timestamp}".to_string()),
+                match_repo_names: vec![],
+                match_path_prefixes: vec![],
+                tags: vec!["agent".to_string(), "klaudia".to_string()],
+            },
             SessionTemplate {
                 name: "Python Env".to_string(),
                 description: "Python development environment".to_string(),

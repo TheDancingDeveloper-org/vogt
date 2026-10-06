@@ -917,7 +917,8 @@ class SessionRuntime(Result):
     that came from."""
 
     agent: str | None = Field(
-        default=None, description="claude / codex / opencode, from the command."
+        default=None,
+        description="claude / codex / opencode / klaudia, from the command.",
     )
     model: str | None = None
     model_basis: str | None = Field(
@@ -3677,7 +3678,7 @@ class StartSessionParams(Params):
         description=(
             "Session template to run, by name or by tag — the engine expands "
             "it against the deployment's templates. Use this to run an agent "
-            "rather than a plain shell: `claude` (or `codex`, `opencode`) "
+            "rather than a plain shell: `claude` (or `codex`, `opencode`, `klaudia`) "
             "starts that agent under the deployment's protected wrapper, so "
             "a request to *do* something in a session names one here. "
             "Omitted means a plain shell, which does nothing until typed into."
@@ -3688,7 +3689,7 @@ class StartSessionParams(Params):
         description=(
             "What the session's agent should do, in the user's words. Folded "
             "into the brief as its Task section; an agent template (Claude "
-            "Code, Codex, OpenCode) is started with a first prompt telling it "
+            "Code, Codex, OpenCode, Klaudia) is started with a first prompt telling it "
             "to read the brief and carry that task out, so 'start a session "
             "on X and check its containers' opens an agent already checking "
             "them. A plain shell only gets the brief's path in "
@@ -3706,7 +3707,8 @@ class StartSessionParams(Params):
             "`accept_edits`: file edits auto-accepted, everything else asks. "
             "`bypass`: no permission checks at all, for one trusted task — "
             "only a person may grant it (an agent is refused), and it is "
-            "audited. Claude Code templates only."
+            "audited. Claude Code, opencode and Klaudia templates (Klaudia: "
+            "its `acceptEdits` mode and `--dangerously-skip-permissions`)."
         ),
     )
     resume: str | None = Field(
@@ -3715,9 +3717,10 @@ class StartSessionParams(Params):
         description=(
             "Continue a previous conversation of the template's agent CLI "
             "instead of starting a new one: its own conversation id, mapped "
-            "to `claude --resume <id>`, `codex resume <id>` or `opencode "
-            "--session <id>`. A Claude Code session Vogt started fresh has "
-            "the engine session id (`engine_session_id`) as its conversation "
+            "to `claude --resume <id>`, `codex resume <id>`, `opencode "
+            "--session <id>` or `klaudia --resume <id>`. A Claude Code (or "
+            "Klaudia) session Vogt started fresh has the engine session id "
+            "(`engine_session_id`) as its conversation "
             "id, so a session lost to a restart can be resumed by that. "
             "The engine starts a resumed conversation in the directory its "
             "transcript records (when inside the workspace), so one begun "

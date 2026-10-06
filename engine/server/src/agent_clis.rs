@@ -146,7 +146,7 @@ pub struct AgentCliTool {
     pub tool: String,
     /// Where it comes from: the npm package, or the Go release mirror.
     pub package: String,
-    /// How a version of it is fetched: `npm` or `go-dist`.
+    /// How a version of it is fetched: `npm`, `go-dist` or `go-src`.
     #[serde(default = "default_kind")]
     pub kind: String,
     pub binary: String,
@@ -403,21 +403,31 @@ fn installed_versions(dir: &Path) -> Vec<String> {
     versions.into_iter().map(|(_, name)| name).collect()
 }
 
-/// The three shapes a version may take on the way to the installer. Anything
-/// else is refused here rather than escaped, because the value arrives from
-/// a tool call and ends up in argv.
+/// The shapes a version may take on the way to the installer: an exact
+/// version, a full commit id (a tool built from source, WI-950), `image`, or
+/// a dist-tag. Anything else is refused here rather than escaped, because the
+/// value arrives from a tool call and ends up in argv. Which shape suits which
+/// tool is the installer's to say (`EX_USAGE`, a 400).
 pub fn validate_version(raw: &str) -> Result<&str> {
     let value = raw.trim();
     if matches!(value, "image" | "latest" | "stable") {
         return Ok(value);
     }
-    if is_exact_version(value) {
+    if is_exact_version(value) || is_commit(value) {
         return Ok(value);
     }
     Err(ApiError::BadRequest(format!(
-        "version {raw:?} is not an exact version (like 2.1.261), `image`, or a \
-         dist-tag (`latest`, `stable`)"
+        "version {raw:?} is not an exact version (like 2.1.261), a full commit \
+         id, `image`, or a dist-tag (`latest`, `stable`)"
     )))
+}
+
+/// A full git commit id: 40 lowercase hex characters.
+fn is_commit(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn is_exact_version(value: &str) -> bool {
@@ -553,6 +563,7 @@ mod tests {
             "image",
             "latest",
             "stable",
+            "b7bd55c96dbf07566bd6ef13641104e067ab9eac",
         ] {
             assert!(validate_version(good).is_ok(), "{good}");
         }
@@ -566,6 +577,9 @@ mod tests {
             "2.1.261-",
             "1.2.3.4",
             "next",
+            "b7bd55c",
+            "B7BD55C96DBF07566BD6EF13641104E067AB9EAC",
+            "main",
         ] {
             assert!(validate_version(bad).is_err(), "{bad:?} reached argv");
         }
