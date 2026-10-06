@@ -271,6 +271,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     // grow without bound. A no-op when history is disabled or the horizon is 0.
     spawn_history_retention_sweeper(Arc::clone(&state));
     crate::hibernate_policy::spawn_watcher(Arc::clone(&state));
+    crate::autopilot::spawn_watcher(Arc::clone(&state));
     crate::resources::spawn_sampler(Arc::clone(&state));
     crate::hibernate_policy::spawn_boot_wake(Arc::clone(&state));
 

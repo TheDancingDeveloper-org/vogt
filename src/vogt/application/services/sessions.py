@@ -186,6 +186,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # row, and logged, so a slow or refused start is attributable afterwards.
     # A refusal raises before any audit write, so it is logged here; the
     # engine audits its own side (`event=session.start`) either way.
+    autopilot = _autopilot(params)
     spawn_started = time.monotonic()
     try:
         started = _start_on_engine(
@@ -194,13 +195,12 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             template=params.template,
             cwd=subject.cwd,
             env=_session_env(ctx, session_id, credential.secret),
-            brief=_brief_with_task(
-                subject.brief, params.task, autopilot=params.autopilot
-            ),
+            brief=_brief_with_task(subject.brief, params.task, autopilot=autopilot),
             model=params.model,
             effort=params.effort,
             resume=params.resume,
             permission_mode=params.permission_mode,
+            autopilot=autopilot,
         )
     except VogtError as error:
         _LOG.warning(
@@ -307,7 +307,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 # it is what the session was *asked* to resume, the same
                 # standing as `model`.
                 "resume": params.resume,
-                "autopilot": params.autopilot,
+                "autopilot": autopilot,
                 # Named on the audit row: who started an unguarded session,
                 # and why, is what an operator looks for afterwards.
                 "permission_mode": params.permission_mode,
@@ -1858,6 +1858,15 @@ def _brief_with_task(brief: str, task: str | None, *, autopilot: bool = False) -
     return f"{brief.rstrip()}\n\n## Task\n\n{task}\n"
 
 
+def _autopilot(params: StartSessionParams) -> bool:
+    """Whether a start runs on autopilot (WI-949): as asked, or — asked
+    nothing — on for an agent template given a task, the shape of a session
+    started to work through something, and off for anything else."""
+    if params.autopilot is not None:
+        return params.autopilot
+    return bool(params.template and params.task and params.task.strip())
+
+
 def _start_on_engine(
     engine: EngineClient,
     *,
@@ -1870,6 +1879,7 @@ def _start_on_engine(
     effort: str | None = None,
     resume: str | None = None,
     permission_mode: str | None = None,
+    autopilot: bool = False,
 ) -> EngineSession:
     return engine.create_session(
         prompt=brief,
@@ -1892,6 +1902,7 @@ def _start_on_engine(
         effort=effort,
         resume=resume,
         permission_mode=permission_mode,
+        autopilot=autopilot,
     )
 
 
@@ -2014,6 +2025,8 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "blocked": _blocked(engine_session.blocked),
         "hibernation": _hibernation(engine_session.hibernation),
         "keep_awake": engine_session.keep_awake,
+        "autopilot": engine_session.autopilot,
+        "autopilot_nudges": engine_session.autopilot_nudges,
         "conversation_id": engine_session.conversation_id,
         "resources": _resources(engine_session.resources),
         "permission_mode": engine_session.permission_mode,

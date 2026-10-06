@@ -410,6 +410,10 @@ pub struct Config {
     /// `ENGINE_HIBERNATE_IDLE_AFTER` or `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW`
     /// is set (`hibernate_policy`).
     pub hibernation: crate::hibernate_policy::Policy,
+    /// Re-driving autopilot sessions (WI-949): how long one sits at its
+    /// prompt before it is told to carry on, and the most nudges it gets
+    /// (`ENGINE_AUTOPILOT_NUDGE_AFTER`, `ENGINE_AUTOPILOT_MAX_NUDGES`).
+    pub autopilot: crate::autopilot::Policy,
     /// Answering Claude Code's per-directory trust questions before a
     /// session starts (`claude_config`). On unless
     /// `ENGINE_AGENT_QUIET_ONBOARDING=0`; off in a hand-built config.
@@ -868,6 +872,7 @@ pub fn load(
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         hibernation: hibernation_policy_from_env()?,
+        autopilot: autopilot_policy_from_env()?,
         agent_onboarding: crate::claude_config::Onboarding::from_env(),
         session_rss_warn_bytes: match engine_env("ENGINE_SESSION_RSS_WARN") {
             Ok(v) if !v.trim().is_empty() => {
@@ -1101,6 +1106,34 @@ fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
         idle_after,
         memavailable_below,
     })
+}
+
+/// `ENGINE_AUTOPILOT_NUDGE_AFTER` (`60s`, `2m`; default one minute) and
+/// `ENGINE_AUTOPILOT_MAX_NUDGES` (default 100; `0` never nudges). A value
+/// that does not parse is a startup error.
+fn autopilot_policy_from_env() -> Result<crate::autopilot::Policy> {
+    let mut policy = crate::autopilot::Policy::default();
+    match engine_env("ENGINE_AUTOPILOT_NUDGE_AFTER") {
+        Ok(v) if !v.trim().is_empty() => {
+            policy.nudge_after = crate::hibernate_policy::parse_duration(&v).ok_or_else(|| {
+                ApiError::Config(format!(
+                    "ENGINE_AUTOPILOT_NUDGE_AFTER={v:?} is not a duration like 60s or 2m"
+                ))
+            })?;
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => {}
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_AUTOPILOT_NUDGE_AFTER: {e}"
+            )))
+        }
+    }
+    if let Some(max) = parse_u64_env("ENGINE_AUTOPILOT_MAX_NUDGES")? {
+        policy.max_nudges = u32::try_from(max).map_err(|_| {
+            ApiError::Config(format!("ENGINE_AUTOPILOT_MAX_NUDGES={max} is too large"))
+        })?;
+    }
+    Ok(policy)
 }
 
 fn parse_u64_env(name: &str) -> Result<Option<u64>> {

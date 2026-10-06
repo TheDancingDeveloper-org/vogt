@@ -163,6 +163,7 @@ fn test_config() -> Config {
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
+        autopilot: vogt_engine_server::autopilot::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         metrics_bind: None,

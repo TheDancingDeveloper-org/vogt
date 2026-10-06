@@ -14,6 +14,11 @@
 //! - one pinned with `keep_awake`;
 //! - one whose turn is running, or that shows a permission dialog;
 //! - one whose agent reported itself blocked on a person;
+//! - by the idle trigger only, one on autopilot (WI-949): it is meant to be
+//!   working through a backlog unattended, and the pause at the end of each
+//!   of its turns is exactly the quiet the idle trigger looks for. Memory
+//!   pressure can still take it — the one valve left when every session is
+//!   busy;
 //! - one with a shell running below its agent CLI: a tool call in progress
 //!   or a background shell, which a hibernation would kill mid-work. The
 //!   agent's MCP servers are not shells, and the wrapper shell that launched
@@ -150,18 +155,22 @@ fn host_mem_available() -> Option<u64> {
     kib.checked_mul(1024)
 }
 
+/// A session policy may hibernate: its id, how long it has been quiet, and
+/// whether the idle trigger must leave it alone (on autopilot).
+pub type Candidate = (Uuid, Duration, bool);
+
 /// One pass of the policy: which sessions to hibernate, and why each one.
 /// Pure over its inputs, so the rules are testable without a clock or a
 /// cgroup.
 pub fn choose(
     policy: &Policy,
-    candidates: &[(Uuid, Duration)],
+    candidates: &[Candidate],
     available: Option<u64>,
 ) -> Vec<(Uuid, HibernateTrigger, String)> {
     let mut chosen: Vec<(Uuid, HibernateTrigger, String)> = Vec::new();
     if let Some(after) = policy.idle_after {
-        for &(id, quiet) in candidates {
-            if quiet >= after {
+        for &(id, quiet, idle_exempt) in candidates {
+            if quiet >= after && !idle_exempt {
                 chosen.push((
                     id,
                     HibernateTrigger::Idle,
@@ -178,9 +187,9 @@ pub fn choose(
         if available < floor {
             let quietest = candidates
                 .iter()
-                .filter(|(id, _)| !chosen.iter().any(|(c, _, _)| c == id))
-                .max_by_key(|(_, quiet)| *quiet);
-            if let Some(&(id, quiet)) = quietest {
+                .filter(|(id, _, _)| !chosen.iter().any(|(c, _, _)| c == id))
+                .max_by_key(|(_, quiet, _)| *quiet);
+            if let Some(&(id, quiet, _)) = quietest {
                 chosen.push((
                     id,
                     HibernateTrigger::Memory,
@@ -218,11 +227,11 @@ pub fn spawn_watcher(state: Arc<AppState>) {
 pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
     // A few small `/proc` reads per session, once a minute: cheap enough to
     // do inline rather than shipping the registry to a blocking thread.
-    let candidates: Vec<(Uuid, Duration)> = registry
+    let candidates: Vec<Candidate> = registry
         .live_sessions()
         .iter()
         .filter_map(|s| match exemption(registry, s) {
-            None => Some((s.id, s.quiet_for())),
+            None => Some((s.id, s.quiet_for(), s.autopilot())),
             Some(why) => {
                 tracing::debug!(session = %s.id, reason = %why, "not hibernating");
                 None
@@ -326,7 +335,11 @@ mod tests {
     fn idle_takes_everything_past_the_threshold_and_memory_the_quietest_left() {
         let (a, b, c) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
         let mins = |m: u64| Duration::from_secs(m * 60);
-        let candidates = [(a, mins(200)), (b, mins(30)), (c, mins(90))];
+        let candidates = [
+            (a, mins(200), false),
+            (b, mins(30), false),
+            (c, mins(90), false),
+        ];
         let idle = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: None,
@@ -356,5 +369,35 @@ mod tests {
             "no pressure"
         );
         assert!(choose(&Policy::default(), &candidates, Some(0)).is_empty());
+    }
+
+    #[test]
+    fn autopilot_is_spared_by_idle_but_not_by_memory_pressure() {
+        let (looping, idle) = (Uuid::new_v4(), Uuid::new_v4());
+        let mins = |m: u64| Duration::from_secs(m * 60);
+        // The looping session is the quietest: it paused between items.
+        let candidates = [(looping, mins(300), true), (idle, mins(150), false)];
+        let idle_only = Policy {
+            idle_after: Some(mins(120)),
+            memavailable_below: None,
+        };
+        let chosen: Vec<_> = choose(&idle_only, &candidates, None)
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        assert_eq!(
+            chosen,
+            vec![idle],
+            "the idle trigger leaves autopilot alone"
+        );
+        let pressure = Policy {
+            idle_after: None,
+            memavailable_below: Some(2 << 30),
+        };
+        let chosen: Vec<_> = choose(&pressure, &candidates, Some(1 << 30))
+            .into_iter()
+            .map(|(id, t, _)| (id, t))
+            .collect();
+        assert_eq!(chosen, vec![(looping, HibernateTrigger::Memory)]);
     }
 }

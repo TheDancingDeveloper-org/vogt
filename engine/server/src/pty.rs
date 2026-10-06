@@ -78,6 +78,10 @@ pub struct Session {
     conversation: Mutex<Option<vogt_engine_contract::AgentConversation>>,
     /// Pinned awake (see `SessionSummary::keep_awake`).
     keep_awake: AtomicBool,
+    /// On autopilot (see `SessionSummary::autopilot`, WI-949).
+    autopilot: AtomicBool,
+    /// Times the engine told it to carry on.
+    autopilot_nudges: std::sync::atomic::AtomicU32,
     /// Set as the session is being hibernated: the exit that follows is not
     /// the session ending, so its record is kept and its history row says
     /// `hibernated`.
@@ -178,6 +182,23 @@ impl Session {
         self.keep_awake.store(keep, Ordering::Release);
     }
 
+    pub fn autopilot(&self) -> bool {
+        self.autopilot.load(Ordering::Acquire)
+    }
+
+    pub fn set_autopilot(&self, on: bool) {
+        self.autopilot.store(on, Ordering::Release);
+    }
+
+    pub fn autopilot_nudges(&self) -> u32 {
+        self.autopilot_nudges.load(Ordering::Acquire)
+    }
+
+    /// Count one nudge; the new total.
+    pub fn count_autopilot_nudge(&self) -> u32 {
+        self.autopilot_nudges.fetch_add(1, Ordering::AcqRel) + 1
+    }
+
     pub fn is_hibernating(&self) -> bool {
         self.hibernating.load(Ordering::Acquire)
     }
@@ -225,6 +246,8 @@ impl Session {
             conversation: self.conversation(),
             hibernation: None,
             keep_awake: self.keep_awake(),
+            autopilot: self.autopilot(),
+            autopilot_nudges: self.autopilot_nudges(),
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
@@ -828,6 +851,8 @@ pub fn spawn(
         blocked: Mutex::new(None),
         conversation: Mutex::new(None),
         keep_awake: AtomicBool::new(false),
+        autopilot: AtomicBool::new(false),
+        autopilot_nudges: std::sync::atomic::AtomicU32::new(0),
         hibernating: AtomicBool::new(false),
         last_input: Mutex::new(None),
         resources: Mutex::new(None),

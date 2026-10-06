@@ -328,7 +328,14 @@ the operator — it does not re-prompt the agent to "continue".
 section to the brief: when the agent's next step needs no person, it carries
 on in the same turn instead of ending it to announce the next item, and
 stops only when it is blocked (reported as above) or no unblocked work is
-left. The flag is recorded on the start's audit row.
+left — then it ends its reply with the line `AUTOPILOT: DONE`. It is on by
+default when a session is started on an agent template with a `task`; pass
+`autopilot: false` to turn it off. The engine backs the convention up: an
+autopilot session is not hibernated for being idle, and when it stops at its
+prompt with work left the engine tells it to carry on, until that line or a
+cap (`autopilot` and `autopilot_nudges` on `session_list`). A driver need not
+re-prompt an autopilot session — wait for it to be blocked or done. The flag
+is recorded on the start's audit row.
 
 #### Permission prompts: `awaiting-approval`
 

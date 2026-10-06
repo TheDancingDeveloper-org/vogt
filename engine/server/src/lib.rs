@@ -11,6 +11,7 @@ pub mod assistant_api;
 pub mod assistant_log;
 pub mod assistant_speech;
 pub mod auth;
+pub mod autopilot;
 pub mod claude_config;
 pub mod client_diag;
 pub mod config;

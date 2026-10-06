@@ -66,6 +66,10 @@ export interface SessionSummary {
   hibernation?: Hibernation | null;
   /** Pinned awake: never hibernated by policy. */
   keep_awake?: boolean;
+  /** On autopilot (WI-949): re-prompted by the engine until it is done. */
+  autopilot?: boolean;
+  /** How many times the engine has told it to carry on. */
+  autopilot_nudges?: number;
   /** The process tree's last resource sample (engine `SessionResources`). */
   resources?: SessionResources | null;
   /** The template it was started from, when one was named. */

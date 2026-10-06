@@ -164,6 +164,9 @@ class EngineSession:
     hibernation: EngineHibernation | None = None
     #: Pinned awake: never hibernated by the engine's policy.
     keep_awake: bool = False
+    #: On autopilot (WI-949), and how often the engine has re-prompted it.
+    autopilot: bool = False
+    autopilot_nudges: int = 0
     #: The process tree's last resource sample (WI-916).
     resources: EngineResources | None = None
     #: The template it was started from, by the name given (WI-919).
@@ -202,6 +205,8 @@ class EngineSession:
             conversation_id=_optional_str(conversation.get("id")),
             hibernation=EngineHibernation.from_payload(payload.get("hibernation")),
             keep_awake=payload.get("keep_awake") is True,
+            autopilot=payload.get("autopilot") is True,
+            autopilot_nudges=_nudges(payload.get("autopilot_nudges")),
             resources=EngineResources.from_payload(payload.get("resources")),
             template=_optional_str(payload.get("template")),
             permission_mode=_optional_str(payload.get("permission_mode")),
@@ -579,6 +584,11 @@ class EngineAgentTask:
         )
 
 
+def _nudges(value: object) -> int:
+    """A nudge count from the engine; anything else is none."""
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def _optional_str(value: object) -> str | None:
     if value is None:
         return None
@@ -644,6 +654,7 @@ class EngineClient:
         effort: str | None = None,
         resume: str | None = None,
         permission_mode: str | None = None,
+        autopilot: bool = False,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -687,6 +698,10 @@ class EngineClient:
             # Sent only when not the default, so a default start is the
             # request this client has always made.
             spec["permission_mode"] = permission_mode.replace("_", "-")
+        if autopilot:
+            # The engine keeps it awake and re-prompts it at its prompt
+            # (WI-949); sent only when on, like the fields above.
+            spec["autopilot"] = True
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 

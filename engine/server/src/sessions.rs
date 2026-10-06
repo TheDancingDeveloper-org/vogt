@@ -527,6 +527,7 @@ impl SessionRegistry {
             .map(|m| m.replace('_', "-"))
             .filter(|m| !m.is_empty() && m != "default");
         session.set_permission_mode(posture.clone());
+        session.set_autopilot(spec.autopilot);
         session.set_template(
             spec.template
                 .as_deref()
@@ -555,6 +556,7 @@ impl SessionRegistry {
                 record.model = spec.model.clone();
                 record.effort = spec.effort.clone();
                 record.permission_mode = posture.clone();
+                record.autopilot = spec.autopilot;
                 record.conversation = conversation;
                 record.brief_file = prompt_file.clone();
                 Some(record)
@@ -1001,6 +1003,7 @@ impl SessionRegistry {
             model: record.model.clone(),
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
+            autopilot: record.autopilot,
             resume: record.conversation.as_ref().map(|c| c.id.clone()),
             cols: req.cols.or(record.cols),
             rows: req.rows.or(record.rows),
@@ -1035,6 +1038,28 @@ impl SessionRegistry {
             Some(session) => Ok(session.summary()),
             None => self.hibernated_summary(id).ok_or(ApiError::NotFound),
         }
+    }
+
+    /// Turn a session's autopilot on or off (WI-949), live and in its record
+    /// so a wake keeps the answer.
+    pub fn set_autopilot(&self, id: Uuid, on: bool) -> Result<()> {
+        let live = self.sessions.get(&id).map(|s| Arc::clone(s.value()));
+        if let Some(session) = live.as_ref() {
+            session.set_autopilot(on);
+        }
+        let updated = self.records.get_mut(&id).map(|mut record| {
+            record.autopilot = on;
+            record.clone()
+        });
+        if let Some(record) = updated.as_ref() {
+            if let Err(e) = hibernation::write(&self.cfg.state_dir, record) {
+                tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+            }
+        }
+        if live.is_none() && updated.is_none() {
+            return Err(ApiError::NotFound);
+        }
+        Ok(())
     }
 
     /// Hibernate every live session that can be, as the engine shuts down,
@@ -1210,6 +1235,8 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         conversation: record.conversation.clone(),
         hibernation: Some(hibernation),
         keep_awake: record.keep_awake,
+        autopilot: record.autopilot,
+        autopilot_nudges: 0,
         resources: None,
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),
