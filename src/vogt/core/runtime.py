@@ -18,7 +18,7 @@ import re
 import shlex
 from dataclasses import dataclass
 
-AGENTS = ("claude", "codex", "opencode")
+AGENTS = ("claude", "codex", "opencode", "klaudia")
 
 _EFFORT_OVERRIDE = re.compile(r"^model_reasoning_effort=(.+)$")
 
