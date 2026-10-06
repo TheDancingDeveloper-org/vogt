@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from pydantic import ValidationError
@@ -1324,14 +1324,16 @@ def test_a_stopped_row_carries_who_stopped_it(
 # -- WI-926: an engine-started agent session gets an agent identity --------------
 
 
-def _as(ctx: AppContext, identity_ref: str, kind: str = "agent") -> AppContext:
+def _as(
+    ctx: AppContext, identity_ref: str, kind: Literal["human", "agent"] = "agent"
+) -> AppContext:
     from vogt.core.principal import Principal
 
     return dataclasses.replace(
         ctx,
         principal=Principal(
             identity_ref=identity_ref, kind=kind, display_name=identity_ref
-        ),  # type: ignore[arg-type]
+        ),
     )
 
 
