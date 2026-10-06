@@ -101,6 +101,7 @@ from vogt.application.services.projects import (
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
     answer_session,
+    engine_session_token,
     hibernate_session,
     history_list,
     keep_session_awake,
@@ -177,6 +178,7 @@ __all__ = [
     "deployed_versions",
     "deps",
     "detect_drift",
+    "engine_session_token",
     "export_instance",
     "get_preferences",
     "get_project",

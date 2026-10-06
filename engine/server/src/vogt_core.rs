@@ -304,6 +304,15 @@ impl VogtCore {
         path: &str,
         body: &serde_json::Value,
     ) -> std::result::Result<(), String> {
+        self.post_json_answer(path, body).await.map(|_| ())
+    }
+
+    /// [`Self::post_json`], keeping the core's JSON answer.
+    pub async fn post_json_answer(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> std::result::Result<serde_json::Value, String> {
         let token = self
             .fallback_token
             .as_deref()
@@ -320,7 +329,7 @@ impl VogtCore {
             .map_err(|e| terse(&e).to_string())?;
         let status = response.status();
         if status.is_success() {
-            return Ok(());
+            return Ok(response.json().await.unwrap_or(serde_json::Value::Null));
         }
         let said = response.text().await.unwrap_or_default();
         Err(format!(

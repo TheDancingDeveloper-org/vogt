@@ -127,3 +127,24 @@ deployment that lists repositories allows it in its own file. Once this is
 deployed, the shared config's blanket `"bash": "allow"` is overridden for
 every engine-launched session, and can be removed so that sessions a person
 starts by hand ask again.
+
+## Agents in engine-started sessions (WI-926, 2026-10-06)
+
+Dev validation found the bypass rule bypassed. An agent in a session the
+engine started itself (from the GUI or a protected template) asked for a
+`bypass` child and got one. Its `VOGT_HTTP_TOKEN` was the pod's brokered
+token, issued to the person `local:vogt`, so vogt-core counted the agent as
+that person.
+
+The engine now asks vogt-core for a credential of the session's own
+(`session.token`, an operation only the engine's credential may call) for
+every Claude Code, Codex or opencode session it launches without one, and
+revokes it when the session ends. The token is bound to the agent actor
+`agent:engine:<engine id>` with `agent_session_scopes`, the same scopes
+`session.start` mints for its own sessions. Such sessions are now refused
+`bypass`, and their writes are attributed to the session rather than to the
+person.
+
+A plain shell keeps the pod's token: a person is at it, so their
+attribution does not change. An agent a person starts by hand in that shell
+inherits the shell's token, and that is their choice to make.

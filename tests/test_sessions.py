@@ -1319,3 +1319,90 @@ def test_a_stopped_row_carries_who_stopped_it(
         }
     )
     assert (row.stopped_by, row.stop_reason) == ("agent:session:ses_parent", "ingested")
+
+
+# -- WI-926: an engine-started agent session gets an agent identity --------------
+
+
+def _as(ctx: AppContext, identity_ref: str, kind: str = "agent") -> AppContext:
+    from vogt.core.principal import Principal
+
+    return dataclasses.replace(
+        ctx,
+        principal=Principal(
+            identity_ref=identity_ref, kind=kind, display_name=identity_ref
+        ),  # type: ignore[arg-type]
+    )
+
+
+ENGINE_SESSION = "0cc46582-ed57-4327-9a28-624a7ae2474a"
+
+
+def test_the_engine_mints_an_agent_token_for_a_session_it_started(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The gap WI-926's dev check found: an agent in a session the engine
+    started (GUI, protected template) ran with the pod's token, bound to a
+    person, so the core let it grant `bypass`. Its own token is an agent's."""
+    from vogt.application.models import EngineSessionTokenParams
+    from vogt.application.services import engine_session_token
+    from vogt.application.services.auth import authenticate
+    from vogt.errors import BypassRefused
+
+    the_engine = _as(wired, wired.config.bootstrap_core_token_actor)
+    minted = engine_session_token(
+        the_engine,
+        EngineSessionTokenParams(engine_session_id=ENGINE_SESSION, reason=WHY),
+    )
+    assert minted.actor == f"agent:engine:{ENGINE_SESSION}"
+    assert minted.token is not None and minted.revoked == 0
+
+    who = authenticate(wired, bearer=minted.token).principal
+    assert who.kind == "agent" and who.identity_ref == minted.actor
+    with pytest.raises(BypassRefused):
+        start_session(
+            dataclasses.replace(wired, principal=who),
+            StartSessionParams(
+                work_item="WI-1",
+                template="claude",
+                permission_mode="bypass",
+                reason=WHY,
+            ),
+        )
+
+    # A second mint (a wake) supersedes the first; revoking ends both.
+    again = engine_session_token(
+        the_engine,
+        EngineSessionTokenParams(engine_session_id=ENGINE_SESSION, reason=WHY),
+    )
+    assert again.revoked == 1 and again.token != minted.token
+    gone = engine_session_token(
+        the_engine,
+        EngineSessionTokenParams(
+            engine_session_id=ENGINE_SESSION, revoke=True, reason=WHY
+        ),
+    )
+    assert gone.token is None and gone.revoked == 1
+    from vogt.errors import VogtError
+
+    with pytest.raises(VogtError):
+        authenticate(wired, bearer=again.token)
+
+
+def test_only_the_engine_may_mint_a_session_token(wired: AppContext) -> None:
+    from vogt.application.models import EngineSessionTokenParams
+    from vogt.application.services import engine_session_token
+    from vogt.errors import EngineOnly
+
+    for who in (
+        _as(wired, "agent:session:ses_runner"),
+        _as(wired, f"agent:engine:{ENGINE_SESSION}"),
+        _as(wired, "local:vogt", kind="human"),
+    ):
+        with pytest.raises(EngineOnly):
+            engine_session_token(
+                who,
+                EngineSessionTokenParams(engine_session_id=ENGINE_SESSION, reason=WHY),
+            )
+    with pytest.raises(ValidationError):
+        EngineSessionTokenParams(engine_session_id="../../etc", reason=WHY)

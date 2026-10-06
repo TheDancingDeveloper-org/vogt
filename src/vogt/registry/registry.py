@@ -62,9 +62,17 @@ LOCAL_ONLY: Mapping[str, str] = {
     ),
 }
 
-#: Operations that exist only over HTTP. Empty so far, and live: an entry
-#: naming an unregistered operation fails the parity test.
-HTTP_ONLY: Mapping[str, str] = {}
+#: Operations that exist only over HTTP. Live: an entry naming an
+#: unregistered operation fails the parity test.
+HTTP_ONLY: Mapping[str, str] = {
+    "session.token": (
+        "The session engine's own call, made over HTTP with its credential, "
+        "to mint or revoke the agent credential of a session it started "
+        "(WI-926). No person or agent has a reason to call it, and an MCP "
+        "tool or CLI command for it would only put a refusal on every "
+        "agent's tool list."
+    ),
+}
 
 
 class RegistryError(Exception):

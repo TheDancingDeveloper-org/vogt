@@ -245,7 +245,7 @@ pub async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(spec): Json<SessionSpec>,
 ) -> Result<Json<SessionSummary>> {
-    let s = state.sessions.create(spec)?;
+    let s = state.sessions.create_launched(spec).await?;
     Ok(Json(s.summary()))
 }
 

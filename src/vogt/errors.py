@@ -58,6 +58,17 @@ class BypassRefused(VogtError):
     http_status = 403
 
 
+class EngineOnly(VogtError):
+    """An operation only the session engine's own credential may call.
+
+    `session.token` mints credentials for sessions the engine started; any
+    other caller, an agent included, is refused here (WI-926).
+    """
+
+    code = "engine_only"
+    http_status = 403
+
+
 class InvalidRequest(VogtError):
     """The request is structurally valid but semantically wrong."""
 

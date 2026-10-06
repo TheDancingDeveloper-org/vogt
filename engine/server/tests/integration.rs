@@ -9718,3 +9718,129 @@ async fn a_session_in_the_default_directory_outside_the_workspace_wakes() {
     let row = wait_for_session_row(&client, &base, &id, |s| s["alive"] == json!(true)).await;
     assert_eq!(row["cwd"], home.to_string_lossy().as_ref(), "{row:?}");
 }
+
+/// WI-926: an agent session the engine starts itself is given its own agent
+/// credential, minted by vogt-core (`POST /api/sessions/token`), instead of
+/// running with the pod's token, which is bound to a person. A plain shell
+/// keeps the pod's; a session that arrives with a credential of its own (one
+/// vogt-core started) is left alone; the credential is revoked when the
+/// session ends.
+#[tokio::test]
+async fn an_engine_started_agent_session_gets_its_own_credential() {
+    use axum::{extract::State, routing::post, Router};
+    use std::os::unix::fs::PermissionsExt;
+    type Calls = Arc<std::sync::Mutex<Vec<Value>>>;
+    let calls: Calls = Arc::default();
+    async fn token(
+        State(calls): State<Calls>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        calls.lock().unwrap().push(body.clone());
+        let id = body["engine_session_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        axum::Json(json!({
+            "engine_session_id": id,
+            "actor": format!("agent:engine:{id}"),
+            "token": if body["revoke"] == json!(true) { Value::Null } else { json!(format!("minted-for-{id}")) },
+            "revoked": 0,
+        }))
+    }
+    let app = Router::new()
+        .route("/api/sessions/token", post(token))
+        .with_state(Arc::clone(&calls));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let core_addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    // A stand-in named `claude`, so the engine treats it as that agent CLI.
+    let claude = tmp.path().join("claude");
+    std::fs::write(
+        &claude,
+        "#!/bin/sh\nprintf 'tok=[%s] sid=[%s]\\n' \"$VOGT_HTTP_TOKEN\" \"$VOGT_SESSION_ID\"\nsleep 300\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut cfg = test_config();
+    cfg.vogt_core_url = Some(format!("http://{core_addr}"));
+    cfg.vogt_core_token = Some("stack-secret".into());
+    let (base, _state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let start = |body: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+
+    let agent = start(json!({ "name": "agent", "command": [claude.to_string_lossy()] })).await;
+    let printed = live_output_containing(&client, &base, &agent, &["tok=["]).await;
+    assert!(
+        printed.contains(&format!("tok=[minted-for-{agent}] sid=[{agent}]")),
+        "{printed}"
+    );
+
+    let shell = start(json!({ "name": "shell", "command": ["/bin/sh", "-c", "printf 'tok=[%s]\\n' \"$VOGT_HTTP_TOKEN\"; sleep 300"] })).await;
+    let printed = live_output_containing(&client, &base, &shell, &["tok=["]).await;
+    assert!(
+        printed.contains("tok=[]"),
+        "a shell is not minted for: {printed}"
+    );
+
+    let core_started = start(json!({
+        "name": "core-started",
+        "command": [claude.to_string_lossy()],
+        "env": [["VOGT_HTTP_TOKEN", "the-cores-own"], ["VOGT_SESSION_ID", "ses_1"]],
+    }))
+    .await;
+    let printed = live_output_containing(&client, &base, &core_started, &["tok=["]).await;
+    assert!(
+        printed.contains("tok=[the-cores-own] sid=[ses_1]"),
+        "{printed}"
+    );
+
+    let minted: Vec<Value> = calls.lock().unwrap().clone();
+    assert_eq!(minted.len(), 1, "only the engine-started agent: {minted:?}");
+    assert_eq!(minted[0]["engine_session_id"], agent.as_str());
+
+    // The credential ends with the session.
+    client
+        .post(format!("{base}/api/sessions/{agent}/kill"))
+        .send()
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c["revoke"] == json!(true) && c["engine_session_id"] == agent.as_str())
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no revoke: {:?}",
+            calls.lock().unwrap()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}

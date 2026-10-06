@@ -1135,7 +1135,16 @@ checks decide what it can finish on its own (WI-926; the design is
   opencode, see below. Codex is `400`, as is a posture on a plain shell. The posture
   shows on the summary (`permission_mode`, absent for the default), is kept
   in the hibernation record, and is reapplied on wake. vogt-core grants
-  `bypass` only to a person; an agent asking for it is refused.
+  `bypass` only to a person; an agent asking for it is refused. An
+  agent in a session the engine started itself (the GUI, a protected
+  template) counts as an agent too: the engine gives every Claude Code,
+  Codex or opencode session it launches without a credential of its own a
+  token minted for it by vogt-core (`session.token`, bound to
+  `agent:engine:<id>`, revoked when the session ends; each mint is logged
+  as `event="session.identity"`), not the pod's brokered token, which is
+  bound to a person. A plain shell keeps the pod's token. An agent a person
+  starts by hand inside such a shell inherits the shell's token: the person
+  started it.
 - **opencode** (WI-932) has its own permission model, a `permission` block
   in its config. Unconfigured, it stops at "Access external directory —
   Allow once / Allow always / Reject" with nobody there to answer. The
@@ -2507,6 +2516,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.report_blocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `session.report_unblocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `session.answer` | Operator-only | Unavailable: The assistant answers permission dialogs through its own approval flow; for drivers over MCP/CLI/REST. |
+| `session.token` | Operator-only | Unavailable: the session engine's own HTTP call to mint and revoke engine-started agent sessions' credentials; not a voice action. |
 | `session.sweep` | Operator-only | Unavailable: An oversight table of every session's screen; for drivers over MCP/CLI/REST and the GUI board. |
 | `session.hibernate` | Operator-only | Unavailable: Stops a session's processes; for the GUI and for agents over MCP/CLI/REST. |
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
