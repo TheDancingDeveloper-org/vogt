@@ -96,6 +96,13 @@ pub struct SessionRegistry {
     /// Set once the engine is shutting down: from then on an exit is the
     /// engine stopping, never a session ending, and keeps its record.
     shutting_down: Arc<AtomicBool>,
+    /// vogt-core, when this engine has one: where an agent session the
+    /// engine starts gets its own agent credential (WI-926). Set once, after
+    /// the core client is built.
+    core: Arc<std::sync::OnceLock<Arc<crate::vogt_core::VogtCore>>>,
+    /// Sessions running with a credential minted for them, revoked when they
+    /// end.
+    minted: Arc<DashMap<Uuid, ()>>,
 }
 
 const MAX_SESSION_NAME_BYTES: usize = 256;
@@ -131,6 +138,8 @@ impl SessionRegistry {
             records,
             transitions: DashMap::new(),
             shutting_down: Arc::new(AtomicBool::new(false)),
+            core: Arc::new(std::sync::OnceLock::new()),
+            minted: Arc::new(DashMap::new()),
         }
     }
 
@@ -139,16 +148,126 @@ impl SessionRegistry {
     }
 
     pub fn create(&self, spec: SessionSpec) -> Result<Arc<Session>> {
-        self.create_inner(spec, Creating::Fresh(Origin::Api))
+        self.create_inner(spec, Creating::Fresh(Origin::Api), None)
+    }
+
+    /// Hand the registry vogt-core, once the client exists (WI-926).
+    pub fn set_core(&self, core: Arc<crate::vogt_core::VogtCore>) {
+        let _ = self.core.set(core);
+    }
+
+    /// [`Self::create`] for `POST /api/sessions`: an agent session (Claude
+    /// Code, Codex, opencode) the caller did not give a credential of its own
+    /// gets one minted for it first, bound to `agent:engine:<its id>` (WI-926).
+    ///
+    /// Without it, an agent in a session started from the GUI or a protected
+    /// template ran with the pod's brokered token, which is bound to a person,
+    /// so vogt-core counted the agent as that person: it could grant `bypass`
+    /// and its writes were attributed to them. A plain shell keeps the pod's
+    /// token, because the person at it is a person. A session vogt-core
+    /// started arrives with its own token and is left alone.
+    pub async fn create_launched(&self, mut spec: SessionSpec) -> Result<Arc<Session>> {
+        let id = Uuid::new_v4();
+        if let Some(env) = self
+            .agent_identity(
+                &spec.command,
+                spec.template.as_deref(),
+                spec.env.as_deref(),
+                id,
+            )
+            .await
+        {
+            let mut merged = env;
+            merged.extend(spec.env.take().unwrap_or_default());
+            spec.env = Some(merged);
+        }
+        self.create_inner(spec, Creating::Fresh(Origin::Api), Some(id))
+    }
+
+    /// The agent CLI a session would run, from its command or its template.
+    fn agent_of(&self, command: &Option<Vec<String>>, template: Option<&str>) -> Option<String> {
+        let resolved;
+        let command = match command {
+            Some(c) if !c.is_empty() => c,
+            _ => {
+                let name = template.map(str::trim).filter(|t| !t.is_empty())?;
+                resolved = self.resolve_template(name).ok()?.command.clone()?;
+                &resolved
+            }
+        };
+        agent_cli::agent_name(command)
+    }
+
+    /// The environment that gives agent session `id` its own credential, or
+    /// `None`: not an agent, a credential already given, no core, or the core
+    /// refused (logged, and the session runs as before).
+    async fn agent_identity(
+        &self,
+        command: &Option<Vec<String>>,
+        template: Option<&str>,
+        env: Option<&[(String, String)]>,
+        id: Uuid,
+    ) -> Option<Vec<(String, String)>> {
+        let agent = self.agent_of(command, template)?;
+        if env.is_some_and(|e| e.iter().any(|(k, _)| k == "VOGT_HTTP_TOKEN")) {
+            return None;
+        }
+        let core = self.core.get()?;
+        let answer = core
+            .post_json_answer(
+                "/sessions/token",
+                &serde_json::json!({
+                    "engine_session_id": id.to_string(),
+                    "reason": format!("{agent} session started by the engine (WI-926)"),
+                }),
+            )
+            .await;
+        match answer
+            .as_ref()
+            .ok()
+            .and_then(|a| a.get("token").and_then(|t| t.as_str()))
+        {
+            Some(token) => {
+                self.minted.insert(id, ());
+                tracing::info!(
+                    target: "vogt::audit",
+                    event = "session.identity",
+                    session_id = %id,
+                    agent = %agent,
+                    actor = %format!("agent:engine:{id}"),
+                    "agent session given its own credential"
+                );
+                Some(vec![
+                    ("VOGT_HTTP_TOKEN".to_string(), token.to_string()),
+                    ("VOGT_SESSION_ID".to_string(), id.to_string()),
+                ])
+            }
+            None => {
+                tracing::warn!(
+                    target: "vogt::audit",
+                    event = "session.identity",
+                    session_id = %id,
+                    agent = %agent,
+                    error = %answer.err().unwrap_or_else(|| "no token in the answer".into()),
+                    "could not mint the agent session's credential; it runs with the pod's"
+                );
+                None
+            }
+        }
     }
 
     /// A session for an agent-task run: like [`Self::create`], but never
     /// recorded for hibernation — the run's runner owns its lifetime.
     pub fn create_for_task(&self, spec: SessionSpec) -> Result<Arc<Session>> {
-        self.create_inner(spec, Creating::Fresh(Origin::AgentTask))
+        self.create_inner(spec, Creating::Fresh(Origin::AgentTask), None)
     }
 
-    fn create_inner(&self, mut spec: SessionSpec, creating: Creating) -> Result<Arc<Session>> {
+    fn create_inner(
+        &self,
+        mut spec: SessionSpec,
+        creating: Creating,
+        preassigned: Option<Uuid>,
+    ) -> Result<Arc<Session>> {
         spec.name = normalize_session_name(&spec.name)?;
         // Expand a template name into a command before anything downstream
         // reads `command`. Only when the caller gave no explicit command —
@@ -216,7 +335,7 @@ impl SessionRegistry {
         // both.
         let id = match &creating {
             Creating::Wake(record) => record.id,
-            Creating::Fresh(_) => Uuid::new_v4(),
+            Creating::Fresh(_) => preassigned.unwrap_or_else(Uuid::new_v4),
         };
         let brief = spec
             .prompt
@@ -692,12 +811,37 @@ impl SessionRegistry {
         let records = Arc::clone(&self.records);
         let shutting_down = Arc::clone(&self.shutting_down);
         let state_dir = self.cfg.state_dir.clone();
+        let minted = Arc::clone(&self.minted);
+        let core = Arc::clone(&self.core);
         Box::new(move |session: &Session| {
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
             records.remove(&session.id);
             hibernation::remove(&state_dir, session.id);
+            // The session's own credential ends with it (WI-926).
+            if minted.remove(&session.id).is_some() {
+                if let (Some(core), Ok(runtime)) =
+                    (core.get().cloned(), tokio::runtime::Handle::try_current())
+                {
+                    let id = session.id;
+                    runtime.spawn(async move {
+                        if let Err(e) = core
+                            .post_json(
+                                "/sessions/token",
+                                &serde_json::json!({
+                                    "engine_session_id": id.to_string(),
+                                    "revoke": true,
+                                    "reason": "the session ended",
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::warn!(session = %id, error = %e, "could not revoke the session's credential");
+                        }
+                    });
+                }
+            }
         })
     }
 
@@ -833,6 +977,15 @@ impl SessionRegistry {
             .ok_or(ApiError::NotFound)?;
         let mut env = record.env.clone();
         env.extend(req.env.unwrap_or_default());
+        // The credential is not in the record (it is a secret); an engine-
+        // started agent session is given a new one, superseding the last.
+        if let Some(identity) = self
+            .agent_identity(&record.command, record.template.as_deref(), Some(&env), id)
+            .await
+        {
+            env.retain(|(k, _)| k != "VOGT_SESSION_ID");
+            env.extend(identity);
+        }
         let spec = SessionSpec {
             name: record.name.clone(),
             command: record.command.clone(),
@@ -853,7 +1006,7 @@ impl SessionRegistry {
             rows: req.rows.or(record.rows),
             scrollback_bytes: None,
         };
-        let session = self.create_inner(spec, Creating::Wake(Box::new(record)))?;
+        let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
         self.bus.publish(ServerEvent::SessionWoken { id });
         tracing::info!(session = %id, "session woken");
         Ok(session)

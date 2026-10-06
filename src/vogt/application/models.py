@@ -3774,6 +3774,30 @@ class StopSessionParams(Params):
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
+class EngineSessionTokenParams(Params):
+    engine_session_id: str = Field(
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        description="The engine's id (UUID) for the session the token is for.",
+    )
+    revoke: bool = Field(
+        default=False,
+        description="Revoke the session's tokens instead of minting one.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class EngineSessionTokenResult(BaseModel):
+    """A session's own agent credential (WI-926)."""
+
+    engine_session_id: str
+    #: The agent actor the token is bound to (`agent:engine:<uuid>`).
+    actor: str
+    #: The secret, shown once; `None` when revoking.
+    token: str | None = None
+    #: How many earlier tokens of the actor were revoked.
+    revoked: int = 0
+
+
 class SweepSessionsParams(Params):
     project: str | None = Field(
         default=None,

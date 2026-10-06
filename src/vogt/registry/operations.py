@@ -73,6 +73,8 @@ from vogt.application.models import (
     DriftListResult,
     DriftResolveParams,
     DriftResult,
+    EngineSessionTokenParams,
+    EngineSessionTokenResult,
     EventListResult,
     ExportParams,
     ExportResult,
@@ -1085,6 +1087,24 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.answer_session,
             route=HttpRoute("POST", "/sessions/answer"),
             cli=CliBinding(("session", "answer")),
+        ),
+        Operation(
+            name="session.token",
+            summary=(
+                "The session engine's call: mint the agent credential of a "
+                "session it started itself (GUI, protected template), bound to "
+                "agent:engine:<uuid>, or revoke it (`revoke`). Refused to every "
+                "other caller (403 engine_only). Gives such sessions an agent "
+                "identity, so the core tells their agents from people. Audited."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=EngineSessionTokenParams,
+            result_model=EngineSessionTokenResult,
+            handler=services.engine_session_token,
+            route=HttpRoute("POST", "/sessions/token"),
+            # HTTP-only (registry.HTTP_ONLY): never registered on the CLI.
+            cli=CliBinding(("engine-session-token",)),
         ),
         Operation(
             name="session.screen",

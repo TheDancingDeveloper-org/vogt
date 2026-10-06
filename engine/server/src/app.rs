@@ -198,6 +198,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     }
 
     let vogt_core = VogtCore::from_config(&cfg);
+    if let Some(core) = vogt_core.as_ref() {
+        sessions.set_core(Arc::clone(core));
+    }
     match cfg.vogt_core_url.as_deref() {
         Some(url) => tracing::info!(
             url = %url,

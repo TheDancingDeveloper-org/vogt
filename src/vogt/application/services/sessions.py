@@ -45,6 +45,8 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     SESSION_INPUT_MAX_BYTES,
     AnswerSessionParams,
+    EngineSessionTokenParams,
+    EngineSessionTokenResult,
     HibernateSessionParams,
     HistoryListParams,
     HistoryListResult,
@@ -101,7 +103,14 @@ from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
-from vogt.errors import BypassRefused, Conflict, InvalidRequest, NotFound, VogtError
+from vogt.errors import (
+    BypassRefused,
+    Conflict,
+    EngineOnly,
+    InvalidRequest,
+    NotFound,
+    VogtError,
+)
 from vogt.observability import logger
 from vogt.storage.interface import ReadView, WriteTxn
 
@@ -1384,6 +1393,98 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
         chosen=option,
         dismissed=dismissed,
     )
+
+
+SESSION_TOKEN = "session.token"
+#: The actor of a session the engine started itself (from the GUI, a
+#: template, an agent task), as opposed to `agent:session:<ses_…>` for one
+#: vogt-core started.
+ENGINE_SESSION_ACTOR_PREFIX = "agent:engine:"
+
+
+def engine_session_token(
+    ctx: AppContext, params: EngineSessionTokenParams
+) -> EngineSessionTokenResult:
+    """Mint (or revoke) the credential of an agent session the engine started.
+
+    WI-926: a session vogt-core starts runs with its own agent token, so the
+    core knows an agent from a person. One the engine started (the GUI, a
+    protected template) ran with the pod's brokered token, bound to a person,
+    so its agent counted as that person: it could grant `bypass`, and its
+    writes were attributed to them. The engine now asks for a token like
+    this one for every agent it launches.
+
+    Only the engine's own credential may ask, and the token carries the same
+    scopes a session `session.start` mints does, so this grants nothing
+    `session.start` does not already grant any `work.write` caller.
+    """
+    reason = writes.validate_reason(params.reason)
+    if ctx.principal.identity_ref != ctx.config.bootstrap_core_token_actor:
+        msg = (
+            "session.token is called by the session engine for the agents it "
+            f"starts, not by {ctx.principal.identity_ref}"
+        )
+        raise EngineOnly(msg)
+    identity_ref = f"{ENGINE_SESSION_ACTOR_PREFIX}{params.engine_session_id}"
+    scopes = _session_scopes(ctx)
+    credential = None if params.revoke else issue(scopes)
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[EngineSessionTokenResult]:
+        del actor
+        now = ctx.clock()
+        holder = txn.actor_by_identity(identity_ref)
+        if holder is None:
+            holder = Actor(
+                id=ctx.id_factory("act"),
+                identity_ref=identity_ref,
+                kind="agent",
+                display_name=f"Engine session {params.engine_session_id[:8]}",
+                created_at=now,
+            )
+            txn.insert_actor(holder)
+        why = "session ended" if params.revoke else f"superseded: {reason}"
+        revoked = [
+            token.id
+            for token in txn.tokens_for_actor(holder.id)
+            if txn.revoke_token(token.id, reason=why, at=now)
+        ]
+        if credential is not None:
+            txn.insert_token(
+                Token(
+                    id=ctx.id_factory("tok"),
+                    actor_id=holder.id,
+                    actor_identity_ref=identity_ref,
+                    name=f"engine session {params.engine_session_id}",
+                    scopes=list(scopes),
+                    created_at=now,
+                    expires_at=None,
+                ),
+                token_hash=credential.token_hash,
+            )
+        return WriteOutcome(
+            result=EngineSessionTokenResult(
+                engine_session_id=params.engine_session_id,
+                actor=identity_ref,
+                token=None if credential is None else credential.secret,
+                revoked=len(revoked),
+            ),
+            entity_kind="actor",
+            entity_id=holder.id,
+            payload={"identity_ref": identity_ref, "kind": "agent"},
+            event_kind=(
+                "session.token_revoked"
+                if credential is None
+                else "session.token_issued"
+            ),
+            # Never the secret: the audit row says what happened, not with what.
+            summary={
+                "engine_session_id": params.engine_session_id,
+                "minted": credential is not None,
+                "revoked": len(revoked),
+            },
+        )
+
+    return audited_write(ctx, operation=SESSION_TOKEN, reason=reason, body=body)
 
 
 SESSION_REPORT_BLOCKED = "session.report_blocked"

@@ -231,7 +231,21 @@ sessions no longer look like crashes (WI-913).
 - `accept_edits`: file edits are accepted and everything else asks.
 - `bypass`: no permission checks, for one trusted task. Only a person may
   grant it; an agent caller gets `403 bypass_refused`. It is recorded on the
-  `session.started` event.
+  `session.started` event. "An agent" includes one in a session the engine
+  started itself (the GUI, a protected template): `session.token` (below)
+  gives such a session its own agent credential.
+
+`session.token` (`work.write`, audited, `POST /api/sessions/token`) is the
+session engine's call, refused to every other caller (`403 engine_only`).
+For an agent session the engine starts without a credential of its own
+(Claude Code, Codex or opencode from the GUI or a protected template), it
+mints a token bound to the agent actor `agent:engine:<engine id>`, with
+`agent_session_scopes` (what `session.start` gives its own sessions).
+`revoke: true` revokes them when the session ends, and a new mint (a wake)
+supersedes the last. Without it, such a session ran with the pod's brokered
+token, which is bound to a person, so its agent counted as that person: it
+could grant `bypass`, and its writes were attributed to them (WI-926). A
+plain shell keeps the pod's token, because the person at it is a person.
 
 The posture shows on session rows as `permission_mode`. See
 [`ENGINE.md`, "Permission posture"](ENGINE.md#permission-posture).
