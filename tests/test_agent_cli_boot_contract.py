@@ -229,3 +229,176 @@ def test_the_strict_shadow_policy_still_refuses_and_warn_still_acknowledges(
     assert acknowledged.returncode == 0
     assert "warning" in acknowledged.stderr
     assert stray.exists(), "warn leaves the deliberate override in place"
+
+
+# --- The Go toolchain (WI-951): a `go-dist` row, fetched from a release mirror.
+
+GO_BAKED = "1.26.8"
+GO_PINNED = "1.99.1"
+GO_ARCH = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}
+
+
+def _go_script(version: str) -> str:
+    return (
+        "#!/bin/sh\n"
+        f'if [ "$1" = version ]; then echo "go version go{version} linux/amd64"; '
+        "exit 0; fi\nexit 2\n"
+    )
+
+
+class GoSandbox(Sandbox):
+    """A Go row instead of an npm one: an image `go` at GO_BAKED and a
+    `file://` mirror carrying one release (GO_PINNED) plus its index, so the
+    real installer downloads, checks the sha256 and unpacks offline."""
+
+    def __init__(self, base: Path) -> None:
+        self.base = base
+        self.root = base / "root"
+        self.image_bin = base / "imagebin"
+        self.home = base / "home"
+        self.share = base / "share"
+        self.shim = base / "shim"
+        self.mirror = base / "mirror"
+        for path in (
+            self.root,
+            self.image_bin,
+            self.home,
+            self.share,
+            self.shim,
+            self.mirror,
+        ):
+            path.mkdir(parents=True)
+        go = self.image_bin / "go"
+        go.write_text(_go_script(GO_BAKED), encoding="utf-8")
+        go.chmod(0o755)
+        (self.share / "agent-versions.resolved").write_text(
+            f"go={GO_BAKED}\n", encoding="utf-8"
+        )
+        (self.share / "agent-clis.tools").write_text(
+            f"go\tfile://{self.mirror}\tgo\tVOGT_GO_VERSION\tgo-dist\n",
+            encoding="utf-8",
+        )
+        self.sha256 = self._release(GO_PINNED)
+        self.write_index(self.sha256)
+
+    def _release(self, version: str) -> str:
+        import hashlib
+        import tarfile
+
+        stage = self.base / "stage" / "go" / "bin"
+        stage.mkdir(parents=True)
+        for name, body in (("go", _go_script(version)), ("gofmt", "#!/bin/sh\n")):
+            (stage / name).write_text(body, encoding="utf-8")
+            (stage / name).chmod(0o755)
+        archive = self.mirror / self.filename(version)
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(self.base / "stage" / "go", arcname="go")
+        return hashlib.sha256(archive.read_bytes()).hexdigest()
+
+    @staticmethod
+    def filename(version: str) -> str:
+        return f"go{version}.linux-{GO_ARCH[os.uname().machine]}.tar.gz"
+
+    def write_index(self, sha256: str) -> None:
+        import json
+
+        index = [
+            {"version": "go1.100rc1", "stable": False, "files": []},
+            {
+                "version": f"go{GO_PINNED}",
+                "stable": True,
+                "files": [
+                    {"filename": self.filename(GO_PINNED), "sha256": sha256},
+                ],
+            },
+        ]
+        (self.share / "go-index.json").write_text(json.dumps(index), encoding="utf-8")
+
+    def env(self, **extra: str) -> dict[str, str]:
+        return super().env(
+            VOGT_GO_DIST_INDEX=str(self.share / "go-index.json"), **extra
+        )
+
+    def install(self, version: str, **extra: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(INSTALL), "go", version],
+            env=self.env(**extra),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def current(self) -> str:
+        link = self.root / "go" / "current"
+        return str(link.readlink()) if link.is_symlink() else ""
+
+
+@pytest.fixture
+def go_sandbox(tmp_path: Path) -> GoSandbox:
+    if os.uname().machine not in GO_ARCH:
+        pytest.skip("no Go release naming for this machine")
+    return GoSandbox(tmp_path)
+
+
+def test_a_go_pin_is_checked_unpacked_and_put_on_path(go_sandbox: GoSandbox) -> None:
+    done = go_sandbox.install(GO_PINNED)
+    assert done.returncode == 0, done.stderr
+    assert go_sandbox.current() == GO_PINNED
+    assert go_sandbox.manifest() == f"go={GO_PINNED}\n"
+    # `go` and `gofmt` both move: a pinned `go` beside the image's `gofmt`
+    # would be two toolchains answering to one name.
+    for name in ("go", "gofmt"):
+        link = go_sandbox.root / "bin" / name
+        assert link.is_symlink(), name
+        assert (go_sandbox.root / "go" / GO_PINNED / "bin" / name).exists()
+    checked = go_sandbox.verify()
+    assert checked.returncode == 0, checked.stderr
+
+
+def test_a_go_release_that_does_not_match_its_checksum_changes_nothing(
+    go_sandbox: GoSandbox,
+) -> None:
+    go_sandbox.write_index("0" * 64)
+    failed = go_sandbox.install(GO_PINNED)
+    assert failed.returncode == 1
+    assert "sha256" in failed.stderr
+    assert go_sandbox.current() == "", "still the image copy"
+    assert not (go_sandbox.root / "go" / GO_PINNED).exists()
+    assert go_sandbox.verify().returncode == 0
+
+
+def test_a_go_release_the_index_does_not_list_is_refused(go_sandbox: GoSandbox) -> None:
+    failed = go_sandbox.install("1.98.0")
+    assert failed.returncode == 1
+    assert "lists no" in failed.stderr
+
+
+def test_go_floats_only_when_the_deployment_opted_in(go_sandbox: GoSandbox) -> None:
+    refused = go_sandbox.install("latest")
+    assert refused.returncode == 64
+    floated = go_sandbox.install("latest", VOGT_AGENT_CLI_ALLOW_DIST_TAGS="1")
+    assert floated.returncode == 0, floated.stderr
+    assert go_sandbox.current() == GO_PINNED, "the newest *stable* release"
+
+
+def test_go_back_to_the_image_copy_is_offline_and_verifies(
+    go_sandbox: GoSandbox,
+) -> None:
+    assert go_sandbox.install(GO_PINNED).returncode == 0
+    back = go_sandbox.install("image")
+    assert back.returncode == 0, back.stderr
+    assert go_sandbox.current() == ""
+    assert not (go_sandbox.root / "bin" / "go").exists()
+    assert not (go_sandbox.root / "bin" / "gofmt").exists()
+    assert go_sandbox.manifest() == f"go={GO_BAKED}\n"
+    assert go_sandbox.verify().returncode == 0
+
+
+def test_a_go_manifest_the_active_toolchain_does_not_match_is_fatal(
+    go_sandbox: GoSandbox,
+) -> None:
+    assert go_sandbox.install(GO_PINNED).returncode == 0
+    (go_sandbox.root / "manifest").write_text("go=1.0.0\n", encoding="utf-8")
+    checked = go_sandbox.verify()
+    assert checked.returncode == 78
+    assert "expected pin 1.0.0" in checked.stderr

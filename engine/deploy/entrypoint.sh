@@ -66,11 +66,11 @@ set -euo pipefail
 # for a version, not a reason to refuse to boot — and `vogt-verify-agent-clis`
 # below then judges the result against the manifest the installer wrote.
 # Which tools, and which variable names each, is the image's table
-# (`agent-clis.tools`: tool, package, binary, env var — `VOGT_CLAUDE_CODE_VERSION`
+# (`agent-clis.tools`: tool, source, binary, env var, kind — `VOGT_CLAUDE_CODE_VERSION`
 # and `VOGT_CODEX_VERSION` for the two every build carries).
 agent_cli_tools="${VOGT_AGENT_CLI_TOOLS:-/usr/local/share/vogt/agent-clis.tools}"
 if [[ -x /usr/local/bin/vogt-agent-cli-install && -r "$agent_cli_tools" ]]; then
-    while IFS=$'\t' read -r tool _ _ var; do
+    while IFS=$'\t' read -r tool _ _ var _; do
         [[ -n "$tool" && -n "$var" && "$tool" != \#* ]] || continue
         if ! /usr/local/bin/vogt-agent-cli-install "$tool" "${!var:-image}"; then
             echo "agent-clis: ${tool} runtime pin (${var}=${!var:-}) was not applied; continuing on the previous version" >&2

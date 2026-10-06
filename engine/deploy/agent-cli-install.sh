@@ -25,11 +25,17 @@
 #   bin/claude -> ../claude-code/current/bin/claude   (PATH-first)
 #   manifest                    active version per tool, `<tool>=<version>`
 #
-# Which tools exist, which npm package each is and what its binary is called
+# Which tools exist, where each comes from and what its binary is called
 # comes from a table the image writes beside its resolved versions
-# (`agent-clis.tools`, tab-separated: tool, package, binary, env var) — so
+# (`agent-clis.tools`, tab-separated: tool, source, binary, env var, kind) — so
 # this script names no tool and a deployment that bakes a different set needs
-# no change here. Codex is the one exception in *shape*: it gets no `bin/`
+# no change here. The kind says how a version is fetched; a row without one is
+# `npm`, the shape every row had before kinds existed:
+#
+#   npm       source is an npm package; `npm install -g --prefix` per version.
+#   go-dist   source is a Go release mirror (https://go.dev/dl); the version's
+#             linux tarball, checked against the sha256 the mirror's own
+#             release index gives for it (WI-951). The prefix is a GOROOT. Codex is the one exception in *shape*: it gets no `bin/`
 # link because `/usr/local/bin/codex` is the codex-full-access wrapper, which
 # itself prefers `codex/current/bin/codex` when it exists, so the image's entry
 # point and PATH lookup agree without a second copy of the bypass flags.
@@ -57,15 +63,16 @@ die() { log "error: $1"; exit "${2:-1}"; }
 usage() {
     cat >&2 <<'USAGE'
 usage: vogt-agent-cli-install <tool> <version>
-  tool     a tool named in the image's agent CLI table (claude-code, codex, ...)
-  version  an exact npm version (2.1.261), `image` for the baked copy, or —
-           only with VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1 — the dist-tag `latest`
-           or `stable`
+  tool     a tool named in the image's agent CLI table (claude-code, codex,
+           go, ...)
+  version  an exact version (2.1.261, or a Go release like 1.27.1), `image`
+           for the baked copy, or — only with VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1
+           — `latest` or `stable` (for Go, either means the newest stable)
 USAGE
     exit 64
 }
 
-# One column of the tools table for a tool: 2 = npm package, 3 = binary.
+# One column of the tools table for a tool: 2 = source, 3 = binary, 5 = kind.
 table_field() {
     local tool="$1" column="$2"
     [[ -r "$tools_table" ]] || return 1
@@ -74,6 +81,20 @@ table_field() {
 }
 package_for() { table_field "$1" 2; }
 binary_for() { table_field "$1" 3; }
+kind_for() {
+    local kind
+    kind="$(table_field "$1" 5 2>/dev/null || true)"
+    printf '%s' "${kind:-npm}"
+}
+
+# Binaries a tool puts on PATH beyond its own: a Go toolchain is `go` and
+# `gofmt`, and a `gofmt` left on the image copy beside a pinned `go` would be
+# a second, older toolchain answering to the same name.
+extra_binaries() {
+    case "$(kind_for "$1")" in
+        go-dist) echo gofmt ;;
+    esac
+}
 all_tools() {
     [[ -r "$tools_table" ]] || return 0
     awk -F'\t' 'NF >= 4 && $1 !~ /^#/ { print $1 }' "$tools_table"
@@ -108,23 +129,28 @@ write_manifest() {
 # Point `current` (and the PATH-first bin link) at a versioned prefix.
 # `ln -sfn` onto a temp name plus `mv -T` so a reader never sees a half-state.
 flip_current() {
-    local tool="$1" version="$2" binary
+    local tool="$1" version="$2" binary name
     binary="$(binary_for "$tool")"
     ln -sfn "$version" "$root/$tool/current.tmp.$$"
     mv -fT "$root/$tool/current.tmp.$$" "$root/$tool/current"
     if [[ "$binary" != "codex" ]]; then
         mkdir -p "$root/bin"
-        ln -sfn "../$tool/current/bin/$binary" "$root/bin/$binary.tmp.$$"
-        mv -fT "$root/bin/$binary.tmp.$$" "$root/bin/$binary"
+        for name in "$binary" $(extra_binaries "$tool"); do
+            ln -sfn "../$tool/current/bin/$name" "$root/bin/$name.tmp.$$"
+            mv -fT "$root/bin/$name.tmp.$$" "$root/bin/$name"
+        done
     fi
 }
 
 # Back to the image copy: no `current`, no bin link, nothing on PATH ahead of
 # /usr/local/bin. Version directories are kept so a later flip is offline.
 reset_to_image() {
-    local tool="$1" binary
+    local tool="$1" binary name
     binary="$(binary_for "$tool")"
-    rm -f "$root/$tool/current" "$root/bin/$binary"
+    rm -f "$root/$tool/current"
+    for name in "$binary" $(extra_binaries "$tool"); do
+        rm -f "$root/bin/$name"
+    done
 }
 
 # Keep the newest $keep version directories (by mtime) plus whatever `current`
@@ -156,6 +182,12 @@ smoke_check() {
     local tool="$1" version="$2" prefix="$3" binary output
     binary="$(binary_for "$tool")"
     [[ -x "$prefix/bin/$binary" ]] || { log "$prefix/bin/$binary is missing or not executable"; return 1; }
+    if [[ "$(kind_for "$tool")" == "go-dist" ]]; then
+        # `go version`, not `--version`, and it names itself `go<version>`.
+        output="$("$prefix/bin/$binary" version 2>&1)" || { log "$binary version failed: ${output:-<no output>}"; return 1; }
+        [[ "$output" == *"go$version "* ]] || { log "$binary version says '${output}', not go$version"; return 1; }
+        return 0
+    fi
     if ! output="$("$prefix/bin/$binary" --version 2>&1)"; then
         log "$binary --version failed: ${output:-<no output>}"
         return 1
@@ -166,12 +198,105 @@ smoke_check() {
     fi
 }
 
+# The GOARCH of this machine, as Go's release tarballs name it.
+go_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo amd64 ;;
+        aarch64|arm64) echo arm64 ;;
+        *) return 1 ;;
+    esac
+}
+
+# go.dev's release index (every release, with each file's sha256), from the
+# mirror the table names. VOGT_GO_DIST_INDEX points at a local copy instead —
+# the tests' offline mirror, or a deployment's own.
+go_index() {
+    local source="$1"
+    if [[ -n "${VOGT_GO_DIST_INDEX:-}" ]]; then
+        cat "$VOGT_GO_DIST_INDEX"
+    else
+        curl -fsSL --max-time 60 "$source/?mode=json&include=all"
+    fi
+}
+
+# The newest stable Go release the index lists, without its `go` prefix.
+go_latest() {
+    go_index "$1" | python3 -c '
+import json, sys
+for release in json.load(sys.stdin):
+    if release.get("stable"):
+        print(release["version"].removeprefix("go"))
+        break
+'
+}
+
+# Unpack one Go release into `prefix` (a GOROOT: `prefix/bin/go`), checked
+# against the sha256 the index records for that exact file.
+install_go_dist() {
+    local tool="$1" version="$2" prefix="$3" source arch file sum archive
+    source="$(package_for "$tool")"
+    arch="$(go_arch)" || { log "no Go release for $(uname -m)"; return 1; }
+    file="go$version.linux-$arch.tar.gz"
+    sum="$(go_index "$source" | python3 -c '
+import json, sys
+name = sys.argv[1]
+for release in json.load(sys.stdin):
+    for f in release.get("files", []):
+        if f.get("filename") == name and f.get("sha256"):
+            print(f["sha256"])
+            sys.exit(0)
+sys.exit(1)
+' "$file")" || { log "the Go release index lists no $file"; return 1; }
+    archive="$prefix.tar.gz"
+    if ! curl -fsSL --max-time 600 "$source/$file" -o "$archive"; then
+        log "could not download $source/$file"
+        rm -f "$archive"
+        return 1
+    fi
+    if ! echo "$sum  $archive" | sha256sum -c - >/dev/null 2>&1; then
+        log "$file does not match the sha256 the release index gives for it"
+        rm -f "$archive"
+        return 1
+    fi
+    tar -xzf "$archive" -C "$prefix" --strip-components=1
+    local status=$?
+    rm -f "$archive"
+    return "$status"
+}
+
+# Fetch `version` of `tool` into the fresh directory `prefix`, by its kind.
+fetch_into() {
+    local tool="$1" version="$2" prefix="$3" package log_file
+    case "$(kind_for "$tool")" in
+        npm)
+            package="$(package_for "$tool")"
+            log_file="$prefix.log"
+            log "installing $package@$version into $root/$tool/$version"
+            if ! npm install -g --prefix "$prefix" "$package@$version" >"$log_file" 2>&1; then
+                log "npm install failed; $(tail -n 5 "$log_file" | tr '\n' ' ')"
+                rm -f "$log_file"
+                return 1
+            fi
+            rm -f "$log_file"
+            ;;
+        go-dist)
+            log "installing Go $version into $root/$tool/$version"
+            install_go_dist "$tool" "$version" "$prefix"
+            ;;
+        *)
+            log "'$(kind_for "$tool")' is not a kind of tool this installer knows"
+            return 1
+            ;;
+    esac
+}
+
 main() {
     (( $# == 2 )) || usage
-    local tool="$1" requested="$2" package binary version baked
+    local tool="$1" requested="$2" package binary version baked kind
     package="$(package_for "$tool")" || die "'$tool' is not a tool this image knows (see $tools_table)" 64
     binary="$(binary_for "$tool")"
     baked="$(baked_version "$tool")"
+    kind="$(kind_for "$tool")"
 
     mkdir -p "$root/$tool" "$root/bin"
 
@@ -184,8 +309,12 @@ main() {
             if [[ "$allow_dist_tags" != "1" ]]; then
                 die "'$requested' is an npm dist-tag; the pin is exact by default. Set VOGT_AGENT_CLI_ALLOW_DIST_TAGS=1 to float on purpose (the 2.1.237 gate is what you are opting out of)" 64
             fi
-            version="$(npm view "$package@$requested" version 2>/dev/null | tail -n 1 | tr -d '[:space:]')"
-            [[ -n "$version" ]] || die "could not resolve $package@$requested against npm"
+            if [[ "$kind" == "go-dist" ]]; then
+                version="$(go_latest "$package" 2>/dev/null | tr -d '[:space:]')"
+            else
+                version="$(npm view "$package@$requested" version 2>/dev/null | tail -n 1 | tr -d '[:space:]')"
+            fi
+            [[ -n "$version" ]] || die "could not resolve $tool $requested against $package"
             log "$tool $requested resolves to $version"
             ;;
         *)
@@ -218,17 +347,14 @@ main() {
         tmp="$root/$tool/.tmp-$version-$$"
         rm -rf "$tmp"
         mkdir -p "$tmp"
-        log "installing $package@$version into $root/$tool/$version"
-        if ! npm install -g --prefix "$tmp" "$package@$version" >"$tmp.log" 2>&1; then
-            log "npm install failed; $(tail -n 5 "$tmp.log" | tr '\n' ' ')"
-            rm -rf "$tmp" "$tmp.log"
+        if ! fetch_into "$tool" "$version" "$tmp"; then
+            rm -rf "$tmp"
             die "$tool stays on ${current:-the image copy}"
         fi
         if ! smoke_check "$tool" "$version" "$tmp"; then
-            rm -rf "$tmp" "$tmp.log"
+            rm -rf "$tmp"
             die "$tool stays on ${current:-the image copy}"
         fi
-        rm -f "$tmp.log"
         rm -rf "${root:?}/${tool:?}/${version:?}"
         mv -T "$tmp" "$root/$tool/$version"
     else

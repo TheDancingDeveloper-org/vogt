@@ -12,8 +12,9 @@
 //!
 //! Three rules, each written against a specific way this could go wrong:
 //!
-//! **The engine names no tool.** Which tools exist, which npm package each
-//! is and which variable pins it come from the table the image writes
+//! **The engine names no tool.** Which tools exist, where each comes from
+//! (an npm package, or a Go release mirror for the Go toolchain, WI-951) and
+//! which variable pins it come from the table the image writes
 //! (`agent-clis.tools`). A tool that is not in it is refused, not guessed.
 //!
 //! **A version string reaches the installer only in one of three shapes** —
@@ -54,7 +55,8 @@ pub struct AgentCliPaths {
     pub root: PathBuf,
     /// `vogt-agent-cli-install`, the only writer.
     pub installer: PathBuf,
-    /// The image's tool table: tool, package, binary, env var (tab-separated).
+    /// The image's tool table: tool, source, binary, env var, kind
+    /// (tab-separated; a row without a kind is `npm`).
     pub tools: PathBuf,
     /// The image's resolved pins (`<tool>=<version>`), the baked baseline.
     pub baked: PathBuf,
@@ -96,7 +98,11 @@ impl AgentCliPaths {
     }
 }
 
-/// How long an upstream `npm view` answer is trusted before it is asked again.
+/// The kind of a table row that names no kind: every row had this shape
+/// before the Go toolchain joined the table.
+pub const DEFAULT_KIND: &str = "npm";
+
+/// How long an upstream answer is trusted before it is asked again.
 const UPSTREAM_TTL: Duration = Duration::from_secs(60 * 60);
 /// Ceiling on one `npm view`. Upstream is a hint, not a dependency.
 const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(15);
@@ -138,7 +144,11 @@ pub enum AgentCliSource {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentCliTool {
     pub tool: String,
+    /// Where it comes from: the npm package, or the Go release mirror.
     pub package: String,
+    /// How a version of it is fetched: `npm` or `go-dist`.
+    #[serde(default = "default_kind")]
+    pub kind: String,
     pub binary: String,
     /// The variable that pins it at boot (`VOGT_CLAUDE_CODE_VERSION`, …).
     pub env_var: String,
@@ -148,8 +158,9 @@ pub struct AgentCliTool {
     /// Versions present under the runtime root, newest first — each one a
     /// switch the installer can make without network access.
     pub installed_versions: Vec<String>,
-    /// npm's `latest` for the package, when asked for and answered. Absent
-    /// otherwise: an unreachable registry is not this pod's fault.
+    /// The newest upstream release — npm's `latest`, or the newest stable Go
+    /// — when asked for and answered. Absent otherwise: an unreachable
+    /// registry is not this pod's fault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_latest: Option<String>,
     /// `upstream_latest` differs from `active_version`. Only when both are known.
@@ -166,9 +177,13 @@ pub struct AgentCliReport {
     pub tools: Vec<AgentCliTool>,
 }
 
+fn default_kind() -> String {
+    DEFAULT_KIND.to_string()
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub struct ListQuery {
-    /// Ask npm for each package's `latest` (cached for an hour).
+    /// Ask upstream for each tool's newest release (cached for an hour).
     #[serde(default)]
     pub upstream: bool,
 }
@@ -257,6 +272,8 @@ pub struct ToolRow {
     pub package: String,
     pub binary: String,
     pub env_var: String,
+    /// `npm` when the row names none.
+    pub kind: String,
 }
 
 pub fn read_table(path: &Path) -> Result<Vec<ToolRow>> {
@@ -278,6 +295,12 @@ pub fn parse_table(text: &str) -> Vec<ToolRow> {
                 package: cols.next()?.to_string(),
                 binary: cols.next()?.to_string(),
                 env_var: cols.next()?.to_string(),
+                kind: cols
+                    .next()
+                    .map(str::trim)
+                    .filter(|kind| !kind.is_empty())
+                    .unwrap_or(DEFAULT_KIND)
+                    .to_string(),
             })
         })
         .collect()
@@ -333,6 +356,7 @@ pub fn read_report(paths: &AgentCliPaths) -> Result<AgentCliReport> {
                 installed_versions: installed_versions(&paths.root.join(&row.tool)),
                 tool: row.tool,
                 package: row.package,
+                kind: row.kind,
                 binary: row.binary,
                 env_var: row.env_var,
                 baked_version,
@@ -424,7 +448,7 @@ async fn annotate_upstream(runtime: &AgentCliRuntime, report: &mut AgentCliRepor
     let lookups = report
         .tools
         .iter()
-        .map(|tool| upstream_latest(runtime, &tool.package));
+        .map(|tool| upstream_latest(runtime, &tool.kind, &tool.package));
     let answers = futures_util::future::join_all(lookups).await;
     for (tool, latest) in report.tools.iter_mut().zip(answers) {
         tool.update_available = match (&latest, &tool.active_version) {
@@ -435,7 +459,7 @@ async fn annotate_upstream(runtime: &AgentCliRuntime, report: &mut AgentCliRepor
     }
 }
 
-async fn upstream_latest(runtime: &AgentCliRuntime, package: &str) -> Option<String> {
+async fn upstream_latest(runtime: &AgentCliRuntime, kind: &str, package: &str) -> Option<String> {
     {
         let cache = runtime.upstream.lock().await;
         if let Some((asked, answer)) = cache.get(package) {
@@ -444,7 +468,53 @@ async fn upstream_latest(runtime: &AgentCliRuntime, package: &str) -> Option<Str
             }
         }
     }
-    let answer = tokio::time::timeout(
+    let answer = match kind {
+        DEFAULT_KIND => npm_latest(package).await,
+        "go-dist" => go_latest(package).await,
+        _ => None,
+    };
+    runtime
+        .upstream
+        .lock()
+        .await
+        .insert(package.to_string(), (Instant::now(), answer.clone()));
+    answer
+}
+
+/// The newest stable release a Go mirror's index lists (`go.dev/dl`'s
+/// `?mode=json` is newest first), without its `go` prefix.
+async fn go_latest(mirror: &str) -> Option<String> {
+    let url = format!("{}/?mode=json", mirror.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(UPSTREAM_TIMEOUT)
+        .build()
+        .ok()?;
+    let releases: Vec<serde_json::Value> = client
+        .get(url)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    latest_stable_go(&releases)
+}
+
+/// The first stable release in a Go release index, as a bare version.
+pub fn latest_stable_go(releases: &[serde_json::Value]) -> Option<String> {
+    releases
+        .iter()
+        .find(|release| release["stable"].as_bool() == Some(true))
+        .and_then(|release| release["version"].as_str())
+        .and_then(|version| version.strip_prefix("go"))
+        .filter(|version| is_exact_version(version))
+        .map(str::to_string)
+}
+
+async fn npm_latest(package: &str) -> Option<String> {
+    tokio::time::timeout(
         UPSTREAM_TIMEOUT,
         tokio::process::Command::new("npm")
             .args(["view", package, "version"])
@@ -460,13 +530,7 @@ async fn upstream_latest(runtime: &AgentCliRuntime, package: &str) -> Option<Str
             .ok()
             .and_then(|text| text.lines().last().map(|line| line.trim().to_string()))
             .filter(|version| is_exact_version(version))
-    });
-    runtime
-        .upstream
-        .lock()
-        .await
-        .insert(package.to_string(), (Instant::now(), answer.clone()));
-    answer
+    })
 }
 
 fn tail(text: &str, lines: usize) -> String {
@@ -511,18 +575,37 @@ mod tests {
     fn the_table_and_manifest_parse_as_the_scripts_write_them() {
         let rows = parse_table(
             "codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\n\
-             claude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\n\
+             claude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\n\
+             go\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\n\
              # a comment\nshort\tline\n",
         );
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 3);
         assert_eq!(rows[1].binary, "claude");
         assert_eq!(rows[1].env_var, "VOGT_CLAUDE_CODE_VERSION");
+        // A row from before kinds existed is an npm package; the Go row says
+        // what it is, and its variable is not glued to its kind.
+        assert_eq!(rows[0].kind, "npm");
+        assert_eq!(rows[1].kind, "npm");
+        assert_eq!(rows[2].kind, "go-dist");
+        assert_eq!(rows[2].env_var, "VOGT_GO_VERSION");
         let manifest = parse_manifest("codex=0.149.1\nclaude-code=2.1.258\nempty=\n");
         assert_eq!(
             manifest.get("claude-code").map(String::as_str),
             Some("2.1.258")
         );
         assert!(!manifest.contains_key("empty"));
+    }
+
+    #[test]
+    fn the_newest_stable_go_is_read_from_the_release_index() {
+        let index: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[{"version":"go1.28rc1","stable":false},
+                {"version":"go1.27.1","stable":true},
+                {"version":"go1.26.8","stable":true}]"#,
+        )
+        .unwrap();
+        assert_eq!(latest_stable_go(&index).as_deref(), Some("1.27.1"));
+        assert_eq!(latest_stable_go(&[]), None);
     }
 
     #[test]

@@ -124,13 +124,27 @@ quarantine_shadow() {
     report "persisted home copy $home would shadow image-managed $system and could not be quarantined"
 }
 
-# Every tool the image knows (`agent-clis.tools`: tool, package, binary, env
-# var), so adding one to the image adds it here without an edit.
+# A Go toolchain is not an npm package: ask the active `go` which release it
+# is (WI-951).
+check_go_dist() {
+    local expected="$1" tool="$2" binary="$3" prefix actual
+    [ -n "$expected" ] || return 0
+    prefix="$(active_prefix "$tool")"
+    [ -x "$prefix/bin/$binary" ] || return 0
+    actual="$("$prefix/bin/$binary" version 2>/dev/null | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"
+    [ "$actual" = "$expected" ] || report "$binary is ${actual:-unknown} at $prefix, expected pin $expected"
+}
+
+# Every tool the image knows (`agent-clis.tools`: tool, source, binary, env
+# var, kind), so adding one to the image adds it here without an edit.
 if [[ -r "$tools_table" ]]; then
-    while IFS=$'\t' read -r tool package binary _; do
+    while IFS=$'\t' read -r tool package binary _ kind; do
         [[ -n "$tool" && "$tool" != \#* ]] || continue
         check_tool "$binary" "$tool" "$image_bin/$binary" "$home_bin/$binary"
-        check_package "$package" "$(expected_version "$tool")" "$tool" "$binary"
+        case "${kind:-npm}" in
+            npm) check_package "$package" "$(expected_version "$tool")" "$tool" "$binary" ;;
+            go-dist) check_go_dist "$(expected_version "$tool")" "$tool" "$binary" ;;
+        esac
     done < "$tools_table"
 else
     # An image built before the table existed: the two CLIs it always carried.
