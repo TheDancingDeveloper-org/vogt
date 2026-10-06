@@ -1408,3 +1408,55 @@ def test_only_the_engine_may_mint_a_session_token(wired: AppContext) -> None:
             )
     with pytest.raises(ValidationError):
         EngineSessionTokenParams(engine_session_id="../../etc", reason=WHY)
+
+
+def test_the_engines_stack_secret_may_mint_whoever_it_was_issued_to(
+    wired: AppContext, tmp_path: Any
+) -> None:
+    """Found validating WI-926 on vogt-dev: the stack secret the engine and the
+    core share had been issued by hand to the person `local:vogt`, and
+    adoption is idempotent on the hash, so it never became `agent:vogt-engine`.
+    The engine's mint was refused and its sessions fell back to the pod's
+    token. The core now knows the engine by its exact credential."""
+    from vogt.application.models import EngineSessionTokenParams, IssueTokenParams
+    from vogt.application.services import engine_session_token
+    from vogt.application.services.auth import authenticate, issue_token
+    from vogt.errors import EngineOnly
+
+    def issued(name: str) -> str:
+        return issue_token(
+            wired,
+            IssueTokenParams(
+                actor=wired.principal.identity_ref,
+                name=name,
+                scopes="admin",
+                reason=WHY,
+            ),
+        ).secret
+
+    stack_secret, phone = issued("stack secret"), issued("phone")
+    secret_file = tmp_path / "vogt-core-token"
+    secret_file.write_text(stack_secret + "\n", encoding="utf-8")
+    ctx = dataclasses.replace(
+        wired,
+        config=wired.config.model_copy(
+            update={"bootstrap_core_token_file": secret_file}
+        ),
+    )
+
+    def as_bearer(secret: str) -> AppContext:
+        who = authenticate(ctx, bearer=secret)
+        return dataclasses.replace(ctx, principal=who.principal, token=who.token)
+
+    engine = as_bearer(stack_secret)
+    assert engine.principal.kind == "human", "a person, as on the estate"
+    minted = engine_session_token(
+        engine, EngineSessionTokenParams(engine_session_id=ENGINE_SESSION, reason=WHY)
+    )
+    assert minted.token is not None
+    # The same person's other credential is still not the engine.
+    with pytest.raises(EngineOnly):
+        engine_session_token(
+            as_bearer(phone),
+            EngineSessionTokenParams(engine_session_id=ENGINE_SESSION, reason=WHY),
+        )
