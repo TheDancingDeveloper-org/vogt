@@ -125,9 +125,7 @@ its own (`DEPLOYMENT.md`).
 
 Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `codex`,
 `claude` and `opencode` CLIs at the Renovate-pinned versions in
-`engine/agent-versions.env`, and `klaudia` (WI-950), a Go coding agent no
-registry publishes, built with the image's Go from the commit pinned there
-(`VOGT_KLAUDIA_VERSION`, a full commit id of `VOGT_KLAUDIA_SOURCE`); it is off by default for a local build and on in
+`engine/agent-versions.env`; it is off by default for a local build and on in
 the published image. That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
@@ -139,10 +137,7 @@ sha256s recorded beside it, unpacked to `/usr/local/go` and linked as
 for a newer toolchain fails by name rather than fetching one. It is a row of
 the same runtime-pin table (kind `go-dist`), so `VOGT_GO_VERSION` in the
 environment moves it at the next start without a rebuild, checked against
-the Go mirror's own release index. Klaudia's row is kind `go-src`: a runtime
-`VOGT_KLAUDIA_VERSION` is another full commit, fetched alone and built into
-the volume at start (`./cmd/klaudia`, CGO off), its `source` recorded in the
-prefix. `GO_VERSION` as a build argument must
+the Go mirror's own release index. `GO_VERSION` as a build argument must
 equal the pin: a build cannot verify a version it has no recorded checksum
 for.
 `POD_BASE_IMAGE` selects the pod base; CI passes it by digest.
@@ -710,7 +705,6 @@ engine turns them into that CLI's own flags (`agent_cli.rs`):
 | `claude` | `--model <id>` | `--effort <level>` |
 | `codex` | `-m <id>` | `-c model_reasoning_effort=<level>` |
 | `opencode` | `--model <provider/id>` | *refused — it has no effort control* |
-| `klaudia` | `--model <id>` | *refused — it has no effort control* |
 
 Three rules, each written against a specific failure:
 
@@ -744,7 +738,6 @@ previous conversation to continue instead of starting a new one:
 | `claude` | `--resume <id>` |
 | `codex` | `resume <id>` — a subcommand, so inserted straight after the binary, ahead of the template's own arguments and the model flags |
 | `opencode` | `--session <id>` |
-| `klaudia` | `--resume <id>` |
 
 It follows the same rules as `model`: refused (`400`) for a command with no
 mapping or the default shell, and validated before it becomes argv — letters,
@@ -759,11 +752,7 @@ already show. A session lost to a redeploy is resumed with
 `resume: <that id>` and the `claude` template. A resumed Claude session keeps
 the id it resumed (no `--session-id` is added), and a command that carries
 arguments of its own after `claude` is not pinned, because Claude Code refuses
-`--session-id` next to a `--continue` or `--session-id` it already has.
-Klaudia (WI-950) is pinned the same way: a bare launch gets `--session-id
-<engine session id>` and a wake `--resume <id>`; with no engine id to give
-it, a fresh launch gets `--new-session`, because Klaudia's TUI otherwise
-resumes the newest conversation in its directory. Codex
+`--session-id` next to a `--continue` or `--session-id` it already has. Codex
 and OpenCode cannot be told an id at launch. Codex's is not knowable to the
 engine; find it with `codex resume` (its picker) inside the pod. OpenCode's
 is **captured** after launch (WI-930): the engine reads opencode's own store
@@ -779,9 +768,8 @@ names it.
 conversation to the directory it ran in, and `claude --resume <id>` finds it
 only from there — often not a registered project root (a parent folder, a
 worktree). For `claude` and `codex`, the engine looks the id up in the
-transcript under `$HOME` (`~/.claude/projects/*/<id>.jsonl`,
-`~/.codex/sessions/**/rollout-*-<id>.jsonl`, or Klaudia's
-`~/.klaudia/sessions/*/<id>.jsonl`), reads the `cwd` it records, and
+transcript under `$HOME` (`~/.claude/projects/*/<id>.jsonl`, or
+`~/.codex/sessions/**/rollout-*-<id>.jsonl`), reads the `cwd` it records, and
 starts the session there instead of the requested `cwd` — but only when that
 directory exists inside `workspace_root`; otherwise the requested `cwd` is kept
 (`engine/server/src/transcripts.rs`). The session summary's `cwd` reports
@@ -1153,10 +1141,7 @@ checks decide what it can finish on its own (WI-926; the design is
   actions keep their built-in rules and stay denied.
 - **`permission_mode` on `POST /api/sessions`**: `accept-edits` maps to
   `--permission-mode acceptEdits` (edits accepted, everything else asks).
-  `bypass` maps to `--dangerously-skip-permissions` (no checks). Klaudia
-  takes the same two flags: `acceptEdits` is its legacy mode with the same
-  meaning, and its default posture is its own `autonomous` mode (finish the
-  task, ask before changing the machine) behind its host guardrail. For
+  `bypass` maps to `--dangerously-skip-permissions` (no checks). For
   opencode, see below. Codex is `400`, as is a posture on a plain shell. The posture
   shows on the summary (`permission_mode`, absent for the default), is kept
   in the hibernation record, and is reapplied on wake. vogt-core grants
@@ -2910,7 +2895,7 @@ service behind it is not there, and exactly which setting turns it on.
 | **Vogt core** | the front door, credential checks, the assistant's Vogt tools, the event follower | `VOGT_CORE_URL` + the stack secret, `VOGT_CORE_TOKEN` / `VOGT_CORE_TOKEN_FILE` — §3, §5 | The engine is bootable alone with a break-glass `ENGINE_TOKEN` (with neither it refuses to start): sessions work, `/readyz` stays ready, the Vogt routes answer `503` with a named reason. |
 | **FCM** (native push) | push to the Android shell | `ENGINE_FCM_SERVICE_ACCOUNT_FILE` (a path to the Firebase service-account JSON; `ENGINE_FCM_SERVICE_ACCOUNT_JSON`, the document inline, is also accepted but carries a private key in the environment and is warned about) | The FCM transport is disabled; browser web-push still works for any subscription. VAPID keys are generated and persisted under `state_dir`. |
 | **GUI streaming** | the GUI tab's live stream of launched processes | `GUI_STREAM_URL` (+ `START_SWAY=1`, and `GUI_STREAM_VERIFIED=1` once an operator has watched it work) | `/readyz` reports `gui: disabled` and the GUI surface's affordances are withdrawn with a stated reason. |
-| **Agent CLIs** (`codex`, `claude`, `opencode`, `klaudia`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published image), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. |
+| **Agent CLIs** (`codex`, `claude`) | agents inside sessions | `INSTALL_AI_CLIENTS=true` at image build (on in the published image), or a user-managed install in the pod's home | Sessions are ordinary shells; the "(protected)" templates cannot start. |
 | **Agent service auth** | brokering third-party service credentials (GitHub and others) into a session from a secrets manager | `ENGINE_AUTO_AGENT_AUTH=1` + `ENGINE_AGENT_AUTH_HELPER` naming a helper (the bundled reference helper is auto-selected when its secrets manager's machine identity is present in the environment), configured through the env vars in `agent-auth.sh`'s header | Sessions run without those credentials pre-loaded; nothing in the engine depends on it. **The shipped helper is one pluggable example** — a data-driven reference implementation against one secrets manager; it bakes in no address, project or secret name and is driven by `ENGINE_AGENT_AUTH_SECRETS`/`_PROBES`. A deployment points the variable at a helper of its own that speaks the same subcommands (`check`, `run`, `shell`, `get`, `set`, `fetch`, `store`), or leaves it off. When it *is* on, a session gets exactly the manifest and never the machine identity — see the credential contract below. |
 
 **The agent-auth session credential contract.** A session launched under this

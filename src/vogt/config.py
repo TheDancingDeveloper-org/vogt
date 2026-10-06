@@ -494,12 +494,11 @@ class VogtConfig(BaseSettings):
         default_factory=lambda: {
             "claude": Path("~/.claude/projects"),
             "codex": Path("~/.codex/sessions"),
-            "klaudia": Path("~/.klaudia/sessions"),
         },
         description=(
             "Where `session.last_reply` and the `last_reply_excerpt` in "
             "`session.list` look for a session's own agent transcript, by "
-            "agent (`claude`, `codex`, `klaudia`). Read on request only — the last few "
+            "format (`claude`, `codex`). Read on request only — the last few "
             "assistant messages of the conversation a session runs, redacted "
             "— never indexed. The defaults are the agents' own directories "
             "under the home of the user the core runs as, which in the "
@@ -779,7 +778,7 @@ class VogtConfig(BaseSettings):
         json_schema_extra={"default_policy": "behaviour"},
     )
 
-    @field_validator("agent_activity_roots")
+    @field_validator("agent_activity_roots", "session_transcript_roots")
     @classmethod
     def _known_transcript_formats(cls, roots: dict[str, Path]) -> dict[str, Path]:
         unknown = sorted(set(roots) - {"claude", "codex"})
@@ -787,18 +786,6 @@ class VogtConfig(BaseSettings):
             msg = (
                 f"transcript root keys must be 'claude' or 'codex', "
                 f"not {', '.join(map(repr, unknown))}"
-            )
-            raise ValueError(msg)
-        return roots
-
-    @field_validator("session_transcript_roots")
-    @classmethod
-    def _known_session_agents(cls, roots: dict[str, Path]) -> dict[str, Path]:
-        unknown = sorted(set(roots) - {"claude", "codex", "klaudia"})
-        if unknown:
-            msg = (
-                f"session transcript root keys must be 'claude', 'codex' or "
-                f"'klaudia', not {', '.join(map(repr, unknown))}"
             )
             raise ValueError(msg)
         return roots
@@ -934,10 +921,7 @@ def _default_label(name: str, field: FieldInfo) -> str:
         ):
             return "*(empty)*"
         if name == "session_transcript_roots":
-            return (
-                '`claude = "~/.claude/projects"`, `codex = "~/.codex/sessions"`, '
-                '`klaudia = "~/.klaudia/sessions"`'
-            )
+            return '`claude = "~/.claude/projects"`, `codex = "~/.codex/sessions"`'
         return "computed"  # pragma: no cover - no other factory fields yet
     if name == "import_root":
         # Derived from another field, so it cannot be a factory — but it is
@@ -1060,13 +1044,8 @@ def _example_value(field: FieldDoc) -> str:
         # An inline table shows the shape an operator gets wrong — the host is
         # the key, the token *file* the value — where an empty `{}` would not.
         return '{ "github.com" = "/run/secrets/github_token" }'
-    if field.name == "agent_activity_roots":
+    if field.name in ("agent_activity_roots", "session_transcript_roots"):
         return '{ claude = "~/.claude/projects", codex = "~/.codex/sessions" }'
-    if field.name == "session_transcript_roots":
-        return (
-            '{ claude = "~/.claude/projects", codex = "~/.codex/sessions", '
-            'klaudia = "~/.klaudia/sessions" }'
-        )
     if field.name == "agent_activity_services":
         return "{ ci = 'ci\\.example\\.org' }"
 
