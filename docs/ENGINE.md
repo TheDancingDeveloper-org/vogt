@@ -1158,9 +1158,10 @@ checks decide what it can finish on its own (WI-926; the design is
 - **`permission_mode` on `POST /api/sessions`**: `accept-edits` maps to
   `--permission-mode acceptEdits` (edits accepted, everything else asks).
   `bypass` maps to `--dangerously-skip-permissions` (no checks). Klaudia
-  takes the same two flags: `acceptEdits` is its legacy mode with the same
-  meaning, and its default posture is its own `autonomous` mode (finish the
-  task, ask before changing the machine) behind its host guardrail. For
+  takes `bypass` the same way; its default posture is its own `autonomous`
+  mode (finish the task, ask before changing the machine) behind its host
+  guardrail, and `accept-edits` is `400` for it: Klaudia's `acceptEdits` is
+  only an alias for `autonomous`, so it would not mean what was asked. For
   opencode, see below. Codex is `400`, as is a posture on a plain shell. The posture
   shows on the summary (`permission_mode`, absent for the default), is kept
   in the hibernation record, and is reapplied on wake. vogt-core grants
