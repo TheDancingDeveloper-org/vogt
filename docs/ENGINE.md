@@ -130,6 +130,16 @@ the published image. That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
 friends, applied by `vogt-agent-cli-install` at container start).
+The image also carries a Go toolchain (WI-951), unconditionally: the release
+`engine/agent-versions.env` pins as `VOGT_GO_VERSION`, checked against the
+sha256s recorded beside it, unpacked to `/usr/local/go` and linked as
+`/usr/local/bin/go` and `gofmt`, with `GOTOOLCHAIN=local` so a `go.mod` asking
+for a newer toolchain fails by name rather than fetching one. It is a row of
+the same runtime-pin table (kind `go-dist`), so `VOGT_GO_VERSION` in the
+environment moves it at the next start without a rebuild, checked against
+the Go mirror's own release index. `GO_VERSION` as a build argument must
+equal the pin: a build cannot verify a version it has no recorded checksum
+for.
 `POD_BASE_IMAGE` selects the pod base; CI passes it by digest.
 
 The image's entrypoint (`engine/deploy/entrypoint.sh`) supervises the
@@ -1450,13 +1460,15 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   `storage` blocks. Storage numbers are counts and byte totals, never paths
   into the workspace beyond the two roots themselves.
 - `GET /api/agent-clis[?upstream=true]` -> `AgentCliReport` — the
-  runtime-pinned agent CLIs ([`DEPLOYMENT.md`](DEPLOYMENT.md) §3): for
-  each tool in the image's table its package, binary, the variable that pins
-  it at boot, the baked version, the active version and its `source` (`image`,
-  `runtime` or `absent`), and the versions already on the volume. With
-  `upstream=true` the engine also asks npm for each package's `latest` (cached
-  an hour; omitted when npm does not answer) and says whether
-  `update_available`. Any valid token.
+  runtime-pinned agent CLIs and the Go toolchain ([`DEPLOYMENT.md`](DEPLOYMENT.md)
+  §3): for each tool in the image's table its package (an npm package, or
+  for `kind: "go-dist"` the Go release mirror), `kind`, binary, the variable
+  that pins it at boot, the baked version, the active version and its
+  `source` (`image`, `runtime` or `absent`), and the versions already on the
+  volume. With `upstream=true` the engine also asks npm for each package's
+  `latest`, or the Go mirror for its newest stable release (cached an hour;
+  omitted when upstream does not answer) and says whether `update_available`.
+  Any valid token.
 - `POST /api/agent-clis/{tool}` with `{"version": "2.1.261"}` -> the same
   report after the move. Runs `vogt-agent-cli-install` for the tool: an exact
   version, `image` for the baked copy, or a dist-tag the deployment opted
@@ -1465,7 +1477,7 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   tool the image's table does not name, `409` when the install or its smoke
   check failed (the previous version stays current; the installer's words are
   in the body). Needs the `agent-clis-write` capability: it downloads and
-  executes a package from npm inside the pod. The pin an environment variable
+  executes a package from npm (or a Go release) inside the pod. The pin an environment variable
   sets is re-applied at the next container start, so a move meant to survive
   a restart belongs in the deployment's `.env` as well.
 

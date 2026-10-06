@@ -147,6 +147,7 @@ services:
       VOGT_CLAUDE_CODE_VERSION: "${VOGT_CLAUDE_CODE_VERSION:-}"
       VOGT_CODEX_VERSION: "${VOGT_CODEX_VERSION:-}"
       VOGT_OPENCODE_VERSION: "${VOGT_OPENCODE_VERSION:-}"
+      VOGT_GO_VERSION: "${VOGT_GO_VERSION:-}"
 
     secrets:
       - vogt_core_token

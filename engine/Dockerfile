@@ -294,6 +294,39 @@ LABEL org.opencontainers.image.title="vogt-stack" \
 # It goes *before* the two halves are copied in: the server binary changes on
 # every commit, so every layer after that COPY is rebuilt every time regardless,
 # and anything placed below it inherits that rate.
+COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
+
+# The Go toolchain (WI-951), so a session can build Go — an agent CLI that is
+# a Go program among it — without a hand-unpacked tarball in the persisted
+# home that nothing declares and no other pod has. Pinned in
+# `engine/agent-versions.env` with its release checksums, unpacked outside
+# /home/sprooty (which the runtime bind-mounts over), and linked into
+# /usr/local/bin so the runtime pin below finds an image copy to fall back to,
+# exactly as it does for the npm CLIs. `GOTOOLCHAIN=local` keeps it the
+# toolchain that runs: a `go.mod` asking for a newer one fails the build by
+# name instead of fetching an unpinned toolchain into the module cache.
+ARG GO_VERSION
+ENV GOTOOLCHAIN=local
+RUN set -eu; \
+    . /usr/local/share/vogt/agent-versions.env; \
+    go_version="${GO_VERSION:-${VOGT_GO_VERSION}}"; \
+    case "$(dpkg --print-architecture)" in \
+        amd64) arch=amd64; go_sum="$VOGT_GO_SHA256_LINUX_AMD64" ;; \
+        arm64) arch=arm64; go_sum="$VOGT_GO_SHA256_LINUX_ARM64" ;; \
+        *) echo "no pinned Go for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    if [ "$go_version" != "$VOGT_GO_VERSION" ]; then \
+        echo "GO_VERSION=$go_version has no recorded checksum; edit engine/agent-versions.env instead" >&2; exit 1; \
+    fi; \
+    curl -fsSL "https://go.dev/dl/go${go_version}.linux-${arch}.tar.gz" -o /tmp/go.tar.gz; \
+    echo "$go_sum  /tmp/go.tar.gz" | sha256sum -c -; \
+    rm -rf /usr/local/go; \
+    tar -xzf /tmp/go.tar.gz -C /usr/local; \
+    rm -f /tmp/go.tar.gz; \
+    ln -sfn /usr/local/go/bin/go /usr/local/bin/go; \
+    ln -sfn /usr/local/go/bin/gofmt /usr/local/bin/gofmt; \
+    go version | grep -qF "go${go_version} "
+
 ARG INSTALL_AI_CLIENTS
 ARG CODEX_VERSION
 ARG CLAUDE_CODE_VERSION
@@ -306,7 +339,6 @@ ARG OPENCODE_VERSION
 # persisted per-user workspace-write/network restrictions for every repo under
 # ~/Working.
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
-COPY engine/agent-versions.env /usr/local/share/vogt/agent-versions.env
 # The driven-session permission policy (WI-926): auto-mode rules every
 # engine-launched Claude session gets with --settings. A deployment replaces it
 # with ENGINE_AGENT_CLAUDE_SETTINGS (docs/ENGINE.md, "Permission posture").
@@ -347,10 +379,11 @@ RUN set -eu; \
     codex_version="${CODEX_VERSION:-${VOGT_CODEX_VERSION}}"; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
-    printf 'codex=%s\nclaude-code=%s\nopencode=%s\n' \
-        "$codex_version" "$claude_code_version" "$opencode_version" \
+    go_version="$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"; \
+    printf 'codex=%s\nclaude-code=%s\nopencode=%s\ngo=%s\n' \
+        "$codex_version" "$claude_code_version" "$opencode_version" "$go_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
-    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\n' \
+    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\n' \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
