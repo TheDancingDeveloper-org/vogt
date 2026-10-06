@@ -360,9 +360,14 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             if let Some(flags) = permission {
                 rewritten.extend(flags);
             }
-            // Positional, and last: `klaudia [prompt] [flags]`.
+            // Never positional: Klaudia reads a positional prompt as `-p`
+            // (answer and exit), so a session started that way did one turn
+            // and ended. `--prompt-interactive` opens the TUI and submits it
+            // as the first message (msp-klaudia WI-953), and the session
+            // stays for the next turn. `=` form, so the brief pointer can
+            // never be read as a flag.
             if let Some(prompt) = prompt {
-                rewritten.push(prompt);
+                rewritten.push(format!("--prompt-interactive={prompt}"));
             }
         }
         _ => unreachable!("checked against KNOWN above"),
@@ -1072,8 +1077,16 @@ mod permission_tests {
             ])
         );
         assert_eq!(command[8..10], cmd(&["--permission-mode", "acceptEdits"]));
-        // The brief pointer is the positional prompt, and it is last.
-        assert_eq!(command.last().unwrap(), &brief_instruction(brief));
+        // The brief pointer goes to the TUI as its first message, never as
+        // the positional prompt Klaudia would answer headless and exit on.
+        assert_eq!(
+            command.last().unwrap(),
+            &format!("--prompt-interactive={}", brief_instruction(brief))
+        );
+        assert!(
+            !command.contains(&brief_instruction(brief)),
+            "a positional prompt makes Klaudia one-shot"
+        );
         // None of Claude Code's own environment or settings: they are
         // Claude Code's, and Klaudia would ignore or misread them.
         assert!(out.env.is_empty());

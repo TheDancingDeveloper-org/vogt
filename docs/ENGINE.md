@@ -763,7 +763,11 @@ arguments of its own after `claude` is not pinned, because Claude Code refuses
 Klaudia (WI-950) is pinned the same way: a bare launch gets `--session-id
 <engine session id>` and a wake `--resume <id>`; with no engine id to give
 it, a fresh launch gets `--new-session`, because Klaudia's TUI otherwise
-resumes the newest conversation in its directory. Codex
+resumes the newest conversation in its directory. Its brief pointer goes in with
+`--prompt-interactive=<text>`, never as a positional prompt: Klaudia reads a
+positional prompt as `-p` (answer once, then exit), so the session would end
+after its first turn. The pinned Klaudia must have that flag (msp-klaudia
+WI-953); a runtime pin to an older commit starts and refuses it. Codex
 and OpenCode cannot be told an id at launch. Codex's is not knowable to the
 engine; find it with `codex resume` (its picker) inside the pod. OpenCode's
 is **captured** after launch (WI-930): the engine reads opencode's own store
