@@ -38,7 +38,7 @@ named by `VOGT_CONFIG_FILE`, then the defaults shown here.
 | `forge_account_key_file` | `VOGT_FORGE_ACCOUNT_KEY_FILE` | path, optional | *(no default — must be set)* | behaviour |
 | `forge_token_files` | `VOGT_FORGE_TOKEN_FILES` | map of string to path | *(empty)* | behaviour |
 | `agent_activity_roots` | `VOGT_AGENT_ACTIVITY_ROOTS` | map of string to path | *(empty)* | behaviour |
-| `session_transcript_roots` | `VOGT_SESSION_TRANSCRIPT_ROOTS` | map of string to path | `claude = "~/.claude/projects"`, `codex = "~/.codex/sessions"` | behaviour |
+| `session_transcript_roots` | `VOGT_SESSION_TRANSCRIPT_ROOTS` | map of string to path | `claude = "~/.claude/projects"`, `codex = "~/.codex/sessions"`, `klaudia = "~/.klaudia/sessions"` | behaviour |
 | `agent_activity_max_bytes_per_sweep` | `VOGT_AGENT_ACTIVITY_MAX_BYTES_PER_SWEEP` | integer | `33554432` | behaviour |
 | `agent_activity_services` | `VOGT_AGENT_ACTIVITY_SERVICES` | map of string to string | *(empty)* | behaviour |
 | `engine_url` | `VOGT_ENGINE_URL` | string, optional | *(no default — must be set)* | exposure |
@@ -172,7 +172,7 @@ Agent transcript directories to index, by format — a TOML table `[agent_activi
 
 ### `session_transcript_roots`
 
-Where `session.last_reply` and the `last_reply_excerpt` in `session.list` look for a session's own agent transcript, by format (`claude`, `codex`). Read on request only — the last few assistant messages of the conversation a session runs, redacted — never indexed. The defaults are the agents' own directories under the home of the user the core runs as, which in the all-in-one stack is the user its sessions run as; a missing directory makes the reply honestly unavailable. An empty table turns both off.
+Where `session.last_reply` and the `last_reply_excerpt` in `session.list` look for a session's own agent transcript, by agent (`claude`, `codex`, `klaudia`). Read on request only — the last few assistant messages of the conversation a session runs, redacted — never indexed. The defaults are the agents' own directories under the home of the user the core runs as, which in the all-in-one stack is the user its sessions run as; a missing directory makes the reply honestly unavailable. An empty table turns both off.
 
 ### `agent_activity_max_bytes_per_sweep`
 

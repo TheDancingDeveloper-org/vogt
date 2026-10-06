@@ -337,6 +337,14 @@ cap (`autopilot` and `autopilot_nudges` on `session_list`). A driver need not
 re-prompt an autopilot session — wait for it to be blocked or done. The flag
 is recorded on the start's audit row.
 
+**Klaudia owns its own loop.** `session_start(template="klaudia")` runs
+Klaudia in its TUI like the other agents (model, resume, permission posture
+and the brief work the same way). Klaudia iterates by itself toward a goal
+spec (`/goal run [N]` against `PRD.md` or `.klaudia/GOAL.md`, stopping at
+`<goal-complete/>` or the iteration cap), so a driver starts that loop once
+and then waits; it does not re-prompt between iterations. Two drivers of one
+loop would interleave prompts into the goal's own turns.
+
 #### Permission prompts: `awaiting-approval`
 
 When a driven Claude Code or Codex stops to ask permission ("Do you want to

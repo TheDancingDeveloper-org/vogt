@@ -38,6 +38,8 @@ pub fn conversation_cwd(agent: &str, id: &str, home: &Path) -> Option<PathBuf> {
     let transcript = match agent {
         "claude" => claude_transcript(&home.join(".claude").join("projects"), id),
         "codex" => codex_transcript(&home.join(".codex").join("sessions"), id),
+        // Klaudia files Claude Code's layout under its own root (WI-950).
+        "klaudia" => claude_transcript(&home.join(".klaudia").join("sessions"), id),
         _ => None,
     }?;
     head_cwd(&transcript)
@@ -148,6 +150,24 @@ mod tests {
             conversation_cwd("codex", "0199aaaa-bbbb", home.path()),
             Some(PathBuf::from("/srv/codex"))
         );
+    }
+
+    #[test]
+    fn finds_a_klaudia_conversations_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let dir = home.path().join(".klaudia/sessions/-srv-klaudia");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("72d33a6b.jsonl"),
+            "{\"type\":\"user\",\"cwd\":\"/srv/klaudia\",\"sessionId\":\"72d33a6b\"}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            conversation_cwd("klaudia", "72d33a6b", home.path()),
+            Some(PathBuf::from("/srv/klaudia"))
+        );
+        // Not under Claude Code's root: the agent decides where to look.
+        assert_eq!(conversation_cwd("claude", "72d33a6b", home.path()), None);
     }
 
     #[test]
