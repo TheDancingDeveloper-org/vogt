@@ -541,6 +541,17 @@ def adopt_bootstrap_agent_token(ctx: AppContext) -> str:
                 summary={"actor": reinstated.actor_identity_ref},
             )
         holder = txn.actor_by_identity(identity_ref)
+        if holder is not None and holder.kind != "agent":
+            # The brokered token is what every session's agent presents. Bound
+            # to a person, the core counts each agent as that person: it may
+            # grant `bypass` and its writes are theirs (WI-926). Refused
+            # loudly, like a malformed scope, rather than adopted quietly.
+            msg = (
+                f"bootstrap_agent_token_actor {identity_ref!r} is a person "
+                f"({holder.kind}); the token sessions' agents present must be "
+                "bound to an agent actor (for example agent:pod:<stack>)"
+            )
+            raise InvalidRequest(msg)
         if holder is None:
             holder = Actor(
                 id=ctx.id_factory("act"),

@@ -136,3 +136,47 @@ def test_core_and_agent_tokens_coexist_in_one_deploy(tmp_path: Path) -> None:
     result = init_instance(_context(cfg), InitParams())
     assert result.bootstrap_core_token == "adopted"
     assert result.bootstrap_agent_token == "adopted"
+
+
+def test_an_agent_presenting_the_pod_token_is_refused_bypass(tmp_path: Path) -> None:
+    """WI-926, option 1: the brokered pod token is an agent's, so every
+    session's agent that presents it is refused `bypass` by the person-only
+    guard, however its session was started."""
+    import dataclasses
+
+    from vogt.application.models import StartSessionParams
+    from vogt.application.services import start_session
+    from vogt.errors import BypassRefused
+
+    token_file = tmp_path / "agent-token"
+    token_file.write_text(SECRET, encoding="utf-8")
+    ctx = _context(
+        _config(tmp_path / "instance", token_file, actor="agent:pod:vogt-dev")
+    )
+    assert init_instance(ctx, InitParams()).bootstrap_agent_token == "adopted"
+    who = authenticate(ctx, bearer=SECRET).principal
+    assert (who.identity_ref, who.kind) == ("agent:pod:vogt-dev", "agent")
+    with pytest.raises(BypassRefused):
+        start_session(
+            dataclasses.replace(ctx, principal=who),
+            StartSessionParams(
+                project="anything",
+                template="claude",
+                permission_mode="bypass",
+                reason="an agent asks for an unguarded child",
+            ),
+        )
+
+
+def test_the_pod_token_cannot_be_bound_to_a_person(tmp_path: Path) -> None:
+    """Bound to a person, the pod token would make every session's agent that
+    person (the WI-926 gap). Start-up refuses instead of adopting quietly."""
+    first = _context(_config(tmp_path / "instance", None))
+    init_instance(first, InitParams())  # creates the local person
+    token_file = tmp_path / "agent-token"
+    token_file.write_text(SECRET, encoding="utf-8")
+    ctx = _context(
+        _config(tmp_path / "instance", token_file, actor=TEST_PRINCIPAL.identity_ref)
+    )
+    with pytest.raises(InvalidRequest, match="is a person"):
+        init_instance(ctx, InitParams())
