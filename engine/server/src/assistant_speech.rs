@@ -153,6 +153,143 @@ impl AssistantSpeech {
     pub fn tts_enabled(&self) -> bool {
         self.tts.is_some()
     }
+
+    /// Transcribe one clip: `/audio/transcriptions` on each configured base
+    /// URL in order, stopping at the first that answers 2xx (local first,
+    /// cloud fallback). `NotFound` when STT is unconfigured or every entry
+    /// fails — the route's 404 — with the reason logged for an operator,
+    /// not returned. The audio is forwarded and never stored.
+    ///
+    /// Shared by the `/api/assistant/stt` route and the live call, which
+    /// transcribes each segment of speech the same way.
+    pub async fn transcribe(
+        &self,
+        bytes: Vec<u8>,
+        file_name: &str,
+        content_type: &str,
+        prompt: Option<String>,
+    ) -> Result<String> {
+        let backend = self.stt.as_ref().ok_or(ApiError::NotFound)?;
+        // A `multipart::Form` is consumed on send, so it is rebuilt per
+        // attempt from the bytes we already hold.
+        let mut last_error = String::new();
+        for base_url in &backend.base_urls {
+            let part = reqwest::multipart::Part::bytes(bytes.clone())
+                .file_name(file_name.to_string())
+                .mime_str(content_type)
+                .unwrap_or_else(|_| {
+                    reqwest::multipart::Part::bytes(bytes.clone())
+                        .file_name("audio.webm")
+                        .mime_str("application/octet-stream")
+                        .expect("octet-stream is a valid mime")
+                });
+            let mut form = reqwest::multipart::Form::new()
+                .text("model", backend.model.clone())
+                .part("file", part);
+            if let Some(prompt) = &prompt {
+                form = form.text("prompt", prompt.clone());
+            }
+
+            let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
+            let mut request = self
+                .client
+                .post(&url)
+                .timeout(self.attempt_timeout)
+                .multipart(form);
+            if let Some(key) = backend.api_key.as_deref() {
+                request = request.bearer_auth(key);
+            }
+            match request.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let payload: Value = resp
+                        .json()
+                        .await
+                        .map_err(|e| ApiError::BadGateway(format!("stt backend body: {e}")))?;
+                    return Ok(payload
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string());
+                }
+                Ok(resp) => {
+                    // Non-2xx: record and fall through to the next entry.
+                    let status = resp.status();
+                    let detail = resp.text().await.unwrap_or_default();
+                    last_error = format!("{url} → HTTP {status}: {}", truncate(&detail, 200));
+                }
+                Err(e) => last_error = format!("{url} → {e}"),
+            }
+        }
+        tracing::warn!(last_error = %last_error, "all STT backends failed");
+        Err(ApiError::NotFound)
+    }
+
+    /// Speak one piece of text: `/audio/speech` on each configured base URL
+    /// in order, the first 2xx winning. `NotFound` when TTS is unconfigured
+    /// or every entry fails. The clip is returned whole, in whatever
+    /// container the backend produced, and never stored.
+    ///
+    /// Shared by the `/api/assistant/tts` route and the live call, which
+    /// speaks a reply a sentence at a time through it.
+    pub async fn synthesize(&self, text: &str) -> Result<SpeechClip> {
+        let backend = self.tts.as_ref().ok_or(ApiError::NotFound)?;
+        if text.trim().is_empty() {
+            return Err(ApiError::BadRequest("no text to speak".into()));
+        }
+        let body = json!({
+            "model": backend.model,
+            "input": text,
+            "voice": backend.voice,
+            "response_format": backend.format,
+        });
+        let mut last_error = String::new();
+        for base_url in &backend.base_urls {
+            let url = format!("{}/audio/speech", base_url.trim_end_matches('/'));
+            let mut request = self
+                .client
+                .post(&url)
+                .timeout(self.attempt_timeout)
+                .json(&body);
+            if let Some(key) = backend.api_key.as_deref() {
+                request = request.bearer_auth(key);
+            }
+            match request.send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let content_type = resp
+                        .headers()
+                        .get(header::CONTENT_TYPE)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("audio/mpeg")
+                        .to_string();
+                    let bytes = resp
+                        .bytes()
+                        .await
+                        .map_err(|e| ApiError::BadGateway(format!("tts backend body: {e}")))?;
+                    return Ok(SpeechClip {
+                        content_type,
+                        bytes,
+                    });
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let detail = resp.text().await.unwrap_or_default();
+                    last_error = format!("{url} → HTTP {status}: {}", truncate(&detail, 200));
+                }
+                Err(e) => last_error = format!("{url} → {e}"),
+            }
+        }
+        tracing::warn!(last_error = %last_error, "all TTS backends failed");
+        Err(ApiError::NotFound)
+    }
+}
+
+/// One synthesized clip, as the backend sent it.
+#[derive(Debug, Clone)]
+pub struct SpeechClip {
+    /// The upstream content type (`audio/wav`, `audio/mpeg`, …); `audio/mpeg`
+    /// when the backend named none.
+    pub content_type: String,
+    pub bytes: bytes::Bytes,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,7 +310,9 @@ pub async fn stt(
     // Both the whole proxy being absent and this specific half being absent
     // read as 404: the route is simply not provisioned.
     let speech = state.assistant_speech.as_ref().ok_or(ApiError::NotFound)?;
-    let backend = speech.stt.as_ref().ok_or(ApiError::NotFound)?;
+    if !speech.stt_enabled() {
+        return Err(ApiError::NotFound);
+    }
 
     // Take the first file-bearing field. A voice client sends one audio blob;
     // we do not care what it named the field, only that it carried bytes.
@@ -217,62 +356,10 @@ pub async fn stt(
     }
     let (bytes, file_name, content_type) =
         audio.ok_or_else(|| ApiError::BadRequest("no audio in upload".into()))?;
-
-    // Try each base URL in order. A `multipart::Form` is consumed on send, so
-    // it is rebuilt per attempt from the bytes we already hold.
-    let mut last_error = String::new();
-    for base_url in &backend.base_urls {
-        let part = reqwest::multipart::Part::bytes(bytes.clone())
-            .file_name(file_name.clone())
-            .mime_str(&content_type)
-            .unwrap_or_else(|_| {
-                reqwest::multipart::Part::bytes(bytes.clone())
-                    .file_name("audio.webm")
-                    .mime_str("application/octet-stream")
-                    .expect("octet-stream is a valid mime")
-            });
-        let mut form = reqwest::multipart::Form::new()
-            .text("model", backend.model.clone())
-            .part("file", part);
-        if let Some(prompt) = &prompt {
-            form = form.text("prompt", prompt.clone());
-        }
-
-        let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
-        let mut request = speech
-            .client
-            .post(&url)
-            .timeout(speech.attempt_timeout)
-            .multipart(form);
-        if let Some(key) = backend.api_key.as_deref() {
-            request = request.bearer_auth(key);
-        }
-        match request.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let payload: Value = resp
-                    .json()
-                    .await
-                    .map_err(|e| ApiError::BadGateway(format!("stt backend body: {e}")))?;
-                let text = payload
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
-                return Ok(Json(SttResponse { text }));
-            }
-            Ok(resp) => {
-                // Non-2xx: record and fall through to the next entry.
-                let status = resp.status();
-                let detail = resp.text().await.unwrap_or_default();
-                last_error = format!("{url} → HTTP {status}: {}", truncate(&detail, 200));
-            }
-            Err(e) => last_error = format!("{url} → {e}"),
-        }
-    }
-    // Every entry failed. Reported as 404 so the client falls back; the
-    // reason is logged for an operator, not returned.
-    tracing::warn!(last_error = %last_error, "all STT backends failed");
-    Err(ApiError::NotFound)
+    let text = speech
+        .transcribe(bytes, &file_name, &content_type, prompt)
+        .await?;
+    Ok(Json(SttResponse { text }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,62 +375,14 @@ pub struct TtsReq {
 /// synthesised audio is streamed back to the caller and never stored.
 pub async fn tts(State(state): State<Arc<AppState>>, Json(req): Json<TtsReq>) -> Result<Response> {
     let speech = state.assistant_speech.as_ref().ok_or(ApiError::NotFound)?;
-    let backend = speech.tts.as_ref().ok_or(ApiError::NotFound)?;
 
-    if req.text.trim().is_empty() {
-        return Err(ApiError::BadRequest("no text to speak".into()));
-    }
-
-    let body = json!({
-        "model": backend.model,
-        "input": req.text,
-        "voice": backend.voice,
-        "response_format": backend.format,
-    });
-
-    let mut last_error = String::new();
-    for base_url in &backend.base_urls {
-        let url = format!("{}/audio/speech", base_url.trim_end_matches('/'));
-        let mut request = speech
-            .client
-            .post(&url)
-            .timeout(speech.attempt_timeout)
-            .json(&body);
-        if let Some(key) = backend.api_key.as_deref() {
-            request = request.bearer_auth(key);
-        }
-        match request.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let content_type = resp
-                    .headers()
-                    .get(header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("audio/mpeg")
-                    .to_string();
-                let audio = resp
-                    .bytes()
-                    .await
-                    .map_err(|e| ApiError::BadGateway(format!("tts backend body: {e}")))?;
-                // `resp.bytes()` already yields a `bytes::Bytes`, which axum
-                // turns into a body directly — no re-wrapping needed.
-                return Ok((
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, content_type)],
-                    audio,
-                )
-                    .into_response());
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                let detail = resp.text().await.unwrap_or_default();
-                last_error = format!("{url} → HTTP {status}: {}", truncate(&detail, 200));
-            }
-            Err(e) => last_error = format!("{url} → {e}"),
-        }
-    }
-    // Every entry failed. Reported as 404 so the client falls back.
-    tracing::warn!(last_error = %last_error, "all TTS backends failed");
-    Err(ApiError::NotFound)
+    let clip = speech.synthesize(&req.text).await?;
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, clip.content_type)],
+        clip.bytes,
+    )
+        .into_response())
 }
 
 /// The largest vocabulary prompt forwarded to a transcription backend. A
