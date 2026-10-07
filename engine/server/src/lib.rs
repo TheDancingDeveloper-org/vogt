@@ -10,6 +10,7 @@ pub mod assistant;
 pub mod assistant_api;
 pub mod assistant_log;
 pub mod assistant_speech;
+pub mod assistant_stream;
 pub mod auth;
 pub mod autopilot;
 pub mod claude_config;

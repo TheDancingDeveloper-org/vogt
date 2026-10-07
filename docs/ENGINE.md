@@ -2291,6 +2291,10 @@ untrusted data like every other cored-derived string.
 - `engine/server/src/vogt_tools.rs` — the Vogt toolbox: `tools/list` fetched
   from vogt-core's MCP surface and converted to OpenAI function shape, the
   curated slice, credential resolution, `tools/call`, delimiting.
+- `engine/server/src/assistant_stream.rs` — streamed chat completions for
+  the live call: decodes an OpenAI-compatible `stream: true` event stream
+  back into the same message the loop consumes, reporting each text delta as
+  it arrives (see *Streamed turns* below).
 - `engine/server/src/assistant_api.rs` — HTTP surface (see §5).
 - `web/src/Assistant.tsx` — PWA tab: transcript, composer, mic (APK only),
   TTS toggle, approve/deny cards.
@@ -2300,6 +2304,30 @@ routes 404 and the PWA hides the tab (`assistant_enabled` in `GET /api/config`).
 The Vogt half is independently absent: with no `vogt_core_url`, or with a core
 that is not answering, the `vogt_*` tools are simply not offered that turn and
 the terminal half works unchanged.
+
+### Streamed turns
+
+A typed turn, and every `/api/assistant/message` request, waits for the whole
+reply. The live call (WI-960) cannot: it speaks the first sentence while the
+model is still writing the second. Inside the engine a turn can therefore run
+*streamed* — the same loop, gate, log and transcript, with two additions:
+
+- **Deltas.** The model is asked with `stream: true` and each piece of reply
+  text is reported the moment it arrives, as is the start of every tool round
+  (the moment a caller waiting in silence learns it will be a while). A
+  provider that refuses the streamed request is asked again without it, and
+  one that ignores the flag and answers with plain JSON is read as the whole
+  reply it is; either way the turn completes, only without early text.
+- **Cancellation.** A streamed turn can be cut short — a call's barge-in.
+  While the model is talking, the stream is dropped and the words received so
+  far become the reply, flagged `interrupted` in the transcript and in the
+  reply. While tools run, the round is allowed to finish, so every tool call
+  in the history keeps its result, and the turn stops before the model is
+  asked again. A caller that knows the listener heard less than was written
+  cuts the flagged reply back to that prefix, so the next turn's model is not
+  told it said something nobody heard.
+
+No HTTP route streams yet; the call socket is the consumer.
 
 ### Configuring the assistant provider
 

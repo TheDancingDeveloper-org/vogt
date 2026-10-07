@@ -1321,6 +1321,8 @@ export interface AssistantTranscriptEntry {
   created_at?: string;
   session_refs?: { id: string; name: string; activity: ActivityState }[];
   actions?: { kind: "open-session"; session_id: string; label: string }[];
+  /** The reply was cut off by the listener speaking over it during a call. */
+  interrupted?: boolean;
 }
 
 /** Keystrokes the assistant wants to type into a terminal. */
@@ -1365,6 +1367,8 @@ export interface AssistantReply {
   created_at?: string;
   session_refs?: { id: string; name: string; activity: ActivityState }[];
   actions?: { kind: "open-session"; session_id: string; label: string }[];
+  /** The turn was cut short; `reply` is what had been said by then. */
+  interrupted?: boolean;
 }
 
 export interface AssistantHistory {
