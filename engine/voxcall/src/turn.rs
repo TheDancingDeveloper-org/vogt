@@ -1,24 +1,6 @@
-//! Audio primitives for the live call (WI-960, WI-966): PCM framing, WAV
-//! encoding, voice activity detection and turn endpointing.
+//! Turn-taking: per-frame speech decisions in, conversation events out.
 //!
-//! Everything here is pure — samples in, decisions out — so the turn-taking
-//! rules can be tested on synthetic audio without a microphone, a socket or
-//! a speech backend.
-//!
-//! ## Why an energy detector, not a neural one
-//!
-//! The engine does not link an inference runtime and should not grow one for
-//! a feature most deployments may never enable. The client captures with the
-//! browser's (or the phone's) echo cancellation, noise suppression and gain
-//! control already applied, which is exactly the condition under which an
-//! adaptive energy detector does well: a steady floor with speech well above
-//! it. The detector is behind the `Vad` trait so a neural one (Silero) can
-//! replace it without touching the endpointer.
-//!
-//! ## Turn-taking
-//!
-//! The endpointer turns per-frame speech/no-speech decisions into the events
-//! a conversation needs:
+//! The `Endpointer` (the shipped `TurnDetector`) reports:
 //!
 //! - `SpeechStarted` after `onset_ms` of voice (a click or a cough is shorter);
 //! - `Sustained` once the utterance has `sustained_ms` of voice — the bar a
@@ -30,161 +12,30 @@
 //!   (with `pre_roll_ms` of audio from before the onset, so the first
 //!   syllable is not clipped), or `Discarded` if it held less than
 //!   `min_speech_ms` of voice.
+//!
+//! Pure — samples in, events out — so the rules are tested on synthetic
+//! audio without a microphone, a socket or a speech backend.
 
-/// The sample rate a call's client audio arrives at.
-pub const CALL_SAMPLE_RATE: u32 = 16_000;
+use crate::audio::SAMPLE_RATE;
+use crate::vad::Vad;
 
-/// Little-endian PCM16 bytes to samples. A trailing odd byte — half a sample —
-/// is dropped rather than guessed at.
-pub fn pcm16_from_le_bytes(bytes: &[u8]) -> Vec<i16> {
-    bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| i16::from_le_bytes(*pair))
-        .collect()
-}
-
-/// A mono PCM16 WAV file of `samples` — the container every
-/// OpenAI-compatible transcription backend accepts.
-pub fn wav_from_pcm16(samples: &[i16], sample_rate: u32) -> Vec<u8> {
-    let data_len = (samples.len() * 2) as u32;
-    let mut out = Vec::with_capacity(44 + data_len as usize);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data_len).to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // mono
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
-    out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_len.to_le_bytes());
-    for sample in samples {
-        out.extend_from_slice(&sample.to_le_bytes());
-    }
-    out
-}
-
-/// Frame level in dBFS (0 = full scale; digital silence is clamped to -100).
-pub fn frame_dbfs(frame: &[i16]) -> f32 {
-    if frame.is_empty() {
-        return -100.0;
-    }
-    let sum: f64 = frame.iter().map(|s| (*s as f64) * (*s as f64)).sum();
-    let rms = (sum / frame.len() as f64).sqrt();
-    if rms < 1.0 {
-        return -100.0;
-    }
-    (20.0 * (rms / 32768.0).log10()) as f32
-}
-
-/// A per-frame speech decision.
-pub trait Vad: Send {
-    fn is_speech(&mut self, frame: &[i16]) -> bool;
-    /// The call's own reply is playing. A detector should demand more of a
-    /// frame then: whatever the echo canceller leaves of the reply is the
-    /// likeliest false trigger there is.
+/// Turns audio into turn-taking events. The pipeline drives one per call.
+pub trait TurnDetector: Send {
+    /// Feed audio of any length; returns the events it caused, in order.
+    fn push(&mut self, samples: &[i16]) -> Vec<EndpointEvent>;
+    /// The reply started or stopped playing (the echo guard).
     fn set_playback(&mut self, playing: bool);
-}
-
-/// Tuning for `EnergyVad`.
-#[derive(Debug, Clone, Copy)]
-pub struct EnergyVadConfig {
-    /// How far above the noise floor a frame must be to count as speech.
-    pub margin_db: f32,
-    /// A frame quieter than this is never speech, whatever the floor says —
-    /// in a silent room the floor sinks and the margin alone would hear
-    /// breathing.
-    pub min_speech_dbfs: f32,
-    /// Added to both while the reply plays.
-    pub playback_extra_db: f32,
-}
-
-impl Default for EnergyVadConfig {
-    fn default() -> Self {
-        Self {
-            margin_db: 12.0,
-            min_speech_dbfs: -50.0,
-            playback_extra_db: 8.0,
-        }
-    }
-}
-
-/// An adaptive noise-floor energy detector.
-///
-/// The first `CALIBRATION_FRAMES` set the floor to the quietest level heard
-/// (a call opens on a beat of room sound, and a floor guessed rather than
-/// measured would hear a loud fan as a voice forever). After that the floor
-/// follows non-speech frames — quickly downward, so a noise that stops stops
-/// counting at once, and slowly upward — and creeps up very slowly even
-/// through "speech", so a noise that starts mid-call is eventually learned
-/// rather than heard as one endless sentence.
-pub struct EnergyVad {
-    config: EnergyVadConfig,
-    floor_db: f32,
-    playing: bool,
-    calibration_left: u32,
-}
-
-const CALIBRATION_FRAMES: u32 = 10;
-
-const FLOOR_MIN_DB: f32 = -90.0;
-const FLOOR_MAX_DB: f32 = -25.0;
-
-impl EnergyVad {
-    pub fn new(config: EnergyVadConfig) -> Self {
-        Self {
-            config,
-            floor_db: FLOOR_MAX_DB,
-            playing: false,
-            calibration_left: CALIBRATION_FRAMES,
-        }
-    }
-
-    pub fn floor_db(&self) -> f32 {
-        self.floor_db
-    }
-}
-
-impl Vad for EnergyVad {
-    fn is_speech(&mut self, frame: &[i16]) -> bool {
-        let level = frame_dbfs(frame);
-        if self.calibration_left > 0 {
-            self.calibration_left -= 1;
-            self.floor_db = self.floor_db.min(level).clamp(FLOOR_MIN_DB, FLOOR_MAX_DB);
-            return false;
-        }
-        let extra = if self.playing {
-            self.config.playback_extra_db
-        } else {
-            0.0
-        };
-        let threshold = (self.floor_db + self.config.margin_db + extra)
-            .max(self.config.min_speech_dbfs + extra);
-        let speech = level > threshold;
-        let rate = match (speech, level < self.floor_db) {
-            (_, true) => 0.3,
-            (false, false) => 0.02,
-            (true, false) => 0.002,
-        };
-        self.floor_db += rate * (level - self.floor_db);
-        self.floor_db = self.floor_db.clamp(FLOOR_MIN_DB, FLOOR_MAX_DB);
-        speech
-    }
-
-    fn set_playback(&mut self, playing: bool) {
-        self.playing = playing;
-    }
+    /// True between `SpeechStarted` and the turn's end.
+    fn in_turn(&self) -> bool;
+    /// The utterance so far, for an early or partial transcription.
+    fn segment(&self) -> &[i16];
+    /// Forget the current utterance.
+    fn reset(&mut self);
 }
 
 /// Turn-taking timings, in milliseconds of audio.
 #[derive(Debug, Clone, Copy)]
 pub struct EndpointConfig {
-    pub frame_ms: u32,
     pub onset_ms: u32,
     pub sustained_ms: u32,
     pub pause_ms: u32,
@@ -197,7 +48,6 @@ pub struct EndpointConfig {
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
-            frame_ms: 20,
             onset_ms: 100,
             sustained_ms: 500,
             pause_ms: 200,
@@ -237,6 +87,7 @@ pub struct Endpointer<V: Vad> {
     config: EndpointConfig,
     vad: V,
     frame_len: usize,
+    frame_ms: u32,
     /// Samples waiting to make up a whole frame.
     partial: Vec<i16>,
     /// Recent frames kept while idle, so an utterance starts `pre_roll_ms`
@@ -253,11 +104,13 @@ pub struct Endpointer<V: Vad> {
 
 impl<V: Vad> Endpointer<V> {
     pub fn new(config: EndpointConfig, vad: V) -> Self {
-        let frame_len = (CALL_SAMPLE_RATE * config.frame_ms / 1000) as usize;
+        let frame_len = vad.frame_len().max(1);
+        let frame_ms = (frame_len as u32 * 1000 / SAMPLE_RATE).max(1);
         Self {
             config,
             vad,
             frame_len,
+            frame_ms,
             partial: Vec::new(),
             pre_roll: std::collections::VecDeque::new(),
             onset_frames: 0,
@@ -270,7 +123,7 @@ impl<V: Vad> Endpointer<V> {
     }
 
     fn frames(&self, ms: u32) -> u32 {
-        (ms / self.config.frame_ms).max(1)
+        (ms / self.frame_ms).max(1)
     }
 
     /// The call's reply started or stopped playing.
@@ -290,7 +143,7 @@ impl<V: Vad> Endpointer<V> {
 
     /// Milliseconds of voice in the current utterance.
     pub fn speech_ms(&self) -> u32 {
-        self.voiced_frames * self.config.frame_ms
+        self.voiced_frames * self.frame_ms
     }
 
     /// Forget the current utterance and any partial frame — after the call
@@ -362,7 +215,7 @@ impl<V: Vad> Endpointer<V> {
                     self.sustained_sent = true;
                     events.push(EndpointEvent::Sustained);
                 }
-                let turn_ms = self.segment.len() as u32 * 1000 / CALL_SAMPLE_RATE;
+                let turn_ms = self.segment.len() as u32 * 1000 / SAMPLE_RATE;
                 let ended = self.silent_frames >= self.frames(self.config.end_of_turn_ms)
                     || turn_ms >= self.config.max_turn_ms;
                 if ended {
@@ -380,18 +233,37 @@ impl<V: Vad> Endpointer<V> {
     }
 }
 
+impl<V: Vad> TurnDetector for Endpointer<V> {
+    fn push(&mut self, samples: &[i16]) -> Vec<EndpointEvent> {
+        Endpointer::push(self, samples)
+    }
+    fn set_playback(&mut self, playing: bool) {
+        Endpointer::set_playback(self, playing)
+    }
+    fn in_turn(&self) -> bool {
+        Endpointer::in_turn(self)
+    }
+    fn segment(&self) -> &[i16] {
+        Endpointer::segment(self)
+    }
+    fn reset(&mut self) {
+        Endpointer::reset(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::vad::{EnergyVad, EnergyVadConfig};
 
     const FRAME: usize = 320; // 20 ms at 16 kHz
 
     /// `ms` of a 220 Hz tone at `amplitude` — a stand-in for voice.
     fn tone(ms: u32, amplitude: f32) -> Vec<i16> {
-        let n = (CALL_SAMPLE_RATE * ms / 1000) as usize;
+        let n = (SAMPLE_RATE * ms / 1000) as usize;
         (0..n)
             .map(|i| {
-                let t = i as f32 / CALL_SAMPLE_RATE as f32;
+                let t = i as f32 / SAMPLE_RATE as f32;
                 (amplitude * 32767.0 * (2.0 * std::f32::consts::PI * 220.0 * t).sin()) as i16
             })
             .collect()
@@ -399,7 +271,7 @@ mod tests {
 
     /// `ms` of low pseudo-random noise — a quiet room.
     fn noise(ms: u32, amplitude: i16) -> Vec<i16> {
-        let n = (CALL_SAMPLE_RATE * ms / 1000) as usize;
+        let n = (SAMPLE_RATE * ms / 1000) as usize;
         let mut x: u32 = 0x1234_5678;
         (0..n)
             .map(|_| {
@@ -441,26 +313,6 @@ mod tests {
     }
 
     #[test]
-    fn a_wav_header_describes_mono_pcm16_at_the_given_rate() {
-        let wav = wav_from_pcm16(&[0, 1, -1], 16_000);
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(&wav[8..12], b"WAVE");
-        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16_000);
-        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);
-        assert_eq!(wav.len(), 44 + 6);
-        assert_eq!(
-            pcm16_from_le_bytes(&wav[44..]),
-            vec![0, 1, -1],
-            "the data chunk round-trips"
-        );
-    }
-
-    #[test]
-    fn half_a_sample_is_dropped_not_guessed() {
-        assert_eq!(pcm16_from_le_bytes(&[1, 0, 7]), vec![1]);
-    }
-
-    #[test]
     fn one_utterance_in_a_quiet_room_is_one_turn_with_its_lead_in() {
         let mut ep = endpointer();
         let mut audio = noise(500, 30);
@@ -473,7 +325,7 @@ mod tests {
         };
         assert!((700..=900).contains(speech_ms), "speech_ms {speech_ms}");
         // Pre-roll + speech + the silence that ended it.
-        let ms = audio.len() as u32 * 1000 / CALL_SAMPLE_RATE;
+        let ms = audio.len() as u32 * 1000 / SAMPLE_RATE;
         assert!(
             ms >= 800 + 700,
             "the utterance keeps its lead-in, got {ms} ms"
@@ -564,7 +416,7 @@ mod tests {
         feed(&mut ep, &noise(200, 30));
         feed(&mut ep, &tone(400, 0.3));
         assert!(ep.in_turn());
-        assert!(ep.segment().len() >= (CALL_SAMPLE_RATE as usize * 400 / 1000));
+        assert!(ep.segment().len() >= (SAMPLE_RATE as usize * 400 / 1000));
         ep.reset();
         assert!(!ep.in_turn());
         assert!(ep.segment().is_empty());

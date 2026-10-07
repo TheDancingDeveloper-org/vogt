@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["server", "contract"]
+members = ["server", "contract", "voxcall"]
 
 [workspace.package]
 edition = "2021"
