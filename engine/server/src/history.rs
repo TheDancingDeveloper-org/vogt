@@ -8,7 +8,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
-use sqlx::{FromRow, Row};
+use sqlx::{AssertSqlSafe, FromRow, Row};
 use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use uuid::Uuid;
@@ -98,7 +98,8 @@ const IDENTITY_COLUMNS: &[&str] = &[
     "work_item",
 ];
 
-/// The columns every metadata read selects.
+/// The columns every metadata read selects. Spliced into queries with
+/// `format!` behind `AssertSqlSafe`: a constant, never input.
 const METADATA_COLUMNS: &str = "id, name, created_at, ended_at, exit_code, cwd, command, \
      scrollback_bytes, end_reason, template, role, conversation_agent, conversation_id, work_item";
 
@@ -253,10 +254,13 @@ impl SessionHistory {
                 })?
                 .is_some();
             if !present {
-                sqlx::query(&format!("ALTER TABLE sessions ADD COLUMN {column} TEXT"))
-                    .execute(&self.pool)
-                    .await
-                    .map_err(|e| ApiError::Internal(format!("failed to add {column}: {}", e)))?;
+                // `column` comes from the compile-time list above, never input.
+                sqlx::query(AssertSqlSafe(format!(
+                    "ALTER TABLE sessions ADD COLUMN {column} TEXT"
+                )))
+                .execute(&self.pool)
+                .await
+                .map_err(|e| ApiError::Internal(format!("failed to add {column}: {}", e)))?;
             }
         }
 
@@ -379,9 +383,9 @@ impl SessionHistory {
     /// List archived sessions
     pub async fn list_sessions(&self, limit: usize, offset: usize) -> Result<Vec<SessionMetadata>> {
         let limit = limit.min(200);
-        let sessions = sqlx::query_as::<_, SessionMetadata>(&format!(
+        let sessions = sqlx::query_as::<_, SessionMetadata>(AssertSqlSafe(format!(
             "SELECT {METADATA_COLUMNS} FROM sessions ORDER BY created_at DESC LIMIT ? OFFSET ?"
-        ))
+        )))
         .bind(limit as i64)
         .bind(offset as i64)
         .fetch_all(&self.pool)
@@ -663,9 +667,9 @@ impl SessionHistory {
 
     /// Get session by ID
     pub async fn get_session(&self, id: Uuid) -> Result<SessionMetadata> {
-        let session = sqlx::query_as::<_, SessionMetadata>(&format!(
+        let session = sqlx::query_as::<_, SessionMetadata>(AssertSqlSafe(format!(
             "SELECT {METADATA_COLUMNS} FROM sessions WHERE id = ?"
-        ))
+        )))
         .bind(id.to_string())
         .fetch_one(&self.pool)
         .await

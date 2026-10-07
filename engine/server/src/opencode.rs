@@ -318,7 +318,7 @@ mod tests {
         db
     }
 
-    async fn exec(db: &Path, sql: &str, binds: &[&str]) {
+    async fn exec(db: &Path, sql: &'static str, binds: &[&str]) {
         let mut conn = SqliteConnectOptions::new()
             .filename(db)
             .connect()
