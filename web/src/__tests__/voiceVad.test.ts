@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
   ONSET_DEFAULTS,
   OnsetDetector,
+  SilenceEndpointer,
   frameRms,
   readOnsetConfig,
   type OnsetConfig,
@@ -93,5 +94,58 @@ describe("readOnsetConfig", () => {
     const c = readOnsetConfig((k) => store[k] ?? null);
     expect(c.vad_threshold).toBe(0.08);
     expect(c.vad_onset_ms).toBe(ONSET_DEFAULTS.vad_onset_ms);
+  });
+});
+
+// The server-STT tap take has no partial transcripts to rearm a silence clock
+// on, so its end of turn is read off the capture's own energy (WI-959).
+describe("SilenceEndpointer", () => {
+  const ecfg = { vad_threshold: 0.1, vad_onset_ms: 200, silence_duration_ms: 1000 };
+  function feed(ep: SilenceEndpointer, level: number, n: number): void {
+    for (let i = 0; i < n; i += 1) ep.push(level, 50);
+  }
+
+  it("ends the turn once, after speech and then the silence window", () => {
+    const events: string[] = [];
+    const ep = new SilenceEndpointer(ecfg, {
+      onSpeech: () => events.push("speech"),
+      onSilence: () => events.push("silence"),
+    });
+    feed(ep, 0.3, 10); // 500 ms of speech: the onset fires at 200 ms
+    expect(events).toEqual(["speech"]);
+    feed(ep, 0.01, 19); // 950 ms quiet: not yet
+    expect(events).toEqual(["speech"]);
+    feed(ep, 0.01, 1); // 1000 ms quiet: the turn ends
+    expect(events).toEqual(["speech", "silence"]);
+    feed(ep, 0.3, 10);
+    feed(ep, 0.01, 40);
+    expect(events).toEqual(["speech", "silence"]);
+  });
+
+  it("restarts the silence window when the speaker pauses and carries on", () => {
+    const events: string[] = [];
+    const ep = new SilenceEndpointer(ecfg, {
+      onSpeech: () => events.push("speech"),
+      onSilence: () => events.push("silence"),
+    });
+    feed(ep, 0.3, 10);
+    feed(ep, 0.01, 15); // a 750 ms pause mid-sentence
+    feed(ep, 0.3, 4);
+    feed(ep, 0.01, 15);
+    expect(events).toEqual(["speech"]);
+    feed(ep, 0.01, 5);
+    expect(events).toEqual(["speech", "silence"]);
+  });
+
+  it("never ends a capture that heard no speech — a click is not a turn", () => {
+    const events: string[] = [];
+    const ep = new SilenceEndpointer(ecfg, {
+      onSpeech: () => events.push("speech"),
+      onSilence: () => events.push("silence"),
+    });
+    feed(ep, 0.01, 40);
+    feed(ep, 0.5, 2); // a 100 ms click
+    feed(ep, 0.01, 60);
+    expect(events).toEqual([]);
   });
 });

@@ -1,4 +1,5 @@
-// The assistant's microphone is held, not toggled.
+// The assistant's microphone: tapped (ends on silence or a second tap) or held
+// (push-to-talk, ends on release).
 //
 // This file is the first thing to mount `Assistant.tsx`. §6.2a's row for
 // the assistant has said "Assistant.tsx is mounted by nothing" through two audit
@@ -72,6 +73,10 @@ describe("the assistant's microphone", () => {
     // into the next. The values are read fresh at take time.
     localStorage.removeItem("vogt.assistant.voice.silence_duration_ms");
     localStorage.removeItem("vogt.assistant.voice.final_result_grace_ms");
+    localStorage.removeItem("vogt.assistant.voice.no_speech_timeout_ms");
+    // The tests in this block hold the button: every press counts as a hold
+    // (push-to-talk), whatever the clock says. The tap tests below clear it.
+    localStorage.setItem("vogt.assistant.voice.hold_threshold_ms", "0");
   });
 
   it("opens only while the button is held", async () => {
@@ -187,6 +192,7 @@ describe("the assistant's microphone", () => {
     // the take was orphaned and nothing was ever sent. It must instead run on,
     // ended by silence — the tap the design has always promised.
     localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "0");
+    localStorage.removeItem("vogt.assistant.voice.hold_threshold_ms");
     const { mic } = await mountAssistant();
     fireEvent.pointerDown(mic, { pointerId: 1 });
     fireEvent.pointerUp(mic, { pointerId: 1 });
@@ -240,6 +246,117 @@ describe("the assistant's microphone", () => {
     const bodies = assistantMessageBodies();
     expect(bodies).toHaveLength(1);
     expect(bodies[0]?.text).toBe("what is on top");
+  });
+});
+
+// -- tap to start, tap or silence to stop (WI-958, WI-959) -----------------
+//
+// The operator's report: the composer mic "practically has to be held", and a
+// spoken take never auto-submitted on silence. Once the recognizer was up, the
+// release of an ordinary tap ended the take on the spot — so a tap opened and
+// closed the microphone in one gesture, and the only take that worked was a
+// held one, which by design never ends on silence. These run on the real
+// hold threshold: a press released at once is a tap.
+describe("the assistant's microphone, tapped", () => {
+  beforeEach(() => {
+    for (const fn of Object.values(recognition)) fn.mockClear();
+    localStorage.removeItem("vogt.assistant.voice.hold_threshold_ms");
+    localStorage.removeItem("vogt.assistant.voice.silence_duration_ms");
+    localStorage.removeItem("vogt.assistant.voice.final_result_grace_ms");
+    localStorage.removeItem("vogt.assistant.voice.no_speech_timeout_ms");
+  });
+
+  it("stays open after a tap released once the recognizer is up, and sends when the speaker goes quiet", async () => {
+    localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "0");
+    const { mic } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle(); // the recognizer is fully up before the finger lifts
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    fireEvent.lostPointerCapture(mic, { pointerId: 1 });
+    await settle();
+    expect(recognition.stop).not.toHaveBeenCalled();
+    expect(mic.dataset.listening).toBe("yes");
+
+    listenerFor("partialResults")?.({ matches: ["what is the build doing"] });
+    await settle();
+    const bodies = assistantMessageBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.text).toBe("what is the build doing");
+    expect(mic.dataset.listening).toBe("no");
+  });
+
+  it("ends the take and sends what was heard on a second tap", async () => {
+    localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "60000");
+    const { mic } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+    listenerFor("partialResults")?.({ matches: ["is any agent stuck"] });
+    await settle();
+    expect(assistantMessageBodies()).toHaveLength(0);
+
+    fireEvent.pointerDown(mic, { pointerId: 2 });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 2 });
+    fireEvent.lostPointerCapture(mic, { pointerId: 2 });
+    await settle();
+    expect(recognition.stop).toHaveBeenCalledTimes(1);
+    expect(mic.dataset.listening).toBe("no");
+    const bodies = assistantMessageBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.text).toBe("is any agent stuck");
+    // The stop tap's own release opens nothing.
+    expect(recognition.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("honours a stop tap that lands while the recognizer is still starting", async () => {
+    let resolveStart: () => void = () => {};
+    recognition.start.mockImplementationOnce(
+      () => new Promise<void>((resolve) => (resolveStart = () => resolve())),
+    );
+    const { mic } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle(); // suspended at the held start()
+    fireEvent.pointerDown(mic, { pointerId: 2 });
+    fireEvent.pointerUp(mic, { pointerId: 2 });
+    await settle();
+    expect(recognition.stop).not.toHaveBeenCalled();
+    resolveStart();
+    await settle();
+    expect(recognition.stop).toHaveBeenCalledTimes(1);
+    expect(mic.dataset.listening).toBe("no");
+  });
+
+  it("closes a tapped take that hears nothing, and sends nothing", async () => {
+    // The Android recognizer's own no-speech error never reaches JS, so
+    // without this the button sat red on "listening…" indefinitely.
+    localStorage.setItem("vogt.assistant.voice.no_speech_timeout_ms", "0");
+    const { mic } = await mountAssistant();
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+    expect(mic.dataset.listening).toBe("no");
+    expect(recognition.stop).toHaveBeenCalledTimes(1);
+    expect(assistantMessageBodies()).toHaveLength(0);
+  });
+
+  it("taps from the keyboard the same way", async () => {
+    localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "60000");
+    const { mic } = await mountAssistant();
+    fireEvent.keyDown(mic, { key: "Enter" });
+    await settle();
+    fireEvent.keyUp(mic, { key: "Enter" });
+    await settle();
+    expect(mic.dataset.listening).toBe("yes");
+    fireEvent.keyDown(mic, { key: "Enter" });
+    await settle();
+    fireEvent.keyUp(mic, { key: "Enter" });
+    await settle();
+    expect(mic.dataset.listening).toBe("no");
+    expect(recognition.start).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -387,6 +504,8 @@ function assistantMessageBodies(): Record<string, unknown>[] {
 describe("what the recognizer heard, repaired before it is sent", () => {
   beforeEach(() => {
     for (const fn of Object.values(recognition)) fn.mockClear();
+    // These hold the button and send on release.
+    localStorage.setItem("vogt.assistant.voice.hold_threshold_ms", "0");
   });
 
   it("sends the repaired utterance, not the raw transcription", async () => {

@@ -57,7 +57,7 @@ import {
   type VoicePorts,
   type VoiceState,
 } from "./voiceTurn";
-import { startBargeInDetection } from "./voiceVad";
+import { readOnsetConfig, startBargeInDetection, watchStreamForSilence } from "./voiceVad";
 import { diag, diagBoot } from "./diag";
 import { audioContextAvailable, playAudioBlob, primeAudio, suspendAudio, type Playback } from "./audioPlayback";
 
@@ -724,6 +724,7 @@ export default function Assistant(props: AssistantProps) {
     });
     haltSpeech("unmount");
     clearSilence();
+    clearTakeGuards();
     transcriptionController?.abort();
     inFlight()?.abort();
     // Leaving the surface ends the conversation, so release the held service
@@ -940,6 +941,50 @@ export default function Assistant(props: AssistantProps) {
   // silence instead: the tap-to-talk the design has always promised.
   let held = false; // the mic button is physically down right now
   let nativeStarting = false; // committed to a native take, `start()` not yet resolved
+  // Tap or hold (WI-958). The composer mic is a tap toggle first: a tap opens a
+  // take that ends when the speaker goes quiet or taps again. A press held past
+  // `hold_threshold_ms` is still push-to-talk — it ends on release. Before
+  // this, the release of every press ended the take unless it happened to land
+  // inside the recognizer's startup, so on a phone whose recognizer starts fast
+  // a tap opened and closed the microphone in one gesture: the button had to be
+  // held, and a held take never ended on silence.
+  let pressStartedAt = 0;
+  // This press landed on an open take: it is the tap that ends it, and its
+  // release must not be read as a second gesture.
+  let pressEndsTake = false;
+  // A stop tap that landed while the native recognizer was still starting:
+  // honoured the moment startup finishes rather than against a half-built one.
+  let stopAfterStart = false;
+  // Whether the take has heard anything yet: a partial transcript, or (on the
+  // server path) a speech onset. Silence only ends a take that heard speech.
+  let heardSpeech = false;
+  // The take's guards: a take that never hears speech ends quietly after
+  // `no_speech_timeout_ms` instead of leaving a microphone open (the Android
+  // recognizer's own no-speech error never reaches JS), and every tap take is
+  // capped at `max_turn_ms`.
+  let noSpeechTimer: ReturnType<typeof setTimeout> | null = null;
+  let maxTurnTimer: ReturnType<typeof setTimeout> | null = null;
+  // The server take's endpointer over its own capture stream.
+  let stopServerEndpointer: (() => void) | null = null;
+  const clearTakeGuards = () => {
+    if (noSpeechTimer !== null) clearTimeout(noSpeechTimer);
+    if (maxTurnTimer !== null) clearTimeout(maxTurnTimer);
+    noSpeechTimer = null;
+    maxTurnTimer = null;
+    stopServerEndpointer?.();
+    stopServerEndpointer = null;
+  };
+  const armTakeGuards = () => {
+    if (noSpeechTimer !== null || maxTurnTimer !== null) return;
+    noSpeechTimer = setTimeout(() => {
+      noSpeechTimer = null;
+      if (!held && takeOpen && !heardSpeech) void abandonTake();
+    }, voiceMs("no_speech_timeout_ms", 8000));
+    maxTurnTimer = setTimeout(() => {
+      maxTurnTimer = null;
+      if (!held && takeOpen) void stopListening();
+    }, voiceMs("max_turn_ms", 30000));
+  };
   // The JS-owned silence detector. The Android recognizer's own end-of-speech
   // is late and untunable in dictation mode, so a tap's turn ends here: a timer
   // rearmed on every partial result, firing once the transcript stops changing.
@@ -953,6 +998,7 @@ export default function Assistant(props: AssistantProps) {
   // Rearm the silence timer for a tap. Skipped while the button is held: a hold
   // *is* the take's length, so a mid-sentence pause must not end it.
   const armSilence = () => {
+    heardSpeech = true;
     if (held) return;
     clearSilence();
     silenceTimer = setTimeout(() => {
@@ -1017,6 +1063,7 @@ export default function Assistant(props: AssistantProps) {
     if (nativeStarting) return;
     takeOpen = false;
     clearSilence();
+    clearTakeGuards();
     await closeRecognizer();
     // The server pipeline sends from the recorder's `onstop` once the audio has
     // been transcribed, not from the draft — there is nothing in the composer
@@ -1045,21 +1092,20 @@ export default function Assistant(props: AssistantProps) {
   const abandonTake = async () => {
     takeOpen = false;
     clearSilence();
+    clearTakeGuards();
     // Tell the server recorder's `onstop` to drop the audio rather than post it.
     abandonServer = true;
     await closeRecognizer();
   };
 
-  // Push-to-talk, and it is held rather than toggled for the reason the name
-  // says. A toggle in a room with other people leaves a microphone
-  // open until somebody remembers it is open, and the recognizer auto-sends
-  // whatever it settled on — so a forgotten toggle does not merely listen, it
-  // speaks. Holding makes the open microphone exactly as long as the
-  // deliberate act. `docs/ENGINE.md` §6 has called this push-to-talk since
-  // before it was.
+  // The composer mic is tap-to-talk with push-to-talk kept for a long press
+  // (WI-958, see `pressMic`/`releaseMic`). A tap take auto-sends when the
+  // speaker goes quiet, so an open microphone is bounded: silence ends it, a
+  // take that hears nothing ends quietly, and every tap take is capped at
+  // `max_turn_ms`. `docs/ENGINE.md` §6 describes both gestures.
   // The desktop take, on the browser's own recognizer. The browser asks for
-  // the microphone itself (no plugin permission call), the take is held rather
-  // than toggled exactly as on the phone, and going quiet fires `onend`, which
+  // the microphone itself (no plugin permission call), tap and hold work
+  // exactly as on the phone, and the recognizer stopping fires `onend`, which
   // is the same "recognizer stopped first" end the native `listeningState`
   // handler covers — routed through the one `stopListening` so what was said is
   // sent once.
@@ -1078,7 +1124,12 @@ export default function Assistant(props: AssistantProps) {
           heard += event.results[i]?.[0]?.transcript ?? "";
         }
         const trimmed = heard.trim();
-        if (trimmed) setDraft(trimmed);
+        if (trimmed) {
+          setDraft(trimmed);
+          // Continuous Web Speech does not end itself on a pause, so the tap
+          // take's silence clock is rearmed here exactly as on the phone.
+          armSilence();
+        }
       };
       recognition.onend = () => {
         if (takeOpen) void stopListening();
@@ -1102,9 +1153,8 @@ export default function Assistant(props: AssistantProps) {
   };
 
   // The desktop take on the server pipeline: capture audio with
-  // `MediaRecorder`, and on release post it to the engine's STT route. Held
-  // rather than toggled, exactly as the other two paths — the release
-  // is what ends the recording and triggers the transcription-and-send.
+  // `MediaRecorder`, and when the take ends (silence, a stop tap, a hold's
+  // release) post it to the engine's STT route and send what comes back.
   const startListeningServer = async () => {
     try {
       haltSpeech("take-start");
@@ -1126,8 +1176,23 @@ export default function Assistant(props: AssistantProps) {
       });
       serverRecorder = recorder;
       takeOpen = true;
+      heardSpeech = false;
       setListening(true);
       recorder.start();
+      // No partials here, so silence is read off the capture itself: speech
+      // then `silence_duration_ms` of quiet ends a tap take, as on the phone.
+      stopServerEndpointer = watchStreamForSilence(
+        stream,
+        { ...readOnsetConfig(), silence_duration_ms: voiceMs("silence_duration_ms", 1000) },
+        {
+          onSpeech: () => {
+            heardSpeech = true;
+          },
+          onSilence: () => {
+            if (!held && takeOpen) void stopListening();
+          },
+        },
+      );
     } catch (e) {
       setListening(false);
       props.onError(`microphone: ${String(e)}`);
@@ -1174,10 +1239,13 @@ export default function Assistant(props: AssistantProps) {
     transcriptionController?.abort();
     if (sttBackend === "web") {
       startListeningWeb();
+      if (!held && takeOpen) armTakeGuards();
       return;
     }
     if (sttBackend === "server") {
       await startListeningServer();
+      // A tap released while the microphone was still being opened.
+      if (!held && takeOpen) armTakeGuards();
       return;
     }
     try {
@@ -1197,6 +1265,7 @@ export default function Assistant(props: AssistantProps) {
       // cannot strip the pair this same startup just added.
       takeOpen = true;
       nativeStarting = true;
+      heardSpeech = false;
       setListening(true);
       await SpeechRecognition.removeAllListeners();
       await SpeechRecognition.addListener("partialResults", (data) => {
@@ -1230,6 +1299,58 @@ export default function Assistant(props: AssistantProps) {
     // (push-to-talk), and any release that already landed was deferred and now
     // leaves the take running until silence — the tap.
     nativeStarting = false;
+    if (stopAfterStart) {
+      stopAfterStart = false;
+      void stopListening();
+    } else if (!held && takeOpen) {
+      // A tap released during startup: its guards start now.
+      armTakeGuards();
+    }
+  };
+
+  // -- the composer mic's gestures (WI-958) ---------------------------------
+  //
+  // Press: on an idle mic, open a take; on an open take, end it (the stop tap).
+  // Release: after a short press, nothing — the take is a tap take and runs
+  // until silence, a stop tap, or a guard; after a long press, end it
+  // (push-to-talk). The keyboard (space/enter) drives the same two functions.
+  const holdThresholdMs = () => voiceMs("hold_threshold_ms", 400);
+
+  const pressMic = () => {
+    if (takeOpen || listening()) {
+      pressEndsTake = true;
+      held = false;
+      if (nativeStarting) stopAfterStart = true;
+      else void stopListening();
+      return;
+    }
+    pressEndsTake = false;
+    stopAfterStart = false;
+    held = true;
+    pressStartedAt = Date.now();
+    // A press is a user gesture: let the reply's audio start later.
+    primeAudio();
+    void startListening();
+  };
+
+  /** `cancelled` when the platform took the gesture away (a scroll, a system
+   *  dialog): the take ends rather than being read as a tap left open. */
+  const releaseMic = (cancelled = false) => {
+    if (pressEndsTake) {
+      pressEndsTake = false;
+      return;
+    }
+    if (!held) return;
+    held = false;
+    if (!cancelled && Date.now() - pressStartedAt < holdThresholdMs()) {
+      // A tap. The take stays open; if words already arrived during the press
+      // the silence clock starts now, and the take's guards start once the
+      // recognizer is up.
+      if (heardSpeech) armSilence();
+      if (!nativeStarting && takeOpen) armTakeGuards();
+      return;
+    }
+    void stopListening();
   };
 
   // -- hands-free conversation mode (WI-174) --------------------------------
@@ -1797,9 +1918,9 @@ export default function Assistant(props: AssistantProps) {
           title, rather than hidden — a control that vanishes leaves the reader
           wondering whether voice exists at all.
 
-          In a hands-free conversation the mic is not held: a tap mutes and
-          unmutes, and the button renders the live mute state. The push/tap-to-
-          talk control below is for the rest of the time.
+          In a hands-free conversation the mic is a mute: a tap mutes and
+          unmutes, and the button renders the live mute state. The tap-to-talk
+          (or hold-to-talk) control below is for the rest of the time.
         */}
         <Show
           when={conversationOn()}
@@ -1827,8 +1948,8 @@ export default function Assistant(props: AssistantProps) {
             class="assistant-mic"
             data-testid="mic"
             data-listening={listening() ? "yes" : "no"}
-            title={listening() ? "Release to send" : "Hold to speak"}
-            aria-label="Hold to speak"
+            title={listening() ? "Tap to stop and send (or just stop talking)" : "Tap to speak — or hold to talk"}
+            aria-label={listening() ? "Stop and send" : "Speak a message"}
             style={{
               // A held button must not also be a drag handle or a scroll
               // start: on a phone the gesture that opens the microphone is
@@ -1837,43 +1958,28 @@ export default function Assistant(props: AssistantProps) {
               ...(listening() ? { background: "var(--danger-strong)", color: "var(--on-emphasis)" } : {}),
             }}
             onPointerDown={(e) => {
-              // Capture, so releasing off the button still ends the take. A
+              // Capture, so releasing a hold off the button still ends it. A
               // finger that slides while speaking is ordinary; a microphone
               // that stays open because of it is not.
               e.currentTarget.setPointerCapture?.(e.pointerId);
-              held = true;
-              // A press is a user gesture: let the reply's audio start later.
-              primeAudio();
-              void startListening();
+              pressMic();
             }}
-            onPointerUp={() => {
-              held = false;
-              void stopListening();
-            }}
-            onPointerCancel={() => {
-              held = false;
-              void stopListening();
-            }}
-            onLostPointerCapture={() => {
-              held = false;
-              void stopListening();
-            }}
+            onPointerUp={() => releaseMic()}
+            onPointerCancel={() => releaseMic(true)}
+            onLostPointerCapture={() => releaseMic()}
             onKeyDown={(e) => {
-              // Hold-to-talk is a pointer idiom, and a button that only
-              // answers to pointers is a button some people cannot use. Space
-              // and Enter hold; the repeat guard is what stops the key's own
-              // auto-repeat from restarting the recognizer every 30ms.
+              // A control only pointers can work is one some people cannot
+              // use: space and enter tap or hold exactly as a finger does. The
+              // repeat guard stops the key's own auto-repeat from re-pressing.
               if ((e.key === " " || e.key === "Enter") && !e.repeat) {
                 e.preventDefault();
-                held = true;
-                void startListening();
+                pressMic();
               }
             }}
             onKeyUp={(e) => {
               if (e.key === " " || e.key === "Enter") {
                 e.preventDefault();
-                held = false;
-                void stopListening();
+                releaseMic();
               }
             }}
           >

@@ -5358,14 +5358,14 @@ async function openVoiceAssistant(page: Page): Promise<void> {
   await expect(page.locator(".assistant-empty")).toBeVisible();
 }
 
-/** Hold-to-talk: press the mic, wait for the take to open, release to send. */
+/** Tap-to-talk (WI-958): tap the mic, the take stays open after the tap, and a
+ *  second tap ends it and sends. */
 async function speakTake(page: Page): Promise<void> {
   const mic = page.getByTestId("mic");
   await expect(mic).toBeVisible();
-  await mic.hover();
-  await page.mouse.down();
+  await mic.click();
   await expect(mic).toHaveAttribute("data-listening", "yes");
-  await page.mouse.up();
+  await mic.click();
 }
 
 test("Assistant voice turn: capture, STT, the {text, utterance} contract, approval, and a spoken reply", async ({ page }) => {
