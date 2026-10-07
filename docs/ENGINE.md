@@ -2995,6 +2995,16 @@ become instructions.
   stronger model (e.g. a WASM Silero VAD) can replace behind the same seam. Off
   by default because the WebView's AEC residual is imperfect and a false trigger
   cuts a reply short; half-duplex is the safe default.
+- **Live call** (WI-960; *Live call contract*, §5) — a different mode from the
+  two above: the engine listens continuously and owns turn-taking and
+  barge-in. On the Android app, placing a call also switches the phone's audio
+  to its communication mode (`call-start` / `call-end` over the voice bridge,
+  `CallAudio.java`), which puts the platform's acoustic echo canceller on the
+  WebView's microphone, and routes the reply to the loudspeaker unless a
+  headset is connected. What it changes it records and restores when the call
+  ends or the activity is destroyed. The shell needs `MODIFY_AUDIO_SETTINGS`
+  for this, so it takes an APK update; an older shell ignores the ops and the
+  call still works, with the WebView's own echo cancellation only.
 
 There is no setting that lets the assistant type without asking. The
 convenience it would buy a trusted single-user setup is outweighed by what it
