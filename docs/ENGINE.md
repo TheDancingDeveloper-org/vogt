@@ -2295,6 +2295,12 @@ untrusted data like every other cored-derived string.
   the live call: decodes an OpenAI-compatible `stream: true` event stream
   back into the same message the loop consumes, reporting each text delta as
   it arrives (see *Streamed turns* below).
+- `engine/server/src/call_audio.rs` and `engine/server/src/call_text.rs` — the
+  live call's pure building blocks: PCM16/WAV framing, an adaptive
+  noise-floor voice activity detector and the turn endpointer (speech
+  started, sustained, pause, resumed, end of turn), and the sentence chunker
+  that cuts a streamed reply into pieces to speak, with `speakable` to drop
+  the markdown a listener should not hear read out.
 - `engine/server/src/assistant_api.rs` — HTTP surface (see §5).
 - `web/src/Assistant.tsx` — PWA tab: transcript, composer, mic (APK only),
   TTS toggle, approve/deny cards.
