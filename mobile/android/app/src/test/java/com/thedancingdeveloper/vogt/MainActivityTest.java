@@ -74,6 +74,16 @@ public class MainActivityTest {
     }
 
     @Test
+    public void a_live_call_switches_the_audio_mode_from_the_main_frame_only() {
+        assertEquals(MainActivity.VoiceAction.CALL_START,
+            MainActivity.voiceAction("{\"op\":\"call-start\"}", true));
+        assertEquals(MainActivity.VoiceAction.CALL_END,
+            MainActivity.voiceAction("{\"op\":\"call-end\"}", true));
+        assertEquals(MainActivity.VoiceAction.NONE,
+            MainActivity.voiceAction("{\"op\":\"call-start\"}", false));
+    }
+
+    @Test
     public void voice_from_a_subframe_is_refused() {
         // The core guarantee for voice: a framed page cannot spin up the
         // foreground mic service even if it reaches the bridge object.

@@ -191,6 +191,9 @@ public class MainActivity extends BridgeActivity {
     public void onDestroy() {
         // Don't leak the Activity through the service's static listener.
         VoiceConversationService.setEndFromUiListener(null);
+        // A call cannot outlive the screen that holds it: put the phone's
+        // audio mode back the way it was.
+        CallAudio.shared(this).end();
         super.onDestroy();
     }
 
@@ -252,7 +255,7 @@ public class MainActivity extends BridgeActivity {
     // ----- Voice foreground service bridge ----------------
 
     /** What a voice message asks for, once frame and payload are resolved. */
-    enum VoiceAction { START, END, NONE }
+    enum VoiceAction { START, END, CALL_START, CALL_END, NONE }
 
     /**
      * Resolve a voice message to an action. {@code NONE} unless it comes from the
@@ -273,6 +276,10 @@ public class MainActivity extends BridgeActivity {
                 return VoiceAction.START;
             case "end":
                 return VoiceAction.END;
+            case "call-start":
+                return VoiceAction.CALL_START;
+            case "call-end":
+                return VoiceAction.CALL_END;
             default:
                 return VoiceAction.NONE;
         }
@@ -303,6 +310,14 @@ public class MainActivity extends BridgeActivity {
                 case END:
                     // The web ended it, so stop directly without signalling back.
                     context.stopService(new Intent(context, VoiceConversationService.class));
+                    break;
+                case CALL_START:
+                    // A live call (WI-960): communication mode, so the
+                    // platform's echo canceller is on the WebView's mic.
+                    CallAudio.shared(context).start();
+                    break;
+                case CALL_END:
+                    CallAudio.shared(context).end();
                     break;
                 default:
                     break;
