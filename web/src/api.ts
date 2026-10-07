@@ -124,6 +124,11 @@ export interface BlockedReport {
 export interface CreateSessionRequest {
   name: string;
   command?: string[];
+  /** A template name (or tag) the engine expands, when `command` is absent. */
+  template?: string;
+  /** Continue this conversation of the template's agent CLI. */
+  resume?: string;
+  role?: SessionRole;
   cwd?: string;
   env?: [string, string][];
   cols?: number;
@@ -569,6 +574,17 @@ export interface HistorySessionMetadata {
   cwd: string | null;
   command: string | null;
   scrollback_bytes: number;
+  /** The template it was started from, when one was named (WI-962). */
+  template?: string | null;
+  /** `worker` or `oversight`, as last set; absent on older rows. */
+  role?: SessionRole | null;
+  /** The last agent conversation it ran: one the engine launched, or one typed
+   *  into its shell that reported itself. Kept after it ends. */
+  conversation_agent?: string | null;
+  conversation_id?: string | null;
+  /** The template that resumes `conversation_id` here, or absent when nothing
+   *  can. Worked out by the engine against its templates when listed. */
+  resume_template?: string | null;
 }
 
 export interface HistorySearchResult {

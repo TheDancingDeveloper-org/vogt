@@ -145,7 +145,17 @@ class StandInEngine:
                         "cwd": ROOT,
                         "command": "make test",
                         "scrollback_bytes": 128,
-                    }
+                    },
+                    {
+                        "id": "hist-2",
+                        "name": "Oversight",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "command": "/usr/local/bin/vogt-agent-auth shell",
+                        "role": "oversight",
+                        "conversation_agent": "claude",
+                        "conversation_id": "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f",
+                        "resume_template": "claude",
+                    },
                 ]
             ).encode()
         if method == "GET" and path.endswith("/api/history/search"):
@@ -1151,11 +1161,20 @@ def test_history_list_forwards_pagination_and_maps_rows(
 ) -> None:
     result = history_list(wired, HistoryListParams(limit=10, offset=5))
     assert result.engine is None
-    assert [row.id for row in result.sessions] == ["hist-1"]
+    assert [row.id for row in result.sessions] == ["hist-1", "hist-2"]
     row = result.sessions[0]
     assert row.name == "old-session"
     assert row.exit_code == 0
     assert row.scrollback_bytes == 128
+    assert row.conversation_id is None and row.role is None
+    # WI-962: a shell with a hand-typed agent reads as what it was, with
+    # what a resume needs.
+    lost = result.sessions[1]
+    assert lost.role == "oversight"
+    assert lost.conversation_agent == "claude"
+    assert lost.conversation_id == "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f"
+    assert lost.resume_template == "claude"
+    assert lost.template is None
     url = _history_urls(engine)[-1]
     assert "limit=10" in url and "offset=5" in url
 

@@ -764,6 +764,7 @@ mod tests {
             "wake",
             "keep-awake",
             "role",
+            "conversation",
             "kill",
             "input",
             "blocked",

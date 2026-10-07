@@ -345,12 +345,37 @@ impl SessionRole {
     pub fn is_worker(&self) -> bool {
         *self == SessionRole::Worker
     }
+
+    /// The role as the wire spells it.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            SessionRole::Worker => "worker",
+            SessionRole::Oversight => "oversight",
+        }
+    }
 }
 
 /// `POST /api/sessions/{id}/role`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRoleRequest {
     pub role: SessionRole,
+}
+
+/// `POST /api/sessions/{id}/conversation`, and the same body on the
+/// broker-token route `/api/agent-auth/conversation`: an agent CLI running
+/// inside the session reports the conversation it is in (WI-962). Claude
+/// Code's `SessionStart` hook sends it, so a `claude` typed by hand into a
+/// plain shell is linked to its session; its `SessionEnd` hook sends the same
+/// body with `ended`, which unlinks the conversation if it is still the
+/// session's.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationReport {
+    /// `claude`, `codex`, `opencode` or `klaudia`.
+    pub agent: String,
+    pub id: String,
+    /// The conversation ended: the CLI exited, or `/clear` left it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ended: bool,
 }
 
 /// `POST /api/sessions/{id}/keep-awake`.

@@ -784,6 +784,11 @@ def history_list(ctx: AppContext, params: HistoryListParams) -> HistoryListResul
                 cwd=row.cwd,
                 command=row.command,
                 scrollback_bytes=row.scrollback_bytes,
+                template=row.template,
+                role=row.role,
+                conversation_agent=row.conversation_agent,
+                conversation_id=row.conversation_id,
+                resume_template=row.resume_template,
             )
             for row in rows
         ]

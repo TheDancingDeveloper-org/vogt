@@ -308,6 +308,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             post(api::keep_session_awake),
         )
         .route("/api/sessions/{id}/role", post(api::set_session_role))
+        .route(
+            "/api/sessions/{id}/conversation",
+            post(api::report_session_conversation),
+        )
         .route("/api/assistant/message", post(assistant_api::message))
         .route(
             "/api/assistant/actions/{id}",
@@ -458,7 +462,13 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route(secret_broker::STORE_ROUTE, post(secret_broker::store))
         // The launch wrapper's report of its own stages (WI-927): the same
         // caller and the same per-session token as the broker.
-        .route(crate::launch::REPORT_ROUTE, post(crate::launch::report));
+        .route(crate::launch::REPORT_ROUTE, post(crate::launch::report))
+        // An agent's report of the conversation it runs (WI-962): the same
+        // caller and the same per-session token.
+        .route(
+            api::OWN_CONVERSATION_ROUTE,
+            post(api::report_own_conversation),
+        );
 
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).

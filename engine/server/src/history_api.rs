@@ -86,8 +86,25 @@ pub async fn list_sessions(
 ) -> Result<Json<Vec<SessionMetadata>>> {
     let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
-    let sessions = history.list_sessions(q.limit, q.offset).await?;
+    let mut sessions = history.list_sessions(q.limit, q.offset).await?;
+    for row in &mut sessions {
+        with_resume_template(&state, row);
+    }
     Ok(Json(sessions))
+}
+
+/// Work out which template a resume of the row's conversation would start
+/// (WI-962), against the templates the engine has now.
+fn with_resume_template(state: &AppState, row: &mut SessionMetadata) {
+    row.resume_template = match (
+        row.conversation_agent.as_deref(),
+        row.conversation_id.as_deref(),
+    ) {
+        (Some(agent), Some(_)) => state
+            .sessions
+            .resume_template(row.template.as_deref(), agent),
+        _ => None,
+    };
 }
 
 /// Search session output via full-text search over the archive, optionally
@@ -140,7 +157,8 @@ pub async fn get_session(
 ) -> Result<Json<SessionMetadata>> {
     let history = state.history.as_ref().ok_or(ApiError::NotFound)?;
 
-    let session = history.get_session(id).await?;
+    let mut session = history.get_session(id).await?;
+    with_resume_template(&state, &mut session);
     Ok(Json(session))
 }
 

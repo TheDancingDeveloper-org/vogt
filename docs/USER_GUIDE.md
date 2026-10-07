@@ -686,7 +686,15 @@ available, a full page says that more may exist until **Load more** reaches a
 short page. Metadata filters apply only to the pages already loaded; archived
 output search runs across the server's full archive (up to the displayed result
 limit) and is debounced, so typing a needle settles to a single server search
-rather than one per keystroke. A failed archive, search, detail or replay read stays attached to that
+rather than one per keystroke. Each row also says what the session was: an
+oversight session reads **oversight**, and a session that ran an agent
+conversation shows the agent and the start of the conversation id — including
+a shell someone typed `claude` into, which reports its conversation to the
+engine by itself. The metadata filter matches templates and conversation ids
+too, so a lost session can be found by the id. A session that has ended with a
+conversation that can still be resumed offers **Resume**, which starts a new
+session on that conversation with the same role; it opens in the directory the
+conversation ran in. A failed archive, search, detail or replay read stays attached to that
 panel with **Retry**. Previously loaded content remains visible but is marked
 stale; an empty archive is shown only after a successful empty response.
 

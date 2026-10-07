@@ -345,6 +345,11 @@ class EngineHistorySession:
     cwd: str | None = None
     command: str | None = None
     scrollback_bytes: int = 0
+    template: str | None = None
+    role: str | None = None
+    conversation_agent: str | None = None
+    conversation_id: str | None = None
+    resume_template: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineHistorySession:
@@ -358,6 +363,11 @@ class EngineHistorySession:
             cwd=_optional_str(payload.get("cwd")),
             command=_optional_str(payload.get("command")),
             scrollback_bytes=raw_bytes if isinstance(raw_bytes, int) else 0,
+            template=_optional_str(payload.get("template")),
+            role=_optional_str(payload.get("role")),
+            conversation_agent=_optional_str(payload.get("conversation_agent")),
+            conversation_id=_optional_str(payload.get("conversation_id")),
+            resume_template=_optional_str(payload.get("resume_template")),
         )
 
 

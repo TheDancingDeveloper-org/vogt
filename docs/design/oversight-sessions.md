@@ -1,7 +1,9 @@
 # Oversight sessions (WI-956)
 
-Status: **design, with slice 0 implemented** (WI-957, the session role and
-the rail order). Everything after slice 0 is a proposal. Where this note and
+Status: **design, with slices 0 and 1 implemented** (WI-957, the session role
+and the rail order; WI-962, conversation capture, history identity and resume).
+Slice 1 leaves out the core mirror event (step 4) and the role chooser in the
+new-session dialog. Everything after slice 1 is a proposal. Where this note and
 [`ENGINE.md`](../ENGINE.md) or [`API.md`](../API.md) disagree, those describe
 what exists.
 
@@ -89,9 +91,18 @@ Make every agent conversation findable, whatever started it:
    session and its record. This covers `claude` typed into a shell, `/clear`
    (a new id) and `--resume` (the id it actually resumed). The same route
    serves codex and opencode once their ids are readable. The id is
-   validated with `agent_cli::is_conversation_id`. *Unverified:* that the hook
-   fires and sees `$VOGT_SESSION_ID` for a CLI typed into an engine shell.
-   Check on dev before relying on it.
+   validated with `agent_cli::is_conversation_id`.
+   *Verified on vogt-dev (2026-10-07), with one correction:* the hook fires
+   for a `claude` typed into an engine shell, but the shell has no
+   `$VOGT_SESSION_ID` (only a session vogt-core started does). It has
+   `$VOGT_ENGINE_SESSION_ID` and the session's broker token, so the hook as
+   built posts to `POST /api/agent-auth/conversation` with the broker token,
+   which names the session by itself, and falls back to
+   `POST /api/sessions/$VOGT_ENGINE_SESSION_ID/conversation` with
+   `VOGT_HTTP_TOKEN` where nothing is brokered. A `SessionEnd` hook unlinks the
+   conversation again, and a `claude` whose stdin is not a terminal (a
+   `claude -p` from a tool call) is ignored. See ENGINE.md, "A conversation
+   reported from inside the session".
 2. **History rows carry identity.** Add `template`, `conversation_agent`,
    `conversation_id` and `role` to the engine history row (a history schema
    migration), and show them in History and `session_history_list`. A lost
@@ -104,7 +115,9 @@ Make every agent conversation findable, whatever started it:
    non-resumable hibernated entry, so the overseer stays listed and
    findable. Boot wake skips non-resumable records, because waking them
    would only open an empty shell.
-4. **Mirror the link in the core.** Write a `session.conversation_linked`
+4. **Mirror the link in the core** (not built in slice 1; the engine logs
+   `event=session.conversation` and keeps it in the record and History).
+   Write a `session.conversation_linked`
    event: an audited action carrying the engine id, agent and conversation
    id. This leaves a durable trail in `vogt.sqlite3` even if the engine's
    `state_dir` is lost. A column on `coding_sessions` was considered and
@@ -196,9 +209,12 @@ Persist it in Vogt:
   requires a known conversation, which slice 1 provides for hand-typed
   agents.
 - Slice 1: after a boot wake, a resumed Claude sits idle at its prompt. For
-  an oversight session, the engine types one line after `ready`:
-  `[vogt] resumed after a restart at <time>; read your latest checkpoint
-  (oversight_get) and continue`. Workers are not nudged. They wake on demand,
+  an oversight session, the engine types one line after `ready`. As built
+  (WI-962), before checkpoints exist, it reads `[vogt] This oversight session
+  was resumed after the engine restarted at <time>. Check on the sessions you
+  oversee (session_sweep), wake the ones you need, and carry on where you
+  left off.` Slice 4 adds "read your latest checkpoint (oversight_get)".
+  Workers are not nudged. They wake on demand,
   and the overseer decides which to wake (`session_input` wakes one, and so
   does `session_wake`).
 - Failure stays visible. If the core is unreachable, the overseer stays
@@ -279,7 +295,7 @@ and docs.
 | Slice | Content | Layers | Effort |
 | --- | --- | --- | --- |
 | 0 (WI-957, done) | `role` on spec, summary and record; `POST /api/sessions/{id}/role`; `session.start(role)`, `session.set_role` (audited); oversight pins awake; rail sorts oversight first, with a badge and a menu toggle; guidance on spawning sessions | engine, core, MCP/CLI/REST, PWA, docs | ~1 day (S) |
-| 1 | Conversation capture via a `SessionStart` hook and `POST …/conversation`; history rows carry template, conversation and role, with *Resume* from History; keep oversight and resumable shell records at boot; resume nudge for a woken overseer; `session.conversation_linked` event; role chooser in the new-session dialog | engine (+ history migration), core, PWA, entrypoint | 3–4 days (M) |
+| 1 (WI-962, done but for the last two) | Conversation capture via a `SessionStart` hook and `POST …/conversation`; history rows carry template, conversation and role, with *Resume* from History; keep oversight and resumable shell records at boot; resume nudge for a woken overseer; `session.conversation_linked` event; role chooser in the new-session dialog | engine (+ history migration), core, PWA, entrypoint | 3–4 days (M) |
 | 2 | Supervisor derived from the principal (`0019`, `SessionSpec.supervisor`); `session.supervise`; `supervised_by` on list and sweep; rail nesting and board grouping | core, engine, PWA | ~3 days (M) |
 | 3 | `session.wait_any` (engine route and core op); opt-in idle injection; core-recorded exit, error and approval events | engine, core, MCP | 4–5 days (M/L) |
 | 4 | Oversight charters and checkpoints (`0020`), `oversight.*` ops, overseer side panel | core, PWA | 4–5 days (M/L) |

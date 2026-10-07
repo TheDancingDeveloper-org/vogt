@@ -123,6 +123,20 @@ os.replace(tmp, path)
 PY
 fi
 
+# Claude Code's SessionStart / SessionEnd hooks report the conversation a
+# `claude` runs to the engine session it runs in (WI-962). The engine pins the
+# id itself for a `claude` it launches, but not for one a person types into a
+# plain shell, which the engine otherwise sees only as a shell: not resumable,
+# dropped after a restart, `bash` in History. Installed into the user's
+# settings so they cover every `claude` in the pod. Best effort; opt out with
+# ENGINE_AGENT_CONVERSATION_HOOK=0.
+if [[ "${ENGINE_AGENT_CONVERSATION_HOOK:-1}" != "0" ]] \
+        && [[ -x /usr/local/bin/vogt-claude-session-hook ]] \
+        && command -v python3 >/dev/null 2>&1; then
+    /usr/local/bin/vogt-claude-session-hook install \
+        || echo "agent-onboarding: could not add the conversation hook to Claude Code's settings; continuing" >&2
+fi
+
 # Agent CLIs are deliberately not installed at container startup; the image
 # carries neutral infrastructure tooling and optional agents can be added by
 # the user. Service credentials for agent commands are brokered on demand by a

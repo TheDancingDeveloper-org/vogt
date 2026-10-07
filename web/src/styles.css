@@ -5203,6 +5203,20 @@ textarea {
   color: var(--activity-errored);
 }
 
+/* What the session was (WI-962): "oversight · claude · 6c1f0d2e…". */
+.history-session-identity {
+  font-size: 12px;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-conversation {
+  font-family: var(--font-mono, monospace);
+  overflow-wrap: anywhere;
+}
+
 .history-session-cwd {
   font-size: 12px;
   color: var(--fg-muted);
@@ -5301,6 +5315,13 @@ textarea {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+.history-detail-actions .primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
 }
 
 .history-detail-actions .danger {

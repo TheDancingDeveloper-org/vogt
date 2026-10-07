@@ -4044,6 +4044,35 @@ class HistorySessionRow(Result):
     cwd: str | None = None
     command: str | None = None
     scrollback_bytes: int = 0
+    template: str | None = Field(
+        default=None, description="The session template it was started from."
+    )
+    role: str | None = Field(
+        default=None,
+        description="`worker` or `oversight`, as last set; null on older rows.",
+    )
+    conversation_agent: str | None = Field(
+        default=None,
+        description=(
+            "The agent CLI of the last conversation the session ran — one the "
+            "engine launched, or one typed into its shell that reported itself."
+        ),
+    )
+    conversation_id: str | None = Field(
+        default=None,
+        description=(
+            "That conversation's id. Kept after it ends, so a lost session can "
+            "be resumed: session_start(template=resume_template, "
+            "resume=conversation_id, role=role)."
+        ),
+    )
+    resume_template: str | None = Field(
+        default=None,
+        description=(
+            "The template that resumes conversation_id here, worked out against "
+            "the engine's templates now; null when nothing can resume it."
+        ),
+    )
 
 
 class HistoryListResult(Result):

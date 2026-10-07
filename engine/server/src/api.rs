@@ -155,6 +155,76 @@ pub async fn set_session_role(
     Ok(Json(state.sessions.set_role(id, req.role)?))
 }
 
+/// `POST /api/sessions/{id}/conversation` — link (or, with `ended`, unlink)
+/// the agent conversation running in a session (WI-962). Gated like every
+/// session write: `sessions`. The agent's own hook normally reports through
+/// [`report_own_conversation`] instead, which needs no engine credential.
+pub async fn report_session_conversation(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<vogt_engine_contract::ConversationReport>,
+) -> Result<Json<SessionSummary>> {
+    Ok(Json(state.sessions.report_conversation(id, req)?))
+}
+
+/// The broker route for a conversation report: `/api/agent-auth/conversation`.
+pub const OWN_CONVERSATION_ROUTE: &str = "/api/agent-auth/conversation";
+
+/// `POST /api/agent-auth/conversation` — the same report as
+/// [`report_session_conversation`], from inside the session, authenticated
+/// by the session's own broker token (WI-962). The token names the session,
+/// so a session can only ever link a conversation to itself. Outside the
+/// bearer gate for the reason the broker is: a session holds no engine
+/// bearer.
+pub async fn report_own_conversation(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::{http::header, response::IntoResponse};
+    let path = request.uri().path().to_string();
+    let request_id = request
+        .extensions()
+        .get::<crate::observability::RequestId>()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
+    let session = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|token| state.sessions.secret_broker().authenticate(token));
+    let Some(id) = session else {
+        crate::auth::record_auth_failure(
+            &axum::http::Method::POST,
+            &path,
+            &request_id,
+            "missing or unknown broker token",
+        )
+        .await;
+        return crate::error::ApiError::Unauthorized.into_response();
+    };
+    let body = match axum::body::to_bytes(request.into_body(), 4096).await {
+        Ok(body) => body,
+        Err(_) => {
+            return crate::error::ApiError::BadRequest("conversation report too large".into())
+                .into_response()
+        }
+    };
+    let report: vogt_engine_contract::ConversationReport = match serde_json::from_slice(&body) {
+        Ok(report) => report,
+        Err(e) => {
+            return crate::error::ApiError::BadRequest(format!("conversation report: {e}"))
+                .into_response()
+        }
+    };
+    match state.sessions.report_conversation(id, report) {
+        Ok(summary) => Json(summary).into_response(),
+        Err(e) => e.into_response(),
+    }
+}
+
 /// Choose one option of the dialog on screen (WI-917): a permission
 /// dialog or a startup gate. The engine reads the menu as it is now, moves
 /// the highlight to the option with arrow keys, presses Enter, and looks

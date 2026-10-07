@@ -684,6 +684,13 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   the pin. The role is kept in the session's record, shown on its summary
   (absent for a worker), and the PWA lists oversight sessions first in the
   Places rail. Requires `sessions`.
+- `POST /api/sessions/:id/conversation` `{"agent", "id", "ended"?}` ->
+  `SessionSummary` (WI-962). Links the agent conversation running in the
+  session, or with `ended` unlinks it while it is still the session's. See
+  [A conversation reported from inside the session](#a-conversation-reported-from-inside-the-session).
+  Requires `sessions`. The same body to `POST /api/agent-auth/conversation`,
+  authenticated by the session's own broker token instead, is how the agent's
+  hook reports.
 
 The 64 KiB input cap mirrors `ws::MAX_INPUT_BYTES`, so the same paste is
 accepted or refused whichever transport carries it. Over the cap is `400` on
@@ -786,6 +793,43 @@ newest opencode session in its directory since it spawned that no other
 session holds; that is a guess, logged as `basis=directory`. The capture is
 logged as `event=launch.conversation`, and the summary's `conversation` then
 names it.
+
+##### A conversation reported from inside the session
+
+All of the above is for an agent the engine launched. A `claude` a person
+types into a plain shell was, to the engine, a shell: it could not be
+hibernated or resumed, a restart dropped its record, and History showed it as
+`bash`. That is how an oversight session was lost on 2026-10-07 (WI-962).
+
+So the agent says which conversation it runs. The pod entrypoint installs
+`vogt-claude-session-hook` (`engine/deploy/claude-session-hook.sh`) into
+Claude Code's user settings (`${CLAUDE_CONFIG_DIR:-~/.claude}/settings.json`)
+as a `SessionStart` and a `SessionEnd` hook, beside whatever the file holds;
+`ENGINE_AGENT_CONVERSATION_HOOK=0` skips it. Every `claude` in the pod then
+runs it. Inside an engine session (`VOGT_ENGINE_SESSION_ID` is set) it posts
+`{"agent": "claude", "id": <session_id from the hook's input>}` to
+`POST /api/agent-auth/conversation` with the session's broker token, or, when
+the deployment brokers nothing, to `POST /api/sessions/:id/conversation`
+with `VOGT_HTTP_TOKEN`. `SessionEnd` posts the same with `"ended": true`. The
+hook prints nothing, never fails the CLI, and ignores a `claude` whose stdin
+is not a terminal: a `claude -p` an agent runs from a tool call is not the
+session's conversation.
+
+The engine validates the agent and the id (`agent_cli::is_conversation_id`),
+sets the session's `conversation`, writes it into the record, records it on
+the History row and logs `event=session.conversation` (audit). From then on
+the session is resumable like any agent session: it hibernates, a restart
+keeps it (`trigger: "recovered"`, `resumable: true`), and a wake starts the
+agent, not the shell, on that conversation, through the template that runs
+the agent (the record's own when it does, else the template the agent's name
+resolves to, else the bare agent). `/clear` reports the new conversation, and
+the end of the old one is then ignored, because an `ended` report unlinks only
+the session's current conversation. A session that is hibernating ignores
+reports, so an agent's exit as the engine stops it cannot change what the
+record resumes. Verified on vogt-dev on 2026-10-07: the hook fires for a
+`claude` (2.1.289) typed into an engine shell and sees
+`VOGT_ENGINE_SESSION_ID`, the broker URL and token. It does not see
+`VOGT_SESSION_ID`, which only a session vogt-core started has.
 
 **Where a resumed conversation starts.** Claude Code and Codex key a
 conversation to the directory it ran in, and `claude --resume <id>` finds it
@@ -1263,12 +1307,17 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   engine mints a new broker grant. The history row and log continue.
   Waking a live session returns it unchanged.
 - **Restarts.** On `SIGTERM` the engine hibernates every session it can
-  (`trigger: "shutdown"`) before the history drain. At boot, every record
-  without a process becomes a hibernated session. A record the engine never
-  got to hibernate (a `SIGKILL`, a crash) comes back as
-  `trigger: "recovered"`, with its screen taken from the history log. A
-  redeploy therefore leaves the agent sessions listed and wakeable, not
-  gone.
+  (`trigger: "shutdown"`) before the history drain, and an oversight session
+  even when it is a plain shell. At boot, every record without a process
+  becomes a hibernated session. A record the engine never got to hibernate
+  (a `SIGKILL`, a crash) comes back as `trigger: "recovered"`, with its
+  screen taken from the history log. A redeploy therefore leaves the agent
+  sessions listed and wakeable, not gone. A recovered record with no
+  conversation to resume is forgotten, unless it is an oversight session,
+  which comes back hibernated with `resumable: false`, so the overseer stays
+  listed (WI-962). A shell whose agent reported its conversation (see
+  [A conversation reported from inside the session](#a-conversation-reported-from-inside-the-session))
+  is resumable and comes back like any agent session.
 - **`keep_awake`** pins a session. The pin is kept in its record and shown
   on its summary. A pinned session is never hibernated by policy, and if the
   engine finds it hibernated at boot (after a shutdown or a crash), it wakes
@@ -1277,7 +1326,15 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   token. The core may still be starting, so the engine retries for a few
   minutes. Pin a driver or oversight session, and it comes back after a
   redeploy by itself. Nominating a session as oversight (`role`, WI-957)
-  pins it for you.
+  pins it for you. Only a session with a conversation to resume is woken: an
+  oversight shell kept without one stays hibernated, because waking it would
+  open an empty shell. An oversight session woken at boot is told so once it
+  is at its prompt (WI-962), with one line typed into it:
+  `[vogt] This oversight session was resumed after the engine restarted at
+  <time>. Check on the sessions you oversee (session_sweep), wake the ones you
+  need, and carry on where you left off.` Workers are not told; they wake on
+  demand. Nothing is typed into an overseer that is not ready within 5
+  minutes or that needs a person.
 - **Policy** (`hibernate_policy.rs`) is off unless configured.
   `ENGINE_HIBERNATE_IDLE_AFTER` (`2h`, `30m`, or seconds) hibernates an agent
   session that has had no input or output for that long.
@@ -1291,6 +1348,9 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   - it is pinned awake;
   - a turn is `running`, or it is `awaiting-approval`;
   - it is `blocked` on a person;
+  - no agent CLI runs in it at all: a shell whose typed-in agent reported its
+    conversation and then died without unlinking it, which a wake would turn
+    into that agent (WI-962);
   - a shell process (`bash`, `sh`, …) runs *below* the agent CLI, meaning a
     tool call or a background job is at work. The agent's MCP servers are not
     shells, and a wrapper shell that launched the CLI sits above it, so
@@ -2016,6 +2076,18 @@ while the engine watched; `exit_code` is its code), `engine-shutdown`
 (archived by the graceful-shutdown drain while still running), `engine-restart`
 (closed out at the next startup), or `null` while the session is live and on
 rows from before the field existed.
+
+A row also says what the session was (WI-962): `template`, `role` (`worker`
+or `oversight`, as last set), and `conversation_agent` / `conversation_id`,
+the last agent conversation it ran — one the engine launched, or one an agent
+typed into its shell reported. The conversation is kept after it ends, so a
+lost session can be found and resumed. `resume_template` is worked out when
+the row is read: the template that resumes that conversation with the
+engine's templates now, or absent when none can. History's *Resume* starts
+`POST /api/sessions` with that `template`, `resume: conversation_id` and the
+row's `role`; vogt-core's `session.history_list` carries the same fields for
+`session_start`. The columns are added to an existing `history.db` at boot,
+empty on older rows.
 
 - `GET /api/history/sessions?limit=&offset=` -> `SessionMetadata[]`; `limit`
   defaults to 50.

@@ -546,6 +546,47 @@ paths:
               schema: { $ref: "#/components/schemas/SessionSummary" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/conversation:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Link the agent conversation running in a session, or unlink it.
+      description: >-
+        WI-962. An agent CLI inside the session reports the conversation it
+        runs, so a `claude` typed by hand into a plain shell is linked to the
+        session: its record then holds the conversation, which makes the
+        session resumable (hibernated at shutdown, kept across a restart, woken
+        into the agent) and its History row shows it. `ended` unlinks the
+        conversation only while it is still the session's. A hibernating
+        session ignores both. Claude Code's hook
+        (`vogt-claude-session-hook`) normally reports through
+        `POST /api/agent-auth/conversation` instead, with the same body and
+        the session's own broker token in place of an engine credential.
+      operationId: reportSessionConversation
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [agent, id]
+              properties:
+                agent:
+                  type: string
+                  enum: [claude, codex, opencode, klaudia]
+                id: { type: string, description: The agent CLI's conversation id. }
+                ended: { type: boolean, default: false }
+      responses:
+        "200":
+          description: The session after the report.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
   /api/sessions/{id}/kill:
     parameters:
       - $ref: "#/components/parameters/SessionId"
