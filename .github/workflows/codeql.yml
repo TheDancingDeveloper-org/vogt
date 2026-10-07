@@ -56,10 +56,19 @@ jobs:
       # the current CodeQL bundle. That keeps this security analysis separate
       # from the authoritative build/test jobs and avoids rebuilding the PWA
       # or engine only to extract source a second time.
+      # The self-hosted runner has 12 CPUs and ~8 GB, and CodeQL's autodetect
+      # took --threads=12 --ram=6270. The matrix runs rust and
+      # javascript-typescript at the same time, so two jobs each claiming 6 GB
+      # exhaust the box: `codeql database finalize` was killed (exit 137) on
+      # main run 37603927375 and on PR #875. Cap each job so two of them fit.
+      # 2 threads and 2 GB is slower than autodetect but stays inside the
+      # runner instead of being killed; the 45 minute timeout still covers it.
       - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
         with:
           languages: ${{ matrix.language }}
           build-mode: none
+          threads: 2
+          ram: 2048
           # Query suite and path scope (test exclusions) live in the config
           # file so they are described once, with rationale, rather than inline.
           config-file: ./.github/codeql/codeql-config.yml
@@ -67,3 +76,5 @@ jobs:
       - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
         with:
           category: /language:${{ matrix.language }}
+          threads: 2
+          ram: 2048
