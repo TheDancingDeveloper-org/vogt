@@ -2,7 +2,8 @@
 //! real WebSocket against stand-in OpenAI-compatible chat and audio servers:
 //! a spoken turn is endpointed, transcribed, answered as a stream and spoken
 //! back a piece at a time; speaking over the reply stops it and keeps only
-//! what was heard; and a spoken "yes" never approves a change.
+//! what was heard; a turn is transcribed in chunks while it is spoken; and a
+//! spoken "yes" never approves a change.
 
 use std::{
     net::SocketAddr,
@@ -31,6 +32,10 @@ const RATE: u32 = 16_000;
 struct Stubs {
     /// What the next transcription says.
     transcript: String,
+    /// What each chunk of a streamed turn says, in order (then `transcript`).
+    chunk_transcripts: Vec<String>,
+    /// The `prompt` each chunk was sent with.
+    chunk_prompts: Vec<Option<String>>,
     /// Scripted chat replies, in order: each a `choices[0].message`.
     chat: Vec<Value>,
     chat_calls: usize,
@@ -101,10 +106,29 @@ async fn transcriptions(
     State(stubs): State<Shared>,
     mut multipart: axum::extract::Multipart,
 ) -> impl IntoResponse {
+    let mut chunk = false;
+    let mut prompt = None;
     while let Ok(Some(field)) = multipart.next_field().await {
+        if field.file_name() == Some("chunk.wav") {
+            chunk = true;
+        }
+        if field.name() == Some("prompt") {
+            prompt = field.text().await.ok();
+            continue;
+        }
         let _ = field.bytes().await;
     }
-    let text = stubs.lock().unwrap().transcript.clone();
+    let mut stubs = stubs.lock().unwrap();
+    let text = if chunk {
+        stubs.chunk_prompts.push(prompt);
+        if stubs.chunk_transcripts.is_empty() {
+            stubs.transcript.clone()
+        } else {
+            stubs.chunk_transcripts.remove(0)
+        }
+    } else {
+        stubs.transcript.clone()
+    };
     Json(json!({ "text": text }))
 }
 
@@ -242,6 +266,16 @@ fn quiet(ms: u32) -> Vec<i16> {
 fn utterance() -> Vec<i16> {
     let mut audio = quiet(300);
     audio.extend(tone(900, 0.3));
+    audio.extend(quiet(1_000));
+    audio
+}
+
+/// Two phrases, the pause between them shorter than the end of a turn.
+fn two_phrases() -> Vec<i16> {
+    let mut audio = quiet(300);
+    audio.extend(tone(1_200, 0.3));
+    audio.extend(quiet(400));
+    audio.extend(tone(1_000, 0.3));
     audio.extend(quiet(1_000));
     audio
 }
@@ -409,6 +443,32 @@ async fn a_spoken_turn_is_heard_answered_and_spoken_back_a_piece_at_a_time() {
     assert_eq!(transcript[0]["text"], "what is running");
     // The model was asked as a call, for spoken sentences.
     assert_eq!(stubs.lock().unwrap().chat_calls, 1);
+}
+
+#[tokio::test]
+async fn a_turn_is_transcribed_in_chunks_each_told_the_words_before_it() {
+    let (addr, stubs) = setup(Stubs {
+        chunk_transcripts: vec!["Check the build".into(), "on the dev stack.".into()],
+        chat: vec![final_reply("It passed.")],
+        ..Stubs::default()
+    })
+    .await;
+    let mut ws = dial(&addr, TEST_TOKEN).await;
+    let mut seen = Vec::new();
+    read_until(&mut ws, &mut seen, is("session.created")).await;
+    speak(&mut ws, &two_phrases()).await;
+    let done = read_until(&mut ws, &mut seen, is("response.done")).await;
+    assert_eq!(done["status"], "completed");
+    let completed = seen
+        .iter()
+        .find(|e| e["type"] == "conversation.item.input_audio_transcription.completed")
+        .unwrap();
+    assert_eq!(completed["text"], "Check the build on the dev stack.");
+    assert_eq!(
+        stubs.lock().unwrap().chunk_prompts,
+        vec![None, Some("Check the build".to_string())],
+        "the second chunk is sent the first chunk's words as its prompt"
+    );
 }
 
 #[tokio::test]

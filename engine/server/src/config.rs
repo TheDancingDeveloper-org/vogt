@@ -1157,7 +1157,8 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>> {
 
 /// The live call's settings: `ENGINE_ASSISTANT_CALL_ENABLED` (default on),
 /// `ENGINE_ASSISTANT_CALL_END_OF_TURN_MS`, `_BARGE_IN_MS`,
-/// `_PARTIAL_INTERVAL_MS` (`0`, the default, turns live captions off), `_VAD` (`earshot`,
+/// `_STT_MODE` (`chunked`, the default: transcribed while spoken; or `whole`),
+/// `_PARTIAL_INTERVAL_MS` (whole mode's captions; `0`, the default, is off), `_VAD` (`earshot`,
 /// the default, or `energy`) and `ENGINE_ASSISTANT_CALL_FILLER` (empty turns
 /// the filler off). A value that
 /// does not parse, or a timing outside its sane range, is a startup error.
@@ -1202,6 +1203,25 @@ fn call_policy_from_env() -> Result<crate::call::CallPolicy> {
         60_000,
         policy.partial_interval_ms,
     )?;
+    match engine_env("ENGINE_ASSISTANT_CALL_STT_MODE") {
+        Ok(v) if !v.trim().is_empty() => {
+            policy.stt_mode = match v.trim().to_ascii_lowercase().as_str() {
+                "chunked" => voxcall::SttMode::Chunked,
+                "whole" => voxcall::SttMode::Whole,
+                other => {
+                    return Err(ApiError::Config(format!(
+                        "ENGINE_ASSISTANT_CALL_STT_MODE={other:?} must be chunked or whole"
+                    )))
+                }
+            };
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => {}
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_ASSISTANT_CALL_STT_MODE: {e}"
+            )))
+        }
+    }
     match engine_env("ENGINE_ASSISTANT_CALL_VAD") {
         Ok(v) if !v.trim().is_empty() => {
             policy.vad = match v.trim().to_ascii_lowercase().as_str() {
