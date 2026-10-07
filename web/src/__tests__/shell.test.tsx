@@ -301,6 +301,53 @@ describe("a pasted link opens the surface it names", () => {
     expect(names()).toEqual(["waiting-one", "running-one", "idle-one"]);
   });
 
+  it("shows a session's work item as a chip and binds and unbinds it (WI-998)", async () => {
+    const sessions = [
+      { id: "eng-bound", name: "on-item", cwd: "/a", activity: "idle", exit_code: null, work_item: "WI-7" },
+      { id: "eng-done", name: "on-done", cwd: "/b", activity: "idle", exit_code: null, work_item: "WI-8" },
+      { id: "eng-free", name: "free", cwd: "/c", activity: "idle", exit_code: null },
+    ];
+    const { container, vogt } = mountShell("/sessions", {
+      sessions,
+      vogt: {
+        "GET /work": (call) => ({
+          body: {
+            items: [
+              call.query.get("query") === "WI-7"
+                ? { ref: "WI-7", title: "terminal render bug", state: "in_progress" }
+                : { ref: "WI-8", title: "shipped thing", state: "done" },
+            ],
+          },
+        }),
+        "POST /sessions/work-item": { body: { session: {}, engine_label: "written" } },
+      },
+    });
+    const chip = (ref: string) =>
+      [...container.querySelectorAll<HTMLAnchorElement>("[data-testid=session-work-chip]")].find(
+        (node) => node.textContent?.includes(ref),
+      );
+    await waitFor(() => expect(chip("WI-7")?.title).toBe("WI-7 — terminal render bug"));
+    expect(chip("WI-7")?.getAttribute("href")).toBe("#/w/WI-7");
+    await waitFor(() => expect(chip("WI-8")?.className).toContain("session-work-chip--finished"));
+    expect(chip("WI-8")?.textContent).toContain("· done");
+    expect(container.querySelectorAll("[data-testid=session-work-chip]")).toHaveLength(2);
+
+    const unbind = [...container.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find(
+      (button) => button.getAttribute("aria-label") === "Unbind on-item from WI-7",
+    );
+    expect(unbind).toBeTruthy();
+    fireEvent.click(unbind!);
+    await waitFor(() => expect(vogt.matching("POST /sessions/work-item")).toHaveLength(1));
+    expect(vogt.matching("POST /sessions/work-item")[0]?.body).toMatchObject({
+      id: "eng-bound",
+      work_item: null,
+    });
+    const binds = [...container.querySelectorAll("[role=menuitem]")].filter((button) =>
+      button.textContent?.startsWith("Bind to"),
+    );
+    expect(binds).toHaveLength(3);
+  });
+
   it("names a missing terminal and offers recovery without a phantom tab", async () => {
     const { container } = mountShell("/t/eng-gone", { sessions: [SESSION] });
 

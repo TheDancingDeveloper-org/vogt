@@ -2054,6 +2054,36 @@ textarea {
   color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
 }
+/* The work item a session serves (WI-998), after its name: the same glyph
+   as the terminal header's badge. Muted once the item is finished. */
+.session-work-chip {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  vertical-align: 1px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.session-work-chip:hover,
+.session-work-chip:focus-visible {
+  border-color: var(--accent);
+}
+.session-work-chip--finished {
+  color: var(--fg-muted);
+  border-color: color-mix(in srgb, var(--fg-muted) 35%, transparent);
+}
+.wid-worked-by {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+.wid-worked-by-label {
+  color: var(--fg-muted);
+}
 .session-row .cwd {
   font-size: 10px;
   color: var(--fg-muted);

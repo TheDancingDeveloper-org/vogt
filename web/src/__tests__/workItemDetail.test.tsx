@@ -245,6 +245,59 @@ describe("one item, one page, and everything about it on it", () => {
     expect(submit).toBeTruthy();
   });
 
+  it("says who is on the item now, and nobody when nobody is (WI-998)", async () => {
+    const session = (id: string, activity: string, extra = {}) => ({
+      id,
+      engine_session_id: `eng-${id}`,
+      work_item: "WI-1",
+      actor: `agent:session:${id}`,
+      cwd: "/srv",
+      reason: "r",
+      started_at: "2026-10-07T00:00:00Z",
+      activity,
+      alive: true,
+      ...extra,
+    });
+    fakeVogt({
+      "GET /work/get": { body: { item: RICH_ITEM, comments: [], sessions: [] } },
+      "GET /why": { body: WHY },
+      "GET /sessions": {
+        body: {
+          sessions: [
+            session("ses_A", "running"),
+            session("ses_B", "awaiting-approval"),
+            session("ses_C", "exited", { alive: false }),
+            session("ses_D", "idle", { stopped_at: "2026-10-07T01:00:00Z" }),
+          ],
+        },
+      },
+    });
+    const { container } = detail();
+    const line = await waitFor(() => {
+      const found = container.querySelector<HTMLElement>("[data-testid=worked-by]");
+      expect(found?.textContent).toContain("ses_A — running");
+      return found!;
+    });
+    expect(line.textContent).toContain("ses_B — awaiting-approval");
+    expect(line.textContent).not.toContain("ses_C");
+    expect(line.textContent).not.toContain("ses_D");
+    expect(line.querySelector("a")?.getAttribute("href")).toBe("#/t/eng-ses_A");
+  });
+
+  it("says nobody right now when no bound session is live (WI-998)", async () => {
+    fakeVogt({
+      "GET /work/get": { body: { item: RICH_ITEM, comments: [], sessions: [] } },
+      "GET /why": { body: WHY },
+      "GET /sessions": { body: { sessions: [] } },
+    });
+    const { container } = detail();
+    await waitFor(() =>
+      expect(
+        container.querySelector("[data-testid=worked-by]")?.textContent,
+      ).toContain("nobody right now"),
+    );
+  });
+
   it("keeps all six on one page, at once", async () => {
     // The requirement is the *page*, not the six panels: a reader who has to
     // navigate between them to answer "what is going on with WI-1" has the

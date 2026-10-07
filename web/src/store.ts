@@ -115,7 +115,7 @@ export async function createSession(
   command?: string[],
   cwd?: string,
   env?: [string, string][],
-  launch?: Pick<CreateSessionRequest, "template" | "resume" | "role">,
+  launch?: Pick<CreateSessionRequest, "template" | "resume" | "role" | "work_item">,
 ): Promise<SessionSummary> {
   const scrollbackBytes = getStoragePrefs().defaultSessionScrollbackBytes;
   const s = await api.createSession({

@@ -316,6 +316,15 @@ Rules:
   template, project, work item and task) rather than as subagents inside
   your own conversation: a session is visible, can be overseen, and outlives
   you.
+- **Bind sessions to their work items.** When the work has an item, pass
+  `work_item` to `session_start` (create the item first if there is none)
+  rather than writing the ref into the task text: the item then shows who is
+  on it, and the GUI's rail shows the item on the session. A session already
+  running — your own included — is bound with `session_bind_work(work_item=…)`
+  (omit `id` for yourself; `work_item=null` unbinds). Rebind when you move on
+  to another item. Binding never changes the item's state: transition it
+  yourself when the work warrants it. Closing an item while sessions are
+  still bound warns (`live_sessions`) and does not stop them.
 - **A session needs a credential it was not started with?** Ask a person for
   it with `session_grant_request(target=<the session>, secret_name=…,
   project_id=…, reason=…)`. Cadastre `lookup` tells you where the credential

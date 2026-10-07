@@ -88,6 +88,7 @@ export const ROUTES = {
   "session.wake": "/sessions/wake",
   "session.keep_awake": "/sessions/keep-awake",
   "session.set_role": "/sessions/role",
+  "session.bind_work": "/sessions/work-item",
   "session.sweep": "/sessions/sweep",
   "session.answer": "/sessions/answer",
   "session.grant_decide": "/sessions/grants/decide",
@@ -516,6 +517,11 @@ export interface SessionSummary {
   engine_session_id: string;
   project?: string | null;
   work_item?: string | null;
+  /** The bound item's title and workflow state, joined by the core (WI-998). */
+  work_item_title?: string | null;
+  work_item_state?: string | null;
+  /** False for a session the engine holds that the core never started. */
+  linked?: boolean;
   actor: string;
   cwd: string;
   template?: string | null;
@@ -615,6 +621,10 @@ export interface WorkDetail {
    *  workflow state, and the contradictions between them as drift. Absent when
    *  there is no git evidence at all. */
   git?: WorkItemGitStory | null;
+  /** On a transition into a finished state: sessions still bound to the item
+   *  and running or hibernated (WI-998). A warning — nothing was refused and
+   *  nothing unbound. */
+  live_sessions?: SessionSummary[];
 }
 
 /** The evidence a drift proposal carries, copied at raise time.
@@ -1225,6 +1235,38 @@ export const keepSessionAwakeInVogt = (id: string, keepAwake: boolean, reason: s
  *  core (WI-957). */
 export const setSessionRoleInVogt = (id: string, role: SessionRole, reason: string) =>
   call<{ session: SessionSummary }>("session.set_role", { id, role, reason }, "POST");
+
+/** What `session.bind_work` answers (WI-998). */
+export interface BindSessionWorkResult {
+  session: SessionSummary;
+  previous_work_item?: string | null;
+  /** The item is filed under another project; the bind still happened. */
+  project_mismatch?: boolean;
+  engine_label: "written" | "not_found" | "unavailable";
+  engine?: string | null;
+}
+
+/** The sentence a finishing transition earns when sessions are still bound
+ *  to the item (WI-998): a warning, never a refusal, and nothing unbound. */
+export function liveSessionsWarning(
+  ref: string,
+  live: SessionSummary[] | undefined,
+): string | null {
+  if (!live || live.length === 0) return null;
+  const which = live.map((session) => session.id).join(", ");
+  return live.length === 1
+    ? `1 session is still bound to ${ref} (${which}); it was not stopped or unbound.`
+    : `${live.length} sessions are still bound to ${ref} (${which}); they were not stopped or unbound.`;
+}
+
+/** Bind a session to the work item it serves, or unbind it (`null`),
+ *  through the core (WI-998). Audited; never moves the item's state. */
+export const bindSessionWorkInVogt = (id: string, workItem: string | null, reason: string) =>
+  call<BindSessionWorkResult>(
+    "session.bind_work",
+    { id, work_item: workItem, reason },
+    "POST",
+  );
 
 /**
  * Revoke the session this browser holds, at the core. The local half — the

@@ -689,6 +689,21 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   the pin. The role is kept in the session's record, shown on its summary
   (absent for a worker), and the PWA lists oversight sessions first in the
   Places rail. Requires `sessions`.
+- `POST /api/sessions/:id/work-item` `{"work_item": "WI-7" | null}` ->
+  `SessionSummary` (WI-998). Labels a session with the work item it serves,
+  or clears the label with `null` or a blank string. `SessionSpec.work_item`
+  sets it at creation. The label is opaque to the engine: trimmed, at most
+  200 characters, no control characters (`400` otherwise). It is kept in the
+  session's record (a wake and a redeploy keep it) and in its History row,
+  and shown on its summary (absent when none). vogt-core sets it from
+  `session.start`'s item and re-declares it with the audited
+  `session.bind_work`; for a session the core started, the core's
+  `coding_sessions.work_item_id` is the truth and the label its copy, and for
+  one the GUI started the label is the binding. An agent task run carries its
+  task's `vogt_work_item` as the label. The PWA's Places rail shows it as a
+  `✦ WI-n` chip. Requires `sessions`. This is an additive field on
+  `SessionSpec`/`SessionSummary`, the same shape as `role`; WI-956 slice 2's
+  `supervisor` is to be added beside it the same way.
 - `POST /api/sessions/:id/conversation` `{"agent", "id", "ended"?}` ->
   `SessionSummary` (WI-962). Links the agent conversation running in the
   session, or with `ended` unlinks it while it is still the session's. See
@@ -2211,14 +2226,16 @@ while the engine watched; `exit_code` is its code), `engine-shutdown`
 rows from before the field existed.
 
 A row also says what the session was (WI-962): `template`, `role` (`worker`
-or `oversight`, as last set), and `conversation_agent` / `conversation_id`,
+or `oversight`, as last set), `work_item` (WI-998: the item it served, as
+last labelled; cleared by an unbind), and `conversation_agent` / `conversation_id`,
 the last agent conversation it ran — one the engine launched, or one an agent
 typed into its shell reported. The conversation is kept after it ends, so a
 lost session can be found and resumed. `resume_template` is worked out when
 the row is read: the template that resumes that conversation with the
 engine's templates now, or absent when none can. History's *Resume* starts
-`POST /api/sessions` with that `template`, `resume: conversation_id` and the
-row's `role`; vogt-core's `session.history_list` carries the same fields for
+`POST /api/sessions` with that `template`, `resume: conversation_id`, the
+row's `role` and its `work_item`, so the resumed session is bound to the
+same item; vogt-core's `session.history_list` carries the same fields for
 `session_start`. The columns are added to an existing `history.db` at boot,
 empty on older rows.
 

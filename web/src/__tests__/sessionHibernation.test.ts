@@ -9,12 +9,14 @@ const core = vi.hoisted(() => ({
   hibernate: vi.fn(),
   keepAwake: vi.fn(),
   setRole: vi.fn(),
+  bindWork: vi.fn(),
 }));
 const engine = vi.hoisted(() => ({
   wakeSession: vi.fn(),
   hibernateSession: vi.fn(),
   keepSessionAwake: vi.fn(),
   setSessionRole: vi.fn(),
+  setSessionWorkItem: vi.fn(),
 }));
 
 vi.mock("../vogtApi", () => {
@@ -32,12 +34,19 @@ vi.mock("../vogtApi", () => {
     hibernateSessionInVogt: core.hibernate,
     keepSessionAwakeInVogt: core.keepAwake,
     setSessionRoleInVogt: core.setRole,
+    bindSessionWorkInVogt: core.bindWork,
   };
 });
 vi.mock("../api", () => ({ api: engine }));
 
 import { VogtUnavailable } from "../vogtApi";
-import { hibernateSession, setKeepAwake, setSessionRole, wakeSession } from "../sessionHibernation";
+import {
+  bindSessionWork,
+  hibernateSession,
+  setKeepAwake,
+  setSessionRole,
+  wakeSession,
+} from "../sessionHibernation";
 
 describe("session hibernation from the GUI", () => {
   beforeEach(() => {
@@ -77,5 +86,17 @@ describe("session hibernation from the GUI", () => {
     engine.setSessionRole.mockResolvedValue({});
     await setSessionRole("uuid-4", "worker");
     expect(engine.setSessionRole).toHaveBeenCalledWith("uuid-4", "worker");
+  });
+
+  it("binds and unbinds through the core, falling back to the engine label (WI-998)", async () => {
+    core.bindWork.mockResolvedValue({ session: {}, engine_label: "written" });
+    await bindSessionWork("uuid-5", "WI-7");
+    expect(core.bindWork).toHaveBeenCalledWith("uuid-5", "WI-7", "bound to WI-7 from the GUI");
+    expect(engine.setSessionWorkItem).not.toHaveBeenCalled();
+
+    core.bindWork.mockRejectedValue(new VogtUnavailable(503, "no core"));
+    engine.setSessionWorkItem.mockResolvedValue({});
+    await bindSessionWork("uuid-5", null);
+    expect(engine.setSessionWorkItem).toHaveBeenCalledWith("uuid-5", null);
   });
 });

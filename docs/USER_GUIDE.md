@@ -253,6 +253,16 @@ hibernates it, and after a restart it wakes by itself. Only agent sessions
 whose conversation can be resumed get these entries (Claude Code sessions,
 and any session started to continue a conversation).
 
+A session bound to a work item shows it after its name as a **✦ WI-n** chip;
+clicking the chip opens the item (not the terminal), its tooltip is the item's
+title, and it turns muted once the item is done. **Bind to work item…** in the
+row menu opens the command palette as a work-item picker, and **Unbind from
+WI-n** clears it. Both are audited writes through Vogt and never change the
+item's state. The work item's page says who is on it — *Being worked by*
+`ses_… — running` — and offers **Attach a running session…** and, per
+session, **Unbind…**. Moving an item to done while sessions are still bound
+warns and leaves them running.
+
 | Surface | Link | What it is |
 |---|---|---|
 | **Board** | `#/board` | Work items in columns. The columns *are* the workflow's states, read from the server — not written down anywhere in the client. |
@@ -723,13 +733,15 @@ short page. Metadata filters apply only to the pages already loaded; archived
 output search runs across the server's full archive (up to the displayed result
 limit) and is debounced, so typing a needle settles to a single server search
 rather than one per keystroke. Each row also says what the session was: an
-oversight session reads **oversight**, and a session that ran an agent
+oversight session reads **oversight**, a session bound to a work item leads
+with its ref, and a session that ran an agent
 conversation shows the agent and the start of the conversation id — including
 a shell someone typed `claude` into, which reports its conversation to the
 engine by itself. The metadata filter matches templates and conversation ids
 too, so a lost session can be found by the id. A session that has ended with a
 conversation that can still be resumed offers **Resume**, which starts a new
-session on that conversation with the same role; it opens in the directory the
+session on that conversation with the same role and bound to the same work
+item; it opens in the directory the
 conversation ran in. A failed archive, search, detail or replay read stays attached to that
 panel with **Retry**. Previously loaded content remains visible but is marked
 stale; an empty archive is shown only after a successful empty response.

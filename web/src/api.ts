@@ -72,6 +72,10 @@ export interface SessionSummary {
   /** What the session is for (WI-957): `oversight` for one nominated to
    *  supervise the others, listed first in the rail. Absent means a worker. */
   role?: SessionRole;
+  /** The work item it serves (WI-998), as the engine's label; absent when
+   *  bound to none. For a session the core started the core's row is the
+   *  truth — the rail joins it (`sessionWorkItems.ts`). */
+  work_item?: string | null;
   /** On autopilot (WI-949): re-prompted by the engine until it is done. */
   autopilot?: boolean;
   /** How many times the engine has told it to carry on. */
@@ -129,6 +133,9 @@ export interface CreateSessionRequest {
   /** Continue this conversation of the template's agent CLI. */
   resume?: string;
   role?: SessionRole;
+  /** The work item the session serves (WI-998): a label the engine keeps.
+   *  A resume from History carries the one the session last had. */
+  work_item?: string;
   cwd?: string;
   env?: [string, string][];
   cols?: number;
@@ -585,6 +592,8 @@ export interface HistorySessionMetadata {
   /** The template that resumes `conversation_id` here, or absent when nothing
    *  can. Worked out by the engine against its templates when listed. */
   resume_template?: string | null;
+  /** The work item it served when it ended (WI-998); a resume binds it again. */
+  work_item?: string | null;
 }
 
 export interface HistorySearchResult {
@@ -896,6 +905,8 @@ export const api = {
     req<SessionSummary>("POST", `/api/sessions/${id}/keep-awake`, { keep_awake: keepAwake }),
   setSessionRole: (id: string, role: SessionRole) =>
     req<SessionSummary>("POST", `/api/sessions/${id}/role`, { role }),
+  setSessionWorkItem: (id: string, workItem: string | null) =>
+    req<SessionSummary>("POST", `/api/sessions/${id}/work-item`, { work_item: workItem }),
   deleteSession: (id: string) =>
     req<OkResponse>("DELETE", `/api/sessions/${id}`),
   health: (signal?: AbortSignal) =>
