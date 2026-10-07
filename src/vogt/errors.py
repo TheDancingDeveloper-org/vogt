@@ -58,6 +58,20 @@ class BypassRefused(VogtError):
     http_status = 403
 
 
+class PersonRequired(VogtError):
+    """Only a person answers a session's permission prompt (WI-983).
+
+    A `permissions.ask` rule means "a person decides". An agent — a session's
+    token, an engine-minted token, the pod token, or the engine's own
+    credential — that answers one, by `session.answer` or by typing into the
+    dialog with `session.input`, is refused, like `GrantRefused`, by who is
+    asking. The overseer escalates to a person instead.
+    """
+
+    code = "person_required"
+    http_status = 403
+
+
 class RoleRefused(VogtError):
     """An agent asked to make a session an overseer (WI-957, WI-973 F3).
 

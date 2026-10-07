@@ -250,8 +250,8 @@ async fn close_with(socket: &mut WebSocket, code: CloseCode, reason: &'static st
         .await;
 }
 
-async fn token_ok(state: &AppState, candidate: &str) -> bool {
-    auth::ws_token_allows_session_access(state, candidate).await
+async fn token_ok(state: &AppState, candidate: &str) -> Option<auth::AuthorizedIdentity> {
+    auth::ws_session_identity(state, candidate).await
 }
 
 /// What a successful attach handshake tells the snapshot: where to resume from
@@ -263,6 +263,9 @@ struct AttachAuth {
     /// Cold-attach only: bound the full snapshot to at most this many trailing
     /// bytes. Ignored when `resume_from` is present.
     snapshot_tail_bytes: Option<u64>,
+    /// Who attached: what decides whether its keystrokes may answer a
+    /// permission prompt (WI-983).
+    identity: auth::AuthorizedIdentity,
 }
 
 /// Read the first frame after upgrade. Must be an `auth` control frame OR the
@@ -277,7 +280,7 @@ async fn authenticate(
     // in: a token there lands in proxy/access logs and browser history.
     if let Some(tok) = legacy_token {
         if state.config.ws_query_token_allowed {
-            if token_ok(state, tok).await {
+            if let Some(identity) = token_ok(state, tok).await {
                 tracing::warn!(
                     target: "vogt::audit",
                     "WS attach authenticated via the deprecated ?token= query \
@@ -286,6 +289,7 @@ async fn authenticate(
                 return Some(AttachAuth {
                     resume_from: None,
                     snapshot_tail_bytes: None,
+                    identity,
                 });
             }
             // A wrong legacy token is a guess; count it, then fall through to
@@ -327,21 +331,23 @@ async fn authenticate(
             return None;
         }
     };
-    match parsed {
+    let attached = match parsed {
         ClientControl::Auth {
             token,
             resume_from,
             snapshot_tail_bytes,
-        } if token_ok(state, &token).await => Some(AttachAuth {
+        } => token_ok(state, &token).await.map(|identity| AttachAuth {
             resume_from,
             snapshot_tail_bytes,
+            identity,
         }),
-        _ => {
-            auth::record_ws_auth_failure("wrong-token").await;
-            close_with(socket, 4401, "unauthorized").await;
-            None
-        }
+        _ => None,
+    };
+    if attached.is_none() {
+        auth::record_ws_auth_failure("wrong-token").await;
+        close_with(socket, 4401, "unauthorized").await;
     }
+    attached
 }
 
 /// The attach exchange for a hibernated session: a full snapshot of its kept
@@ -392,6 +398,32 @@ async fn send_hibernated(
         }
     }
     close_with(socket, 1000, "hibernated").await;
+}
+
+/// Whether a keystroke from this socket may reach the PTY now: always for a
+/// person; for anyone else, not while a permission prompt is showing
+/// (WI-983, `person_gate`). The render runs off the async thread, and only
+/// for a caller who is not a person, so a person's typing stays cheap.
+async fn may_type(
+    session: &Arc<Session>,
+    identity: &auth::AuthorizedIdentity,
+) -> Result<(), String> {
+    if crate::person_gate::is_person(Some(identity), None) {
+        return Ok(());
+    }
+    let reading = Arc::clone(session);
+    let identity = identity.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::person_gate::guard(
+            &reading,
+            Some(&identity),
+            None,
+            crate::person_gate::Via::Attach,
+        )
+    })
+    .await
+    .map_err(|e| format!("could not read the screen: {e}"))?
+    .map_err(|refusal| refusal.to_string())
 }
 
 async fn handle_socket(
@@ -482,6 +514,9 @@ async fn handle_socket(
     }
 
     let writer_session = Arc::clone(&session);
+    // Refusals the inbound task hands the outbound one to say in band.
+    let (refused_tx, mut refused_rx) = mpsc::unbounded_channel::<String>();
+    let identity = auth.identity;
     // Inbound: client → PTY stdin + control frames.
     let inbound = tokio::spawn(async move {
         while let Some(msg) = stream.next().await {
@@ -489,6 +524,10 @@ async fn handle_socket(
             match msg {
                 Message::Binary(data) => {
                     if data.len() > MAX_INPUT_BYTES {
+                        continue;
+                    }
+                    if let Err(refusal) = may_type(&writer_session, &identity).await {
+                        let _ = refused_tx.send(refusal);
                         continue;
                     }
                     if writer_session.write_input(&data).is_err() {
@@ -514,6 +553,10 @@ async fn handle_socket(
                         Err(_) => {
                             // Plain-text input (some tools send text frames).
                             if s.len() > MAX_INPUT_BYTES {
+                                continue;
+                            }
+                            if let Err(refusal) = may_type(&writer_session, &identity).await {
+                                let _ = refused_tx.send(refusal);
                                 continue;
                             }
                             if writer_session.write_input(s.as_bytes()).is_err() {
@@ -573,6 +616,16 @@ async fn handle_socket(
                     }
                     let (cols, rows) = *size_rx.borrow_and_update();
                     let frame = ServerControl::Resize { cols, rows };
+                    if sink
+                        .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Some(reason) = refused_rx.recv() => {
+                    let frame = ServerControl::InputRefused { reason };
                     if sink
                         .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
                         .await

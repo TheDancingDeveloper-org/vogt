@@ -876,6 +876,10 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     the effect (the `audited_action` ordering) with the byte count and key
     names only: what was typed may be a password, and an audit row is the
     wrong place to keep one.
+
+    While the session shows a permission prompt, every keystroke answers it,
+    so the engine refuses input from anyone but a person (`PersonRequired`,
+    WI-983); this says which the caller is (`_answers_as_person`).
     """
     reason = writes.validate_reason(params.reason)
     text = params.text or ""
@@ -893,6 +897,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
+    person = _answers_as_person(ctx)
 
     writes_in_order: list[tuple[str, bool]] = []
     if text:
@@ -916,7 +921,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         before = None if seen is None else seen.activity
     woke = False
     try:
-        _send_all(engine, engine_id, params.id, writes_in_order)
+        _send_all(engine, engine_id, params.id, writes_in_order, person=person)
     except Conflict:
         # The engine refuses input to a hibernated session. Typing into one
         # is asking for it back: wake it — resuming its conversation, with a
@@ -941,7 +946,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             raise Conflict(msg) from None
         # Freshly woken and at its prompt: nothing was running.
         before = "waiting-for-input"
-        _send_all(engine, engine_id, params.id, writes_in_order)
+        _send_all(engine, engine_id, params.id, writes_in_order, person=person)
 
     verdict = (
         _confirm_delivery(engine, engine_id, before)
@@ -966,6 +971,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             "submitted": submitted,
             "delivery": verdict.delivery,
             "woke": woke,
+            "person": person,
         },
         event_kind=SESSION_INPUT_EVENT,
     )
@@ -1021,10 +1027,15 @@ def _confirm_delivery(
 
 
 def _send_all(
-    engine: EngineClient, engine_id: str, named: str, chunks: list[tuple[str, bool]]
+    engine: EngineClient,
+    engine_id: str,
+    named: str,
+    chunks: list[tuple[str, bool]],
+    *,
+    person: bool,
 ) -> None:
     for chunk, submit in chunks:
-        if not engine.send_input(engine_id, chunk, submit=submit):
+        if not engine.send_input(engine_id, chunk, submit=submit, person=person):
             msg = f"the engine has no live session {named!r}"
             raise NotFound(msg)
 
@@ -1701,7 +1712,11 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
 
     The engine reads the menu as it is at that moment and moves the highlight
     itself, so nothing here counts rows. Audited after the effect with the
-    question, the kind and the option chosen.
+    question, the kind, the option chosen and whether a person chose it.
+
+    A permission prompt (not a startup gate) is a person's to answer: the
+    engine refuses it for anyone else with `PersonRequired` (WI-983), and
+    this decides which the caller is (`_answers_as_person`).
     """
     reason = writes.validate_reason(params.reason)
     if (params.option is None) == (params.label is None or not params.label.strip()):
@@ -1710,11 +1725,13 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
+    person = _answers_as_person(ctx)
     answered = engine.answer_session(
         engine_id,
         option=params.option,
         label=None if params.label is None else params.label.strip(),
         expect_question=params.expect_question,
+        person=person,
     )
     if answered is None:
         msg = (
@@ -1746,6 +1763,7 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
             "option": option.number,
             "label": option.label[:200],
             "dismissed": dismissed,
+            "person": person,
         },
         event_kind=SESSION_ANSWERED_EVENT,
     )
@@ -1764,6 +1782,19 @@ SESSION_TOKEN = "session.token"
 #: template, an agent task), as opposed to `agent:session:<ses_…>` for one
 #: vogt-core started.
 ENGINE_SESSION_ACTOR_PREFIX = "agent:engine:"
+
+
+def _answers_as_person(ctx: AppContext) -> bool:
+    """Whether this caller answers a permission prompt as a person (WI-983).
+
+    The rule `session.grant_decide` applies (WI-973): an agent principal —
+    a session's token, an `agent:engine:` token, the pod token — never
+    does. Nor does the engine's own credential, whatever actor it is bound
+    to: on a deployment whose stack secret was first issued to a person, its
+    principal is that person, but what presents it is the engine, and any
+    process that can read it.
+    """
+    return ctx.principal.kind == "human" and not _is_engine_credential(ctx)
 
 
 def _is_engine_credential(ctx: AppContext) -> bool:

@@ -554,6 +554,8 @@ class _InputEngine(StandInEngine):
     def __init__(self) -> None:
         super().__init__()
         self.inputs: list[tuple[str, dict[str, Any]]] = []
+        #: The session shows a permission prompt (WI-983): input is refused.
+        self.permission_prompt = False
 
     def __call__(
         self, url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
@@ -561,6 +563,10 @@ class _InputEngine(StandInEngine):
         if method == "POST" and url.endswith("/input"):
             engine_id = url.rsplit("/", 2)[-2]
             self.inputs.append((engine_id, json.loads(body.decode())))
+            if self.permission_prompt:
+                return 403, json.dumps(
+                    {"error": "forbidden: person required: a permission prompt"}
+                ).encode()
             return (200, b'{"ok":true}') if engine_id in self.alive else (404, b"")
         return super().__call__(url, headers, body, method)
 
@@ -635,7 +641,7 @@ def test_a_bound_branch_conclusion_reaches_the_inbox_and_the_session_once(
     typed = [body for _, body in engine.inputs]
     assert typed[0]["text"].startswith("[vogt] CI FAILED on wi-1")
     assert "WI-1" in typed[0]["text"]
-    assert typed[1] == {"text": "", "submit": True}
+    assert typed[1] == {"text": "", "submit": True, "person": False}
 
     # Once per conclusion: a second sweep's announce types nothing new.
     assert announce_concluded(ctx) == 0
@@ -647,6 +653,32 @@ def test_a_bound_branch_conclusion_reaches_the_inbox_and_the_session_once(
             if e.kind == CI_BRANCH_CONCLUDED_EVENT
         ]
     assert len(events) == 1 and events[0].summary["sessions_notified"] == 1
+
+
+def test_a_session_at_a_permission_prompt_is_not_typed_into(
+    wired: tuple[AppContext, _Forges],
+) -> None:
+    """The nudge ends in Enter, which on a permission prompt approves it.
+    The engine refuses that input (WI-983); the announcement still stands
+    and the sweep goes on."""
+    ctx, _forges = wired
+    engine = _InputEngine()
+    engine.permission_prompt = True
+    ctx = dataclasses.replace(
+        ctx, engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine)
+    )
+    native_work_item(ctx, title="Asking", project="app")  # WI-1
+    start_session(ctx, StartSessionParams(work_item="WI-1", reason=WHY))
+    bind_branch(ctx, BindBranchParams(ref="WI-1", branch="wi-1", reason=WHY))
+    project = _project(ctx)
+    stamp = (ctx.clock() - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    _seed(ctx, [_branch_check(project, "ci", "failure", stamp)])
+
+    assert announce_concluded(ctx) == 1
+    # The notice was refused, so the Enter after it was never sent.
+    assert [body.get("submit") for _, body in engine.inputs] == [False]
+    assert engine.inputs[0][1]["person"] is False
+    assert any(e.kind == "ci.branch_concluded" for e in _ci_entries(ctx))
 
 
 def test_a_stale_conclusion_is_never_announced(
