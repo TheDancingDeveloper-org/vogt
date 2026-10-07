@@ -409,6 +409,13 @@ def test_klaudia_mcp_upserts_and_removes_only_its_own_entry(tmp_path: Path) -> N
     data = json.loads(config.read_text(encoding="utf-8"))
     assert data["mcpServers"] == {"mine": {"command": "/bin/mine"}}
 
+    with_env = klaudia_mcp(tmp_path, "set", "-e", "URL=http://k:1", "kom", "/k")
+    assert with_env.returncode == 0, with_env.stderr
+    data = json.loads(config.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["kom"] == {"command": "/k", "env": {"URL": "http://k:1"}}
+    assert klaudia_mcp(tmp_path, "set", "-e", "NOVALUE", "kom", "/k").returncode == 2
+    assert klaudia_mcp(tmp_path, "remove", "kom").returncode == 2
+
     config.write_text("{not json", encoding="utf-8")
     broken = klaudia_mcp(tmp_path, "set", "vogt", "/v")
     assert broken.returncode == 1
