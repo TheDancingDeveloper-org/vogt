@@ -54,6 +54,21 @@ def _config(
     )
 
 
+def test_the_core_token_cannot_be_bound_to_a_person(tmp_path: Path) -> None:
+    """Bound to a person, the engine's own writes — and a grant approval,
+    which only a person may make (WI-973) — would be that person's. Start-up
+    refuses instead of adopting quietly, as it does for the agent token."""
+    first = _context(_config(tmp_path / "instance", None))
+    init_instance(first, InitParams())  # creates the local person
+    token_file = tmp_path / "core-token"
+    token_file.write_text(SECRET, encoding="utf-8")
+    ctx = _context(
+        _config(tmp_path / "instance", token_file, actor=TEST_PRINCIPAL.identity_ref)
+    )
+    with pytest.raises(InvalidRequest, match="is a person"):
+        init_instance(ctx, InitParams())
+
+
 def test_adopt_hashes_a_supplied_secret_rather_than_minting_one() -> None:
     credential = adopt(SECRET, ("read",))
     assert credential.secret == SECRET

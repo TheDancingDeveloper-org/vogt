@@ -209,6 +209,13 @@ pub struct AuthorizedIdentity {
     /// present (a break-glass token on a door with no stack secret).
     pub core_bearer: Option<String>,
     pub mutating_requests_per_minute: u32,
+    /// Whether the bearer *was* the stack secret: vogt-core's own identity,
+    /// decided by constant-time comparison with the configured value and by
+    /// nothing else. Routes that only vogt-core may call (a session's grants,
+    /// WI-973) test this flag, never `name`, because `name` is also what a
+    /// core-resolved actor's `identity_ref` becomes, and an actor can be
+    /// created with any `identity_ref` string.
+    pub stack_secret: bool,
 }
 
 impl AuthorizedIdentity {
@@ -255,6 +262,7 @@ pub async fn authorize(
                 // identity this design keeps, and keeps for exactly this.
                 core_bearer: cfg.vogt_core_token.clone(),
                 mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
+                stack_secret: false,
             });
         }
     }
@@ -266,6 +274,7 @@ pub async fn authorize(
                 scopes: Vec::new(),
                 core_bearer: Some(secret.to_string()),
                 mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
+                stack_secret: true,
             });
         }
     }
@@ -298,6 +307,7 @@ fn from_core(
         scopes: identity.scopes,
         core_bearer: Some(bearer.to_string()),
         mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
+        stack_secret: false,
     }
 }
 
@@ -662,6 +672,7 @@ mod tests {
             scopes: scopes(scopes_held),
             core_bearer: None,
             mutating_requests_per_minute: 60,
+            stack_secret: false,
         }
     }
 

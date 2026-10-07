@@ -58,6 +58,19 @@ class BypassRefused(VogtError):
     http_status = 403
 
 
+class RoleRefused(VogtError):
+    """An agent asked to make a session an overseer (WI-957, WI-973 F3).
+
+    The oversight role is what lets a session ask for grants on another
+    session's behalf, so it is a person's nomination, like `bypass`: an agent
+    that could nominate itself would make the "only an overseer asks for
+    another session" rule self-service. Refused by who is asking.
+    """
+
+    code = "role_refused"
+    http_status = 403
+
+
 class GrantRefused(VogtError):
     """A grant step was asked for by someone who may not take it (WI-973).
 

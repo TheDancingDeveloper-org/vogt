@@ -233,7 +233,9 @@ fn require_core_identity(
     identity: Option<&crate::auth::AuthorizedIdentity>,
 ) -> crate::error::Result<()> {
     match identity {
-        Some(identity) if identity.name == crate::auth::STACK_SECRET_NAME => Ok(()),
+        // The flag, not the name: `name` is also a core actor's identity_ref,
+        // which an admin can set to any string.
+        Some(identity) if identity.stack_secret => Ok(()),
         Some(identity) => Err(crate::error::ApiError::Forbidden(format!(
             "only vogt-core applies grants, after a person approves one (session_grant_decide); \
              {} cannot",
@@ -270,9 +272,9 @@ pub async fn apply_session_grant(
         .map_err(|refusal| match refusal {
             GrantRefusal::Invalid(_) => ApiError::BadRequest(refusal.to_string()),
             GrantRefusal::ProjectNotGrantable(_) => ApiError::Forbidden(refusal.to_string()),
-            GrantRefusal::NoBroker | GrantRefusal::ShadowsManifest(_) => {
-                ApiError::Conflict(refusal.to_string())
-            }
+            GrantRefusal::NoBroker
+            | GrantRefusal::ShadowsManifest(_)
+            | GrantRefusal::VarInUse(_) => ApiError::Conflict(refusal.to_string()),
         })?;
     tracing::info!(
         target: "vogt::audit",
@@ -313,11 +315,29 @@ pub async fn revoke_session_grant(
 }
 
 /// `GET /api/sessions/{id}/grants` — the grants a session holds now, never a
-/// value. Gated like every session route (`sessions`).
+/// value. An operator's view: the stack secret, the break-glass token or an
+/// `admin`-scoped token. Every `work.write` token holds `sessions`, and
+/// which secrets another session was granted is not every session's to
+/// read; a session sees its own with `GET /api/agent-auth/grants`.
 pub async fn list_session_grants(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
 ) -> Result<Json<Vec<vogt_engine_contract::SessionGrant>>> {
+    use crate::{auth::TokenCapability, error::ApiError};
+    match identity.as_deref() {
+        Some(identity) if identity.stack_secret || identity.allows(TokenCapability::GuiControl) => {
+        }
+        Some(identity) => {
+            return Err(ApiError::Forbidden(format!(
+                "listing a session's grants is an operator's read (the admin scope, the \
+                 break-glass token or vogt-core); {} is none of those — a session lists \
+                 its own with `vogt-agent-auth grants`",
+                identity.name
+            )));
+        }
+        None => return Err(ApiError::Unauthorized),
+    }
     state.sessions.get(id)?;
     let now = time::OffsetDateTime::now_utc();
     Ok(Json(

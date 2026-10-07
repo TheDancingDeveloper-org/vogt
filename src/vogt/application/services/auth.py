@@ -420,6 +420,18 @@ def adopt_bootstrap_core_token(ctx: AppContext) -> str:
                 created_at=ctx.clock(),
             )
             txn.insert_actor(holder)
+        elif holder.kind != "agent":
+            # The stack secret is what the engine presents to the core on its
+            # own behalf and on the break-glass token's. Bound to a person,
+            # every write the engine makes would be that person's — and so
+            # would a grant approval (WI-973), which only a person may make.
+            # Refused loudly, as the agent token's binding is (WI-926).
+            msg = (
+                f"bootstrap_core_token_actor {identity_ref!r} is a person "
+                f"({holder.kind}); the token the engine presents must be bound "
+                "to an agent actor (for example agent:vogt-engine)"
+            )
+            raise InvalidRequest(msg)
         # A changed secret is a rotation, not an addition. Every earlier
         # bootstrap token on this actor is revoked in the same transaction,
         # so the old value stops working the moment the new one is adopted

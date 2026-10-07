@@ -593,7 +593,11 @@ paths:
     get:
       tags: [sessions]
       summary: The person-approved grants a session holds now (WI-973).
-      description: Names only, never a value. Expired grants are dropped.
+      description: >-
+        Names only, never a value. Expired grants are dropped. An operator's
+        read: the stack secret, the break-glass token or an admin-scoped token;
+        any other credential gets 403. A session lists its own with
+        `GET /api/agent-auth/grants` and its broker token.
       operationId: listSessionGrants
       x-capability: sessions
       responses:
@@ -787,6 +791,13 @@ components:
         secret_name: { type: string }
         uses: { type: string, enum: [once, ttl], default: once }
         expires_at: { type: string, format: date-time }
+        reason:
+          type: string
+          default: ""
+          description: >-
+            Why it was asked for, as the requester wrote it and the approver
+            read it (at most 2000 characters). Untrusted text the session and
+            its permission classifier see; never a value.
     OkResponse:
       type: object
       required: [ok]

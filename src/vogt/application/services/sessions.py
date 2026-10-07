@@ -111,6 +111,7 @@ from vogt.errors import (
     EngineOnly,
     InvalidRequest,
     NotFound,
+    RoleRefused,
     VogtError,
 )
 from vogt.observability import logger
@@ -1349,6 +1350,17 @@ def set_session_role(ctx: AppContext, params: SetSessionRoleParams) -> SessionRe
     the overseer, and who said so".
     """
     reason = writes.validate_reason(params.reason)
+    if ctx.principal.kind == "agent":
+        # The role is a person's nomination. An overseer may ask for grants on
+        # another session's behalf (WI-973), so an agent that could nominate
+        # itself would hand itself that standing; and a worker demoting its
+        # overseer is no better. Refused by who is asking, like `bypass`.
+        msg = (
+            "only a person nominates an oversight session, or makes one a worker "
+            f"again ({ctx.principal.identity_ref} is an agent); ask a person to "
+            "set the role from the GUI, or start the session with role=oversight"
+        )
+        raise RoleRefused(msg)
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id

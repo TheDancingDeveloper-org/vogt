@@ -307,11 +307,12 @@ Rules:
   `session_stop`. `session_keep_awake` pins one that must never be
   hibernated, such as a long-running driver.
 - **If you are the overseer**, say so: start as one with
-  `session_start(..., role="oversight")`, or nominate your own session with
-  `session_set_role(id=$VOGT_SESSION_ID, role="oversight")`. That pins you
-  awake (a redeploy brings you back by resuming your conversation), records
-  in the audit log which session was overseeing, and lists you first in the
-  GUI. Start the work you drive as Vogt sessions (`session_start` with a
+  `session_start(..., role="oversight")`. The role is a person's nomination —
+  `session_set_role` refuses an agent — so if you were not started as one,
+  ask a person to nominate you from the GUI rather than trying to set it
+  yourself. Being the overseer pins you awake (a redeploy brings you back by
+  resuming your conversation), records in the audit log which session was
+  overseeing, and lists you first in the GUI. Start the work you drive as Vogt sessions (`session_start` with a
   template, project, work item and task) rather than as subagents inside
   your own conversation: a session is visible, can be overseen, and outlives
   you.
@@ -321,9 +322,11 @@ Rules:
   lives. An overseer may ask on a worker's behalf, and any session may ask for
   itself. Nothing is granted until a person approves it in the Inbox; you can
   never approve one yourself. Once it is approved, the target runs `vogt-agent-auth
-  grants` to see it and `vogt-agent-auth fetch VAR` to use it. Ask for one
-  item, for the shortest time that will do, with `uses=once` unless the task
-  needs it repeatedly.
+  grants` to see it (with the reason it was approved for) and `vogt-agent-auth
+  fetch VAR` to use it, for that reason only. Ask for one item, for the
+  shortest time that will do, with `uses=once` unless the task needs it
+  repeatedly — a `once` grant is spent by its first fetch even if the fetch
+  fails, so ask again rather than retry.
 - **Long turn or hung?** `session_list` and `session_screen` carry
   `turn_started_at` (when the agent last went to work from rest) and
   `last_output_at` (when the terminal last printed). Agent TUIs animate while

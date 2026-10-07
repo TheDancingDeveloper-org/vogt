@@ -17,7 +17,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from vogt.adapters.engine import EngineUnavailable
-from vogt.adapters.engine.client import EngineApproval, EngineBlocked
+from vogt.adapters.engine.client import EngineApproval, EngineBlocked, EngineSession
 from vogt.adapters.forge import KIND_CHECK, KIND_NOTIFICATION
 from vogt.adapters.forge.kinds import (
     COLLECTOR_CHECKS,
@@ -499,14 +499,24 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
     for proposal in view.list_drift(status="open", limit=MAX_SCAN):
         entries.append(_drift_entry(ctx, proposal, projects, view))
 
-    # Grants waiting for a person (WI-973): one entry per request, decided
-    # with Approve/Deny on the entry itself.
-    for grant in pending_grants(view, ctx):
-        entries.append(_grant_entry(ctx, grant))
-
+    live: list[EngineSession] = []
     if ctx.engine is not None:
         try:
             live = ctx.engine.list_sessions()
+        except EngineUnavailable:
+            live = []
+
+    # Grants waiting for a person (WI-973): one entry per request, decided
+    # with Approve/Deny on the entry itself. The target is named as the
+    # person knows it (title, role, agent, project), because approving the
+    # right secret for the wrong session is the mistake this entry must not
+    # invite.
+    live_by_id = {session.id: session for session in live}
+    for grant in pending_grants(view, ctx):
+        entries.append(_grant_entry(ctx, grant, view, projects, live_by_id))
+
+    if ctx.engine is not None:
+        try:
             for session in live:
                 if session.blocked is not None and session.alive:
                     entries.append(
@@ -839,34 +849,96 @@ def _blocked_entry(
     )
 
 
-def _grant_entry(ctx: AppContext, grant: SessionGrantView) -> InboxEntry:
+def _grant_entry(
+    ctx: AppContext,
+    grant: SessionGrantView,
+    view: ReadView,
+    projects: dict[str, Project],
+    live: dict[str, EngineSession],
+) -> InboxEntry:
     """A grant a session asked for and a person has yet to decide (WI-973).
 
     The reason is the asking agent's text — untrusted, shown verbatim, never
-    acted on. What is asked for (secret and project) is spelled out, because
-    that is what the person approves.
+    acted on. What is asked for (secret and project), for whom (the target as
+    the person knows it: title, role, agent, project) and by whom (the
+    requester, and whether it is asking for itself) are spelled out, because
+    that is what the person approves. The requester chose `target`, `var`
+    and the reason; the names here come from the engine and the core, not
+    from the request.
     """
+    target = live.get(grant.target)
+    declared = view.session_by_engine_id(grant.target)
+    project = None if declared is None else projects.get(declared.project_id)
+    label = grant.target if target is None else (target.name or grant.target)
+    facts: list[str] = []
+    if target is None:
+        facts.append("not running now")
+    else:
+        facts.append(target.role)
+        if target.conversation_agent:
+            facts.append(target.conversation_agent)
+        if target.permission_mode:
+            facts.append(f"permission {target.permission_mode}")
+    if project is not None:
+        facts.append(f"project {project.slug}")
+    if declared is not None:
+        facts.append(declared.id)
+    who = (
+        "itself"
+        if grant.requested_by == f"agent:engine:{grant.target}"
+        or (
+            declared is not None
+            and grant.requested_by == f"agent:session:{declared.id}"
+        )
+        else f"session {label} ({', '.join(facts)})"
+    )
     item = f"{grant.secret_name} (project {grant.project_id}) as {grant.var}"
     uses = "one fetch" if grant.uses == "once" else "any number of fetches"
     summary = (
-        f"{grant.requested_by} asks for {item}, {uses}, for "
+        f"{grant.requested_by} asks for {item} for {who}: {uses}, for "
         f"{grant.ttl_seconds // 60} min once approved. Reason: {grant.reason}"
     )[:1000]
+    requester = view.actor_by_identity(grant.requested_by)
     return InboxEntry(
         entry_key=f"agent:grant:{grant.id}",
         source=AGENT_KIND,
         kind="session.grant_request",
         occurred_at=grant.requested_at,
         observed_at=None,
-        title=f"Grant request: {grant.secret_name} for session {grant.target[:8]}",
+        title=f"Grant request: {grant.secret_name} for session {label}",
         summary=summary,
+        project_slug=None if project is None else project.slug,
         session_id=grant.target,
         source_subject_key=grant.id,
         trust_state="unverified",
         freshness="live",
         provisional=True,
         action=InboxAction(kind="grant", grant_id=grant.id, session_id=grant.target),
-        **_actor_fields(SYSTEM_ACTOR),
+        evidence_snapshot={
+            "grant_id": grant.id,
+            "target": grant.target,
+            "target_name": None if target is None else target.name,
+            "target_role": None if target is None else target.role,
+            "target_agent": None if target is None else target.conversation_agent,
+            "target_permission_mode": (
+                None if target is None else target.permission_mode
+            ),
+            "target_alive": target is not None,
+            "target_session": None if declared is None else declared.id,
+            "project": None if project is None else project.slug,
+            "requested_by": grant.requested_by,
+            "requester_is_target": who == "itself",
+            "var": grant.var,
+            "project_id": grant.project_id,
+            "secret_name": grant.secret_name,
+            "uses": grant.uses,
+            "ttl_seconds": grant.ttl_seconds,
+        },
+        actor_login=grant.requested_by,
+        actor_kind="human"
+        if requester is not None and requester.kind == "human"
+        else "bot",
+        actor_relation="org_member",
     )
 
 

@@ -152,6 +152,10 @@ def decide_grant(ctx: AppContext, params: DecideGrantParams) -> SessionGrantResu
             "secret_name": grant.secret_name,
             "uses": grant.uses,
             "expires_at": expires_at.isoformat().replace("+00:00", "Z"),
+            # The purpose the person is approving, so the session (and the
+            # classifier reading `vogt-agent-auth grants`) sees it. Text, not
+            # a value; the engine caps its length.
+            "reason": grant.reason,
         },
     )
     try:
@@ -163,11 +167,16 @@ def decide_grant(ctx: AppContext, params: DecideGrantParams) -> SessionGrantResu
             decided_at=decided_at,
             expires_at=expires_at,
         )
-    except Conflict:
-        # Someone else decided it between the read and the write: take back
-        # what was just applied, so the engine never holds a grant the record
-        # does not say was approved by this decision.
-        engine.revoke_grant(grant.target_engine_session_id, grant.id)
+    except BaseException:
+        # The record did not say approved. Whatever the cause — someone else
+        # decided it between the read and the write, or the write itself
+        # failed — the engine must not hold a grant the record does not
+        # stand behind. The one exception is another person's approval of
+        # this same grant landing first: the engine holds their grant (the
+        # same id replaced ours), and taking it back would revoke a decision
+        # that was made.
+        if not _approved_meanwhile(ctx, grant.id):
+            engine.revoke_grant(grant.target_engine_session_id, grant.id)
         raise
 
 
@@ -221,10 +230,21 @@ def revoke_grant(ctx: AppContext, params: RevokeGrantParams) -> SessionGrantResu
 
 
 def list_grants(ctx: AppContext, params: ListGrantsParams) -> ListGrantsResult:
-    """Grants, newest first; `state=expired` and `pending` are what most ask."""
+    """Grants, newest first; `state=expired` and `pending` are what most ask.
+
+    A person sees every grant. An agent sees its own session's: which secrets
+    another session was granted, and until when, is not every agent's to read
+    (names only, but names are a map). An agent that is not a session sees
+    nothing.
+    """
     target = (
         None if params.target is None else _target(ctx, params.target).engine_session_id
     )
+    if ctx.principal.kind == "agent":
+        own = _own_engine_session(ctx)
+        if own is None or (target is not None and target != own):
+            return ListGrantsResult(grants=[])
+        target = own
     stored_state = "approved" if params.state == "expired" else params.state
     with ctx.declared.read() as view:
         rows = view.list_session_grants(
@@ -280,6 +300,14 @@ def _own_engine_session(ctx: AppContext) -> str | None:
             session = view.session_by_id(ref.removeprefix("agent:session:"))
         return None if session is None else session.engine_session_id
     return None
+
+
+def _approved_meanwhile(ctx: AppContext, grant_id: str) -> bool:
+    """Whether the grant is recorded approved now — by a decision that was
+    not this one, when called from a failed approval."""
+    with ctx.declared.read() as view:
+        current = view.session_grant(grant_id)
+    return current is not None and current.state == "approved"
 
 
 def _load(ctx: AppContext, grant_id: str) -> SessionGrant:
