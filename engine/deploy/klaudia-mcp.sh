@@ -7,33 +7,57 @@
 # command, so `vogt-mcp-bootstrap` (and a derivative image's own bootstrap)
 # can reconcile Klaudia the way it does Claude Code, Codex and opencode:
 #
-#   vogt-klaudia-mcp set NAME COMMAND [ARG...]   upsert NAME to run COMMAND ARG...
-#   vogt-klaudia-mcp remove NAME COMMAND         remove NAME only if it runs COMMAND
+#   vogt-klaudia-mcp set [-e KEY=VALUE]... NAME COMMAND [ARG...]
+#                                     upsert NAME to run COMMAND ARG...
+#   vogt-klaudia-mcp remove NAME COMMAND
+#                                     remove NAME only if it runs COMMAND
 #
 # `set` writes only when the entry differs, and keeps every other server and
 # key in the file. `remove` touches only an entry this kind of caller wrote
 # (one running COMMAND), so a server an operator registered by hand under the
-# same name survives. No environment value is ever stored: Klaudia starts a
-# stdio server with its own environment, which is where the session's tokens
-# are. Nothing goes to stdout — the bootstrap that calls this runs ahead of a
-# stdio MCP server, whose stdout is the protocol.
+# same name survives. Klaudia starts a stdio server with its own environment,
+# which is where the session's tokens are, so `-e` is for fixed, non-secret
+# settings (an endpoint, an allowlist) and never for a credential. Nothing
+# goes to stdout — the bootstrap that calls this runs ahead of a stdio MCP
+# server, whose stdout is the protocol.
 set -euo pipefail
 
 config="${KLAUDIA_CONFIG_DIR:-$HOME/.klaudia}/.mcp.json"
 
-case "${1:-}" in
-    set) [[ $# -ge 3 ]] ;;
-    remove) [[ $# -eq 3 ]] ;;
-    *) false ;;
-esac || {
-    printf 'usage: vogt-klaudia-mcp set NAME COMMAND [ARG...] | remove NAME COMMAND\n' >&2
+usage() {
+    printf 'usage: vogt-klaudia-mcp set [-e KEY=VALUE]... NAME COMMAND [ARG...] | remove NAME COMMAND\n' >&2
     exit 2
 }
 
-exec python3 - "$config" "$@" <<'PY'
+op="${1:-}"
+[[ $# -gt 0 ]] && shift
+env_pairs=()
+if [[ "$op" == set ]]; then
+    while [[ "${1:-}" == -e ]]; do
+        [[ "${2:-}" == ?*=* ]] || usage
+        env_pairs+=("$2")
+        shift 2
+    done
+    [[ $# -ge 2 ]] || usage
+elif [[ "$op" == remove ]]; then
+    [[ $# -eq 2 ]] || usage
+else
+    usage
+fi
+
+# The env pairs travel as one NUL-free, newline-separated argument ahead of
+# the rest; a KEY=VALUE holding a newline is refused rather than split.
+for pair in "${env_pairs[@]}"; do
+    [[ "$pair" != *$'\n'* ]] || usage
+done
+env_arg="$(printf '%s\n' "${env_pairs[@]}")"
+[[ ${#env_pairs[@]} -gt 0 ]] || env_arg=""
+
+exec python3 - "$config" "$op" "$env_arg" "$@" <<'PY'
 import json, os, sys, tempfile
 
-path, op, name, command, *args = sys.argv[1:]
+path, op, env_arg, name, command, *args = sys.argv[1:]
+env = dict(line.split("=", 1) for line in env_arg.splitlines() if line)
 try:
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
@@ -55,6 +79,8 @@ if op == "set":
     wanted = {"command": command}
     if args:
         wanted["args"] = args
+    if env:
+        wanted["env"] = env
     if current == wanted:
         sys.exit(0)
     servers[name] = wanted
