@@ -91,6 +91,9 @@ pub struct Record {
     /// What the session is for (WI-957); a wake keeps it.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
+    /// The work item it serves (WI-998); a wake and a redeploy keep it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item: Option<String>,
     /// Set while hibernated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernation: Option<Hibernation>,
@@ -120,6 +123,7 @@ impl Record {
             keep_awake: false,
             autopilot: false,
             role: SessionRole::Worker,
+            work_item: None,
             hibernation: None,
             rows: None,
             cols: None,

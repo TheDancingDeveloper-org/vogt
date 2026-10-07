@@ -273,6 +273,8 @@ impl SessionRegistry {
         preassigned: Option<Uuid>,
     ) -> Result<Arc<Session>> {
         spec.name = normalize_session_name(&spec.name)?;
+        spec.work_item = vogt_engine_contract::normalize_work_item(spec.work_item.as_deref())
+            .map_err(ApiError::BadRequest)?;
         // Expand a template name into a command before anything downstream
         // reads `command`. Only when the caller gave no explicit command —
         // the GUI copies a template's command into the spec itself and sends
@@ -533,6 +535,7 @@ impl SessionRegistry {
         session.set_permission_mode(posture.clone());
         session.set_autopilot(spec.autopilot);
         session.set_role(spec.role);
+        session.set_work_item(spec.work_item.clone());
         // An oversight session is the one that brings the others back, so it
         // must come back by itself: pinned awake, it is never hibernated by
         // policy and is woken at boot (WI-957).
@@ -569,6 +572,7 @@ impl SessionRegistry {
                 record.permission_mode = posture.clone();
                 record.autopilot = spec.autopilot;
                 record.role = spec.role;
+                record.work_item = spec.work_item.clone();
                 record.keep_awake = session.keep_awake();
                 record.conversation = conversation.clone();
                 record.brief_file = prompt_file.clone();
@@ -601,24 +605,31 @@ impl SessionRegistry {
         // even if it lands after the finalize under load. Metadata only — no
         // FTS write here, so it cannot wipe indexed output either.
         if let Some(history) = self.history.clone() {
-            let record = ArchiveRecord {
-                id: session.id,
-                name: session.name(),
-                created_at: session.created_at,
-                ended_at: None,
-                exit_code: None,
-                cwd: Some(session.cwd.clone()),
-                command: session.command(),
-                scrollback_bytes: 0,
-                end_reason: None,
-                identity: Some(SessionIdentity {
-                    template: session.template(),
-                    role: Some(spec.role.as_str()),
-                    conversation: session.conversation(),
-                }),
-            };
+            let role = spec.role.as_str();
+            let live = Arc::clone(&session);
             let sid = session.id;
             tokio::spawn(async move {
+                // Built when the task runs, not when it is spawned: a work
+                // item bound in between updates no row yet (there is none),
+                // so the insert must carry the label as it is now (WI-998).
+                let record = ArchiveRecord {
+                    id: live.id,
+                    name: live.name(),
+                    created_at: live.created_at,
+                    ended_at: None,
+                    exit_code: None,
+                    cwd: Some(live.cwd.clone()),
+                    command: live.command(),
+                    scrollback_bytes: 0,
+                    end_reason: None,
+                    identity: Some(SessionIdentity {
+                        template: live.template(),
+                        role: Some(role),
+                        conversation: live.conversation(),
+                        work_item: live.work_item(),
+                    }),
+                };
+                drop(live);
                 if let Err(e) = history.archive_session(record).await {
                     tracing::warn!(session = %sid, error = %e, "failed to record provisional history row");
                 }
@@ -1034,6 +1045,7 @@ impl SessionRegistry {
             permission_mode: record.permission_mode.clone(),
             autopilot: record.autopilot,
             role: record.role,
+            work_item: record.work_item.clone(),
             resume: record.conversation.as_ref().map(|c| c.id.clone()),
             cols: req.cols.or(record.cols),
             rows: req.rows.or(record.rows),
@@ -1227,6 +1239,64 @@ impl SessionRegistry {
             (Some(_), None) => {}
             (None, None) => return Err(ApiError::NotFound),
         }
+        match live {
+            Some(session) => Ok(session.summary()),
+            None => self.hibernated_summary(id).ok_or(ApiError::NotFound),
+        }
+    }
+
+    /// Label a session with the work item it serves, or clear the label
+    /// (WI-998), live or hibernated, in its record so a wake and a redeploy
+    /// keep it, and in history so a resume from History can bind again. The
+    /// label is opaque here: vogt-core validates the ref and, for a session
+    /// it started, holds the truth this copies.
+    pub fn set_work_item(&self, id: Uuid, work_item: Option<&str>) -> Result<SessionSummary> {
+        let work_item =
+            vogt_engine_contract::normalize_work_item(work_item).map_err(ApiError::BadRequest)?;
+        let live = self.sessions.get(&id).map(|s| Arc::clone(s.value()));
+        if let Some(session) = live.as_ref() {
+            session.set_work_item(work_item.clone());
+        }
+        let updated = self.records.get_mut(&id).map(|mut record| {
+            record.work_item = work_item.clone();
+            record.clone()
+        });
+        if let Some(history) = self.history.clone() {
+            if live.is_some() || updated.is_some() {
+                let label = work_item.clone();
+                tokio::spawn(async move {
+                    // The provisional row is written by a task of its own and
+                    // can still be queued behind the pool when a session is
+                    // bound straight after it starts; an update then finds no
+                    // row, and the insert lands without the label. So wait for
+                    // the row, briefly — a label History lost is a Resume that
+                    // no longer re-binds.
+                    for _ in 0..50 {
+                        match history.set_work_item(id, label.as_deref()).await {
+                            Ok(true) => return,
+                            Ok(false) => {
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                            }
+                            Err(e) => {
+                                tracing::warn!(session = %id, error = %e, "could not record the session's work item in history");
+                                return;
+                            }
+                        }
+                    }
+                    tracing::warn!(session = %id, "no history row to record the session's work item in");
+                });
+            }
+        }
+        match (&live, updated) {
+            (_, Some(record)) => {
+                if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
+                    tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+                }
+            }
+            (Some(_), None) => {}
+            (None, None) => return Err(ApiError::NotFound),
+        }
+        tracing::info!(session = %id, work_item = ?work_item, "session work item set");
         match live {
             Some(session) => Ok(session.summary()),
             None => self.hibernated_summary(id).ok_or(ApiError::NotFound),
@@ -1439,6 +1509,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         autopilot: record.autopilot,
         autopilot_nudges: 0,
         role: record.role,
+        work_item: record.work_item.clone(),
         resources: None,
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),

@@ -314,6 +314,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         )
         .route("/api/sessions/{id}/role", post(api::set_session_role))
         .route(
+            "/api/sessions/{id}/work-item",
+            post(api::set_session_work_item),
+        )
+        .route(
             "/api/sessions/{id}/grants",
             get(api::list_session_grants).post(api::apply_session_grant),
         )

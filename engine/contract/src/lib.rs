@@ -124,6 +124,14 @@ pub struct SessionSpec {
     /// keeps it.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
+    /// The work item the session serves (WI-998), e.g. `WI-7`: a label the
+    /// engine keeps with the record and reports on the summary, never
+    /// interpreted. vogt-core sets it from `session.start`'s item and
+    /// re-declares it with `session.bind_work`; for a session vogt-core
+    /// started, the core's row is the truth and this is its copy. Kept in
+    /// the record, so a wake keeps it, and in history, so a resume can.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -203,6 +211,10 @@ pub struct SessionSummary {
     /// `SessionSpec::role`); absent for an ordinary worker.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
+    /// The work item the session serves (WI-998, see
+    /// `SessionSpec::work_item`); absent when it is bound to none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item: Option<String>,
     /// Set when someone asked the session to stop: who, when and why. The
     /// exit that follows reads `stopped`, not `errored` (WI-913).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -359,6 +371,36 @@ impl SessionRole {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRoleRequest {
     pub role: SessionRole,
+}
+
+/// `POST /api/sessions/{id}/work-item` (WI-998): label the session with the
+/// work item it serves, or clear the label with `null`. The longest label
+/// the engine keeps; a longer one is refused rather than cut.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionWorkItemRequest {
+    pub work_item: Option<String>,
+}
+
+/// The longest `work_item` label the engine accepts (a ref or an upstream
+/// subject key, `owner/repo#123`-shaped, fits well inside it).
+pub const WORK_ITEM_LABEL_MAX: usize = 200;
+
+/// A `work_item` label as the engine keeps it: trimmed, `None` when blank,
+/// `Err` when longer than [`WORK_ITEM_LABEL_MAX`] or holding a control
+/// character. The engine never interprets the label beyond this.
+pub fn normalize_work_item(label: Option<&str>) -> Result<Option<String>, String> {
+    let Some(label) = label.map(str::trim).filter(|l| !l.is_empty()) else {
+        return Ok(None);
+    };
+    if label.chars().count() > WORK_ITEM_LABEL_MAX {
+        return Err(format!(
+            "work_item is longer than {WORK_ITEM_LABEL_MAX} characters"
+        ));
+    }
+    if label.chars().any(char::is_control) {
+        return Err("work_item holds a control character".to_string());
+    }
+    Ok(Some(label.to_string()))
 }
 
 /// `POST /api/sessions/{id}/conversation`, and the same body on the
@@ -1347,5 +1389,25 @@ mod tests {
         assert!(reply.created_at.is_none());
         assert!(reply.session_refs.is_empty());
         assert!(reply.actions.is_empty());
+    }
+
+    #[test]
+    fn a_work_item_label_is_trimmed_bounded_and_blank_means_none() {
+        assert_eq!(normalize_work_item(None), Ok(None));
+        assert_eq!(normalize_work_item(Some("  ")), Ok(None));
+        assert_eq!(
+            normalize_work_item(Some(" WI-7 ")),
+            Ok(Some("WI-7".to_string()))
+        );
+        let long = "x".repeat(WORK_ITEM_LABEL_MAX + 1);
+        assert!(normalize_work_item(Some(&long)).is_err());
+        assert!(normalize_work_item(Some("WI-7\u{1b}[2J")).is_err());
+        // Absent on the wire both ways.
+        let spec: SessionSpec = serde_json::from_str(r#"{"name":"x"}"#).unwrap();
+        assert_eq!(spec.work_item, None);
+        assert!(serde_json::to_value(&spec)
+            .unwrap()
+            .get("work_item")
+            .is_none());
     }
 }

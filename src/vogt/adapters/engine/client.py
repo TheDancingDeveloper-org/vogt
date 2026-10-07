@@ -170,6 +170,10 @@ class EngineSession:
     #: What the session is for (WI-957): `worker`, or `oversight` for one
     #: nominated to supervise the others. Absent on the wire means `worker`.
     role: str = "worker"
+    #: The work item the session serves, as the engine carries it (WI-998):
+    #: an opaque label the core writes on bind, never interpreted by the
+    #: engine. For a linked session the core's row is the truth.
+    work_item: str | None = None
     #: The process tree's last resource sample (WI-916).
     resources: EngineResources | None = None
     #: The template it was started from, by the name given (WI-919).
@@ -211,6 +215,7 @@ class EngineSession:
             autopilot=payload.get("autopilot") is True,
             autopilot_nudges=_nudges(payload.get("autopilot_nudges")),
             role="oversight" if payload.get("role") == "oversight" else "worker",
+            work_item=_optional_str(payload.get("work_item")),
             resources=EngineResources.from_payload(payload.get("resources")),
             template=_optional_str(payload.get("template")),
             permission_mode=_optional_str(payload.get("permission_mode")),
@@ -350,6 +355,7 @@ class EngineHistorySession:
     conversation_agent: str | None = None
     conversation_id: str | None = None
     resume_template: str | None = None
+    work_item: str | None = None
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> EngineHistorySession:
@@ -368,6 +374,7 @@ class EngineHistorySession:
             conversation_agent=_optional_str(payload.get("conversation_agent")),
             conversation_id=_optional_str(payload.get("conversation_id")),
             resume_template=_optional_str(payload.get("resume_template")),
+            work_item=_optional_str(payload.get("work_item")),
         )
 
 
@@ -670,6 +677,7 @@ class EngineClient:
         permission_mode: str | None = None,
         autopilot: bool = False,
         role: str = "worker",
+        work_item: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -720,6 +728,10 @@ class EngineClient:
         if role != "worker":
             # An oversight session (WI-957): pinned awake and listed first.
             spec["role"] = role
+        if work_item:
+            # The item the session serves (WI-998), as a label the engine
+            # keeps with the record and reports back on the summary.
+            spec["work_item"] = work_item
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 
@@ -1068,6 +1080,22 @@ class EngineClient:
             f"/api/sessions/{urllib.parse.quote(session_id)}/role",
             method="POST",
             payload={"role": role},
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineSession.from_payload(payload)
+
+    def set_work_item(
+        self, session_id: str, *, work_item: str | None
+    ) -> EngineSession | None:
+        """Label a session with the work item it serves, or clear the label
+        (WI-998); `None` on a 404 — no such session, or an engine that
+        predates the route."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/work-item",
+            method="POST",
+            payload={"work_item": work_item},
             allow_missing=True,
         )
         if not isinstance(payload, dict):

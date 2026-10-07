@@ -2862,6 +2862,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
 | `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |
 | `session.set_role` | Operator-only | Unavailable: Nominates the overseeing session; for the GUI and for agents over MCP/CLI/REST. |
+| `session.bind_work` | Operator-only | Unavailable: Declares which work item a session serves; for the GUI and for agents over MCP/CLI/REST. |
 | `session.grant_request` | Operator-only | Unavailable: Asks a person to approve a credential for a session; for agents over MCP/CLI/REST. |
 | `session.grant_decide` | Operator-only | Unavailable: A person's approval of a grant, made deliberately in the Inbox, never by voice. |
 | `session.grant_revoke` | Operator-only | Unavailable: Revoking a grant; for the GUI and for agents over MCP/CLI/REST. |

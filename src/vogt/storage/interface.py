@@ -722,6 +722,15 @@ class WriteTxn(ReadView, Protocol):
         """Replace a grant's decision and revocation fields."""
         ...
 
+    def set_session_work_item(self, session_id: str, work_item_id: str | None) -> None:
+        """Re-declare the work item a session serves (WI-998), or clear it.
+
+        The one mutable declared field of a session row: binding is a new
+        decision by a principal, audited by the caller, never a copy of live
+        engine state. The history of bindings is the audit log, not this row.
+        """
+        ...
+
     def mark_session_stopped(self, session_id: str, *, at: datetime) -> None:
         """Record that Vogt stopped this session.
 

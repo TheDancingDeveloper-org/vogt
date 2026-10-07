@@ -9413,6 +9413,123 @@ async fn an_oversight_session_is_pinned_listed_as_oversight_and_back_after_a_res
     }
 }
 
+#[tokio::test]
+async fn a_work_item_label_is_set_cleared_kept_in_history_and_survives_a_restart() {
+    let (_tmp, cfg, stub) = hibernation_sandbox();
+    let (base, state, guard) = boot_with_state(cfg.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // One labelled at start, one labelled afterwards.
+    let mut ids = Vec::new();
+    for (name, work_item) in [("on WI-7", Some(" WI-7 ")), ("bound later", None)] {
+        let mut body = json!({ "name": name, "command": [stub.to_string_lossy()] });
+        if let Some(work_item) = work_item {
+            body["work_item"] = json!(work_item);
+        }
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    for id in &ids {
+        live_output_containing(&client, &base, id, &["helper=["]).await;
+    }
+    let set = |id: String, work_item: Value| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/api/sessions/{id}/work-item"))
+                .json(&json!({ "work_item": work_item }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let bound: Value = set(ids[1].clone(), json!("WI-8"))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(bound["work_item"], "WI-8");
+
+    // A label the engine will not keep is refused, not cut; the old one stays.
+    let refused = set(ids[1].clone(), json!("x".repeat(201))).await;
+    assert_eq!(refused.status(), reqwest::StatusCode::BAD_REQUEST);
+    let missing = set(uuid::Uuid::new_v4().to_string(), json!("WI-1")).await;
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap().clone();
+    assert_eq!(row(&ids[0])["work_item"], "WI-7", "trimmed at start");
+    assert_eq!(row(&ids[1])["work_item"], "WI-8");
+
+    // History knows it while the session runs; an unbind clears it there too.
+    let cleared: Value = set(ids[0].clone(), Value::Null).await.json().await.unwrap();
+    assert!(
+        cleared.get("work_item").is_none(),
+        "unbound carries no label"
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let first: Value = client
+            .get(format!("{base}/api/history/{}", ids[0]))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let second: Value = client
+            .get(format!("{base}/api/history/{}", ids[1]))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if second["work_item"] == "WI-8" && first.get("work_item").is_none() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "history never showed the work items: {first} {second}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The record keeps it through a restart.
+    state.sessions.hibernate_for_shutdown().await;
+    drop(guard);
+    let (base, _h) = boot_with_config(cfg).await;
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let kept = listed.iter().find(|s| s["id"] == ids[1].as_str()).unwrap();
+    assert_eq!(kept["activity"], "hibernated");
+    assert_eq!(kept["work_item"], "WI-8", "the label survives the restart");
+}
+
 /// [`hibernation_sandbox`] with a `claude` template that runs the stub, the
 /// way a deployment's templates run Claude Code: what a wake resumes a
 /// reported conversation through (WI-962).

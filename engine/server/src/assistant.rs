@@ -2608,6 +2608,7 @@ mod tests {
                 permission_mode: None,
                 autopilot: false,
                 role: Default::default(),
+                work_item: None,
                 cols: Some(80),
                 rows: Some(24),
                 scrollback_bytes: None,

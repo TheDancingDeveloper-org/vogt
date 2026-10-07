@@ -107,6 +107,7 @@ from vogt.application.services.projects import (
 from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
     answer_session,
+    bind_session_work,
     engine_session_token,
     hibernate_session,
     history_list,
@@ -163,6 +164,7 @@ __all__ = [
     "backlog",
     "backup",
     "bind_branch",
+    "bind_session_work",
     "brief_project",
     "bugs",
     "clone",

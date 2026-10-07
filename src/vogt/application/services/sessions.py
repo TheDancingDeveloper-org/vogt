@@ -29,7 +29,7 @@ from __future__ import annotations
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from vogt.adapters import transcripts
 from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
@@ -46,6 +46,8 @@ from vogt.application.context import AppContext
 from vogt.application.models import (
     SESSION_INPUT_MAX_BYTES,
     AnswerSessionParams,
+    BindSessionWorkParams,
+    BindSessionWorkResult,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
     HibernateSessionParams,
@@ -133,6 +135,9 @@ SESSION_KEEP_AWAKE = "session.keep_awake"
 SESSION_KEEP_AWAKE_EVENT = "session.keep_awake"
 SESSION_SET_ROLE = "session.set_role"
 SESSION_ROLE_EVENT = "session.role_set"
+SESSION_BIND_WORK = "session.bind_work"
+SESSION_WORK_BOUND_EVENT = "session.work_bound"
+SESSION_WORK_UNBOUND_EVENT = "session.work_unbound"
 
 #: The byte sequence an xterm-compatible terminal sends for each named key.
 #: Arrows are the normal-mode CSI forms (`ESC [ A`), which every TUI this
@@ -198,7 +203,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             name=params.name or subject.default_name,
             template=params.template,
             cwd=subject.cwd,
-            env=_session_env(ctx, session_id, credential.secret),
+            env=_session_env(
+                ctx, session_id, credential.secret, work_item=subject.work_item_ref
+            ),
             brief=_brief_with_task(subject.brief, params.task, autopilot=autopilot),
             model=params.model,
             effort=params.effort,
@@ -206,6 +213,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             permission_mode=params.permission_mode,
             autopilot=autopilot,
             role=params.role,
+            work_item=subject.work_item_ref,
         )
     except VogtError as error:
         _LOG.warning(
@@ -568,7 +576,7 @@ def _rows(
                 ):
                     continue
                 if view.session_by_engine_id(engine_session.id) is None:
-                    summaries.append(_summarize_engine_only(engine_session))
+                    summaries.append(_summarize_engine_only(engine_session, view))
             summaries = summaries[: params.limit]
 
         templates = {
@@ -790,6 +798,7 @@ def history_list(ctx: AppContext, params: HistoryListParams) -> HistoryListResul
                 conversation_agent=row.conversation_agent,
                 conversation_id=row.conversation_id,
                 resume_template=row.resume_template,
+                work_item=row.work_item,
             )
             for row in rows
         ]
@@ -1390,6 +1399,179 @@ def set_session_role(ctx: AppContext, params: SetSessionRoleParams) -> SessionRe
         )
 
 
+def bind_session_work(
+    ctx: AppContext, params: BindSessionWorkParams
+) -> BindSessionWorkResult:
+    """Declare which work item a session serves, or that it serves none
+    (WI-998).
+
+    The core's `coding_sessions.work_item_id` is the truth for a session Vogt
+    started; this re-declares it. One current item per session: rebinding
+    from WI-A to WI-B is one call, and the sequence is the audit log
+    (`audit.list(entity_id=<ses_…>)`), not a second table. Any `work.write`
+    principal may bind — a person, the session itself, its overseer: a
+    binding grants nothing, it says what the session is doing.
+
+    Binding never moves the terminal (its project and cwd stay), never moves
+    the item to `in_progress`, and is allowed on a finished item (a
+    verification session is legitimate). An item in another project is bound
+    with `project_mismatch` set. A bind records the item's declared branch,
+    as a start does; an unbind leaves it, forward-only, as a stop does.
+
+    The engine carries a copy as its `work_item` label, so the rail and a
+    session the GUI started (no core row — the label is all it has) show it.
+    The core row is written first and wins: a label the engine could not take
+    is reported in `engine_label`, not fatal.
+    """
+    reason = writes.validate_reason(params.reason)
+    target = _target(ctx, params.id or _own_session(ctx))
+    engine_id = target.engine_session_id
+    wanted = (params.work_item or "").strip() or None
+    with ctx.declared.read() as view:
+        item = None if wanted is None else _resolve.work_item(view, wanted)
+    ref = None if item is None else item.ref
+    entity_id = target.session.id if target.session is not None else engine_id
+
+    if target.session is None:
+        # A session the GUI started: no row to declare on, and adopting one
+        # would invent an actor for writes it never made (decision 5). The
+        # engine's label is the binding.
+        engine = _engine(ctx)
+        current = engine.get_session(engine_id)
+        if current is None:
+            msg = f"no session {engine_id!r}"
+            raise NotFound(msg)
+        updated = engine.set_work_item(engine_id, work_item=ref)
+        if updated is None:
+            msg = (
+                f"the engine cannot label session {engine_id!r} with a work "
+                "item (it predates session work items)"
+            )
+            raise NotFound(msg)
+        audited_action(
+            ctx,
+            operation=SESSION_BIND_WORK,
+            reason=reason,
+            entity_kind="session",
+            entity_id=entity_id,
+            outcome={
+                "engine_session_id": engine_id,
+                "linked": False,
+                "work_item_id": None if item is None else item.id,
+                "previous_work_item": current.work_item,
+            },
+            event_kind=SESSION_WORK_UNBOUND_EVENT
+            if item is None
+            else SESSION_WORK_BOUND_EVENT,
+            summary={
+                "engine_session_id": engine_id,
+                "linked": False,
+                "work_item": ref,
+                "previous_work_item": current.work_item,
+            },
+        )
+        with ctx.declared.read() as view:
+            summary = _summarize_engine_only(updated, view)
+        return BindSessionWorkResult(
+            session=summary,
+            previous_work_item=current.work_item,
+            engine_label="written",
+        )
+
+    session = target.session
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[BindSessionWorkResult]:
+        del actor
+        current = txn.session_by_id(session.id)
+        if current is None:  # pragma: no cover - resolved a moment ago
+            msg = f"no session {session.id!r}"
+            raise NotFound(msg)
+        if current.stopped_at is not None:
+            # A stopped session's binding is history: what it was on when it
+            # ended. Rewriting it would rewrite that.
+            msg = (
+                f"session {session.id} was stopped; its work item is a "
+                "record of what it was on, not something to re-declare"
+            )
+            raise Conflict(msg)
+        previous = (
+            None
+            if current.work_item_id is None
+            else txn.work_item_by_id(current.work_item_id)
+        )
+        txn.set_session_work_item(current.id, None if item is None else item.id)
+        declared_branch = (
+            None
+            if item is None
+            else _record_declared_branch(
+                txn,
+                work_ref=item.ref,
+                project_id=item.project_id or current.project_id,
+                at=ctx.clock(),
+                template=ctx.config.branch_binding_template,
+            )
+        )
+        updated = txn.session_by_id(current.id)
+        assert updated is not None  # written in this transaction
+        mismatch = item is not None and item.project_id != current.project_id
+        previous_ref = None if previous is None else previous.ref
+        return WriteOutcome(
+            result=BindSessionWorkResult(
+                session=_summarize(txn, updated, engine_session=None),
+                previous_work_item=previous_ref,
+                project_mismatch=mismatch,
+                engine_label="unavailable",
+            ),
+            entity_kind="session",
+            entity_id=updated.id,
+            payload={
+                **_audited_payload(updated),
+                "previous_work_item_id": current.work_item_id,
+            },
+            event_kind=SESSION_WORK_UNBOUND_EVENT
+            if item is None
+            else SESSION_WORK_BOUND_EVENT,
+            summary={
+                "engine_session_id": updated.engine_session_id,
+                "work_item": ref,
+                "previous_work_item": previous_ref,
+                "branch": declared_branch,
+                "project_mismatch": mismatch,
+            },
+        )
+
+    result = audited_write(ctx, operation=SESSION_BIND_WORK, reason=reason, body=body)
+
+    # After the declared write, never inside it: the engine and SQLite cannot
+    # share a transaction, and the row is the truth the label copies.
+    live: EngineSession | None = None
+    label: Literal["written", "not_found", "unavailable"] = "unavailable"
+    detail: str | None = None
+    if ctx.engine is None:
+        detail = "no session engine is configured (VOGT_ENGINE_URL is unset)"
+    else:
+        try:
+            live = ctx.engine.set_work_item(engine_id, work_item=ref)
+            label = "written" if live is not None else "not_found"
+            if live is None:
+                detail = (
+                    "the engine has no such session, or predates session work "
+                    "items; the binding is recorded in Vogt"
+                )
+                live = ctx.engine.get_session(engine_id)
+        except EngineUnavailable as exc:
+            detail = str(exc)
+    with ctx.declared.read() as view:
+        bound = view.session_by_id(session.id)
+        assert bound is not None
+        summary = _summarize(
+            view, bound, engine_session=live, engine_asked=label != "unavailable"
+        )
+    return result.model_copy(
+        update={"session": summary, "engine_label": label, "engine": detail}
+    )
+
+
 SESSION_ANSWER = "session.answer"
 SESSION_ANSWERED_EVENT = "session.answered"
 
@@ -1944,6 +2126,7 @@ def _start_on_engine(
     permission_mode: str | None = None,
     autopilot: bool = False,
     role: str = "worker",
+    work_item: str | None = None,
 ) -> EngineSession:
     return engine.create_session(
         prompt=brief,
@@ -1968,10 +2151,13 @@ def _start_on_engine(
         permission_mode=permission_mode,
         autopilot=autopilot,
         role=role,
+        work_item=work_item,
     )
 
 
-def _session_env(ctx: AppContext, session_id: str, secret: str) -> dict[str, str]:
+def _session_env(
+    ctx: AppContext, session_id: str, secret: str, *, work_item: str | None = None
+) -> dict[str, str]:
     """What an agent inside the session needs to reach Vogt.
 
     The same two variables the MCP bootstrap already uses in an engine
@@ -1987,6 +2173,12 @@ def _session_env(ctx: AppContext, session_id: str, secret: str) -> dict[str, str
     `session_screen`) remain the recommended way to drive another session.
     """
     env = {"VOGT_HTTP_TOKEN": secret, "VOGT_SESSION_ID": session_id}
+    if work_item:
+        # The item it was started for (WI-998), readable without a call — the
+        # same variable an agent task run gets. A later session.bind_work is
+        # not reflected here: the env is the start's, the binding is the
+        # core's (`session.list`, `auth.whoami`).
+        env["VOGT_WORK_ITEM"] = work_item
     if ctx.config.public_url:
         env["VOGT_URL"] = ctx.config.public_url
     if ctx.engine is not None:
@@ -2044,6 +2236,8 @@ def _summarize(
         engine_session_id=session.engine_session_id,
         project=None if project is None else project.slug,
         work_item=None if work_item is None else work_item.ref,
+        work_item_title=None if work_item is None else work_item.title,
+        work_item_state=None if work_item is None else work_item.state,
         actor=session.actor_id if actor is None else actor.identity_ref,
         cwd=session.cwd,
         template=session.template,
@@ -2134,20 +2328,28 @@ def _blocked(blocked: EngineBlocked | None) -> SessionBlocked | None:
     )
 
 
-def _summarize_engine_only(engine_session: EngineSession) -> SessionSummary:
+def _summarize_engine_only(
+    engine_session: EngineSession, view: ReadView | None = None
+) -> SessionSummary:
     """A session the engine is running but Vogt never linked.
 
     Vogt has no declared row for it, so every audited field is null: it is
-    not Vogt's to name a project, work item, actor or reason for something it
-    did not start. What can be reported truthfully is reported — the engine's
-    id, where it runs, its live activity, and the engine's own start time.
+    not Vogt's to name a project, actor or reason for something it did not
+    start. What can be reported truthfully is reported — the engine's id,
+    where it runs, its live activity, the engine's own start time, and the
+    `work_item` label a session.bind_work put on it (WI-998), joined to the
+    item's title and state when `view` is given and the ref still resolves.
     """
+    label = engine_session.work_item
+    item = None if label is None or view is None else view.work_item_by_ref(label)
     return SessionSummary(
         linked=False,
         id=engine_session.id,
         engine_session_id=engine_session.id,
         project=None,
-        work_item=None,
+        work_item=label,
+        work_item_title=None if item is None else item.title,
+        work_item_state=None if item is None else item.state,
         actor=None,
         cwd=engine_session.cwd,
         template=None,
@@ -2180,6 +2382,7 @@ def _parse_engine_timestamp(value: str | None) -> datetime | None:
 
 __all__ = [
     "answer_session",
+    "bind_session_work",
     "hibernate_session",
     "history_list",
     "keep_session_awake",

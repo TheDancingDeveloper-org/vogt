@@ -508,6 +508,16 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    # Re-declare the item the session serves (WI-998): the core row, then
+    # the stand-in engine's label.
+    (
+        "session.bind_work",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "work_item": "WI-1",
+            "reason": WHY,
+        },
+    ),
     (
         "session.wake",
         lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
@@ -962,6 +972,10 @@ def _stand_in_engine() -> EngineClient:
             return 200, json.dumps(spec).encode()
         if method == "DELETE" and "/grants/" in path:
             return 200, json.dumps({"revoked": True}).encode()
+        if method == "POST" and path.endswith("/work-item"):
+            return 200, json.dumps(
+                {**summary(path.rsplit("/", 2)[-2]), "work_item": spec["work_item"]}
+            ).encode()
         if method == "POST" and path.endswith("/role"):
             return 200, json.dumps(
                 {

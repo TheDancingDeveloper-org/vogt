@@ -1008,7 +1008,22 @@ class SessionSummary(Result):
     engine_session_id: str
     project: str | None = None
     work_item: str | None = Field(
-        default=None, description="Work item ref, e.g. WI-7, when opened for one."
+        default=None,
+        description=(
+            "The work item the session serves, e.g. WI-7: set at session.start "
+            "or re-declared by session.bind_work. For an unlinked session, the "
+            "engine's `work_item` label, when one was bound."
+        ),
+    )
+    work_item_title: str | None = Field(
+        default=None, description="That work item's title, joined at read time."
+    )
+    work_item_state: str | None = Field(
+        default=None,
+        description=(
+            "That work item's workflow state, joined at read time — a bound "
+            "session on a `done` item is still allowed, and shown muted."
+        ),
     )
     actor: str | None = Field(
         default=None,
@@ -1347,6 +1362,11 @@ class WorkResult(Result):
     #: state first and target last — one audited transition per edge. Empty
     #: for a single-edge transition and on every other operation.
     walked: list[str] = []
+    #: On a `work.transition` into a finished state: the sessions still
+    #: bound to the item and running or hibernated (WI-998). A warning, never
+    #: a refusal — a session may still be finishing (a PR, a comment) — and
+    #: nothing is unbound. Empty everywhere else.
+    live_sessions: list[SessionSummary] = []
 
 
 class GetWorkParams(Params):
@@ -3976,6 +3996,50 @@ class SetSessionRoleParams(Params):
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
+class BindSessionWorkParams(Params):
+    id: str | None = Field(
+        default=None,
+        description=(
+            SESSION_ID_DESCRIPTION + " Omit it from inside a session Vogt "
+            "started to bind that session itself."
+        ),
+    )
+    work_item: str | None = Field(
+        description=(
+            "The work item the session now serves, e.g. WI-7 (a native ref "
+            "or an upstream subject key); null unbinds it. Rebinding from one "
+            "item to another is one call."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class BindSessionWorkResult(Result):
+    session: SessionSummary
+    previous_work_item: str | None = Field(
+        default=None, description="The item the session was bound to before."
+    )
+    project_mismatch: bool = Field(
+        default=False,
+        description=(
+            "The item belongs to a different project from the session's. The "
+            "bind still happened; binding never moves the terminal."
+        ),
+    )
+    engine_label: Literal["written", "not_found", "unavailable"] = Field(
+        description=(
+            "Whether the engine's `work_item` label was written. For a linked "
+            "session the core row is the truth and a label that could not be "
+            "written is reported, not fatal; an unlinked session has only the "
+            "label."
+        ),
+    )
+    engine: str | None = Field(
+        default=None,
+        description="What the engine said, when the label could not be written.",
+    )
+
+
 # -- approved grants to a session (WI-973) --------------------------------
 #
 # A session asks — usually an overseer, for a worker it drives — for one scoped
@@ -4174,6 +4238,15 @@ class HistorySessionRow(Result):
             "That conversation's id. Kept after it ends, so a lost session can "
             "be resumed: session_start(template=resume_template, "
             "resume=conversation_id, role=role)."
+        ),
+    )
+    work_item: str | None = Field(
+        default=None,
+        description=(
+            "The work item the session served when it ended, as last bound "
+            "(session.bind_work); null when it was bound to none. Resume "
+            "binds it again: session_start(..., resume=conversation_id) then "
+            "session_bind_work(work_item)."
         ),
     )
     resume_template: str | None = Field(

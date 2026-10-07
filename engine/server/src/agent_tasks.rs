@@ -1475,6 +1475,9 @@ impl AgentTaskRegistry {
             permission_mode: None,
             autopilot: false,
             role: Default::default(),
+            // The rail shows the item a run works on, like any session's
+            // (WI-998).
+            work_item: task.vogt_work_item.clone(),
             cols: Some(100),
             rows: Some(30),
             scrollback_bytes: None,

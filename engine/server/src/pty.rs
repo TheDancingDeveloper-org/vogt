@@ -95,6 +95,8 @@ pub struct Session {
     resources: Mutex<Option<vogt_engine_contract::SessionResources>>,
     /// The template it was started from, when one was named.
     template: Mutex<Option<String>>,
+    /// The work item it serves (see `SessionSummary::work_item`, WI-998).
+    work_item: Mutex<Option<String>>,
     /// The permission posture, when not the default (WI-926).
     permission_mode: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
@@ -272,6 +274,7 @@ impl Session {
             autopilot: self.autopilot(),
             autopilot_nudges: self.autopilot_nudges(),
             role: self.role(),
+            work_item: self.work_item(),
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
@@ -318,6 +321,14 @@ impl Session {
 
     pub fn template(&self) -> Option<String> {
         self.template.lock().clone()
+    }
+
+    pub fn set_work_item(&self, work_item: Option<String>) {
+        *self.work_item.lock() = work_item;
+    }
+
+    pub fn work_item(&self) -> Option<String> {
+        self.work_item.lock().clone()
     }
 
     pub fn set_resources(&self, resources: Option<vogt_engine_contract::SessionResources>) {
@@ -886,6 +897,7 @@ pub fn spawn(
         last_input: Mutex::new(None),
         resources: Mutex::new(None),
         template: Mutex::new(None),
+        work_item: Mutex::new(None),
         permission_mode: Mutex::new(None),
         stop: Mutex::new(None),
         launcher: if spawning_agent_auth_helper {
