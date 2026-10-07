@@ -35,14 +35,17 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::{
     activity::{strip_ansi, ActivityState},
     agent_tasks::AgentTaskRegistry,
     assistant_log::{AssistantLog, ListQuery, LogEvent, LoggedEntry},
+    assistant_stream::{DeltaAccumulator, SseDecoder},
     config::Config,
     error::{ApiError, Result},
     push::PushManager,
@@ -124,6 +127,11 @@ pub struct TranscriptEntry {
     pub session_refs: Vec<SessionRef>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub actions: Vec<TranscriptAction>,
+    /// The reply was cut off by the listener speaking over it (a call's
+    /// barge-in). `text` is then what was said before the cut, not a whole
+    /// answer.
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub interrupted: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -270,6 +278,53 @@ pub struct AssistantReply {
     pub session_refs: Vec<SessionRef>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<TranscriptAction>,
+    /// The turn was cancelled before it finished — `reply` is the part that
+    /// had been produced, or `None` if the cut came before any text.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
+}
+
+/// Something a streamed turn reports while it is still running.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TurnEvent {
+    /// A piece of the reply's text, the moment the model produced it.
+    TextDelta(String),
+    /// The model asked for tools and the loop is about to run them — the
+    /// point at which a caller waiting in silence learns it will be a while.
+    ToolRound { tools: Vec<String> },
+}
+
+/// Where a streamed turn's events go. A plain callback rather than a channel
+/// so a consumer (and a test) can act on an event — cancel, say — before the
+/// loop takes its next step.
+pub type TurnEventSink = Arc<dyn Fn(TurnEvent) + Send + Sync>;
+
+/// What makes a turn a streamed one: a sink for its events and a token that
+/// cuts it short.
+///
+/// Cancellation is honoured only where the conversation stays valid. While
+/// the model is talking, the stream is dropped and the words already received
+/// become the reply (marked interrupted). While tools run, the round is
+/// allowed to finish — every `tool_call` in the history must have its result —
+/// and the turn stops before the next model call.
+#[derive(Clone)]
+pub struct TurnStream {
+    pub sink: TurnEventSink,
+    pub cancel: CancellationToken,
+}
+
+impl TurnStream {
+    fn emit(&self, event: TurnEvent) {
+        (self.sink)(event);
+    }
+}
+
+/// How a streamed model call ended.
+enum Streamed {
+    /// A whole response, shaped like a non-streamed one.
+    Complete(Value),
+    /// Cancelled part-way; the text received until then.
+    Cancelled { partial: String },
 }
 
 struct PendingAction {
@@ -406,6 +461,143 @@ impl ChatBackend {
             }
         }
     }
+
+    /// One model call with `stream: true`, forwarding text as it arrives.
+    ///
+    /// Providers differ in how well they stream, so this degrades rather
+    /// than fails: a refusal of the streamed request (any non-2xx before a
+    /// byte of the stream) is retried once without `stream`, and a 2xx that
+    /// is plain JSON — a provider that ignored the flag — is read as the
+    /// whole response it is. Either way the caller gets the same message
+    /// shape, just without the early deltas.
+    async fn stream(
+        &self,
+        profile: &Profile,
+        body: Value,
+        stream: &TurnStream,
+    ) -> Result<Streamed> {
+        match self {
+            ChatBackend::Http { client } => {
+                let url = format!(
+                    "{}/chat/completions",
+                    profile.base_url.trim_end_matches('/')
+                );
+                let mut streamed_body = body.clone();
+                streamed_body["stream"] = json!(true);
+                let send = client
+                    .post(&url)
+                    .bearer_auth(&profile.api_key)
+                    .json(&streamed_body)
+                    .send();
+                let resp = tokio::select! {
+                    _ = stream.cancel.cancelled() => {
+                        return Ok(Streamed::Cancelled { partial: String::new() });
+                    }
+                    resp = send => resp
+                        .map_err(|e| ApiError::Internal(format!("assistant backend: {e}")))?,
+                };
+                if !resp.status().is_success() {
+                    tracing::debug!(
+                        status = %resp.status(),
+                        "assistant backend refused a streamed request; retrying unstreamed"
+                    );
+                    return tokio::select! {
+                        _ = stream.cancel.cancelled() => {
+                            Ok(Streamed::Cancelled { partial: String::new() })
+                        }
+                        whole = self.complete(profile, body) => whole.map(Streamed::Complete),
+                    };
+                }
+                let is_sse = resp
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v.starts_with("text/event-stream"));
+                if !is_sse {
+                    let payload: Value = resp
+                        .json()
+                        .await
+                        .map_err(|e| ApiError::Internal(format!("assistant backend body: {e}")))?;
+                    if let Some(text) = payload
+                        .pointer("/choices/0/message/content")
+                        .and_then(Value::as_str)
+                        .filter(|text| !text.is_empty())
+                    {
+                        stream.emit(TurnEvent::TextDelta(text.to_string()));
+                    }
+                    return Ok(Streamed::Complete(payload));
+                }
+                let mut bytes = resp.bytes_stream();
+                let mut decoder = SseDecoder::default();
+                let mut acc = DeltaAccumulator::default();
+                loop {
+                    let chunk = tokio::select! {
+                        _ = stream.cancel.cancelled() => {
+                            return Ok(Streamed::Cancelled { partial: acc.text().to_string() });
+                        }
+                        chunk = bytes.next() => chunk,
+                    };
+                    let (payloads, closed) = match chunk {
+                        Some(Ok(chunk)) => (decoder.feed(&chunk), false),
+                        Some(Err(e)) => {
+                            return Err(ApiError::Internal(format!(
+                                "assistant backend stream: {e}"
+                            )))
+                        }
+                        None => (decoder.finish().into_iter().collect(), true),
+                    };
+                    let ended = closed || chunk_is_end(&payloads);
+                    for payload in payloads {
+                        if payload.trim() == "[DONE]" {
+                            break;
+                        }
+                        let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+                            continue;
+                        };
+                        if let Some(text) = acc.push(&value)? {
+                            stream.emit(TurnEvent::TextDelta(text));
+                        }
+                    }
+                    if ended {
+                        return Ok(Streamed::Complete(acc.response()));
+                    }
+                }
+            }
+            #[cfg(test)]
+            ChatBackend::Mock { script, seen } => {
+                let mut recorded = body;
+                recorded["stream"] = json!(true);
+                seen.lock().push(recorded);
+                let response = script
+                    .lock()
+                    .pop_front()
+                    .ok_or_else(|| ApiError::Internal("mock backend script exhausted".into()))?;
+                // Replays the scripted reply word by word, so a test sees
+                // the deltas a provider would send and can cancel between
+                // them.
+                let content = response
+                    .pointer("/choices/0/message/content")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let mut said = String::new();
+                for word in content.split_inclusive(' ') {
+                    if stream.cancel.is_cancelled() {
+                        return Ok(Streamed::Cancelled { partial: said });
+                    }
+                    said.push_str(word);
+                    stream.emit(TurnEvent::TextDelta(word.to_string()));
+                    tokio::task::yield_now().await;
+                }
+                Ok(Streamed::Complete(response))
+            }
+        }
+    }
+}
+
+/// True when a read carried the stream's `[DONE]` sentinel.
+fn chunk_is_end(payloads: &[String]) -> bool {
+    payloads.iter().any(|payload| payload.trim() == "[DONE]")
 }
 
 pub struct AssistantRuntime {
@@ -454,6 +646,9 @@ struct Turn {
     /// The `<vocabulary>` note for this turn — the names a dictated sentence
     /// is most likely reaching for — or nothing when there are no names.
     vocabulary: Option<String>,
+    /// Set when the turn is streamed (a call); `None` for a request that
+    /// waits for the whole reply.
+    stream: Option<TurnStream>,
 }
 
 impl Turn {
@@ -676,6 +871,7 @@ impl AssistantRuntime {
             caller,
             vogt_tools,
             vocabulary,
+            stream: None,
         }
     }
 
@@ -806,6 +1002,34 @@ impl AssistantRuntime {
         utterance: Option<String>,
         profile: Option<String>,
     ) -> Result<AssistantReply> {
+        self.handle_message_with(caller, text, utterance, profile, None)
+            .await
+    }
+
+    /// `handle_message`, streamed: the reply's text reaches `stream`'s sink
+    /// as the model writes it, and `stream`'s token can cut the turn short
+    /// (see `TurnStream` for where). The finished reply is returned and
+    /// recorded exactly as an unstreamed turn's is.
+    pub async fn handle_message_streamed(
+        &self,
+        caller: Caller,
+        text: String,
+        utterance: Option<String>,
+        profile: Option<String>,
+        stream: &TurnStream,
+    ) -> Result<AssistantReply> {
+        self.handle_message_with(caller, text, utterance, profile, Some(stream))
+            .await
+    }
+
+    async fn handle_message_with(
+        &self,
+        caller: Caller,
+        text: String,
+        utterance: Option<String>,
+        profile: Option<String>,
+        stream: Option<&TurnStream>,
+    ) -> Result<AssistantReply> {
         let text = text.trim().to_string();
         if text.is_empty() {
             return Err(ApiError::BadRequest("message must not be empty".into()));
@@ -826,7 +1050,8 @@ impl AssistantRuntime {
         // Before the conversation lock: resolving the turn can mean an HTTP
         // round trip to the core, and holding the lock across it would make
         // one slow core serialize every client of this assistant.
-        let turn = self.begin_turn(caller, utterance.is_some()).await;
+        let mut turn = self.begin_turn(caller, utterance.is_some()).await;
+        turn.stream = stream.cloned();
         let actor = turn.caller.token_name.clone();
         let mut convo = self.conversation.lock().await;
         convo.profile = Some(profile.name.clone());
@@ -861,6 +1086,7 @@ impl AssistantRuntime {
             created_at: Some(transcript_now()),
             session_refs: vec![],
             actions: vec![],
+            interrupted: false,
         });
         self.run_loop(
             &mut convo,
@@ -887,7 +1113,33 @@ impl AssistantRuntime {
         id: Uuid,
         approve: bool,
     ) -> Result<AssistantReply> {
-        let turn = self.begin_turn(caller, false).await;
+        self.resolve_action_with(caller, id, approve, None).await
+    }
+
+    /// `resolve_action`, with the resumed turn streamed like
+    /// `handle_message_streamed`. Approval itself is not streamed or
+    /// cancellable: by the time the loop resumes, the write has been
+    /// delivered or declined.
+    pub async fn resolve_action_streamed(
+        &self,
+        caller: Caller,
+        id: Uuid,
+        approve: bool,
+        stream: &TurnStream,
+    ) -> Result<AssistantReply> {
+        self.resolve_action_with(caller, id, approve, Some(stream))
+            .await
+    }
+
+    async fn resolve_action_with(
+        &self,
+        caller: Caller,
+        id: Uuid,
+        approve: bool,
+        stream: Option<&TurnStream>,
+    ) -> Result<AssistantReply> {
+        let mut turn = self.begin_turn(caller, false).await;
+        turn.stream = stream.cloned();
         let mut convo = self.conversation.lock().await;
         // The route that proposed the card finishes the turn that made it.
         let profile = self.profile_for(convo.profile.as_deref())?;
@@ -1082,12 +1334,20 @@ impl AssistantRuntime {
         profile: &Profile,
     ) -> Result<AssistantReply> {
         convo.messages.extend(carried_results);
+        let stream = turn.stream.as_ref();
         let actor = turn.caller.token_name.clone();
         let mut tool_trace = carried_trace;
         let mut session_refs = carried_session_refs;
         let mut rounds = 0u32;
         let mut forced_rounds = 0u32;
         loop {
+            // A cut that landed while tools ran stops here, with every
+            // tool call answered and before the model is asked again.
+            if stream.is_some_and(|s| s.cancel.is_cancelled()) {
+                return Ok(self
+                    .finish_interrupted(convo, &actor, String::new(), tool_trace, session_refs)
+                    .await);
+            }
             let force_final = rounds >= self.max_tool_calls;
             if force_final {
                 forced_rounds += 1;
@@ -1106,6 +1366,7 @@ impl AssistantRuntime {
                     created_at: Some(transcript_now()),
                     session_refs: session_refs.clone(),
                     actions: open_session_actions(&session_refs),
+                    interrupted: false,
                 });
                 trim_history(convo);
                 return Ok(AssistantReply {
@@ -1118,15 +1379,22 @@ impl AssistantRuntime {
                         .and_then(|entry| entry.created_at.clone()),
                     actions: open_session_actions(&session_refs),
                     session_refs,
+                    interrupted: false,
                 });
             }
-            let response = self
-                .backend
-                .complete(
-                    profile,
-                    self.request_body(convo, force_final, turn, profile),
-                )
-                .await;
+            let body = self.request_body(convo, force_final, turn, profile);
+            let response = match stream {
+                None => self.backend.complete(profile, body).await,
+                Some(stream) => match self.backend.stream(profile, body, stream).await {
+                    Ok(Streamed::Complete(response)) => Ok(response),
+                    Ok(Streamed::Cancelled { partial }) => {
+                        return Ok(self
+                            .finish_interrupted(convo, &actor, partial, tool_trace, session_refs)
+                            .await);
+                    }
+                    Err(e) => Err(e),
+                },
+            };
             let response = match response {
                 Ok(r) => r,
                 Err(e) => {
@@ -1163,6 +1431,7 @@ impl AssistantRuntime {
                         created_at: Some(transcript_now()),
                         session_refs: session_refs.clone(),
                         actions: open_session_actions(&session_refs),
+                        interrupted: false,
                     });
                     trim_history(convo);
                     return Ok(AssistantReply {
@@ -1175,6 +1444,7 @@ impl AssistantRuntime {
                             .and_then(|entry| entry.created_at.clone()),
                         actions: open_session_actions(&session_refs),
                         session_refs,
+                        interrupted: false,
                     });
                 }
             };
@@ -1208,6 +1478,7 @@ impl AssistantRuntime {
                     created_at: Some(created_at.clone()),
                     session_refs: session_refs.clone(),
                     actions: actions.clone(),
+                    interrupted: false,
                 });
                 trim_history(convo);
                 return Ok(AssistantReply {
@@ -1217,6 +1488,7 @@ impl AssistantRuntime {
                     created_at: Some(created_at),
                     session_refs,
                     actions,
+                    interrupted: false,
                 });
             }
 
@@ -1256,6 +1528,14 @@ impl AssistantRuntime {
             }
 
             rounds += tool_calls.len() as u32;
+            if let Some(stream) = stream {
+                stream.emit(TurnEvent::ToolRound {
+                    tools: tool_calls
+                        .iter()
+                        .map(|call| tool_call_name_and_args(call).0)
+                        .collect(),
+                });
+            }
             let mut results: Vec<Value> = Vec::new();
             for (idx, call) in tool_calls.iter().enumerate() {
                 let call_id = call
@@ -1378,6 +1658,7 @@ impl AssistantRuntime {
                             created_at: None,
                             actions: open_session_actions(&session_refs),
                             session_refs,
+                            interrupted: false,
                         });
                     }
                     Some(Err(e)) => {
@@ -1428,6 +1709,104 @@ impl AssistantRuntime {
             }
             convo.messages.extend(results);
         }
+    }
+
+    /// End a turn the listener cut short. `partial` is what the model had
+    /// said; it becomes the reply, flagged, so the next turn's model knows it
+    /// was interrupted mid-sentence rather than believing it finished.
+    async fn finish_interrupted(
+        &self,
+        convo: &mut Conversation,
+        actor: &str,
+        partial: String,
+        tool_trace: Vec<String>,
+        session_refs: Vec<SessionRef>,
+    ) -> AssistantReply {
+        let partial = partial.trim().to_string();
+        let actions = open_session_actions(&session_refs);
+        if partial.is_empty() {
+            return AssistantReply {
+                reply: None,
+                pending_action: None,
+                tool_trace,
+                created_at: None,
+                session_refs,
+                actions,
+                interrupted: true,
+            };
+        }
+        self.log_event(
+            actor,
+            LogEvent::Reply {
+                text: partial.clone(),
+            },
+        )
+        .await;
+        convo
+            .messages
+            .push(json!({"role": "assistant", "content": partial}));
+        let created_at = transcript_now();
+        convo.transcript.push(TranscriptEntry {
+            role: "assistant".into(),
+            text: partial.clone(),
+            tool_trace: tool_trace.clone(),
+            created_at: Some(created_at.clone()),
+            session_refs: session_refs.clone(),
+            actions: actions.clone(),
+            interrupted: true,
+        });
+        trim_history(convo);
+        AssistantReply {
+            reply: Some(partial),
+            pending_action: None,
+            tool_trace,
+            created_at: Some(created_at),
+            session_refs,
+            actions,
+            interrupted: true,
+        }
+    }
+
+    /// Cut the last reply back to what the listener actually heard.
+    ///
+    /// A call stops the model the moment someone speaks over it, but the
+    /// model has usually written further than the speaker had got: text
+    /// already synthesized, or still queued, was never heard. Recording it
+    /// would let the next turn assume the person knows something they were
+    /// never told. Applies only to a reply already flagged interrupted, and
+    /// only shortens it — `heard` that is not a prefix of the reply is
+    /// refused. Empty `heard` removes the reply altogether.
+    pub async fn truncate_interrupted_reply(&self, heard: &str) -> bool {
+        let heard = heard.trim();
+        let mut convo = self.conversation.lock().await;
+        let Some(entry) = convo.transcript.last() else {
+            return false;
+        };
+        if entry.role != "assistant" || !entry.interrupted || !entry.text.starts_with(heard) {
+            return false;
+        }
+        let Some(last) = convo.messages.last() else {
+            return false;
+        };
+        let is_plain_reply = last.get("role").and_then(Value::as_str) == Some("assistant")
+            && last.get("tool_calls").is_none()
+            && last.get("content").and_then(Value::as_str) == Some(entry.text.as_str());
+        if !is_plain_reply {
+            return false;
+        }
+        if heard.is_empty() {
+            convo.messages.pop();
+            convo.transcript.pop();
+        } else {
+            let heard = heard.to_string();
+            if let Some(last) = convo.messages.last_mut() {
+                last["content"] = json!(heard);
+            }
+            if let Some(entry) = convo.transcript.last_mut() {
+                entry.text = heard;
+            }
+        }
+        true
     }
 
     fn request_body(
@@ -4490,5 +4869,323 @@ mod tests {
             !entries.iter().any(|e| e.kind == "utterance"),
             "a typed turn must not fabricate an utterance"
         );
+    }
+
+    // ----- Streamed turns (call mode, WI-965) ------------------------------
+
+    /// A sink that records every event, with an optional hook that may act
+    /// (cancel) on each one before the loop takes its next step.
+    fn recording_stream(
+        on_event: impl Fn(&TurnEvent, &CancellationToken) + Send + Sync + 'static,
+    ) -> (TurnStream, Arc<parking_lot::Mutex<Vec<TurnEvent>>>) {
+        let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let cancel = CancellationToken::new();
+        let sink_events = Arc::clone(&events);
+        let sink_cancel = cancel.clone();
+        let stream = TurnStream {
+            sink: Arc::new(move |event| {
+                on_event(&event, &sink_cancel);
+                sink_events.lock().push(event);
+            }),
+            cancel,
+        };
+        (stream, events)
+    }
+
+    fn requests_seen(rt: &AssistantRuntime) -> Vec<Value> {
+        match &rt.backend {
+            ChatBackend::Mock { seen, .. } => seen.lock().clone(),
+            ChatBackend::Http { .. } => unreachable!(),
+        }
+    }
+
+    fn deltas(events: &[TurnEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEvent::TextDelta(text) => Some(text.as_str()),
+                TurnEvent::ToolRound { .. } => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_streamed_reply_arrives_in_pieces_and_is_recorded_whole() {
+        let rt = runtime_with_script(
+            test_registry(),
+            vec![final_reply("Two sessions are idle and one is waiting.")],
+        );
+        let (stream, events) = recording_stream(|_, _| {});
+        let out = rt
+            .handle_message_streamed(terminal_caller(), "status?".into(), None, None, &stream)
+            .await
+            .unwrap();
+        let events = events.lock().clone();
+        assert!(
+            events.len() > 1,
+            "the reply should arrive in more than one piece"
+        );
+        assert_eq!(deltas(&events), "Two sessions are idle and one is waiting.");
+        assert_eq!(
+            out.reply.as_deref(),
+            Some("Two sessions are idle and one is waiting.")
+        );
+        assert!(!out.interrupted);
+        assert_eq!(rt.history().await.len(), 2);
+        assert_eq!(requests_seen(&rt)[0]["stream"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn a_tool_round_is_announced_before_the_tools_run() {
+        let rt = runtime_with_script(
+            test_registry(),
+            vec![
+                tool_call_reply("list_sessions", json!({})),
+                final_reply("Nothing is running."),
+            ],
+        );
+        let (stream, events) = recording_stream(|_, _| {});
+        let out = rt
+            .handle_message_streamed(
+                terminal_caller(),
+                "anything on?".into(),
+                None,
+                None,
+                &stream,
+            )
+            .await
+            .unwrap();
+        let events = events.lock().clone();
+        assert_eq!(
+            events.first(),
+            Some(&TurnEvent::ToolRound {
+                tools: vec!["list_sessions".into()]
+            })
+        );
+        assert_eq!(deltas(&events), "Nothing is running.");
+        assert_eq!(out.reply.as_deref(), Some("Nothing is running."));
+    }
+
+    #[tokio::test]
+    async fn a_cut_mid_reply_keeps_only_what_was_said_and_says_it_was_cut() {
+        let rt = runtime_with_script(
+            test_registry(),
+            vec![final_reply("one two three four five")],
+        );
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counter = Arc::clone(&seen);
+        let (stream, _) = recording_stream(move |event, cancel| {
+            if matches!(event, TurnEvent::TextDelta(_))
+                && counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1
+            {
+                cancel.cancel();
+            }
+        });
+        let out = rt
+            .handle_message_streamed(terminal_caller(), "count".into(), None, None, &stream)
+            .await
+            .unwrap();
+        assert!(out.interrupted);
+        assert_eq!(out.reply.as_deref(), Some("one two"));
+        let history = rt.history().await;
+        let last = history.last().unwrap();
+        assert!(last.interrupted);
+        assert_eq!(last.text, "one two");
+        let convo = rt.conversation.lock().await;
+        assert_eq!(
+            convo.messages.last().unwrap(),
+            &json!({"role": "assistant", "content": "one two"})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cut_during_tools_answers_every_call_and_never_asks_the_model_again() {
+        let rt = runtime_with_script(
+            test_registry(),
+            vec![
+                tool_call_reply("list_sessions", json!({})),
+                final_reply("never requested"),
+            ],
+        );
+        let (stream, _) = recording_stream(|event, cancel| {
+            if matches!(event, TurnEvent::ToolRound { .. }) {
+                cancel.cancel();
+            }
+        });
+        let out = rt
+            .handle_message_streamed(terminal_caller(), "anything?".into(), None, None, &stream)
+            .await
+            .unwrap();
+        assert!(out.interrupted);
+        assert_eq!(out.reply, None);
+        assert_eq!(
+            requests_seen(&rt).len(),
+            1,
+            "no second model call after the cut"
+        );
+        let convo = rt.conversation.lock().await;
+        // The history stays valid: the tool call has its result.
+        let roles: Vec<&str> = convo
+            .messages
+            .iter()
+            .filter_map(|m| m.get("role").and_then(Value::as_str))
+            .collect();
+        assert_eq!(roles, vec!["user", "assistant", "tool"]);
+    }
+
+    #[tokio::test]
+    async fn an_unstreamed_turn_is_unchanged_and_never_asks_for_a_stream() {
+        let rt = runtime_with_script(test_registry(), vec![final_reply("plain")]);
+        let out = rt
+            .handle_message(terminal_caller(), "hi".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(out.reply.as_deref(), Some("plain"));
+        assert!(requests_seen(&rt)[0].get("stream").is_none());
+    }
+
+    async fn interrupted_after(rt: &AssistantRuntime, words: usize) {
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (stream, _) = recording_stream(move |event, cancel| {
+            if matches!(event, TurnEvent::TextDelta(_))
+                && seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1 == words
+            {
+                cancel.cancel();
+            }
+        });
+        let out = rt
+            .handle_message_streamed(terminal_caller(), "go".into(), None, None, &stream)
+            .await
+            .unwrap();
+        assert!(out.interrupted);
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_reply_is_cut_back_to_what_was_heard() {
+        let rt = runtime_with_script(test_registry(), vec![final_reply("alpha beta gamma delta")]);
+        interrupted_after(&rt, 3).await;
+        assert_eq!(rt.history().await.last().unwrap().text, "alpha beta gamma");
+        // Not a prefix of what was said: refused, nothing changes.
+        assert!(!rt.truncate_interrupted_reply("beta").await);
+        assert!(rt.truncate_interrupted_reply("alpha beta").await);
+        assert_eq!(rt.history().await.last().unwrap().text, "alpha beta");
+        let convo = rt.conversation.lock().await;
+        assert_eq!(
+            convo.messages.last().unwrap()["content"],
+            json!("alpha beta")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_reply_nobody_heard_is_removed_and_a_finished_one_is_left_alone() {
+        let rt = runtime_with_script(
+            test_registry(),
+            vec![final_reply("alpha beta"), final_reply("finished answer")],
+        );
+        interrupted_after(&rt, 1).await;
+        assert!(rt.truncate_interrupted_reply("").await);
+        let history = rt.history().await;
+        assert_eq!(history.len(), 1, "only the user's turn is left");
+        rt.handle_message(terminal_caller(), "again".into(), None, None)
+            .await
+            .unwrap();
+        assert!(!rt.truncate_interrupted_reply("finished").await);
+        assert_eq!(rt.history().await.last().unwrap().text, "finished answer");
+    }
+
+    /// A stand-in provider on loopback answering `/chat/completions` with
+    /// whatever `answer` makes of the request body.
+    async fn stub_provider(
+        answer: impl Fn(Value) -> axum::response::Response + Clone + Send + Sync + 'static,
+    ) -> String {
+        use axum::{routing::post, Json, Router};
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let answer = answer.clone();
+                async move { answer(body) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        format!("http://{addr}/v1")
+    }
+
+    fn http_backend() -> ChatBackend {
+        ChatBackend::Http {
+            client: reqwest::Client::new(),
+        }
+    }
+
+    fn profile_at(base_url: String) -> Profile {
+        Profile {
+            base_url,
+            ..test_profile("default", "test-model")
+        }
+    }
+
+    #[tokio::test]
+    async fn the_http_backend_reads_a_real_event_stream() {
+        use axum::response::IntoResponse;
+        let base = stub_provider(|body| {
+            assert_eq!(body["stream"], json!(true));
+            let sse = concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\n",
+                ": keep-alive\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"there.\"}}]}\n\n",
+                "data: [DONE]\n\n",
+            );
+            ([("content-type", "text/event-stream")], sse).into_response()
+        })
+        .await;
+        let (stream, events) = recording_stream(|_, _| {});
+        let out = http_backend()
+            .stream(&profile_at(base), json!({"messages": []}), &stream)
+            .await
+            .unwrap();
+        let Streamed::Complete(response) = out else {
+            panic!("expected a complete response");
+        };
+        assert_eq!(response["choices"][0]["message"]["content"], "Hello there.");
+        assert_eq!(deltas(&events.lock()), "Hello there.");
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_refuses_to_stream_is_asked_again_without_it() {
+        use axum::{http::StatusCode, response::IntoResponse};
+        let base = stub_provider(|body| {
+            if body.get("stream").is_some() {
+                (StatusCode::BAD_REQUEST, "stream not supported").into_response()
+            } else {
+                axum::Json(final_reply("unstreamed answer")).into_response()
+            }
+        })
+        .await;
+        let (stream, _) = recording_stream(|_, _| {});
+        let out = http_backend()
+            .stream(&profile_at(base), json!({"messages": []}), &stream)
+            .await
+            .unwrap();
+        let Streamed::Complete(response) = out else {
+            panic!("expected a complete response");
+        };
+        assert_eq!(
+            response["choices"][0]["message"]["content"],
+            "unstreamed answer"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_provider_that_ignores_stream_is_read_as_one_whole_reply() {
+        use axum::response::IntoResponse;
+        let base = stub_provider(|_| axum::Json(final_reply("whole reply")).into_response()).await;
+        let (stream, events) = recording_stream(|_, _| {});
+        let out = http_backend()
+            .stream(&profile_at(base), json!({"messages": []}), &stream)
+            .await
+            .unwrap();
+        assert!(matches!(out, Streamed::Complete(_)));
+        assert_eq!(deltas(&events.lock()), "whole reply");
     }
 }
