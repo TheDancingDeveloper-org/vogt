@@ -44,6 +44,11 @@ pub struct Session {
     idle_after_ms: u64,
 
     scrollback: Mutex<Scrollback>,
+    /// The terminal the PTY output is parsed into, so the screen is read from
+    /// a grid that has seen every byte rather than replayed from a tail of the
+    /// ring (WI-990). `None` for a session restored from hibernation, which
+    /// has only the tail it kept and renders by replaying that.
+    terminal: Mutex<Option<crate::screen::Terminal>>,
     writer: Mutex<Box<dyn Write + Send>>,
     master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
     child: Mutex<Option<Box<dyn portable_pty::Child + Send>>>,
@@ -141,6 +146,34 @@ impl Session {
     /// in the registry (its scrollback is still readable) until deleted.
     pub fn is_alive(&self) -> bool {
         self.exit_code.lock().is_none()
+    }
+
+    /// Parse `bytes` of PTY output into the live grid. A session without one
+    /// (restored from hibernation) has nothing to update.
+    pub fn feed_terminal(&self, bytes: &[u8]) {
+        if let Some(terminal) = self.terminal.lock().as_mut() {
+            terminal.process(bytes);
+        }
+    }
+
+    /// Reflow the live grid to the PTY's new size.
+    pub fn resize_terminal(&self, rows: u16, cols: u16) {
+        if let Some(terminal) = self.terminal.lock().as_mut() {
+            terminal.resize(rows, cols);
+        }
+    }
+
+    /// The current screen and the scrollback above it. From the live grid
+    /// when the session has one — it has parsed every byte since spawn, so a
+    /// diff-painting TUI's frame survives past the replay window (WI-990) —
+    /// and otherwise by replaying the tail of the ring a hibernated session
+    /// kept.
+    pub fn render_screen(&self, scrollback_lines: usize) -> (crate::screen::Rendered, Vec<String>) {
+        if let Some(terminal) = self.terminal.lock().as_mut() {
+            return terminal.render(scrollback_lines);
+        }
+        let (bytes, rows, cols) = self.screen_source(crate::screen::SCREEN_REPLAY_BYTES);
+        crate::screen::render_with_scrollback(&bytes, rows, cols, scrollback_lines)
     }
 
     /// The bytes and size to render the current screen from: the last
@@ -363,13 +396,7 @@ impl Session {
     /// than from the last activity pass, so an answer is aimed at what is
     /// actually showing.
     pub fn current_dialog(&self) -> Option<crate::approval::Detected> {
-        let (bytes, rows, cols) = self.screen_source(crate::screen::SCREEN_REPLAY_BYTES);
-        let (rendered, scrollback) = crate::screen::render_with_scrollback(
-            &bytes,
-            rows,
-            cols,
-            crate::approval::SCROLLBACK_CONTEXT_LINES,
-        );
+        let (rendered, scrollback) = self.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
         crate::approval::detect(&rendered.lines, &scrollback)
     }
 
@@ -483,6 +510,10 @@ impl Session {
                 pixel_height: 0,
             })
             .map_err(|e| ApiError::Pty(format!("resize: {e}")))?;
+        drop(master);
+        // Reflow the grid to match, so a screen read before the program's own
+        // repaint arrives is already the new size.
+        self.resize_terminal(rows, cols);
         Ok(())
     }
 
@@ -857,6 +888,7 @@ pub fn spawn(
         scrollback: Mutex::new(Scrollback::new(
             spec.scrollback_bytes.unwrap_or(defaults.scrollback_bytes),
         )),
+        terminal: Mutex::new(Some(crate::screen::Terminal::new(size.rows, size.cols))),
         writer: Mutex::new(writer),
         master: Mutex::new(pair.master),
         child: Mutex::new(Some(child)),
@@ -941,6 +973,7 @@ fn spawn_reader_thread(
                             sb.push(&data);
                             sb.total_written()
                         };
+                        session.feed_terminal(&data);
                         let pos = pos_after - n as u64;
                         *session.last_output.lock() = Some(Instant::now());
                         *session.last_output_at.lock() = Some(time::OffsetDateTime::now_utc());
@@ -1251,13 +1284,8 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // answered and redrawn over is not reported from text lingering in the
     // tail.
     let detected = if crate::approval::mentions_approval(&strip_ansi(&tail)) {
-        let (bytes, rows, cols) = session.screen_source(crate::screen::SCREEN_REPLAY_BYTES);
-        let (rendered, scrollback) = crate::screen::render_with_scrollback(
-            &bytes,
-            rows,
-            cols,
-            crate::approval::SCROLLBACK_CONTEXT_LINES,
-        );
+        let (rendered, scrollback) =
+            session.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
         crate::approval::detect(&rendered.lines, &scrollback)
     } else {
         None

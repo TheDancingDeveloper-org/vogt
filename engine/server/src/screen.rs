@@ -1,12 +1,18 @@
 //! The rendered terminal screen of a session, for programs that drive it.
 //!
-//! The engine keeps no terminal emulator of its own: a session's output lives
-//! as raw bytes in its scrollback ring, and every client (xterm.js in the
-//! PWA) renders it by replaying that ring on attach. `GET
-//! /api/sessions/{id}/screen` does the same replay server-side, into a `vt100`
-//! grid sized to the PTY's current rows and cols, and returns the visible
-//! rows as text. Nothing is kept between requests and the PTY reader's hot
-//! path is untouched; the cost is one bounded replay per request.
+//! A session's output lives as raw bytes in its scrollback ring, and every
+//! client (xterm.js in the PWA) renders it by replaying that ring on attach.
+//! The engine also keeps its own terminal: the PTY reader feeds each chunk
+//! into a per-session `vt100` grid ([`Terminal`]), and `GET
+//! /api/sessions/{id}/screen` reads that grid rather than replaying a tail of
+//! the ring. A diff-painting TUI (opencode / OpenTUI) draws one full frame and
+//! then only the cells that changed, with no newline at all, so once more than
+//! the replay window's worth of diffs have followed the last full repaint a
+//! tail replay onto a blank grid shows only the recently changed cells — a
+//! spinner and a progress bar on an otherwise blank screen (WI-990). The live
+//! grid has seen every byte since the session started, so it still holds the
+//! whole frame. A resize reflows it; a hibernated session has no live grid and
+//! falls back to replaying the tail it kept.
 
 use std::sync::Arc;
 
@@ -17,12 +23,66 @@ use crate::{
     pty::Session,
 };
 
-/// How much of the scrollback ring is replayed to render the screen. A
-/// screen is at most a few tens of KiB of cells; 1 MiB of recent output is
-/// ample to reach the last full redraw of any TUI while bounding the cost of
-/// a poll. The tail is aligned to a ground-state boundary, exactly as a
-/// bounded attach replay is.
+/// How much of the scrollback ring is replayed to render the screen of a
+/// session that has no live grid (a hibernated one, whose grid was dropped
+/// with its process). A live session's screen is read from its [`Terminal`]
+/// and never replays. The tail is aligned to a ground-state boundary, exactly
+/// as a bounded attach replay is.
 pub const SCREEN_REPLAY_BYTES: usize = 1024 * 1024;
+
+/// Scrollback lines the live grid keeps above the screen. The screen route
+/// returns at most [`MAX_SCROLLBACK_LINES`] of them, and the grid is what
+/// bounds the memory a session's emulator holds.
+pub const GRID_SCROLLBACK_LINES: usize = MAX_SCROLLBACK_LINES;
+
+/// The terminal one session's PTY output is parsed into.
+///
+/// Fed incrementally by the PTY reader ([`Terminal::process`]) and resized
+/// with the PTY ([`Terminal::resize`]). `vt100` 0.16.2 (pinned in
+/// `Cargo.lock`, already the crate the on-demand replay used) parses the
+/// stream into a cell grid: it implements the alternate screen, scroll
+/// regions and reflow on resize, consumes DEC private modes it does not act
+/// on — including 2026, synchronized output, which it treats as a no-op so a
+/// frame is never held back — and drops OSC queries and any other sequence it
+/// does not implement without letting their bytes reach a cell. Holding one
+/// per session is what lets `session_screen` answer from the grid instead of
+/// from a tail of raw bytes.
+pub struct Terminal {
+    parser: vt100::Parser<TitleCapture>,
+}
+
+impl Terminal {
+    /// A grid of `rows`×`cols` with [`GRID_SCROLLBACK_LINES`] of history.
+    pub fn new(rows: u16, cols: u16) -> Self {
+        let (rows, cols) = (rows.max(1), cols.max(1));
+        Self {
+            parser: vt100::Parser::new_with_callbacks(
+                rows,
+                cols,
+                GRID_SCROLLBACK_LINES,
+                TitleCapture::default(),
+            ),
+        }
+    }
+
+    /// Parse the next chunk of PTY output into the grid.
+    pub fn process(&mut self, bytes: &[u8]) {
+        self.parser.process(bytes);
+    }
+
+    /// Reflow the grid to the PTY's new size. A no-op when it already matches.
+    pub fn resize(&mut self, rows: u16, cols: u16) {
+        let (rows, cols) = (rows.max(1), cols.max(1));
+        if self.parser.screen().size() != (rows, cols) {
+            self.parser.screen_mut().set_size(rows, cols);
+        }
+    }
+
+    /// The visible screen and up to `scrollback_lines` lines above it.
+    pub fn render(&mut self, scrollback_lines: usize) -> (Rendered, Vec<String>) {
+        read_parser(&mut self.parser, scrollback_lines)
+    }
+}
 
 /// Captures the window title a program sets (OSC 0 / OSC 2).
 #[derive(Default)]
@@ -69,6 +129,17 @@ pub fn render_with_scrollback(
     let keep = scrollback_lines.min(MAX_SCROLLBACK_LINES);
     let mut parser = vt100::Parser::new_with_callbacks(rows, cols, keep, TitleCapture::default());
     parser.process(bytes);
+    read_parser(&mut parser, scrollback_lines)
+}
+
+/// Read a parsed grid back as text. Shared by the on-demand replay and the
+/// live [`Terminal`], so both answer in the same shape.
+fn read_parser(
+    parser: &mut vt100::Parser<TitleCapture>,
+    scrollback_lines: usize,
+) -> (Rendered, Vec<String>) {
+    let (rows, cols) = parser.screen().size();
+    let keep = scrollback_lines.min(MAX_SCROLLBACK_LINES);
     let mut history = Vec::new();
     if keep > 0 {
         // The view at offset `off` starts at history line `len - off`; read
@@ -190,25 +261,25 @@ pub fn is_ready(activity: ActivityState, alive: bool, lines: &[String]) -> bool 
 }
 
 /// Render a session's current screen, with up to `scrollback_lines` lines of
-/// history above it. The replay runs on the blocking pool (it is CPU-bound
-/// over up to [`SCREEN_REPLAY_BYTES`]), and a panic inside the emulator on
+/// history above it. A live session is read from its [`Terminal`]; a
+/// hibernated one, which has none, is replayed from the tail it kept. Either
+/// way the work runs on the blocking pool, and a panic inside the emulator on
 /// hostile output fails this one request, not the engine.
 pub async fn session_screen(
     session: Arc<Session>,
     scrollback_lines: usize,
 ) -> Result<SessionScreen> {
-    // The live state is read *before* the bytes are copied: the state was
-    // computed from output already in the ring, so the render includes the
-    // output that state describes. Read after, a `waiting-for-input` that
-    // arrived mid-render could be paired with a screen that does not yet
-    // show its prompt.
+    // The live state is read *before* the grid: the state was computed from
+    // output already parsed into it, so the render includes the output that
+    // state describes. Read after, a `waiting-for-input` that arrived
+    // mid-render could be paired with a screen that does not yet show its
+    // prompt.
     let summary = session.summary();
-    let (bytes, rows, cols) = session.screen_source(SCREEN_REPLAY_BYTES);
-    let (rendered, scrollback) = tokio::task::spawn_blocking(move || {
-        render_with_scrollback(&bytes, rows, cols, scrollback_lines)
-    })
-    .await
-    .map_err(|e| ApiError::Internal(format!("render screen: {e}")))?;
+    let rendering = Arc::clone(&session);
+    let (rendered, scrollback) =
+        tokio::task::spawn_blocking(move || rendering.render_screen(scrollback_lines))
+            .await
+            .map_err(|e| ApiError::Internal(format!("render screen: {e}")))?;
     let ready = is_ready(summary.activity, summary.alive, &rendered.lines);
     Ok(SessionScreen {
         id: session.id,
@@ -472,6 +543,77 @@ mod tests {
         assert!(!is_ready(ActivityState::Running, true, &finished));
         // A bar with no footer is just a box-drawing character in output.
         assert!(!shows_opencode_prompt(&screen(&["┃ some table cell"])));
+    }
+
+    /// WI-990: a diff-painting TUI draws one full frame, then only the cells
+    /// that changed. Once more than the replay window of diffs has followed,
+    /// replaying the tail onto a blank grid loses the frame; a grid that was
+    /// fed every byte keeps it, and still shows none of the control bytes.
+    #[test]
+    fn a_live_grid_keeps_the_frame_a_tail_replay_loses() {
+        let rows = 4u16;
+        let cols = 30u16;
+        let mut full = b"\x1b[?1049h\x1b[2J".to_vec();
+        for row in 1..=rows {
+            full.extend(format!("\x1b[{row};1Hline {row} of the frame").bytes());
+        }
+        let mut diffs = Vec::new();
+        for n in 0..50000 {
+            diffs
+                .extend(format!("\x1b[?2026h\x1b[{};{}H{n:06}\x1b[?2026l", rows, cols - 5).bytes());
+        }
+        // The diffs alone outrun the replay window, so a tail replay starts
+        // after the full frame and can only draw the last counter.
+        assert!(diffs.len() > SCREEN_REPLAY_BYTES);
+        let tail = &diffs[diffs.len() - SCREEN_REPLAY_BYTES..];
+        let replayed = render(tail, rows, cols);
+        assert!(
+            replayed.lines.iter().all(|l| !l.contains("line 1")),
+            "a tail replay should have lost the frame: {replayed:?}"
+        );
+
+        let mut live = Terminal::new(rows, cols);
+        live.process(&full);
+        live.process(&diffs);
+        let (rendered, _) = live.render(0);
+        assert_eq!(rendered.lines[0], "line 1 of the frame");
+        assert_eq!(rendered.lines[1], "line 2 of the frame");
+        // The counter the diffs paint sits at the end of the last row, over
+        // the tail of that row's text, and nothing of the escape sequences
+        // around it leaked as text.
+        assert!(
+            rendered.lines[3].starts_with("line 4 of the"),
+            "{:?}",
+            rendered.lines[3]
+        );
+        assert!(
+            rendered.lines[3].ends_with("049999"),
+            "{:?}",
+            rendered.lines[3]
+        );
+        for line in &rendered.lines {
+            assert!(!line.contains('\u{1b}'), "{line:?}");
+        }
+    }
+
+    /// WI-990: resize reflows the live grid, the alternate screen restores the
+    /// main one, and a mode the emulator has never heard of changes nothing.
+    #[test]
+    fn resize_reflows_and_the_alternate_screen_restores() {
+        let mut t = Terminal::new(3, 10);
+        t.process(b"main line");
+        t.process(b"\x1b[?1049h\x1b[2J\x1b[Halt screen");
+        assert_eq!(t.render(0).0.lines[0], "alt screen");
+        t.process(b"\x1b[?1049l");
+        assert_eq!(t.render(0).0.lines[0], "main line");
+
+        t.process(b"\x1b[?9999h");
+        assert_eq!(t.render(0).0.lines[0], "main line");
+
+        t.resize(3, 4);
+        let (r, _) = t.render(0);
+        assert_eq!((r.rows, r.cols), (3, 4));
+        assert_eq!(r.lines[0], "main");
     }
 
     #[test]
