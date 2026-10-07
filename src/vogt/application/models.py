@@ -126,10 +126,12 @@ SessionRole = Literal["worker", "oversight"]
 class InboxAction(Result):
     """A typed target for the action a row can take."""
 
-    kind: Literal["drift", "observation", "session"]
+    kind: Literal["drift", "observation", "session", "grant"]
     drift_id: str | None = None
     subject_key: str | None = None
     session_id: str | None = None
+    #: A pending grant a person approves or denies (WI-973).
+    grant_id: str | None = None
 
 
 class InboxEntry(Result):
@@ -3972,6 +3974,114 @@ class SetSessionRoleParams(Params):
         )
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+# -- approved grants to a session (WI-973) --------------------------------
+#
+# A session asks — usually an overseer, for a worker it drives — for one scoped
+# item for one target session; a person approves it in the Inbox; the engine
+# applies it to the live session. `docs/design/oversight-grants.md`.
+
+GrantDecision = Literal["approve", "deny"]
+GrantStateView = Literal["pending", "approved", "denied", "revoked", "expired"]
+
+
+class SessionGrantView(Result):
+    """A grant as callers read it: names only, never a value."""
+
+    id: str
+    target: str = Field(description="The target session's engine id.")
+    kind: Literal["credential", "capability"]
+    var: str | None = None
+    project_id: str | None = None
+    secret_name: str | None = None
+    capability: str | None = None
+    uses: Literal["once", "ttl"]
+    ttl_seconds: int
+    reason: str
+    requested_by: str = Field(description="identity_ref of who asked.")
+    requested_at: datetime
+    state: GrantStateView = Field(
+        description="`expired` is an approved grant past `expires_at`."
+    )
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    decision_reason: str | None = None
+    expires_at: datetime | None = None
+    revoked_by: str | None = None
+    revoked_at: datetime | None = None
+
+
+class SessionGrantResult(Result):
+    grant: SessionGrantView
+
+
+class RequestGrantParams(Params):
+    """Ask a person to approve one scoped item for one session."""
+
+    target: str = Field(
+        description="The session the grant is for: ses_… or the engine's UUID. "
+        "Asking for a session other than your own needs you to be an "
+        "oversight session."
+    )
+    kind: Literal["credential", "capability"] = Field(
+        default="credential",
+        description="`credential` (one named secret). `capability` is not "
+        "available yet (milestone 2).",
+    )
+    secret_name: str | None = Field(
+        default=None,
+        description="The secret's name in the secrets manager, e.g. "
+        "100.109.218.11_SSH. Cadastre `lookup` says where a credential lives.",
+    )
+    project_id: str | None = Field(
+        default=None,
+        description="The secrets-manager project that holds it. The engine "
+        "accepts only projects open to grants.",
+    )
+    var: str | None = Field(
+        default=None,
+        description="The name the session fetches it under "
+        "(`vogt-agent-auth fetch VAR`). Defaults to GRANT_<secret name>.",
+    )
+    capability: str | None = None
+    uses: Literal["once", "ttl"] = Field(
+        default="once",
+        description="`once`: the first fetch consumes it. `ttl`: any number "
+        "of fetches until it expires.",
+    )
+    ttl_seconds: int = Field(
+        default=3600,
+        ge=60,
+        le=86_400,
+        description="Lifetime once approved, 60 s to 24 h.",
+    )
+    reason: Reason = Field(
+        description="Why the target needs it. The approver reads this."
+    )
+
+
+class DecideGrantParams(Params):
+    id: str = Field(description="The grant id (grt_…).")
+    decision: GrantDecision
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class RevokeGrantParams(Params):
+    id: str = Field(description="The grant id (grt_…).")
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ListGrantsParams(Params):
+    state: GrantStateView | None = None
+    target: str | None = Field(
+        default=None, description="Only grants for this session (either id)."
+    )
+    limit: int = Field(default=50, ge=1, le=200)
+
+
+class ListGrantsResult(Result):
+    grants: list[SessionGrantView] = []
 
 
 class ListSessionsParams(Params):

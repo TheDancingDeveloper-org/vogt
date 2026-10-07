@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vogt.errors import Conflict, InvalidRequest, NotFound, VogtError
+from vogt.errors import Conflict, GrantRefused, InvalidRequest, NotFound, VogtError
 
 USER_AGENT = "vogt"
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -1074,6 +1074,36 @@ class EngineClient:
             return None
         return EngineSession.from_payload(payload)
 
+    def apply_grant(self, session_id: str, grant: dict[str, Any]) -> dict[str, Any]:
+        """Hand the engine a person-approved grant for a live session (WI-973).
+
+        Sent with the core's own credential, which is the only one the engine
+        accepts for this. Raises `NotFound` when the engine does not know the
+        session, `Conflict` when it cannot hold the grant (exited, no broker,
+        a manifest name), `GrantRefused` for a project not open to grants and
+        `InvalidRequest` for a field it rejects.
+        """
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/grants",
+            method="POST",
+            payload=grant,
+            allow_missing=True,
+        )
+        if payload is None:
+            msg = f"the {self.label} has no session {session_id!r}"
+            raise NotFound(msg)
+        return payload if isinstance(payload, dict) else {}
+
+    def revoke_grant(self, session_id: str, grant_id: str) -> bool:
+        """Drop one grant at the engine; whether it still held it."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/grants/"
+            f"{urllib.parse.quote(grant_id)}",
+            method="DELETE",
+            allow_missing=True,
+        )
+        return isinstance(payload, dict) and bool(payload.get("revoked"))
+
     # -- transport ---------------------------------------------------------
 
     def healthz(self) -> None:
@@ -1152,6 +1182,12 @@ class EngineClient:
         )
         if status == 404 and allow_missing:
             return None
+        if status == 403:
+            said = _engine_error_text(response.decode("utf-8", errors="replace"))
+            if said.startswith("forbidden: "):
+                # The engine understood the credential and refused the act
+                # itself, saying why (a grant to a project not open to grants).
+                raise GrantRefused(said.removeprefix("forbidden: "))
         if status in (401, 403):
             msg = (
                 f"the {self.label} refused this request ({status}): the token "

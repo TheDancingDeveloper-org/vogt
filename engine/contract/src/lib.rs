@@ -378,6 +378,36 @@ pub struct ConversationReport {
     pub ended: bool,
 }
 
+/// How many times a session may use a grant (WI-973).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GrantUses {
+    /// The first successful fetch consumes it.
+    #[default]
+    Once,
+    /// Any number of fetches until it expires.
+    Ttl,
+}
+
+/// `POST /api/sessions/{id}/grants`: a person-approved grant of one named
+/// credential to one live session (WI-973). Accepted only from vogt-core's
+/// own identity (the stack secret), which sends it once a person approved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionGrant {
+    /// vogt-core's id for the grant (`grt_…`), named in every audit line.
+    pub grant_id: String,
+    /// The name the session fetches it under (`vogt-agent-auth fetch VAR`).
+    pub var: String,
+    /// The secrets-manager project that holds it.
+    pub project_id: String,
+    /// The secret's name in that project.
+    pub secret_name: String,
+    #[serde(default)]
+    pub uses: GrantUses,
+    /// RFC 3339; never honoured after this.
+    pub expires_at: String,
+}
+
 /// `POST /api/sessions/{id}/keep-awake`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeepAwakeRequest {

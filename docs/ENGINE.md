@@ -2837,6 +2837,10 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
 | `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |
 | `session.set_role` | Operator-only | Unavailable: Nominates the overseeing session; for the GUI and for agents over MCP/CLI/REST. |
+| `session.grant_request` | Operator-only | Unavailable: Asks a person to approve a credential for a session; for agents over MCP/CLI/REST. |
+| `session.grant_decide` | Operator-only | Unavailable: A person's approval of a grant, made deliberately in the Inbox, never by voice. |
+| `session.grant_revoke` | Operator-only | Unavailable: Revoking a grant; for the GUI and for agents over MCP/CLI/REST. |
+| `session.grant_list` | Operator-only | Unavailable: Lists grants to sessions; for the GUI and for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |
@@ -3272,6 +3276,41 @@ is audited** on `vogt::audit` by session id, variable and secret name and
 byte length — never value. `writable` widens blast radius only to the entries an
 operator pre-authorised, and every overwrite is in the audit log. The same
 honest caveat applies.
+
+**Approved grants: one secret, one session, until a time (WI-973).** The
+manifest is fixed at deploy time, and changing it cycles the pod. A grant is
+the runtime counterpart: a person approves, in the Inbox, one named secret for
+one live session, and vogt-core hands it to the engine with
+`POST /api/sessions/{id}/grants` `{grant_id, var, project_id, secret_name,
+uses, expires_at}`. **Only the stack secret (vogt-core's identity) may call it**,
+or `DELETE /api/sessions/{id}/grants/{grant_id}`. A person's token, the
+break-glass token and every session token are refused with 403, even though
+they hold `sessions`. The engine refuses:
+
+- a session it does not know (404), or one that has exited (409);
+- a deployment with no broker (409);
+- a `var` that is a manifest entry (409: a grant never shadows the manifest);
+- a project the manifest does not name and `ENGINE_AGENT_GRANT_PROJECTS` does
+  not list (403);
+- an expiry in the past or more than 24 h ahead (400).
+
+The session fetches the grant with the command it already has, `vogt-agent-auth
+fetch VAR`. The fetch route checks the manifest first, then that session's own
+live grants. It runs the helper's `get VAR` with `ENGINE_AGENT_AUTH_SECRETS`
+replaced by exactly the granted line, so the helper's manifest check still
+holds. A `once` grant is gone after its first successful fetch, and each fetch
+is audited with its `grant_id`. `vogt-agent-auth grants` (`GET
+/api/agent-auth/grants`, broker token) lists the session's live grants, never
+a value, and `GET /api/sessions/{id}/grants` (`sessions`) shows the same to an
+operator.
+
+Grants live in memory. The session ending or hibernating, or the engine
+restarting, drops them, which fails closed. Every apply and revoke is audited
+as `event=session.grant`. The driven-session policy carries one allow rule,
+*Approved Vogt Grant*, for credentials `vogt-agent-auth grants` lists. The
+decision half (request, Inbox, approval by a person only) is vogt-core's
+`session.grant_*` ([`API.md`](API.md)). The design and its invariants are
+[`design/oversight-grants.md`](design/oversight-grants.md).
 
 Operator-local notes about a particular deployment belong in the git-ignored
 `docs/local/`, not here.

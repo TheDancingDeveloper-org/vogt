@@ -36,6 +36,7 @@ from vogt.application.models import (
     InboxSavedFilter,
     InboxSnoozeParams,
     InboxTriageResult,
+    SessionGrantView,
 )
 from vogt.application.services import _resolve
 from vogt.application.services.ci_watch import (
@@ -43,6 +44,7 @@ from vogt.application.services.ci_watch import (
     bound_branches,
     index_by_branch,
 )
+from vogt.application.services.grants import pending_grants
 from vogt.application.services.views import trust_for
 from vogt.application.writes import WriteOutcome, audited_write
 from vogt.collectors.session_outcomes import KIND_TASK_RUN
@@ -497,6 +499,11 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
     for proposal in view.list_drift(status="open", limit=MAX_SCAN):
         entries.append(_drift_entry(ctx, proposal, projects, view))
 
+    # Grants waiting for a person (WI-973): one entry per request, decided
+    # with Approve/Deny on the entry itself.
+    for grant in pending_grants(view, ctx):
+        entries.append(_grant_entry(ctx, grant))
+
     if ctx.engine is not None:
         try:
             live = ctx.engine.list_sessions()
@@ -828,6 +835,37 @@ def _blocked_entry(
         freshness="live",
         provisional=True,
         action=InboxAction(kind="session", session_id=session_id),
+        **_actor_fields(SYSTEM_ACTOR),
+    )
+
+
+def _grant_entry(ctx: AppContext, grant: SessionGrantView) -> InboxEntry:
+    """A grant a session asked for and a person has yet to decide (WI-973).
+
+    The reason is the asking agent's text — untrusted, shown verbatim, never
+    acted on. What is asked for (secret and project) is spelled out, because
+    that is what the person approves.
+    """
+    item = f"{grant.secret_name} (project {grant.project_id}) as {grant.var}"
+    uses = "one fetch" if grant.uses == "once" else "any number of fetches"
+    summary = (
+        f"{grant.requested_by} asks for {item}, {uses}, for "
+        f"{grant.ttl_seconds // 60} min once approved. Reason: {grant.reason}"
+    )[:1000]
+    return InboxEntry(
+        entry_key=f"agent:grant:{grant.id}",
+        source=AGENT_KIND,
+        kind="session.grant_request",
+        occurred_at=grant.requested_at,
+        observed_at=None,
+        title=f"Grant request: {grant.secret_name} for session {grant.target[:8]}",
+        summary=summary,
+        session_id=grant.target,
+        source_subject_key=grant.id,
+        trust_state="unverified",
+        freshness="live",
+        provisional=True,
+        action=InboxAction(kind="grant", grant_id=grant.id, session_id=grant.target),
         **_actor_fields(SYSTEM_ACTOR),
     )
 

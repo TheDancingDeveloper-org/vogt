@@ -512,6 +512,33 @@ SCRIPT: list[tuple[str, StepParams]] = [
         "session.wake",
         lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
     ),
+    # A grant (WI-973): asked for, listed, approved by the harness's person,
+    # then revoked — against the same stand-in engine.
+    (
+        "session.grant_request",
+        lambda seen: {
+            "target": seen["session.start"]["session"]["id"],
+            "secret_name": "PARITY_SECRET",
+            "project_id": "parity-project",
+            "reason": WHY,
+        },
+    ),
+    ("session.grant_list", {"state": "pending"}),
+    (
+        "session.grant_decide",
+        lambda seen: {
+            "id": seen["session.grant_request"]["grant"]["id"],
+            "decision": "approve",
+            "reason": WHY,
+        },
+    ),
+    (
+        "session.grant_revoke",
+        lambda seen: {
+            "id": seen["session.grant_request"]["grant"]["id"],
+            "reason": WHY,
+        },
+    ),
     (
         "session.stop",
         lambda seen: {
@@ -931,6 +958,10 @@ def _stand_in_engine() -> EngineClient:
             return 200, json.dumps(
                 {**summary(path.rsplit("/", 2)[-2]), "keep_awake": spec["keep_awake"]}
             ).encode()
+        if method == "POST" and path.endswith("/grants"):
+            return 200, json.dumps(spec).encode()
+        if method == "DELETE" and "/grants/" in path:
+            return 200, json.dumps({"revoked": True}).encode()
         if method == "POST" and path.endswith("/role"):
             return 200, json.dumps(
                 {

@@ -210,6 +210,7 @@ Usage:
   vogt-agent-auth fetch <VAR>
   vogt-agent-auth set <VAR>     (value on stdin)
   vogt-agent-auth store <VAR>   (value on stdin)
+  vogt-agent-auth grants
 
 Commands:
   check  Fetch credentials and validate secrets-manager access, any configured
@@ -227,6 +228,9 @@ Commands:
          session.
   store  (session-side) Send a value on stdin to the engine's broker to store
          under one `writable` manifest entry. Needs only the broker token.
+  grants (session-side) List the credential grants a person approved for this
+         session (WI-973): VAR, secret, uses, expiry. Never a value. Fetch one
+         with `fetch VAR`.
 EOF
 }
 
@@ -560,6 +564,33 @@ fetch_one() {
     esac
 }
 
+# `grants`: the session's half of an approved grant (WI-973). Lists what a
+# person approved for this session — one line per grant, never a value — so
+# the agent knows which VAR to `fetch`, and the grant is visible in its
+# transcript. Needs only the broker token.
+list_grants() {
+    local response status
+    [[ -n "${VOGT_ENGINE_BROKER_URL:-}" && -n "${VOGT_ENGINE_BROKER_TOKEN:-}" ]] || die \
+        "no secret broker in this environment (VOGT_ENGINE_BROKER_URL/_TOKEN are unset): not an engine session, or the engine declares nothing in ENGINE_AGENT_AUTH_SECRETS"
+    require_command curl
+    require_command jq
+    umask 077
+    response="$(mktemp)"
+    status="$(curl -sS --max-time 15 -o "$response" -w '%{http_code}' \
+        -H @<(printf 'Authorization: Bearer %s\n' "$VOGT_ENGINE_BROKER_TOKEN") \
+        "${VOGT_ENGINE_BROKER_URL%/}/api/agent-auth/grants" 2>/dev/null)" || status="000"
+    if [[ "$status" != "200" ]]; then
+        rm -f "$response"
+        die "secret broker could not list grants (HTTP $status)"
+    fi
+    if [[ "$(jq 'length' "$response")" == "0" ]]; then
+        echo "no approved grants for this session"
+    else
+        jq -r '.[] | "\(.var)\tsecret=\(.secret_name) project=\(.project_id) uses=\(.uses) expires=\(.expires_at) grant=\(.grant_id)"' "$response"
+    fi
+    rm -f "$response"
+}
+
 # Load every secret named in ENGINE_AGENT_AUTH_SECRETS, export it under its
 # manifest variable, and optionally alias one of them to GH_TOKEN.
 #
@@ -859,6 +890,9 @@ main() {
             shift
             [[ $# -eq 1 && -n "${1:-}" ]] || die "store requires exactly one VAR"
             store_one "$1"
+            ;;
+        grants)
+            list_grants
             ;;
         -h|--help|help)
             usage

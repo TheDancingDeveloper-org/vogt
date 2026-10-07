@@ -32,6 +32,7 @@ from vogt.core.entities import (
     PasswordCredential,
     Project,
     RelationKind,
+    SessionGrant,
     Suppression,
     Sweep,
     SweepOutcome,
@@ -489,6 +490,18 @@ class ReadView(Protocol):
 
     def session_by_id(self, session_id: str) -> CodingSession | None: ...
 
+    def session_grant(self, grant_id: str) -> SessionGrant | None: ...
+
+    def list_session_grants(
+        self,
+        *,
+        state: str | None = None,
+        target_engine_session_id: str | None = None,
+        limit: int = 200,
+    ) -> list[SessionGrant]:
+        """Grants, newest request first, optionally of one state or target."""
+        ...
+
     def session_by_engine_id(self, engine_session_id: str) -> CodingSession | None:
         """The link for a terminal the engine named.
 
@@ -702,6 +715,12 @@ class WriteTxn(ReadView, Protocol):
     def insert_writeback(self, record: WriteBackRecord) -> None: ...
 
     def insert_session(self, session: CodingSession) -> None: ...
+
+    def insert_session_grant(self, grant: SessionGrant) -> None: ...
+
+    def update_session_grant(self, grant: SessionGrant) -> None:
+        """Replace a grant's decision and revocation fields."""
+        ...
 
     def mark_session_stopped(self, session_id: str, *, at: datetime) -> None:
         """Record that Vogt stopped this session.

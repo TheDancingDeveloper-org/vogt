@@ -51,6 +51,12 @@ from vogt.application.services.forge_import import import_forge_repo
 from vogt.application.services.forge_link import link_project
 from vogt.application.services.forge_publish import publish_project
 from vogt.application.services.forge_repos import list_forge_repos
+from vogt.application.services.grants import (
+    decide_grant,
+    list_grants,
+    request_grant,
+    revoke_grant,
+)
 from vogt.application.services.history import list_audit, list_events
 from vogt.application.services.imports import import_project
 from vogt.application.services.inbox import (
@@ -176,6 +182,7 @@ __all__ = [
     "create_project",
     "create_user",
     "create_work",
+    "decide_grant",
     "deployed_versions",
     "deps",
     "detect_drift",
@@ -205,6 +212,7 @@ __all__ = [
     "list_drift",
     "list_events",
     "list_forge_repos",
+    "list_grants",
     "list_inbox",
     "list_initiatives",
     "list_labels",
@@ -233,9 +241,11 @@ __all__ = [
     "report_blocked",
     "report_unblocked",
     "reproject_initiative",
+    "request_grant",
     "resolve_drift",
     "restore",
     "restore_inbox",
+    "revoke_grant",
     "revoke_suppression",
     "revoke_token",
     "scaffold_project",

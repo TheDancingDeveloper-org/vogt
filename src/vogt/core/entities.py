@@ -498,6 +498,54 @@ class ActorPreference(Entity):
     updated_at: datetime
 
 
+GrantKind = Literal["credential", "capability"]
+GrantUses = Literal["once", "ttl"]
+GrantState = Literal["pending", "approved", "denied", "revoked"]
+
+
+class SessionGrant(Entity):
+    """One scoped item a person approved (or has yet to) for one session.
+
+    WI-973 (`docs/design/oversight-grants.md`). A session asks — usually an
+    overseer, for the worker it drives — and a person decides. The engine
+    applies an approved credential grant to the live session and is the only
+    thing that ever sees its value; this row holds names, never a value.
+    `expired` is not a state: it is an approved grant past `expires_at`.
+    """
+
+    id: str
+    target_engine_session_id: str
+    kind: GrantKind
+    var: str | None = None
+    project_id: str | None = None
+    secret_name: str | None = None
+    capability: str | None = None
+    uses: GrantUses = "once"
+    ttl_seconds: int
+    reason: str
+    requested_by: str
+    requested_at: datetime
+    state: GrantState = "pending"
+    decided_by: str | None = None
+    decided_at: datetime | None = None
+    decision_reason: str | None = None
+    expires_at: datetime | None = None
+    revoked_by: str | None = None
+    revoked_at: datetime | None = None
+
+    def effective_state(
+        self, now: datetime
+    ) -> Literal["pending", "approved", "denied", "revoked", "expired"]:
+        """`expired` for an approved grant past its expiry, else the state."""
+        if (
+            self.state == "approved"
+            and self.expires_at is not None
+            and self.expires_at <= now
+        ):
+            return "expired"
+        return self.state
+
+
 class DepRef(Entity):
     """One reference from a project to another project.
 

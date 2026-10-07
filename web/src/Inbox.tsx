@@ -6,6 +6,7 @@ import {
   archiveInbox,
   listInbox,
   resolveInboxDrift,
+  decideGrant,
   restoreInbox,
   snoozeInbox,
   suppressSubject,
@@ -142,12 +143,13 @@ interface EntryProps {
   ) => Promise<string | null>;
   onAction: (
     entry: InboxEntry,
-    action: "adopt" | "suppress" | "accept" | "reject",
+    action: DecisionAction,
     reason: string,
   ) => Promise<string | null>;
 }
 
-type EntryAction = "archive" | "snooze" | "restore" | "adopt" | "suppress" | "accept" | "reject";
+type DecisionAction = "adopt" | "suppress" | "accept" | "reject" | "approve_grant" | "deny_grant";
+type EntryAction = "archive" | "snooze" | "restore" | DecisionAction;
 
 const Entry: Component<EntryProps> = (props) => {
   const [composing, setComposing] = createSignal<EntryAction | null>(null);
@@ -225,7 +227,7 @@ const Entry: Component<EntryProps> = (props) => {
     else if (props.phone) closeSheet();
     else cancel();
   };
-  const submitAction = async (action: "adopt" | "suppress" | "accept" | "reject") => {
+  const submitAction = async (action: DecisionAction) => {
     const error = await props.onAction(props.entry, action, reason());
     if (error) setRefusal(error);
     else if (props.phone) closeSheet();
@@ -309,6 +311,10 @@ const Entry: Component<EntryProps> = (props) => {
                 <button type="button" disabled={props.busy} onClick={() => begin("accept")}>Accept proposed change…</button>
                 <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
               </Show>
+              <Show when={props.entry.action?.kind === "grant" && props.entry.action.grant_id}>
+                <button type="button" disabled={props.busy} onClick={() => begin("approve_grant")}>Approve grant…</button>
+                <button type="button" disabled={props.busy} onClick={() => begin("deny_grant")}>Deny grant…</button>
+              </Show>
               {/* The routine triage lives in a quieter, compact second row so the
                   entry reads first and acts second. */}
               <div class="inbox-entry-actions-secondary">
@@ -365,7 +371,7 @@ const Entry: Component<EntryProps> = (props) => {
               </Show>
               <div class="inbox-entry-composer-actions">
                 <button type="submit" disabled={props.busy || !reason().trim()}>
-                  {props.busy ? "Submitting…" : `Confirm ${chosen()}`}
+                  {props.busy ? "Submitting…" : `Confirm ${chosen().replaceAll("_", " ")}`}
                 </button>
                 <button type="button" disabled={props.busy} onClick={cancel}>Cancel</button>
               </div>
@@ -393,6 +399,10 @@ const Entry: Component<EntryProps> = (props) => {
               <Show when={props.entry.action?.kind === "drift" && props.entry.evidence_snapshot && props.entry.proposed_change}>
                 <button type="button" disabled={props.busy} onClick={() => begin("accept")}>Accept proposed change…</button>
                 <button type="button" disabled={props.busy} onClick={() => begin("reject")}>Reject proposed change…</button>
+              </Show>
+              <Show when={props.entry.action?.kind === "grant" && props.entry.action.grant_id}>
+                <button type="button" disabled={props.busy} onClick={() => begin("approve_grant")}>Approve grant…</button>
+                <button type="button" disabled={props.busy} onClick={() => begin("deny_grant")}>Deny grant…</button>
               </Show>
             </Show>
             <Show when={props.entry.triage_state !== "active"}>
@@ -429,7 +439,7 @@ const Entry: Component<EntryProps> = (props) => {
                 </Show>
                 <div class="inbox-entry-composer-actions">
                   <button type="submit" disabled={props.busy || !reason().trim()}>
-                    {props.busy ? "Submitting…" : `Confirm ${chosen()}`}
+                    {props.busy ? "Submitting…" : `Confirm ${chosen().replaceAll("_", " ")}`}
                   </button>
                   <button type="button" disabled={props.busy} onClick={cancel}>Cancel</button>
                 </div>
@@ -832,7 +842,7 @@ const Inbox: Component<Props> = (props) => {
 
   const action = async (
     entry: InboxEntry,
-    kind: "adopt" | "suppress" | "accept" | "reject",
+    kind: DecisionAction,
     reason: string,
   ): Promise<string | null> => {
     if (!reason.trim()) {
@@ -840,6 +850,13 @@ const Inbox: Component<Props> = (props) => {
     }
     setTriaging(entry.entry_key);
     try {
+      if (kind === "approve_grant" || kind === "deny_grant") {
+        const grantId = entry.action?.grant_id;
+        if (!grantId) throw new Error("Inbox entry names no grant.");
+        await decideGrant(grantId, kind === "approve_grant" ? "approve" : "deny", reason);
+        await reload();
+        return null;
+      }
       const target = entry.action?.subject_key ?? entry.source_subject_key;
       if (!target) throw new Error("Inbox entry has no adoptable source subject.");
       if (kind === "adopt") await adoptSubject(target, reason);

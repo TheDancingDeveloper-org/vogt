@@ -40,6 +40,17 @@
 //! or put in argv/env, and every write is audited by name. `writable` widens
 //! blast radius only to the entries an operator pre-authorised.
 //!
+//! **Approved grants** (WI-973, `docs/design/oversight-grants.md`) are the
+//! runtime counterpart to a manifest line: one secret, for one live session,
+//! until a time, applied by vogt-core once a *person* approved it. Only the
+//! stack secret may add or remove one (`POST`/`DELETE
+//! /api/sessions/{id}/grants`). The fetch route checks the manifest first and
+//! then the presenting session's own grants, so a grant never shadows a
+//! manifest entry and never reaches another session. The helper is run with
+//! `ENGINE_AGENT_AUTH_SECRETS` replaced by exactly the granted line, so its own
+//! manifest check still holds. Grants live in memory: a hibernation, an exit or
+//! an engine restart drops them, which fails closed.
+//!
 //! Honest caveat: the engine and its sessions run as the
 //! same uid today, so `/proc/1/environ` still exposes the identity to any
 //! session that goes looking. Until sessions run as a separate uid this is a
@@ -86,6 +97,8 @@ pub const FETCH_ROUTE: &str = "/api/agent-auth/fetch/{var}";
 /// The write route: a session stores one manifest secret it just
 /// produced. Same auth and gate placement as the read route.
 pub const STORE_ROUTE: &str = "/api/agent-auth/store/{var}";
+/// The session's own approved grants (WI-973). Same auth as the read route.
+pub const GRANTS_ROUTE: &str = "/api/agent-auth/grants";
 
 /// Per-session ceiling on fetches. A secret is asked for a handful of times in
 /// a session's life; a loop asking sixty times a minute is a bug or an attack,
@@ -296,6 +309,75 @@ pub struct SecretBroker {
     /// Session id → SHA-256 of that session's broker token. The plaintext is
     /// handed to the child once and never stored.
     grants: DashMap<Uuid, [u8; 32]>,
+    /// Projects beyond the manifest's that an approved grant may fetch from
+    /// (`ENGINE_AGENT_GRANT_PROJECTS`).
+    grant_projects: Vec<String>,
+    /// Session id → the person-approved credential grants it holds (WI-973).
+    session_grants: DashMap<Uuid, Vec<HeldGrant>>,
+}
+
+/// The longest a grant may live.
+pub const MAX_GRANT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// A grant as the broker holds it: the wire shape plus its parsed expiry.
+#[derive(Clone, Debug)]
+pub struct HeldGrant {
+    pub grant: vogt_engine_contract::SessionGrant,
+    pub expires_at: time::OffsetDateTime,
+}
+
+impl HeldGrant {
+    /// The manifest line this grant stands for, as the helper reads it.
+    fn manifest_line(&self) -> String {
+        format!(
+            "{} {} {} ondemand",
+            self.grant.var, self.grant.project_id, self.grant.secret_name
+        )
+    }
+
+    fn entry(&self) -> ManifestSecret {
+        ManifestSecret {
+            var: self.grant.var.clone(),
+            project_id: self.grant.project_id.clone(),
+            secret_name: self.grant.secret_name.clone(),
+            policy: ManifestPolicy::OnDemand,
+            writable: false,
+        }
+    }
+}
+
+/// Why a grant was not applied. Each says what to change.
+#[derive(Debug, PartialEq, Eq)]
+pub enum GrantRefusal {
+    /// No broker, so nothing could ever reach the session.
+    NoBroker,
+    /// A field the grant cannot have.
+    Invalid(String),
+    /// The name is a manifest entry; a grant never shadows one.
+    ShadowsManifest(String),
+    /// The project is not open to grants.
+    ProjectNotGrantable(String),
+}
+
+impl std::fmt::Display for GrantRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GrantRefusal::NoBroker => write!(
+                f,
+                "on-demand secret brokering is not configured on this engine \
+                 (ENGINE_AGENT_AUTH_SECRETS declares nothing), so no session can be handed a grant"
+            ),
+            GrantRefusal::Invalid(why) => write!(f, "{why}"),
+            GrantRefusal::ShadowsManifest(var) => write!(
+                f,
+                "{var} is already an ENGINE_AGENT_AUTH_SECRETS entry; a grant never shadows the manifest — choose another var"
+            ),
+            GrantRefusal::ProjectNotGrantable(project) => write!(
+                f,
+                "project {project} is not open to grants: grants may fetch only from projects the manifest names or ENGINE_AGENT_GRANT_PROJECTS lists"
+            ),
+        }
+    }
 }
 
 impl SecretBroker {
@@ -314,7 +396,134 @@ impl SecretBroker {
             helper,
             manifest,
             grants: DashMap::new(),
+            grant_projects: Vec::new(),
+            session_grants: DashMap::new(),
         }
+    }
+
+    /// Open more projects to approved grants than the manifest names.
+    pub fn with_grant_projects(mut self, projects: Vec<String>) -> Self {
+        self.grant_projects = projects;
+        self
+    }
+
+    /// Whether an approved grant may fetch from `project`: one the manifest
+    /// already names, or one the deployment opened to grants.
+    pub fn project_grantable(&self, project: &str) -> bool {
+        self.manifest.iter().any(|e| e.project_id == project)
+            || self.grant_projects.iter().any(|p| p == project)
+    }
+
+    /// Hold a person-approved grant for `session` (WI-973). The caller has
+    /// already checked that vogt-core sent it and that the session is live.
+    /// A grant with the same id replaces the earlier one.
+    pub fn apply_grant(
+        &self,
+        session: Uuid,
+        grant: vogt_engine_contract::SessionGrant,
+        now: time::OffsetDateTime,
+    ) -> Result<HeldGrant, GrantRefusal> {
+        if !self.enabled() {
+            return Err(GrantRefusal::NoBroker);
+        }
+        if grant.grant_id.trim().is_empty() || grant.grant_id.len() > 64 {
+            return Err(GrantRefusal::Invalid(
+                "grant_id must be 1-64 characters".into(),
+            ));
+        }
+        if !is_env_name(&grant.var) {
+            return Err(GrantRefusal::Invalid(format!(
+                "var {:?} is not a valid environment variable name",
+                grant.var
+            )));
+        }
+        let plain = |v: &str| {
+            !v.is_empty()
+                && v.len() <= 256
+                && !v.starts_with('-')
+                && v.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-/".contains(c))
+        };
+        if !plain(&grant.secret_name) || !plain(&grant.project_id) {
+            return Err(GrantRefusal::Invalid(
+                "project_id and secret_name must be plain names (letters, digits, . _ - /)".into(),
+            ));
+        }
+        if self.permitted(&grant.var).is_some() {
+            return Err(GrantRefusal::ShadowsManifest(grant.var));
+        }
+        if !self.project_grantable(&grant.project_id) {
+            return Err(GrantRefusal::ProjectNotGrantable(grant.project_id));
+        }
+        let expires_at = time::OffsetDateTime::parse(
+            &grant.expires_at,
+            &time::format_description::well_known::Rfc3339,
+        )
+        .map_err(|e| GrantRefusal::Invalid(format!("expires_at is not RFC 3339: {e}")))?;
+        if expires_at <= now {
+            return Err(GrantRefusal::Invalid("expires_at is in the past".into()));
+        }
+        if expires_at - now > MAX_GRANT_TTL {
+            return Err(GrantRefusal::Invalid(format!(
+                "expires_at is more than {} h ahead",
+                MAX_GRANT_TTL.as_secs() / 3600
+            )));
+        }
+        let held = HeldGrant { grant, expires_at };
+        let mut list = self.session_grants.entry(session).or_default();
+        list.retain(|g| g.grant.grant_id != held.grant.grant_id && g.grant.var != held.grant.var);
+        list.push(held.clone());
+        Ok(held)
+    }
+
+    /// Drop one grant; whether the session held it.
+    pub fn remove_grant(&self, session: Uuid, grant_id: &str) -> bool {
+        let Some(mut list) = self.session_grants.get_mut(&session) else {
+            return false;
+        };
+        let before = list.len();
+        list.retain(|g| g.grant.grant_id != grant_id);
+        before != list.len()
+    }
+
+    /// Take a `once` grant out of the table before it is used, so two fetches
+    /// racing for it cannot both be answered; `None` when another took it.
+    pub fn take_grant(&self, session: Uuid, grant_id: &str) -> Option<HeldGrant> {
+        let mut list = self.session_grants.get_mut(&session)?;
+        let index = list.iter().position(|g| g.grant.grant_id == grant_id)?;
+        Some(list.remove(index))
+    }
+
+    /// Put back a `once` grant whose fetch failed, so the failure does not
+    /// spend it.
+    pub fn restore_grant(&self, session: Uuid, held: HeldGrant) {
+        self.session_grants.entry(session).or_default().push(held);
+    }
+
+    /// Drop every grant a session holds: it ended, or was hibernated.
+    pub fn drop_grants(&self, session: Uuid) {
+        self.session_grants.remove(&session);
+    }
+
+    /// The grants a session holds now, the expired ones dropped.
+    pub fn grants_for(&self, session: Uuid, now: time::OffsetDateTime) -> Vec<HeldGrant> {
+        let Some(mut list) = self.session_grants.get_mut(&session) else {
+            return Vec::new();
+        };
+        list.retain(|g| g.expires_at > now);
+        list.clone()
+    }
+
+    /// The live grant that lets `session` fetch `var`, if any.
+    pub fn grant_for_var(
+        &self,
+        session: Uuid,
+        var: &str,
+        now: time::OffsetDateTime,
+    ) -> Option<HeldGrant> {
+        self.grants_for(session, now)
+            .into_iter()
+            .find(|g| g.grant.var == var)
     }
 
     /// Brokering exists only where a deployment declared something to broker.
@@ -350,6 +559,7 @@ impl SecretBroker {
     /// exactly as long as the engine remembers the session.
     pub fn revoke(&self, session: Uuid) {
         self.grants.remove(&session);
+        self.session_grants.remove(&session);
     }
 
     /// Which live session presented this token, if any. Constant-time per
@@ -402,13 +612,27 @@ impl SecretBroker {
     /// a session (`sanitized_child_env` plus the re-granted identity), and
     /// nothing else. The value is the helper's stdout, verbatim.
     pub async fn fetch(&self, entry: &ManifestSecret) -> Result<String, FetchFailure> {
+        self.fetch_with(entry, None).await
+    }
+
+    /// [`Self::fetch`], with the helper's manifest replaced by `manifest` for
+    /// this one call: how a granted secret is fetched, so the helper's own
+    /// manifest check sees exactly the granted line and nothing more.
+    async fn fetch_with(
+        &self,
+        entry: &ManifestSecret,
+        manifest: Option<&str>,
+    ) -> Result<String, FetchFailure> {
         let mut cmd = tokio::process::Command::new(&self.helper);
         cmd.arg("get")
             .arg(&entry.var)
             .env_clear()
             .envs(pty::sanitized_child_env())
-            .envs(pty::agent_auth_helper_env())
-            .stdin(std::process::Stdio::null())
+            .envs(pty::agent_auth_helper_env());
+        if let Some(manifest) = manifest {
+            cmd.env("ENGINE_AGENT_AUTH_SECRETS", manifest);
+        }
+        cmd.stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -573,23 +797,57 @@ pub async fn fetch(
             .into_response();
     }
 
-    let Some(entry) = broker.permitted(&var) else {
-        tracing::warn!(
-            target: "vogt::audit",
-            request_id = %request_id,
-            session_id = %session,
-            var = %var,
-            "secret broker refused: not in the manifest"
-        );
-        return refusal(
-            StatusCode::FORBIDDEN,
-            &format!(
-                "{var} is not in this deployment's ENGINE_AGENT_AUTH_SECRETS manifest; to make it available to sessions add a line '{var} PROJECT_ID SECRET_NAME ondemand' to the stack and restart the engine"
-            ),
-        );
+    // The manifest first, so a grant can never stand in for what the
+    // deployment declared; then this session's own approved grants (WI-973),
+    // only while the session is running.
+    let granted = match broker.permitted(&var) {
+        Some(_) => None,
+        None => broker
+            .grant_for_var(session, &var, time::OffsetDateTime::now_utc())
+            .filter(|_| state.sessions.get(session).is_ok_and(|s| s.is_alive()))
+            // A `once` grant is taken before it is used: of two fetches racing
+            // for it, only one is answered.
+            .and_then(|held| match held.grant.uses {
+                vogt_engine_contract::GrantUses::Once => {
+                    broker.take_grant(session, &held.grant.grant_id)
+                }
+                vogt_engine_contract::GrantUses::Ttl => Some(held),
+            }),
+    };
+    let entry = match (broker.permitted(&var), granted.as_ref()) {
+        (Some(entry), _) => entry,
+        (None, Some(held)) => held.entry(),
+        (None, None) => {
+            tracing::warn!(
+                target: "vogt::audit",
+                request_id = %request_id,
+                session_id = %session,
+                var = %var,
+                "secret broker refused: not in the manifest and not granted"
+            );
+            return refusal(
+                StatusCode::FORBIDDEN,
+                &format!(
+                    "{var} is not in this deployment's ENGINE_AGENT_AUTH_SECRETS manifest and this session holds no approved grant for it; to make it available to sessions add a line '{var} PROJECT_ID SECRET_NAME ondemand' to the stack and restart the engine, or ask a person to approve a grant (session_grant_request)"
+                ),
+            );
+        }
     };
 
-    match broker.fetch(&entry).await {
+    let fetched = match granted.as_ref() {
+        Some(held) => broker.fetch_with(&entry, Some(&held.manifest_line())).await,
+        None => broker.fetch(&entry).await,
+    };
+    if let (Err(_), Some(held)) = (&fetched, granted.as_ref()) {
+        if held.grant.uses == vogt_engine_contract::GrantUses::Once {
+            broker.restore_grant(session, held.clone());
+        }
+    }
+    let grant_id = granted
+        .as_ref()
+        .map(|g| g.grant.grant_id.clone())
+        .unwrap_or_default();
+    match fetched {
         Ok(value) => {
             // The whole audit trail of the fetch: who, what, never the value.
             tracing::info!(
@@ -600,6 +858,7 @@ pub async fn fetch(
                 secret_name = %entry.secret_name,
                 project_id = %entry.project_id,
                 policy = ?entry.policy,
+                grant_id = %grant_id,
                 "secret brokered to session"
             );
             (
@@ -625,6 +884,46 @@ pub async fn fetch(
             ApiError::BadGateway(failure.to_string()).into_response()
         }
     }
+}
+
+/// `GET /api/agent-auth/grants` — the approved grants the presenting session
+/// holds now (WI-973): `var`, secret name, project, uses and expiry. Never a
+/// value. What `vogt-agent-auth grants` prints, so the agent — and the
+/// permission classifier reading its transcript — can see what a person
+/// approved for it.
+pub async fn own_grants(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+    let broker = state.sessions.secret_broker();
+    let path = request.uri().path().to_string();
+    let request_id = request
+        .extensions()
+        .get::<RequestId>()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
+    let session = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|token| broker.authenticate(token))
+        .filter(|id| state.sessions.get(*id).is_ok());
+    let Some(session) = session else {
+        auth::record_auth_failure(
+            &Method::GET,
+            &path,
+            &request_id,
+            "missing or unknown broker token",
+        )
+        .await;
+        return ApiError::Unauthorized.into_response();
+    };
+    let grants: Vec<_> = broker
+        .grants_for(session, time::OffsetDateTime::now_utc())
+        .into_iter()
+        .map(|held| held.grant)
+        .collect();
+    Json(grants).into_response()
 }
 
 /// `POST /api/agent-auth/store/{var}` — take one secret a session produced and
