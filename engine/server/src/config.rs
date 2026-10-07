@@ -1100,8 +1100,9 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>> {
 
 /// The live call's settings: `ENGINE_ASSISTANT_CALL_ENABLED` (default on),
 /// `ENGINE_ASSISTANT_CALL_END_OF_TURN_MS`, `_BARGE_IN_MS`,
-/// `_PARTIAL_INTERVAL_MS` (`0` turns live captions off) and
-/// `ENGINE_ASSISTANT_CALL_FILLER` (empty turns the filler off). A value that
+/// `_PARTIAL_INTERVAL_MS` (`0` turns live captions off), `_VAD` (`earshot`,
+/// the default, or `energy`) and `ENGINE_ASSISTANT_CALL_FILLER` (empty turns
+/// the filler off). A value that
 /// does not parse, or a timing outside its sane range, is a startup error.
 fn call_policy_from_env() -> Result<crate::call::CallPolicy> {
     let mut policy = crate::call::CallPolicy::default();
@@ -1144,6 +1145,25 @@ fn call_policy_from_env() -> Result<crate::call::CallPolicy> {
         60_000,
         policy.partial_interval_ms,
     )?;
+    match engine_env("ENGINE_ASSISTANT_CALL_VAD") {
+        Ok(v) if !v.trim().is_empty() => {
+            policy.vad = match v.trim().to_ascii_lowercase().as_str() {
+                "earshot" => crate::call::CallVad::Earshot,
+                "energy" => crate::call::CallVad::Energy,
+                other => {
+                    return Err(ApiError::Config(format!(
+                        "ENGINE_ASSISTANT_CALL_VAD={other:?} must be earshot or energy"
+                    )))
+                }
+            };
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => {}
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_ASSISTANT_CALL_VAD: {e}"
+            )))
+        }
+    }
     if let Ok(filler) = engine_env("ENGINE_ASSISTANT_CALL_FILLER") {
         policy.filler = filler.trim().to_string();
     }
