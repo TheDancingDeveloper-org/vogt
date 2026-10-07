@@ -64,6 +64,9 @@ struct AudioBackend {
     /// only local, keyless entries are configured.
     api_key: Option<String>,
     model: String,
+    /// ISO language sent with `/audio/transcriptions` (`en`, …). Empty leaves
+    /// detection to the backend. Meaningful for STT; unused for TTS.
+    language: String,
     /// Voice name — meaningful for TTS (`/audio/speech` requires one) and
     /// unused for STT, where it is left empty.
     voice: String,
@@ -79,6 +82,7 @@ impl AudioBackend {
         base_urls: &[String],
         api_key: &Option<String>,
         model: &str,
+        language: &str,
         voice: &str,
         format: &str,
     ) -> Option<Self> {
@@ -89,6 +93,7 @@ impl AudioBackend {
             base_urls: base_urls.to_vec(),
             api_key: api_key.clone(),
             model: model.to_string(),
+            language: language.to_string(),
             voice: voice.to_string(),
             format: format.to_string(),
         })
@@ -117,6 +122,7 @@ impl AssistantSpeech {
             &cfg.assistant_stt_base_urls,
             &cfg.assistant_stt_api_key,
             &cfg.assistant_stt_model,
+            &cfg.assistant_stt_language,
             "",
             "",
         );
@@ -124,6 +130,7 @@ impl AssistantSpeech {
             &cfg.assistant_tts_base_urls,
             &cfg.assistant_tts_api_key,
             &cfg.assistant_tts_model,
+            "",
             &cfg.assistant_tts_voice,
             &cfg.assistant_tts_format,
         );
@@ -160,6 +167,10 @@ impl AssistantSpeech {
     /// fails — the route's 404 — with the reason logged for an operator,
     /// not returned. The audio is forwarded and never stored.
     ///
+    /// `language` overrides the configured one when `Some`; an empty string
+    /// sends no language, so the backend detects it. The public route passes
+    /// a caller's field through that way; the live call passes `None`.
+    ///
     /// Shared by the `/api/assistant/stt` route and the live call, which
     /// transcribes each segment of speech the same way.
     pub async fn transcribe(
@@ -168,6 +179,7 @@ impl AssistantSpeech {
         file_name: &str,
         content_type: &str,
         prompt: Option<String>,
+        language: Option<&str>,
     ) -> Result<String> {
         let backend = self.stt.as_ref().ok_or(ApiError::NotFound)?;
         // A `multipart::Form` is consumed on send, so it is rebuilt per
@@ -188,6 +200,13 @@ impl AssistantSpeech {
                 .part("file", part);
             if let Some(prompt) = &prompt {
                 form = form.text("prompt", prompt.clone());
+            }
+            // A set language skips the backend's own detection pass. On a
+            // faster-whisper CPU that pass is a second or two of the first
+            // 30s of audio, paid on every clip, and a call is one language.
+            let language = language.unwrap_or(backend.language.as_str()).trim();
+            if !language.is_empty() {
+                form = form.text("language", language.to_string());
             }
 
             let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
@@ -323,6 +342,10 @@ pub async fn stt(
     // backend that ignores the field is no worse off. Not read as audio, and
     // not required — a client that sends none transcribes as before.
     let mut prompt: Option<String> = None;
+    // An optional `language` field overrides the configured one for this
+    // upload (`en`, or empty to ask the backend to detect). A client that
+    // sends none gets the deployment's language.
+    let mut language: Option<String> = None;
     while let Some(field) = multipart
         .next_field()
         .await
@@ -334,6 +357,14 @@ pub async fn stt(
                 .await
                 .map_err(|e| ApiError::BadRequest(format!("reading prompt: {e}")))?;
             prompt = clamp_stt_prompt(&text);
+            continue;
+        }
+        if field.name() == Some("language") {
+            let text = field
+                .text()
+                .await
+                .map_err(|e| ApiError::BadRequest(format!("reading language: {e}")))?;
+            language = Some(clamp_stt_language(&text));
             continue;
         }
         let file_name = field
@@ -357,7 +388,13 @@ pub async fn stt(
     let (bytes, file_name, content_type) =
         audio.ok_or_else(|| ApiError::BadRequest("no audio in upload".into()))?;
     let text = speech
-        .transcribe(bytes, &file_name, &content_type, prompt)
+        .transcribe(
+            bytes,
+            &file_name,
+            &content_type,
+            prompt,
+            language.as_deref(),
+        )
         .await?;
     Ok(Json(SttResponse { text }))
 }
@@ -392,6 +429,21 @@ const MAX_STT_PROMPT_BYTES: usize = 2048;
 
 /// A client-supplied STT bias prompt, trimmed and bounded, or nothing when it
 /// is empty — an empty `prompt` field is the same as sending none.
+/// A language code is a short token (`en`, `en-US`). Anything longer, or
+/// with characters a code does not use, is dropped to empty — which means
+/// "detect" — rather than forwarded to the backend as a free-form string.
+fn clamp_stt_language(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.len() > 16
+        || !trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return String::new();
+    }
+    trimmed.to_string()
+}
+
 fn clamp_stt_prompt(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -416,6 +468,15 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_language_is_a_short_code_or_empty() {
+        assert_eq!(clamp_stt_language(" en "), "en");
+        assert_eq!(clamp_stt_language("en-US"), "en-US");
+        assert_eq!(clamp_stt_language(""), "");
+        assert_eq!(clamp_stt_language("not a language"), "");
+        assert_eq!(clamp_stt_language("english-but-far-too-long"), "");
+    }
 
     #[test]
     fn a_prompt_is_trimmed_and_empty_becomes_none() {

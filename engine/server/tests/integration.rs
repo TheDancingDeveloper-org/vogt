@@ -62,6 +62,7 @@ fn test_config() -> Config {
         assistant_stt_base_urls: vec![],
         assistant_stt_api_key: None,
         assistant_stt_model: "whisper-1".into(),
+        assistant_stt_language: "en".into(),
         assistant_tts_base_urls: vec![],
         assistant_tts_api_key: None,
         assistant_tts_model: "tts-1".into(),

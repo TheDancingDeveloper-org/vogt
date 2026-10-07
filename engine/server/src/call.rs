@@ -42,8 +42,9 @@
 //! them: a call needs no speech protocol of its own. To hide transcription
 //! time, the turn so far is transcribed as soon as the user pauses; if they
 //! do not resume, that transcript is ready (or nearly) when the turn is
-//! declared over. While they speak, the turn so far is re-transcribed every
-//! `partial_interval_ms` and shown as a live caption.
+//! declared over. Live captions (`partial_interval_ms`) are off by default:
+//! each one is another full transcription of the whole turn, and on a CPU
+//! that cost stacks rather than hiding.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,7 +113,7 @@ impl Default for CallPolicy {
             enabled: true,
             end_of_turn_ms: 700,
             barge_in_ms: 500,
-            partial_interval_ms: 1_500,
+            partial_interval_ms: 0,
             filler: "One moment.".to_string(),
             vad: CallVad::Earshot,
         }
@@ -324,7 +325,7 @@ impl Stt for SpeechProvider {
     fn transcribe(&self, wav: Vec<u8>) -> BoxFuture<'_, Result<String, ProviderError>> {
         Box::pin(async move {
             self.0
-                .transcribe(wav, "turn.wav", "audio/wav", None)
+                .transcribe(wav, "turn.wav", "audio/wav", None, None)
                 .await
                 .map_err(|e| ProviderError(e.to_string()))
         })

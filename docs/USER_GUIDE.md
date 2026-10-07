@@ -558,6 +558,27 @@ imperfect echo cancellation can cut a reply short by mistake). Turn timing is
 tunable per device through the `vogt.assistant.voice.*` browser settings (silence
 window, idle timeout, barge-in); the defaults suit a phone.
 
+**A live call.** Where the deployment offers it, the assistant can be a call
+rather than a take: the microphone stays open, a pause of about three quarters
+of a second ends your turn, and the reply starts speaking as soon as its first
+clause exists, while the rest is still being written. Speaking over a reply
+stops it. The same rule as every other voice path holds, and it is the one
+that matters most here: **a spoken "yes" never approves anything.** A change
+still waits on a button on the screen, and while that button is waiting the
+call will not even pass what you say to the model — it reminds you to tap.
+
+A call's speed is the transcription backend's speed. The engine sends a
+language with every clip (`ENGINE_ASSISTANT_STT_LANGUAGE`, `en` unless you say
+otherwise) so the backend does not spend the start of each turn detecting
+one, and it transcribes the moment you pause rather than waiting until the
+turn is declared over. Live captions while you are still talking are off
+(`ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS=0`): on a small CPU model each
+caption is another full transcription of everything said so far, and that
+work queues behind the transcription that actually answers you. A self-hosted
+faster-whisper `small` on CPU is a few seconds from the end of your speech to
+the first sound of the reply; a smaller model or a GPU is what shortens that,
+not a tighter silence window. The knobs are in [`ENGINE.md`](ENGINE.md) §6.
+
 When the deployment offers server-side transcription, Settings shows
 **Transcribe voice on the server**. On by default a phone uses its own
 recognizer, which is fast but has never heard your project names; turning this
