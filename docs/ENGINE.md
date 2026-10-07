@@ -1740,9 +1740,11 @@ speech routes stubbed.
 ### Live call contract
 
 `GET /api/assistant/call` upgrades to a WebSocket carrying one spoken
-conversation (WI-960). The DTOs are `CallClientEvent` / `CallServerEvent` in
-`engine/contract`; event names follow the OpenAI Realtime API's where the
-meaning is the same. The implementation is `engine/server/src/call.rs`.
+conversation (WI-960). The pipeline is the generic `voxcall` crate
+(`engine/voxcall`, its `DESIGN.md` has the trait boundary); the DTOs are
+`CallClientEvent` / `CallServerEvent` in `voxcall::protocol`, and event names
+follow the OpenAI Realtime API's where the meaning is the same. Vogt's side —
+the route, authentication, the providers — is `engine/server/src/call.rs`.
 
 **Opening.** The first frame must be `{"type":"auth","token":"..."}` within
 5 s, and the bearer needs the `assistant` capability (`4401` unauthorized,
@@ -1793,8 +1795,8 @@ event and close `4409`. The server answers `session.created`
 - `error {message}`.
 
 **Turn-taking.** The engine runs voice activity detection on the incoming
-audio (`call_audio.rs`: an adaptive noise-floor energy detector, calibrated on
-the call's first 200 ms). A turn starts after 100 ms of voice and ends after
+audio — `earshot`'s small neural detector by default, or the adaptive
+noise-floor energy detector with `ENGINE_ASSISTANT_CALL_VAD=energy`. A turn starts after 100 ms of voice and ends after
 `end_of_turn_ms` of silence (default 700); a sound with less than 250 ms of
 voice is discarded. When the user pauses for 200 ms the turn so far is
 transcribed at once, so the transcript is usually ready when the turn is
@@ -1813,7 +1815,7 @@ default "One moment.") covers the wait.
 (default 500) stops it: the turn is cancelled, `output_audio.clear` is sent,
 and the reply is cut back to what had started playing, flagged `interrupted`
 in the transcript. A shorter sound over a reply (a "mm", or echo) is ignored.
-While the reply plays, the detector demands 8 dB more of a frame, since what
+While the reply plays, the detector demands more of a frame, since what
 the client's echo cancellation leaves of the reply is the likeliest false
 trigger.
 
@@ -2398,16 +2400,19 @@ untrusted data like every other cored-derived string.
   it arrives (see *Streamed turns* below).
 - `engine/voxcall/` — `voxcall`, the live call's generic pipeline crate, kept
   free of Vogt types so it can be published on its own (its `DESIGN.md` has
-  the trait boundary). This release holds the pure building blocks:
+  the trait boundary). It holds
   PCM16/WAV framing; voice activity detection (`EarshotVad`, the default,
   wrapping the `earshot` crate, and `EnergyVad`, an adaptive noise-floor
   detector); the turn endpointer (speech started, sustained, pause, resumed,
   end of turn); and the sentence chunker that cuts a streamed reply into
   pieces to speak, with `speakable` to drop the markdown a listener should
-  not hear read out.
-- `engine/server/src/call.rs` — the live call's WebSocket orchestrator:
-  endpointing, early and partial transcription, the streamed turn spoken a
-  piece at a time, barge-in, approval cards (see *Live call contract*, §5).
+  not hear read out. The pipeline (`voxcall::pipeline`) owns turn-taking,
+  early and partial transcription, the streamed reply spoken a piece at a
+  time, barge-in and the approval invariant.
+- `engine/server/src/call.rs` — Vogt's side of the live call: the WebSocket
+  route, authentication and the one-call slot, and the `voxcall` providers —
+  the assistant runtime as the turn, the speech proxy as STT/TTS, the pending
+  card as approvals (see *Live call contract*, §5).
 - `engine/server/src/assistant_api.rs` — HTTP surface (see §5).
 - `web/src/Assistant.tsx` — PWA tab: transcript, composer, mic (APK only),
   TTS toggle, approve/deny cards.
@@ -2500,6 +2505,7 @@ Every setting, with the TOML key for a `--config` file and its default
 | — | `ENGINE_ASSISTANT_CALL_END_OF_TURN_MS` | `700` | silence after speech that ends the user's turn (300–5000) |
 | — | `ENGINE_ASSISTANT_CALL_BARGE_IN_MS` | `500` | voice needed to stop a reply by speaking over it (100–3000) |
 | — | `ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS` | `1500` | how often a turn is re-transcribed as a live caption; `0` turns captions off (fewer STT calls on a CPU-bound host) |
+| — | `ENGINE_ASSISTANT_CALL_VAD` | `earshot` | the call's voice detector: `earshot` (neural, pure Rust) or `energy` (adaptive noise floor) |
 | — | `ENGINE_ASSISTANT_CALL_FILLER` | `One moment.` | said while the model runs tools before answering; empty for none |
 
 The Vogt half of the assistant needs no key of its own: it uses
