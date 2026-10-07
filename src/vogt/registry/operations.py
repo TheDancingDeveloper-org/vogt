@@ -33,6 +33,8 @@ from vogt.application.models import (
     BackupParams,
     BackupResult,
     BindBranchParams,
+    BindSessionWorkParams,
+    BindSessionWorkResult,
     BoardListParams,
     BoardListResult,
     BugsParams,
@@ -1092,6 +1094,25 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.set_session_role,
             route=HttpRoute("POST", "/sessions/role"),
             cli=CliBinding(("session", "set-role")),
+        ),
+        Operation(
+            name="session.bind_work",
+            summary=(
+                "Declare which work item a session serves (work_item=WI-n), "
+                "or that it serves none (work_item=null) — one current item "
+                "per session, re-declarable, audited. Any principal with "
+                "work.write may bind: a person, the session itself (omit id "
+                "inside a session Vogt started), or its overseer. Never moves "
+                "the terminal or the item's state; the item then shows the "
+                "session as being worked by it. Takes either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=BindSessionWorkParams,
+            result_model=BindSessionWorkResult,
+            handler=services.bind_session_work,
+            route=HttpRoute("POST", "/sessions/work-item"),
+            cli=CliBinding(("session", "bind")),
         ),
         Operation(
             name="session.grant_request",

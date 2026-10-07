@@ -155,6 +155,7 @@ class StandInEngine:
                         "conversation_agent": "claude",
                         "conversation_id": "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f",
                         "resume_template": "claude",
+                        "work_item": "WI-7",
                     },
                 ]
             ).encode()
@@ -1175,6 +1176,9 @@ def test_history_list_forwards_pagination_and_maps_rows(
     assert lost.conversation_id == "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f"
     assert lost.resume_template == "claude"
     assert lost.template is None
+    # WI-998: what a resume binds again.
+    assert lost.work_item == "WI-7"
+    assert row.work_item is None
     url = _history_urls(engine)[-1]
     assert "limit=10" in url and "offset=5" in url
 

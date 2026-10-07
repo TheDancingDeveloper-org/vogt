@@ -2012,6 +2012,12 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def set_session_work_item(self, session_id: str, work_item_id: str | None) -> None:
+        self._conn.execute(
+            "UPDATE coding_sessions SET work_item_id = ? WHERE id = ?",
+            (work_item_id, session_id),
+        )
+
     def mark_session_stopped(self, session_id: str, *, at: datetime) -> None:
         self._conn.execute(
             "UPDATE coding_sessions SET stopped_at = ? "

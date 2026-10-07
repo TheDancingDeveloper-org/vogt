@@ -944,9 +944,36 @@ def transition_work(ctx: AppContext, params: TransitionWorkParams) -> WorkResult
     `walk` takes the shortest path of valid edges instead of one edge; see
     `_walk_transition`.
     """
-    if params.walk:
-        return _walk_transition(ctx, params)
-    return _transition_once(ctx, params)
+    result = (
+        _walk_transition(ctx, params) if params.walk else _transition_once(ctx, params)
+    )
+    return _warn_live_sessions(ctx, result)
+
+
+def _warn_live_sessions(ctx: AppContext, result: WorkResult) -> WorkResult:
+    """Name the sessions still bound to an item that just finished (WI-998).
+
+    A warning, never a refusal (operator decision 3), and nothing is
+    unbound: the session may still be finishing — a pull request, a comment.
+    Read after the transition, through `session.list`, so liveness is the
+    engine's at that moment; an engine that cannot be asked yields no warning
+    rather than a guessed one.
+    """
+    item = result.item
+    if item.state not in TERMINAL_STATES:
+        return result
+    with ctx.declared.read() as view:
+        if view.work_item_by_ref(item.ref) is None:
+            return result  # an upstream item: no session rows point at it
+    sessions = list_sessions(ctx, ListSessionsParams(work_item=item.ref)).sessions
+    live = [
+        session
+        for session in sessions
+        if session.alive or session.activity == "hibernated"
+    ]
+    if not live:
+        return result
+    return result.model_copy(update={"live_sessions": live})
 
 
 def _walk_transition(ctx: AppContext, params: TransitionWorkParams) -> WorkResult:

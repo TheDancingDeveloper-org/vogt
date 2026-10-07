@@ -63,6 +63,11 @@ pub struct SessionMetadata {
     pub conversation_agent: Option<String>,
     #[sqlx(default)]
     pub conversation_id: Option<String>,
+    /// The work item the session served, as last labelled (WI-998); cleared
+    /// when it was unbound. What a resume from History binds again.
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_item: Option<String>,
     /// The template a resume of `conversation_id` would start, worked out
     /// against the deployment's templates when the row is read: the row's
     /// own template when it runs that agent, else the one the agent's name
@@ -81,14 +86,21 @@ pub struct SessionIdentity {
     pub template: Option<String>,
     pub role: Option<&'static str>,
     pub conversation: Option<vogt_engine_contract::AgentConversation>,
+    pub work_item: Option<String>,
 }
 
 /// The identity columns, added to an existing database in this order.
-const IDENTITY_COLUMNS: &[&str] = &["template", "role", "conversation_agent", "conversation_id"];
+const IDENTITY_COLUMNS: &[&str] = &[
+    "template",
+    "role",
+    "conversation_agent",
+    "conversation_id",
+    "work_item",
+];
 
 /// The columns every metadata read selects.
 const METADATA_COLUMNS: &str = "id, name, created_at, ended_at, exit_code, cwd, command, \
-     scrollback_bytes, end_reason, template, role, conversation_agent, conversation_id";
+     scrollback_bytes, end_reason, template, role, conversation_agent, conversation_id, work_item";
 
 /// `end_reason` values. See [`SessionMetadata::end_reason`].
 pub const END_EXITED: &str = "exited";
@@ -283,8 +295,8 @@ impl SessionHistory {
         sqlx::query(
             r#"
             INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason,
-                                  template, role, conversation_agent, conversation_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                  template, role, conversation_agent, conversation_id, work_item)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
@@ -299,7 +311,8 @@ impl SessionHistory {
                 template = COALESCE(excluded.template, sessions.template),
                 role = COALESCE(excluded.role, sessions.role),
                 conversation_agent = COALESCE(excluded.conversation_agent, sessions.conversation_agent),
-                conversation_id = COALESCE(excluded.conversation_id, sessions.conversation_id)
+                conversation_id = COALESCE(excluded.conversation_id, sessions.conversation_id),
+                work_item = COALESCE(excluded.work_item, sessions.work_item)
             "#,
         )
         .bind(record.id.to_string())
@@ -315,6 +328,7 @@ impl SessionHistory {
         .bind(identity.role)
         .bind(identity.conversation.as_ref().map(|c| c.agent.clone()))
         .bind(identity.conversation.map(|c| c.id))
+        .bind(identity.work_item)
         .execute(&self.pool)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to archive session: {}", e)))?;
@@ -346,6 +360,20 @@ impl SessionHistory {
         .await
         .map_err(|e| ApiError::Internal(format!("failed to update session identity: {e}")))?;
         Ok(())
+    }
+
+    /// Set or clear a session row's work item (WI-998). Unlike the rest of
+    /// the identity a label can be cleared — an unbind is a declaration too —
+    /// so this writes what it is given. Whether a row was there to update:
+    /// `false` while the provisional row is still on its way.
+    pub async fn set_work_item(&self, id: Uuid, work_item: Option<&str>) -> Result<bool> {
+        let done = sqlx::query("UPDATE sessions SET work_item = ? WHERE id = ?")
+            .bind(work_item)
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to update session work item: {e}")))?;
+        Ok(done.rows_affected() > 0)
     }
 
     /// List archived sessions
@@ -1019,6 +1047,7 @@ mod tests {
                     template: None,
                     role: Some("worker"),
                     conversation: None,
+                    work_item: Some("WI-7".into()),
                 }),
             })
             .await
@@ -1038,6 +1067,21 @@ mod tests {
         let row = history.get_session(id).await.unwrap();
         assert_eq!(row.role.as_deref(), Some("oversight"));
         assert_eq!(row.conversation_agent.as_deref(), Some("claude"));
+        assert_eq!(
+            row.work_item.as_deref(),
+            Some("WI-7"),
+            "set_identity keeps it"
+        );
+        // A rebind replaces the work item; an unbind clears it (WI-998).
+        assert!(history.set_work_item(id, Some("WI-8")).await.unwrap());
+        assert_eq!(
+            history.get_session(id).await.unwrap().work_item.as_deref(),
+            Some("WI-8")
+        );
+        assert!(history.set_work_item(id, None).await.unwrap());
+        assert!(!history.set_work_item(Uuid::new_v4(), None).await.unwrap());
+        assert_eq!(history.get_session(id).await.unwrap().work_item, None);
+        assert!(history.set_work_item(id, Some("WI-8")).await.unwrap());
         assert_eq!(
             row.conversation_id.as_deref(),
             Some(conversation.id.as_str())
@@ -1064,5 +1108,10 @@ mod tests {
             Some(conversation.id.as_str())
         );
         assert_eq!(row.role.as_deref(), Some("oversight"));
+        assert_eq!(
+            row.work_item.as_deref(),
+            Some("WI-8"),
+            "a finalize keeps it"
+        );
     }
 }

@@ -546,6 +546,38 @@ paths:
               schema: { $ref: "#/components/schemas/SessionSummary" }
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/work-item:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Label a session with the work item it serves, or clear the label.
+      description: >-
+        WI-998. An opaque label (a ref such as `WI-7`), trimmed, at most 200
+        characters and free of control characters; `null` or blank clears it.
+        Live or hibernated; kept in the session's record and its History row,
+        so a wake keeps it and a resume from History can bind again. vogt-core's
+        audited `session.bind_work` is the way to set it; for a session the
+        core started, the core's row is the truth and this is its copy.
+      operationId: setSessionWorkItem
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [work_item]
+              properties:
+                work_item: { type: string, nullable: true, maxLength: 200 }
+      responses:
+        "200":
+          description: The session after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/sessions/{id}/conversation:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -878,6 +910,9 @@ components:
           description: How many times the engine has told it to carry on; absent when none.
         role:
           $ref: "#/components/schemas/SessionRole"
+        work_item:
+          type: string
+          description: The work item the session serves (WI-998); absent when bound to none.
         resources: { $ref: "#/components/schemas/SessionResources" }
         template:
           type: string
@@ -1122,6 +1157,12 @@ components:
             workspace, instead of `cwd`.
         role:
           $ref: "#/components/schemas/SessionRole"
+        work_item:
+          type: string
+          maxLength: 200
+          description: >-
+            The work item the session serves (WI-998), as an opaque label kept
+            with the record and reported on the summary.
         autopilot:
           type: boolean
           default: false

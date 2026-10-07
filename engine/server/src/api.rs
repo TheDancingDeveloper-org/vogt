@@ -155,6 +155,19 @@ pub async fn set_session_role(
     Ok(Json(state.sessions.set_role(id, req.role)?))
 }
 
+/// Label a session with the work item it serves, or clear the label (WI-998).
+/// Gated like every session write; vogt-core's `session.bind_work` is the
+/// audited way to reach it.
+pub async fn set_session_work_item(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<vogt_engine_contract::SessionWorkItemRequest>,
+) -> Result<Json<SessionSummary>> {
+    Ok(Json(
+        state.sessions.set_work_item(id, req.work_item.as_deref())?,
+    ))
+}
+
 /// `POST /api/sessions/{id}/conversation` — link (or, with `ended`, unlink)
 /// the agent conversation running in a session (WI-962). Gated like every
 /// session write: `sessions`. The agent's own hook normally reports through

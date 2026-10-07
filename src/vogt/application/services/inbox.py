@@ -527,6 +527,8 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                             session.blocked,
                             view.session_by_engine_id(session.id),
                             projects,
+                            view=view,
+                            work_label=session.work_item,
                         )
                     )
                 if session.activity not in (
@@ -546,6 +548,8 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                         declared,
                         projects,
                         approval=session.approval,
+                        view=view,
+                        work_label=session.work_item,
                     )
                 )
         except EngineUnavailable:
@@ -819,6 +823,9 @@ def _blocked_entry(
     blocked: EngineBlocked,
     declared: CodingSession | None,
     projects: dict[str, Project],
+    *,
+    view: ReadView,
+    work_label: str | None = None,
 ) -> InboxEntry:
     """A session whose agent reported it cannot go on without a person.
 
@@ -827,6 +834,7 @@ def _blocked_entry(
     untrusted, shown verbatim.
     """
     project = None if declared is None else projects.get(declared.project_id)
+    ref = _bound_ref(view, declared, work_label)
     todo = "; ".join(blocked.items)
     summary = f"{blocked.reason}{' — to do: ' + todo if todo else ''}"[:1000]
     return InboxEntry(
@@ -835,11 +843,15 @@ def _blocked_entry(
         kind="session.blocked",
         occurred_at=_when(blocked.since) or ctx.clock(),
         observed_at=None,
-        title=f"Session {name or session_id} is blocked on you",
+        title=(
+            f"{ref} session {name or session_id} is blocked on you"
+            if ref
+            else f"Session {name or session_id} is blocked on you"
+        ),
         summary=summary,
         project_slug=None if project is None else project.slug,
         session_id=session_id,
-        work_item_ref=None,
+        work_item_ref=ref,
         source_subject_key=session_id,
         trust_state="unverified",
         freshness="live",
@@ -952,9 +964,12 @@ def _session_entry(
     projects: dict[str, Project],
     *,
     approval: EngineApproval | None = None,
+    view: ReadView,
+    work_label: str | None = None,
 ) -> InboxEntry:
     project = None if declared is None else projects.get(declared.project_id)
-    label = name or session_id
+    ref = _bound_ref(view, declared, work_label)
+    label = f"{ref} {name or session_id}" if ref else (name or session_id)
     if activity == "awaiting-approval":
         # A permission dialog denies itself on a countdown: say what it asks
         # and how long is left, so it can be answered from the Inbox row.
@@ -983,7 +998,7 @@ def _session_entry(
         summary=summary,
         project_slug=None if project is None else project.slug,
         session_id=session_id,
-        work_item_ref=None,
+        work_item_ref=ref,
         source_subject_key=session_id,
         trust_state="unverified",
         freshness="live",
@@ -991,6 +1006,21 @@ def _session_entry(
         action=InboxAction(kind="session", session_id=session_id),
         **_actor_fields(SYSTEM_ACTOR),
     )
+
+
+def _bound_ref(
+    view: ReadView, declared: CodingSession | None, label: str | None
+) -> str | None:
+    """The work item a session serves (WI-998): the core's row for a session
+    Vogt started — it is the truth — and the engine's label for one the GUI
+    started. Named on the entry so it reads "WI-983 session … is blocked"
+    and the Inbox's work-item filter catches it."""
+    if declared is not None:
+        if declared.work_item_id is None:
+            return None
+        item = view.work_item_by_id(declared.work_item_id)
+        return None if item is None else item.ref
+    return label
 
 
 def _apply_triage(
