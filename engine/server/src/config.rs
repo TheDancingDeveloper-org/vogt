@@ -357,6 +357,12 @@ pub struct Config {
     /// `whisper-1` (voicemode's OpenAI transcription model; a local Whisper.cpp
     /// server serving `large-v2` answers the same OpenAI-compatible route).
     pub assistant_stt_model: String,
+    /// ISO language sent with every transcription (`en` by default). Empty
+    /// leaves detection to the backend. A faster-whisper CPU spends a second
+    /// or two detecting language on the first 30s of every clip when this is
+    /// unset, and a call is one language. A client of `/api/assistant/stt`
+    /// may override it per upload.
+    pub assistant_stt_language: String,
     pub assistant_tts_base_urls: Vec<String>,
     pub assistant_tts_api_key: Option<String>,
     /// Speech model sent to `/audio/speech`. Defaults to `tts-1-hd` (voicemode).
@@ -488,6 +494,7 @@ struct FileConfig {
     assistant_stt_base_urls: Option<Vec<String>>,
     assistant_stt_api_key: Option<String>,
     assistant_stt_model: Option<String>,
+    assistant_stt_language: Option<String>,
     assistant_tts_base_urls: Option<Vec<String>>,
     assistant_tts_api_key: Option<String>,
     assistant_tts_model: Option<String>,
@@ -853,6 +860,12 @@ pub fn load(
             .or_else(|| engine_env("ENGINE_ASSISTANT_STT_MODEL").ok())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| "whisper-1".to_string()),
+        assistant_stt_language: from_file
+            .assistant_stt_language
+            .or_else(|| engine_env("ENGINE_ASSISTANT_STT_LANGUAGE").ok())
+            .unwrap_or_else(|| "en".to_string())
+            .trim()
+            .to_string(),
         assistant_tts_base_urls,
         assistant_tts_api_key,
         assistant_tts_model: from_file
@@ -1100,7 +1113,7 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>> {
 
 /// The live call's settings: `ENGINE_ASSISTANT_CALL_ENABLED` (default on),
 /// `ENGINE_ASSISTANT_CALL_END_OF_TURN_MS`, `_BARGE_IN_MS`,
-/// `_PARTIAL_INTERVAL_MS` (`0` turns live captions off), `_VAD` (`earshot`,
+/// `_PARTIAL_INTERVAL_MS` (`0`, the default, turns live captions off), `_VAD` (`earshot`,
 /// the default, or `energy`) and `ENGINE_ASSISTANT_CALL_FILLER` (empty turns
 /// the filler off). A value that
 /// does not parse, or a timing outside its sane range, is a startup error.

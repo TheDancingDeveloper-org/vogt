@@ -2503,6 +2503,7 @@ Every setting, with the TOML key for a `--config` file and its default
 | `history_live_scan_bytes` | `ENGINE_HISTORY_LIVE_SCAN_BYTES` | `262144` | trailing scrollback bytes scanned per live session when a history search sets `include_live` |
 | `assistant_stt_base_urls` | `ENGINE_ASSISTANT_STT_BASE_URLS` (comma-separated) | empty (server STT off) | ordered list of OpenAI-compatible `/audio/transcriptions` bases |
 | `assistant_stt_model` | `ENGINE_ASSISTANT_STT_MODEL` | `whisper-1` | transcription model |
+| `assistant_stt_language` | `ENGINE_ASSISTANT_STT_LANGUAGE` | `en` | ISO language sent with `/audio/transcriptions`; empty leaves detection to the backend. A client of `/api/assistant/stt` may override it per upload with a `language` field (empty asks for detection) |
 | `assistant_stt_api_key` | `ENGINE_ASSISTANT_STT_API_KEY` | unset | key for whichever STT entry needs one; a local server needs none |
 | `assistant_tts_base_urls` | `ENGINE_ASSISTANT_TTS_BASE_URLS` (comma-separated) | empty (server TTS off) | ordered list of OpenAI-compatible `/audio/speech` bases |
 | `assistant_tts_model` | `ENGINE_ASSISTANT_TTS_MODEL` | `tts-1-hd` | speech model |
@@ -2513,7 +2514,7 @@ Every setting, with the TOML key for a `--config` file and its default
 | — | `ENGINE_ASSISTANT_CALL_ENABLED` | on | offer the live call (`/api/assistant/call`) when the assistant, STT and TTS are configured; off makes it 404 |
 | — | `ENGINE_ASSISTANT_CALL_END_OF_TURN_MS` | `700` | silence after speech that ends the user's turn (300–5000) |
 | — | `ENGINE_ASSISTANT_CALL_BARGE_IN_MS` | `500` | voice needed to stop a reply by speaking over it (100–3000) |
-| — | `ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS` | `1500` | how often a turn is re-transcribed as a live caption; `0` turns captions off (fewer STT calls on a CPU-bound host) |
+| — | `ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS` | `0` | how often a turn is re-transcribed as a live caption; `0` (the default) turns captions off. On a CPU transcriber each partial is another full decode of the whole turn so far, stacked on the eager transcription that already hides the pause, so captions cost latency rather than saving it |
 | — | `ENGINE_ASSISTANT_CALL_VAD` | `earshot` | the call's voice detector: `earshot` (neural, pure Rust) or `energy` (adaptive noise floor) |
 | — | `ENGINE_ASSISTANT_CALL_FILLER` | `One moment.` | said while the model runs tools before answering; empty for none |
 
