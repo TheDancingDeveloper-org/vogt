@@ -307,6 +307,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             "/api/sessions/{id}/keep-awake",
             post(api::keep_session_awake),
         )
+        .route("/api/sessions/{id}/role", post(api::set_session_role))
         .route("/api/assistant/message", post(assistant_api::message))
         .route(
             "/api/assistant/actions/{id}",

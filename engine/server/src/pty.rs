@@ -82,6 +82,9 @@ pub struct Session {
     autopilot: AtomicBool,
     /// Times the engine told it to carry on.
     autopilot_nudges: std::sync::atomic::AtomicU32,
+    /// Nominated to supervise other sessions (see `SessionSummary::role`,
+    /// WI-957).
+    oversight: AtomicBool,
     /// Set as the session is being hibernated: the exit that follows is not
     /// the session ending, so its record is kept and its history row says
     /// `hibernated`.
@@ -190,6 +193,21 @@ impl Session {
         self.autopilot.store(on, Ordering::Release);
     }
 
+    pub fn role(&self) -> vogt_engine_contract::SessionRole {
+        if self.oversight.load(Ordering::Acquire) {
+            vogt_engine_contract::SessionRole::Oversight
+        } else {
+            vogt_engine_contract::SessionRole::Worker
+        }
+    }
+
+    pub fn set_role(&self, role: vogt_engine_contract::SessionRole) {
+        self.oversight.store(
+            role == vogt_engine_contract::SessionRole::Oversight,
+            Ordering::Release,
+        );
+    }
+
     pub fn autopilot_nudges(&self) -> u32 {
         self.autopilot_nudges.load(Ordering::Acquire)
     }
@@ -248,6 +266,7 @@ impl Session {
             keep_awake: self.keep_awake(),
             autopilot: self.autopilot(),
             autopilot_nudges: self.autopilot_nudges(),
+            role: self.role(),
             resources: self.resources.lock().clone(),
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
@@ -853,6 +872,7 @@ pub fn spawn(
         keep_awake: AtomicBool::new(false),
         autopilot: AtomicBool::new(false),
         autopilot_nudges: std::sync::atomic::AtomicU32::new(0),
+        oversight: AtomicBool::new(false),
         hibernating: AtomicBool::new(false),
         last_input: Mutex::new(None),
         resources: Mutex::new(None),

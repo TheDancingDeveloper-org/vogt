@@ -8,11 +8,12 @@
 // does the GUI ask the engine directly — then there is no token to mint and
 // nothing to audit it in.
 
-import { api } from "./api";
+import { api, type SessionRole } from "./api";
 import {
   VogtUnavailable,
   hibernateSessionInVogt,
   keepSessionAwakeInVogt,
+  setSessionRoleInVogt,
   wakeSessionInVogt,
 } from "./vogtApi";
 
@@ -50,5 +51,18 @@ export function setKeepAwake(
   return viaCore(
     () => keepSessionAwakeInVogt(id, keepAwake, reason),
     () => api.keepSessionAwake(id, keepAwake),
+  );
+}
+
+/** Nominate a session as oversight, or make it a worker again (WI-957).
+ *  Oversight pins it awake too; the rail lists it first. */
+export function setSessionRole(
+  id: string,
+  role: SessionRole,
+  reason = role === "oversight" ? "nominated as oversight from the GUI" : "made a worker again from the GUI",
+): Promise<void> {
+  return viaCore(
+    () => setSessionRoleInVogt(id, role, reason),
+    () => api.setSessionRole(id, role),
   );
 }

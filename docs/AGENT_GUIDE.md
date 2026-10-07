@@ -306,6 +306,15 @@ Rules:
   with for now but may come back to, use `session_hibernate` rather than
   `session_stop`. `session_keep_awake` pins one that must never be
   hibernated, such as a long-running driver.
+- **If you are the overseer**, say so: start as one with
+  `session_start(..., role="oversight")`, or nominate your own session with
+  `session_set_role(id=$VOGT_SESSION_ID, role="oversight")`. That pins you
+  awake (a redeploy brings you back by resuming your conversation), records
+  in the audit log which session was overseeing, and lists you first in the
+  GUI. Start the work you drive as Vogt sessions (`session_start` with a
+  template, project, work item and task) rather than as subagents inside
+  your own conversation: a session is visible, can be overseen, and outlives
+  you.
 - **Long turn or hung?** `session_list` and `session_screen` carry
   `turn_started_at` (when the agent last went to work from rest) and
   `last_output_at` (when the terminal last printed). Agent TUIs animate while

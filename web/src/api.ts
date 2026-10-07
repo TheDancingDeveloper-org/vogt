@@ -40,6 +40,9 @@ export interface ApprovalPrompt {
   detected_at: string;
 }
 
+/** What a session is for (engine `SessionRole`, WI-957). */
+export type SessionRole = "worker" | "oversight";
+
 export interface SessionSummary {
   id: string;
   name: string;
@@ -66,6 +69,9 @@ export interface SessionSummary {
   hibernation?: Hibernation | null;
   /** Pinned awake: never hibernated by policy. */
   keep_awake?: boolean;
+  /** What the session is for (WI-957): `oversight` for one nominated to
+   *  supervise the others, listed first in the rail. Absent means a worker. */
+  role?: SessionRole;
   /** On autopilot (WI-949): re-prompted by the engine until it is done. */
   autopilot?: boolean;
   /** How many times the engine has told it to carry on. */
@@ -872,6 +878,8 @@ export const api = {
     req<SessionSummary>("POST", `/api/sessions/${id}/wake`, {}, undefined, "long"),
   keepSessionAwake: (id: string, keepAwake: boolean) =>
     req<SessionSummary>("POST", `/api/sessions/${id}/keep-awake`, { keep_awake: keepAwake }),
+  setSessionRole: (id: string, role: SessionRole) =>
+    req<SessionSummary>("POST", `/api/sessions/${id}/role`, { role }),
   deleteSession: (id: string) =>
     req<OkResponse>("DELETE", `/api/sessions/${id}`),
   health: (signal?: AbortSignal) =>

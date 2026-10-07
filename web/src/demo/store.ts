@@ -458,7 +458,7 @@ export class DemoStore {
       for (const row of rows) counts[row.attention] = (counts[row.attention] ?? 0) + 1;
       return json({ rows, counts, swept_at: this.now(), engine: null });
     }
-    if (["/sessions/hibernate", "/sessions/wake", "/sessions/keep-awake", "/sessions/answer"].includes(path)) return refusal("The demo's terminals are simulated in the browser: there is no process to hibernate or wake.");
+    if (["/sessions/hibernate", "/sessions/wake", "/sessions/keep-awake", "/sessions/role", "/sessions/answer"].includes(path)) return refusal("The demo's terminals are simulated in the browser: there is no process to hibernate or wake.");
     return json({ error: { code: "demo.unhandled", message: `No demo responder for ${method} ${path}` } }, { status: 404 });
   }
 

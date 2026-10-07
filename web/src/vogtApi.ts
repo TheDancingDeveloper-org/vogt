@@ -20,6 +20,7 @@
 //      cannot invent one — there is no default.
 
 import { ApiError, getBase, getToken, reportAuthResponse } from "./api";
+import type { SessionRole } from "./api";
 import { fetchWithRetry } from "./transport";
 import { DEADLINE_MS } from "./deadlines";
 import {
@@ -86,6 +87,7 @@ export const ROUTES = {
   "session.hibernate": "/sessions/hibernate",
   "session.wake": "/sessions/wake",
   "session.keep_awake": "/sessions/keep-awake",
+  "session.set_role": "/sessions/role",
   "session.sweep": "/sessions/sweep",
   "session.answer": "/sessions/answer",
 } as const;
@@ -523,6 +525,8 @@ export interface SessionSummary {
   stopped_at?: string | null;
   activity?: string | null;
   alive?: boolean | null;
+  /** `oversight` or `worker` (WI-957); null when the engine was not asked. */
+  role?: SessionRole | null;
 }
 
 /** One branch bound to a work item.
@@ -1201,6 +1205,11 @@ export const keepSessionAwakeInVogt = (id: string, keepAwake: boolean, reason: s
     { id, keep_awake: keepAwake, reason },
     "POST",
   );
+
+/** Nominate a session as oversight (or make it a worker again) through the
+ *  core (WI-957). */
+export const setSessionRoleInVogt = (id: string, role: SessionRole, reason: string) =>
+  call<{ session: SessionSummary }>("session.set_role", { id, role, reason }, "POST");
 
 /**
  * Revoke the session this browser holds, at the core. The local half — the

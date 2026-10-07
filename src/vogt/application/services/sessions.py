@@ -85,6 +85,7 @@ from vogt.application.models import (
     SessionSweepRow,
     SessionWaitParams,
     SessionWaitResult,
+    SetSessionRoleParams,
     StartSessionParams,
     StopSessionParams,
     SweepSessionsParams,
@@ -129,6 +130,8 @@ SESSION_WAKE = "session.wake"
 SESSION_WOKEN_EVENT = "session.woken"
 SESSION_KEEP_AWAKE = "session.keep_awake"
 SESSION_KEEP_AWAKE_EVENT = "session.keep_awake"
+SESSION_SET_ROLE = "session.set_role"
+SESSION_ROLE_EVENT = "session.role_set"
 
 #: The byte sequence an xterm-compatible terminal sends for each named key.
 #: Arrows are the normal-mode CSI forms (`ESC [ A`), which every TUI this
@@ -201,6 +204,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             resume=params.resume,
             permission_mode=params.permission_mode,
             autopilot=autopilot,
+            role=params.role,
         )
     except VogtError as error:
         _LOG.warning(
@@ -308,6 +312,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
                 # standing as `model`.
                 "resume": params.resume,
                 "autopilot": autopilot,
+                # Recorded so that "which session was the overseer?" has an
+                # answer after the engine has forgotten it (WI-957).
+                "role": params.role,
                 # Named on the audit row: who started an unguarded session,
                 # and why, is what an operator looks for afterwards.
                 "permission_mode": params.permission_mode,
@@ -1327,6 +1334,45 @@ def keep_session_awake(
         )
 
 
+def set_session_role(ctx: AppContext, params: SetSessionRoleParams) -> SessionResult:
+    """Nominate a session as oversight, or make it a worker again (WI-957).
+
+    The role lives with the engine, beside `keep_awake`, because it has to
+    survive exactly what the engine's record survives — hibernation and a
+    redeploy — and because a session started from the GUI has no row here to
+    hold it. The audit row is the core's durable answer to "which session was
+    the overseer, and who said so".
+    """
+    reason = writes.validate_reason(params.reason)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    updated = engine.set_role(engine_id, role=params.role)
+    if updated is None:
+        msg = f"the engine has no session {params.id!r}, or predates session roles"
+        raise NotFound(msg)
+    audited_action(
+        ctx,
+        operation=SESSION_SET_ROLE,
+        reason=reason,
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": target.session is not None,
+            "role": params.role,
+            "keep_awake": updated.keep_awake,
+        },
+        event_kind=SESSION_ROLE_EVENT,
+    )
+    if target.session is None:
+        return SessionResult(session=_summarize_engine_only(updated))
+    with ctx.declared.read() as view:
+        return SessionResult(
+            session=_summarize(view, target.session, engine_session=updated)
+        )
+
+
 SESSION_ANSWER = "session.answer"
 SESSION_ANSWERED_EVENT = "session.answered"
 
@@ -1880,6 +1926,7 @@ def _start_on_engine(
     resume: str | None = None,
     permission_mode: str | None = None,
     autopilot: bool = False,
+    role: str = "worker",
 ) -> EngineSession:
     return engine.create_session(
         prompt=brief,
@@ -1903,6 +1950,7 @@ def _start_on_engine(
         resume=resume,
         permission_mode=permission_mode,
         autopilot=autopilot,
+        role=role,
     )
 
 
@@ -2027,6 +2075,7 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "keep_awake": engine_session.keep_awake,
         "autopilot": engine_session.autopilot,
         "autopilot_nudges": engine_session.autopilot_nudges,
+        "role": engine_session.role,
         "conversation_id": engine_session.conversation_id,
         "resources": _resources(engine_session.resources),
         "permission_mode": engine_session.permission_mode,

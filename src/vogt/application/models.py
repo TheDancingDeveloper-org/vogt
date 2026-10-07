@@ -118,6 +118,9 @@ def apply_aliases(data: object, aliases: dict[str, str], *, model: str) -> objec
 
 InboxSource = Literal["github", "drift", "ci", "agent"]
 InboxTriageState = Literal["active", "archived", "snoozed"]
+#: What a session is for (WI-957): an ordinary worker, or one nominated to
+#: supervise the others.
+SessionRole = Literal["worker", "oversight"]
 
 
 class InboxAction(Result):
@@ -1123,6 +1126,14 @@ class SessionSummary(Result):
     autopilot_nudges: int | None = Field(
         default=None,
         description="How many times the engine has told it to carry on.",
+    )
+    role: SessionRole | None = Field(
+        default=None,
+        description=(
+            "What the session is for (session.set_role): `oversight` for one "
+            "nominated to supervise other sessions, `worker` otherwise. None "
+            "when the engine could not be asked."
+        ),
     )
     stopped_by: str | None = Field(
         default=None,
@@ -3778,6 +3789,16 @@ class StartSessionParams(Params):
             "otherwise; `false` turns it off."
         ),
     )
+    role: SessionRole = Field(
+        default="worker",
+        description=(
+            "`oversight` nominates the session to supervise others (drive "
+            "rollouts, check on and revive worker sessions): it is pinned "
+            "awake, so it comes back by itself after a redeploy, and the GUI "
+            "lists it first. `worker` (default) is every other session. "
+            "Change it later with session.set_role."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
@@ -3937,6 +3958,18 @@ class KeepSessionAwakeParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     keep_awake: bool = Field(
         description="True pins the session awake; false lets policy hibernate it."
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class SetSessionRoleParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    role: SessionRole = Field(
+        description=(
+            "`oversight` nominates the session to supervise others (and pins "
+            "it awake); `worker` makes it an ordinary session again (the pin "
+            "stays until session.keep_awake lifts it)."
+        )
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
 

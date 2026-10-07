@@ -516,6 +516,36 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/SessionSummary" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/{id}/role:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    post:
+      tags: [sessions]
+      summary: Nominate a session as oversight, or make it a worker again.
+      description: >-
+        WI-957. `oversight` marks a session that supervises the others; it is
+        also pinned awake (`keep_awake`), so a restart wakes it by itself.
+        `worker` clears the role and leaves the pin as it is. Live or
+        hibernated; the role is kept in the session's record.
+      operationId: setSessionRole
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { $ref: "#/components/schemas/SessionRole" }
+      responses:
+        "200":
+          description: The session after the change.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionSummary" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /api/sessions/{id}/kill:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -721,6 +751,8 @@ components:
         autopilot_nudges:
           type: integer
           description: How many times the engine has told it to carry on; absent when none.
+        role:
+          $ref: "#/components/schemas/SessionRole"
         resources: { $ref: "#/components/schemas/SessionResources" }
         template:
           type: string
@@ -904,6 +936,13 @@ components:
         last_output_at: { type: string, format: date-time, description: As on SessionSummary. }
         approval: { $ref: "#/components/schemas/ApprovalPrompt" }
         blocked: { $ref: "#/components/schemas/BlockedReport" }
+    SessionRole:
+      type: string
+      enum: [worker, oversight]
+      description: >-
+        What a session is for (WI-957). `oversight` is a session nominated to
+        supervise the others: pinned awake and listed first by the PWA.
+        Absent means `worker`.
     SessionSpec:
       type: object
       required: [name]
@@ -956,6 +995,8 @@ components:
             For `claude` and `codex` the session starts in the directory the
             conversation's transcript records, when that is inside the
             workspace, instead of `cwd`.
+        role:
+          $ref: "#/components/schemas/SessionRole"
         autopilot:
           type: boolean
           default: false

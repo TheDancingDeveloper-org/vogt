@@ -2035,6 +2035,24 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* An oversight session (WI-957): first in the rail, and marked so that the
+   order is not the only signal. */
+.session-row.oversight:not(.active):not(.waiting) {
+  border-left-color: var(--accent);
+}
+.session-role-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  vertical-align: 1px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 50%, transparent);
+}
 .session-row .cwd {
   font-size: 10px;
   color: var(--fg-muted);

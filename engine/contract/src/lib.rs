@@ -117,6 +117,13 @@ pub struct SessionSpec {
     /// is reached. vogt-core sets it from `session.start`'s `autopilot`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autopilot: bool,
+    /// What the session is for (WI-957): an ordinary `worker`, or an
+    /// `oversight` session that supervises others. An oversight session is
+    /// pinned awake from the start, so a redeploy brings it back by itself,
+    /// and the PWA lists it first. Kept in the session's record, so a wake
+    /// keeps it.
+    #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
+    pub role: SessionRole,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -192,6 +199,10 @@ pub struct SessionSummary {
     /// How many times the engine has told this session to carry on.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub autopilot_nudges: u32,
+    /// `oversight` for a session nominated to supervise others (WI-957, see
+    /// `SessionSpec::role`); absent for an ordinary worker.
+    #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
+    pub role: SessionRole,
     /// Set when someone asked the session to stop: who, when and why. The
     /// exit that follows reads `stopped`, not `errored` (WI-913).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -316,6 +327,30 @@ pub struct WakeRequest {
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
+}
+
+/// What a session is for (WI-957). Absent on the wire means `worker`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SessionRole {
+    /// An ordinary session: an agent working on something, or a shell.
+    #[default]
+    Worker,
+    /// A session nominated to supervise others: it drives rollouts, checks
+    /// on and revives worker sessions. Pinned awake, listed first.
+    Oversight,
+}
+
+impl SessionRole {
+    pub fn is_worker(&self) -> bool {
+        *self == SessionRole::Worker
+    }
+}
+
+/// `POST /api/sessions/{id}/role`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRoleRequest {
+    pub role: SessionRole,
 }
 
 /// `POST /api/sessions/{id}/keep-awake`.

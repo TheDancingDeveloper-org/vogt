@@ -763,6 +763,7 @@ mod tests {
             "hibernate",
             "wake",
             "keep-awake",
+            "role",
             "kill",
             "input",
             "blocked",

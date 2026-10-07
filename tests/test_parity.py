@@ -501,6 +501,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     (
+        "session.set_role",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "role": "oversight",
+            "reason": WHY,
+        },
+    ),
+    (
         "session.wake",
         lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
     ),
@@ -922,6 +930,14 @@ def _stand_in_engine() -> EngineClient:
         if method == "POST" and path.endswith("/keep-awake"):
             return 200, json.dumps(
                 {**summary(path.rsplit("/", 2)[-2]), "keep_awake": spec["keep_awake"]}
+            ).encode()
+        if method == "POST" and path.endswith("/role"):
+            return 200, json.dumps(
+                {
+                    **summary(path.rsplit("/", 2)[-2]),
+                    "role": spec["role"],
+                    "keep_awake": spec["role"] == "oversight",
+                }
             ).encode()
         if (
             method == "GET"

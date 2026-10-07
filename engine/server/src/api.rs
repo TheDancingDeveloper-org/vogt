@@ -145,6 +145,16 @@ pub async fn keep_session_awake(
     Ok(Json(state.sessions.set_keep_awake(id, req.keep_awake)?))
 }
 
+/// Nominate a session as oversight, or make it a worker again (WI-957).
+/// Becoming oversight pins it awake too.
+pub async fn set_session_role(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<vogt_engine_contract::SessionRoleRequest>,
+) -> Result<Json<SessionSummary>> {
+    Ok(Json(state.sessions.set_role(id, req.role)?))
+}
+
 /// Choose one option of the dialog on screen (WI-917): a permission
 /// dialog or a startup gate. The engine reads the menu as it is now, moves
 /// the highlight to the option with arrow keys, presses Enter, and looks
