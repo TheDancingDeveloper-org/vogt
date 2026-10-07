@@ -1109,12 +1109,32 @@ body), and vogt-core's Inbox shows the session as "asking for approval". To
 answer: read the excerpt, then `session.input` the option's number (or arrows
 and `enter`), or `esc` to decline.
 
-The engine keeps no terminal emulator of its own. The screen is rendered per
-request by replaying the last 1 MiB of the session's scrollback ring — the
-same bytes an attach replays into xterm.js, aligned to the same ground-state
-boundary — into a `vt100` grid at the PTY's current size
-(`engine/server/src/screen.rs`). It is therefore what a client attaching now
-would see, and costs one bounded replay on the blocking pool per call.
+The engine keeps a terminal emulator per live session. The PTY reader feeds
+every chunk into a `vt100` grid (`Terminal` in `engine/server/src/screen.rs`,
+`vt100` 0.16.2), and `/screen` reads that grid — visible rows, cursor, title
+and up to 2000 lines of scrollback — rather than replaying raw bytes. This
+reverses the earlier decision to keep no emulator, and it was forced: a
+diff-painting TUI such as opencode (OpenTUI) draws one full frame and then
+only the cells that changed, with no newline at all, so once more than the
+replay window of diffs had followed the last full repaint, replaying a tail
+onto a blank grid showed only the recently changed cells — a spinner and a
+progress bar on an otherwise blank screen (WI-990). A grid that has parsed
+every byte since the session started still holds the whole frame.
+
+The grid is what makes an unsupported sequence harmless. `vt100` consumes DEC
+private modes it does not act on, including 2026 (synchronized output, which
+it treats as a no-op so a frame is never held back), drops OSC queries, and
+ignores anything else it does not implement, so no control byte can reach a
+cell as text. It also tracks the alternate screen and scroll regions, and a
+PTY resize reflows the grid to the new size. The grid keeps 2000 scrollback
+lines, which bounds what one session's emulator holds; parsing a chunk is the
+cost added to the PTY reader's hot path.
+
+A hibernated session has no live grid — it was dropped with the process — so
+its screen is still rendered by replaying the tail of output it kept, and an
+attach still replays the raw ring into the client's own xterm.js. The two
+agree for as long as the replay window contains a full frame, which is the
+case for anything that redraws in lines.
 
 **Readiness for a driver.** Watch `GET /api/events` for the `activity` event
 of your session: `waiting-for-input` is the push signal that a prompt is up,
