@@ -593,6 +593,15 @@ backend does not spend the start of each turn detecting one. Opening a call
 transcribes a moment of silence, so a backend that unloaded its model while
 idle has it loaded again before your first turn.
 
+Measured against speaches (faster-whisper `base.en`, int8, CPU) on a busy
+24-core host, with four test turns of 2–12 s spoken 12 times each: the wait
+for the transcript after a turn ended fell from a median of 418 ms (p90
+2.2 s) sending whole turns to 128 ms (p90 0.6 s) sending pieces, and the end
+of speech to the first audio of the reply from 1.6 s to 1.1 s with an instant
+model. Whole turns also came back as a looping transcript ("…passed passed
+passed…") 7 times in 48; pieces did not, because a piece that loops is
+transcribed again without the words before it.
+
 The model is the rest of it. A piece is hidden only when it is transcribed
 inside the half second between your pause and the end of your turn.
 On a 24-core CPU with speaches, measured warm, a two-second turn took 1.4 s on
