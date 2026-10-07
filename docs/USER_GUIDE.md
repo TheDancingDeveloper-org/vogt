@@ -577,19 +577,24 @@ that matters most here: **a spoken "yes" never approves anything.** A change
 still waits on a button on the screen, and while that button is waiting the
 call will not even pass what you say to the model — it reminds you to tap.
 
-A call's speed is the transcription backend's speed. The engine sends a
-language with every clip (`ENGINE_ASSISTANT_STT_LANGUAGE`, `en` unless you say
-otherwise) so the backend does not spend the start of each turn detecting
-one, and it transcribes the moment you pause rather than waiting until the
-turn is declared over. Live captions while you are still talking are off
-(`ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS=0`): on a small CPU model each
-caption is another full transcription of everything said so far, and that
-work queues behind the transcription that actually answers you. Opening a
-call also transcribes a moment of silence, so a backend that unloaded its
-model while idle has it loaded again before your first turn.
+A call's speed is the transcription backend's speed. The engine transcribes
+your turn *while you are still talking*: every pause sends what you said
+since the last one to the backend, and the words come back as a live caption.
+By the time the call decides your turn is over, usually only the last phrase
+was still being transcribed, and often not even that, so a long turn is
+answered about as fast as a short one. Whisper servers, speaches included,
+only transcribe finished clips, which is why the turn goes in phrase-sized
+pieces rather than as a continuous stream. Each piece is sent the words
+before it, so a sentence split at a pause still reads as one. If a backend
+transcribes short pieces badly, `ENGINE_ASSISTANT_CALL_STT_MODE=whole` sends
+whole turns instead. The engine also sends a language with every clip
+(`ENGINE_ASSISTANT_STT_LANGUAGE`, `en` unless you say otherwise) so the
+backend does not spend the start of each turn detecting one. Opening a call
+transcribes a moment of silence, so a backend that unloaded its model while
+idle has it loaded again before your first turn.
 
-The model is the rest of it. The early transcription is hidden only when it
-finishes inside the half second between your pause and the end of your turn.
+The model is the rest of it. A piece is hidden only when it is transcribed
+inside the half second between your pause and the end of your turn.
 On a 24-core CPU with speaches, measured warm, a two-second turn took 1.4 s on
 faster-whisper `small` and 0.46 s on `base.en`, both at `int8`. A six-second
 turn took 1.9 s and 0.67 s. Neither model got a word of the test turns wrong.
