@@ -1200,11 +1200,29 @@ checks decide what it can finish on its own (WI-926; the design is
   image ships `/usr/local/share/vogt/driven-session-settings.json`:
   - it states that the session is driven, and that a denied action is
     reported, never routed around;
-  - it adds one exception, **Own Green PR Merge**: merging a pull request
-    the agent opened for its task, in a repository listed under
-    `Autonomous-merge repositories`, after its required checks pass, with
-    the plain merge command. `--admin` and force options, other people's PRs,
-    unlisted repositories and red or pending checks stay blocked.
+  - it adds three exceptions, all in the classifier's own wording, with no
+    pattern rule (`permissions.allow`/`ask`/`deny`), so the classifier
+    judges every command:
+    - **Read-Only Inspection**: commands that only report state (`docker
+      ps|logs|stats`, `docker inspect --format` of non-environment fields,
+      `ss`, `netstat`, read-only `git`, `gh pr view|list|checks|diff`, `gh
+      run view`, a credential-less GET of a local health endpoint) are not
+      *Modify Shared Resources* or *Interfere With Workloads*. Printing a
+      secret, dumping the environment (`.Config.Env` included), `docker
+      exec`, any create/start/stop/remove and sending data off the host stay
+      blocked.
+    - **Credential Presence Check**: testing whether a credential exists,
+      its length, variable *names* and the `AGENT_AUTH_*` name lists, never
+      a value or part of one. Fetching stays with the default rules and the
+      grant flow.
+    - **Own Green PR Merge**: merging a pull request the agent opened for its
+      task, in a repository listed under `Autonomous-merge repositories`,
+      after its required checks pass, with the plain merge command.
+      `--admin` and force options, other people's PRs, unlisted repositories
+      and red or pending checks stay blocked. Any other merge is still the
+      classifier's *Merge Without Review*: it is not turned into a prompt,
+      because any agent with `work.write` can answer a session's prompt
+      (WI-983).
 
   The shipped list is *none configured*, so the image changes nothing until
   a deployment names its repositories. `ENGINE_AGENT_CLAUDE_SETTINGS` points

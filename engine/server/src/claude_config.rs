@@ -326,3 +326,366 @@ mod tests {
         assert_eq!(opencode_config_from(Some("off")), None);
     }
 }
+
+/// The shipped driven-session policy (`engine/deploy/driven-session-settings.json`)
+/// is a security boundary, so its shape is pinned here (WI-926).
+///
+/// Two layers decide a driven Claude session's actions. Pattern rules
+/// (`permissions.deny`, then `ask`, then `allow`) resolve first and never
+/// reach the classifier; everything else goes to auto mode's classifier,
+/// judged against its built-in rules plus this file's `autoMode` entries.
+/// These tests prove what the file itself decides: it keeps every built-in
+/// rule, it adds no pattern rule, so every command below still reaches the
+/// classifier (a read is never pattern-denied or pattern-asked, and a merge,
+/// force-push, `rm -rf`, Komodo write, Infisical read or `docker compose
+/// down` is never pattern-allowed or downgraded to a prompt), and its allow
+/// exceptions say what they clear and what they never cover.
+///
+/// What they cannot prove is the classifier's verdict: whether it actually
+/// lets `docker ps` through under *Read-Only Inspection*, or still denies a
+/// `.Config.Env` dump, is judged by a model at run time. That needs a check
+/// on vogt-dev after merge.
+#[cfg(test)]
+mod driven_policy_tests {
+    use serde_json::Value;
+
+    const SHIPPED: &str = include_str!("../../deploy/driven-session-settings.json");
+
+    fn policy() -> Value {
+        serde_json::from_str(SHIPPED).expect("the shipped policy is JSON")
+    }
+
+    fn allow_rules() -> Vec<String> {
+        policy()["autoMode"]["allow"]
+            .as_array()
+            .expect("autoMode.allow is a list")
+            .iter()
+            .map(|r| r.as_str().expect("every rule is prose").to_string())
+            .collect()
+    }
+
+    fn rule(name: &str) -> String {
+        let prefix = format!("{name}:");
+        allow_rules()
+            .into_iter()
+            .find(|r| r.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("the shipped policy has no `{name}` rule"))
+    }
+
+    /// Claude Code's documented Bash rule matching, enough to ask whether
+    /// any rule in the file would catch a command: `*` matches any text,
+    /// a trailing ` *` (or `:*`) also matches the bare command, and a
+    /// compound command is matched part by part.
+    fn bash_rule_matches(rule: &str, command: &str) -> bool {
+        let Some(pattern) = rule.strip_prefix("Bash(").and_then(|r| r.strip_suffix(')')) else {
+            // A bare tool name (`Bash`) matches every call of that tool.
+            return rule == "Bash";
+        };
+        let pattern = pattern
+            .strip_suffix(":*")
+            .map_or_else(|| pattern.to_string(), |p| format!("{p} *"));
+        let glob = format!(
+            "^{}$",
+            pattern
+                .split('*')
+                .map(regex::escape)
+                .collect::<Vec<_>>()
+                .join(".*")
+        );
+        let re = regex::Regex::new(&glob).unwrap();
+        let bare = pattern
+            .strip_suffix(" *")
+            .filter(|p| !p.contains('*'))
+            .map(str::to_string);
+        regex::Regex::new(r"&&|\|\||;|\||\n")
+            .unwrap()
+            .split(command)
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .any(|part| re.is_match(part) || bare.as_deref() == Some(part))
+    }
+
+    /// The pattern verdict for a command, or `None` when no pattern rule
+    /// matches and the classifier decides.
+    fn pattern_verdict(command: &str) -> Option<&'static str> {
+        let policy = policy();
+        for list in ["deny", "ask", "allow"] {
+            let rules = policy["permissions"][list]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if rules
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|r| bash_rule_matches(r, command))
+            {
+                return Some(list);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn the_matcher_matches_the_way_claude_code_documents() {
+        // Guard for the helper the other tests rely on.
+        assert!(bash_rule_matches(
+            "Bash(gh pr merge *)",
+            "gh pr merge 12 --squash"
+        ));
+        assert!(bash_rule_matches("Bash(gh pr merge *)", "gh pr merge"));
+        assert!(bash_rule_matches(
+            "Bash(gh pr merge:*)",
+            "cd x && gh pr merge 3"
+        ));
+        assert!(bash_rule_matches(
+            "Bash(gh pr merge *--admin*)",
+            "gh pr merge 3 --admin --rebase"
+        ));
+        assert!(bash_rule_matches("Bash", "ls"));
+        assert!(!bash_rule_matches("Bash(ls *)", "lsof"));
+        assert!(!bash_rule_matches("Bash(gh pr merge *)", "gh pr view 3"));
+    }
+
+    #[test]
+    fn every_built_in_rule_is_kept() {
+        // A list without "$defaults" replaces Claude Code's whole list for
+        // that section: soft_deny would lose force-push, prod deploys and
+        // credential rules; hard_deny would lose Data Exfiltration.
+        let auto = &policy()["autoMode"];
+        for list in ["environment", "allow", "soft_deny", "hard_deny"] {
+            if let Some(rules) = auto.get(list) {
+                let rules = rules.as_array().expect("a rule list");
+                assert!(
+                    rules.iter().any(|r| r == "$defaults"),
+                    "autoMode.{list} must keep \"$defaults\""
+                );
+            }
+        }
+        assert!(auto.get("environment").is_some() && auto.get("allow").is_some());
+        // The policy only adds exceptions: it never relaxes a built-in block
+        // rule by redefining it, nor turns the classifier off for the shell.
+        assert!(auto.get("soft_deny").is_none(), "no soft_deny override");
+        assert!(auto.get("hard_deny").is_none(), "no hard_deny override");
+        assert!(auto.get("classifyAllShell").is_none());
+    }
+
+    #[test]
+    fn there_is_no_pattern_rule_so_the_classifier_judges_every_command() {
+        // A pattern allow cannot tell `docker inspect --format '{{.State}}'`
+        // from a `.Config.Env` dump, or a curl GET from one with `-d @file`,
+        // and resolves before the classifier sees the command.
+        let policy = policy();
+        for list in ["allow", "ask", "deny"] {
+            let rules = policy["permissions"][list]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(
+                rules.is_empty(),
+                "permissions.{list} must stay empty in the shipped policy: {rules:?}"
+            );
+        }
+        // Nor may the file pick a posture: bypass is a person's grant, made
+        // per spawn (`permission_mode`), never by the policy itself.
+        assert!(policy["permissions"].get("defaultMode").is_none());
+        assert!(policy.get("skipDangerousModePermissionPrompt").is_none());
+    }
+
+    #[test]
+    fn read_only_commands_are_neither_denied_nor_asked_by_a_pattern() {
+        for command in [
+            "docker ps",
+            "docker ps -a --format '{{.Names}} {{.Status}}'",
+            "docker logs --tail 200 vogt-dev-engine-1",
+            "docker stats --no-stream",
+            "docker inspect --format '{{.State.Health.Status}}' vogt-dev-engine-1",
+            "ss -ltnp",
+            "netstat -tlnp",
+            "curl -fsS http://127.0.0.1:8910/healthz",
+            "wget -qO- http://localhost:8080/health",
+            "git status --short",
+            "git log --oneline -5",
+            "git diff origin/main",
+            "git show HEAD",
+            "git branch -a",
+            "gh pr view 873",
+            "gh pr list --state open",
+            "gh pr checks 873",
+            "gh pr diff 873",
+            "gh run view 12345 --log-failed",
+            "ls -la",
+            "cat README.md",
+            "grep -rn autoMode engine/",
+            "find . -name '*.rs'",
+            "head -20 Cargo.toml",
+            "tail -f /dev/null",
+            "test -n \"${GH_TOKEN:+x}\" && echo set",
+            "echo \"$AGENT_AUTH_GRANTED\"",
+        ] {
+            assert_eq!(pattern_verdict(command), None, "{command}");
+        }
+    }
+
+    #[test]
+    fn the_read_only_rule_clears_only_inspection_and_keeps_secrets_blocked() {
+        let rule = rule("Read-Only Inspection");
+        for command in [
+            "`docker ps`",
+            "`docker logs`",
+            "`docker stats`",
+            "`docker inspect --format`",
+            "`ss`",
+            "`netstat`",
+            "`git` commands",
+            "`gh pr view|list|checks|diff`",
+            "`gh run view`",
+            "`curl`/`wget`",
+        ] {
+            assert!(
+                rule.contains(command),
+                "Read-Only Inspection names {command}"
+            );
+        }
+        // What it clears, and only that.
+        assert!(rule.contains(
+            "This clears Modify Shared Resources and Interfere With Workloads for those reads only"
+        ));
+        // What it never covers.
+        for kept in [
+            "no request body and no credentials",
+            "printing a secret",
+            "dumping environment variables",
+            "`.Config.Env`",
+            "`docker exec`",
+            "creating/starting/stopping/removing anything",
+            "writing to a shared service",
+            "sending data off the host",
+            "stay blocked",
+        ] {
+            assert!(
+                rule.contains(kept),
+                "Read-Only Inspection must keep: {kept}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_presence_rule_never_reads_or_fetches_a_credential() {
+        let rule = rule("Credential Presence Check");
+        for name in [
+            "AGENT_AUTH_MODE",
+            "AGENT_AUTH_GRANTED",
+            "AGENT_AUTH_ONDEMAND",
+            "AGENT_AUTH_WRITABLE",
+        ] {
+            assert!(rule.contains(name), "{name}");
+        }
+        assert!(rule.contains("presence checks only"));
+        for kept in [
+            "printing a credential value or any portion of one",
+            "copying it into a file or another variable",
+            "obtaining a credential the session does not already hold",
+            "Vogt grant flow",
+        ] {
+            assert!(
+                rule.contains(kept),
+                "Credential Presence Check must keep: {kept}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_is_not_converted_to_a_prompt_and_stays_with_the_classifier() {
+        // Deferred (WI-983): any agent with work.write can answer a session's
+        // permission prompt, so an ask rule would let one agent approve
+        // another's merge rather than put a person in the loop.
+        for command in [
+            "gh pr merge 873 --rebase",
+            "gh pr merge 873 --squash --delete-branch",
+            "gh pr merge 873 --admin --rebase",
+            "gh pr merge --auto 873",
+            "cd /w/repo && gh pr merge 1",
+        ] {
+            assert_eq!(pattern_verdict(command), None, "{command}");
+        }
+        // The only merge exception is still Own Green PR Merge, last in the
+        // list, for listed repositories, and never `--admin`.
+        let rules = allow_rules();
+        let merge: Vec<_> = rules.iter().filter(|r| r.contains("gh pr merge")).collect();
+        assert_eq!(merge.len(), 1, "only Own Green PR Merge mentions a merge");
+        assert!(merge[0].starts_with("Own Green PR Merge:"));
+        assert!(rules.last().unwrap().starts_with("Own Green PR Merge:"));
+        assert!(merge[0].contains("It never covers `--admin`"));
+        assert!(merge[0].contains("Autonomous-merge repositories"));
+        let env = policy()["autoMode"]["environment"].to_string();
+        assert!(
+            env.contains("**Autonomous-merge repositories**: none configured"),
+            "the image ships no autonomous-merge repository"
+        );
+    }
+
+    #[test]
+    fn prod_destructive_and_secret_actions_still_go_to_the_classifier() {
+        for command in [
+            "git push --force origin main",
+            "git push -f origin main",
+            "git push origin +main",
+            "git push origin --delete main",
+            "git push origin feature/x",
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf /var/lib/docker/volumes",
+            "docker compose down",
+            "docker compose -p vogt-prod down -v",
+            "docker rm -f vogt-prod-vogt-1",
+            "docker exec vogt-prod-vogt-1 env",
+            "docker inspect vogt-prod-vogt-1",
+            "docker inspect --format '{{.Config.Env}}' vogt-prod-vogt-1",
+            "infisical secrets get HOMELAB_VOGT_PROD_AGENT_TOKEN",
+            "infisical export --env=prod",
+            "infisical run -- env",
+            "vogt-agent-auth fetch GH_TOKEN",
+            "curl -X POST http://100.92.54.45:3011/execute/DeployStack -d '{}'",
+            "curl -X POST http://100.92.54.45:3011/write/UpdateStack -d @stack.json",
+            "printenv",
+            "cat ~/.config/gh/hosts.yml",
+            "sqlite3 vogt.db 'DROP TABLE work_items'",
+        ] {
+            assert_eq!(pattern_verdict(command), None, "{command}");
+        }
+        // And no exception this file adds names one of them as covered:
+        // the new rules mention these only in what they never cover.
+        let added: Vec<_> = allow_rules()
+            .into_iter()
+            .filter(|r| r != "$defaults" && !r.starts_with("Own Green PR Merge:"))
+            .collect();
+        assert_eq!(
+            added.len(),
+            2,
+            "exactly the two read-only exceptions are added"
+        );
+        for rule in &added {
+            for dangerous in [
+                "git push",
+                "--force",
+                "rm -rf",
+                "compose down",
+                "docker rm",
+                "infisical",
+                "Komodo",
+                "DeployStack",
+                "UpdateStack",
+                "vogt-agent-auth fetch",
+                "DROP",
+                "Production Deploy",
+                "Credential Materialization",
+                "Data Exfiltration",
+            ] {
+                assert!(
+                    !rule.contains(dangerous),
+                    "an added exception must not name {dangerous:?}: {rule}"
+                );
+            }
+        }
+    }
+}

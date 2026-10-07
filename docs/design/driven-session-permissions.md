@@ -148,3 +148,36 @@ person.
 A plain shell keeps the pod's token: a person is at it, so their
 attribution does not change. An agent a person starts by hand in that shell
 inherits the shell's token, and that is their choice to make.
+
+## Read-only relief (2026-10-07)
+
+Driven sessions were denied reads: `docker ps` and `docker inspect` as
+*Modify Shared Resources* or *Interfere With Workloads*, and checking whether
+a credential variable is set as credential materialization. The shipped
+policy adds two exceptions in the classifier's own wording, and no pattern
+rule:
+
+- **Read-Only Inspection** clears those two rules for commands that only
+  report state. It does not cover secret printing, environment dumps
+  (`.Config.Env` included), `docker exec`, or any create, start, stop or
+  remove.
+- **Credential Presence Check** covers existence and length tests and
+  variable names, never a value. Fetching stays with the default rules and
+  the grant flow (WI-973).
+
+Pattern allow rules were rejected because they resolve before the
+classifier and cannot tell a harmless `docker inspect --format` from an
+environment dump, or a health-check GET from a curl that carries a body.
+
+**Not changed: merge as a prompt.** An explicit `permissions.ask` rule is
+the only way to make auto mode prompt rather than deny. But any agent with
+`work.write` can answer a session's prompt (`session.answer`,
+`session.input`), so an ask rule on `gh pr merge` would let one agent
+approve another's merge. That waits on WI-983. An ask rule on `git push`
+was also rejected: ordinary pushes already pass, a rule would make every
+push prompt, and it would turn a classifier-denied force-push into a
+prompt.
+
+Whether the classifier honours the new exceptions is judged at run time.
+The engine's unit tests pin the file's shape, and the verdicts need a
+check on vogt-dev.
