@@ -23,7 +23,15 @@ permissions:
 jobs:
   analyze:
     name: analyze (${{ matrix.language }})
-    runs-on: [self-hosted]
+    # `bigmem` is node-b-gha-public-bigmem (ops personal/github-runner, 32 G
+    # cap). Bare [self-hosted] let analysis land on node-f runners whose 8 G
+    # caps oversubscribe a 15 G guest, and `codeql database finalize` was
+    # killed with exit 137 there (main run 37603927375, WI-999). CodeQL sizes
+    # --ram from the container's memory limit, so no threads/ram pin is set:
+    # on this runner autodetect has room, and a pin only slows the analysis.
+    # A label no online runner advertises queues forever, so this runner must
+    # stay up; there is one bigmem slot, so the languages run one after another.
+    runs-on: [self-hosted, bigmem]
     timeout-minutes: 45
     concurrency:
       # Newest-wins: an analysis of a superseded commit is fully covered by
