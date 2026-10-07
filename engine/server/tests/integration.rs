@@ -8610,23 +8610,36 @@ async fn startup_closes_out_history_rows_left_unfinished_by_a_restart() {
     assert!(row["exit_code"].is_null(), "the code is unknown: {row:?}");
     assert_eq!(row["end_reason"], "engine-restart", "{row:?}");
 
-    // A session of this process is not touched by the reconcile.
+    // A session of this process is not touched by the reconcile. Its
+    // provisional history row is written by a task spawned at launch, so it
+    // is polled for rather than assumed to have landed within a fixed sleep:
+    // on a loaded runner the spawn had not run 200 ms later and the row was
+    // simply absent.
     let id = create_session_with(
         &client,
         &base,
         json!({ "name": "fresh", "command": ["/bin/cat"] }),
     )
     .await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let rows: Vec<Value> = client
-        .get(format!("{base}/api/history/sessions?limit=20"))
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let row = rows.iter().find(|r| r["id"] == id).unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let row = loop {
+        let rows: Vec<Value> = client
+            .get(format!("{base}/api/history/sessions?limit=20"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(row) = rows.iter().find(|r| r["id"] == id) {
+            break row.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the fresh session never got its provisional history row: {rows:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert!(row["ended_at"].is_null(), "{row:?}");
     assert!(row["end_reason"].is_null(), "{row:?}");
 
