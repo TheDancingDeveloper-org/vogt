@@ -1835,8 +1835,9 @@ event and close `4409`. The server answers `session.created`
 - `input_audio_buffer.speech_started` / `.speech_stopped` — the user's turn
   began / ended (endpointing below).
 - `conversation.item.input_audio_transcription.partial {text}` — a live
-  caption: the turn so far, re-transcribed while it is still being spoken
-  (the whole text each time). `.completed {text}` — the turn's transcript.
+  caption: the words of the turn so far, while it is still being spoken (the
+  whole text each time, not an increment). `.completed {text}` — the turn's
+  transcript.
 - `response.created {response_id}`; `response.text.delta {response_id,
   delta}` as the model writes.
 - `response.audio.start {response_id, index, text, content_type, bytes}`,
@@ -1858,10 +1859,33 @@ event and close `4409`. The server answers `session.created`
 audio — `earshot`'s small neural detector by default, or the adaptive
 noise-floor energy detector with `ENGINE_ASSISTANT_CALL_VAD=energy`. A turn starts after 100 ms of voice and ends after
 `end_of_turn_ms` of silence (default 700); a sound with less than 250 ms of
-voice is discarded. When the user pauses for 200 ms the turn so far is
-transcribed at once, so the transcript is usually ready when the turn is
-declared over. STT and TTS are the deployment's own backends, called exactly
-as `/api/assistant/stt` and `/tts` call them.
+voice is discarded. STT and TTS are the deployment's own backends, called
+exactly as `/api/assistant/stt` and `/tts` call them.
+
+**Streaming transcription.** The turn is transcribed while it is being
+spoken (`ENGINE_ASSISTANT_CALL_STT_MODE=chunked`, the default). Whisper
+servers decode whole clips only; speaches' `stream=true` yields segments
+after a full decode, and its `/v1/realtime` transcribes the buffer on
+commit. So the engine streams the turn to the backend as chunks:
+
+- each 200 ms pause cuts what was said since the last cut (at least 1 s of
+  it) into a chunk, and speech that runs 6 s without one is cut at its
+  quietest 20 ms;
+- chunks are transcribed one at a time, in order, each with the turn's
+  words so far as the request's `prompt`, so a sentence cut at a pause still
+  reads as one, and a single-worker backend never has more than one clip of
+  the call queued;
+- each finished chunk is sent as a `.partial` caption;
+- when the turn ends, only the audio after the last cut is left (usually
+  none, because the pause that ended the turn already cut it), trimmed to
+  200 ms of its trailing silence — whisper models given the full 700 ms tend
+  to fill it with repeated words.
+
+The transcript is the chunks' words joined. If a chunk fails, the turn is
+transcribed once more as one whole clip. `ENGINE_ASSISTANT_CALL_STT_MODE=whole`
+is that whole-clip path throughout: the turn so far is transcribed at each
+pause and discarded if the user talks on, otherwise the whole turn when it
+ends. Use it for a backend that transcribes short clips badly.
 
 **The reply.** The transcript runs as an ordinary assistant turn, *streamed*
 (see *Streamed turns* in §6) and told it is on a call (short plain
@@ -2468,9 +2492,10 @@ untrusted data like every other cored-derived string.
   detector); the turn endpointer (speech started, sustained, pause, resumed,
   end of turn); and the sentence chunker that cuts a streamed reply into
   pieces to speak, with `speakable` to drop the markdown a listener should
-  not hear read out. The pipeline (`voxcall::pipeline`) owns turn-taking,
-  early and partial transcription, the streamed reply spoken a piece at a
-  time, barge-in and the approval invariant.
+  not hear read out. `voxcall::chunk` decides where a turn is cut into
+  chunks to transcribe while it is spoken. The pipeline (`voxcall::pipeline`)
+  owns turn-taking, the streamed (or whole-clip) transcription, the streamed
+  reply spoken a piece at a time, barge-in and the approval invariant.
 - `engine/server/src/call.rs` — Vogt's side of the live call: the WebSocket
   route, authentication and the one-call slot, and the `voxcall` providers —
   the assistant runtime as the turn, the speech proxy as STT/TTS, the pending
@@ -2576,7 +2601,8 @@ Every setting, with the TOML key for a `--config` file and its default
 | — | `ENGINE_ASSISTANT_CALL_ENABLED` | on | offer the live call (`/api/assistant/call`) when the assistant, STT and TTS are configured; off makes it 404 |
 | — | `ENGINE_ASSISTANT_CALL_END_OF_TURN_MS` | `700` | silence after speech that ends the user's turn (300–5000) |
 | — | `ENGINE_ASSISTANT_CALL_BARGE_IN_MS` | `500` | voice needed to stop a reply by speaking over it (100–3000) |
-| — | `ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS` | `0` | how often a turn is re-transcribed as a live caption; `0` (the default) turns captions off. On a CPU transcriber each partial is another full decode of the whole turn so far, stacked on the eager transcription that already hides the pause, so captions cost latency rather than saving it |
+| — | `ENGINE_ASSISTANT_CALL_STT_MODE` | `chunked` | how a call turn is transcribed: `chunked` streams it to the backend in chunks cut at the speaker's pauses while they talk (captions come free); `whole` transcribes whole clips, for a backend that transcribes short clips badly |
+| — | `ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS` | `0` | `whole` mode only: how often a turn is re-transcribed as a live caption; `0` (the default) turns captions off. On a CPU transcriber each partial is another full decode of the whole turn so far, stacked on the eager transcription that already hides the pause, so captions cost latency rather than saving it |
 | — | `ENGINE_ASSISTANT_CALL_VAD` | `earshot` | the call's voice detector: `earshot` (neural, pure Rust) or `energy` (adaptive noise floor) |
 | — | `ENGINE_ASSISTANT_CALL_FILLER` | `One moment.` | said while the model runs tools before answering; empty for none |
 
