@@ -49,7 +49,46 @@ pub struct SessionMetadata {
     /// rows written before the column existed.
     #[sqlx(default)]
     pub end_reason: Option<String>,
+    /// The session template it was started from, when it was (WI-962).
+    #[sqlx(default)]
+    pub template: Option<String>,
+    /// `worker` or `oversight` (WI-957), as last set. NULL on rows written
+    /// before the column existed.
+    #[sqlx(default)]
+    pub role: Option<String>,
+    /// The agent conversation the session last ran (WI-962): the one the
+    /// engine launched, or the one an agent typed into the shell reported.
+    /// Kept after the conversation ends, so a lost session can be resumed.
+    #[sqlx(default)]
+    pub conversation_agent: Option<String>,
+    #[sqlx(default)]
+    pub conversation_id: Option<String>,
+    /// The template a resume of `conversation_id` would start, worked out
+    /// against the deployment's templates when the row is read: the row's
+    /// own template when it runs that agent, else the one the agent's name
+    /// resolves to. `None` when there is nothing to resume or no template
+    /// runs that agent.
+    #[sqlx(skip)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_template: Option<String>,
 }
+
+/// What a session is, as History shows it (WI-962): its template, its role
+/// and the agent conversation it runs. Written with the provisional row and
+/// updated when the role changes or an agent reports its conversation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionIdentity {
+    pub template: Option<String>,
+    pub role: Option<&'static str>,
+    pub conversation: Option<vogt_engine_contract::AgentConversation>,
+}
+
+/// The identity columns, added to an existing database in this order.
+const IDENTITY_COLUMNS: &[&str] = &["template", "role", "conversation_agent", "conversation_id"];
+
+/// The columns every metadata read selects.
+const METADATA_COLUMNS: &str = "id, name, created_at, ended_at, exit_code, cwd, command, \
+     scrollback_bytes, end_reason, template, role, conversation_agent, conversation_id";
 
 /// `end_reason` values. See [`SessionMetadata::end_reason`].
 pub const END_EXITED: &str = "exited";
@@ -98,6 +137,8 @@ pub struct ArchiveRecord {
     pub command: Option<String>,
     pub scrollback_bytes: u64,
     pub end_reason: Option<&'static str>,
+    /// Set on the provisional row; `None` leaves what the row holds.
+    pub identity: Option<SessionIdentity>,
 }
 
 impl SessionHistory {
@@ -187,21 +228,24 @@ impl SessionHistory {
         .await
         .map_err(|e| ApiError::Internal(format!("failed to create fts table: {}", e)))?;
 
-        // `end_reason` arrived after the table did; add it to an existing
-        // database. SQLite has no ADD COLUMN IF NOT EXISTS, so look first.
-        let has_end_reason =
-            sqlx::query("SELECT 1 FROM pragma_table_info('sessions') WHERE name = 'end_reason'")
+        // `end_reason` and the identity columns arrived after the table did;
+        // add them to an existing database. SQLite has no ADD COLUMN IF NOT
+        // EXISTS, so look first.
+        for column in std::iter::once(&"end_reason").chain(IDENTITY_COLUMNS) {
+            let present = sqlx::query("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?")
+                .bind(column)
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(|e| {
                     ApiError::Internal(format!("failed to inspect sessions table: {}", e))
                 })?
                 .is_some();
-        if !has_end_reason {
-            sqlx::query("ALTER TABLE sessions ADD COLUMN end_reason TEXT")
-                .execute(&self.pool)
-                .await
-                .map_err(|e| ApiError::Internal(format!("failed to add end_reason: {}", e)))?;
+            if !present {
+                sqlx::query(&format!("ALTER TABLE sessions ADD COLUMN {column} TEXT"))
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|e| ApiError::Internal(format!("failed to add {column}: {}", e)))?;
+            }
         }
 
         // Index on created_at for date-range queries
@@ -225,6 +269,7 @@ impl SessionHistory {
     /// scrollback. A real finalize (non-NULL values) still overwrites the
     /// provisional NULLs.
     pub async fn archive_session(&self, record: ArchiveRecord) -> Result<()> {
+        let identity = record.identity.unwrap_or_default();
         let created_str = record
             .created_at
             .format(&time::format_description::well_known::Rfc3339)
@@ -237,8 +282,9 @@ impl SessionHistory {
 
         sqlx::query(
             r#"
-            INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO sessions (id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason,
+                                  template, role, conversation_agent, conversation_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 ended_at = COALESCE(excluded.ended_at, sessions.ended_at),
@@ -249,7 +295,11 @@ impl SessionHistory {
                 END,
                 cwd = COALESCE(excluded.cwd, sessions.cwd),
                 command = COALESCE(excluded.command, sessions.command),
-                scrollback_bytes = MAX(excluded.scrollback_bytes, sessions.scrollback_bytes)
+                scrollback_bytes = MAX(excluded.scrollback_bytes, sessions.scrollback_bytes),
+                template = COALESCE(excluded.template, sessions.template),
+                role = COALESCE(excluded.role, sessions.role),
+                conversation_agent = COALESCE(excluded.conversation_agent, sessions.conversation_agent),
+                conversation_id = COALESCE(excluded.conversation_id, sessions.conversation_id)
             "#,
         )
         .bind(record.id.to_string())
@@ -261,6 +311,10 @@ impl SessionHistory {
         .bind(record.command)
         .bind(record.scrollback_bytes as i64)
         .bind(record.end_reason)
+        .bind(identity.template)
+        .bind(identity.role)
+        .bind(identity.conversation.as_ref().map(|c| c.agent.clone()))
+        .bind(identity.conversation.map(|c| c.id))
         .execute(&self.pool)
         .await
         .map_err(|e| ApiError::Internal(format!("failed to archive session: {}", e)))?;
@@ -268,17 +322,38 @@ impl SessionHistory {
         Ok(())
     }
 
+    /// Update a session row's identity (WI-962): its role when given, and its
+    /// conversation when given. A conversation that ends is not cleared —
+    /// the row keeps the last one, which is what a resume needs. A row that
+    /// does not exist yet (history off, or the provisional write still in
+    /// flight) is left alone.
+    pub async fn set_identity(
+        &self,
+        id: Uuid,
+        role: Option<&'static str>,
+        conversation: Option<&vogt_engine_contract::AgentConversation>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE sessions SET role = COALESCE(?, role), \
+             conversation_agent = COALESCE(?, conversation_agent), \
+             conversation_id = COALESCE(?, conversation_id) WHERE id = ?",
+        )
+        .bind(role)
+        .bind(conversation.map(|c| c.agent.as_str()))
+        .bind(conversation.map(|c| c.id.as_str()))
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to update session identity: {e}")))?;
+        Ok(())
+    }
+
     /// List archived sessions
     pub async fn list_sessions(&self, limit: usize, offset: usize) -> Result<Vec<SessionMetadata>> {
         let limit = limit.min(200);
-        let sessions = sqlx::query_as::<_, SessionMetadata>(
-            r#"
-            SELECT id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason
-            FROM sessions
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-            "#,
-        )
+        let sessions = sqlx::query_as::<_, SessionMetadata>(&format!(
+            "SELECT {METADATA_COLUMNS} FROM sessions ORDER BY created_at DESC LIMIT ? OFFSET ?"
+        ))
         .bind(limit as i64)
         .bind(offset as i64)
         .fetch_all(&self.pool)
@@ -560,13 +635,9 @@ impl SessionHistory {
 
     /// Get session by ID
     pub async fn get_session(&self, id: Uuid) -> Result<SessionMetadata> {
-        let session = sqlx::query_as::<_, SessionMetadata>(
-            r#"
-            SELECT id, name, created_at, ended_at, exit_code, cwd, command, scrollback_bytes, end_reason
-            FROM sessions
-            WHERE id = ?
-            "#,
-        )
+        let session = sqlx::query_as::<_, SessionMetadata>(&format!(
+            "SELECT {METADATA_COLUMNS} FROM sessions WHERE id = ?"
+        ))
         .bind(id.to_string())
         .fetch_one(&self.pool)
         .await
@@ -889,5 +960,109 @@ mod tests {
     fn truncate_chars_appends_ellipsis_only_when_dropping() {
         assert_eq!(truncate_chars("short", 10), "short");
         assert_eq!(truncate_chars("abcdef", 3), "abc...");
+    }
+
+    /// A history database from before WI-962 gains the identity columns, its
+    /// rows read with them empty, and a session's identity is kept: role and
+    /// conversation updates land, and an update without a conversation does
+    /// not erase the last one.
+    #[tokio::test]
+    async fn an_old_history_gains_the_identity_columns_and_keeps_the_last_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let pool = SqlitePoolOptions::new()
+                .connect_with(
+                    SqliteConnectOptions::new()
+                        .filename(dir.path().join("history.db"))
+                        .create_if_missing(true),
+                )
+                .await
+                .unwrap();
+            sqlx::query(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT NOT NULL, \
+                 created_at TEXT NOT NULL, ended_at TEXT, exit_code INTEGER, cwd TEXT, \
+                 command TEXT, scrollback_bytes INTEGER DEFAULT 0, end_reason TEXT)",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO sessions (id, name, created_at, command) \
+                 VALUES ('00000000-0000-4000-8000-000000000001', 'old', '2026-10-01T00:00:00Z', 'bash')",
+            )
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let history = SessionHistory::new(dir.path()).await.unwrap();
+        let old = history
+            .get_session(Uuid::parse_str("00000000-0000-4000-8000-000000000001").unwrap())
+            .await
+            .unwrap();
+        assert_eq!(old.command.as_deref(), Some("bash"));
+        assert_eq!(old.conversation_id, None);
+        assert_eq!(old.role, None);
+
+        let id = Uuid::new_v4();
+        history
+            .archive_session(ArchiveRecord {
+                id,
+                name: "Oversight".into(),
+                created_at: OffsetDateTime::now_utc(),
+                ended_at: None,
+                exit_code: None,
+                cwd: None,
+                command: Some("bash".into()),
+                scrollback_bytes: 0,
+                end_reason: None,
+                identity: Some(SessionIdentity {
+                    template: None,
+                    role: Some("worker"),
+                    conversation: None,
+                }),
+            })
+            .await
+            .unwrap();
+        let conversation = vogt_engine_contract::AgentConversation {
+            agent: "claude".into(),
+            id: "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f".into(),
+        };
+        history
+            .set_identity(id, None, Some(&conversation))
+            .await
+            .unwrap();
+        history
+            .set_identity(id, Some("oversight"), None)
+            .await
+            .unwrap();
+        let row = history.get_session(id).await.unwrap();
+        assert_eq!(row.role.as_deref(), Some("oversight"));
+        assert_eq!(row.conversation_agent.as_deref(), Some("claude"));
+        assert_eq!(
+            row.conversation_id.as_deref(),
+            Some(conversation.id.as_str())
+        );
+        // A later finalize carries no identity and keeps it.
+        history
+            .archive_session(ArchiveRecord {
+                id,
+                name: "Oversight".into(),
+                created_at: OffsetDateTime::now_utc(),
+                ended_at: Some(OffsetDateTime::now_utc()),
+                exit_code: Some(0),
+                cwd: None,
+                command: None,
+                scrollback_bytes: 10,
+                end_reason: Some(END_EXITED),
+                identity: None,
+            })
+            .await
+            .unwrap();
+        let row = history.get_session(id).await.unwrap();
+        assert_eq!(
+            row.conversation_id.as_deref(),
+            Some(conversation.id.as_str())
+        );
+        assert_eq!(row.role.as_deref(), Some("oversight"));
     }
 }

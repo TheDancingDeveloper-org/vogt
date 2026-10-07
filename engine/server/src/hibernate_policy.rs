@@ -19,6 +19,8 @@
 //!   of its turns is exactly the quiet the idle trigger looks for. Memory
 //!   pressure can still take it — the one valve left when every session is
 //!   busy;
+//! - one with no agent CLI running in it at all: a shell whose typed-in
+//!   agent reported its conversation and then died without unlinking it;
 //! - one with a shell running below its agent CLI: a tool call in progress
 //!   or a background shell, which a hibernation would kill mid-work. The
 //!   agent's MCP servers are not shells, and the wrapper shell that launched
@@ -26,12 +28,15 @@
 //!
 //! At boot, sessions pinned awake that were hibernated (by the shutdown, or
 //! recovered) are woken — through vogt-core when there is one, so a linked
-//! session gets a fresh token; the engine never stores one.
+//! session gets a fresh token; the engine never stores one. A woken oversight
+//! session is then told, once it is at its prompt, that it was resumed after
+//! a restart (WI-962): a resumed agent otherwise sits idle, and the overseer
+//! is the session that brings the others back.
 
 use std::{sync::Arc, time::Duration};
 
 use uuid::Uuid;
-use vogt_engine_contract::{ActivityState, HibernateTrigger, WakeRequest};
+use vogt_engine_contract::{ActivityState, HibernateTrigger, SessionRole, WaitUntil, WakeRequest};
 
 use crate::{app::AppState, hibernation, pty::Session, sessions::SessionRegistry};
 
@@ -109,11 +114,26 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
         return Some("blocked on a person".into());
     }
     if let Some(pid) = session.pid() {
+        if !agent_running(pid) {
+            // A shell whose typed-in agent reported its conversation and then
+            // died without saying so (WI-962): a hibernation would wake it into
+            // that agent, which is not what the person left running.
+            return Some("no agent CLI is running in it".into());
+        }
         if let Some(shell) = shell_below_agent(pid) {
             return Some(format!("a shell is running below the agent (pid {shell})"));
         }
     }
     None
+}
+
+/// Whether a process named like an agent CLI is in the tree rooted at `root`.
+fn agent_running(root: u32) -> bool {
+    std::iter::once(root)
+        .chain(hibernation::descendants(root))
+        .any(|pid| {
+            hibernation::process_name(pid).is_some_and(|name| AGENTS.contains(&name.as_str()))
+        })
 }
 
 /// The pid of a shell running below the agent CLI in the tree rooted at
@@ -281,10 +301,81 @@ pub fn spawn_boot_wake(state: Arc<AppState>) {
                 Some(core) => wake_through_core(core, id).await,
             };
             match woken {
-                Ok(()) => tracing::info!(session = %id, "woke a session pinned awake at boot"),
+                Ok(()) => {
+                    tracing::info!(session = %id, "woke a session pinned awake at boot");
+                    prompt_resumed_overseer(&state, id);
+                }
                 Err(e) => {
                     tracing::warn!(session = %id, error = %e, "could not wake a session pinned awake; it stays hibernated")
                 }
+            }
+        }
+    });
+}
+
+/// How long a woken overseer is given to reach its prompt before the resume
+/// line is dropped. A resumed Claude Code with MCP servers to start takes
+/// tens of seconds.
+const RESUME_PROMPT_WAIT: Duration = Duration::from_secs(300);
+
+/// The line typed into an oversight session woken at boot, at `at`.
+pub fn resume_prompt(at: &str) -> String {
+    format!(
+        "[vogt] This oversight session was resumed after the engine restarted at {at}. \
+         Check on the sessions you oversee (session_sweep), wake the ones you need, \
+         and carry on where you left off."
+    )
+}
+
+/// Tell a woken oversight session it was resumed after a restart, once it is
+/// at its prompt (WI-962). Workers are not told: they wake on demand, and the
+/// overseer decides which to wake. Nothing is typed into a session that is
+/// not ready within [`RESUME_PROMPT_WAIT`], that needs a person, or that is
+/// not running an agent.
+fn prompt_resumed_overseer(state: &Arc<AppState>, id: Uuid) {
+    let Ok(session) = state.sessions.get(id) else {
+        return;
+    };
+    if session.role() != SessionRole::Oversight || session.conversation().is_none() {
+        return;
+    }
+    let bus = state.bus.clone();
+    tokio::spawn(async move {
+        let at = time::OffsetDateTime::now_utc()
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_default();
+        match crate::wait::wait(
+            &bus,
+            Arc::clone(&session),
+            WaitUntil::Ready,
+            RESUME_PROMPT_WAIT,
+        )
+        .await
+        {
+            Ok(waited) if waited.matched => {
+                // Enter on its own, as the autopilot nudge types it: a TUI
+                // reads a burst ending in a carriage return as a paste.
+                let typed = match session.write_input(resume_prompt(&at).as_bytes()) {
+                    Ok(()) => {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        session.write_input(b"\r")
+                    }
+                    Err(e) => Err(e),
+                };
+                match typed {
+                    Ok(()) => tracing::info!(session = %id, "told a woken overseer it was resumed"),
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "could not prompt a woken overseer")
+                    }
+                }
+            }
+            Ok(waited) => tracing::info!(
+                session = %id,
+                outcome = %waited.outcome,
+                "a woken overseer did not reach its prompt; not prompting it"
+            ),
+            Err(e) => {
+                tracing::warn!(session = %id, error = %e, "could not wait for a woken overseer")
             }
         }
     });

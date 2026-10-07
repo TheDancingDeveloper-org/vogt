@@ -5,7 +5,10 @@ use std::sync::{
 
 use dashmap::DashMap;
 use uuid::Uuid;
-use vogt_engine_contract::{ActivityState, HibernateTrigger, Hibernation, SessionRole};
+use vogt_engine_contract::{
+    ActivityState, AgentConversation, ConversationReport, HibernateTrigger, Hibernation,
+    SessionRole,
+};
 
 use crate::secret_broker::SecretBroker;
 
@@ -15,7 +18,7 @@ use crate::{
     error::{ApiError, Result},
     events::{EventBus, ServerEvent},
     hibernation::{self, Record},
-    history::{ArchiveRecord, SessionHistory},
+    history::{ArchiveRecord, SessionHistory, SessionIdentity},
     prompt_files,
     pty::{self, Session, SessionSpec, SessionSummary, SpawnDefaults},
     workspace_path,
@@ -566,7 +569,7 @@ impl SessionRegistry {
                 record.autopilot = spec.autopilot;
                 record.role = spec.role;
                 record.keep_awake = session.keep_awake();
-                record.conversation = conversation;
+                record.conversation = conversation.clone();
                 record.brief_file = prompt_file.clone();
                 Some(record)
             }
@@ -607,6 +610,11 @@ impl SessionRegistry {
                 command: session.command(),
                 scrollback_bytes: 0,
                 end_reason: None,
+                identity: Some(SessionIdentity {
+                    template: session.template(),
+                    role: Some(spec.role.as_str()),
+                    conversation: session.conversation(),
+                }),
             };
             let sid = session.id;
             tokio::spawn(async move {
@@ -689,12 +697,18 @@ impl SessionRegistry {
         Err(ApiError::NotFound)
     }
 
-    /// Hibernated sessions pinned awake: what the engine wakes at boot.
+    /// Hibernated sessions pinned awake: what the engine wakes at boot. Only
+    /// those with a conversation to resume: waking a shell the engine kept
+    /// only so it stays listed (an oversight shell, WI-962) would open an
+    /// empty shell in its place.
     pub fn hibernated_keep_awake(&self) -> Vec<Uuid> {
         self.records
             .iter()
             .filter(|r| {
-                r.keep_awake && r.hibernation.is_some() && !self.sessions.contains_key(r.key())
+                r.keep_awake
+                    && r.hibernation.is_some()
+                    && r.conversation.is_some()
+                    && !self.sessions.contains_key(r.key())
             })
             .map(|r| *r.key())
             .collect()
@@ -988,10 +1002,11 @@ impl SessionRegistry {
             .ok_or(ApiError::NotFound)?;
         let mut env = record.env.clone();
         env.extend(req.env.unwrap_or_default());
+        let (command, template) = self.wake_launch(&record);
         // The credential is not in the record (it is a secret); an engine-
         // started agent session is given a new one, superseding the last.
         if let Some(identity) = self
-            .agent_identity(&record.command, record.template.as_deref(), Some(&env), id)
+            .agent_identity(&command, template.as_deref(), Some(&env), id)
             .await
         {
             env.retain(|(k, _)| k != "VOGT_SESSION_ID");
@@ -999,8 +1014,8 @@ impl SessionRegistry {
         }
         let spec = SessionSpec {
             name: record.name.clone(),
-            command: record.command.clone(),
-            template: record.template.clone(),
+            command,
+            template,
             // A record from before the line above names the default
             // directory itself; that too means "the default".
             cwd: record
@@ -1023,6 +1038,124 @@ impl SessionRegistry {
         self.bus.publish(ServerEvent::SessionWoken { id });
         tracing::info!(session = %id, "session woken");
         Ok(session)
+    }
+
+    /// What a wake starts for `record`: its own command and template, unless
+    /// its conversation is one an agent reported from inside a shell
+    /// (WI-962) — the shell cannot be told to resume it, so the wake starts
+    /// that agent instead, through the template [`Self::resume_template`]
+    /// finds, or the agent's bare name when no template runs it.
+    fn wake_launch(&self, record: &Record) -> (Option<Vec<String>>, Option<String>) {
+        let Some(conversation) = record.conversation.as_ref() else {
+            return (record.command.clone(), record.template.clone());
+        };
+        if self
+            .agent_of(&record.command, record.template.as_deref())
+            .as_deref()
+            == Some(conversation.agent.as_str())
+        {
+            return (record.command.clone(), record.template.clone());
+        }
+        match self.resume_template(record.template.as_deref(), &conversation.agent) {
+            Some(template) => (None, Some(template)),
+            None => (Some(vec![conversation.agent.clone()]), None),
+        }
+    }
+
+    /// The template that resumes a conversation of `agent` (WI-962): `template`
+    /// itself when it runs that agent, else the template the agent's name
+    /// resolves to (by name, then by tag) when that one runs it. `None` when
+    /// no template runs the agent.
+    pub fn resume_template(&self, template: Option<&str>, agent: &str) -> Option<String> {
+        let runs_agent = |name: &str| {
+            self.resolve_template(name)
+                .ok()
+                .and_then(|t| t.command.as_deref().and_then(agent_cli::agent_name))
+                .as_deref()
+                == Some(agent)
+        };
+        template
+            .map(str::trim)
+            .filter(|t| !t.is_empty() && runs_agent(t))
+            .map(str::to_string)
+            .or_else(|| runs_agent(agent).then(|| agent.to_string()))
+    }
+
+    /// An agent CLI inside session `id` reports the conversation it runs, or
+    /// that the conversation ended (WI-962). Claude Code's hook sends this, so
+    /// a `claude` typed by hand into a plain shell is linked to the session:
+    /// its record then holds the conversation, which makes the session
+    /// resumable — hibernated at shutdown, kept across a restart, woken into
+    /// the agent — and its History row shows it.
+    ///
+    /// An `ended` report unlinks the conversation only while it is still the
+    /// session's, so a `/clear` that reports the new conversation first is not
+    /// undone. A session that is hibernating ignores both: the agent's last
+    /// words as the engine stops it must not change what the record resumes.
+    pub fn report_conversation(
+        &self,
+        id: Uuid,
+        report: ConversationReport,
+    ) -> Result<SessionSummary> {
+        let agent = report.agent.trim();
+        if agent_cli::agent_name(&[agent.to_string()]).as_deref() != Some(agent) {
+            return Err(ApiError::BadRequest(format!(
+                "agent {agent:?} is not an agent CLI the engine knows"
+            )));
+        }
+        let conversation_id = report.id.trim();
+        if !agent_cli::is_conversation_id(conversation_id) {
+            return Err(ApiError::BadRequest(format!(
+                "{conversation_id:?} is not a conversation id"
+            )));
+        }
+        let session = self.get(id)?;
+        if session.is_hibernating() || !session.is_alive() {
+            return Ok(session.summary());
+        }
+        let reported = AgentConversation {
+            agent: agent.to_string(),
+            id: conversation_id.to_string(),
+        };
+        let current = session.conversation();
+        let next = if report.ended {
+            if current.as_ref() != Some(&reported) {
+                return Ok(session.summary());
+            }
+            None
+        } else {
+            if current.as_ref() == Some(&reported) {
+                return Ok(session.summary());
+            }
+            Some(reported.clone())
+        };
+        session.set_conversation(next.clone());
+        let updated = self.records.get_mut(&id).map(|mut record| {
+            record.conversation = next.clone();
+            record.clone()
+        });
+        if let Some(record) = updated {
+            if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
+                tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+            }
+        }
+        if let (Some(history), Some(conversation)) = (self.history.clone(), next.clone()) {
+            tokio::spawn(async move {
+                if let Err(e) = history.set_identity(id, None, Some(&conversation)).await {
+                    tracing::warn!(session = %id, error = %e, "could not record the session's conversation in history");
+                }
+            });
+        }
+        tracing::info!(
+            target: "vogt::audit",
+            event = "session.conversation",
+            session_id = %id,
+            agent = %reported.agent,
+            conversation_id = %reported.id,
+            linked = next.is_some(),
+            "agent conversation reported from inside the session"
+        );
+        Ok(session.summary())
     }
 
     /// Pin a session awake (or unpin it), live or hibernated.
@@ -1071,6 +1204,15 @@ impl SessionRegistry {
             }
             record.clone()
         });
+        if let Some(history) = self.history.clone() {
+            if live.is_some() || updated.is_some() {
+                tokio::spawn(async move {
+                    if let Err(e) = history.set_identity(id, Some(role.as_str()), None).await {
+                        tracing::warn!(session = %id, error = %e, "could not record the session's role in history");
+                    }
+                });
+            }
+        }
         match (&live, updated) {
             (_, Some(record)) => {
                 if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
@@ -1114,11 +1256,17 @@ impl SessionRegistry {
     /// (shells, agent-task runs) are left to the history drain.
     pub async fn hibernate_for_shutdown(&self) {
         self.shutting_down.store(true, Ordering::Release);
-        let candidates: Vec<Uuid> = self
+        // An oversight session is kept even as a plain shell, so it stays
+        // listed — with its last screen — after the restart (WI-962).
+        let candidates: Vec<(Uuid, bool)> = self
             .live_sessions()
             .into_iter()
-            .filter(|s| self.hibernate_refusal(s, false).is_none())
-            .map(|s| s.id)
+            .filter_map(|s| {
+                let allow_shell = s.role() == SessionRole::Oversight;
+                self.hibernate_refusal(&s, allow_shell)
+                    .is_none()
+                    .then_some((s.id, allow_shell))
+            })
             .collect();
         if candidates.is_empty() {
             return;
@@ -1127,18 +1275,20 @@ impl SessionRegistry {
             count = candidates.len(),
             "hibernating live sessions for shutdown"
         );
-        let results = futures_util::future::join_all(candidates.into_iter().map(|id| async move {
-            (
-                id,
-                self.hibernate(
+        let results = futures_util::future::join_all(candidates.into_iter().map(
+            |(id, allow_shell)| async move {
+                (
                     id,
-                    Some("the engine was shutting down".into()),
-                    HibernateTrigger::Shutdown,
-                    false,
+                    self.hibernate(
+                        id,
+                        Some("the engine was shutting down".into()),
+                        HibernateTrigger::Shutdown,
+                        allow_shell,
+                    )
+                    .await,
                 )
-                .await,
-            )
-        }))
+            },
+        ))
         .await;
         for (id, result) in results {
             if let Err(e) = result {
@@ -1296,7 +1446,11 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
 /// had already hibernated keeps its trigger; one it never got to (a SIGKILL,
 /// a crash) is `recovered`, with its screen taken from the history log when
 /// there is one. A record with no conversation to resume that was not
-/// hibernated on purpose (a shell the engine lost) is forgotten.
+/// hibernated on purpose (a shell the engine lost) is forgotten — unless it is
+/// an oversight session, which is kept, not resumable, so the session that
+/// revives the others stays listed and findable (WI-962). A shell an agent
+/// reported its conversation from has that conversation in its record, so it
+/// is resumable and kept like any agent session.
 fn recover_records(
     state_dir: &std::path::Path,
     history: Option<&SessionHistory>,
@@ -1305,7 +1459,8 @@ fn recover_records(
     for mut record in hibernation::load_all(state_dir) {
         let id = record.id;
         if record.hibernation.is_none() {
-            if record.conversation.is_none() {
+            let resumable = record.conversation.is_some();
+            if !resumable && record.role != SessionRole::Oversight {
                 hibernation::remove(state_dir, id);
                 continue;
             }
@@ -1313,7 +1468,7 @@ fn recover_records(
                 at: now_rfc3339(),
                 trigger: HibernateTrigger::Recovered,
                 reason: Some("the engine stopped without hibernating it".into()),
-                resumable: true,
+                resumable,
             });
             if hibernation::read_screen(state_dir, id).is_empty() {
                 if let Some(tail) = history.and_then(|h| log_tail(&h.log_path(id))) {

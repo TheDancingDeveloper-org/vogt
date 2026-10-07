@@ -311,6 +311,10 @@ impl Session {
         *self.template.lock() = template;
     }
 
+    pub fn template(&self) -> Option<String> {
+        self.template.lock().clone()
+    }
+
     pub fn set_resources(&self, resources: Option<vogt_engine_contract::SessionResources>) {
         *self.resources.lock() = resources;
     }
@@ -1068,6 +1072,7 @@ fn try_spawn_archive(
             } else {
                 crate::history::END_EXITED
             }),
+            identity: None,
         };
 
         if let Err(e) = history
@@ -1107,6 +1112,7 @@ pub async fn archive_live_session(session: &Arc<Session>, history: &SessionHisto
         } else {
             crate::history::END_ENGINE_SHUTDOWN
         }),
+        identity: None,
     };
     if let Err(e) = history
         .archive_session_with_output(record, output_text.as_ref())

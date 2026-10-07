@@ -2199,6 +2199,10 @@ const App: Component = () => {
                     <History
                       onError={(msg) => showToast(msg, { kind: "error" })}
                       confirmAction={confirmUser}
+                      onOpenSession={(sessionId, label) => {
+                        openTerminalTab(sessionId, label);
+                        navigate(`/t/${sessionId}`);
+                      }}
                     />
                   </Show>
                   <Show when={t.kind === "assistant"}>

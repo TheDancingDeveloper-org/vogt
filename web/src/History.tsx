@@ -23,7 +23,7 @@ import {
 } from "./historyPins";
 import { readToolDraft, writeToolDraft } from "./toolDrafts";
 import { toReadableTranscript } from "./historyReplay";
-import { sessionsStore } from "./store";
+import { createSession, sessionsStore } from "./store";
 import { SafeSnippet } from "./SafeSnippet";
 import { onWake } from "./wakeCoordinator";
 import {
@@ -36,6 +36,8 @@ import {
 interface Props {
   onError?: (message: string) => void;
   confirmAction?: (title: string, body?: string) => Promise<boolean>;
+  /** Open a session's terminal, e.g. one History just resumed. */
+  onOpenSession?: (sessionId: string, label: string) => void;
 }
 
 type StatusFilter = "all" | "running" | "exited" | "unfinished";
@@ -110,6 +112,27 @@ function formatDate(value: string | null): string {
   } catch {
     return value;
   }
+}
+
+/** The start of a conversation id: enough to tell two apart at a glance. */
+function shortId(id: string): string {
+  return id.length > 8 ? `${id.slice(0, 8)}…` : id;
+}
+
+/**
+ * What a session was, in a few words (WI-962): its role when it was an
+ * overseer, and the agent conversation it ran. A shell someone typed `claude`
+ * into reads as that conversation, not as `bash`.
+ */
+export function historyIdentity(
+  row: Pick<HistorySessionMetadata, "role" | "conversation_agent" | "conversation_id">,
+): string | null {
+  const parts: string[] = [];
+  if (row.role === "oversight") parts.push("oversight");
+  if (row.conversation_agent && row.conversation_id) {
+    parts.push(`${row.conversation_agent} · ${shortId(row.conversation_id)}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 function formatSize(bytes: number): string {
@@ -196,6 +219,10 @@ const History: Component<Props> = (props) => {
         cwd: live.cwd ?? null,
         command: live.command ?? null,
         scrollback_bytes: live.scrollback_bytes,
+        template: live.template ?? null,
+        role: live.role ?? null,
+        conversation_agent: live.conversation?.agent ?? null,
+        conversation_id: live.conversation?.id ?? null,
         live: true,
       });
     }
@@ -522,7 +549,13 @@ const History: Component<Props> = (props) => {
       if (showPinnedOnly() && !pinned.has(session.id)) return false;
       if (!matchesStatus(session, statusFilter())) return false;
       if (!metadataNeedle) return true;
-      const haystack = [session.name, session.cwd ?? "", session.command ?? ""]
+      const haystack = [
+        session.name,
+        session.cwd ?? "",
+        session.command ?? "",
+        session.template ?? "",
+        session.conversation_id ?? "",
+      ]
         .join("\n")
         .toLowerCase();
       return haystack.includes(metadataNeedle);
@@ -695,6 +728,30 @@ const History: Component<Props> = (props) => {
       await loadFirstPage();
     } catch (error) {
       props.onError?.(`Delete failed: ${errorMessage(error)}`);
+    }
+  };
+
+  const [resuming, setResuming] = createSignal(false);
+
+  // Continue the session's last conversation in a new session (WI-962): the
+  // agent it ran, through the template the engine says resumes it, with the
+  // same role. The engine starts it in the directory the conversation ran in.
+  const resumeSession = async (session: HistorySessionMetadata): Promise<void> => {
+    const conversation = session.conversation_id;
+    const template = session.resume_template;
+    if (!conversation || !template || resuming()) return;
+    setResuming(true);
+    try {
+      const created = await createSession(session.name, undefined, undefined, undefined, {
+        template,
+        resume: conversation,
+        role: session.role === "oversight" ? "oversight" : undefined,
+      });
+      props.onOpenSession?.(created.id, created.name);
+    } catch (error) {
+      props.onError?.(`Resume failed: ${errorMessage(error)}`);
+    } finally {
+      setResuming(false);
     }
   };
 
@@ -927,6 +984,11 @@ const History: Component<Props> = (props) => {
                             <span>{formatDate(session.created_at)}</span>
                             <span>{formatSize(session.scrollback_bytes)}</span>
                           </div>
+                          <Show when={historyIdentity(session)}>
+                            {(identity) => (
+                              <div class="history-session-identity">{identity()}</div>
+                            )}
+                          </Show>
                           <Show when={session.cwd}>
                             <div class="history-session-cwd">{session.cwd}</div>
                           </Show>
@@ -986,6 +1048,25 @@ const History: Component<Props> = (props) => {
                       </div>
                     </div>
                     <div class="history-detail-actions">
+                      {/* A running session is already its conversation; a
+                          hibernated one is woken, not resumed twice. */}
+                      <Show
+                        when={
+                          !selectedIsLive() &&
+                          session().conversation_id &&
+                          session().resume_template
+                        }
+                      >
+                        <button
+                          type="button"
+                          class="primary"
+                          disabled={resuming()}
+                          title={`Start ${session().resume_template} on conversation ${session().conversation_id}`}
+                          onClick={() => void resumeSession(session())}
+                        >
+                          {resuming() ? "Resuming…" : "Resume"}
+                        </button>
+                      </Show>
                       <button type="button" onClick={() => togglePin(session().id)}>
                         {pinnedIds().includes(session().id) ? "Unpin" : "Pin"}
                       </button>
@@ -1014,6 +1095,26 @@ const History: Component<Props> = (props) => {
                       <div class="history-detail-label">Command</div>
                       <div class="history-detail-value">{session().command || "Default shell"}</div>
                     </div>
+                    <Show when={session().template}>
+                      <div class="history-detail-card">
+                        <div class="history-detail-label">Template</div>
+                        <div class="history-detail-value">{session().template}</div>
+                      </div>
+                    </Show>
+                    <Show when={session().role}>
+                      <div class="history-detail-card">
+                        <div class="history-detail-label">Role</div>
+                        <div class="history-detail-value">{session().role}</div>
+                      </div>
+                    </Show>
+                    <Show when={session().conversation_id}>
+                      <div class="history-detail-card">
+                        <div class="history-detail-label">Conversation</div>
+                        <div class="history-detail-value history-conversation">
+                          {session().conversation_agent} · {session().conversation_id}
+                        </div>
+                      </div>
+                    </Show>
                   </div>
 
                   <Show when={selectedSearchMatches().length > 0}>

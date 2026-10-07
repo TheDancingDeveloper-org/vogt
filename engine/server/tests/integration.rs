@@ -2417,6 +2417,7 @@ async fn provisional_history_row_is_written_at_spawn_and_not_clobbered() {
             command: None,
             scrollback_bytes: 0,
             end_reason: None,
+            identity: None,
         })
         .await
         .unwrap();
@@ -8246,6 +8247,7 @@ async fn startup_closes_out_history_rows_left_unfinished_by_a_restart() {
                 command: None,
                 scrollback_bytes: 0,
                 end_reason: None,
+                identity: None,
             })
             .await
             .unwrap();
@@ -9055,6 +9057,446 @@ async fn an_oversight_session_is_pinned_listed_as_oversight_and_back_after_a_res
             "the oversight sessions never woke"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // A woken overseer is told, at its prompt, that it was resumed (WI-962).
+    for id in &ids[..2] {
+        live_output_containing(
+            &client,
+            &base,
+            id,
+            &["[vogt] This oversight session was resumed after the engine restarted"],
+        )
+        .await;
+    }
+}
+
+/// [`hibernation_sandbox`] with a `claude` template that runs the stub, the
+/// way a deployment's templates run Claude Code: what a wake resumes a
+/// reported conversation through (WI-962).
+fn conversation_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
+    let (tmp, mut cfg, stub) = hibernation_sandbox();
+    cfg.session_templates.push(SessionTemplate {
+        name: "Claude Code (test)".to_string(),
+        description: "the stand-in claude".to_string(),
+        command: Some(vec![stub.to_string_lossy().into_owned()]),
+        cwd: None,
+        env: vec![],
+        default_name: None,
+        match_repo_names: vec![],
+        match_path_prefixes: vec![],
+        tags: vec!["claude".to_string()],
+    });
+    (tmp, cfg, stub)
+}
+
+/// Stand in for a SIGKILL of the engine: end the session (so this engine's
+/// exit hook has run and cannot race the next engine) and put back the
+/// write-ahead record a killed engine would have left.
+async fn lose_session(
+    client: &reqwest::Client,
+    base: &str,
+    id: &str,
+    record_path: &std::path::Path,
+) {
+    let record = std::fs::read_to_string(record_path).unwrap();
+    client
+        .post(format!("{base}/api/sessions/{id}/kill"))
+        .send()
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while record_path.exists() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the record outlived the kill"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    std::fs::write(record_path, record).unwrap();
+}
+
+async fn session_row(client: &reqwest::Client, base: &str, id: &str) -> Value {
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    listed
+        .into_iter()
+        .find(|s| s["id"] == id)
+        .unwrap_or_else(|| panic!("{id} is not listed"))
+}
+
+/// The 2026-10-07 incident (WI-962): a `claude` typed by hand into a plain
+/// shell. The engine saw a shell, the redeploy's SIGKILL left a record with
+/// no conversation, boot dropped it, and History showed only `bash`. Now the
+/// agent reports its conversation from inside the session, the record keeps
+/// it, the session comes back hibernated and resumable, a wake starts the
+/// agent on that conversation, and History shows and offers it.
+#[tokio::test]
+async fn a_claude_typed_into_a_shell_is_linked_kept_across_a_sigkill_and_resumed() {
+    let (_tmp, cfg, _stub) = conversation_sandbox();
+    let state_dir = cfg.state_dir.clone();
+    let (base, guard) = boot_with_config(cfg.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "Oversight" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert!(
+        created.get("conversation").is_none(),
+        "a shell, to start with"
+    );
+
+    let conversation = "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f";
+    for bad in [
+        json!({ "agent": "bash", "id": conversation }),
+        json!({ "agent": "claude", "id": "../../etc/passwd" }),
+    ] {
+        let refused = client
+            .post(format!("{base}/api/sessions/{id}/conversation"))
+            .json(&bad)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let linked: Value = client
+        .post(format!("{base}/api/sessions/{id}/conversation"))
+        .json(&json!({ "agent": "claude", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(linked["conversation"]["agent"], "claude");
+    assert_eq!(linked["conversation"]["id"], conversation);
+
+    // What a SIGKILL leaves behind is the write-ahead record: it now holds
+    // the conversation.
+    let record_path = state_dir.join("sessions").join(format!("{id}.json"));
+    let record = std::fs::read_to_string(&record_path).unwrap();
+    assert!(record.contains(conversation), "{record}");
+    drop(record);
+
+    // History knows what the session is, without waiting for it to end.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let row: Value = client
+            .get(format!("{base}/api/history/{id}"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if row["conversation_id"] == conversation {
+            assert_eq!(row["conversation_agent"], "claude");
+            assert_eq!(row["role"], "worker");
+            assert_eq!(row["resume_template"], "claude");
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "history never showed the conversation: {row}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // The engine dies without hibernating anything.
+    lose_session(&client, &base, &id, &record_path).await;
+    drop(guard);
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let recovered = session_row(&client, &base, &id).await;
+    assert_eq!(recovered["activity"], "hibernated", "{recovered}");
+    assert_eq!(recovered["hibernation"]["trigger"], "recovered");
+    assert_eq!(recovered["hibernation"]["resumable"], true);
+    assert_eq!(recovered["conversation"]["id"], conversation);
+
+    // Waking it starts the agent on its conversation, not an empty shell.
+    let woken = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::OK);
+    let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
+    assert!(
+        printed.contains(&format!("arg=[--resume]\r\narg=[{conversation}]")),
+        "{printed:?}"
+    );
+
+    // History still offers the resume after a restart.
+    let rows: Vec<Value> = client
+        .get(format!("{base}/api/history/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = rows.iter().find(|r| r["id"] == id.as_str()).unwrap();
+    assert_eq!(row["conversation_id"], conversation);
+    assert_eq!(row["resume_template"], "claude");
+}
+
+/// A shell nobody reported a conversation from is still forgotten at boot —
+/// unless it is the overseer, which stays listed, not resumable, and is not
+/// woken into an empty shell (WI-962).
+#[tokio::test]
+async fn an_oversight_shell_stays_listed_after_a_sigkill_and_a_worker_shell_does_not() {
+    let (_tmp, cfg, _stub) = conversation_sandbox();
+    let state_dir = cfg.state_dir.clone();
+    let (base, guard) = boot_with_config(cfg.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let mut records = Vec::new();
+    for (name, role) in [("the overseer", "oversight"), ("a shell", "worker")] {
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({ "name": name, "role": role }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+        let path = state_dir.join("sessions").join(format!("{id}.json"));
+        lose_session(&client, &base, &id, &path).await;
+        records.push((id, path));
+    }
+    drop(guard);
+
+    let (base, _h) = boot_with_config(cfg).await;
+    // Give a boot wake time to (wrongly) happen.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let overseer = session_row(&client, &base, &records[0].0).await;
+    assert_eq!(overseer["activity"], "hibernated", "{overseer}");
+    assert_eq!(overseer["role"], "oversight");
+    assert_eq!(overseer["hibernation"]["resumable"], false);
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !listed.iter().any(|s| s["id"] == records[1].0.as_str()),
+        "a lost worker shell is forgotten: {listed:?}"
+    );
+    assert!(!records[1].1.exists());
+}
+
+/// A graceful shutdown keeps an oversight shell too, with its screen, rather
+/// than leaving it to the history drain (WI-962). It is not woken at boot.
+#[tokio::test]
+async fn a_shutdown_hibernates_an_oversight_shell_and_boot_leaves_it_hibernated() {
+    let (_tmp, cfg, _stub) = conversation_sandbox();
+    let (base, state, guard) = boot_with_state(cfg.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "overseer shell",
+            "role": "oversight",
+            "command": ["/bin/bash", "-c", "echo overseeing; sleep 300"],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    live_output_containing(&client, &base, &id, &["overseeing"]).await;
+    state.sessions.hibernate_for_shutdown().await;
+    drop(guard);
+
+    let (base, _h) = boot_with_config(cfg).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let row = session_row(&client, &base, &id).await;
+    assert_eq!(row["activity"], "hibernated", "{row}");
+    assert_eq!(row["hibernation"]["trigger"], "shutdown");
+    assert_eq!(row["hibernation"]["resumable"], false);
+    assert_eq!(row["role"], "oversight");
+}
+
+/// `vogt-claude-session-hook install`, which the entrypoint runs: both hooks
+/// land in Claude Code's user settings once, beside what was there, and a
+/// file that is not JSON is left alone.
+#[test]
+fn the_claude_session_hook_installs_itself_once_and_keeps_the_settings() {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: install is written in python3");
+        return;
+    }
+    let hook = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../deploy/claude-session-hook.sh")
+        .canonicalize()
+        .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let settings = tmp.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        r#"{"theme":"dark","hooks":{"Stop":[{"hooks":[{"type":"command","command":"x"}]}]}}"#,
+    )
+    .unwrap();
+    for _ in 0..2 {
+        let status = std::process::Command::new(&hook)
+            .arg("install")
+            .arg(&settings)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    let written: Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+    assert_eq!(written["theme"], "dark");
+    assert_eq!(written["hooks"]["Stop"][0]["hooks"][0]["command"], "x");
+    for (event, arg) in [("SessionStart", "start"), ("SessionEnd", "end")] {
+        let groups = written["hooks"][event].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{event} added once: {written}");
+        assert_eq!(
+            groups[0]["hooks"][0]["command"],
+            format!("{} {arg}", hook.display())
+        );
+    }
+    let broken = tmp.path().join("broken.json");
+    std::fs::write(&broken, "not json").unwrap();
+    let status = std::process::Command::new(&hook)
+        .arg("install")
+        .arg(&broken)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(std::fs::read_to_string(&broken).unwrap(), "not json");
+}
+
+/// The hook itself (`engine/deploy/claude-session-hook.sh`), as Claude Code
+/// runs it inside a session: it links the conversation through the
+/// session's own broker token, unlinks it on `end` only while it is still
+/// the session's, and ignores a `claude` whose stdin is not a terminal.
+#[tokio::test]
+async fn the_claude_session_hook_links_and_unlinks_the_conversation_it_runs_in() {
+    let hook = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../deploy/claude-session-hook.sh")
+        .canonicalize()
+        .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    // A stand-in `claude` that runs the hook the way Claude Code does, with
+    // the hook's JSON on stdin.
+    let cli = tmp.path().join("claude");
+    std::fs::write(
+        &cli,
+        format!(
+            "#!/bin/bash\nprintf '{{\"session_id\":\"%s\",\"hook_event_name\":\"x\"}}' \"$2\" | '{}' \"$1\"\n",
+            hook.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let first = "11111111-2222-4333-8444-555555555555";
+    let second = "66666666-7777-4888-9999-aaaaaaaaaaaa";
+    let other = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff";
+    let cli = cli.display();
+    let script = format!(
+        "'{cli}' start {first} </dev/null; echo step-1; read; \
+         '{cli}' start {first}; echo step-2; read; \
+         '{cli}' end {other}; echo step-3; read; \
+         '{cli}' start {second}; '{cli}' end {first}; echo step-4; read; \
+         '{cli}' end {second}; echo step-5; sleep 30"
+    );
+    let id = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "hand-typed claude",
+            "command": ["/bin/bash", "-c", script],
+            "env": [["VOGT_ENGINE_BROKER_URL", base]],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let conversation = |row: &Value| row["conversation"]["id"].as_str().map(str::to_string);
+    let step = |n: u32| {
+        let client = client.clone();
+        let base = base.clone();
+        let id = id.clone();
+        async move {
+            live_output_containing(&client, &base, &id, &[&format!("step-{n}")]).await;
+            session_row(&client, &base, &id).await
+        }
+    };
+    let next = |client: &reqwest::Client| {
+        client
+            .post(format!("{base}/api/sessions/{id}/input"))
+            .json(&json!({ "text": "\r" }))
+            .send()
+    };
+
+    // A `claude` with no terminal on stdin is not the session's own.
+    assert_eq!(conversation(&step(1).await), None);
+    next(&client).await.unwrap();
+    assert_eq!(conversation(&step(2).await).as_deref(), Some(first));
+    next(&client).await.unwrap();
+    // The end of a conversation that is not the session's changes nothing.
+    assert_eq!(conversation(&step(3).await).as_deref(), Some(first));
+    next(&client).await.unwrap();
+    // `/clear`: the new conversation is reported, then the old one ends.
+    assert_eq!(conversation(&step(4).await).as_deref(), Some(second));
+    next(&client).await.unwrap();
+    assert_eq!(conversation(&step(5).await), None);
+
+    // Nobody else can report: no token, or one the engine never issued.
+    let anonymous = reqwest::Client::new();
+    for bearer in [None, Some("not-a-broker-token")] {
+        let mut request = anonymous
+            .post(format!("{base}/api/agent-auth/conversation"))
+            .json(&json!({ "agent": "claude", "id": first }));
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 }
 
