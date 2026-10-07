@@ -48,8 +48,11 @@
 //! then the presenting session's own grants, so a grant never shadows a
 //! manifest entry and never reaches another session. The helper is run with
 //! `ENGINE_AGENT_AUTH_SECRETS` replaced by exactly the granted line, so its own
-//! manifest check still holds. Grants live in memory: a hibernation, an exit or
-//! an engine restart drops them, which fails closed.
+//! manifest check still holds. A `once` grant is spent by its first fetch,
+//! whether or not the helper succeeds: it is taken out of the table before the
+//! helper runs and never put back, so a revoke that lands mid-fetch cannot be
+//! undone by the fetch failing. Grants live in memory: a hibernation, an exit
+//! or an engine restart drops them, which fails closed.
 //!
 //! Honest caveat: the engine and its sessions run as the
 //! same uid today, so `/proc/1/environ` still exposes the identity to any
@@ -318,6 +321,8 @@ pub struct SecretBroker {
 
 /// The longest a grant may live.
 pub const MAX_GRANT_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// The longest `reason` a grant carries: it is shown, never acted on.
+pub const MAX_GRANT_REASON_CHARS: usize = 2000;
 
 /// A grant as the broker holds it: the wire shape plus its parsed expiry.
 #[derive(Clone, Debug)]
@@ -357,6 +362,8 @@ pub enum GrantRefusal {
     ShadowsManifest(String),
     /// The project is not open to grants.
     ProjectNotGrantable(String),
+    /// Another live grant already lets this session fetch that `var`.
+    VarInUse(String),
 }
 
 impl std::fmt::Display for GrantRefusal {
@@ -375,6 +382,10 @@ impl std::fmt::Display for GrantRefusal {
             GrantRefusal::ProjectNotGrantable(project) => write!(
                 f,
                 "project {project} is not open to grants: grants may fetch only from projects the manifest names or ENGINE_AGENT_GRANT_PROJECTS lists"
+            ),
+            GrantRefusal::VarInUse(var) => write!(
+                f,
+                "the session already holds a live grant for {var}; revoke it first, or choose another var"
             ),
         }
     }
@@ -416,7 +427,9 @@ impl SecretBroker {
 
     /// Hold a person-approved grant for `session` (WI-973). The caller has
     /// already checked that vogt-core sent it and that the session is live.
-    /// A grant with the same id replaces the earlier one.
+    /// A grant with the same id replaces the earlier one (a retried apply);
+    /// a *different* grant for a `var` the session can already fetch is
+    /// refused, so one approval never silently ends another.
     pub fn apply_grant(
         &self,
         session: Uuid,
@@ -469,9 +482,21 @@ impl SecretBroker {
                 MAX_GRANT_TTL.as_secs() / 3600
             )));
         }
+        if grant.reason.chars().count() > MAX_GRANT_REASON_CHARS {
+            return Err(GrantRefusal::Invalid(format!(
+                "reason is longer than {MAX_GRANT_REASON_CHARS} characters"
+            )));
+        }
         let held = HeldGrant { grant, expires_at };
         let mut list = self.session_grants.entry(session).or_default();
-        list.retain(|g| g.grant.grant_id != held.grant.grant_id && g.grant.var != held.grant.var);
+        list.retain(|g| g.expires_at > now);
+        if list
+            .iter()
+            .any(|g| g.grant.grant_id != held.grant.grant_id && g.grant.var == held.grant.var)
+        {
+            return Err(GrantRefusal::VarInUse(held.grant.var));
+        }
+        list.retain(|g| g.grant.grant_id != held.grant.grant_id);
         list.push(held.clone());
         Ok(held)
     }
@@ -488,16 +513,12 @@ impl SecretBroker {
 
     /// Take a `once` grant out of the table before it is used, so two fetches
     /// racing for it cannot both be answered; `None` when another took it.
+    /// It is never put back: a fetch that fails has spent it, because a
+    /// revoke or a session exit that lands while the helper runs must stand.
     pub fn take_grant(&self, session: Uuid, grant_id: &str) -> Option<HeldGrant> {
         let mut list = self.session_grants.get_mut(&session)?;
         let index = list.iter().position(|g| g.grant.grant_id == grant_id)?;
         Some(list.remove(index))
-    }
-
-    /// Put back a `once` grant whose fetch failed, so the failure does not
-    /// spend it.
-    pub fn restore_grant(&self, session: Uuid, held: HeldGrant) {
-        self.session_grants.entry(session).or_default().push(held);
     }
 
     /// Drop every grant a session holds: it ended, or was hibernated.
@@ -806,7 +827,9 @@ pub async fn fetch(
             .grant_for_var(session, &var, time::OffsetDateTime::now_utc())
             .filter(|_| state.sessions.get(session).is_ok_and(|s| s.is_alive()))
             // A `once` grant is taken before it is used: of two fetches racing
-            // for it, only one is answered.
+            // for it, only one is answered. It is spent whether or not the
+            // fetch succeeds (never restored), so a revoke that lands while
+            // the helper runs cannot be undone by a failure.
             .and_then(|held| match held.grant.uses {
                 vogt_engine_contract::GrantUses::Once => {
                     broker.take_grant(session, &held.grant.grant_id)
@@ -838,11 +861,6 @@ pub async fn fetch(
         Some(held) => broker.fetch_with(&entry, Some(&held.manifest_line())).await,
         None => broker.fetch(&entry).await,
     };
-    if let (Err(_), Some(held)) = (&fetched, granted.as_ref()) {
-        if held.grant.uses == vogt_engine_contract::GrantUses::Once {
-            broker.restore_grant(session, held.clone());
-        }
-    }
     let grant_id = granted
         .as_ref()
         .map(|g| g.grant.grant_id.clone())

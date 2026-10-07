@@ -406,6 +406,12 @@ pub struct SessionGrant {
     pub uses: GrantUses,
     /// RFC 3339; never honoured after this.
     pub expires_at: String,
+    /// Why it was asked for, as the requester wrote it and the approver read
+    /// it: untrusted text, carried so the session (and the permission
+    /// classifier reading `vogt-agent-auth grants`) sees the purpose the
+    /// person approved. Never a value.
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// `POST /api/sessions/{id}/keep-awake`.

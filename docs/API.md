@@ -280,9 +280,12 @@ default 120) and then types; the result says `woke`. `session.screen` and
 "hibernated"` and the kept screen. `session.keep_awake` pins a session
 against the engine's idle policy. `session.set_role` (`work.write`, audited)
 nominates a session as `oversight` — the one supervising the others — or
-makes it a `worker` again; `session.start` takes the same `role`. An
-oversight session is pinned awake as it becomes one, rows carry `role`, and
-the GUI lists oversight sessions first (WI-957).
+makes it a `worker` again; `session.start` takes the same `role`. **It is a
+person's nomination**: an agent principal gets `403 role_refused`, because
+the role is what lets a session ask for grants on another session's behalf
+(below), and a session that could nominate itself would make that rule
+self-service. An oversight session is pinned awake as it becomes one, rows
+carry `role`, and the GUI lists oversight sessions first (WI-957).
 
 `session.grant_request` (`work.write`, audited) asks a person to approve one
 named credential (`secret_name`, `project_id`, optional `var`; `uses` `once` or
@@ -295,8 +298,11 @@ decides. An approval is applied to the session by the engine before it is
 recorded, so an engine refusal leaves the request pending with its reason.
 `session.grant_revoke` withdraws a pending grant or revokes an approved one at
 once; a person or the asker may. `session.grant_list` (`read`) lists grants by
-`state` (`pending`, `approved`, `denied`, `revoked`, `expired`) or `target`.
-Rows carry names, never a value. The engine half and the session's `vogt-agent-auth
+`state` (`pending`, `approved`, `denied`, `revoked`, `expired`) or `target`;
+a person sees every grant, an agent only its own session's. Rows carry names,
+never a value. The Inbox entry names the target as the person knows it
+(title, role, agent, project) and says who is asking and whether it is asking
+for itself; those come from the engine and the core, not from the request. The engine half and the session's `vogt-agent-auth
 fetch VAR` are [`ENGINE.md` §9](ENGINE.md),
 and the design is [`design/oversight-grants.md`](design/oversight-grants.md).
 

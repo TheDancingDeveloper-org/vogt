@@ -7103,7 +7103,7 @@ async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
     let helper = tmp.path().join("grant-helper");
     std::fs::write(
         &helper,
-        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\nprintf 'value-of-%s|%s' \"$2\" \"$ENGINE_AGENT_AUTH_SECRETS\"\n",
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\n[ \"$2\" = GRANT_BROKEN ] && exit 3\nprintf 'value-of-%s|%s' \"$2\" \"$ENGINE_AGENT_AUTH_SECRETS\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -7144,6 +7144,7 @@ async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
             "secret_name": "100.109.218.11_SSH",
             "uses": uses,
             "expires_at": expires,
+            "reason": "the worker needs the emulator key",
         })
     };
 
@@ -7216,7 +7217,44 @@ async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
         .unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0]["grant_id"], "grt_2");
+    assert_eq!(
+        listed[0]["reason"], "the worker needs the emulator key",
+        "the session sees the purpose the person approved"
+    );
     assert!(!listed[0].to_string().contains("value-of"));
+    // One approval never silently ends another: a different grant for a var
+    // the session can already fetch is refused, while re-applying the same
+    // grant (a retried approval) replaces it.
+    let in_use = core
+        .post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_2b", "GRANT_SSH", "proj", "once", &in_an_hour))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(in_use.status(), 409);
+    assert!(in_use
+        .text()
+        .await
+        .unwrap()
+        .contains("already holds a live grant"));
+    core.post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_2", "GRANT_SSH", "extra", "ttl", &in_an_hour))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    // An operator reads a session's grants; the reason rides along.
+    let seen: Vec<Value> = operator
+        .get(format!("{base}/api/sessions/{target}/grants"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0]["grant_id"], "grt_2");
     let empty: Vec<Value> = plain
         .get(format!("{base}/api/agent-auth/grants"))
         .bearer_auth(&other_token)
@@ -7246,6 +7284,46 @@ async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
     assert_eq!(
         fetch(&target_token, "GRANT_SSH").await.unwrap().status(),
         403
+    );
+
+    // A `once` grant is spent by its first fetch even when the helper fails:
+    // taken before the helper runs and never put back, so a revoke landing
+    // mid-fetch is not undone by the failure.
+    core.post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant(
+            "grt_broken",
+            "GRANT_BROKEN",
+            "proj",
+            "once",
+            &in_an_hour,
+        ))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        fetch(&target_token, "GRANT_BROKEN").await.unwrap().status(),
+        502,
+        "the helper failed"
+    );
+    assert_eq!(
+        fetch(&target_token, "GRANT_BROKEN").await.unwrap().status(),
+        403,
+        "a failed once-fetch still spent the grant"
+    );
+    let after_failure: Vec<Value> = plain
+        .get(format!("{base}/api/agent-auth/grants"))
+        .bearer_auth(&target_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        after_failure.iter().all(|g| g["grant_id"] != "grt_broken"),
+        "{after_failure:?}"
     );
 
     // Least privilege: never a manifest name, never an unopened project,

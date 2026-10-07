@@ -24,6 +24,7 @@ from vogt.application.models import (
     ListGrantsParams,
     RequestGrantParams,
     RevokeGrantParams,
+    SetSessionRoleParams,
 )
 from vogt.application.services import (
     decide_grant,
@@ -32,10 +33,12 @@ from vogt.application.services import (
     list_inbox,
     request_grant,
     revoke_grant,
+    set_session_role,
 )
+from vogt.application.services import grants as grants_service
 from vogt.application.services.grants import default_var
 from vogt.core.principal import Principal
-from vogt.errors import Conflict, GrantRefused, InvalidRequest
+from vogt.errors import Conflict, GrantRefused, InvalidRequest, RoleRefused
 
 WHY = "grant test"
 SECRET = "100.109.218.11_SSH"
@@ -170,6 +173,8 @@ def test_a_person_approves_and_the_engine_holds_it_before_the_record_says_so(
         "secret_name": SECRET,
         "uses": "ttl",
         "expires_at": sent["expires_at"],
+        # The purpose the person approved rides to the session (F5).
+        "reason": "the worker needs the emulator key",
     }
     assert "value" not in json.dumps(sent).lower()
     # Decided once: a second decision is a conflict, not a second grant.
@@ -223,6 +228,83 @@ def test_the_requester_is_the_principal_not_a_parameter(ctx: AppContext) -> None
     ask(as_agent(ctx, "eng-overseer"))
     (row,) = list_grants(ctx, ListGrantsParams()).grants
     assert row.requested_by == "agent:engine:eng-overseer"
+
+
+def test_an_agent_cannot_make_itself_an_overseer(ctx: AppContext) -> None:
+    """The overseer rule would be self-service if a session could set its own
+    role; the role is a person's nomination (F3)."""
+    for who in ("eng-other", "eng-worker"):
+        with pytest.raises(RoleRefused, match="only a person nominates"):
+            set_session_role(
+                as_agent(ctx, who),
+                SetSessionRoleParams(id=who, role="oversight", reason=WHY),
+            )
+    with pytest.raises(GrantRefused, match="only an oversight session"):
+        ask(as_agent(ctx, "eng-other"), target="eng-worker")
+
+
+def test_an_agent_lists_only_its_own_sessions_grants(ctx: AppContext) -> None:
+    """Which secrets another session was granted is not every agent's to read
+    (F8): an agent sees its own session's grants, a person sees all."""
+    mine = ask(as_agent(ctx, "eng-worker"), target="eng-worker")
+    ask(ctx, target="eng-other")
+    assert len(list_grants(ctx, ListGrantsParams()).grants) == 2
+    seen = list_grants(as_agent(ctx, "eng-worker"), ListGrantsParams()).grants
+    assert [g.id for g in seen] == [mine]
+    other = list_grants(
+        as_agent(ctx, "eng-worker"), ListGrantsParams(target="eng-other")
+    ).grants
+    assert other == []
+    pod = dataclasses.replace(
+        ctx,
+        principal=Principal(
+            identity_ref="agent:pod:vogt", kind="agent", display_name="pod"
+        ),
+    )
+    assert list_grants(pod, ListGrantsParams()).grants == []
+
+
+def test_a_failed_approval_takes_the_grant_back_unless_another_person_approved(
+    ctx: AppContext, engine: GrantEngine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The engine never holds a grant the record does not stand behind (F6):
+    any failure after the apply revokes it — except another person's approval
+    of the same grant landing first, which stands."""
+    grant_id = ask(as_agent(ctx, "eng-overseer"))
+    real = grants_service._record_decision
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("the record could not be written")
+
+    monkeypatch.setattr(grants_service, "_record_decision", broken)
+    with pytest.raises(RuntimeError):
+        decide_grant(
+            ctx, DecideGrantParams(id=grant_id, decision="approve", reason=WHY)
+        )
+    assert engine.revoked == [("eng-worker", grant_id)]
+    (row,) = list_grants(ctx, ListGrantsParams()).grants
+    assert row.state == "pending"
+
+    # Two people approve at once: the second's record is a conflict, but the
+    # first's approval stands at the engine.
+    engine.revoked.clear()
+    calls = {"n": 0}
+
+    def raced(*args: Any, **kwargs: Any) -> Any:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            real(*args, **kwargs)  # the other person's write lands first
+            raise Conflict(f"grant {grant_id} is approved, not pending")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(grants_service, "_record_decision", raced)
+    with pytest.raises(Conflict):
+        decide_grant(
+            ctx, DecideGrantParams(id=grant_id, decision="approve", reason=WHY)
+        )
+    assert engine.revoked == [], "the other person's approval was not taken back"
+    (row,) = list_grants(ctx, ListGrantsParams()).grants
+    assert row.state == "approved"
 
 
 # -- invariant 4: least privilege ---------------------------------------------
@@ -311,6 +393,27 @@ def test_a_pending_grant_is_an_inbox_entry_until_it_is_decided(ctx: AppContext) 
     assert SECRET in entry.title
     assert "agent:engine:eng-overseer" in entry.summary
     assert "infra" in entry.summary
+    # The approver sees the target as they know it, and who is asking for
+    # whom (F4): the names come from the engine, not the request.
+    assert "for session eng-worker" in entry.title
+    assert "for session eng-worker (worker)" in entry.summary
+    assert entry.actor_login == "agent:engine:eng-overseer"
+    assert entry.actor_kind == "bot"
+    assert entry.evidence_snapshot is not None
+    assert entry.evidence_snapshot["target_role"] == "worker"
+    assert entry.evidence_snapshot["requester_is_target"] is False
+    own = ask(as_agent(ctx, "eng-other"), target="eng-other")
+    (self_entry,) = [
+        e
+        for e in list_inbox(ctx, InboxListParams()).entries
+        if e.kind == "session.grant_request"
+        and e.action is not None
+        and e.action.grant_id == own
+    ]
+    assert "asks for" in self_entry.summary and "for itself" in self_entry.summary
+    assert self_entry.evidence_snapshot is not None
+    assert self_entry.evidence_snapshot["requester_is_target"] is True
+    decide_grant(ctx, DecideGrantParams(id=own, decision="deny", reason=WHY))
     decide_grant(ctx, DecideGrantParams(id=grant_id, decision="deny", reason=WHY))
     assert not [
         e

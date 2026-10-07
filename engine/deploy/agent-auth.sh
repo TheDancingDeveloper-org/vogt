@@ -229,8 +229,8 @@ Commands:
   store  (session-side) Send a value on stdin to the engine's broker to store
          under one `writable` manifest entry. Needs only the broker token.
   grants (session-side) List the credential grants a person approved for this
-         session (WI-973): VAR, secret, uses, expiry. Never a value. Fetch one
-         with `fetch VAR`.
+         session (WI-973): VAR, secret, uses, expiry, grant id and the reason
+         it was approved for. Never a value. Fetch one with `fetch VAR`.
 EOF
 }
 
@@ -586,7 +586,9 @@ list_grants() {
     if [[ "$(jq 'length' "$response")" == "0" ]]; then
         echo "no approved grants for this session"
     else
-        jq -r '.[] | "\(.var)\tsecret=\(.secret_name) project=\(.project_id) uses=\(.uses) expires=\(.expires_at) grant=\(.grant_id)"' "$response"
+        # The reason is the requester's text: one line, tabs and newlines
+        # folded, so a listing is always one grant per line.
+        jq -r '.[] | "\(.var)\tsecret=\(.secret_name) project=\(.project_id) uses=\(.uses) expires=\(.expires_at) grant=\(.grant_id) reason=\((.reason // "") | gsub("[\\n\\r\\t]+"; " "))"' "$response"
     fi
     rm -f "$response"
 }

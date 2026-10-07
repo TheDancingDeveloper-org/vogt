@@ -79,14 +79,24 @@ authenticated principal. It is never a parameter.
 WI-957 role, read from the engine). A person may request for any session.
 Every request still needs a person's approval, so this rule does not protect
 the boundary. Its job is to keep the Inbox about overseers and their workers,
-not any agent asking for anything.
+not any agent asking for anything. For the rule to mean that, the role has
+to be a person's nomination: `session.set_role` refuses agent principals
+(`role_refused`), so a session cannot make itself an overseer first.
+Overseers are started as one (`session.start` with `role`) or nominated
+from the GUI.
 
 ## Decision
 
 The Inbox shows each pending grant as an `agent`-source entry of kind
 `session.grant_request`, with **Approve** and **Deny**. The title names the
-target session and the item. The summary carries the requester, the reason,
-`uses` and the TTL. The action is `{kind: "grant", grant_id}`.
+item and the target session *as the person knows it* (its title; the summary
+and `evidence_snapshot` add its role, agent CLI, permission mode, project and
+`ses_…` id, read from the engine and the core, never from the request). The
+summary says who is asking, and whether the requester is the target itself
+("for itself") or another session — an overseer asking for a credential
+*for itself* while the reason talks about its worker is the thing the
+approver must be able to see. The requester is the entry's actor. The
+action is `{kind: "grant", grant_id}`.
 
 `session.grant_decide` (`decision`: `approve` | `deny`, plus a reason):
 
@@ -98,7 +108,13 @@ target session and the item. The summary carries the requester, the reason,
   follows the repository rule: resolve the external dependency, then write. If
   the engine refuses (the session is gone, the project is not grantable, no
   broker), the row stays `pending`, the decision fails with the engine's
-  reason, and the person can deny it instead.
+  reason, and the person can deny it instead. If the *record* fails after
+  the engine said yes — any failure, not only a conflict — the grant is
+  taken back from the engine, so the engine never holds a grant the record
+  does not stand behind; the one exception is another person's approval of
+  the same grant having landed first, which stands (the engine holds the
+  same `grant_id`). The approved `reason` travels to the engine with the
+  grant, so the session sees what it was approved for.
 - **Deny** records `denied`. Nothing reaches the engine.
 - **Approve-once vs standing.** `uses: once` is the approve-once case. A
   `ttl` grant stands until it expires or is revoked. A standing *rule* that
@@ -120,7 +136,10 @@ uses, expires_at}`:
 - It refuses a session it does not know (404) and one with no broker grant
   (409: brokering is not configured, so nothing can reach the session).
 - It refuses a `var` that names a manifest entry (409), so a grant can never
-  shadow what the deployment declared.
+  shadow what the deployment declared; and a *different* grant for a `var`
+  the session can already fetch (409), so one approval never silently ends
+  another. The same `grant_id` sent again replaces the earlier copy, which
+  is what a retried approval is.
 - It refuses a `project_id` that is not grantable (403). Grantable projects
   are those the manifest already names, plus `ENGINE_AGENT_GRANT_PROJECTS`
   (space- or comma-separated project ids). An approval cannot reach into a
@@ -138,19 +157,27 @@ in the manifest, it looks for an active grant for *that* session and *that*
 `ENGINE_AGENT_AUTH_SECRETS` replaced by exactly the granted line (`VAR
 PROJECT_ID SECRET_NAME ondemand`). The helper's own manifest check stays
 meaningful (it sees the effective manifest for this one call) and needs no
-change. A `once` grant is removed after the first successful fetch. Each fetch
-is audited with the grant id.
+change. A `once` grant is spent by its first fetch, successful or not: it is
+taken out of the table before the helper runs and never put back, so a
+revoke or a session exit that lands while the helper runs cannot be undone
+by the fetch failing. Each fetch is audited with the grant id.
 
 `vogt-agent-auth grants` (session side, `GET /api/agent-auth/grants` with the
 broker token) lists the session's active grants: `var`, secret name, `uses`,
-expiry, grant id. Values are never listed. This lets the agent see what it
-was granted. It also lets Claude Code's permission classifier see it: the
-driven-session policy gains an allow rule, **Approved Vogt Grant**, which
-clears fetching and using a credential `vogt-agent-auth grants` lists for that
-session, for the purpose it was granted. Everything else about credential
-materialisation stays denied by the defaults. *Unverified:* how the
-classifier weighs that rule against the default. Check it on dev with a real
-grant before relying on it.
+expiry, grant id and the `reason` it was approved for. Values are never
+listed. This lets the agent see what it was granted and for what. It also
+lets Claude Code's permission classifier see it: the driven-session policy
+gains an allow rule, **Approved Vogt Grant**, which clears fetching a
+credential a `vogt-agent-auth grants` command *run in the session* lists, and
+using it only for what that line's `reason=` says. The classifier cannot
+verify a listing (an agent could quote one), which is why the rule is worded
+around a command actually run and why the engine, not the rule, is the gate:
+the rule can clear no VAR the engine will not serve. Everything else about
+credential materialisation stays denied by the defaults. *Unverified:* how
+the classifier weighs that rule against the default. Check it on dev with a
+real grant before relying on it. `GET /api/sessions/{id}/grants` is an
+operator's read (stack secret, break-glass token or `admin`), and
+`session.grant_list` shows an agent only its own session's grants.
 
 ### A capability (milestone 2)
 
@@ -198,13 +225,22 @@ the person cancels it.
    an agent-principal decide raises `GrantRefused`, and the row stays
    `pending`.
 2. **Nothing reaches the engine except through that decision.** The engine's
-   grant routes accept only the stack secret (`vogt-core`). A session holds a
+   grant routes accept only the stack secret (`vogt-core`), decided by the
+   credential compared (`AuthorizedIdentity.stack_secret`), not by its name,
+   which a core actor's `identity_ref` could also spell. A session holds a
    core token and a broker token, and neither opens them. *Test:* a person's
    token, the break-glass token and a session token all get 403 on `POST
-   …/grants`. *Caveat:* the stack secret is in the engine's environment, and
-   sessions run as the same uid (the existing caveat in `secret_broker.rs`:
-   `/proc/1/environ`). That is a reduction in exposure, not an enforced uid
-   boundary, until sessions run as a separate uid.
+   …/grants`. **Caveat, stated plainly: this is not a uid boundary.** The
+   stack secret is in the engine's environment and its token file, and
+   sessions run as the engine's uid; a session that reads `/proc/1/environ`
+   or that file holds it and can apply a grant to itself with no person
+   involved. (From a session on this deployment, `/proc/1/environ` is
+   readable and names `VOGT_CORE_TOKEN_FILE`; the 2026-10-07 review did not
+   verify the file's own mode.) The engine warns at start-up when a token
+   file is group- or world-readable. Until sessions run as a separate uid,
+   invariant 2 narrows ambient exposure and adds an audited, person-approved
+   path; calling grants a *boundary* waits on that uid line, which is the
+   prerequisite work this design depends on (WI-982).
 3. **No laundering.** The requester is the authenticated principal, never a
    parameter. An agent cannot approve (1), cannot apply (2), and cannot
    request for another session unless it is an overseer. A grant is bound to
@@ -218,9 +254,11 @@ the person cancels it.
    both refused.
 5. **Time-boxed.** At most 24 h. Expiry is enforced by the engine at use, not
    only displayed. A `once` grant is taken out of the table *before* its fetch
-   runs, so of two racing fetches only one is answered, and a failed fetch puts
-   it back. *Test:* an expired grant is refused at fetch, and a `once` grant
-   answers only the first fetch.
+   runs, so of two racing fetches only one is answered, and it is never put
+   back: a failed fetch has spent it, because restoring it would also undo a
+   revoke that landed while the helper ran. *Test:* an expired grant is
+   refused at fetch, a `once` grant answers only the first fetch, and a
+   `once` grant whose helper fails is gone afterwards.
 6. **Revocable at once.** A revoke deletes the grant at the engine before it
    is recorded. The session ending or the engine restarting drops every grant
    (fails closed).

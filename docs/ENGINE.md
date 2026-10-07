@@ -3282,35 +3282,58 @@ manifest is fixed at deploy time, and changing it cycles the pod. A grant is
 the runtime counterpart: a person approves, in the Inbox, one named secret for
 one live session, and vogt-core hands it to the engine with
 `POST /api/sessions/{id}/grants` `{grant_id, var, project_id, secret_name,
-uses, expires_at}`. **Only the stack secret (vogt-core's identity) may call it**,
-or `DELETE /api/sessions/{id}/grants/{grant_id}`. A person's token, the
+uses, expires_at, reason}`. **Only the stack secret (vogt-core's identity) may
+call it**, or `DELETE /api/sessions/{id}/grants/{grant_id}`. The engine decides
+that by the credential it compared, not by a name: a core actor whose
+`identity_ref` happens to read `vogt-core` is not it. A person's token, the
 break-glass token and every session token are refused with 403, even though
 they hold `sessions`. The engine refuses:
 
 - a session it does not know (404), or one that has exited (409);
 - a deployment with no broker (409);
 - a `var` that is a manifest entry (409: a grant never shadows the manifest);
+- a *different* grant for a `var` the session can already fetch (409: one
+  approval never silently ends another; re-sending the same `grant_id`
+  replaces it, which is what a retried approval does);
 - a project the manifest does not name and `ENGINE_AGENT_GRANT_PROJECTS` does
   not list (403);
-- an expiry in the past or more than 24 h ahead (400).
+- an expiry in the past or more than 24 h ahead, or a `reason` over 2000
+  characters (400).
 
 The session fetches the grant with the command it already has, `vogt-agent-auth
 fetch VAR`. The fetch route checks the manifest first, then that session's own
 live grants. It runs the helper's `get VAR` with `ENGINE_AGENT_AUTH_SECRETS`
 replaced by exactly the granted line, so the helper's manifest check still
-holds. A `once` grant is gone after its first successful fetch, and each fetch
-is audited with its `grant_id`. `vogt-agent-auth grants` (`GET
-/api/agent-auth/grants`, broker token) lists the session's live grants, never
-a value, and `GET /api/sessions/{id}/grants` (`sessions`) shows the same to an
-operator.
+holds. A `once` grant is spent by its first fetch, **whether or not the helper
+succeeds**: it is taken out of the table before the helper runs and is never
+put back, so a revoke or a session exit that lands while the helper is running
+stands (a failed fetch means asking again). Each fetch is audited with its
+`grant_id`. `vogt-agent-auth grants` (`GET /api/agent-auth/grants`, broker
+token) lists the session's live grants with the `reason` each was approved
+for, never a value. `GET /api/sessions/{id}/grants` shows the same to an
+operator only: the stack secret, the break-glass token or an `admin`-scoped
+token; a `work.write` token, which every session holds, gets 403, because
+which secrets another session was granted is not every session's to read.
 
 Grants live in memory. The session ending or hibernating, or the engine
 restarting, drops them, which fails closed. Every apply and revoke is audited
 as `event=session.grant`. The driven-session policy carries one allow rule,
-*Approved Vogt Grant*, for credentials `vogt-agent-auth grants` lists. The
-decision half (request, Inbox, approval by a person only) is vogt-core's
-`session.grant_*` ([`API.md`](API.md)). The design and its invariants are
+*Approved Vogt Grant*, for credentials a `vogt-agent-auth grants` run in the
+session lists, for the use its `reason=` states. The decision half (request,
+Inbox, approval by a person only) is vogt-core's `session.grant_*`
+([`API.md`](API.md)). The design and its invariants are
 [`design/oversight-grants.md`](design/oversight-grants.md).
+
+**What this is not.** "Only the stack secret may apply a grant" is a check on
+the credential presented, not a uid boundary. The stack secret is in the
+engine's environment and its token file, and sessions run as the engine's
+uid, so a session that reads `/proc/1/environ` or that file (the caveat
+above) holds it and can apply a grant to itself with no person involved. The
+engine warns at start-up (`event=config.token_file_mode`) when a token file's
+mode lets a group or others read it; keep it `0600`. Until sessions run as a
+separate uid, grants narrow ambient exposure and add an audited,
+person-approved path; they are a boundary only once that uid line exists
+(WI-982).
 
 Operator-local notes about a particular deployment belong in the git-ignored
 `docs/local/`, not here.

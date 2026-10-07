@@ -1045,8 +1045,39 @@ fn read_token_path(path: Option<&str>) -> Result<Option<String>> {
             "vogt_core_token_file ({path}) is empty"
         )));
     }
+    warn_if_readable_by_others("vogt_core_token_file", path);
     Ok(Some(value))
 }
+
+/// Say so, loudly and in the audit log, when a token file's mode lets a
+/// group or anyone else read it. The stack secret is what lets vogt-core hand
+/// a session a person-approved grant (WI-973); sessions run as this process's
+/// uid today, so the file's mode is the only thing between a session and
+/// that credential besides the uid boundary the deployment does not yet have.
+/// A warning, not a refusal: an existing deployment must keep booting, and
+/// the mode is the deployment's to fix.
+#[cfg(unix)]
+fn warn_if_readable_by_others(setting: &str, path: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "config.token_file_mode",
+            setting,
+            path,
+            mode = format!("{mode:o}"),
+            "token file is readable by its group or by others; make it 0600 — \
+             any process at this uid (every session, today) can read it as it is"
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_readable_by_others(_setting: &str, _path: &str) {}
 
 fn read_token_file(name: &str) -> Result<Option<String>> {
     let Ok(path) = engine_env(name) else {
@@ -1057,6 +1088,7 @@ fn read_token_file(name: &str) -> Result<Option<String>> {
     }
     let raw = std::fs::read_to_string(path.trim())
         .map_err(|e| ApiError::Config(format!("reading {name} ({path}): {e}")))?;
+    warn_if_readable_by_others(name, path.trim());
     Ok(Some(raw.trim().to_string()).filter(|s| !s.is_empty()))
 }
 
