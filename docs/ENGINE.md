@@ -168,6 +168,7 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-mcp` | `deploy/vogt-mcp-auth.sh` | stdio bridge to Vogt's `/mcp` for clients that cannot take a bearer directly; uses the session's own token | optional |
 | `vogt-rust-analyzer-mcp` | `deploy/rust-analyzer-mcp.sh` | starts `rust-analyzer-mcp` anchored to the nearest `Cargo.toml` | optional |
 | `vogt-readonly-mcp` | `deploy/readonly-mcp.sh` | starts the GitHub, Grafana or Gitea/Forgejo MCP server in read-only mode with the session's token (§4) | optional — registered only when its token is present |
+| `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
 | `codex` wrapper | `deploy/codex-full-access.sh` | runs Codex without its nested sandbox, because the pod is the isolation boundary | only with `INSTALL_AI_CLIENTS` |
@@ -341,9 +342,10 @@ it from a non-Rust directory.
 three third-party MCP servers at exact versions, each tarball checked against a
 sha256 recorded in `engine/Dockerfile` (a bump is an edit there):
 `github-mcp-server` 1.14.0, `mcp-grafana` 2.0.0 and `gitea-mcp` 1.8.0.
-`vogt-mcp-bootstrap` registers each one with Claude Code and Codex **only
-while the session holds its token**, and removes the registration when it
-does not, so a deployment turns one on by adding its token to the session's
+`vogt-mcp-bootstrap` registers each one with Claude Code, Codex, opencode
+and Klaudia **only while the session holds its token**, and removes the
+registration when it does not (opencode excepted: it has no `mcp remove`, so
+its entry stays and the wrapper, finding no token, refuses to start), so a deployment turns one on by adding its token to the session's
 environment (normally a launch-time line in `ENGINE_AGENT_AUTH_SECRETS`, §9 —
 an `ondemand` line is not in the environment when the bootstrap runs, so it
 does not register anything) and off by removing it.
@@ -355,8 +357,8 @@ does not register anything) and off by removing it.
 | `forgejo-ro` | `GITEA_HOST` + `GITEA_MCP_TOKEN` — a read-scoped token; works against Forgejo's Gitea-compatible API | `-r` and `GITEA_READONLY=true` (only read tools are offered), plus the token's scope |
 
 The registration stores `vogt-readonly-mcp <server>` and nothing else: no
-token value (Claude Code passes a stdio server the session's environment;
-Codex is told which variables to pass with `env_vars`) and no flag a session
+token value (Claude Code, opencode and Klaudia pass a stdio server the
+session's environment; Codex is told which variables to pass with `env_vars`) and no flag a session
 could edit. `vogt-readonly-mcp` (`deploy/readonly-mcp.sh`) renames the token
 to the variable the upstream server reads and sets the read-only switches on
 every start, overriding any `GITHUB_TOOLSETS`, `GITHUB_READ_ONLY` or
@@ -383,7 +385,10 @@ $TOKEN"` breaks the moment a layer of shell drops its quotes.
 server automatically, carrying a per-session actor-scoped token, so an agent's
 writes are attributed to that session's actor rather than to a shared
 identity. The session exports the endpoint as `VOGT_URL` and
-`mcp-bootstrap.sh` registers it; `VOGT_MCP_URL` overrides the endpoint, and
+`mcp-bootstrap.sh` registers it with every agent CLI in the image — Claude
+Code (`~/.claude.json`), Codex (`~/.codex/config.toml`), opencode (its user
+`opencode.json[c]`) and Klaudia (`~/.klaudia/.mcp.json`, through
+`vogt-klaudia-mcp`); `VOGT_MCP_URL` overrides the endpoint, and
 with neither set the bootstrap falls back to the front door on loopback.
 
 Any further MCP server an agent should reach is registered by hand inside the
