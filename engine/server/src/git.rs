@@ -237,6 +237,7 @@ pub async fn diff(
         .await?
         .ok_or(ApiError::NotFound)?;
     let path = clean_repo_rel(&q.path)?;
+    diff_may_show(&state.config.workspace_root, &repo, &path).await?;
 
     // HEAD content via `git show HEAD:path`. Returns empty if untracked.
     let head_arg = format!("HEAD:{path}");
@@ -259,6 +260,16 @@ pub async fn diff(
         let full = repo.join(&path);
         match (full.canonicalize(), repo.canonicalize()) {
             (Ok(canon), Ok(repo_canon)) if canon.starts_with(&repo_canon) => {
+                // The working-tree side is held to the policy on the resolved
+                // path too: a tracked `notes.txt -> .env` link must not read
+                // the credential it points at.
+                let lexical = repo_canon.join(&path);
+                let root = &state.config.workspace_root;
+                if canon != lexical && workspace_path::may_show(root, &canon).is_err() {
+                    return Err(ApiError::BadRequest(
+                        "refusing to diff a link to a hidden or credential file".into(),
+                    ));
+                }
                 tokio::fs::read_to_string(&canon).await.unwrap_or_default()
             }
             _ => String::new(),
@@ -270,6 +281,39 @@ pub async fn diff(
         current,
         head,
     }))
+}
+
+/// The file API's content policy, applied to a diff. Credential names and
+/// anything under `.git/` are refused outright — on both the HEAD and the
+/// working-tree side, since a committed secret is as secret as an uncommitted
+/// one. A hidden component inside the repo (`.github/workflows/ci.yml`,
+/// `.gitignore`) is allowed only for a file git tracks: the Git panel lists
+/// those, and their content is already in HEAD. Untracked dotfiles
+/// (`.envrc`, `.claude/settings.local.json`) and a repo that itself sits
+/// under a hidden directory are refused like the viewer refuses them.
+async fn diff_may_show(root: &Path, repo: &Path, path: &str) -> Result<()> {
+    let lexical = repo.join(path);
+    if workspace_path::names_a_secret(root, &lexical) {
+        return Err(ApiError::BadRequest(
+            "refusing to diff a credential file".into(),
+        ));
+    }
+    if workspace_path::has_hidden_component(root, repo) {
+        return Err(ApiError::BadRequest(
+            "refusing to diff a file in a hidden directory".into(),
+        ));
+    }
+    if workspace_path::has_hidden_component(repo, &lexical) {
+        let tracked = run_git(repo, &["ls-files", "--error-unmatch", "--", path])
+            .await
+            .is_ok();
+        if !tracked {
+            return Err(ApiError::BadRequest(
+                "refusing to diff an untracked hidden file".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]

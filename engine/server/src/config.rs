@@ -751,7 +751,7 @@ pub fn load(
         ));
     }
 
-    Ok(Config {
+    let config = Config {
         bind,
         token,
         token_mutating_request_limit_per_minute,
@@ -950,7 +950,16 @@ pub fn load(
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(std::path::PathBuf::from),
-    })
+    };
+    // Every file API is confined to `workspace_root`; a root of `/` or `$HOME`
+    // would quietly put the engine's state and every credential in the home
+    // directory behind it. Fail the start instead.
+    crate::workspace_path::validate_root(
+        &config.workspace_root,
+        dirs_home().as_deref(),
+        &config.state_dir,
+    )?;
+    Ok(config)
 }
 
 /// The engine config-file path from the environment (`ENGINE_CONFIG`).

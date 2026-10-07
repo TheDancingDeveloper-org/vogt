@@ -215,7 +215,7 @@ vogt_core_token_file = "/run/secrets/vogt_core_token"   # or VOGT_CORE_TOKEN(_FI
 scrollback_bytes = 4194304
 default_shell = "/bin/bash"
 default_cwd   = "/srv/workspace"
-workspace_root = "/srv/workspace"      # default: ~/Working
+workspace_root = "/srv/workspace"      # default: ~/Working; `/`, $HOME or a root holding state_dir fails the start
 activity_idle_after_ms = 1500
 state_dir = "/var/lib/vogt-engine"     # default: ~/.local/share/vogt-engine
 vapid_subject = "mailto:admin@example.invalid"
@@ -1934,14 +1934,27 @@ result must still start with the root, so a symlink pointing outward is `400`
 too. Paths come back relative to the same root, so a client never learns the
 absolute layout.
 
+Confinement decides where a path may point; `workspace_path::may_show`
+decides whether its bytes may leave the engine. Every route that returns file
+content — `GET /api/files`, `/api/files/download`, `/api/search` hits and the
+working-tree side of `/api/git/diff` — applies it to the **resolved** path and
+answers `400` for any hidden component below the root (`.git/`, `.ssh/`,
+`.claude/`, `.env`, `.mcp.json`: what `dir`/`tree` already hide) or a
+credential name (`*.env`, `*.key`, `*.pem`, `*.tfstate`, `*.tfvars`,
+`secrets.*`, `credentials*`, `*_token`, `id_rsa*`, backups of any of these, and
+similar). `move` and `duplicate` refuse such a source, so a rename cannot walk
+one past the check. The engine refuses to start when `workspace_root` is `/`,
+contains `$HOME`, or contains `state_dir`.
+
 - `GET /api/dir?path=` -> `FileEntry[]` — one directory, directories first
   then case-insensitive alphabetical. Dotfiles are omitted; a client that
   wants them lists the hidden directory by name.
 - `GET /api/tree?path=&depth=` -> `TreeNode[]` — `depth` is capped at 3 and
   defaults to 0 (children only). Symlinks are skipped entirely, because
   following one is how a walk leaves the workspace.
-- `GET /api/files?path=` -> `FileRead` — refuses anything over 5 MiB with
-  `400`. A file with a NUL byte in its first 8 KiB is returned as
+- `GET /api/files?path=` -> `FileRead` — accepts a workspace-relative path
+  or an absolute one under the root. Refuses anything over 5 MiB with `400`,
+  enforced on the bytes read rather than an earlier `stat`. A file with a NUL byte in its first 8 KiB is returned as
   `content_base64` with `is_binary: true`; otherwise as `content`, with
   invalid UTF-8 replaced by U+FFFD rather than refused.
 - `PUT /api/files` `WriteReq` -> `WriteFileResponse` (requires
@@ -1977,7 +1990,10 @@ outside the workspace. An empty `repo` means the workspace root itself.
   — the two texts, not a computed diff; the client renders it. `path` is
   repo-relative and rejected if absolute or containing `..`. A path missing
   from `HEAD` yields an empty `head` rather than an error, which is how an
-  untracked file diffs.
+  untracked file diffs. Credential names and `.git/` are refused on both
+  sides; a hidden path inside the repo diffs only when git tracks it
+  (`.github/workflows/*`, `.gitignore`); a working-tree link to a refused file
+  is refused.
 - `GET /api/git/log?repo=&n=` -> `LogEntry[]` — `n` defaults to 50, capped at
   500.
 - `GET /api/git/branch?repo=` -> `BranchInfo` `{current, all}`.

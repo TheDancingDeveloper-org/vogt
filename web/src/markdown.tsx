@@ -71,7 +71,7 @@ export function safeHref(raw: string | null | undefined): string | null {
   const url = raw.trim();
   if (!url) return null;
   const probe = decodeEntities(url)
-    .replace(/[- ]+/g, "")
+    .replace(/[\u0000-\u0020\u007f]+/g, "")
     .toLowerCase();
   if (/^(https?:|mailto:)/.test(probe)) return url;
   // No scheme before the first path separator means a relative reference.
@@ -188,8 +188,10 @@ function linkify(nodes: JSX.Element[]): JSX.Element[] {
       if (!ref) continue;
       const at = found.index ?? 0;
       if (at > cursor) out.push(node.slice(cursor, at));
-      out.push(<FileLink path={ref}>{found[0].replace(/[),.;:]+$/, "")}</FileLink>);
-      cursor = at + found[0].length;
+      // Trailing punctuation is prose, not path: keep it as text after the link.
+      const shown = found[0].replace(/[),.;:]+$/, "");
+      out.push(<FileLink path={ref}>{shown}</FileLink>);
+      cursor = at + shown.length;
     }
     if (cursor < node.length) out.push(node.slice(cursor));
   }

@@ -11011,3 +11011,131 @@ async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
         "a blocked session was nudged"
     );
 }
+
+/// WI-1005: every route that returns file content holds to the one policy
+/// in `workspace_path::may_show` — the viewer, the download, the ripgrep
+/// search and the git diff — judged on the resolved path, so neither a
+/// symlink nor a rename walks a credential past it.
+#[tokio::test]
+async fn file_content_routes_refuse_hidden_and_secret_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let sh = |cmd: &str| {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{cmd}: {:?}", out);
+    };
+    sh("git init -q -b main");
+    sh("git config user.email t@t");
+    sh("git config user.name t");
+    std::fs::create_dir(repo.join(".github")).unwrap();
+    std::fs::write(repo.join(".github/ci.yml"), "on: push\n").unwrap();
+    std::fs::write(repo.join("server.key"), "needle-key\n").unwrap();
+    std::fs::write(repo.join("ok.txt"), "needle-ok\n").unwrap();
+    sh("git add .github/ci.yml server.key ok.txt && git commit -q -m init");
+    std::fs::write(repo.join(".github/ci.yml"), "on: [push]\n").unwrap();
+    std::fs::write(repo.join("prod.env"), "needle-env\n").unwrap();
+    std::fs::write(repo.join(".envrc"), "needle-envrc\n").unwrap();
+    std::os::unix::fs::symlink("prod.env", repo.join("link.txt")).unwrap();
+
+    let (base, _h) = boot_with_config(Config {
+        default_cwd: repo.to_path_buf(),
+        workspace_root: repo.canonicalize().unwrap(),
+        ..test_config()
+    })
+    .await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let status = |path: String| {
+        let client = client.clone();
+        async move { client.get(path).send().await.unwrap().status() }
+    };
+
+    // Viewer and download: secret names, hidden components, and a link that
+    // resolves to a secret are all refused; an ordinary file still reads.
+    for path in [
+        "prod.env",
+        "server.key",
+        ".envrc",
+        ".git/config",
+        ".github/ci.yml",
+        "link.txt",
+    ] {
+        for route in ["files", "files/download"] {
+            assert_eq!(
+                status(format!("{base}/api/{route}?path={path}")).await,
+                StatusCode::BAD_REQUEST,
+                "/api/{route} must refuse {path}"
+            );
+        }
+    }
+    assert_eq!(
+        status(format!("{base}/api/files?path=ok.txt")).await,
+        StatusCode::OK
+    );
+
+    // Search: hits in secret files are dropped; a hidden search root is refused.
+    let hits: Vec<Value> = client
+        .get(format!("{base}/api/search?q=needle"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paths: Vec<&str> = hits.iter().filter_map(|h| h["path"].as_str()).collect();
+    assert_eq!(
+        paths,
+        vec!["ok.txt"],
+        "search leaked a secret file: {hits:?}"
+    );
+    assert_eq!(
+        status(format!("{base}/api/search?q=.&path=.git")).await,
+        StatusCode::BAD_REQUEST
+    );
+
+    // Git diff: credential names refused on both sides (server.key is
+    // committed), untracked dotfiles and links to secrets refused, a tracked
+    // dotfile still diffs.
+    for path in [
+        "prod.env",
+        "server.key",
+        ".envrc",
+        ".git/config",
+        "link.txt",
+    ] {
+        assert_eq!(
+            status(format!("{base}/api/git/diff?path={path}")).await,
+            StatusCode::BAD_REQUEST,
+            "/api/git/diff must refuse {path}"
+        );
+    }
+    let diff: Value = client
+        .get(format!("{base}/api/git/diff?path=.github/ci.yml"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(diff["head"], "on: push\n");
+    assert_eq!(diff["current"], "on: [push]\n");
+
+    // Rename-then-read: a secret cannot be moved or copied to an ordinary name.
+    for op in ["move", "duplicate"] {
+        let res = client
+            .post(format!("{base}/api/files/op"))
+            .json(&json!({ "op": op, "from": "prod.env", "to": "notes.txt" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{op} of a secret");
+    }
+    assert!(!repo.join("notes.txt").exists());
+}

@@ -115,6 +115,14 @@ describe("safeHref — the href allow-list", () => {
     // Entity-encoded and whitespace-split disguises are caught too.
     expect(safeHref("&#106;avascript:alert(1)")).toBeNull();
     expect(safeHref("java\tscript:alert(1)")).toBeNull();
+    expect(safeHref("java\u0000script:alert(1)")).toBeNull();
+    expect(safeHref("java\nscript:alert(1)")).toBeNull();
+  });
+
+  it("strips control characters, not hyphens, before judging the scheme", () => {
+    // A hyphen is an ordinary character: `h-ttps:` is an unknown scheme.
+    expect(safeHref("h-ttps://x.test")).toBeNull();
+    expect(safeHref("my-page/sub-page")).toBe("my-page/sub-page");
   });
 });
 
@@ -137,6 +145,14 @@ describe("file paths", () => {
     expect(link.textContent).toBe("/home/sprooty/Working/notes.md");
     link.click();
     expect(opened).toEqual(["/home/sprooty/Working/notes.md"]);
+  });
+
+  it("keeps trailing punctuation after a bare path as text", () => {
+    const c = render(() => <div>{renderMarkdown("read /home/sprooty/Working/notes.md.")}</div>);
+    expect(c.container.querySelector("button.md-file-link")?.textContent).toBe(
+      "/home/sprooty/Working/notes.md",
+    );
+    expect(c.container.textContent).toBe("read /home/sprooty/Working/notes.md.");
   });
 
   it("keeps an https link as a normal link", () => {
