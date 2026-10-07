@@ -311,7 +311,18 @@ pub type TurnEventSink = Arc<dyn Fn(TurnEvent) + Send + Sync>;
 pub struct TurnStream {
     pub sink: TurnEventSink,
     pub cancel: CancellationToken,
+    /// The reply will be spoken on a live call, so the model is asked for
+    /// short plain sentences rather than a formatted chat answer.
+    pub spoken: bool,
 }
+
+/// What a call turn tells the model about its medium.
+const CALL_NOTE: &str = "This turn is part of a live voice call: your reply \
+is spoken aloud as you write it. Answer in one to three short, plain \
+sentences — no markdown, lists, tables or code — lead with the answer, and \
+do not read out ids, hashes or URLs in full unless asked. Changes still \
+need the user's on-screen approval; when you propose one, say briefly what \
+it is and that it is on their screen.";
 
 impl TurnStream {
     fn emit(&self, event: TurnEvent) {
@@ -1767,14 +1778,16 @@ impl AssistantRuntime {
         }
     }
 
-    /// Cut the last reply back to what the listener actually heard.
+    /// Cut the last reply back to what the listener actually heard, and flag
+    /// it interrupted.
     ///
-    /// A call stops the model the moment someone speaks over it, but the
-    /// model has usually written further than the speaker had got: text
-    /// already synthesized, or still queued, was never heard. Recording it
-    /// would let the next turn assume the person knows something they were
-    /// never told. Applies only to a reply already flagged interrupted, and
-    /// only shortens it — `heard` that is not a prefix of the reply is
+    /// A call stops the reply the moment someone speaks over it, but the
+    /// model has usually written further than the speaker had got — often
+    /// the whole answer, with only its first sentence played. Recording the
+    /// rest would let the next turn assume the person knows something they
+    /// were never told. Applies to the last reply only when it is plain text
+    /// (a reply that ended in tool calls is not a thing that was said), and
+    /// only shortens it: `heard` that is not a prefix of the reply is
     /// refused. Empty `heard` removes the reply altogether.
     pub async fn truncate_interrupted_reply(&self, heard: &str) -> bool {
         let heard = heard.trim();
@@ -1782,7 +1795,7 @@ impl AssistantRuntime {
         let Some(entry) = convo.transcript.last() else {
             return false;
         };
-        if entry.role != "assistant" || !entry.interrupted || !entry.text.starts_with(heard) {
+        if entry.role != "assistant" || !entry.text.starts_with(heard) {
             return false;
         }
         let Some(last) = convo.messages.last() else {
@@ -1803,10 +1816,26 @@ impl AssistantRuntime {
                 last["content"] = json!(heard);
             }
             if let Some(entry) = convo.transcript.last_mut() {
+                entry.interrupted = entry.interrupted || entry.text != heard;
                 entry.text = heard;
             }
         }
         true
+    }
+
+    /// Record a spoken utterance the call answered itself, without the model
+    /// — one heard while an approval card was waiting. The durable log keeps
+    /// every utterance that reached the assistant, including the ones it
+    /// deliberately did not act on.
+    pub async fn record_held_utterance(&self, caller: &Caller, raw: &str) {
+        self.log_event(
+            &caller.token_name,
+            LogEvent::Utterance {
+                raw: raw.to_string(),
+                repaired: None,
+            },
+        )
+        .await;
     }
 
     fn request_body(
@@ -1819,6 +1848,9 @@ impl AssistantRuntime {
         let mut messages = vec![json!({"role": "system", "content": SYSTEM_PROMPT})];
         if let Some(vocabulary) = &turn.vocabulary {
             messages.push(json!({"role": "system", "content": vocabulary}));
+        }
+        if turn.stream.as_ref().is_some_and(|stream| stream.spoken) {
+            messages.push(json!({"role": "system", "content": CALL_NOTE}));
         }
         messages.extend(convo.messages.iter().cloned());
         // The session tools are the engine's own and are literals; the Vogt
@@ -2458,6 +2490,7 @@ mod tests {
             vogt_core_token: None,
             agent_clis: crate::agent_clis::AgentCliPaths::default(),
             hibernation: crate::hibernate_policy::Policy::default(),
+            assistant_call: crate::call::CallPolicy::default(),
             autopilot: crate::autopilot::Policy::default(),
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,
@@ -4888,6 +4921,7 @@ mod tests {
                 sink_events.lock().push(event);
             }),
             cancel,
+            spoken: false,
         };
         (stream, events)
     }
@@ -5077,20 +5111,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_reply_nobody_heard_is_removed_and_a_finished_one_is_left_alone() {
-        let rt = runtime_with_script(
-            test_registry(),
-            vec![final_reply("alpha beta"), final_reply("finished answer")],
-        );
+    async fn a_reply_nobody_heard_is_removed() {
+        let rt = runtime_with_script(test_registry(), vec![final_reply("alpha beta")]);
         interrupted_after(&rt, 1).await;
         assert!(rt.truncate_interrupted_reply("").await);
         let history = rt.history().await;
         assert_eq!(history.len(), 1, "only the user's turn is left");
-        rt.handle_message(terminal_caller(), "again".into(), None, None)
+    }
+
+    #[tokio::test]
+    async fn a_finished_reply_cut_while_it_was_spoken_is_flagged_and_shortened() {
+        let rt = runtime_with_script(test_registry(), vec![final_reply("First. Second.")]);
+        rt.handle_message(terminal_caller(), "go".into(), None, None)
             .await
             .unwrap();
-        assert!(!rt.truncate_interrupted_reply("finished").await);
-        assert_eq!(rt.history().await.last().unwrap().text, "finished answer");
+        assert!(!rt.history().await.last().unwrap().interrupted);
+        // The whole of it was heard: nothing to cut, nothing to flag.
+        assert!(rt.truncate_interrupted_reply("First. Second.").await);
+        assert!(!rt.history().await.last().unwrap().interrupted);
+        assert!(rt.truncate_interrupted_reply("First.").await);
+        let last = rt.history().await.last().unwrap().clone();
+        assert!(last.interrupted);
+        assert_eq!(last.text, "First.");
+    }
+
+    #[tokio::test]
+    async fn a_spoken_turn_tells_the_model_it_is_on_a_call() {
+        let rt = runtime_with_script(test_registry(), vec![final_reply("ok")]);
+        let (mut stream, _) = recording_stream(|_, _| {});
+        stream.spoken = true;
+        rt.handle_message_streamed(terminal_caller(), "hi".into(), None, None, &stream)
+            .await
+            .unwrap();
+        let body = &requests_seen(&rt)[0];
+        let notes: Vec<&str> = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["role"] == "system")
+            .filter_map(|m| m["content"].as_str())
+            .collect();
+        assert!(notes.iter().any(|n| n.contains("live voice call")));
     }
 
     /// A stand-in provider on loopback answering `/chat/completions` with

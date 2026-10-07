@@ -67,6 +67,10 @@ pub struct AppState {
     pub history: Option<Arc<SessionHistory>>,
     /// None when `assistant_api_key` is not configured; routes 404.
     pub assistant: Option<Arc<AssistantRuntime>>,
+    /// Held by the one live call this engine serves at a time: the
+    /// assistant has one conversation, and two people talking into it at
+    /// once would each hear answers to the other.
+    pub call_slot: Arc<tokio::sync::Mutex<()>>,
     /// Server-side speech proxy, or `None` when neither the STT nor
     /// the TTS half is configured — in which case both `/api/assistant/stt`
     /// and `/api/assistant/tts` answer 404 and the client falls back.
@@ -228,6 +232,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         agent_tasks,
         history,
         assistant,
+        call_slot: Arc::new(tokio::sync::Mutex::new(())),
         assistant_speech,
         assistant_log,
         vogt_core,
@@ -472,7 +477,11 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
 
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
-    let ws_routes = Router::new().route("/api/sessions/{id}/attach", get(ws::attach));
+    let ws_routes = Router::new()
+        .route("/api/sessions/{id}/attach", get(ws::attach))
+        // The live call authenticates on its first frame like attach, and
+        // additionally requires the `assistant` capability (`call.rs`).
+        .route("/api/assistant/call", get(crate::call::call));
 
     // The `/api` namespace, owned to its leaves. `/mcp` already is, by
     // the proxy routes above; `/api` was not, because it is a

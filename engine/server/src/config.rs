@@ -428,6 +428,10 @@ pub struct Config {
     /// `ENGINE_HIBERNATE_IDLE_AFTER` or `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW`
     /// is set (`hibernate_policy`).
     pub hibernation: crate::hibernate_policy::Policy,
+    /// The live call's switch and turn-taking timings (WI-960). A call is
+    /// offered only when this is enabled *and* the assistant, STT and TTS
+    /// are all configured.
+    pub assistant_call: crate::call::CallPolicy,
     /// Re-driving autopilot sessions (WI-949): how long one sits at its
     /// prompt before it is told to carry on, and the most nudges it gets
     /// (`ENGINE_AUTOPILOT_NUDGE_AFTER`, `ENGINE_AUTOPILOT_MAX_NUDGES`).
@@ -890,6 +894,7 @@ pub fn load(
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         hibernation: hibernation_policy_from_env()?,
+        assistant_call: call_policy_from_env()?,
         autopilot: autopilot_policy_from_env()?,
         agent_onboarding: crate::claude_config::Onboarding::from_env(),
         session_rss_warn_bytes: match engine_env("ENGINE_SESSION_RSS_WARN") {
@@ -1091,6 +1096,58 @@ fn parse_u32_env(name: &str) -> Result<Option<u32>> {
         Err(std::env::VarError::NotPresent) => Ok(None),
         Err(e) => Err(ApiError::Config(format!("reading {name}: {e}"))),
     }
+}
+
+/// The live call's settings: `ENGINE_ASSISTANT_CALL_ENABLED` (default on),
+/// `ENGINE_ASSISTANT_CALL_END_OF_TURN_MS`, `_BARGE_IN_MS`,
+/// `_PARTIAL_INTERVAL_MS` (`0` turns live captions off) and
+/// `ENGINE_ASSISTANT_CALL_FILLER` (empty turns the filler off). A value that
+/// does not parse, or a timing outside its sane range, is a startup error.
+fn call_policy_from_env() -> Result<crate::call::CallPolicy> {
+    let mut policy = crate::call::CallPolicy::default();
+    match engine_env("ENGINE_ASSISTANT_CALL_ENABLED") {
+        Ok(v) if !v.trim().is_empty() => {
+            policy.enabled = parse_bool_env("ENGINE_ASSISTANT_CALL_ENABLED", &v)?;
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => {}
+        Err(e) => {
+            return Err(ApiError::Config(format!(
+                "reading ENGINE_ASSISTANT_CALL_ENABLED: {e}"
+            )))
+        }
+    }
+    let bounded = |name: &str, value: Option<u32>, min: u32, max: u32, default: u32| match value {
+        None => Ok(default),
+        Some(v) if (min..=max).contains(&v) => Ok(v),
+        Some(v) => Err(ApiError::Config(format!(
+            "{name}={v} is outside {min}..={max}"
+        ))),
+    };
+    policy.end_of_turn_ms = bounded(
+        "ENGINE_ASSISTANT_CALL_END_OF_TURN_MS",
+        parse_u32_env("ENGINE_ASSISTANT_CALL_END_OF_TURN_MS")?,
+        300,
+        5_000,
+        policy.end_of_turn_ms,
+    )?;
+    policy.barge_in_ms = bounded(
+        "ENGINE_ASSISTANT_CALL_BARGE_IN_MS",
+        parse_u32_env("ENGINE_ASSISTANT_CALL_BARGE_IN_MS")?,
+        100,
+        3_000,
+        policy.barge_in_ms,
+    )?;
+    policy.partial_interval_ms = bounded(
+        "ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS",
+        parse_u32_env("ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS")?,
+        0,
+        60_000,
+        policy.partial_interval_ms,
+    )?;
+    if let Ok(filler) = engine_env("ENGINE_ASSISTANT_CALL_FILLER") {
+        policy.filler = filler.trim().to_string();
+    }
+    Ok(policy)
 }
 
 /// `ENGINE_HIBERNATE_IDLE_AFTER` (`2h`, `30m`, seconds) and
