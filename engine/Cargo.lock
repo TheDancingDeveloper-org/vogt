@@ -4002,7 +4002,12 @@ dependencies = [
 name = "voxcall"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "earshot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
