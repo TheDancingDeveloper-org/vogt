@@ -26,10 +26,13 @@ jobs:
     runs-on: [self-hosted]
     timeout-minutes: 45
     concurrency:
-      # Newest-wins: an analysis of a superseded commit is fully covered by
-      # the analysis that replaces it — CodeQL scans the whole tree, so
-      # cancelling loses nothing on any event.
-      group: codeql-${{ github.ref }}-${{ matrix.language }}
+      # One analysis at a time, across every language. The self-hosted runner
+      # has ~8 GB and each analysis needs about half of it (see the ram pin
+      # below); letting rust and javascript-typescript run together is what
+      # got both killed with exit 137 on main run 37603927375. Newest-wins
+      # still holds within a ref, and CodeQL scans the whole tree, so
+      # cancelling a superseded commit loses nothing.
+      group: codeql-${{ github.ref }}
       cancel-in-progress: true
     permissions:
       contents: read
@@ -57,18 +60,17 @@ jobs:
       # from the authoritative build/test jobs and avoids rebuilding the PWA
       # or engine only to extract source a second time.
       # The self-hosted runner has 12 CPUs and ~8 GB, and CodeQL's autodetect
-      # took --threads=12 --ram=6270. The matrix runs rust and
-      # javascript-typescript at the same time, so two jobs each claiming 6 GB
-      # exhaust the box: `codeql database finalize` was killed (exit 137) on
-      # main run 37603927375 and on PR #875. Cap each job so two of them fit.
-      # 2 threads and 2 GB is slower than autodetect but stays inside the
-      # runner instead of being killed; the 45 minute timeout still covers it.
+      # took --threads=12 --ram=6270. With the languages running together that
+      # was killed (exit 137) on main run 37603927375. They now run one at a
+      # time (the concurrency group above), and each gets a fixed 4 GB and 4
+      # threads: 2 GB is not enough for the javascript-typescript queries,
+      # which exited 99 "out of memory" on PR #880.
       - uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
         with:
           languages: ${{ matrix.language }}
           build-mode: none
-          threads: 2
-          ram: 2048
+          threads: 4
+          ram: 4096
           # Query suite and path scope (test exclusions) live in the config
           # file so they are described once, with rationale, rather than inline.
           config-file: ./.github/codeql/codeql-config.yml
@@ -76,5 +78,5 @@ jobs:
       - uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2
         with:
           category: /language:${{ matrix.language }}
-          threads: 2
-          ram: 2048
+          threads: 4
+          ram: 4096
