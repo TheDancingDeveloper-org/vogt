@@ -125,11 +125,47 @@ const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
 /// transfer size rather than memory usage.
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
+/// A file whose name looks like a credential. A path that appears in a
+/// session's output must never become a way to read a secret through the GUI,
+/// so the read-only viewer refuses these outright: environment files, private
+/// keys, and anything named like a token.
+fn is_secret_file(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if name.is_empty() {
+        return false;
+    }
+    if name == ".env" || name.starts_with(".env.") || name.ends_with(".env") {
+        return true;
+    }
+    const EXACT: &[&str] = &[".netrc", ".pgpass", ".npmrc", ".pypirc", "credentials"];
+    if EXACT.contains(&name.as_str()) {
+        return true;
+    }
+    const SUFFIXES: &[&str] = &[
+        ".key", ".pem", ".p12", ".pfx", ".kdbx", ".keystore", ".jks",
+    ];
+    if SUFFIXES.iter().any(|s| name.ends_with(s)) {
+        return true;
+    }
+    name.contains("_token")
+        || name.contains("-token")
+        || name.contains("token_")
+        || name.starts_with("id_")
+}
+
 pub async fn read_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Json<FileRead>> {
-    let p = workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?;
+    let p = workspace_path::resolve_existing_allow_absolute(&state.config.workspace_root, &q.path)?;
+    if is_secret_file(&p) {
+        return Err(ApiError::BadRequest(
+            "refusing to read a credential file through the file viewer".into(),
+        ));
+    }
     let meta = tokio::fs::metadata(&p).await?;
     if !meta.is_file() {
         return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
@@ -176,7 +212,12 @@ pub async fn download_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Response> {
-    let p = workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?;
+    let p = workspace_path::resolve_existing_allow_absolute(&state.config.workspace_root, &q.path)?;
+    if is_secret_file(&p) {
+        return Err(ApiError::BadRequest(
+            "refusing to read a credential file through the file viewer".into(),
+        ));
+    }
     let meta = tokio::fs::metadata(&p).await?;
     if !meta.is_file() {
         return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
@@ -836,6 +877,23 @@ fn looks_binary(b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn secret_files_are_refused() {
+        let secret = [
+            ".env", ".env.local", "prod.env", "id_rsa", "id_ed25519",
+            "server.key", "cert.pem", "store.p12", "vault.kdbx",
+            "github_token", "api-token.txt", "deploy_token_prod", ".netrc",
+            "credentials",
+        ];
+        for name in secret {
+            assert!(is_secret_file(Path::new(name)), "{name} must be refused");
+        }
+        let allowed = ["README.md", "main.rs", "notes.txt", "identity.ts", "tokenise.py"];
+        for name in allowed {
+            assert!(!is_secret_file(Path::new(name)), "{name} must be readable");
+        }
+    }
 
     #[test]
     fn binary_detection() {

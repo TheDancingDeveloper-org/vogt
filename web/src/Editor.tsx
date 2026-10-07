@@ -159,6 +159,15 @@ const Editor: Component<Props> = (props) => {
       ]);
       if (disposed) return;
       if (file.is_binary) {
+        if (file.content_base64 && /\.(png|jpe?g|gif|webp|svg)$/i.test(props.path)) {
+          const ext = props.path.split(".").pop()?.toLowerCase() ?? "png";
+          const mime = ext === "svg" ? "image/svg+xml" : ext === "jpg" ? "image/jpeg" : `image/${ext}`;
+          mountedHost.replaceChildren(Object.assign(document.createElement("img"), {
+            alt: props.path, src: `data:${mime};base64,${file.content_base64}`,
+          }));
+          setStatus("ready");
+          return;
+        }
         setError("binary file (cannot edit)");
         setStatus("error");
         return;
