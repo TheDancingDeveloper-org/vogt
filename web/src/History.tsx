@@ -125,9 +125,14 @@ function shortId(id: string): string {
  * into reads as that conversation, not as `bash`.
  */
 export function historyIdentity(
-  row: Pick<HistorySessionMetadata, "role" | "conversation_agent" | "conversation_id">,
+  row: Pick<
+    HistorySessionMetadata,
+    "role" | "conversation_agent" | "conversation_id" | "work_item"
+  >,
 ): string | null {
   const parts: string[] = [];
+  // The work item it served (WI-998), first: what a finished session was for.
+  if (row.work_item) parts.push(row.work_item);
   if (row.role === "oversight") parts.push("oversight");
   if (row.conversation_agent && row.conversation_id) {
     parts.push(`${row.conversation_agent} · ${shortId(row.conversation_id)}`);
@@ -221,6 +226,7 @@ const History: Component<Props> = (props) => {
         scrollback_bytes: live.scrollback_bytes,
         template: live.template ?? null,
         role: live.role ?? null,
+        work_item: live.work_item ?? null,
         conversation_agent: live.conversation?.agent ?? null,
         conversation_id: live.conversation?.id ?? null,
         live: true,
@@ -735,7 +741,8 @@ const History: Component<Props> = (props) => {
 
   // Continue the session's last conversation in a new session (WI-962): the
   // agent it ran, through the template the engine says resumes it, with the
-  // same role. The engine starts it in the directory the conversation ran in.
+  // same role and bound to the same work item (WI-998). The engine starts it
+  // in the directory the conversation ran in.
   const resumeSession = async (session: HistorySessionMetadata): Promise<void> => {
     const conversation = session.conversation_id;
     const template = session.resume_template;
@@ -746,6 +753,7 @@ const History: Component<Props> = (props) => {
         template,
         resume: conversation,
         role: session.role === "oversight" ? "oversight" : undefined,
+        work_item: session.work_item ?? undefined,
       });
       props.onOpenSession?.(created.id, created.name);
     } catch (error) {
@@ -1100,6 +1108,16 @@ const History: Component<Props> = (props) => {
                         <div class="history-detail-label">Template</div>
                         <div class="history-detail-value">{session().template}</div>
                       </div>
+                    </Show>
+                    <Show when={session().work_item}>
+                      {(ref) => (
+                        <div class="history-detail-card">
+                          <div class="history-detail-label">Work item</div>
+                          <div class="history-detail-value">
+                            <a href={`#/w/${encodeURIComponent(ref())}`}>{ref()}</a>
+                          </div>
+                        </div>
+                      )}
                     </Show>
                     <Show when={session().role}>
                       <div class="history-detail-card">

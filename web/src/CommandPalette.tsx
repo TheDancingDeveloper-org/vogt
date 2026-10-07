@@ -272,6 +272,9 @@ interface Props {
   onRestoreWorkspaceLayout?: (
     layoutId: string,
   ) => boolean | void | Promise<boolean | void>;
+  /** Pick mode (WI-998): the palette lists work items only, and choosing one
+   *  hands its ref to `onPick` instead of opening it. */
+  pickWorkItem?: { title: string; onPick: (ref: string) => void } | null;
 }
 
 function fuzzyMatch(pattern: string, text: string): boolean {
@@ -1534,8 +1537,26 @@ const CommandPalette: Component<Props> = (props) => {
     return out;
   };
 
+  /** The work items as picks, for `pickWorkItem` (WI-998). */
+  const pickCommands = (pick: NonNullable<Props["pickWorkItem"]>): Command[] =>
+    workItems().map<Command>((item) => ({
+      id: `pick-work-${item.ref}`,
+      label: `${item.ref} — ${item.title}`,
+      description: [item.kind, item.state, item.project_slug]
+        .filter(Boolean)
+        .join(" · "),
+      icon: "work",
+      action: () => {
+        pick.onPick(item.ref);
+        props.onClose();
+      },
+      category: pick.title,
+    }));
+
   const filteredCommands = () => {
     const q = query().trim();
+    const pick = props.pickWorkItem;
+    if (pick) return q ? rankCommands(q, pickCommands(pick)) : pickCommands(pick);
     // History, filename, and symbol search modes.
     if (q.startsWith(">")) return historyCommands();
     if (q.startsWith("/")) return fileCommands();
@@ -1596,7 +1617,7 @@ const CommandPalette: Component<Props> = (props) => {
   // Every activation path runs a command through here, so recency is recorded
   // once, in one place, whether the command was reached by Enter or by click.
   const execute = (command: Command): void | Promise<void> => {
-    recordRecentCommand(baseIdOf(command.id));
+    if (!props.pickWorkItem) recordRecentCommand(baseIdOf(command.id));
     return command.action();
   };
 
@@ -1671,9 +1692,11 @@ const CommandPalette: Component<Props> = (props) => {
             id={inputId}
             type="text"
             class="command-palette-input"
-            placeholder={narrow()
-              ? "Search, or # @ / > for modes…"
-              : "Type a command, # for workspace actions, @ symbols, / files, or > history..."}
+            placeholder={props.pickWorkItem
+              ? `${props.pickWorkItem.title}: search work items by ref or title…`
+              : narrow()
+                ? "Search, or # @ / > for modes…"
+                : "Type a command, # for workspace actions, @ symbols, / files, or > history..."}
             value={query()}
             onInput={handleInput}
             onKeyDown={handleKeyDown}

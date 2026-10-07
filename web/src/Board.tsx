@@ -105,6 +105,7 @@ import {
   VogtUnavailable,
   createWork,
   listBoard,
+  liveSessionsWarning,
   transitionWork,
   type BoardCellPage,
   type WorkItem,
@@ -1868,7 +1869,12 @@ const Board: Component<Props> = (props) => {
         // a drag/keyboard move draws it in the column the card arrived in.
         column: move.pick ? move.from : move.to,
         laneKey: move.laneKey,
-        message: `${move.ref} moved to ${humanState(move.to)}.`,
+        message: [
+          `${move.ref} moved to ${humanState(move.to)}.`,
+          liveSessionsWarning(move.ref, answer?.live_sessions),
+        ]
+          .filter(Boolean)
+          .join(" "),
       });
       window.setTimeout(() => {
         if (ack()?.ref === move.ref) setAck(null);

@@ -287,6 +287,29 @@ the role is what lets a session ask for grants on another session's behalf
 self-service. An oversight session is pinned awake as it becomes one, rows
 carry `role`, and the GUI lists oversight sessions first (WI-957).
 
+`session.bind_work` (`POST /sessions/work-item`, `work.write`, audited)
+declares which work item a session serves — `work_item: "WI-7"` — or that it
+serves none (`work_item: null`); rebinding is one call (WI-998). One current
+item per session: the sequence of bindings is the audit log
+(`audit.list(entity_id=<ses_…>)`, events `session.work_bound` /
+`session.work_unbound`). **Any `work.write` principal may bind**, including
+the session itself (omit `id` inside a session Vogt started) and an overseer
+for its children. Binding never moves the terminal or the item's state, is
+allowed on a finished item, records the item's declared branch as a start
+does, and reports `project_mismatch` when the item is filed under another
+project. A stopped session's binding is history and is refused (`409`). The
+core row is written first, then the engine's `work_item` label; the result's
+`engine_label` (`written`, `not_found`, `unavailable`) says whether the label
+landed, which is never fatal. A session the GUI started has no core row: it
+is bound by the engine label alone, and `session.list` reports it with
+`linked: false`. A session started for an item gets `VOGT_WORK_ITEM` in its
+environment. Session rows carry `work_item_title` and `work_item_state`;
+`session.history_list` rows carry `work_item`. A `work.transition` into a
+finished state answers `live_sessions` — the sessions still bound and running
+or hibernated — as a warning: it never refuses and never unbinds. Inbox
+entries about a session (`session.blocked`, `session.attention`) carry the
+bound item as `work_item_ref`.
+
 `session.grant_request` (`work.write`, audited) asks a person to approve one
 named credential (`secret_name`, `project_id`, optional `var`; `uses` `once` or
 `ttl`; `ttl_seconds` 60 to 86 400) for one live session (`target`). A session

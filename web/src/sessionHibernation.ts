@@ -13,6 +13,7 @@ import {
   VogtUnavailable,
   hibernateSessionInVogt,
   keepSessionAwakeInVogt,
+  bindSessionWorkInVogt,
   setSessionRoleInVogt,
   wakeSessionInVogt,
 } from "./vogtApi";
@@ -64,5 +65,18 @@ export function setSessionRole(
   return viaCore(
     () => setSessionRoleInVogt(id, role, reason),
     () => api.setSessionRole(id, role),
+  );
+}
+
+/** Bind a session to the work item it serves, or unbind it with `null`
+ *  (WI-998). Through the core, audited; with no core, the engine's label. */
+export function bindSessionWork(
+  id: string,
+  workItem: string | null,
+  reason = workItem ? `bound to ${workItem} from the GUI` : "unbound from its work item in the GUI",
+): Promise<void> {
+  return viaCore(
+    () => bindSessionWorkInVogt(id, workItem, reason),
+    () => api.setSessionWorkItem(id, workItem),
   );
 }

@@ -342,7 +342,10 @@ re-observation of the same `subject_key`.
 
 This table records what Vogt *asked for*: a session, in this project's tree,
 for this item, attributed to this actor, with a reason — an ordinary audited
-declared write. It holds nothing about what is happening inside the
+declared write. `work_item_id` is the one field re-declared after the start:
+`session.bind_work` sets or clears it (WI-998), audited with the previous
+item, so the history of bindings is the audit log rather than a second
+table. A stopped session's binding is not rewritten. It holds nothing about what is happening inside the
 terminal. Live activity (`idle`/`running`/`waiting-for-input`/`errored`),
 scrollback and exit code are the engine's, published on its SSE stream and
 read from it when a view needs them; a cached column would be stale the

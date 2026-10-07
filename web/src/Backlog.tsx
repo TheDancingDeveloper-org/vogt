@@ -45,6 +45,7 @@ import {
   createWork,
   startSession,
   suppressSubject,
+  liveSessionsWarning,
   transitionWork,
   updateWork,
   why,
@@ -1270,8 +1271,9 @@ const Backlog: Component<Props> = (props) => {
     const outcomes: BulkOutcome[] = [];
     for (const ref of refs) {
       try {
-        await transitionWork(ref, target, reason);
-        outcomes.push({ ref, ok: true, message: `→ ${target}` });
+        const answer = await transitionWork(ref, target, reason);
+        const warning = liveSessionsWarning(ref, answer?.live_sessions);
+        outcomes.push({ ref, ok: true, message: warning ? `→ ${target}. ${warning}` : `→ ${target}` });
       } catch (error) {
         outcomes.push({ ref, ok: false, message: errorMessage(error) });
       }

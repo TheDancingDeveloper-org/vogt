@@ -70,11 +70,11 @@ function status(): OperationalStatus {
   };
 }
 
-function renderHistory(onOpenSession = vi.fn()) {
+function renderHistory(onOpenSession = vi.fn(), overseer = lostOverseer) {
   vi.spyOn(api, "operationalStatus").mockResolvedValue(status());
-  vi.spyOn(api, "listHistorySessions").mockResolvedValue([lostOverseer, plainShell]);
+  vi.spyOn(api, "listHistorySessions").mockResolvedValue([overseer, plainShell]);
   vi.spyOn(api, "getHistorySession").mockImplementation(async (id) =>
-    id === lostOverseer.id ? lostOverseer : plainShell,
+    id === overseer.id ? overseer : plainShell,
   );
   vi.spyOn(api, "getHistorySessionLog").mockImplementation(async (id) => ({
     session_id: id,
@@ -168,5 +168,30 @@ describe("History identity and resume (WI-962)", () => {
     await fireEvent.click(row!);
     expect(await screen.findByRole("heading", { name: "Oversight" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Resume" })).not.toBeInTheDocument();
+  });
+
+  it("names the work item it served and resumes bound to it (WI-998)", async () => {
+    const bound = { ...lostOverseer, work_item: "WI-998" };
+    expect(historyIdentity(bound)).toBe("WI-998 · oversight · claude · 6c1f0d2e…");
+    const create = vi.spyOn(api, "createSession").mockResolvedValue({
+      id: "new-2",
+      name: "Oversight",
+      activity: "running",
+      exit_code: null,
+      scrollback_bytes: 0,
+      cwd: "/home/sprooty/Working",
+      created_at: "2026-10-07T01:00:00Z",
+      work_item: "WI-998",
+    });
+    renderHistory(vi.fn(), bound);
+    const row = (await screen.findByText("WI-998 · oversight · claude · 6c1f0d2e…")).closest("button");
+    await fireEvent.click(row!);
+    expect(await screen.findByRole("link", { name: "WI-998" })).toHaveAttribute("href", "#/w/WI-998");
+    await fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    await waitFor(() =>
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({ resume: CONVERSATION, work_item: "WI-998" }),
+      ),
+    );
   });
 });

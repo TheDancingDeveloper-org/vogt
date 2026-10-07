@@ -57,10 +57,16 @@ import {
   refreshSessions,
   renameSession,
   sessionsError,
+  onVogtChangedEvent,
   sessionsStore,
   startEventStream,
   stopEventStream,
 } from "./store";
+import {
+  FINISHED_STATES,
+  watchSessionWorkItems,
+  workItemFacts,
+} from "./sessionWorkItems";
 import { autoSessionName } from "./terminalNaming";
 import {
   closeTab,
@@ -73,6 +79,7 @@ import {
   openOversightTab,
   openTasksTab,
   openTerminalTab,
+  openWorkItemTab,
   renameTab,
   replaceTabs,
   recentPlaceLabel,
@@ -130,7 +137,13 @@ import {
 import { railSections, setRailSection } from "./railSections";
 import { setExpanded } from "./fileTreeState";
 import { demoManifest, resetDemoData } from "./runtimeTransport";
-import { hibernateSession, setKeepAwake, setSessionRole, wakeSession } from "./sessionHibernation";
+import {
+  bindSessionWork,
+  hibernateSession,
+  setKeepAwake,
+  setSessionRole,
+  wakeSession,
+} from "./sessionHibernation";
 
 // -- what the first screen does not have to carry -----------
 //
@@ -471,6 +484,10 @@ const App: Component = () => {
   let settingsRouted = false;
   let settingsHasHistoryReturn = false;
   const [commandPaletteOpen, setCommandPaletteOpen] = createSignal(false);
+  /** Set while the palette is open as a work-item picker for Bind (WI-998). */
+  const [workItemPick, setWorkItemPick] = createSignal<
+    { title: string; onPick: (ref: string) => void } | null
+  >(null);
   // The phone bottom bar reaches four places; the fifth "More" slot opens this
   // sheet, which carries every other place plus Settings and Sign out so both
   // are one tap from the bar rather than a command-palette round trip.
@@ -861,6 +878,8 @@ const App: Component = () => {
   onCleanup(() => {
     stopEventStream();
   });
+  // The rail's work-item chips (WI-998) follow binds made anywhere.
+  onCleanup(watchSessionWorkItems(onVogtChangedEvent, refreshSessions));
   // The badges follow the core's changes like every other surface — through
   // `onVogtLive`, so a backgrounded tab stops reading and reconciles once when
   // it comes back. Previously this subscribed to the raw event and refreshed
@@ -1146,6 +1165,27 @@ const App: Component = () => {
     } catch (e) {
       showToast(`changing the role failed: ${(e as Error).message}`, { kind: "error" });
     }
+  };
+
+  // Bind a session to the work item it serves, or unbind it (WI-998).
+  // Through the core, audited; the picker is the palette's work-item search.
+  const onBindWork = async (s: SessionSummary, ref: string | null) => {
+    try {
+      await bindSessionWork(s.id, ref);
+      void refreshSessions();
+    } catch (e) {
+      showToast(`${ref ? "binding" : "unbinding"} failed: ${(e as Error).message}`, {
+        kind: "error",
+      });
+    }
+  };
+  const onPickWorkItem = (s: SessionSummary) => {
+    setOpenMenuId(null);
+    setWorkItemPick({
+      title: `Bind ${s.name} to`,
+      onPick: (ref) => void onBindWork(s, ref),
+    });
+    setCommandPaletteOpen(true);
   };
 
   const onRenameSession = async (s: SessionSummary) => {
@@ -1688,6 +1728,39 @@ const App: Component = () => {
                         <span class="session-role-badge" title="Oversight session: supervises the others; pinned awake">oversight</span>
                       </Show>
                       {s.name}
+                      {/* The work item it serves (WI-998): the engine's label,
+                          named with the item's title and muted once the item
+                          is finished. Opens the item, not the terminal. */}
+                      <Show when={s.work_item}>
+                        {(ref) => {
+                          const facts = () => workItemFacts(ref());
+                          const finished = () => {
+                            const state = facts()?.state;
+                            return state !== undefined && FINISHED_STATES.has(state);
+                          };
+                          return (
+                            <a
+                              class={`session-work-chip${finished() ? " session-work-chip--finished" : ""}`}
+                              href={`#/w/${encodeURIComponent(ref())}`}
+                              data-testid="session-work-chip"
+                              title={
+                                facts()
+                                  ? `${ref()} — ${facts()!.title}${finished() ? ` (${facts()!.state})` : ""}`
+                                  : ref()
+                              }
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                setOpenMenuId(null);
+                                openWorkItemTab(ref());
+                              }}
+                              onKeyDown={(event) => event.stopPropagation()}
+                            >
+                              ✦ {ref()}
+                              {finished() ? ` · ${facts()!.state === "wont_do" ? "won't do" : facts()!.state}` : ""}
+                            </a>
+                          );
+                        }}
+                      </Show>
                     </span>
                     <span class={`state${s.activity === "waiting-for-input" ? " state--waiting" : ""}`}>
                       {sessionStateWord(s, railNow(), sessionsStore.ready && !isConnected() ? sessionsStore.lastAnswerAt : null)}
@@ -1765,6 +1838,26 @@ const App: Component = () => {
                       void onRenameSession(s);
                     }}
                   >Rename</button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    aria-label={`Bind ${s.name} to a work item`}
+                    title="Say which work item this session serves; the item then shows it as being worked by it"
+                    onClick={() => onPickWorkItem(s)}
+                  >{s.work_item ? "Bind to another work item…" : "Bind to work item…"}</button>
+                  <Show when={s.work_item}>
+                    {(ref) => (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        aria-label={`Unbind ${s.name} from ${ref()}`}
+                        onClick={() => {
+                          setOpenMenuId(null);
+                          void onBindWork(s, null);
+                        }}
+                      >Unbind from {ref()}</button>
+                    )}
+                  </Show>
                   <Show when={s.activity === "hibernated"}>
                     <button
                       type="button"
@@ -2427,7 +2520,11 @@ const App: Component = () => {
 
       <CommandPalette
         open={commandPaletteOpen()}
-        onClose={() => setCommandPaletteOpen(false)}
+        onClose={() => {
+          setCommandPaletteOpen(false);
+          setWorkItemPick(null);
+        }}
+        pickWorkItem={workItemPick()}
         onCreateSession={() => void onCreate()}
         onNewFile={() => setFileWorkflow("new")}
         onChooseFile={() => setFileWorkflow("open")}

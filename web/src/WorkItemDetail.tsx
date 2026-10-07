@@ -33,10 +33,13 @@ import {
   createSignal,
 } from "solid-js";
 import type { Component, JSX } from "solid-js";
-import { api } from "./api";
+import { api, type SessionSummary as EngineSession } from "./api";
+import { sessionsStore } from "./store";
 import {
   VogtUnavailable,
   backlog,
+  bindSessionWorkInVogt,
+  liveSessionsWarning,
   commentWork,
   getWork,
   listAudit,
@@ -1129,6 +1132,29 @@ const WorkItemDetail: Component<Props> = (props) => {
 
   const liveCount = createMemo(() => sessionList().filter(isLive).length);
 
+  /** Who is on this item now (WI-998): bound sessions not stopped and not
+   *  known to be gone — running, waiting, hibernated, or unknown when the
+   *  engine could not be asked. Liveness is read, never stored. */
+  const workedBy = createMemo(() =>
+    sessionList().filter((session) => !session.stopped_at && session.alive !== false),
+  );
+
+  /** Running sessions the engine holds that serve no item yet: what "Attach a
+   *  running session…" offers, newest first. */
+  const attachable = createMemo(() => {
+    const bound = new Set(sessionList().map((session) => session.engine_session_id));
+    return sessionsStore.order
+      .map((id) => sessionsStore.sessions[id])
+      .filter(
+        (session): session is EngineSession =>
+          session !== undefined &&
+          session.exit_code === null &&
+          !session.work_item &&
+          !bound.has(session.id),
+      )
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+  });
+
   const freshnessState = createMemo<FreshnessView | null>(() => {
     const loaded = sweep();
     if (!loaded || !loaded.ok) return null;
@@ -1570,6 +1596,7 @@ const WorkItemDetail: Component<Props> = (props) => {
     try {
       const answer = await transitionWork(ref, to, reason);
       const updated = answer?.item;
+      setCloseWarning(liveSessionsWarning(ref, answer?.live_sessions));
       setOptimistic(null);
       if (updated) setAccepted({ ref, item: updated });
       setMoveTarget("");
@@ -1615,6 +1642,33 @@ const WorkItemDetail: Component<Props> = (props) => {
     setStopping(null);
     void refetchSessions();
   };
+
+  /** Which session row has its Unbind form open (WI-998). */
+  const [unbinding, setUnbinding] = createSignal<string | null>(null);
+  const submitUnbind = async (id: string, reason: string) => {
+    await bindSessionWorkInVogt(id, null, reason);
+    setUnbinding(null);
+    void refetchSessions();
+  };
+
+  const [attachOpen, setAttachOpen] = createSignal(false);
+  const [attachChoice, setAttachChoice] = createSignal("");
+  const submitAttach = async (reason: string) => {
+    const id = attachChoice() || attachable()[0]?.id;
+    if (!id) return;
+    const result = await bindSessionWorkInVogt(id, props.itemRef, reason);
+    setAttachOpen(false);
+    setAttachChoice("");
+    if (result.project_mismatch) {
+      props.onError?.(
+        `Bound — note the session runs in another project's tree than ${props.itemRef}.`,
+      );
+    }
+    void refetchSessions();
+  };
+
+  /** What the last transition said about sessions still bound (WI-998). */
+  const [closeWarning, setCloseWarning] = createSignal<string | null>(null);
 
   return (
     <div class="vogt-surface wid-view">
@@ -1742,6 +1796,44 @@ const WorkItemDetail: Component<Props> = (props) => {
                 <span class="wid-chip wid-chip--unsaved">unsaved — Vogt is deciding</span>
               </Show>
             </div>
+
+            {/* Who is on this item right now (WI-998): the bound sessions,
+                live state read from the engine at this moment. Shown beside
+                the git phase, never as it — a session is not evidence in git. */}
+            <Show when={!sessionsFailure()}>
+              <p class="wid-worked-by" data-testid="worked-by">
+                <span class="wid-worked-by-label">Being worked by</span>{" "}
+                <Show
+                  when={workedBy().length > 0}
+                  fallback={<span class="wid-hint">nobody right now</span>}
+                >
+                  <For each={workedBy().slice(0, 3)}>
+                    {(session, index) => (
+                      <>
+                        {index() > 0 ? ", " : ""}
+                        <a
+                          class="wid-mono"
+                          href={`#/t/${encodeURIComponent(session.engine_session_id)}`}
+                          title={liveness(session, engineNote()).title}
+                        >
+                          {session.id} — {liveness(session, engineNote()).label}
+                        </a>
+                      </>
+                    )}
+                  </For>
+                  <Show when={workedBy().length > 3}>
+                    <span> +{workedBy().length - 3}</span>
+                  </Show>
+                </Show>
+              </p>
+            </Show>
+            <Show when={closeWarning()}>
+              {(warning) => (
+                <p class="wid-engine-note" role="status" data-testid="close-warning">
+                  {warning()}
+                </p>
+              )}
+            </Show>
 
             {/* Inline edit, through a view that collects a reason
                . Optimistic above, authoritative below. */}
@@ -2290,6 +2382,55 @@ const WorkItemDetail: Component<Props> = (props) => {
                     </span>
                   </div>
 
+                  {/* Bind a session already running to this item (WI-998):
+                      it keeps its own tree and terminal; the item then names
+                      it as being worked by it. */}
+                  <Show
+                    when={attachOpen()}
+                    fallback={
+                      <button
+                        type="button"
+                        class="wid-inline-btn"
+                        data-testid="attach-session"
+                        disabled={attachable().length === 0}
+                        title={
+                          attachable().length === 0
+                            ? "No running session serves no item"
+                            : `Bind a running session to ${props.itemRef}`
+                        }
+                        onClick={() => setAttachOpen(true)}
+                      >
+                        Attach a running session…
+                      </button>
+                    }
+                  >
+                    <ReasonForm
+                      submitLabel={`Bind to ${props.itemRef}`}
+                      busyLabel="Binding…"
+                      placeholder="why this session now serves the item"
+                      blockedBy={vogtWritesBlocked()}
+                      onFailure={props.onError}
+                      onSubmit={submitAttach}
+                    >
+                      <label class="wid-field">
+                        <span>Session</span>
+                        <select
+                          aria-label="Session to attach"
+                          value={attachChoice() || attachable()[0]?.id || ""}
+                          onInput={(event) => setAttachChoice(event.currentTarget.value)}
+                        >
+                          <For each={attachable()}>
+                            {(session) => (
+                              <option value={session.id}>
+                                {session.name} — {session.activity}
+                              </option>
+                            )}
+                          </For>
+                        </select>
+                      </label>
+                    </ReasonForm>
+                  </Show>
+
                   <Show when={engineNote()}>
                     {(note) => (
                       <p class="wid-engine-note" role="status">
@@ -2415,6 +2556,32 @@ const WorkItemDetail: Component<Props> = (props) => {
                                   onDone={() => void refetchSessions()}
                                   onFailure={(message) => props.onError?.(message)}
                                 />
+                              </Show>
+                              <Show when={!session.stopped_at}>
+                                <Show
+                                  when={unbinding() === session.id}
+                                  fallback={
+                                    <button
+                                      type="button"
+                                      class="wid-inline-btn"
+                                      title={`Say this session no longer serves ${props.itemRef}; the session keeps running`}
+                                      onClick={() => setUnbinding(session.id)}
+                                    >
+                                      Unbind…
+                                    </button>
+                                  }
+                                >
+                                  <ReasonForm
+                                    submitLabel={`Unbind from ${props.itemRef}`}
+                                    busyLabel="Unbinding…"
+                                    placeholder="why this session no longer serves the item"
+                                    blockedBy={vogtWritesBlocked()}
+                                    onFailure={props.onError}
+                                    onSubmit={(reason) =>
+                                      submitUnbind(session.id, reason)
+                                    }
+                                  />
+                                </Show>
                               </Show>
                               <Show when={!session.stopped_at}>
                                 <Show

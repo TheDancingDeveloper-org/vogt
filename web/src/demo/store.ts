@@ -459,6 +459,7 @@ export class DemoStore {
       return json({ rows, counts, swept_at: this.now(), engine: null });
     }
     if (["/sessions/hibernate", "/sessions/wake", "/sessions/keep-awake", "/sessions/role", "/sessions/answer"].includes(path)) return refusal("The demo's terminals are simulated in the browser: there is no process to hibernate or wake.");
+    if (path === "/sessions/work-item") return refusal("The demo's terminals are simulated in the browser: there is no session to bind to a work item.");
     if (path === "/sessions/grants/decide") return refusal("The demo has no secrets to grant: its sessions are simulated in the browser.");
     return json({ error: { code: "demo.unhandled", message: `No demo responder for ${method} ${path}` } }, { status: 404 });
   }
