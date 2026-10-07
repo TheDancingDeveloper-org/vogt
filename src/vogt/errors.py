@@ -58,6 +58,20 @@ class BypassRefused(VogtError):
     http_status = 403
 
 
+class GrantRefused(VogtError):
+    """A grant step was asked for by someone who may not take it (WI-973).
+
+    Only a person decides a grant, and only an overseer asks for one on
+    another session's behalf. Like `BypassRefused`, the refusal is by who is
+    asking, so no agent can widen another agent's power — or its own — by
+    proxy. The engine refusing a grant it was sent (a project not open to
+    grants) is this too.
+    """
+
+    code = "grant_refused"
+    http_status = 403
+
+
 class EngineOnly(VogtError):
     """An operation only the session engine's own credential may call.
 

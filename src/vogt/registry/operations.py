@@ -61,6 +61,7 @@ from vogt.application.models import (
     CreateProjectResult,
     CreateUserParams,
     CreateWorkParams,
+    DecideGrantParams,
     DeployedVersionsParams,
     DeployedVersionsResult,
     DepsParams,
@@ -117,6 +118,8 @@ from vogt.application.models import (
     ListActorsParams,
     ListAuditParams,
     ListEventsParams,
+    ListGrantsParams,
+    ListGrantsResult,
     ListInitiativesParams,
     ListLabelsParams,
     ListProjectsParams,
@@ -158,8 +161,10 @@ from vogt.application.models import (
     RemoveUserResult,
     ReportBlockedParams,
     ReportUnblockedParams,
+    RequestGrantParams,
     RestoreParams,
     RestoreResult,
+    RevokeGrantParams,
     RevokeSuppressionParams,
     RevokeTokenParams,
     ScaffoldProjectParams,
@@ -170,6 +175,7 @@ from vogt.application.models import (
     ServeResult,
     SessionAnswerResult,
     SessionBlockedResult,
+    SessionGrantResult,
     SessionInputParams,
     SessionInputResult,
     SessionLastReplyParams,
@@ -1086,6 +1092,69 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.set_session_role,
             route=HttpRoute("POST", "/sessions/role"),
             cli=CliBinding(("session", "set-role")),
+        ),
+        Operation(
+            name="session.grant_request",
+            summary=(
+                "Ask a person to approve one scoped item for one live session "
+                "(WI-973): a named credential (secret_name + project_id) the "
+                "target then fetches with `vogt-agent-auth fetch VAR`. It "
+                "appears in the Inbox; nothing is granted until a person "
+                "approves. Ask for your own session, or — as an oversight "
+                "session — for a session you drive. uses=once (default) or "
+                "ttl; ttl_seconds 60..86400."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=RequestGrantParams,
+            result_model=SessionGrantResult,
+            handler=services.request_grant,
+            route=HttpRoute("POST", "/sessions/grants"),
+            cli=CliBinding(("session", "grant-request")),
+        ),
+        Operation(
+            name="session.grant_decide",
+            summary=(
+                "Approve or deny a pending grant. A person's decision only: "
+                "every agent is refused. Approval is applied to the live "
+                "session by the engine before it is recorded."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=DecideGrantParams,
+            result_model=SessionGrantResult,
+            handler=services.decide_grant,
+            route=HttpRoute("POST", "/sessions/grants/decide"),
+            cli=CliBinding(("session", "grant-decide")),
+        ),
+        Operation(
+            name="session.grant_revoke",
+            summary=(
+                "Withdraw a pending grant or revoke an approved one at once. "
+                "A person, or the session that asked, may."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=RevokeGrantParams,
+            result_model=SessionGrantResult,
+            handler=services.revoke_grant,
+            route=HttpRoute("POST", "/sessions/grants/revoke"),
+            cli=CliBinding(("session", "grant-revoke")),
+        ),
+        Operation(
+            name="session.grant_list",
+            summary=(
+                "Grants to sessions, newest first, by state (pending, "
+                "approved, denied, revoked, expired) or target. Names only, "
+                "never a value."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=ListGrantsParams,
+            result_model=ListGrantsResult,
+            handler=services.list_grants,
+            route=HttpRoute("GET", "/sessions/grants"),
+            cli=CliBinding(("session", "grants")),
         ),
         Operation(
             name="session.answer",

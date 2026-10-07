@@ -129,7 +129,8 @@ enum Creating {
 
 impl SessionRegistry {
     pub fn new(cfg: Arc<Config>, bus: EventBus, history: Option<Arc<SessionHistory>>) -> Self {
-        let secret_broker = Arc::new(SecretBroker::new(&cfg));
+        let secret_broker =
+            Arc::new(SecretBroker::new(&cfg).with_grant_projects(cfg.agent_grant_projects.clone()));
         let records = Arc::new(DashMap::new());
         recover_records(&cfg.state_dir, history.as_deref(), &records);
         Self {
@@ -838,7 +839,11 @@ impl SessionRegistry {
         let state_dir = self.cfg.state_dir.clone();
         let minted = Arc::clone(&self.minted);
         let core = Arc::clone(&self.core);
+        let broker = Arc::clone(&self.secret_broker);
         Box::new(move |session: &Session| {
+            // An approved grant is for a running session; whatever stopped it,
+            // the grant goes with the process (WI-973).
+            broker.drop_grants(session.id);
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }

@@ -247,6 +247,11 @@ work started by an overseer is denied under the default policy. The
 guardrail is right. What is missing is a fast, auditable way for a person to
 say yes. Two options, in order:
 
+*Generalised by [approved grants](oversight-grants.md) (WI-973): any one
+scoped item — a named credential (milestone 1, built) or a capability such as
+bypass (milestone 2) — for a live session, requested by an overseer and
+approved by a person in the Inbox.*
+
 1. **Ask instead of refuse (recommended first).** When an agent calls
    `session.start` with `permission_mode=bypass`, the core creates a
    **pending start** instead of returning `BypassRefused`. The pending start

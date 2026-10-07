@@ -2462,6 +2462,7 @@ mod tests {
             auto_agent_auth: false,
             agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
             agent_auth_secrets: vec![],
+            agent_grant_projects: vec![],
             session_templates: vec![],
             assistant_api_key: None,
             assistant_base_url: "http://unused.invalid".into(),

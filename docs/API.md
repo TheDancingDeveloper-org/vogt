@@ -282,7 +282,25 @@ against the engine's idle policy. `session.set_role` (`work.write`, audited)
 nominates a session as `oversight` — the one supervising the others — or
 makes it a `worker` again; `session.start` takes the same `role`. An
 oversight session is pinned awake as it becomes one, rows carry `role`, and
-the GUI lists oversight sessions first (WI-957). Only a session whose conversation id the
+the GUI lists oversight sessions first (WI-957).
+
+`session.grant_request` (`work.write`, audited) asks a person to approve one
+named credential (`secret_name`, `project_id`, optional `var`; `uses` `once` or
+`ttl`; `ttl_seconds` 60 to 86 400) for one live session (`target`). A session
+may ask for itself. Asking for another session requires the caller to be an
+oversight session. The request appears in the Inbox as
+`session.grant_request`, with an action of kind `grant`. `session.grant_decide`
+(`approve` | `deny`) is **refused for every agent principal**: only a person
+decides. An approval is applied to the session by the engine before it is
+recorded, so an engine refusal leaves the request pending with its reason.
+`session.grant_revoke` withdraws a pending grant or revokes an approved one at
+once; a person or the asker may. `session.grant_list` (`read`) lists grants by
+`state` (`pending`, `approved`, `denied`, `revoked`, `expired`) or `target`.
+Rows carry names, never a value. The engine half and the session's `vogt-agent-auth
+fetch VAR` are [`ENGINE.md` §9](ENGINE.md),
+and the design is [`design/oversight-grants.md`](design/oversight-grants.md).
+
+Only a session whose conversation id the
 engine knows can hibernate: Claude Code started by Vogt, or any `resume`. A
 shell needs `allow_shell`, and wakes as a fresh shell. The engine side is
 [`ENGINE.md`, "Hibernation"](ENGINE.md#hibernation).

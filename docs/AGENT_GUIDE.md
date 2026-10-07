@@ -315,6 +315,15 @@ Rules:
   template, project, work item and task) rather than as subagents inside
   your own conversation: a session is visible, can be overseen, and outlives
   you.
+- **A session needs a credential it was not started with?** Ask a person for
+  it with `session_grant_request(target=<the session>, secret_name=…,
+  project_id=…, reason=…)`. Cadastre `lookup` tells you where the credential
+  lives. An overseer may ask on a worker's behalf, and any session may ask for
+  itself. Nothing is granted until a person approves it in the Inbox; you can
+  never approve one yourself. Once it is approved, the target runs `vogt-agent-auth
+  grants` to see it and `vogt-agent-auth fetch VAR` to use it. Ask for one
+  item, for the shortest time that will do, with `uses=once` unless the task
+  needs it repeatedly.
 - **Long turn or hung?** `session_list` and `session_screen` carry
   `turn_started_at` (when the agent last went to work from rest) and
   `last_output_at` (when the terminal last printed). Agent TUIs animate while

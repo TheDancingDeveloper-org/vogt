@@ -284,6 +284,10 @@ pub struct Config {
     /// broker off. A malformed line is a startup error, not a silent skip —
     /// the helper would refuse every session launch over it anyway.
     pub agent_auth_secrets: Vec<crate::secret_broker::ManifestSecret>,
+    /// `ENGINE_AGENT_GRANT_PROJECTS`: secrets-manager projects, beyond the
+    /// ones the manifest already names, that a person-approved grant may
+    /// fetch from (WI-973). Space- or comma-separated project ids.
+    pub agent_grant_projects: Vec<String>,
     /// Session templates available for quick session creation.
     pub session_templates: Vec<SessionTemplate>,
     /// Bearer key for the assistant's LLM backend. Sourced from
@@ -796,6 +800,14 @@ pub fn load(
         auto_agent_auth,
         agent_auth_helper,
         agent_auth_secrets,
+        agent_grant_projects: engine_env("ENGINE_AGENT_GRANT_PROJECTS")
+            .map(|text| {
+                text.split(|c: char| c == ',' || c.is_whitespace())
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
         session_templates: from_file
             .session_templates
             .unwrap_or_else(SessionTemplate::default_templates),

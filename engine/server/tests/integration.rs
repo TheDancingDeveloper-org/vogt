@@ -42,6 +42,7 @@ fn test_config() -> Config {
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
         agent_auth_secrets: vec![],
+        agent_grant_projects: vec![],
         // The synthetic agent CLI is registered as a session preset in the
         // *test* config — never the production defaults — so agent-task
         // scenarios can be driven without a real `claude`/`codex` in a PTY
@@ -7085,6 +7086,255 @@ async fn secret_broker_hands_a_session_one_declared_secret_and_only_that() {
         .await
         .unwrap();
     assert_eq!(r.status(), 401, "revoked with the session");
+}
+
+/// WI-973: a person-approved credential grant, as the engine holds and
+/// honours it. Only vogt-core's identity may apply or revoke one; it reaches
+/// only the session it was granted to; `once` is consumed by the first fetch;
+/// `ttl` stands until revoked or expired; and a grant never shadows the
+/// manifest or reaches a project the operator has not opened.
+#[tokio::test]
+async fn an_approved_grant_reaches_only_its_session_until_revoked_or_expired() {
+    const STACK: &str = "stack-secret-for-grants-1234567890";
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = broker_config(&tmp, "LATER proj later ondemand\n");
+    // A helper that also says which manifest it was run with, so the test
+    // sees the granted line replace the deployment's for the call.
+    let helper = tmp.path().join("grant-helper");
+    std::fs::write(
+        &helper,
+        "#!/bin/sh\n[ \"$1\" = get ] || exit 64\nprintf 'value-of-%s|%s' \"$2\" \"$ENGINE_AGENT_AUTH_SECRETS\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    cfg.agent_auth_helper = helper;
+    cfg.vogt_core_token = Some(STACK.into());
+    cfg.agent_grant_projects = vec!["extra".into()];
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let operator = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let core = reqwest::Client::builder()
+        .default_headers(auth_for(STACK))
+        .build()
+        .unwrap();
+    let plain = reqwest::Client::new();
+    let target = create_session_id(&operator, &base, "worker").await;
+    let other = create_session_id(&operator, &base, "bystander").await;
+    let target_token = state
+        .sessions
+        .secret_broker()
+        .issue(target.parse().unwrap());
+    let other_token = state.sessions.secret_broker().issue(other.parse().unwrap());
+    let fetch = |token: &str, var: &str| {
+        plain
+            .post(format!("{base}/api/agent-auth/fetch/{var}"))
+            .bearer_auth(token.to_string())
+            .send()
+    };
+    let in_an_hour = (OffsetDateTime::now_utc() + time::Duration::hours(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let grant = |id: &str, var: &str, project: &str, uses: &str, expires: &str| {
+        json!({
+            "grant_id": id,
+            "var": var,
+            "project_id": project,
+            "secret_name": "100.109.218.11_SSH",
+            "uses": uses,
+            "expires_at": expires,
+        })
+    };
+
+    // Deny by default: nothing granted, nothing fetched.
+    assert_eq!(
+        fetch(&target_token, "GRANT_SSH").await.unwrap().status(),
+        403
+    );
+
+    // Only vogt-core applies a grant: the break-glass operator token holds
+    // `sessions` and is still refused.
+    let refused = operator
+        .post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_1", "GRANT_SSH", "proj", "once", &in_an_hour))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), 403);
+    assert!(refused.text().await.unwrap().contains("only vogt-core"));
+
+    let applied = core
+        .post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_1", "GRANT_SSH", "proj", "once", &in_an_hour))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(applied.status(), 200, "{:?}", applied.text().await);
+
+    // It reaches only its own session.
+    assert_eq!(
+        fetch(&other_token, "GRANT_SSH").await.unwrap().status(),
+        403
+    );
+    let got = fetch(&target_token, "GRANT_SSH").await.unwrap();
+    assert_eq!(got.status(), 200);
+    assert_eq!(
+        got.text().await.unwrap(),
+        "value-of-GRANT_SSH|GRANT_SSH proj 100.109.218.11_SSH ondemand",
+        "the helper sees exactly the granted line as its manifest"
+    );
+    // `once`: consumed by that fetch.
+    assert_eq!(
+        fetch(&target_token, "GRANT_SSH").await.unwrap().status(),
+        403
+    );
+
+    // A standing (ttl) grant answers until it is revoked; the session can list
+    // it, never with a value.
+    core.post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_2", "GRANT_SSH", "extra", "ttl", &in_an_hour))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            fetch(&target_token, "GRANT_SSH").await.unwrap().status(),
+            200
+        );
+    }
+    let listed: Vec<Value> = plain
+        .get(format!("{base}/api/agent-auth/grants"))
+        .bearer_auth(&target_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["grant_id"], "grt_2");
+    assert!(!listed[0].to_string().contains("value-of"));
+    let empty: Vec<Value> = plain
+        .get(format!("{base}/api/agent-auth/grants"))
+        .bearer_auth(&other_token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(empty.is_empty());
+    assert_eq!(
+        operator
+            .delete(format!("{base}/api/sessions/{target}/grants/grt_2"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403,
+        "revoking is vogt-core's too"
+    );
+    core.delete(format!("{base}/api/sessions/{target}/grants/grt_2"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        fetch(&target_token, "GRANT_SSH").await.unwrap().status(),
+        403
+    );
+
+    // Least privilege: never a manifest name, never an unopened project,
+    // never past 24 h or already expired.
+    let too_late = (OffsetDateTime::now_utc() + time::Duration::days(2))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    for (body, status) in [
+        (grant("g", "LATER", "proj", "ttl", &in_an_hour), 409),
+        (
+            grant("g", "GRANT_SSH", "elsewhere", "ttl", &in_an_hour),
+            403,
+        ),
+        (grant("g", "GRANT_SSH", "proj", "ttl", &too_late), 400),
+        (
+            grant("g", "GRANT_SSH", "proj", "ttl", "2020-01-01T00:00:00Z"),
+            400,
+        ),
+        (grant("g", "not a var", "proj", "ttl", &in_an_hour), 400),
+    ] {
+        let r = core
+            .post(format!("{base}/api/sessions/{target}/grants"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), status, "{body}");
+    }
+
+    // Expiry is enforced at use, not only shown.
+    let soon = (OffsetDateTime::now_utc() + time::Duration::milliseconds(1500))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    core.post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_3", "GRANT_SSH", "proj", "ttl", &soon))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        fetch(&target_token, "GRANT_SSH").await.unwrap().status(),
+        200
+    );
+    tokio::time::sleep(Duration::from_millis(1700)).await;
+    assert_eq!(
+        fetch(&target_token, "GRANT_SSH").await.unwrap().status(),
+        403
+    );
+
+    // The session ending takes its grants with it.
+    core.post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_4", "GRANT_SSH", "proj", "ttl", &in_an_hour))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    operator
+        .post(format!("{base}/api/sessions/{target}/kill"))
+        .send()
+        .await
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let held: Vec<Value> = operator
+            .get(format!("{base}/api/sessions/{target}/grants"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap_or_default();
+        if held.is_empty() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "grants outlived the session"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let late = core
+        .post(format!("{base}/api/sessions/{target}/grants"))
+        .json(&grant("grt_5", "GRANT_SSH", "proj", "ttl", &in_an_hour))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(late.status(), 409, "no grant for an exited session");
 }
 
 #[tokio::test]

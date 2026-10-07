@@ -36,6 +36,7 @@ from vogt.core.entities import (
     Project,
     Relation,
     RelationKind,
+    SessionGrant,
     Suppression,
     Token,
     WorkItem,
@@ -1185,6 +1186,35 @@ class SqliteReadView:
         ).fetchone()
         return None if row is None else _row_to_session(row)
 
+    def session_grant(self, grant_id: str) -> SessionGrant | None:
+        row = self._conn.execute(
+            "SELECT * FROM session_grants WHERE id = ?", (grant_id,)
+        ).fetchone()
+        return None if row is None else _row_to_session_grant(row)
+
+    def list_session_grants(
+        self,
+        *,
+        state: str | None = None,
+        target_engine_session_id: str | None = None,
+        limit: int = 200,
+    ) -> list[SessionGrant]:
+        clauses: list[str] = []
+        params: list[object] = []
+        if state is not None:
+            clauses.append("state = ?")
+            params.append(state)
+        if target_engine_session_id is not None:
+            clauses.append("target_engine_session_id = ?")
+            params.append(target_engine_session_id)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM session_grants {where}"
+            "ORDER BY requested_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_session_grant(row) for row in rows]
+
     def session_by_engine_id(self, engine_session_id: str) -> CodingSession | None:
         row = self._conn.execute(
             "SELECT * FROM coding_sessions WHERE engine_session_id = ?",
@@ -1914,6 +1944,53 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def insert_session_grant(self, grant: SessionGrant) -> None:
+        self._conn.execute(
+            "INSERT INTO session_grants (id, target_engine_session_id, kind, var, "
+            "project_id, secret_name, capability, uses, ttl_seconds, reason, "
+            "requested_by, requested_at, state, decided_by, decided_at, "
+            "decision_reason, expires_at, revoked_by, revoked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                grant.id,
+                grant.target_engine_session_id,
+                grant.kind,
+                grant.var,
+                grant.project_id,
+                grant.secret_name,
+                grant.capability,
+                grant.uses,
+                grant.ttl_seconds,
+                grant.reason,
+                grant.requested_by,
+                to_iso(grant.requested_at),
+                grant.state,
+                grant.decided_by,
+                _iso_or_none(grant.decided_at),
+                grant.decision_reason,
+                _iso_or_none(grant.expires_at),
+                grant.revoked_by,
+                _iso_or_none(grant.revoked_at),
+            ),
+        )
+
+    def update_session_grant(self, grant: SessionGrant) -> None:
+        self._conn.execute(
+            "UPDATE session_grants SET state = ?, decided_by = ?, decided_at = ?, "
+            "decision_reason = ?, expires_at = ?, revoked_by = ?, revoked_at = ? "
+            "WHERE id = ?",
+            (
+                grant.state,
+                grant.decided_by,
+                _iso_or_none(grant.decided_at),
+                grant.decision_reason,
+                _iso_or_none(grant.expires_at),
+                grant.revoked_by,
+                _iso_or_none(grant.revoked_at),
+                grant.id,
+            ),
+        )
+
     def insert_session(self, session: CodingSession) -> None:
         self._conn.execute(
             "INSERT INTO coding_sessions (id, engine_session_id, project_id, "
@@ -2596,6 +2673,44 @@ def _row_to_writeback(row: sqlite3.Row) -> WriteBackRecord:
         reason=str(row["reason"]),
         detail=None if row["detail"] is None else str(row["detail"]),
         source_url=None if row["source_url"] is None else str(row["source_url"]),
+    )
+
+
+def _iso_or_none(value: datetime | None) -> str | None:
+    return None if value is None else to_iso(value)
+
+
+def _opt(row: sqlite3.Row, column: str) -> str | None:
+    value = row[column]
+    return None if value is None else str(value)
+
+
+def _opt_time(row: sqlite3.Row, column: str) -> datetime | None:
+    value = row[column]
+    return None if value is None else from_iso(str(value))
+
+
+def _row_to_session_grant(row: sqlite3.Row) -> SessionGrant:
+    return SessionGrant(
+        id=str(row["id"]),
+        target_engine_session_id=str(row["target_engine_session_id"]),
+        kind=row["kind"],
+        var=_opt(row, "var"),
+        project_id=_opt(row, "project_id"),
+        secret_name=_opt(row, "secret_name"),
+        capability=_opt(row, "capability"),
+        uses=row["uses"],
+        ttl_seconds=int(row["ttl_seconds"]),
+        reason=str(row["reason"]),
+        requested_by=str(row["requested_by"]),
+        requested_at=from_iso(str(row["requested_at"])),
+        state=row["state"],
+        decided_by=_opt(row, "decided_by"),
+        decided_at=_opt_time(row, "decided_at"),
+        decision_reason=_opt(row, "decision_reason"),
+        expires_at=_opt_time(row, "expires_at"),
+        revoked_by=_opt(row, "revoked_by"),
+        revoked_at=_opt_time(row, "revoked_at"),
     )
 
 

@@ -90,6 +90,7 @@ export const ROUTES = {
   "session.set_role": "/sessions/role",
   "session.sweep": "/sessions/sweep",
   "session.answer": "/sessions/answer",
+  "session.grant_decide": "/sessions/grants/decide",
 } as const;
 
 export type VogtOperation = keyof typeof ROUTES;
@@ -254,9 +255,11 @@ export interface InboxEntry {
   evidence_snapshot?: Record<string, unknown> | null;
   proposed_change?: Record<string, unknown> | null;
   action?: {
-    kind?: "drift" | "observation" | "session" | string;
+    kind?: "drift" | "observation" | "session" | "grant" | string;
     drift_id?: string;
     subject_key?: string;
+    /** A pending grant a person approves or denies (WI-973). */
+    grant_id?: string;
   };
   /** Who caused the occurrence (resolved at collect time). Drift, CI and
    *  agent entries are the instance itself: a bot inside the org. */
@@ -901,6 +904,18 @@ export const resolveInboxDrift = (
   resolution: "accepted" | "rejected",
   reason: string,
 ) => call<DriftResult>("drift.resolve", { id, resolution, reason }, "POST");
+
+/** Approve or deny a grant a session asked for (WI-973). A person's
+ *  decision: the core refuses it from any agent. */
+export const decideGrant = (
+  id: string,
+  decision: "approve" | "deny",
+  reason: string,
+) => call<{ grant: { id: string; state: string } }>(
+  "session.grant_decide",
+  { id, decision, reason },
+  "POST",
+);
 
 /** The audit log, narrowed and paged.
  *

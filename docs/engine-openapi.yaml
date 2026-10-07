@@ -587,6 +587,69 @@ paths:
         "400": { $ref: "#/components/responses/BadRequest" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/grants:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+    get:
+      tags: [sessions]
+      summary: The person-approved grants a session holds now (WI-973).
+      description: Names only, never a value. Expired grants are dropped.
+      operationId: listSessionGrants
+      x-capability: sessions
+      responses:
+        "200":
+          description: The session's live grants.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/SessionGrant" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [sessions]
+      summary: Hold a person-approved credential grant for a live session (WI-973).
+      description: >-
+        Accepted only from vogt-core's own identity (the stack secret), which
+        sends it once a person approved the grant. Every other credential is
+        refused with 403 even though it holds `sessions`. The session then
+        fetches the secret with `vogt-agent-auth fetch VAR` through the broker.
+      operationId: applySessionGrant
+      x-capability: sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SessionGrant" }
+      responses:
+        "200":
+          description: The grant as the engine holds it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SessionGrant" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/sessions/{id}/grants/{grant_id}:
+    parameters:
+      - $ref: "#/components/parameters/SessionId"
+      - name: grant_id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [sessions]
+      summary: Revoke one grant at once (WI-973). vogt-core only.
+      operationId: revokeSessionGrant
+      x-capability: sessions
+      responses:
+        "200":
+          description: Whether the engine still held it; absence is the revoked state.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked: { type: boolean }
   /api/sessions/{id}/kill:
     parameters:
       - $ref: "#/components/parameters/SessionId"
@@ -714,6 +777,16 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
   schemas:
+    SessionGrant:
+      type: object
+      required: [grant_id, var, project_id, secret_name, expires_at]
+      properties:
+        grant_id: { type: string, description: "vogt-core's grant id (grt_…)." }
+        var: { type: string, description: The name the session fetches it under. }
+        project_id: { type: string }
+        secret_name: { type: string }
+        uses: { type: string, enum: [once, ttl], default: once }
+        expires_at: { type: string, format: date-time }
     OkResponse:
       type: object
       required: [ok]

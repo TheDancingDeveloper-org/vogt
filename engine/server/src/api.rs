@@ -225,6 +225,112 @@ pub async fn report_own_conversation(
     }
 }
 
+/// Only vogt-core's own identity may change a session's grants (WI-973): the
+/// core sends one only after a person approved it, so every other credential
+/// — a person's token, the break-glass token, a session's token — is refused
+/// even though it holds `sessions`.
+fn require_core_identity(
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+) -> crate::error::Result<()> {
+    match identity {
+        Some(identity) if identity.name == crate::auth::STACK_SECRET_NAME => Ok(()),
+        Some(identity) => Err(crate::error::ApiError::Forbidden(format!(
+            "only vogt-core applies grants, after a person approves one (session_grant_decide); \
+             {} cannot",
+            identity.name
+        ))),
+        None => Err(crate::error::ApiError::Unauthorized),
+    }
+}
+
+fn grant_view(held: &crate::secret_broker::HeldGrant) -> vogt_engine_contract::SessionGrant {
+    held.grant.clone()
+}
+
+/// `POST /api/sessions/{id}/grants` — hold a person-approved credential grant
+/// for a live session (WI-973). vogt-core only.
+pub async fn apply_session_grant(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
+    Json(grant): Json<vogt_engine_contract::SessionGrant>,
+) -> Result<Json<vogt_engine_contract::SessionGrant>> {
+    use crate::{error::ApiError, secret_broker::GrantRefusal};
+    require_core_identity(identity.as_deref())?;
+    let session = state.sessions.get(id)?;
+    if !session.is_alive() {
+        return Err(ApiError::Conflict(
+            "the session has exited; a grant is for a running session".into(),
+        ));
+    }
+    let held = state
+        .sessions
+        .secret_broker()
+        .apply_grant(id, grant, time::OffsetDateTime::now_utc())
+        .map_err(|refusal| match refusal {
+            GrantRefusal::Invalid(_) => ApiError::BadRequest(refusal.to_string()),
+            GrantRefusal::ProjectNotGrantable(_) => ApiError::Forbidden(refusal.to_string()),
+            GrantRefusal::NoBroker | GrantRefusal::ShadowsManifest(_) => {
+                ApiError::Conflict(refusal.to_string())
+            }
+        })?;
+    tracing::info!(
+        target: "vogt::audit",
+        event = "session.grant",
+        action = "applied",
+        session_id = %id,
+        grant_id = %held.grant.grant_id,
+        var = %held.grant.var,
+        project_id = %held.grant.project_id,
+        secret_name = %held.grant.secret_name,
+        uses = ?held.grant.uses,
+        expires_at = %held.grant.expires_at,
+        "approved grant applied to the session"
+    );
+    Ok(Json(grant_view(&held)))
+}
+
+/// `DELETE /api/sessions/{id}/grants/{grant_id}` — revoke one grant at once
+/// (WI-973). vogt-core only. Revoking a grant the engine no longer holds is
+/// not an error: absence is the revoked state.
+pub async fn revoke_session_grant(
+    State(state): State<Arc<AppState>>,
+    Path((id, grant_id)): Path<(Uuid, String)>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
+) -> Result<Json<serde_json::Value>> {
+    require_core_identity(identity.as_deref())?;
+    let held = state.sessions.secret_broker().remove_grant(id, &grant_id);
+    tracing::info!(
+        target: "vogt::audit",
+        event = "session.grant",
+        action = "revoked",
+        session_id = %id,
+        grant_id = %grant_id,
+        held,
+        "grant revoked"
+    );
+    Ok(Json(serde_json::json!({ "revoked": held })))
+}
+
+/// `GET /api/sessions/{id}/grants` — the grants a session holds now, never a
+/// value. Gated like every session route (`sessions`).
+pub async fn list_session_grants(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<Vec<vogt_engine_contract::SessionGrant>>> {
+    state.sessions.get(id)?;
+    let now = time::OffsetDateTime::now_utc();
+    Ok(Json(
+        state
+            .sessions
+            .secret_broker()
+            .grants_for(id, now)
+            .iter()
+            .map(grant_view)
+            .collect(),
+    ))
+}
+
 /// Choose one option of the dialog on screen (WI-917): a permission
 /// dialog or a startup gate. The engine reads the menu as it is now, moves
 /// the highlight to the option with arrow keys, presses Enter, and looks

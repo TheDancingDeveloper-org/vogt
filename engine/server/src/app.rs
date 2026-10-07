@@ -314,6 +314,14 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         )
         .route("/api/sessions/{id}/role", post(api::set_session_role))
         .route(
+            "/api/sessions/{id}/grants",
+            get(api::list_session_grants).post(api::apply_session_grant),
+        )
+        .route(
+            "/api/sessions/{id}/grants/{grant_id}",
+            axum::routing::delete(api::revoke_session_grant),
+        )
+        .route(
             "/api/sessions/{id}/conversation",
             post(api::report_session_conversation),
         )
@@ -473,7 +481,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         .route(
             api::OWN_CONVERSATION_ROUTE,
             post(api::report_own_conversation),
-        );
+        )
+        // A session's own approved grants (WI-973): the same caller and the
+        // same per-session token.
+        .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants));
 
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
