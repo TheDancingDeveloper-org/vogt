@@ -49,11 +49,12 @@ class WebSocket:
         port = parsed.port or (443 if secure else 80)
         host = parsed.hostname or "localhost"
         raw = socket.create_connection((host, port), timeout=30)
-        self.sock: socket.socket = (
-            ssl.create_default_context().wrap_socket(raw, server_hostname=host)
-            if secure
-            else raw
-        )
+        if secure:
+            context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            self.sock: socket.socket = context.wrap_socket(raw, server_hostname=host)
+        else:
+            self.sock = raw
         key = base64.b64encode(os.urandom(16)).decode()
         request = (
             f"GET {parsed.path or '/'} HTTP/1.1\r\nHost: {host}\r\n"
