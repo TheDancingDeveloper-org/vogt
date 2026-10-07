@@ -249,7 +249,12 @@ impl Session {
         SessionSummary {
             id: self.id,
             name: self.name.lock().clone(),
-            activity: *self.activity.lock(),
+            // An exited child is terminal whatever the cached state says:
+            // the exit waiter stores the code a moment before it moves the
+            // activity, and a summary read in between said `idle` beside an
+            // exit code.
+            activity: crate::activity::terminal_state(exit_code, self.stop_requested())
+                .unwrap_or_else(|| *self.activity.lock()),
             exit_code,
             alive: exit_code.is_none(),
             scrollback_bytes: sb.total_written(),
