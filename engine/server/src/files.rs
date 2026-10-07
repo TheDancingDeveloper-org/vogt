@@ -125,64 +125,24 @@ const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
 /// transfer size rather than memory usage.
 const MAX_DOWNLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
-/// A file whose name looks like a credential. A path that appears in a
-/// session's output must never become a way to read a secret through the GUI,
-/// so the read-only viewer refuses these outright: environment files, private
-/// keys, and anything named like a token.
-fn is_secret_file(path: &Path) -> bool {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_lowercase())
-        .unwrap_or_default();
-    if name.is_empty() {
-        return false;
-    }
-    if name == ".env" || name.starts_with(".env.") || name.ends_with(".env") {
-        return true;
-    }
-    const EXACT: &[&str] = &[".netrc", ".pgpass", ".npmrc", ".pypirc", "credentials"];
-    if EXACT.contains(&name.as_str()) {
-        return true;
-    }
-    const SUFFIXES: &[&str] = &[".key", ".pem", ".p12", ".pfx", ".kdbx", ".keystore", ".jks"];
-    if SUFFIXES.iter().any(|s| name.ends_with(s)) {
-        return true;
-    }
-    name.contains("_token")
-        || name.contains("-token")
-        || name.contains("token_")
-        || name.starts_with("id_")
-}
-
 pub async fn read_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Json<FileRead>> {
     let p = workspace_path::resolve_existing_allow_absolute(&state.config.workspace_root, &q.path)?;
-    if is_secret_file(&p) {
-        return Err(ApiError::BadRequest(
-            "refusing to read a credential file through the file viewer".into(),
-        ));
-    }
+    workspace_path::may_show(&state.config.workspace_root, &p)?;
     let meta = tokio::fs::metadata(&p).await?;
     if !meta.is_file() {
         return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
     }
-    if meta.len() > MAX_READ_BYTES {
-        return Err(ApiError::BadRequest(format!(
-            "file too large: {} bytes (max {})",
-            meta.len(),
-            MAX_READ_BYTES
-        )));
-    }
-    let bytes = tokio::fs::read(&p).await?;
+    let bytes = read_capped(&p, MAX_READ_BYTES).await?;
     let hash = hash_bytes(&bytes);
     let mtime = mtime_millis(&meta);
     let is_binary = looks_binary(&bytes);
     let resp = if is_binary {
         FileRead {
             path: rel_to(&state.config.workspace_root, &p),
-            size: meta.len(),
+            size: bytes.len() as u64,
             content: None,
             content_base64: Some(base64::engine::general_purpose::STANDARD.encode(&bytes)),
             is_binary: true,
@@ -195,7 +155,7 @@ pub async fn read_file(
         let s = String::from_utf8_lossy(&bytes).into_owned();
         FileRead {
             path: rel_to(&state.config.workspace_root, &p),
-            size: meta.len(),
+            size: bytes.len() as u64,
             content: Some(s),
             content_base64: None,
             is_binary: false,
@@ -206,16 +166,28 @@ pub async fn read_file(
     Ok(Json(resp))
 }
 
+/// Read at most `cap` bytes. The size is enforced on the bytes actually read,
+/// not on an earlier `stat`, so a file that grows between the two cannot slip
+/// a larger body past the cap.
+async fn read_capped(path: &Path, cap: u64) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::new();
+    file.take(cap + 1).read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > cap {
+        return Err(ApiError::BadRequest(format!(
+            "file too large (max {cap} bytes)"
+        )));
+    }
+    Ok(bytes)
+}
+
 pub async fn download_file(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ReadQuery>,
 ) -> Result<Response> {
     let p = workspace_path::resolve_existing_allow_absolute(&state.config.workspace_root, &q.path)?;
-    if is_secret_file(&p) {
-        return Err(ApiError::BadRequest(
-            "refusing to read a credential file through the file viewer".into(),
-        ));
-    }
+    workspace_path::may_show(&state.config.workspace_root, &p)?;
     let meta = tokio::fs::metadata(&p).await?;
     if !meta.is_file() {
         return Err(ApiError::BadRequest(format!("not a file: {}", q.path)));
@@ -499,6 +471,9 @@ pub async fn operate(
             require_nonempty_path(&from)?;
             require_nonempty_path(&to)?;
             let src = workspace_path::resolve_existing(root, &from)?;
+            // Renaming a hidden or credential file to an ordinary name would
+            // walk its bytes past `may_show` on the next read.
+            workspace_path::may_show(root, &src)?;
             let dst = resolve_target(root, &to, create_parents).await?;
             reject_same_or_nested_destination(&src, &dst).await?;
             reject_existing_destination(&dst).await?;
@@ -548,6 +523,9 @@ pub async fn operate(
             require_nonempty_path(&from)?;
             require_nonempty_path(&to)?;
             let src = workspace_path::resolve_existing(root, &from)?;
+            // Renaming a hidden or credential file to an ordinary name would
+            // walk its bytes past `may_show` on the next read.
+            workspace_path::may_show(root, &src)?;
             let dst = resolve_target(root, &to, create_parents).await?;
             reject_same_or_nested_destination(&src, &dst).await?;
             reject_existing_destination(&dst).await?;
@@ -731,6 +709,9 @@ pub async fn search(
     } else {
         workspace_path::resolve_existing(&state.config.workspace_root, &q.path)?
     };
+    if dir != state.config.workspace_root {
+        workspace_path::may_show(&state.config.workspace_root, &dir)?;
+    }
     let cap = q.max.unwrap_or(200).min(SEARCH_HARD_CAP);
 
     let mut cmd = Command::new("rg");
@@ -769,6 +750,9 @@ pub async fn search(
             .to_string();
         // Stitch path back relative to workspace_root (rg ran in `dir`).
         let full = dir.join(&path_rel);
+        if !search_hit_may_show(&state.config.workspace_root, &full) {
+            continue;
+        }
         hits.push(SearchHit {
             path: rel_to(&state.config.workspace_root, &full),
             line: line_no,
@@ -779,6 +763,17 @@ pub async fn search(
         }
     }
     Ok(Json(hits))
+}
+
+/// A ripgrep hit returns line text, so it is held to the viewer's policy on
+/// the resolved path. `rg` already skips hidden and gitignored files, but not
+/// `prod.env`, `server.key` or `credentials`. A hit that cannot be resolved
+/// is dropped rather than shown.
+fn search_hit_may_show(root: &Path, full: &Path) -> bool {
+    match full.canonicalize() {
+        Ok(canon) => canon.starts_with(root) && workspace_path::may_show(root, &canon).is_ok(),
+        Err(_) => false,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -875,39 +870,6 @@ fn looks_binary(b: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn secret_files_are_refused() {
-        let secret = [
-            ".env",
-            ".env.local",
-            "prod.env",
-            "id_rsa",
-            "id_ed25519",
-            "server.key",
-            "cert.pem",
-            "store.p12",
-            "vault.kdbx",
-            "github_token",
-            "api-token.txt",
-            "deploy_token_prod",
-            ".netrc",
-            "credentials",
-        ];
-        for name in secret {
-            assert!(is_secret_file(Path::new(name)), "{name} must be refused");
-        }
-        let allowed = [
-            "README.md",
-            "main.rs",
-            "notes.txt",
-            "identity.ts",
-            "tokenise.py",
-        ];
-        for name in allowed {
-            assert!(!is_secret_file(Path::new(name)), "{name} must be readable");
-        }
-    }
 
     #[test]
     fn binary_detection() {
