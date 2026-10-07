@@ -5,7 +5,7 @@ use std::sync::{
 
 use dashmap::DashMap;
 use uuid::Uuid;
-use vogt_engine_contract::{ActivityState, HibernateTrigger, Hibernation};
+use vogt_engine_contract::{ActivityState, HibernateTrigger, Hibernation, SessionRole};
 
 use crate::secret_broker::SecretBroker;
 
@@ -528,6 +528,13 @@ impl SessionRegistry {
             .filter(|m| !m.is_empty() && m != "default");
         session.set_permission_mode(posture.clone());
         session.set_autopilot(spec.autopilot);
+        session.set_role(spec.role);
+        // An oversight session is the one that brings the others back, so it
+        // must come back by itself: pinned awake, it is never hibernated by
+        // policy and is woken at boot (WI-957).
+        if spec.role == SessionRole::Oversight {
+            session.set_keep_awake(true);
+        }
         session.set_template(
             spec.template
                 .as_deref()
@@ -557,6 +564,8 @@ impl SessionRegistry {
                 record.effort = spec.effort.clone();
                 record.permission_mode = posture.clone();
                 record.autopilot = spec.autopilot;
+                record.role = spec.role;
+                record.keep_awake = session.keep_awake();
                 record.conversation = conversation;
                 record.brief_file = prompt_file.clone();
                 Some(record)
@@ -1004,6 +1013,7 @@ impl SessionRegistry {
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
             autopilot: record.autopilot,
+            role: record.role,
             resume: record.conversation.as_ref().map(|c| c.id.clone()),
             cols: req.cols.or(record.cols),
             rows: req.rows.or(record.rows),
@@ -1023,6 +1033,42 @@ impl SessionRegistry {
         }
         let updated = self.records.get_mut(&id).map(|mut record| {
             record.keep_awake = keep;
+            record.clone()
+        });
+        match (&live, updated) {
+            (_, Some(record)) => {
+                if let Err(e) = hibernation::write(&self.cfg.state_dir, &record) {
+                    tracing::warn!(session = %id, error = %e, "could not write the session's hibernation record");
+                }
+            }
+            (Some(_), None) => {}
+            (None, None) => return Err(ApiError::NotFound),
+        }
+        match live {
+            Some(session) => Ok(session.summary()),
+            None => self.hibernated_summary(id).ok_or(ApiError::NotFound),
+        }
+    }
+
+    /// Nominate a session as oversight, or make it an ordinary worker again
+    /// (WI-957), live or hibernated, and in its record so a wake and a
+    /// redeploy keep the answer. Becoming oversight also pins the session
+    /// awake; going back to worker leaves the pin as it is, for the caller to
+    /// lift with keep-awake if it wants to.
+    pub fn set_role(&self, id: Uuid, role: SessionRole) -> Result<SessionSummary> {
+        let live = self.sessions.get(&id).map(|s| Arc::clone(s.value()));
+        let oversight = role == SessionRole::Oversight;
+        if let Some(session) = live.as_ref() {
+            session.set_role(role);
+            if oversight {
+                session.set_keep_awake(true);
+            }
+        }
+        let updated = self.records.get_mut(&id).map(|mut record| {
+            record.role = role;
+            if oversight {
+                record.keep_awake = true;
+            }
             record.clone()
         });
         match (&live, updated) {
@@ -1237,6 +1283,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         keep_awake: record.keep_awake,
         autopilot: record.autopilot,
         autopilot_nudges: 0,
+        role: record.role,
         resources: None,
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),

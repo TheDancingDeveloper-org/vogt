@@ -2193,6 +2193,7 @@ mod tests {
                 resume: None,
                 permission_mode: None,
                 autopilot: false,
+                role: Default::default(),
                 cols: Some(80),
                 rows: Some(24),
                 scrollback_bytes: None,

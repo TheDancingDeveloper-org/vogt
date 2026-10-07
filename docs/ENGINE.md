@@ -676,6 +676,14 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   "rows"?}` -> `SessionSummary`, and `POST /api/sessions/:id/keep-awake`
   `{"keep_awake": bool}` -> `SessionSummary` — see
   [Hibernation](#hibernation). Each requires `sessions`.
+- `POST /api/sessions/:id/role` `{"role": "oversight" | "worker"}` ->
+  `SessionSummary` (WI-957). Nominates a session as oversight — one that
+  supervises the others — or makes it a worker again. `SessionSpec.role` sets
+  it at creation. An oversight session is pinned awake (`keep_awake`) as it
+  becomes one, so a restart wakes it by itself; going back to `worker` leaves
+  the pin. The role is kept in the session's record, shown on its summary
+  (absent for a worker), and the PWA lists oversight sessions first in the
+  Places rail. Requires `sessions`.
 
 The 64 KiB input cap mirrors `ws::MAX_INPUT_BYTES`, so the same paste is
 accepted or refused whichever transport carries it. Over the cap is `400` on
@@ -1268,7 +1276,8 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   `session.wake`, using the stack secret, so a linked session gets a fresh
   token. The core may still be starting, so the engine retries for a few
   minutes. Pin a driver or oversight session, and it comes back after a
-  redeploy by itself.
+  redeploy by itself. Nominating a session as oversight (`role`, WI-957)
+  pins it for you.
 - **Policy** (`hibernate_policy.rs`) is off unless configured.
   `ENGINE_HIBERNATE_IDLE_AFTER` (`2h`, `30m`, or seconds) hibernates an agent
   session that has had no input or output for that long.
@@ -2587,6 +2596,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.hibernate` | Operator-only | Unavailable: Stops a session's processes; for the GUI and for agents over MCP/CLI/REST. |
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
 | `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |
+| `session.set_role` | Operator-only | Unavailable: Nominates the overseeing session; for the GUI and for agents over MCP/CLI/REST. |
 | `token.issue` | Operator-only | Unavailable: Issues credentials that must never enter model context. |
 | `token.list` | Operator-only | Unavailable: Admin credential inventory. |
 | `token.revoke` | Operator-only | Unavailable: Admin credential revocation. |

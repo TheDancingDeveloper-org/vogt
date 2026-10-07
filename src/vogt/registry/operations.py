@@ -182,6 +182,7 @@ from vogt.application.models import (
     SessionWaitParams,
     SessionWaitResult,
     SetPasswordParams,
+    SetSessionRoleParams,
     SetWriteBackParams,
     StartSessionParams,
     StatusParams,
@@ -1068,6 +1069,23 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.keep_session_awake,
             route=HttpRoute("POST", "/sessions/keep-awake"),
             cli=CliBinding(("session", "keep-awake")),
+        ),
+        Operation(
+            name="session.set_role",
+            summary=(
+                "Nominate a session as oversight (role=oversight): one that "
+                "supervises other sessions. It is pinned awake, so it comes "
+                "back by itself after a redeploy, and the GUI lists it first. "
+                "role=worker makes it an ordinary session again. Takes either "
+                "id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=SetSessionRoleParams,
+            result_model=SessionResult,
+            handler=services.set_session_role,
+            route=HttpRoute("POST", "/sessions/role"),
+            cli=CliBinding(("session", "set-role")),
         ),
         Operation(
             name="session.answer",

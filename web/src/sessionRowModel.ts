@@ -145,14 +145,21 @@ export function sortSessionsByAttention(sessions: SessionSummary[]): SessionSumm
   });
 }
 
-/** Attention order plus one stable bookmark partition for the Places rail. */
+/** Whether a session was nominated to supervise the others (WI-957). */
+export function isOversight(s: SessionSummary): boolean {
+  return s.role === "oversight";
+}
+
+/** Attention order plus two stable partitions for the Places rail: oversight
+ *  sessions first (WI-957) — the one a reader goes to for the state of
+ *  everything else — then bookmarks, then the rest. Within each partition the
+ *  attention order holds. */
 export function sortSessionsForRail(
   sessions: SessionSummary[],
   bookmarked: ReadonlySet<string>,
 ): SessionSummary[] {
-  return sortSessionsByAttention(sessions).sort(
-    (left, right) => Number(bookmarked.has(right.id)) - Number(bookmarked.has(left.id)),
-  );
+  const partition = (s: SessionSummary) => (isOversight(s) ? 0 : bookmarked.has(s.id) ? 1 : 2);
+  return sortSessionsByAttention(sessions).sort((left, right) => partition(left) - partition(right));
 }
 
 /**

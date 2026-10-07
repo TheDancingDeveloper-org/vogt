@@ -8948,6 +8948,117 @@ async fn a_session_pinned_awake_wakes_by_itself_after_a_restart() {
 }
 
 #[tokio::test]
+async fn an_oversight_session_is_pinned_listed_as_oversight_and_back_after_a_restart() {
+    let (_tmp, cfg, stub) = hibernation_sandbox();
+    let (base, state, guard) = boot_with_state(cfg.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // One nominated at start, one nominated afterwards, one left a worker.
+    let mut ids = Vec::new();
+    for (name, role) in [
+        ("overseer", Some("oversight")),
+        ("promoted", None),
+        ("a worker", None),
+    ] {
+        let mut body = json!({ "name": name, "command": [stub.to_string_lossy()] });
+        if let Some(role) = role {
+            body["role"] = json!(role);
+        }
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    for id in &ids {
+        live_output_containing(&client, &base, id, &["helper=["]).await;
+    }
+    let promoted: Value = client
+        .post(format!("{base}/api/sessions/{}/role", ids[1]))
+        .json(&json!({ "role": "oversight" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(promoted["role"], "oversight");
+    assert_eq!(
+        promoted["keep_awake"], true,
+        "oversight pins the session awake"
+    );
+
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap().clone();
+    assert_eq!(row(&ids[0])["role"], "oversight");
+    assert_eq!(row(&ids[0])["keep_awake"], true);
+    assert!(
+        row(&ids[2]).get("role").is_none(),
+        "a worker carries no role on the wire"
+    );
+    assert!(row(&ids[2]).get("keep_awake").is_none());
+
+    // Unknown roles are refused rather than read as a worker.
+    let refused = client
+        .post(format!("{base}/api/sessions/{}/role", ids[2]))
+        .json(&json!({ "role": "boss" }))
+        .send()
+        .await
+        .unwrap();
+    assert!(refused.status().is_client_error());
+
+    state.sessions.hibernate_for_shutdown().await;
+    drop(guard);
+
+    let (base, _h) = boot_with_config(cfg).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let listed: Vec<Value> = client
+            .get(format!("{base}/api/sessions"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let row = |id: &str| listed.iter().find(|s| s["id"] == id).cloned();
+        let awake = |id: &str| row(id).is_some_and(|r| r["activity"] != "hibernated");
+        if awake(&ids[0]) && awake(&ids[1]) {
+            for id in &ids[..2] {
+                let r = row(id).unwrap();
+                assert_eq!(r["role"], "oversight", "the role survives the restart");
+                assert_eq!(r["alive"], true);
+            }
+            assert_eq!(
+                row(&ids[2]).unwrap()["activity"],
+                "hibernated",
+                "the worker waits to be woken"
+            );
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the oversight sessions never woke"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+#[tokio::test]
 async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readable() {
     let (tmp, mut cfg, stub) = hibernation_sandbox();
     let claude_home = tmp.path().join("claude-home");

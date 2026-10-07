@@ -167,6 +167,9 @@ class EngineSession:
     #: On autopilot (WI-949), and how often the engine has re-prompted it.
     autopilot: bool = False
     autopilot_nudges: int = 0
+    #: What the session is for (WI-957): `worker`, or `oversight` for one
+    #: nominated to supervise the others. Absent on the wire means `worker`.
+    role: str = "worker"
     #: The process tree's last resource sample (WI-916).
     resources: EngineResources | None = None
     #: The template it was started from, by the name given (WI-919).
@@ -207,6 +210,7 @@ class EngineSession:
             keep_awake=payload.get("keep_awake") is True,
             autopilot=payload.get("autopilot") is True,
             autopilot_nudges=_nudges(payload.get("autopilot_nudges")),
+            role="oversight" if payload.get("role") == "oversight" else "worker",
             resources=EngineResources.from_payload(payload.get("resources")),
             template=_optional_str(payload.get("template")),
             permission_mode=_optional_str(payload.get("permission_mode")),
@@ -655,6 +659,7 @@ class EngineClient:
         resume: str | None = None,
         permission_mode: str | None = None,
         autopilot: bool = False,
+        role: str = "worker",
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -702,6 +707,9 @@ class EngineClient:
             # The engine keeps it awake and re-prompts it at its prompt
             # (WI-949); sent only when on, like the fields above.
             spec["autopilot"] = True
+        if role != "worker":
+            # An oversight session (WI-957): pinned awake and listed first.
+            spec["role"] = role
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 
@@ -1037,6 +1045,19 @@ class EngineClient:
             f"/api/sessions/{urllib.parse.quote(session_id)}/keep-awake",
             method="POST",
             payload={"keep_awake": keep_awake},
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineSession.from_payload(payload)
+
+    def set_role(self, session_id: str, *, role: str) -> EngineSession | None:
+        """Nominate a session as oversight, or make it a worker again
+        (WI-957); `None` on a 404."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}/role",
+            method="POST",
+            payload={"role": role},
             allow_missing=True,
         )
         if not isinstance(payload, dict):

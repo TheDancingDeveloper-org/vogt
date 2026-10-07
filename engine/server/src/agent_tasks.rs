@@ -1474,6 +1474,7 @@ impl AgentTaskRegistry {
             resume: None,
             permission_mode: None,
             autopilot: false,
+            role: Default::default(),
             cols: Some(100),
             rows: Some(30),
             scrollback_bytes: None,

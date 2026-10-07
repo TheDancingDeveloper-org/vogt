@@ -121,6 +121,7 @@ import {
   activityClass,
   activityLabel,
   holdRailOrder,
+  isOversight,
   sessionActivityAge,
   sessionStateWord,
   sessionRuntimeHint,
@@ -129,7 +130,7 @@ import {
 import { railSections, setRailSection } from "./railSections";
 import { setExpanded } from "./fileTreeState";
 import { demoManifest, resetDemoData } from "./runtimeTransport";
-import { hibernateSession, setKeepAwake, wakeSession } from "./sessionHibernation";
+import { hibernateSession, setKeepAwake, setSessionRole, wakeSession } from "./sessionHibernation";
 
 // -- what the first screen does not have to carry -----------
 //
@@ -1136,6 +1137,17 @@ const App: Component = () => {
     }
   };
 
+  // Nominate a session as oversight (WI-957): pinned awake, listed first.
+  // The role publishes no event, so read the list again, as keep-awake does.
+  const onToggleOversight = async (s: SessionSummary) => {
+    try {
+      await setSessionRole(s.id, isOversight(s) ? "worker" : "oversight");
+      void refreshSessions();
+    } catch (e) {
+      showToast(`changing the role failed: ${(e as Error).message}`, { kind: "error" });
+    }
+  };
+
   const onRenameSession = async (s: SessionSummary) => {
     const name = await promptUser("Rename session", s.name);
     if (!name || name === s.name) return;
@@ -1632,8 +1644,8 @@ const App: Component = () => {
                   tabIndex={0}
                   draggable={true}
                   aria-current={tabsStore.active === `term:${s.id}` ? "page" : undefined}
-                  aria-label={`${s.name}, ${activityLabel(s.activity, s.exit_code)}`}
-                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" ? "waiting" : ""}`}
+                  aria-label={`${s.name}${isOversight(s) ? ", oversight" : ""}, ${activityLabel(s.activity, s.exit_code)}`}
+                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" ? "waiting" : ""} ${isOversight(s) ? "oversight" : ""}`}
                   onDragStart={(event) => {
                     // Drag a session into the terminal workspace to mirror it as
                     // a split. The dedicated mime keeps the workspace from
@@ -1671,7 +1683,12 @@ const App: Component = () => {
                 >
                   <span class={`activity-dot ${activityClass(s)}${belledSessions().has(s.id) ? " bell" : ""}`} title={activityLabel(s.activity, s.exit_code)} />
                   <div class="session-row-body">
-                    <span class="name">{s.name}</span>
+                    <span class="name">
+                      <Show when={isOversight(s)}>
+                        <span class="session-role-badge" title="Oversight session: supervises the others; pinned awake">oversight</span>
+                      </Show>
+                      {s.name}
+                    </span>
                     <span class={`state${s.activity === "waiting-for-input" ? " state--waiting" : ""}`}>
                       {sessionStateWord(s, railNow(), sessionsStore.ready && !isConnected() ? sessionsStore.lastAnswerAt : null)}
                     </span>
@@ -1783,6 +1800,19 @@ const App: Component = () => {
                         void onHibernation(s, s.keep_awake ? "unpin" : "pin");
                       }}
                     >{s.keep_awake ? "✓ Keep awake" : "Keep awake"}</button>
+                  </Show>
+                  <Show when={s.exit_code === null}>
+                    <button
+                      type="button"
+                      role="menuitemcheckbox"
+                      aria-checked={isOversight(s)}
+                      aria-label={`Oversight session: ${s.name}`}
+                      title="An oversight session supervises the others: it is pinned awake and listed first"
+                      onClick={() => {
+                        setOpenMenuId(null);
+                        void onToggleOversight(s);
+                      }}
+                    >{isOversight(s) ? "✓ Oversight" : "Oversight"}</button>
                   </Show>
                   <div class="row-menu-list-sep" role="separator" />
                   <button

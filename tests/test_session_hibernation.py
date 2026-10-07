@@ -22,11 +22,13 @@ from vogt.application.models import (
     HibernateSessionParams,
     KeepSessionAwakeParams,
     ListAuditParams,
+    ListEventsParams,
     ListSessionsParams,
     RegisterProjectParams,
     SessionInputParams,
     SessionScreenParams,
     SessionWaitParams,
+    SetSessionRoleParams,
     StartSessionParams,
     WakeSessionParams,
 )
@@ -34,11 +36,13 @@ from vogt.application.services import (
     hibernate_session,
     keep_session_awake,
     list_audit,
+    list_events,
     list_sessions,
     register_project,
     session_input,
     session_screen,
     session_wait,
+    set_session_role,
     start_session,
     wake_session,
 )
@@ -59,6 +63,8 @@ class Engine:
         self.live: set[str] = set()
         self.hibernated: set[str] = set()
         self.keep_awake: set[str] = set()
+        #: Sessions nominated as oversight (WI-957).
+        self.oversight: set[str] = set()
         self.counter = 0
         #: The outcome a wait answers with for a live session.
         self.wait_outcome = "ready"
@@ -76,6 +82,7 @@ class Engine:
             "created_at": "2026-10-05T00:00:00Z",
             "conversation": {"agent": "claude", "id": engine_id},
             "keep_awake": engine_id in self.keep_awake,
+            **({"role": "oversight"} if engine_id in self.oversight else {}),
             **(
                 {
                     "hibernation": {
@@ -104,6 +111,9 @@ class Engine:
             self.counter += 1
             engine_id = f"00000000-0000-4000-8000-00000000000{self.counter}"
             self.live.add(engine_id)
+            if payload.get("role") == "oversight":
+                self.oversight.add(engine_id)
+                self.keep_awake.add(engine_id)
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "GET" and path == "/api/sessions":
             ids = sorted(self.live | self.hibernated)
@@ -134,6 +144,13 @@ class Engine:
                 self.keep_awake.add(engine_id)
             else:
                 self.keep_awake.discard(engine_id)
+            return 200, json.dumps(self.summary(engine_id)).encode()
+        if method == "POST" and verb == "role":
+            if payload.get("role") == "oversight":
+                self.oversight.add(engine_id)
+                self.keep_awake.add(engine_id)
+            else:
+                self.oversight.discard(engine_id)
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "POST" and verb == "input":
             if asleep:
@@ -394,3 +411,67 @@ def test_keep_awake_is_passed_through_and_audited(
     assert result.session.keep_awake is True
     audit = list_audit(wired, ListAuditParams(limit=5)).records
     assert audit[0].operation == "session.keep_awake"
+
+
+def test_an_oversight_session_is_nominated_at_start_and_pinned(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-957: role=oversight reaches the engine, which pins it awake; the
+    start's audit row names the role, so the overseer is findable later."""
+    result = start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", template="claude", role="oversight", reason=WHY
+        ),
+    )
+    engine_id = result.session.engine_session_id
+    starts = [r for r in engine.sent if r["path"] == "/api/sessions"]
+    assert starts[-1]["body"]["role"] == "oversight"
+    assert result.session.role == "oversight"
+    assert result.session.keep_awake is True
+    started = [
+        e
+        for e in list_events(wired, ListEventsParams()).events
+        if e.kind == "session.started"
+    ]
+    assert started[-1].summary["role"] == "oversight"
+
+    # A worker is the request this client has always made.
+    _started(wired)
+    starts = [r for r in engine.sent if r["path"] == "/api/sessions"]
+    assert "role" not in starts[-1]["body"]
+    rows = {
+        row.engine_session_id: row
+        for row in list_sessions(wired, ListSessionsParams()).sessions
+    }
+    assert rows[engine_id].role == "oversight"
+    assert {row.role for row in rows.values()} == {"oversight", "worker"}
+
+
+def test_set_role_nominates_any_session_and_is_audited(
+    wired: AppContext, engine: Engine
+) -> None:
+    ses_id, engine_id = _started(wired)
+    result = set_session_role(
+        wired, SetSessionRoleParams(id=ses_id, role="oversight", reason=WHY)
+    )
+    assert engine_id in engine.oversight
+    assert result.session.role == "oversight"
+    assert result.session.keep_awake is True
+    audit = list_audit(wired, ListAuditParams(limit=5)).records
+    assert audit[0].operation == "session.set_role"
+
+    # A session the GUI started (no link in the core) can be nominated too:
+    # the role lives with the engine.
+    engine.live.add(UNLINKED)
+    unlinked = set_session_role(
+        wired, SetSessionRoleParams(id=UNLINKED, role="oversight", reason=WHY)
+    )
+    assert unlinked.session.linked is False
+    assert unlinked.session.role == "oversight"
+
+    back = set_session_role(
+        wired, SetSessionRoleParams(id=ses_id, role="worker", reason=WHY)
+    )
+    assert back.session.role == "worker"
+    assert back.session.keep_awake is True, "demoting leaves the pin alone"

@@ -12,6 +12,7 @@ import {
   holdRailOrder,
   sessionStateWord,
   sortSessionsForRail,
+  isOversight,
   sortSessionsByAttention,
 } from "../sessionRowModel";
 
@@ -26,6 +27,7 @@ function session(over: Partial<SessionSummary> & { id: string }): SessionSummary
     created_at: over.created_at ?? "2026-08-18T08:00:00Z",
     activity_changed_at: over.activity_changed_at,
     blocked: over.blocked,
+    role: over.role,
   };
 }
 
@@ -119,6 +121,20 @@ describe("attention order", () => {
     ];
     expect(sortSessionsForRail(rows, new Set(["idle-old"])).map((row) => row.id))
       .toEqual(["idle-old", "waiting", "idle-new"]);
+  });
+
+  it("lists oversight sessions first, ahead of bookmarks and attention (WI-957)", () => {
+    const rows = [
+      session({ id: "waiting", activity: "waiting-for-input" }),
+      session({ id: "bookmarked", activity: "idle" }),
+      session({ id: "overseer", activity: "idle", role: "oversight" }),
+      session({ id: "worker", activity: "running", role: "worker" }),
+      session({ id: "overseer-busy", activity: "waiting-for-input", role: "oversight" }),
+    ];
+    expect(sortSessionsForRail(rows, new Set(["bookmarked"])).map((row) => row.id))
+      .toEqual(["overseer-busy", "overseer", "bookmarked", "waiting", "worker"]);
+    expect(isOversight(rows[2]!)).toBe(true);
+    expect(isOversight(rows[0]!)).toBe(false);
   });
 });
 

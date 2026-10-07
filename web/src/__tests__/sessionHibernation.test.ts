@@ -8,11 +8,13 @@ const core = vi.hoisted(() => ({
   wake: vi.fn(),
   hibernate: vi.fn(),
   keepAwake: vi.fn(),
+  setRole: vi.fn(),
 }));
 const engine = vi.hoisted(() => ({
   wakeSession: vi.fn(),
   hibernateSession: vi.fn(),
   keepSessionAwake: vi.fn(),
+  setSessionRole: vi.fn(),
 }));
 
 vi.mock("../vogtApi", () => {
@@ -29,12 +31,13 @@ vi.mock("../vogtApi", () => {
     wakeSessionInVogt: core.wake,
     hibernateSessionInVogt: core.hibernate,
     keepSessionAwakeInVogt: core.keepAwake,
+    setSessionRoleInVogt: core.setRole,
   };
 });
 vi.mock("../api", () => ({ api: engine }));
 
 import { VogtUnavailable } from "../vogtApi";
-import { hibernateSession, setKeepAwake, wakeSession } from "../sessionHibernation";
+import { hibernateSession, setKeepAwake, setSessionRole, wakeSession } from "../sessionHibernation";
 
 describe("session hibernation from the GUI", () => {
   beforeEach(() => {
@@ -62,5 +65,17 @@ describe("session hibernation from the GUI", () => {
     core.keepAwake.mockRejectedValue(new Error("the engine does not know a conversation"));
     await expect(setKeepAwake("uuid-3", true)).rejects.toThrow("conversation");
     expect(engine.keepSessionAwake).not.toHaveBeenCalled();
+  });
+
+  it("nominates oversight through the core, falling back to the engine (WI-957)", async () => {
+    core.setRole.mockResolvedValue({ session: {} });
+    await setSessionRole("uuid-4", "oversight");
+    expect(core.setRole).toHaveBeenCalledWith("uuid-4", "oversight", "nominated as oversight from the GUI");
+    expect(engine.setSessionRole).not.toHaveBeenCalled();
+
+    core.setRole.mockRejectedValue(new VogtUnavailable(503, "no core"));
+    engine.setSessionRole.mockResolvedValue({});
+    await setSessionRole("uuid-4", "worker");
+    expect(engine.setSessionRole).toHaveBeenCalledWith("uuid-4", "worker");
   });
 });

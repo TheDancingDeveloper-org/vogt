@@ -278,7 +278,11 @@ hibernated session wakes it, waits until it is ready (`wake_timeout_s`,
 default 120) and then types; the result says `woke`. `session.screen` and
 `session.wait` never wake: a wait answers at once with `outcome:
 "hibernated"` and the kept screen. `session.keep_awake` pins a session
-against the engine's idle policy. Only a session whose conversation id the
+against the engine's idle policy. `session.set_role` (`work.write`, audited)
+nominates a session as `oversight` — the one supervising the others — or
+makes it a `worker` again; `session.start` takes the same `role`. An
+oversight session is pinned awake as it becomes one, rows carry `role`, and
+the GUI lists oversight sessions first (WI-957). Only a session whose conversation id the
 engine knows can hibernate: Claude Code started by Vogt, or any `resume`. A
 shell needs `allow_shell`, and wakes as a fresh shell. The engine side is
 [`ENGINE.md`, "Hibernation"](ENGINE.md#hibernation).
