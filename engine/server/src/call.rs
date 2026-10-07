@@ -39,12 +39,19 @@
 //!
 //! STT and TTS are the deployment's own OpenAI-compatible backends, called
 //! through `AssistantSpeech` exactly as the turn-by-turn voice routes call
-//! them: a call needs no speech protocol of its own. To hide transcription
-//! time, the turn so far is transcribed as soon as the user pauses; if they
-//! do not resume, that transcript is ready (or nearly) when the turn is
-//! declared over. Live captions (`partial_interval_ms`) are off by default:
-//! each one is another full transcription of the whole turn, and on a CPU
-//! that cost stacks rather than hiding.
+//! them: a call needs no speech protocol of its own. The turn is transcribed
+//! *while it is spoken* (`ENGINE_ASSISTANT_CALL_STT_MODE=chunked`, the
+//! default): every pause cuts what was said since the last one into a chunk,
+//! the chunks are transcribed in order with the words before each sent as
+//! the transcriber's `prompt`, and each finished chunk is a live caption. At
+//! the end of the turn only the audio after the last pause is left, so the
+//! transcript is ready about when the turn is declared over. Whisper servers
+//! (speaches included) decode whole clips only, which is why the stream is
+//! cut into clips rather than fed sample by sample. `whole` keeps the
+//! whole-clip path — the turn so far transcribed at each pause, discarded if
+//! the user talks on — for a backend that transcribes short clips badly;
+//! its captions (`partial_interval_ms`) are full re-transcriptions and off
+//! by default.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,7 +73,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use voxcall::{
     Approvals, BoxFuture, CallClientEvent, CallConfig, CallServerEvent, Clip, Endpointer, Inbound,
-    Llm, LlmEvent, LlmSink, Outbound, ProviderError, Providers, ResponseReport, Stt, Tts,
+    Llm, LlmEvent, LlmSink, Outbound, ProviderError, Providers, ResponseReport, Stt, SttMode, Tts,
     TurnOutcome, TurnRequest,
 };
 
@@ -88,7 +95,10 @@ pub struct CallPolicy {
     pub end_of_turn_ms: u32,
     /// Voice needed, while a reply is playing, to stop it.
     pub barge_in_ms: u32,
-    /// How often the turn so far is re-transcribed as a caption; 0 is never.
+    /// Streamed (chunked) or whole-clip transcription of a turn.
+    pub stt_mode: SttMode,
+    /// Whole-clip mode only: how often the turn so far is re-transcribed as
+    /// a caption; 0 is never.
     pub partial_interval_ms: u32,
     /// Said while the model runs tools before its answer; empty is nothing.
     pub filler: String,
@@ -113,6 +123,7 @@ impl Default for CallPolicy {
             enabled: true,
             end_of_turn_ms: 700,
             barge_in_ms: 500,
+            stt_mode: SttMode::Chunked,
             partial_interval_ms: 0,
             filler: "One moment.".to_string(),
             vad: CallVad::Earshot,
@@ -125,6 +136,7 @@ impl CallPolicy {
         CallConfig {
             end_of_turn_ms: self.end_of_turn_ms,
             barge_in_ms: self.barge_in_ms,
+            stt_mode: self.stt_mode,
             partial_interval_ms: self.partial_interval_ms,
             filler: self.filler.clone(),
             ..CallConfig::default()
@@ -326,6 +338,23 @@ impl Stt for SpeechProvider {
         Box::pin(async move {
             self.0
                 .transcribe(wav, "turn.wav", "audio/wav", None, None)
+                .await
+                .map_err(|e| ProviderError(e.to_string()))
+        })
+    }
+
+    /// A chunk of a turn still being spoken, with the turn's words so far as
+    /// the backend's `prompt` — whisper reads it as the text before the clip,
+    /// which keeps a sentence cut at a pause reading as one.
+    fn transcribe_after(
+        &self,
+        wav: Vec<u8>,
+        context: String,
+    ) -> BoxFuture<'_, Result<String, ProviderError>> {
+        Box::pin(async move {
+            let prompt = (!context.trim().is_empty()).then_some(context);
+            self.0
+                .transcribe(wav, "chunk.wav", "audio/wav", prompt, None)
                 .await
                 .map_err(|e| ProviderError(e.to_string()))
         })
