@@ -144,9 +144,7 @@ fn is_secret_file(path: &Path) -> bool {
     if EXACT.contains(&name.as_str()) {
         return true;
     }
-    const SUFFIXES: &[&str] = &[
-        ".key", ".pem", ".p12", ".pfx", ".kdbx", ".keystore", ".jks",
-    ];
+    const SUFFIXES: &[&str] = &[".key", ".pem", ".p12", ".pfx", ".kdbx", ".keystore", ".jks"];
     if SUFFIXES.iter().any(|s| name.ends_with(s)) {
         return true;
     }
@@ -881,15 +879,31 @@ mod tests {
     #[test]
     fn secret_files_are_refused() {
         let secret = [
-            ".env", ".env.local", "prod.env", "id_rsa", "id_ed25519",
-            "server.key", "cert.pem", "store.p12", "vault.kdbx",
-            "github_token", "api-token.txt", "deploy_token_prod", ".netrc",
+            ".env",
+            ".env.local",
+            "prod.env",
+            "id_rsa",
+            "id_ed25519",
+            "server.key",
+            "cert.pem",
+            "store.p12",
+            "vault.kdbx",
+            "github_token",
+            "api-token.txt",
+            "deploy_token_prod",
+            ".netrc",
             "credentials",
         ];
         for name in secret {
             assert!(is_secret_file(Path::new(name)), "{name} must be refused");
         }
-        let allowed = ["README.md", "main.rs", "notes.txt", "identity.ts", "tokenise.py"];
+        let allowed = [
+            "README.md",
+            "main.rs",
+            "notes.txt",
+            "identity.ts",
+            "tokenise.py",
+        ];
         for name in allowed {
             assert!(!is_secret_file(Path::new(name)), "{name} must be readable");
         }
