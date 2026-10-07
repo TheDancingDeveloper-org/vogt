@@ -531,8 +531,8 @@ section that documents it.
 - `GET /api/config` -> `PublicConfig`
   `{gui_stream_url, gui_stream_available, version, product_version,
   source_ref, source_sha, release_url, features, session_templates,
-  assistant_enabled, assistant_stt_enabled, assistant_tts_enabled, vogt,
-  assistant_model?, assistant_profiles?}` — what the browser needs at boot,
+  assistant_enabled, assistant_stt_enabled, assistant_tts_enabled,
+  assistant_call_enabled, vogt, assistant_model?, assistant_profiles?}` — what the browser needs at boot,
   before the user has typed a token into Settings. It is outside the gate
   because it returns no secrets: `assistant_enabled` is presence only, never
   the key.
@@ -1595,6 +1595,10 @@ provisioned. Mutating routes require the `assistant` token capability. See
   server-side synthesis. Proxies `{model, input, voice}` to `/audio/speech` on
   the same kind of ordered list. **404** when unconfigured/all-failed. Audio is
   streamed back and never stored.
+- `GET /api/assistant/call` — WebSocket, the live call (see *Live call
+  contract* below). **404** unless the assistant, STT and TTS are all
+  configured and `ENGINE_ASSISTANT_CALL_ENABLED` is not off, which is exactly
+  when `/api/config` reports `assistant_call_enabled: true`.
 
 `PendingAction` is tagged by `kind`, because the assistant has two effectors
 and a client must not render one as the other:
@@ -1667,6 +1671,103 @@ and `web/tests/browser/gui.spec.ts` drives the whole
 capture -> STT -> repair -> `{text, utterance}` -> approval -> TTS journey (and
 its STT/TTS-unavailable fallbacks) in a real browser with the microphone and
 speech routes stubbed.
+
+### Live call contract
+
+`GET /api/assistant/call` upgrades to a WebSocket carrying one spoken
+conversation (WI-960). The DTOs are `CallClientEvent` / `CallServerEvent` in
+`engine/contract`; event names follow the OpenAI Realtime API's where the
+meaning is the same. The implementation is `engine/server/src/call.rs`.
+
+**Opening.** The first frame must be `{"type":"auth","token":"..."}` within
+5 s, and the bearer needs the `assistant` capability (`4401` unauthorized,
+`4403` lacking the capability, `4408` too slow). One call at a time per
+engine — the assistant has one conversation — so a second gets an `error`
+event and close `4409`. The server answers `session.created`
+`{call_id, sample_rate: 16000, end_of_turn_ms, barge_in_ms}` and
+`call.state {state: "listening"}`.
+
+**Client → server.**
+
+- Binary frames: the microphone as little-endian PCM16, mono, 16 kHz (the PWA
+  sends 20 ms frames; at most 64 KiB per frame).
+- `session.update {profile?}` — the assistant profile the call's turns run on.
+- `output_audio.started {response_id, index}` — the client began playing piece
+  `index`. What was heard of a cut reply is reckoned from these; a client that
+  never sends them is reckoned from the clips' lengths instead.
+- `output_audio.idle {response_id}` — the playback queue ran dry.
+- `response.cancel` — stop the reply now (a tap rather than a barge-in).
+- `action.resolve {id, approve}` — the approval card's buttons. The only way a
+  call approves or denies anything.
+- `ping` → `pong`.
+
+**Server → client.**
+
+- `call.state {state}` — `listening`, `user_speaking`, `thinking`,
+  `speaking`, `awaiting_approval`.
+- `input_audio_buffer.speech_started` / `.speech_stopped` — the user's turn
+  began / ended (endpointing below).
+- `conversation.item.input_audio_transcription.partial {text}` — a live
+  caption: the turn so far, re-transcribed while it is still being spoken
+  (the whole text each time). `.completed {text}` — the turn's transcript.
+- `response.created {response_id}`; `response.text.delta {response_id,
+  delta}` as the model writes.
+- `response.audio.start {response_id, index, text, content_type, bytes}`,
+  then exactly one **binary** frame: that piece's audio, whole, in the
+  container the TTS backend produced. Play pieces in `index` order.
+- `response.done {response_id, status, text?, metrics}` — `status` is
+  `completed`, `interrupted`, `pending_approval` or `failed`; `text` is the
+  reply as the conversation records it (for a cut reply, what was heard).
+- `output_audio.clear {response_id}` — stop playing and drop what is queued.
+- `conversation.item.truncated {response_id, text}` — a reply that had
+  finished generating was cut while being spoken; the conversation now keeps
+  only `text`.
+- `assistant.pending_action {action}` — an approval card (the same
+  `PendingAction` shape as `/api/assistant/history`);
+  `assistant.action_resolved {id, approved}` once its button was pressed.
+- `error {message}`.
+
+**Turn-taking.** The engine runs voice activity detection on the incoming
+audio (`call_audio.rs`: an adaptive noise-floor energy detector, calibrated on
+the call's first 200 ms). A turn starts after 100 ms of voice and ends after
+`end_of_turn_ms` of silence (default 700); a sound with less than 250 ms of
+voice is discarded. When the user pauses for 200 ms the turn so far is
+transcribed at once, so the transcript is usually ready when the turn is
+declared over. STT and TTS are the deployment's own backends, called exactly
+as `/api/assistant/stt` and `/tts` call them.
+
+**The reply.** The transcript runs as an ordinary assistant turn, *streamed*
+(see *Streamed turns* in §6) and told it is on a call (short plain
+sentences). The reply is cut into sentences as it arrives — the first at its
+first clause, to start sooner — and each is synthesized and sent the moment
+it exists, while the model is still writing the rest. When the model starts
+a tool round before saying anything, a filler line (`ENGINE_ASSISTANT_CALL_FILLER`,
+default "One moment.") covers the wait.
+
+**Barge-in.** While a reply is generating or playing, `barge_in_ms` of voice
+(default 500) stops it: the turn is cancelled, `output_audio.clear` is sent,
+and the reply is cut back to what had started playing, flagged `interrupted`
+in the transcript. A shorter sound over a reply (a "mm", or echo) is ignored.
+While the reply plays, the detector demands 8 dB more of a frame, since what
+the client's echo cancellation leaves of the reply is the likeliest false
+trigger.
+
+**Approvals.** A turn that proposes a change ends at the gate exactly as a
+typed one: the card is sent as `assistant.pending_action` and a short line
+says it is on screen. **Nothing spoken approves it.** While a card waits, an
+utterance is answered with a fixed reminder ("That change is waiting on your
+screen…"), recorded in the durable log as an utterance, and never sent to the
+model — so "yes, do it" neither approves the card nor, as a typed message
+would, abandons it. `action.resolve` (a button) resolves it with the call's
+authenticated caller, and the resumed turn is spoken like any other.
+
+**Metrics.** Every `response.done` carries `metrics`: `endpoint_ms` (last
+voice → end of turn), `stt_ms` (end of turn → transcript; near 0 when the
+early transcription had finished), `llm_first_text_ms`, `tts_first_ms` (first
+piece → its audio), `speech_end_to_first_audio_ms` (the headline: last voice
+→ first reply audio sent), `tool_rounds` and `filler`. The same line is logged
+under `vogt::call`. `scripts/call_latency.py` measures a deployment with a
+WAV file and no microphone.
 
 ### File APIs
 
@@ -2227,6 +2328,9 @@ untrusted data like every other cored-derived string.
   end of turn); and the sentence chunker that cuts a streamed reply into
   pieces to speak, with `speakable` to drop the markdown a listener should
   not hear read out.
+- `engine/server/src/call.rs` — the live call's WebSocket orchestrator:
+  endpointing, early and partial transcription, the streamed turn spoken a
+  piece at a time, barge-in, approval cards (see *Live call contract*, §5).
 - `engine/server/src/assistant_api.rs` — HTTP surface (see §5).
 - `web/src/Assistant.tsx` — PWA tab: transcript, composer, mic (APK only),
   TTS toggle, approve/deny cards.
@@ -2259,7 +2363,8 @@ model is still writing the second. Inside the engine a turn can therefore run
   cuts the flagged reply back to that prefix, so the next turn's model is not
   told it said something nobody heard.
 
-No HTTP route streams yet; the call socket is the consumer.
+The live call (`/api/assistant/call`, §5) is the consumer; no plain HTTP
+route streams.
 
 ### Configuring the assistant provider
 
@@ -2314,6 +2419,11 @@ Every setting, with the TOML key for a `--config` file and its default
 | `assistant_tts_format` | `ENGINE_ASSISTANT_TTS_FORMAT` | `mp3` | `response_format` requested from `/audio/speech`; the shipped stack sets `wav` for the bundled Piper sidecar, which serves only wav. The engine passes the upstream content type through, so either plays in the PWA |
 | `assistant_tts_api_key` | `ENGINE_ASSISTANT_TTS_API_KEY` | unset | key for whichever TTS entry needs one |
 | `assistant_speech_attempt_timeout_ms` | `ENGINE_ASSISTANT_SPEECH_TIMEOUT_MS` | `30000` | per-attempt bound on one speech upstream, not on the whole request |
+| — | `ENGINE_ASSISTANT_CALL_ENABLED` | on | offer the live call (`/api/assistant/call`) when the assistant, STT and TTS are configured; off makes it 404 |
+| — | `ENGINE_ASSISTANT_CALL_END_OF_TURN_MS` | `700` | silence after speech that ends the user's turn (300–5000) |
+| — | `ENGINE_ASSISTANT_CALL_BARGE_IN_MS` | `500` | voice needed to stop a reply by speaking over it (100–3000) |
+| — | `ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS` | `1500` | how often a turn is re-transcribed as a live caption; `0` turns captions off (fewer STT calls on a CPU-bound host) |
+| — | `ENGINE_ASSISTANT_CALL_FILLER` | `One moment.` | said while the model runs tools before answering; empty for none |
 
 The Vogt half of the assistant needs no key of its own: it uses
 `vogt_core_url` — the same core the front door proxies — and the caller's

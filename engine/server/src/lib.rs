@@ -13,6 +13,7 @@ pub mod assistant_speech;
 pub mod assistant_stream;
 pub mod auth;
 pub mod autopilot;
+pub mod call;
 pub mod claude_config;
 pub mod client_diag;
 pub mod config;

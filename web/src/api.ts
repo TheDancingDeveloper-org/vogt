@@ -1279,6 +1279,12 @@ export interface PublicConfig {
   assistant_stt_enabled?: boolean;
   assistant_tts_enabled?: boolean;
   /**
+   * A live call (`/api/assistant/call`) can be placed: the assistant, STT and
+   * TTS are all configured and calls are not turned off. Absent from an
+   * older engine, which reads as false.
+   */
+  assistant_call_enabled?: boolean;
+  /**
    * Whether this front door has a vogt-core behind it, and where its surfaces
    * are mounted. Presence only — never a token. Read before offering a Vogt
    * tab: one that opens and then reports an outage is a worse answer than no

@@ -210,6 +210,11 @@ pub struct PublicConfig {
     /// Whether the server-side TTS route is configured. A client with
     /// no on-device synthesis speaks replies through it. Presence only.
     pub assistant_tts_enabled: bool,
+    /// Whether a live call (`/api/assistant/call`) can be placed: the
+    /// assistant, STT and TTS are all configured and the operator has not
+    /// turned calls off. A client offers the Call control only when this is
+    /// true, and otherwise keeps the turn-by-turn voice loop.
+    pub assistant_call_enabled: bool,
     /// Whether this front door has a vogt-core behind it, and where its
     /// surfaces are mounted. Presence only, never a token: a client that has
     /// to provoke a 503 to find out whether Vogt exists cannot render an
@@ -261,6 +266,7 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
             .assistant_speech
             .as_ref()
             .is_some_and(|s| s.tts_enabled()),
+        assistant_call_enabled: crate::call::call_available(&state),
         assistant_model: state.assistant.as_ref().map(|a| a.model().to_string()),
         assistant_profiles: state
             .assistant
