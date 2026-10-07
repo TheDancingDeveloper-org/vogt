@@ -64,6 +64,9 @@ function assistantMessages(): string[] {
 describe("the desktop microphone (Web Speech)", () => {
   beforeEach(() => {
     FakeRecognition.instances = [];
+    // These hold the button and send on release (push-to-talk); the tap
+    // gesture is covered in assistant.test.tsx.
+    localStorage.setItem("vogt.assistant.voice.hold_threshold_ms", "0");
   });
   afterEach(() => vi.unstubAllGlobals());
 

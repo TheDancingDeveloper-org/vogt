@@ -111,6 +111,8 @@ describe("the server-side speech pipeline", () => {
     vi.stubGlobal("webkitSpeechRecognition", undefined);
     vi.stubGlobal("SpeechRecognition", undefined);
     localStorage.clear();
+    // These takes are held and end on release; the tapped take is below.
+    localStorage.setItem("vogt.assistant.voice.hold_threshold_ms", "0");
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -350,5 +352,88 @@ describe("the server-side speech pipeline", () => {
     expect(errors).toEqual([]);
     // The mic retired itself, degrading to typed input.
     expect(container.querySelector('[data-testid="mic"]')).toBeNull();
+  });
+
+  // WI-958 / WI-959 on the server path: a tap opens a recording that runs on
+  // after the finger lifts, and the speaker going quiet — read off the
+  // capture's own energy, since this path has no partial transcripts — ends
+  // it, transcribes it and sends it with no second touch.
+  it("keeps recording after a tap and sends when the speaker goes quiet", async () => {
+    installMediaGlobals();
+    localStorage.removeItem("vogt.assistant.voice.hold_threshold_ms");
+    localStorage.setItem("vogt.assistant.voice.vad_onset_ms", "50");
+    localStorage.setItem("vogt.assistant.voice.silence_duration_ms", "100");
+    resetAudioForTests();
+    let level = 0;
+    class FakeAnalyser {
+      fftSize = 1024;
+      getFloatTimeDomainData(buf: Float32Array) {
+        buf.fill(level);
+      }
+    }
+    class FakeAudioContext {
+      state = "running";
+      destination = {};
+      resume = vi.fn(async () => {});
+      suspend = vi.fn(async () => {});
+      close = vi.fn(async () => {});
+      createMediaStreamSource() {
+        return { connect: vi.fn() };
+      }
+      createAnalyser() {
+        return new FakeAnalyser();
+      }
+    }
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    fakeVogt({}, engine());
+    const errors: string[] = [];
+    const { container } = render(() => <Assistant onError={(m) => errors.push(m)} />);
+    await settle();
+
+    const mic = container.querySelector('[data-testid="mic"]') as HTMLButtonElement;
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    fireEvent.lostPointerCapture(mic, { pointerId: 1 });
+    await settle();
+    // A tap: still recording, nothing posted yet.
+    expect(FakeMediaRecorder.instances.at(-1)?.state).toBe("recording");
+    expect(mic.dataset.listening).toBe("yes");
+    expect(calls("/api/assistant/stt")).toHaveLength(0);
+
+    level = 0.3; // speech
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(calls("/api/assistant/stt")).toHaveLength(0);
+    level = 0; // and quiet
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
+
+    expect(FakeMediaRecorder.instances.at(-1)?.state).toBe("inactive");
+    expect(calls("/api/assistant/stt")).toHaveLength(1);
+    expect(calls("/api/assistant/message")).toHaveLength(1);
+    expect(mic.dataset.listening).toBe("no");
+    expect(errors).toEqual([]);
+  });
+
+  it("ends a tapped recording on a second tap", async () => {
+    installMediaGlobals();
+    localStorage.removeItem("vogt.assistant.voice.hold_threshold_ms");
+    fakeVogt({}, engine());
+    const { container } = render(() => <Assistant onError={() => {}} />);
+    await settle();
+    const mic = container.querySelector('[data-testid="mic"]') as HTMLButtonElement;
+    fireEvent.pointerDown(mic, { pointerId: 1 });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 1 });
+    await settle();
+    expect(mic.dataset.listening).toBe("yes");
+    fireEvent.pointerDown(mic, { pointerId: 2 });
+    await settle();
+    fireEvent.pointerUp(mic, { pointerId: 2 });
+    await settle();
+    expect(calls("/api/assistant/stt")).toHaveLength(1);
+    expect(calls("/api/assistant/message")).toHaveLength(1);
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(mic.dataset.listening).toBe("no");
   });
 });

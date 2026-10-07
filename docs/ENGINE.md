@@ -2700,21 +2700,25 @@ become instructions.
 ### Voice
 
 - **STT** — `@capacitor-community/speech-recognition` (on-device Android
-  recognizer), only inside the APK; browsers fall back to typing. Push-to-talk
-  via the mic button — **held**, not tapped: press to open the microphone,
-  release to send. Partial results land in the composer and the release sends
-  what the recognizer settled on. Held rather than toggled because the take
-  auto-sends: a toggle left on in a room with other people does not merely
-  listen, it eventually speaks. It is also holdable from the keyboard with
-  space or enter, since a control only pointers can work is one some people
-  cannot use. `RECORD_AUDIO` is declared in the manifest; the plugin prompts
-  at first use.
-  A quick tap (as opposed to a hold) opens a **tap-to-talk** take that ends
-  itself: JS owns the silence detection (the dictation-mode end-of-speech is
-  late and untunable), and a grace after the recognizer's own stop includes the
-  final result rather than the last interim guess. A release that lands before
-  the recognizer has finished starting is honoured as a tap, not a stop that
-  would orphan a recognizer that is not up yet.
+  recognizer) inside the APK, Web Speech in a desktop browser, or the server
+  pipeline (`MediaRecorder` → `POST /api/assistant/stt`) when the device has
+  neither or prefers it. The composer mic is **tap-to-talk**: a tap opens a
+  take, partial results land in the composer, and the take auto-sends when the
+  speaker goes quiet (`silence_duration_ms` after the transcript last changed;
+  on the server path, an energy endpointer over the capture — speech onset,
+  then that much quiet) or when the mic is tapped again. A press held past
+  `hold_threshold_ms` (400) is **push-to-talk** instead: the take is exactly as
+  long as the hold and ends on release, and a pause mid-hold never ends it. An
+  open tap take is bounded — one that hears nothing ends without sending after
+  `no_speech_timeout_ms` (8000; the Android recognizer's own no-speech error
+  never reaches JS), and every tap take is capped at `max_turn_ms`. The
+  button works from the keyboard (space/enter tap or hold the same way).
+  JS owns the silence detection (the dictation-mode end-of-speech is late and
+  untunable), and a grace after the recognizer's own stop includes the final
+  result rather than the last interim guess. A press or stop tap that lands
+  before the native recognizer has finished starting is honoured once it is
+  up, never against a recognizer that is not up yet. `RECORD_AUDIO` is
+  declared in the manifest; the plugin prompts at first use.
 - **TTS** — Web Speech `speechSynthesis` when the browser has it (the desktop
   PWA), sentence-chunked, toggle persisted in localStorage. The synth is primed
   on the toggle gesture because the Android WebView requires a user gesture
@@ -2732,7 +2736,9 @@ become instructions.
   flag that keeps the session alive. Default is half-duplex (mic closed while a
   reply plays). Turn detection is client-owned on every backend, tuned by
   localStorage in the OpenAI Realtime vocabulary so a Realtime-shaped backend
-  adopts it unrenamed: `vogt.assistant.voice.silence_duration_ms` (1000),
+  adopts it unrenamed: `vogt.assistant.voice.silence_duration_ms` (1000, also
+  the tap take's window), `hold_threshold_ms` (400, tap take only),
+  `no_speech_timeout_ms` (8000, tap take only),
   `final_result_grace_ms` (300), `max_turn_ms` (30000),
   `idle_timeout_ms` (60000), `max_empty_turns` (3),
   `interrupt_response` (false), `reopen_delay_ms` (400 — settle time before

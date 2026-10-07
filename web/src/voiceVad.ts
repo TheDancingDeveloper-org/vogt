@@ -172,3 +172,108 @@ export function startBargeInDetection(
 
   return stop;
 }
+
+// -- end-of-turn on the server-STT take (WI-959) ----------------------------
+//
+// The on-device recognizers report partial transcripts, and the tap take's
+// silence timer is rearmed on each one. The server-STT take has no partials —
+// it is a `MediaRecorder` capture that is only transcribed once it ends — so
+// it had no way to notice the speaker had gone quiet, and a tap on it could
+// only be ended by another tap. This is that missing signal: an energy-based
+// endpointer over the same capture stream, so going quiet sends here too.
+
+/** Endpointer tuning; the onset pair is shared with barge-in. */
+export interface EndpointConfig extends OnsetConfig {
+  /** Quiet time after speech that ends the turn (the tap take's silence window). */
+  silence_duration_ms: number;
+}
+
+/**
+ * Speech-then-silence detection over frame energies. `onSpeech` fires once,
+ * when a sustained onset (the barge-in accumulator, so a click does not count)
+ * shows the speaker has started; `onSilence` fires once, after speech, when the
+ * frames have stayed below the threshold for `silence_duration_ms`. Nothing
+ * fires for a capture that never heard speech — the caller owns that timeout.
+ */
+export class SilenceEndpointer {
+  private readonly onset: OnsetDetector;
+  private speaking = false;
+  private quietMs = 0;
+  private ended = false;
+
+  constructor(
+    private readonly cfg: EndpointConfig,
+    private readonly handlers: { onSpeech: () => void; onSilence: () => void },
+  ) {
+    this.onset = new OnsetDetector(cfg, () => {
+      this.speaking = true;
+      this.quietMs = 0;
+      this.handlers.onSpeech();
+    });
+  }
+
+  /** Feed one analysis frame: `rms` in [0, 1], `dtMs` its duration. */
+  push(rms: number, dtMs: number): void {
+    if (this.ended) return;
+    if (!this.speaking) {
+      this.onset.push(rms, dtMs);
+      return;
+    }
+    if (rms >= this.cfg.vad_threshold) {
+      this.quietMs = 0;
+      return;
+    }
+    this.quietMs += dtMs;
+    if (this.quietMs >= this.cfg.silence_duration_ms) {
+      this.ended = true;
+      this.handlers.onSilence();
+    }
+  }
+}
+
+/** The endpointer's frame period; also its clock. */
+const ENDPOINT_FRAME_MS = 50;
+
+/**
+ * Watch an already-open capture stream (the server take's own `MediaRecorder`
+ * stream — no second microphone) for speech and then silence. Returns a stop
+ * handle that frees the analysis graph but leaves the stream's tracks alone:
+ * the recorder owns them. Without Web Audio this is a no-op, and the take
+ * falls back to ending on a tap or the turn cap.
+ */
+export function watchStreamForSilence(
+  stream: MediaStream,
+  cfg: EndpointConfig,
+  handlers: { onSpeech: () => void; onSilence: () => void },
+): StopBargeIn {
+  const w = window as unknown as WindowAudio;
+  const Ctx = w.AudioContext ?? w.webkitAudioContext;
+  if (!Ctx) return () => {};
+  let audioCtx: AudioContext | null = null;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let stopped = false;
+  const stop: StopBargeIn = () => {
+    if (stopped) return;
+    stopped = true;
+    if (timer !== null) clearInterval(timer);
+    timer = null;
+    void audioCtx?.close().catch(() => {});
+    audioCtx = null;
+  };
+  try {
+    audioCtx = new Ctx();
+    const source = audioCtx.createMediaStreamSource(stream);
+    const analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    const buffer = new Float32Array(analyser.fftSize);
+    const endpointer = new SilenceEndpointer(cfg, handlers);
+    timer = setInterval(() => {
+      analyser.getFloatTimeDomainData(buffer);
+      endpointer.push(frameRms(buffer), ENDPOINT_FRAME_MS);
+    }, ENDPOINT_FRAME_MS);
+  } catch {
+    stop();
+  }
+  return stop;
+}

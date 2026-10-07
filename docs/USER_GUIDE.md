@@ -531,11 +531,13 @@ text, whether Enter will be appended, and the target session before **Deny**
 and **Approve on screen** can be pressed.
 
 **Voice never approves.** Speech reaches the assistant only as a user message,
-and an approval is a tap. Push-to-talk is *held*, not toggled — press to open
-the microphone, release to send — because a take auto-sends, and a toggle left
-on in a room with other people does not merely listen. The button is holdable
-from the keyboard as well as by pointer. A quick tap (rather than a hold) also
-works: it opens the microphone and sends once you go quiet.
+and an approval is a tap. The microphone beside the message box is **tap to
+talk**: tap it, speak, and the message sends on its own about a second after
+you stop talking — or tap it again to send straight away. Holding it down
+instead works as push-to-talk: the message sends when you let go, and a pause
+while you hold never cuts you off. A tap that hears nothing closes the
+microphone again after a few seconds without sending anything, so it is never
+left open. Space or Enter taps and holds it from the keyboard.
 
 **Hands-free conversation.** The head control beside Spoken replies starts a
 hands-free conversation: speak, go quiet, and the turn sends on its own; the
