@@ -16,6 +16,7 @@ import { Capacitor } from "@capacitor/core";
 import type { TerminalActions } from "./Terminal";
 import type { AgentTaskDraftGuard } from "./AgentTasks";
 import Board from "./Board";
+import { setFileViewOpener } from "./markdown";
 import Sessions from "./Sessions";
 import RouteOutcomeView from "./RouteOutcome";
 import { isEditableTarget, matchAppShortcut } from "./keyboardShortcuts";
@@ -477,6 +478,7 @@ function pathFor(tab: Tab): string {
 
 const App: Component = () => {
   const navigate = useNavigate();
+  setFileViewOpener((path) => { openEditorTab(path); navigate(`/e/${encodeURIComponent(path)}`); });
   const params = useParams<{ id?: string; path?: string; ref?: string }>();
   const location = useLocation();
   const [settingsOpen, setSettingsOpen] = createSignal(false);

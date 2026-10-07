@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 import { render } from "@solidjs/testing-library";
-import { renderMarkdown, safeHref } from "../markdown";
+import { renderMarkdown, safeHref, filePathRef, setFileViewOpener } from "../markdown";
 
 function mount(source: string): HTMLElement {
   const { container } = render(() => <div>{renderMarkdown(source)}</div>);
@@ -115,5 +115,33 @@ describe("safeHref — the href allow-list", () => {
     // Entity-encoded and whitespace-split disguises are caught too.
     expect(safeHref("&#106;avascript:alert(1)")).toBeNull();
     expect(safeHref("java\tscript:alert(1)")).toBeNull();
+  });
+});
+
+describe("file paths", () => {
+  it("recognises real paths and refuses everything else", () => {
+    expect(filePathRef("/home/sprooty/Working/notes.md")).toBe("/home/sprooty/Working/notes.md");
+    expect(filePathRef("file:///home/sprooty/Working/notes.md")).toBe("/home/sprooty/Working/notes.md");
+    expect(filePathRef("./docs/ARCHITECTURE.md")).toBe("docs/ARCHITECTURE.md");
+    expect(filePathRef("src/vogt/app.py")).toBe("src/vogt/app.py");
+    expect(filePathRef("/etc")).toBeNull();
+    expect(filePathRef("https://example.com/a/b")).toBeNull();
+    expect(filePathRef("just-a-word")).toBeNull();
+  });
+
+  it("makes a bare path clickable and opens the viewer", () => {
+    const opened: string[] = [];
+    setFileViewOpener((path: string) => opened.push(path));
+    const c = render(() => <div>{renderMarkdown("see /home/sprooty/Working/notes.md please")}</div>);
+    const link = c.container.querySelector("button.md-file-link") as HTMLButtonElement;
+    expect(link.textContent).toBe("/home/sprooty/Working/notes.md");
+    link.click();
+    expect(opened).toEqual(["/home/sprooty/Working/notes.md"]);
+  });
+
+  it("keeps an https link as a normal link", () => {
+    const c = render(() => <div>{renderMarkdown("[docs](https://example.com/guide)")}</div>);
+    expect(c.container.querySelector("a")?.getAttribute("href")).toBe("https://example.com/guide");
+    expect(c.container.querySelector("button.md-file-link")).toBeNull();
   });
 });
