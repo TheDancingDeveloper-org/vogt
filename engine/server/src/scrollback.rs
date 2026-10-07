@@ -13,10 +13,9 @@ use bytes::Bytes;
 /// leading sequence is misparsed — a chopped `\x1b[32m` left as `\x1b[s...`
 /// is read as "save cursor" and eats the following characters, so a line like
 /// `scope` renders as `cope`. To avoid that, overflow trimming
-/// advances the cut forward to just past the next newline, so the retained
-/// buffer always begins in the terminal's ground state: a line feed never
-/// appears inside a CSI/OSC sequence and `0x0A` is never a UTF-8 continuation
-/// byte, so a replay that starts there is always safe.
+/// advances the cut forward to just past the next newline or onto the next
+/// `ESC`, so the retained buffer always begins in the terminal's ground state
+/// (see [`ground_state_start`]).
 pub struct Scrollback {
     capacity: usize,
     buf: Vec<u8>,
@@ -30,16 +29,28 @@ pub struct Scrollback {
 /// terminal's ground state.
 ///
 /// We must drop *at least* `at_least` bytes (the ring-buffer overflow). We
-/// then extend the cut forward to just past the next newline, because the byte
-/// after a `\n` is the only position we can prove is ground state without
-/// replaying the entire prior history: a line feed never appears inside a
-/// CSI/OSC escape sequence, and `0x0A` is never a UTF-8 continuation byte, so
-/// no multibyte character straddles it. When `at_least` is 0 nothing is being
-/// cut off the front (the retained region already starts at a natural stream
-/// boundary), so we align nothing. When no newline exists at or after the cut
-/// (a single very long line with no line breaks) we fall back to the raw
-/// `at_least` cut rather than dropping the whole buffer.
-fn newline_aligned_start(buf: &[u8], at_least: usize) -> usize {
+/// then extend the cut forward to the nearest position we can prove is ground
+/// state without replaying the entire prior history:
+///
+/// - just past a newline: a line feed never appears inside a CSI/OSC escape
+///   sequence, and `0x0A` is never a UTF-8 continuation byte;
+/// - on an `ESC` byte: `ESC` always begins a sequence — inside a CSI or OSC
+///   it aborts or terminates the one in progress — and is never part of a
+///   multibyte character, so a replay that starts on it starts a sequence
+///   from its beginning.
+///
+/// Whichever comes first wins, so the least is dropped. The `ESC` seam is
+/// what a full-screen TUI needs: opencode (OpenTUI) paints every frame with
+/// cursor addressing and emits no newline at all, so a newline-only seam
+/// never existed in its output and a cut fell back to the raw byte offset —
+/// landing inside `ESC[?2026l` left `26l` on the replayed screen (WI-987).
+///
+/// When `at_least` is 0 nothing is being cut off the front (the retained
+/// region already starts at a natural stream boundary), so we align nothing.
+/// When neither seam exists at or after the cut (plain text with no line
+/// breaks) we fall back to the raw `at_least` cut, moved forward off any
+/// UTF-8 continuation byte, rather than dropping the whole buffer.
+fn ground_state_start(buf: &[u8], at_least: usize) -> usize {
     if at_least == 0 {
         return 0;
     }
@@ -47,11 +58,20 @@ fn newline_aligned_start(buf: &[u8], at_least: usize) -> usize {
         return buf.len();
     }
     // The newline must sit at index >= at_least - 1 so that dropping through it
-    // (its index + 1) still removes at least `at_least` bytes.
-    let from = at_least - 1;
-    match buf[from..].iter().position(|&b| b == b'\n') {
-        Some(rel) => from + rel + 1,
-        None => at_least,
+    // (its index + 1) still removes at least `at_least` bytes; an `ESC` is kept,
+    // so it must sit at index >= at_least.
+    let after_newline = buf[at_least - 1..]
+        .iter()
+        .position(|&b| b == b'\n')
+        .map(|rel| at_least + rel);
+    let at_escape = buf[at_least..]
+        .iter()
+        .position(|&b| b == 0x1b)
+        .map(|rel| at_least + rel);
+    match (after_newline, at_escape) {
+        (Some(nl), Some(esc)) => nl.min(esc),
+        (Some(seam), None) | (None, Some(seam)) => seam,
+        (None, None) => utf8_aligned_start(buf, at_least),
     }
 }
 
@@ -84,7 +104,7 @@ impl Scrollback {
             // forward to a ground-state boundary so replay never starts inside
             // an escape sequence or a UTF-8 char.
             let start = chunk.len() - self.capacity;
-            let start = newline_aligned_start(chunk, start);
+            let start = ground_state_start(chunk, start);
             self.buf.clear();
             self.buf.extend_from_slice(&chunk[start..]);
             return;
@@ -99,15 +119,18 @@ impl Scrollback {
         // capacity; `total_written`/`snapshot_since` already tolerate
         // variable-size trims.
         let slack = self.capacity / 16;
-        if self.buf.len() + chunk.len() > self.capacity + slack {
-            let overflow = (self.buf.len() + chunk.len()) - self.capacity;
+        let trim = self.buf.len() + chunk.len() > self.capacity + slack;
+        // Append first, so the seam search below can find a newline or `ESC`
+        // in the new chunk when the cut falls past every one in the old bytes.
+        self.buf.extend_from_slice(chunk);
+        if trim {
+            let overflow = self.buf.len() - self.capacity;
             // Drop at least the oldest `overflow` bytes, extending the cut
-            // forward to just past the next newline so the retained buffer
+            // forward to the next newline or `ESC` so the retained buffer
             // begins in the terminal's ground state (see the type comment).
-            let drop_to = newline_aligned_start(&self.buf, overflow);
+            let drop_to = ground_state_start(&self.buf, overflow);
             self.buf.drain(..drop_to);
         }
-        self.buf.extend_from_slice(chunk);
     }
 
     /// Snapshot the entire scrollback as a single `Bytes` (cheap-ish clone).
@@ -120,23 +143,17 @@ impl Scrollback {
     /// or a UTF-8 character. A cold-attaching client that sends a tail
     /// hint gets this instead of the whole ring buffer.
     ///
-    /// The cut is aligned exactly like the overflow trim in [`Self::push`]:
-    /// advance past the next newline when there is one (the only position we
-    /// can prove is the terminal's ground state), otherwise fall forward to the
-    /// next UTF-8 codepoint start. Both only ever move the cut later, so the
-    /// result is always `<= limit`.
+    /// The cut is aligned exactly like the overflow trim in [`Self::push`]
+    /// (see [`ground_state_start`]): forward to the next newline or `ESC`,
+    /// otherwise to the next UTF-8 codepoint start. Each only ever moves the
+    /// cut later, so the result is always `<= limit`.
     pub fn snapshot_tail(&self, limit: usize) -> Bytes {
         if self.buf.len() <= limit {
             return Bytes::copy_from_slice(&self.buf);
         }
         // Drop at least this many leading bytes so the tail is within `limit`.
         let at_least = self.buf.len() - limit;
-        let start = newline_aligned_start(&self.buf, at_least);
-        // `newline_aligned_start` may fall back to the raw `at_least` cut when
-        // the tail holds no newline; that raw cut can land on a UTF-8
-        // continuation byte, so align forward once more. When it already landed
-        // just past a newline this is a no-op (that byte is a valid start).
-        let start = utf8_aligned_start(&self.buf, start);
+        let start = ground_state_start(&self.buf, at_least);
         Bytes::copy_from_slice(&self.buf[start..])
     }
 
@@ -294,18 +311,18 @@ mod tests {
     // ---- boundary-safe overflow trimming ----
 
     #[test]
-    fn newline_aligned_start_advances_past_next_newline() {
+    fn ground_state_start_advances_past_next_newline() {
         // Must drop >= 2 bytes; the next newline is at index 3, so the retained
         // region starts at 4 ("def").
-        assert_eq!(newline_aligned_start(b"abc\ndef", 2), 4);
+        assert_eq!(ground_state_start(b"abc\ndef", 2), 4);
         // Newline exactly at the minimum-drop boundary is honoured, not skipped.
-        assert_eq!(newline_aligned_start(b"a\nbcd", 1), 2);
-        // No newline at or after the cut: fall back to the raw minimum drop.
-        assert_eq!(newline_aligned_start(b"abcdef", 3), 3);
+        assert_eq!(ground_state_start(b"a\nbcd", 1), 2);
+        // No newline or ESC at or after the cut: fall back to the raw minimum drop.
+        assert_eq!(ground_state_start(b"abcdef", 3), 3);
         // Nothing to drop off the front: never advance.
-        assert_eq!(newline_aligned_start(b"a\nbc", 0), 0);
+        assert_eq!(ground_state_start(b"a\nbc", 0), 0);
         // Dropping everything is clamped to the buffer length.
-        assert_eq!(newline_aligned_start(b"ab", 5), 2);
+        assert_eq!(ground_state_start(b"ab", 5), 2);
     }
 
     /// A chopped ANSI escape sequence is the failure this guards against: an overflow cut
@@ -369,5 +386,69 @@ mod tests {
         assert_eq!(sb.snapshot_since(6).as_deref(), Some(&b"ef\ngh"[..]));
         // A cursor older than what the ring retained forces a full reset.
         assert!(sb.snapshot_since(2).is_none());
+    }
+
+    /// One OpenTUI-style frame: a synchronized update of cursor-addressed,
+    /// coloured cells, with no newline anywhere — what opencode emits.
+    fn tui_frame(n: usize) -> Vec<u8> {
+        format!(
+            "\x1b[?2026h\x1b[?25l\x1b[31;9H\x1b[38;5;114m\x1b[48;5;232m\u{2299} \x1b[0m\
+             \x1b[31;11H\x1b[38;5;255mtick {n}\x1b[0m\x1b[?25h\x1b[?2026l"
+        )
+        .into_bytes()
+    }
+
+    /// WI-987: a newline-free TUI stream used to be cut at the raw byte offset,
+    /// so a tail could begin with `26l` — the end of `ESC[?2026l` — and replay
+    /// it as text. Every cut must now begin on an `ESC`.
+    #[test]
+    fn a_newline_free_tui_tail_always_starts_on_an_escape() {
+        let mut stream = Vec::new();
+        for n in 0..40 {
+            stream.extend(tui_frame(n));
+        }
+        assert!(!stream.contains(&b'\n'));
+        let mut sb = Scrollback::new(stream.len());
+        sb.push(&stream);
+        for limit in 1..stream.len() {
+            let tail = sb.snapshot_tail(limit);
+            assert!(tail.len() <= limit);
+            // A window holding no ESC at all has no seam to find; it is kept
+            // as the raw cut, as plain text with no line breaks always was.
+            if !stream[stream.len() - limit..].contains(&0x1b) {
+                continue;
+            }
+            assert!(
+                tail[0] == 0x1b,
+                "limit {limit}: tail starts {:?}",
+                String::from_utf8_lossy(&tail[..tail.len().min(12)])
+            );
+        }
+    }
+
+    /// The same for the overflow trim, at every capacity across a frame.
+    #[test]
+    fn a_newline_free_tui_overflow_trim_starts_on_an_escape() {
+        let frame_len = tui_frame(0).len();
+        for cap in frame_len..frame_len * 3 {
+            let mut sb = Scrollback::new(cap);
+            for n in 0..20 {
+                sb.push(&tui_frame(n));
+            }
+            let snap = sb.snapshot();
+            assert_eq!(snap.first(), Some(&0x1b), "capacity {cap}");
+        }
+    }
+
+    #[test]
+    fn the_nearer_of_a_newline_and_an_escape_wins() {
+        // ESC first: kept from the ESC itself.
+        assert_eq!(ground_state_start(b"ab\x1b[1mc\nd", 1), 2);
+        // Newline first: kept from just past it.
+        assert_eq!(ground_state_start(b"ab\nc\x1b[1md", 1), 3);
+        // An ESC before the minimum drop does not count.
+        assert_eq!(ground_state_start(b"\x1b[1mabc\x1b[0m", 2), 7);
+        // No seam: the raw cut, moved off a UTF-8 continuation byte.
+        assert_eq!(ground_state_start(&[0x61, 0xC3, 0xA9, 0x62], 2), 3);
     }
 }

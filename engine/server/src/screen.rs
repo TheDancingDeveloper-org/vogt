@@ -324,6 +324,86 @@ mod tests {
         assert_eq!(r.lines, vec!["x"]);
     }
 
+    /// Every non-blank cell's text, for asserting that nothing leaked.
+    fn visible(r: &Rendered) -> String {
+        r.lines.join("\n").trim().to_string()
+    }
+
+    /// WI-987: DEC private modes the emulator implements, ignores or has never
+    /// heard of, and the terminal queries a modern TUI sends at startup, are
+    /// all consumed whole. Not one parameter byte reaches the grid as text,
+    /// and a synchronized update (mode 2026) never holds the screen back.
+    #[test]
+    fn private_modes_and_queries_never_reach_the_grid() {
+        let sequences: &[&[u8]] = &[
+            b"\x1b[?2026h",                       // begin synchronized update
+            b"\x1b[?2026l",                       // end synchronized update
+            b"\x1b[?9999h",                       // a mode nobody implements
+            b"\x1b[?9999;2026;1049l",             // several at once
+            b"\x1b[?2027h\x1b[?2031h\x1b[?1016h", // grapheme, theme, pixel mouse
+            b"\x1b]11;?\x07",                     // OSC 11 background query, BEL
+            b"\x1b]10;?\x1b\\",                   // OSC 10 foreground query, ST
+            b"\x1b]4;0;?\x07",                    // palette query
+            b"\x1b[?2026$p",                      // DECRQM: is 2026 supported?
+            b"\x1b[>0q",                          // XTVERSION
+            b"\x1b[?u",                           // kitty keyboard query
+            b"\x1b[>4;1m",                        // modifyOtherKeys
+            b"\x1bP+q4d73\x1b\\",                 // XTGETTCAP
+            b"\x1b]66;w=1; \x1b\\",               // kitty text sizing probe
+            b"\x1b[6n",                           // cursor position report
+        ];
+        for seq in sequences {
+            let r = render(seq, 3, 40);
+            assert_eq!(visible(&r), "", "{:?} leaked", String::from_utf8_lossy(seq));
+            // Text after the sequence lands at the origin, unshifted.
+            let mut bytes = seq.to_vec();
+            bytes.extend_from_slice(b"ok");
+            let r = render(&bytes, 3, 40);
+            assert_eq!(r.lines[0], "ok", "{:?}", String::from_utf8_lossy(seq));
+        }
+        // A frame drawn inside a synchronized update shows, whether or not the
+        // update is ever closed: there is no held state to get stuck in.
+        let open = render(b"\x1b[?2026h\x1b[2;3Hframe", 3, 20);
+        assert_eq!(open.lines[1], "  frame");
+        let closed = render(b"\x1b[?2026h\x1b[2;3Hframe\x1b[?2026l", 3, 20);
+        assert_eq!(closed.lines, open.lines);
+    }
+
+    /// WI-987 end to end: an opencode-shaped stream (no newline anywhere, every
+    /// frame a synchronized update) cut by the scrollback at every possible
+    /// size renders without a fragment of an escape sequence as text — the
+    /// `26l` an operator saw on a blanked opencode session.
+    #[test]
+    fn a_tui_tail_cut_anywhere_renders_no_sequence_fragments() {
+        let mut stream = b"\x1b[?1049h\x1b[?2027h".to_vec();
+        for n in 0..30 {
+            stream.extend(
+                format!(
+                    "\x1b[?2026h\x1b[?25l\x1b[2;1H\x1b[38;5;114m\x1b[48;5;232m~\x1b[0m\
+                     \x1b[2;3H\x1b[38;5;255mtick{n:02}\x1b[0m\x1b[?2026l"
+                )
+                .bytes(),
+            );
+        }
+        let mut sb = crate::scrollback::Scrollback::new(stream.len());
+        sb.push(&stream);
+        let frame = stream.len() / 30;
+        for limit in frame..stream.len() {
+            let tail = sb.snapshot_tail(limit);
+            let r = render(&tail, 3, 20);
+            // A tail that starts after a frame's cursor move draws that
+            // frame's first cells at the origin — a diff stream carries no
+            // more context than that — but never a sequence's bytes as text.
+            for line in &r.lines {
+                assert!(
+                    !line.contains(|c: char| "[;?hlm".contains(c)),
+                    "limit {limit}: fragment in {r:?}"
+                );
+            }
+            assert_eq!(r.lines[1], "~ tick29", "limit {limit}: {r:?}");
+        }
+    }
+
     #[test]
     fn recognises_agent_prompts() {
         let claude = vec![
