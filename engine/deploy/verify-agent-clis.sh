@@ -85,6 +85,13 @@ check_package() {
     actual="$(npm list --global --prefix="$prefix" --depth=0 --json "$package" 2>/dev/null \
         | python3 -c 'import json,sys; data=json.load(sys.stdin); package=sys.argv[1]; print(data.get("dependencies",{}).get(package,{}).get("version", ""))' "$package" \
         || true)"
+    # No version reported means the package is not installed here, not that it
+    # is installed at the wrong version. A build with the CLIs off
+    # (INSTALL_AI_CLIENTS unset, as the e2e engine is) still ships the package
+    # manager's own stub binary, and `npm list` answers nothing for it — so
+    # treating that as a mismatch refused to boot the e2e stack on main over a
+    # pin the image never claimed to satisfy. A real install always reports one.
+    [ -n "$actual" ] || return 0
     [ "$actual" = "$expected" ] || report "$package is $actual at $prefix, expected pin $expected"
 }
 
