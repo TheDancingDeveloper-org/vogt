@@ -2415,7 +2415,16 @@ untrusted data like every other cored-derived string.
   card as approvals (see *Live call contract*, §5).
 - `engine/server/src/assistant_api.rs` — HTTP surface (see §5).
 - `web/src/Assistant.tsx` — PWA tab: transcript, composer, mic (APK only),
-  TTS toggle, approve/deny cards.
+  TTS toggle, approve/deny cards, and the Call control (shown when
+  `/api/config` reports `assistant_call_enabled`).
+- `web/src/callSession.ts`, `callCapture.ts` (+ `public/call-capture-worklet.js`),
+  `callPlayer.ts`, `callProtocol.ts` — the PWA side of the live call: the
+  echo-cancelled microphone framed to 16 kHz PCM16 by an AudioWorklet (a
+  same-origin file, as the CSP requires), the gapless Web Audio queue that
+  plays each piece and reports what started, and the socket client (silence
+  while muted, so a turn still ends; reconnects up to three times). During a
+  call the approval card's buttons go up the call socket, so the outcome is
+  spoken.
 
 The runtime only exists when `assistant_api_key` is configured; otherwise the
 routes 404 and the PWA hides the tab (`assistant_enabled` in `GET /api/config`).

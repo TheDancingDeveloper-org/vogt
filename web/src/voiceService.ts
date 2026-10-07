@@ -132,3 +132,29 @@ export async function registerPushSpeaker(
     return () => {};
   }
 }
+
+/**
+ * Put the phone in its call audio mode for a live call (WI-960): the platform's
+ * communication mode, which brings in the hardware echo canceller, with the
+ * reply on the loudspeaker (or a connected headset). The native shell records
+ * what it changed and restores it on `stopCallAudio` or when the app goes
+ * away. A no-op off the Android app, and on a shell too old to know the op.
+ */
+export function startCallAudio(): void {
+  postVoiceOp("call-start");
+}
+
+/** Leave the call audio mode. Idempotent. */
+export function stopCallAudio(): void {
+  postVoiceOp("call-end");
+}
+
+function postVoiceOp(op: string): void {
+  const bridge = voiceBridge();
+  if (!isNativePlatform() || !bridge?.postMessage) return;
+  try {
+    bridge.postMessage(JSON.stringify({ op }));
+  } catch {
+    /* the shell is gone; nothing to switch */
+  }
+}

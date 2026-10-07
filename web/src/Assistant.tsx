@@ -26,6 +26,8 @@ import GoToButton from "./GoToButton";
 import {
   api,
   ApiError,
+  getBase,
+  getToken,
   type AssistantPendingAction,
   type AssistantReply,
   type AssistantSendInputAction,
@@ -47,7 +49,9 @@ import {
 import {
   onVoiceServiceEnded,
   registerPushSpeaker,
+  startCallAudio,
   startVoiceService,
+  stopCallAudio,
   stopVoiceService,
 } from "./voiceService";
 import {
@@ -59,7 +63,19 @@ import {
 } from "./voiceTurn";
 import { readOnsetConfig, startBargeInDetection, watchStreamForSilence } from "./voiceVad";
 import { diag, diagBoot } from "./diag";
-import { audioContextAvailable, playAudioBlob, primeAudio, suspendAudio, type Playback } from "./audioPlayback";
+import {
+  audioContextAvailable,
+  playAudioBlob,
+  primeAudio,
+  sharedAudioContext,
+  suspendAudio,
+  type Playback,
+} from "./audioPlayback";
+import { callPhaseLabel, type CallView } from "./callProtocol";
+import { CallSession, callSocketUrl } from "./callSession";
+import { callCaptureSupported, startCapture } from "./callCapture";
+import { CallPlayer } from "./callPlayer";
+import { runtimeTransport } from "./runtimeTransport";
 
 const TTS_PREF_KEY = "vogt.assistant.tts";
 
@@ -320,6 +336,10 @@ export default function Assistant(props: AssistantProps) {
   // it never auto-resumes on mount. `voiceState`/`voiceMuted` mirror the pure
   // machine for the status chip.
   const [conversationOn, setConversationOn] = createSignal(false);
+  const [callEnabled, setCallEnabled] = createSignal(false);
+  const [callView, setCallView] = createSignal<CallView | null>(null);
+  const [callMuted, setCallMuted] = createSignal(false);
+  let call: CallSession | null = null;
   const [voiceState, setVoiceState] = createSignal<VoiceState>("idle");
   const [voiceMuted, setVoiceMuted] = createSignal(false);
   const [listening, setListening] = createSignal(false);
@@ -630,6 +650,7 @@ export default function Assistant(props: AssistantProps) {
     setProfiles(cfg.assistant_profiles ?? []);
     setServerSttEnabled(cfg.assistant_stt_enabled ?? false);
     setServerTtsEnabled(cfg.assistant_tts_enabled ?? false);
+    setCallEnabled(cfg.assistant_call_enabled ?? false);
   };
 
   const configureSpeechInput = async () => {
@@ -729,6 +750,8 @@ export default function Assistant(props: AssistantProps) {
     inFlight()?.abort();
     // Leaving the surface ends the conversation, so release the held service
     // and drop the native listeners (all no-ops on the desktop PWA).
+    call?.hangUp();
+    stopCallAudio();
     stopVoiceService();
     voiceEndedCleanup?.();
     pushSpeakerCleanup?.();
@@ -850,6 +873,13 @@ export default function Assistant(props: AssistantProps) {
   const resolve = async (approve: boolean) => {
     const action = pendingAction();
     if (!action || busy()) return;
+    // On a call, the button goes up the call socket so the outcome is spoken.
+    // (It is still a button: nothing said on the call resolves a card.)
+    if (call?.resolve(action.id, approve)) {
+      setPendingAction(null);
+      invalidateAssistantSnapshot();
+      return;
+    }
     setBusy(true);
     setPendingAction(null);
     // The action was consumed locally before the network round-trip. Any
@@ -1475,6 +1505,81 @@ export default function Assistant(props: AssistantProps) {
 
   /** Tear the conversation down. `userInitiated` when the toggle/leave did it,
    *  as opposed to the machine ending itself (idle, empty turns, backend gone).*/
+  // ----- The live call (WI-960) -------------------------------------------
+  //
+  // A call is a different thing from the hands-free loop above: the engine
+  // listens continuously, decides when a turn is over, and speaks the reply a
+  // sentence at a time while it is still being written; speaking over it
+  // stops it. The two never run at once. Offered only when the engine says a
+  // call can be placed (`assistant_call_enabled`) and this browser can
+  // capture for one.
+  const callActive = () => {
+    const view = callView();
+    return view !== null && view.phase !== "ended";
+  };
+  const callSupported = () => callEnabled() && callCaptureSupported() && audioContextAvailable();
+
+  const releaseCall = () => {
+    call = null;
+    stopCallAudio();
+    stopVoiceService();
+  };
+
+  const refreshTranscript = async () => {
+    invalidateAssistantSnapshot();
+    try {
+      const snapshot = await readAssistantSnapshot(true);
+      if (snapshot) setTranscript(snapshot.transcript);
+    } catch {
+      /* the call goes on; the transcript catches up on the next turn */
+    }
+  };
+
+  const startCall = async () => {
+    if (call || !callSupported()) return;
+    if (conversationOn()) endConversation(true);
+    haltSpeech("call-start");
+    setSpeechStatus("");
+    // Inside the gesture: the playback context and the microphone both want one.
+    primeAudio();
+    startVoiceService();
+    startCallAudio();
+    const session = new CallSession(
+      {
+        url: callSocketUrl(getBase(), window.location),
+        token: getToken(),
+        profile: profile() || undefined,
+        openSocket: (url) => runtimeTransport().openSocket(url),
+        startCapture,
+        createPlayer: (events) => new CallPlayer(sharedAudioContext(), events),
+        log: (event, fields) => diag(event, fields),
+        onResponseDone: () => void refreshTranscript(),
+      },
+      (view, muted) => {
+        setCallView(view);
+        setCallMuted(muted);
+        if (view.pending && pendingAction()?.id !== view.pending.id) {
+          setPendingAction(view.pending);
+          invalidateAssistantSnapshot();
+        }
+        if (view.phase === "ended") {
+          releaseCall();
+          void refreshTranscript();
+          // A call that ended cleanly closes its panel; one that ended on an
+          // error keeps it open so the reason is read.
+          if (!view.error) setCallView(null);
+        }
+      },
+    );
+    call = session;
+    diag("call.start", {});
+    await session.start();
+  };
+
+  const endCall = () => {
+    call?.hangUp();
+  };
+
   const endConversation = (userInitiated: boolean, reason?: string) => {
     const machine = conversation;
     conversation = null;
@@ -1669,6 +1774,31 @@ export default function Assistant(props: AssistantProps) {
             </Show>
           </svg>
         </button>
+        <Show when={callEnabled()}>
+          <button
+            type="button"
+            class="assistant-toggle assistant-call-toggle"
+            data-testid="assistant-call"
+            aria-pressed={callActive()}
+            disabled={!callActive() && !callSupported()}
+            aria-label={callActive() ? "End the call" : "Call the assistant"}
+            title={
+              callActive()
+                ? "End the call"
+                : callSupported()
+                  ? "Call: talk it through live, and talk over it to interrupt"
+                  : "This browser cannot place a call (no microphone or Web Audio)"
+            }
+            onClick={() => (callActive() ? endCall() : void startCall())}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6.6 3.5 9 3l1.6 4-2 1.3a11 11 0 0 0 7.1 7.1l1.3-2 4 1.6-.5 2.4a2 2 0 0 1-2.1 1.6A16.5 16.5 0 0 1 5 5.6a2 2 0 0 1 1.6-2.1Z" />
+              <Show when={callActive()}>
+                <circle cx="19" cy="5" r="2.2" />
+              </Show>
+            </svg>
+          </button>
+        </Show>
         <button type="button" aria-label="Clear the conversation" title="Clear the conversation" onClick={() => void reset()}>
           <svg viewBox="0 0 24 24" aria-hidden="true">
             <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6.5 7l1 12A1.5 1.5 0 0 0 9 20.4h6a1.5 1.5 0 0 0 1.5-1.4l1-12" />
@@ -1886,6 +2016,72 @@ export default function Assistant(props: AssistantProps) {
         >
           heard differently: {repaired()}
         </div>
+      </Show>
+
+      <Show when={callView()}>
+        {(view) => (
+          <section
+            class="assistant-call"
+            data-testid="assistant-call-panel"
+            data-phase={view().phase}
+            aria-label="Call"
+          >
+            <div class="assistant-call__status" role="status">
+              <span class="assistant-call__dot" aria-hidden="true" />
+              {callPhaseLabel(view().phase, callMuted())}
+            </div>
+            <Show when={view().heard}>
+              <p class="assistant-call__heard" data-partial={view().heardIsPartial ? "true" : "false"}>
+                {view().heard}
+              </p>
+            </Show>
+            <Show when={view().reply}>
+              <p class="assistant-call__reply" data-testid="assistant-call-reply">{view().reply}</p>
+            </Show>
+            <Show when={view().error}>
+              <p class="assistant-call__error" role="alert">{view().error}</p>
+            </Show>
+            <div class="assistant-call__controls">
+              <Show
+                when={view().phase !== "ended"}
+                fallback={
+                  <button type="button" onClick={() => setCallView(null)}>
+                    Close
+                  </button>
+                }
+              >
+                <Show when={view().phase === "speaking"}>
+                  <button type="button" data-testid="assistant-call-stop" onClick={() => call?.interrupt()}>
+                    Stop reply
+                  </button>
+                </Show>
+                <button
+                  type="button"
+                  data-testid="assistant-call-mute"
+                  aria-pressed={callMuted()}
+                  onClick={() => call?.setMuted(!callMuted())}
+                >
+                  {callMuted() ? "Unmute" : "Mute"}
+                </button>
+                <button
+                  type="button"
+                  class="assistant-call__hangup"
+                  data-testid="assistant-call-hangup"
+                  onClick={endCall}
+                >
+                  End call
+                </button>
+              </Show>
+            </div>
+            <Show when={view().lastMetrics?.speech_end_to_first_audio_ms}>
+              {(ms) => (
+                <small class="assistant-call__latency">
+                  answered in {(ms() / 1000).toFixed(1)} s
+                </small>
+              )}
+            </Show>
+          </section>
+        )}
       </Show>
 
       <form
