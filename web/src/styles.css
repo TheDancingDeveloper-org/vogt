@@ -2036,8 +2036,9 @@ textarea {
   text-overflow: ellipsis;
 }
 /* An oversight session (WI-957): first in the rail, and marked so that the
-   order is not the only signal. */
-.session-row.oversight:not(.active):not(.waiting) {
+   order is not the only signal. Not a bare `.oversight` modifier: that is the
+   Oversight board's own class, and it turned the row into a padded column. */
+.session-row.session-row--oversight:not(.active):not(.waiting) {
   border-left-color: var(--accent);
 }
 .session-role-badge {
