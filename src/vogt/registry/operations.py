@@ -992,6 +992,8 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "Takes either id: ses_… or the engine UUID. Read "
                 "session_screen first and never send a blind Enter: at a "
                 "menu it accepts whatever is highlighted (dismiss with esc). "
+                "While a permission prompt shows, only a person's input is "
+                "typed: an agent's is refused (403 person_required). "
                 "Audited (byte count and keys, never the text)."
             ),
             scope="work.write",
@@ -1161,9 +1163,11 @@ def build_operations() -> list[Operation[Any, Any]]:
             summary=(
                 "Answer the dialog a session shows (activity awaiting-approval) "
                 "by choice: `option` (its number) or `label` (unique text of "
-                "it). Works for permission dialogs and startup gates (folder "
-                "trust, external CLAUDE.md imports, reading outside the "
-                "working directory); the engine moves the highlight itself. "
+                "it); the engine moves the highlight itself. Startup gates "
+                "(folder trust, external CLAUDE.md imports) take anyone's "
+                "answer; a permission prompt (approval.kind permission or "
+                "read-outside-cwd) only a person's — an agent is refused "
+                "(403 person_required) and should leave it for the Inbox. "
                 "Pass expect_question = approval.question so a stale answer "
                 "is refused. Audited. Takes either id."
             ),

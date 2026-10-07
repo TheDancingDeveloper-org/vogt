@@ -357,9 +357,14 @@ pub async fn list_session_grants(
 /// again to report whether the dialog went away. `409` when no dialog is
 /// showing, when it no longer asks `expect_question`, or when the option is
 /// not on its menu.
+///
+/// A permission dialog (not a startup gate) is answered only by a person
+/// (WI-983, `person_gate`): `403 person required` for anyone else, before
+/// anything is typed.
 pub async fn answer_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
     Json(req): Json<vogt_engine_contract::AnswerRequest>,
 ) -> Result<Json<vogt_engine_contract::AnswerResult>> {
     use crate::error::ApiError;
@@ -369,6 +374,23 @@ pub async fn answer_session(
         .await
         .map_err(|e| ApiError::Internal(format!("read the screen: {e}")))?
         .ok_or_else(|| ApiError::Conflict("no dialog is showing on this session".into()))?;
+    let identity = identity.as_deref();
+    let person = crate::person_gate::is_person(identity, req.person);
+    if crate::person_gate::needs_person(dialog.kind) && !person {
+        let who = identity.map_or("unidentified", |i| i.name.as_str());
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "session.permission_answer",
+            outcome = "refused",
+            via = "answer",
+            session_id = %id,
+            principal = %who,
+            kind = dialog.kind,
+            question = %dialog.question,
+            "refused an agent's answer to a permission prompt; only a person answers one"
+        );
+        return Err(crate::person_gate::refusal(who, &dialog));
+    }
     if let Some(expected) = req.expect_question.as_deref() {
         if dialog.question.trim() != expected.trim() {
             return Err(ApiError::Conflict(format!(
@@ -422,6 +444,15 @@ pub async fn answer_session(
             .map_err(|e| ApiError::Pty(format!("write input: {e}")))?;
         tokio::time::sleep(Duration::from_millis(40)).await;
     }
+    crate::person_gate::audit_answer(
+        &session,
+        identity,
+        req.person,
+        dialog.kind,
+        &dialog.question,
+        chosen.number,
+        &chosen.label,
+    );
     let mut dismissed = false;
     for _ in 0..20 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -693,11 +724,20 @@ pub struct SessionInputReq {
     /// Append a carriage return after `text` (i.e. "press Enter").
     #[serde(default)]
     pub submit: bool,
+    /// Whether the principal behind this input is a person, as vogt-core
+    /// relays it (WI-983); read only from the stack secret and the
+    /// break-glass token, as for `AnswerRequest::person`.
+    #[serde(default)]
+    pub person: Option<bool>,
 }
 
+/// Type into a session. Refused with `403 person required`, nothing typed,
+/// when a permission prompt is showing and the caller is not a person: on a
+/// modal dialog every keystroke is an answer to it (WI-983).
 pub async fn session_input(
     State(state): State<Arc<AppState>>,
     Path(id): Path<Uuid>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
     Json(req): Json<SessionInputReq>,
 ) -> Result<Json<OkResponse>> {
     if req.text.len() > MAX_HTTP_INPUT_BYTES {
@@ -706,6 +746,21 @@ pub async fn session_input(
         )));
     }
     let session = state.sessions.get(id)?;
+    let identity = identity.map(|axum::Extension(identity)| identity);
+    if !crate::person_gate::is_person(identity.as_ref(), req.person) {
+        let reading = Arc::clone(&session);
+        let person = req.person;
+        tokio::task::spawn_blocking(move || {
+            crate::person_gate::guard(
+                &reading,
+                identity.as_ref(),
+                person,
+                crate::person_gate::Via::Input,
+            )
+        })
+        .await
+        .map_err(|e| crate::error::ApiError::Internal(format!("read the screen: {e}")))??;
+    }
     let mut bytes = req.text.into_bytes();
     if req.submit {
         bytes.push(b'\r');

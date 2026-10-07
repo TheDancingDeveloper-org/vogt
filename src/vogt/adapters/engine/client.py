@@ -20,7 +20,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vogt.errors import Conflict, GrantRefused, InvalidRequest, NotFound, VogtError
+from vogt.errors import (
+    Conflict,
+    GrantRefused,
+    InvalidRequest,
+    NotFound,
+    PersonRequired,
+    VogtError,
+)
 
 USER_AGENT = "vogt"
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -881,17 +888,22 @@ class EngineClient:
             return None
         return EngineSessionLog.from_payload(payload)
 
-    def send_input(self, session_id: str, text: str, *, submit: bool = False) -> bool:
+    def send_input(
+        self, session_id: str, text: str, *, submit: bool = False, person: bool = False
+    ) -> bool:
         """Write `text` to a session's PTY (`submit` appends a carriage return).
 
         `False` when the engine has no such session. The engine caps one
         write at 64 KiB; the caller checks that first so the refusal names
-        the limit rather than an HTTP status.
+        the limit rather than an HTTP status. `person` says whether the
+        principal behind the input is a person: the engine refuses anyone
+        else's input while a permission prompt is showing (WI-983), raised
+        here as `PersonRequired`.
         """
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/input",
             method="POST",
-            payload={"text": text, "submit": submit},
+            payload={"text": text, "submit": submit, "person": person},
             allow_missing=True,
         )
         return payload is not None
@@ -982,11 +994,13 @@ class EngineClient:
         option: int | None,
         label: str | None,
         expect_question: str | None,
+        person: bool = False,
     ) -> dict[str, Any] | None:
         """Choose an option of the dialog on screen; the engine's
         `AnswerResult`, or `None` on a 404. A dialog that is gone, changed,
-        or lacks the option is a `Conflict` naming why."""
-        body: dict[str, Any] = {}
+        or lacks the option is a `Conflict` naming why; a permission prompt
+        answered without `person` is `PersonRequired` (WI-983)."""
+        body: dict[str, Any] = {"person": person}
         if option is not None:
             body["option"] = option
         if label is not None:
@@ -1184,6 +1198,9 @@ class EngineClient:
             return None
         if status == 403:
             said = _engine_error_text(response.decode("utf-8", errors="replace"))
+            if said.startswith("forbidden: person required: "):
+                # A permission prompt only a person answers (WI-983).
+                raise PersonRequired(said.removeprefix("forbidden: "))
             if said.startswith("forbidden: "):
                 # The engine understood the credential and refused the act
                 # itself, saying why (a grant to a project not open to grants).

@@ -1114,7 +1114,8 @@ const TerminalView: Component<Props> = (props) => {
             | { type: "snapshot-done" }
             | { type: "pong"; id: number; pos: number }
             | { type: "lag"; note?: string }
-            | { type: "hibernated" };
+            | { type: "hibernated" }
+            | { type: "input-refused"; reason?: string };
           if (ctrl.type === "snapshot-start") {
             replay?.cancel();
             replay = createReplayQueue(
@@ -1178,6 +1179,14 @@ const TerminalView: Component<Props> = (props) => {
             setReconnectView(null);
             setStatusText(null);
             setHibernatedView({ state: "asleep" });
+          } else if (ctrl.type === "input-refused") {
+            // A permission prompt is showing and this login is not a
+            // person's (WI-983): the keystroke was dropped, not typed.
+            const notice = "Only a person can answer this permission prompt";
+            setStatusText(notice);
+            setTimeout(() => {
+              if (!destroyed && statusText() === notice) setStatusText(null);
+            }, 4000);
           } else if (ctrl.type === "lag") {
             term?.write("\r\n\x1b[31m[lag — reattaching]\x1b[0m\r\n");
             setStatusText("Reattaching terminal...");

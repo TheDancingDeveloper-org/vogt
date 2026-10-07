@@ -232,7 +232,11 @@ paths:
         option, presses Enter, and reports whether the dialog went away.
         Choose by `option` (number) or `label` (unique, case-insensitive
         text). With `expect_question`, the answer is refused if the dialog
-        asks something else now.
+        asks something else now. A permission prompt (`kind` `permission` or
+        `read-outside-cwd`) is answered only by a person (WI-983): a caller
+        the core resolves to a human actor, vogt-core's credential with
+        `person: true`, or the break-glass token unless `person: false`.
+        Anyone else gets 403 `person required` and nothing is typed.
       operationId: answerSession
       x-capability: sessions
       requestBody:
@@ -245,6 +249,13 @@ paths:
                 option: { type: integer, minimum: 1 }
                 label: { type: string }
                 expect_question: { type: string }
+                person:
+                  type: boolean
+                  description: >-
+                    Whether a person is behind this answer. Read only from
+                    vogt-core's credential (absent means false) and the
+                    break-glass token (absent means true); ignored from
+                    anyone else.
       responses:
         "200":
           description: What was chosen.
@@ -259,6 +270,11 @@ paths:
                   chosen: { $ref: "#/components/schemas/ApprovalOption" }
                   dismissed: { type: boolean }
         "400": { $ref: "#/components/responses/BadRequest" }
+        "403":
+          description: A permission prompt is showing and the caller is not a person.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
         "404": { $ref: "#/components/responses/NotFound" }
         "409": { $ref: "#/components/responses/Conflict" }
   /api/sessions/sweep:
@@ -693,7 +709,9 @@ paths:
         Not recorded in vogt-core's audit log (only the engine's own request
         log line); agents should prefer the core's `session.input`, which is.
         Never send a bare Enter without first reading `/screen`: an Enter at
-        an unexpected menu accepts whatever is highlighted.
+        an unexpected menu accepts whatever is highlighted. While a permission
+        prompt is showing, only a person's input is typed (WI-983; who counts
+        is as for `/answer`); anyone else's is refused with 403.
       operationId: sessionInput
       x-capability: sessions
       requestBody:
@@ -705,6 +723,11 @@ paths:
         "200": { $ref: "#/components/responses/Ok" }
         "400":
           description: Over the 64 KiB cap, or malformed body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "403":
+          description: A permission prompt is showing and the caller is not a person; nothing was typed.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
@@ -1145,6 +1168,11 @@ components:
           type: boolean
           default: false
           description: Append `\r` (press Enter) after `text`.
+        person:
+          type: boolean
+          description: >-
+            Whether a person is behind this input (WI-983), as for
+            `/answer`; matters only while a permission prompt is showing.
     SessionEvent:
       description: The session-related `ServerEvent` variants, tagged by `type`.
       oneOf:

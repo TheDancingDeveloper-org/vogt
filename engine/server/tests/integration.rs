@@ -217,7 +217,9 @@ async fn stand_in_core_knowing(
                     StatusCode::OK,
                     axum::Json(json!({
                         "identity_ref": identity_ref,
-                        "kind": "human",
+                        // What the real core says of these: an `agent:`
+                        // actor is an agent, anyone else a person.
+                        "kind": if identity_ref.starts_with("agent:") { "agent" } else { "human" },
                         "display_name": identity_ref,
                         "scopes": scopes,
                     })),
@@ -10893,4 +10895,338 @@ async fn an_autopilot_session_blocked_on_a_person_is_left_alone() {
         std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
         "a blocked session was nudged"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Only a person answers a permission prompt (WI-983)
+// ---------------------------------------------------------------------------
+
+/// A stand-in agent CLI showing one dialog: `question` over a numbered menu.
+/// It prints `typed <bytes>` for anything that is not an arrow or Enter, and
+/// `chose N` and exits on Enter, so a test can tell whether input reached it.
+fn dialog_script(dir: &std::path::Path, name: &str, question: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            r#"import os, sys, tty
+opts = ["Yes", "No"]
+sel = 0
+def draw():
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.write("Bash command\r\n\r\n  rm -rf build\r\n\r\n{question}\r\n")
+    for i, o in enumerate(opts):
+        sys.stdout.write(("❯ " if i == sel else "  ") + f"{{i+1}}. {{o}}\r\n")
+    sys.stdout.flush()
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+draw()
+buf = b""
+while True:
+    buf += os.read(fd, 16)
+    while buf:
+        if buf.startswith(b"\x1b[B"):
+            sel = min(sel + 1, len(opts) - 1); buf = buf[3:]; draw()
+        elif buf.startswith(b"\x1b[A"):
+            sel = max(sel - 1, 0); buf = buf[3:]; draw()
+        elif buf.startswith(b"\r"):
+            sys.stdout.write("\x1b[2J\x1b[H" + f"chose {{sel+1}}\r\n> ")
+            sys.stdout.flush()
+            os.read(fd, 1)
+            sys.exit(0)
+        elif buf.startswith(b"\x1b") and len(buf) < 3:
+            break
+        else:
+            sys.stdout.write("\x1b[20;1Htyped " + repr(buf[:1]))
+            sys.stdout.flush()
+            buf = buf[1:]
+"#
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// Start `script` as a session and wait until it reads as awaiting approval;
+/// the dialog it shows, as the screen reports it.
+async fn session_showing_dialog(
+    client: &reqwest::Client,
+    base: &str,
+    name: &str,
+    script: &std::path::Path,
+) -> (String, Value) {
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": name, "command": ["python3", script.to_string_lossy()] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let screen: Value = client
+            .get(format!("{base}/api/sessions/{id}/screen"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if screen["activity"] == "awaiting-approval" {
+            return (id, screen["approval"].clone());
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never awaiting-approval: {screen}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wi983_front_door() -> (String, tempfile::TempDir, ServerGuard) {
+    let core = stand_in_core_knowing(vec![
+        (
+            WI983_SESSION,
+            "agent:session:ses_overseer",
+            vec!["work.write"],
+        ),
+        (WI983_ENGINE, "agent:engine:3f2a", vec!["work.write"]),
+        (WI983_POD, "agent:pod:vogt-dev", vec!["work.write"]),
+        // An agent token holding `admin` is still an agent.
+        (WI983_AGENT_ADMIN, "agent:vogt-sessions", vec!["admin"]),
+        (WI983_PERSON, "human:ada", vec!["work.write"]),
+    ])
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.vogt_core_url = Some(core);
+    cfg.vogt_core_token = Some(WI983_STACK.into());
+    let (base, guard) = boot_with_config(cfg).await;
+    (base, tmp, guard)
+}
+
+const WI983_STACK: &str = "stack-secret-for-wi983-1234567890";
+const WI983_SESSION: &str = "session-token-wi983-1234567890";
+const WI983_ENGINE: &str = "engine-token-wi983-1234567890";
+const WI983_POD: &str = "pod-token-wi983-1234567890abcd";
+const WI983_AGENT_ADMIN: &str = "agent-admin-wi983-1234567890";
+const WI983_PERSON: &str = "person-token-wi983-1234567890";
+
+fn client_for(token: &str) -> reqwest::Client {
+    reqwest::Client::builder()
+        .default_headers(auth_for(token))
+        .build()
+        .unwrap()
+}
+
+/// WI-983: a permission prompt is answered by a person and nobody else. A
+/// session token, an engine-minted token, the pod token — even one holding
+/// `admin` — and vogt-core's own credential without a person behind it are
+/// refused on every route that reaches the terminal: `/answer`, raw
+/// `/input`, and a WebSocket keystroke. Nothing they send is typed. A person
+/// answers it; so does vogt-core relaying a person.
+#[tokio::test]
+async fn only_a_person_answers_a_permission_prompt() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let script = dialog_script(tmp.path(), "ask.py", "Do you want to proceed?");
+    let (id, approval) = session_showing_dialog(&operator, &base, "asking", &script).await;
+    assert_eq!(approval["kind"], "permission", "{approval}");
+
+    for token in [WI983_SESSION, WI983_ENGINE, WI983_POD, WI983_AGENT_ADMIN] {
+        let agent = client_for(token);
+        let answered = agent
+            .post(format!("{base}/api/sessions/{id}/answer"))
+            .json(&json!({ "option": 1, "person": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::FORBIDDEN, "{token}");
+        let said: Value = answered.json().await.unwrap();
+        let said = said["error"].as_str().unwrap();
+        assert!(said.contains("person required"), "{said}");
+        assert!(said.contains("session_report_blocked"), "{said}");
+
+        // Raw input is the same answer by other means: a TUI dialog is
+        // modal, so "1", Enter or Esc all land on it.
+        for text in ["1", "\r", "\x1b"] {
+            let typed = agent
+                .post(format!("{base}/api/sessions/{id}/input"))
+                .json(&json!({ "text": text, "submit": false, "person": true }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(typed.status(), StatusCode::FORBIDDEN, "{token} {text:?}");
+        }
+    }
+
+    // vogt-core's own credential relays for a principal; without saying a
+    // person is behind it, it is refused like an agent.
+    let core = client_for(WI983_STACK);
+    for body in [
+        json!({ "option": 1 }),
+        json!({ "option": 1, "person": false }),
+    ] {
+        let answered = core
+            .post(format!("{base}/api/sessions/{id}/answer"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::FORBIDDEN, "{body}");
+    }
+    let typed = core
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "1", "submit": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(typed.status(), StatusCode::FORBIDDEN);
+    // The break-glass operator, told by the core that an agent is behind
+    // it, is refused too.
+    let relayed = operator
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "1", "submit": true, "person": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(relayed.status(), StatusCode::FORBIDDEN);
+
+    // A WebSocket attach by an agent: the keystroke is dropped and the
+    // socket told why, in band.
+    let mut ws = ws_attach_with_token(&base, &id, WI983_SESSION).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Message::Text(t) = &msg {
+            if t.contains("snapshot-done") {
+                break;
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+    }
+    ws.send(Message::Binary(b"1\r".to_vec().into()))
+        .await
+        .unwrap();
+    let refused = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("an input-refused frame")
+            .unwrap()
+            .unwrap();
+        if let Message::Text(t) = &msg {
+            let frame: Value = serde_json::from_str(t).unwrap();
+            if frame["type"] == "input-refused" {
+                break frame;
+            }
+        }
+    };
+    assert!(
+        refused["reason"]
+            .as_str()
+            .unwrap()
+            .contains("person required"),
+        "{refused}"
+    );
+
+    // Nothing any of them sent reached the dialog.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let screen: Value = operator
+        .get(format!("{base}/api/sessions/{id}/screen"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(screen["activity"], "awaiting-approval", "{screen}");
+    let shown = screen["lines"].to_string();
+    assert!(!shown.contains("typed"), "{shown}");
+    assert!(!shown.contains("chose"), "{shown}");
+
+    // A person answers it.
+    let answered: Value = client_for(WI983_PERSON)
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 2, "expect_question": "Do you want to proceed?" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(answered["chosen"]["number"], 2, "{answered}");
+    assert_eq!(answered["kind"], "permission");
+    live_output_containing(&operator, &base, &id, &["chose 2"]).await;
+
+    // vogt-core relaying a person answers it as well — what the core's own
+    // `session.answer` sends after deciding its principal is a person.
+    let (relayed, _) = session_showing_dialog(&operator, &base, "relayed", &script).await;
+    let answered = core
+        .post(format!("{base}/api/sessions/{relayed}/answer"))
+        .json(&json!({ "option": 1, "person": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &relayed, &["chose 1"]).await;
+}
+
+/// WI-983 stops at permission prompts. An overseer still drives: it types
+/// into a session with no dialog showing, by REST and over a WebSocket, and
+/// it answers a startup gate (folder trust), which is not a permission
+/// prompt.
+#[tokio::test]
+async fn an_overseer_still_drives_a_session_that_is_not_asking_permission() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let overseer = client_for(WI983_SESSION);
+
+    // Ordinary input to a shell.
+    let shell: Value = operator
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "worker", "command": ["/bin/sh"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let shell = shell["id"].as_str().unwrap().to_string();
+    let typed = overseer
+        .post(format!("{base}/api/sessions/{shell}/input"))
+        .json(&json!({ "text": "echo driven-$((40+2))", "submit": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(typed.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &shell, &["driven-42"]).await;
+    let mut ws = ws_attach_with_token(&base, &shell, WI983_SESSION).await;
+    ws.send(Message::Binary(b"echo attached-$((6*7))\r".to_vec().into()))
+        .await
+        .unwrap();
+    live_output_containing(&operator, &base, &shell, &["attached-42"]).await;
+
+    // A folder-trust gate is a startup gate, not a permission prompt.
+    let gate = dialog_script(
+        tmp.path(),
+        "trust.py",
+        "Quick safety check: Is this a project you created or one you trust?",
+    );
+    let (gated, approval) = session_showing_dialog(&operator, &base, "gated", &gate).await;
+    assert_eq!(approval["kind"], "folder-trust", "{approval}");
+    let answered = overseer
+        .post(format!("{base}/api/sessions/{gated}/answer"))
+        .json(&json!({ "option": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &gated, &["chose 1"]).await;
 }
