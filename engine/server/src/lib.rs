@@ -32,6 +32,7 @@ pub mod launch;
 pub mod metrics;
 pub mod observability;
 pub mod opencode;
+pub mod person_gate;
 pub mod product;
 pub mod prompt_files;
 pub mod pty;

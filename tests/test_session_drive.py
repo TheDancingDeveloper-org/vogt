@@ -70,6 +70,9 @@ class Engine:
         self.blocked: dict[str, Any] | None = None
         #: Bodies sent to POST /answer.
         self.answers: list[dict[str, Any]] = []
+        #: A permission prompt is showing: the engine refuses an answer or
+        #: input that does not say a person is behind it (WI-983).
+        self.permission_prompt = False
 
     def __call__(
         self,
@@ -110,6 +113,30 @@ class Engine:
             verb = parts[4] if len(parts) > 4 else ""
             if engine_id not in self.live:
                 return 404, b""
+            if (
+                method == "POST"
+                and verb in ("answer", "input")
+                and self.permission_prompt
+                and payload.get("person") is not True
+            ):
+                if verb == "answer":
+                    self.answers.append(payload)
+                return 403, json.dumps(
+                    {
+                        "error": "forbidden: person required: session is showing a "
+                        "permission prompt and only a person answers one"
+                    }
+                ).encode()
+            if method == "POST" and verb == "answer" and self.permission_prompt:
+                self.answers.append(payload)
+                return 200, json.dumps(
+                    {
+                        "question": "Do you want to proceed?",
+                        "kind": "permission",
+                        "chosen": {"number": 2, "label": "No", "selected": True},
+                        "dismissed": True,
+                    }
+                ).encode()
             if method == "POST" and verb == "answer":
                 self.answers.append(payload)
                 if payload.get("expect_question") == "stale?":
@@ -216,8 +243,20 @@ class Engine:
         return 404, b""
 
     def inputs(self) -> list[tuple[str, dict[str, Any]]]:
+        """What was typed, where; `person` (WI-983) has its own tests."""
         return [
-            (row["path"].split("/")[3], row["body"])
+            (
+                row["path"].split("/")[3],
+                {k: v for k, v in row["body"].items() if k != "person"},
+            )
+            for row in self.sent
+            if row["method"] == "POST" and row["path"].endswith("/input")
+        ]
+
+    def persons(self) -> list[bool | None]:
+        """The `person` each input said, in order."""
+        return [
+            row["body"].get("person")
             for row in self.sent
             if row["method"] == "POST" and row["path"].endswith("/input")
         ]
@@ -660,7 +699,7 @@ def test_answer_chooses_by_option_and_is_audited(
         ),
     )
     assert engine.answers == [
-        {"option": 1, "expect_question": "Is this a project you trust?"}
+        {"option": 1, "expect_question": "Is this a project you trust?", "person": True}
     ]
     assert result.kind == "folder-trust"
     assert result.chosen.number == 1
@@ -722,3 +761,148 @@ def test_the_approval_carries_its_kind_and_menu(
     assert screen.approval.kind == "external-imports"
     assert [o.number for o in screen.approval.options] == [1, 2]
     assert screen.approval.options[0].selected is True
+
+
+# -- only a person answers a permission prompt (WI-983) ---------------------
+
+AGENTS = (
+    "agent:session:ses_01OVERSEER",
+    "agent:engine:3f2a",
+    "agent:pod:vogt-dev",
+    "agent:vogt-sessions",
+)
+
+
+def _as(ctx: AppContext, identity_ref: str, kind: str = "agent") -> AppContext:
+    return dataclasses.replace(
+        ctx,
+        principal=Principal(
+            identity_ref=identity_ref,
+            kind=kind,  # type: ignore[arg-type]
+            display_name=identity_ref,
+        ),
+    )
+
+
+@pytest.mark.parametrize("identity_ref", AGENTS)
+def test_an_agent_cannot_answer_a_permission_prompt(
+    wired: AppContext, engine: Engine, identity_ref: str
+) -> None:
+    from vogt.application.models import AnswerSessionParams
+    from vogt.application.services import answer_session
+    from vogt.errors import PersonRequired
+
+    ses_id, _ = _started(wired)
+    engine.permission_prompt = True
+    agent = _as(wired, identity_ref)
+    with pytest.raises(PersonRequired, match="only a person"):
+        answer_session(agent, AnswerSessionParams(id=ses_id, option=1, reason=WHY))
+    assert engine.answers[-1]["person"] is False
+    # Typing into the dialog is the same answer by other means.
+    with pytest.raises(PersonRequired):
+        session_input(
+            agent, SessionInputParams(id=ses_id, text="1", submit=True, reason=WHY)
+        )
+    assert engine.persons() == [False]
+    with wired.declared.read() as view:
+        audited = [row.operation for row in view.list_audit(limit=50)]
+    assert "session.answer" not in audited
+    assert "session.input" not in audited
+
+
+def test_a_person_answers_a_permission_prompt_and_is_audited(
+    wired: AppContext, engine: Engine
+) -> None:
+    from vogt.application.models import AnswerSessionParams
+    from vogt.application.services import answer_session
+
+    ses_id, _ = _started(wired)
+    engine.permission_prompt = True
+    person = _as(wired, "human:ada", kind="human")
+    result = answer_session(
+        person, AnswerSessionParams(id=ses_id, label="no", reason=WHY)
+    )
+    assert result.kind == "permission"
+    assert engine.answers[-1]["person"] is True
+    with wired.declared.read() as view:
+        row = next(
+            r for r in view.list_audit(limit=50) if r.operation == "session.answer"
+        )
+        event = next(
+            e
+            for e in view.list_events(after=0, limit=100)
+            if e.kind == "session.answered"
+        )
+    assert row.actor_identity_ref == "human:ada"
+    assert row.reason == WHY
+    assert event.summary["kind"] == "permission"
+    assert event.summary["question"] == "Do you want to proceed?"
+    assert event.summary["option"] == 2
+    assert event.summary["label"] == "No"
+    assert event.summary["person"] is True
+
+
+def test_the_engines_own_credential_is_not_a_person_even_when_bound_to_one(
+    wired: AppContext, engine: Engine, tmp_path: Any
+) -> None:
+    """The stack secret first issued by hand is bound to a person (the
+    estate); presented, it is the engine — or any process that read it."""
+    from vogt.application.models import AnswerSessionParams, IssueTokenParams
+    from vogt.application.services import answer_session
+    from vogt.application.services.auth import authenticate, issue_token
+    from vogt.errors import PersonRequired
+
+    ses_id, _ = _started(wired)
+    secret = issue_token(
+        wired,
+        IssueTokenParams(
+            actor=wired.principal.identity_ref,
+            name="stack secret",
+            scopes="admin",
+            reason=WHY,
+        ),
+    ).secret
+    secret_file = tmp_path / "vogt-core-token"
+    secret_file.write_text(secret + "\n", encoding="utf-8")
+    ctx = dataclasses.replace(
+        wired,
+        config=wired.config.model_copy(
+            update={"bootstrap_core_token_file": secret_file}
+        ),
+    )
+    who = authenticate(ctx, bearer=secret)
+    as_engine = dataclasses.replace(ctx, principal=who.principal, token=who.token)
+    assert as_engine.principal.kind == "human"
+    engine.permission_prompt = True
+    with pytest.raises(PersonRequired):
+        answer_session(as_engine, AnswerSessionParams(id=ses_id, option=1, reason=WHY))
+    assert engine.answers[-1]["person"] is False
+
+
+def test_an_overseer_still_drives_a_session_with_no_permission_prompt(
+    wired: AppContext, engine: Engine
+) -> None:
+    """Ordinary input and startup-gate answers from an agent are unchanged:
+    the engine, which reads the screen, is what tells them apart."""
+    from vogt.application.models import AnswerSessionParams
+    from vogt.application.services import answer_session
+
+    ses_id, engine_id = _started(wired)
+    overseer = _as(wired, AGENTS[0])
+    typed = session_input(
+        overseer,
+        SessionInputParams(id=ses_id, text="carry on", submit=True, reason=WHY),
+    )
+    assert typed.submitted is True
+    assert engine.inputs() == [
+        (engine_id, {"text": "carry on", "submit": False}),
+        (engine_id, {"text": "", "submit": True}),
+    ]
+    assert engine.persons() == [False, False]
+    gate = answer_session(
+        overseer, AnswerSessionParams(id=ses_id, option=1, reason=WHY)
+    )
+    assert gate.kind == "folder-trust"
+    with wired.declared.read() as view:
+        rows = [r for r in view.list_audit(limit=50) if r.operation == "session.answer"]
+    assert rows[0].actor_identity_ref == AGENTS[0]

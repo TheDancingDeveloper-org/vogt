@@ -31,6 +31,7 @@ from vogt.application.context import AppContext
 from vogt.core.ci_alerts import BranchCi, branch_ci
 from vogt.core.entities import Observation
 from vogt.core.workflow import TERMINAL_STATES
+from vogt.errors import PersonRequired
 from vogt.observability import logger
 from vogt.storage.interface import ReadView
 
@@ -216,6 +217,14 @@ def _nudge(ctx: AppContext, engine_ids: list[str], bound: BoundBranch) -> int:
                 engine_id, "", submit=True
             ):
                 sent += 1
+        except PersonRequired:
+            # The session is at a permission prompt, where this Enter would
+            # be an answer — a person's to give (WI-983). The Inbox entry
+            # still says CI concluded; the session hears it next time.
+            _log.info(
+                "not notifying a session at a permission prompt of a CI conclusion",
+                extra={"vogt": {"session": engine_id}},
+            )
         except EngineUnavailable as exc:
             _log.warning(
                 "could not notify a bound session of a CI conclusion",

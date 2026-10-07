@@ -660,23 +660,29 @@ than these routes.
   `DELETE`. The optional body is recorded before the kill, and the exit then
   reads `stopped` rather than `errored`. Requires the `sessions`
   capability)
-- `POST /api/sessions/:id/input` `{"text": "...", "submit": bool}` -> `OkResponse`
-  (writes verbatim to PTY stdin, 64 KiB cap, `submit` appends `\r`; requires
-  the `sessions` capability)
+- `POST /api/sessions/:id/input` `{"text": "...", "submit": bool, "person"?}`
+  -> `OkResponse` (writes verbatim to PTY stdin, 64 KiB cap, `submit`
+  appends `\r`; requires the `sessions` capability). `403 person required`,
+  with nothing typed, when a permission prompt is showing and the caller is
+  not a person ([Only a person answers a permission
+  prompt](#only-a-person-answers-a-permission-prompt)).
 - `DELETE /api/sessions/:id` -> `OkResponse` — kills the child if it is still
   running, then forgets the session and its prompt file (requires the
   `sessions` capability). MCP: `session_remove`.
 - `GET /api/sessions/:id/attach` — the WebSocket stream (see
   [Attach protocol](#attach-protocol)); a driver does not need it.
 - `POST /api/sessions/:id/answer` `{"option": N | "label": "...",
-  "expect_question"?}` -> `AnswerResult` — choose an option of the dialog on
+  "expect_question"?, "person"?}` -> `AnswerResult` — choose an option of the dialog on
   screen: a permission dialog, or a startup gate (`approval.kind`
   `folder-trust`, `external-imports`, `read-outside-cwd`). The engine
   re-reads the menu at that moment, moves the highlight from where it is
   with arrow keys (one write each), presses Enter, and looks again for up to
   2 s to report `dismissed`. `409` when no dialog is showing, when it no
   longer asks `expect_question`, when the option is not on the menu, or when
-  a label matches several options. Requires `sessions` (WI-917).
+  a label matches several options. Requires `sessions` (WI-917). A
+  permission prompt (`kind` `permission` or `read-outside-cwd`) is answered
+  only by a person: anyone else gets `403 person required` and nothing is
+  typed (WI-983, below).
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
@@ -1179,7 +1185,9 @@ ready → read → answer → stop.** Over MCP (the core's tools, preferred):
    `last_reply_excerpt` for each live agent session.
 4. **Answer.** `session_input` with `text` and `submit: true` to type a
    follow-up; `keys: ["esc"]` to dismiss a menu or dialog; `keys: ["down",
-   "enter"]` to pick an option. Then go back to step 2.
+   "enter"]` to pick an option; `session_answer` for a startup gate. A
+   permission prompt is not the driver's to answer unless the driver is a
+   person (below). Then go back to step 2.
 5. **Stop.** `session_stop` kills the process and, for a session the core
    started, revokes its token. The screen and log stay readable until the
    session is deleted.
@@ -1208,7 +1216,65 @@ sequences included, JSON-escaped) plus `\r` when `submit` is true; an empty
   status). Use the core's operation unless it cannot do what is needed.
 - **Any `sessions` holder can type into any session**, including one a
   person is using. There is no per-session grant (`API.md`, "Who may read
-  and type into sessions").
+  and type into sessions"). The one exception is a permission prompt.
+
+##### Only a person answers a permission prompt
+
+A Claude Code `permissions.ask` rule, and the same dialog in Codex and
+opencode, means "a person decides". Every route that reaches a terminal
+needs only `sessions`, which every `work.write` token holds, so without a
+check any agent could approve another session's prompt, or its own
+(WI-983). The engine therefore refuses, with `403 person required:` and
+nothing typed, input from anyone but a person that lands while a
+**permission** dialog is on the screen: `approval.kind` `permission` or
+`read-outside-cwd`. It covers every way in — `POST /answer`, a raw
+`POST /input`, and a WebSocket keystroke (dropped, with an `input-refused`
+frame; see [Attach protocol](#attach-protocol)). A TUI dialog is modal, so
+at that moment any keystroke is an answer to it, `Esc` and `Ctrl-C`
+included. The screen is read fresh for the check, the same read `/answer`
+aims by.
+
+Not gated: input to a session with no dialog showing (ordinary driving),
+and the startup gates `folder-trust` and `external-imports`, which an
+overseer answers as before. Engine-internal writers (the autopilot nudge,
+the post-wake resume prompt) type only into a session that is `ready`, and
+`ready` is false while a dialog shows.
+
+Who is a person is decided by flags the authentication gate sets, never by
+the caller's name (an actor's `identity_ref` can be any string), the same
+discipline as the WI-973 grant routes:
+
+- a caller the core resolves to an actor of kind `human`;
+- vogt-core's own credential (the stack secret) only when the request says
+  `"person": true`. The core's `session.answer` and `session.input` send it,
+  and decide it from their own authenticated principal the way
+  `session.grant_decide` does: never for an agent principal (a session's
+  `agent:session:` token, an `agent:engine:` token, the pod token), and never
+  for the engine's own credential, whatever actor that is bound to;
+- the break-glass `ENGINE_TOKEN`, an operator credential no session holds,
+  unless the request says `"person": false` (as the core does when it relays
+  an agent with it).
+
+Everyone else — every agent-bound token, whatever its scopes — is refused,
+and `"person"` in its request is ignored. Refusals and a person's answers to
+permission prompts through `/answer` are logged under `vogt::audit` as
+`event=session.permission_answer` with the principal, session, kind,
+question and (for an answer) the option chosen. The core's `session.answer`
+audit row names the actor, and its `session.answered` event records `kind`,
+`question`, `option`, `label` and `person`; `session.input` records
+`person`.
+
+The refusal tells the overseer to escalate: leave the prompt for a person in
+the Inbox (it is already there as "asking for approval"), or report it with
+`session_report_blocked`; stopping the session is still allowed.
+
+This is a boundary only against a session that cannot act as the engine. A
+session running as the engine's uid can read the stack secret or the
+break-glass token and relay its own `"person": true`; separating the uids is
+WI-982. Detection is the same screen reading that raises `awaiting-approval`,
+so a dialog the engine does not recognise is not gated, and input that
+reaches the terminal in the instant before a dialog is drawn is not gated
+either.
 
 Over HTTP, the same loop with `curl`:
 
@@ -1577,6 +1643,7 @@ Server text control frames:
 {"type":"pong","id":1,"pos":123}
 {"type":"lag","note":"client too slow; reattach"}
 {"type":"hibernated"}
+{"type":"input-refused","reason":"person required: …"}
 ```
 
 One PTY has one size, however many clients attach. `snapshot-start` carries
@@ -1590,6 +1657,13 @@ narrower client wraps each line so the moves land on the wrong rows and leave
 ghost frames (WI-1089). The PWA asks for its own size only from the pane the
 person is using — on open, on input or focus, on a resize while focused, or
 from its "Fit to this screen" chip — and follows otherwise.
+
+`input-refused` says that input this socket sent was dropped rather than
+typed: a permission prompt was showing and the attached caller is not a
+person (WI-983, [Only a person answers a permission
+prompt](#only-a-person-answers-a-permission-prompt)). The socket stays open;
+input once the prompt is gone is typed as usual. A person's keystrokes are
+never checked.
 
 `hibernated` follows `snapshot-done` when the session is hibernated. The
 snapshot was its kept output (always `reset`, whatever `resume_from` said).

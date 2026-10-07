@@ -262,6 +262,21 @@ dialogs and the startup gates `folder-trust`, `external-imports` and
 engine moves the highlight itself and reports `dismissed`. `approval.options`
 on the list, screen and sweep rows lists the menu.
 
+**A permission prompt is a person's to answer** (WI-983). For
+`approval.kind` `permission` or `read-outside-cwd`, `session.answer` from an
+agent principal — a session's token, an `agent:engine:` token, the pod
+token — or from the engine's own credential is refused with
+`403 person_required`, and so is `session.input` while such a prompt is
+showing, since every keystroke on a modal dialog answers it. Nothing is
+typed. The startup gates `folder-trust` and `external-imports`, and input to
+a session with no dialog showing, are unaffected. The core decides who is a
+person the way `session.grant_decide` does and tells the engine, which reads
+the screen and refuses (`ENGINE.md`, "Only a person answers a permission
+prompt"). The audit row names the actor; the `session.answered` event
+records `kind`, `question`, `option`, `label` and `person`. An overseer that
+meets a permission prompt leaves it for a person in the Inbox or reports it
+with `session.report_blocked`.
+
 `session.sweep` (`read`) is the oversight table, built in one call. It has a
 row for every live and hibernated session, ordered by who needs attention:
 `approval`, `blocked`, `waiting` (at its prompt, wanting the next
