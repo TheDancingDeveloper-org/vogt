@@ -1200,21 +1200,28 @@ checks decide what it can finish on its own (WI-926; the design is
   image ships `/usr/local/share/vogt/driven-session-settings.json`:
   - it states that the session is driven, and that a denied action is
     reported, never routed around;
-  - it adds three exceptions, all in the classifier's own wording, with no
-    pattern rule (`permissions.allow`/`ask`/`deny`), so the classifier
-    judges every command:
-    - **Read-Only Inspection**: commands that only report state (`docker
-      ps|logs|stats`, `docker inspect --format` of non-environment fields,
-      `ss`, `netstat`, read-only `git`, `gh pr view|list|checks|diff`, `gh
-      run view`, a credential-less GET of a local health endpoint) are not
-      *Modify Shared Resources* or *Interfere With Workloads*. Printing a
-      secret, dumping the environment (`.Config.Env` included), `docker
-      exec`, any create/start/stop/remove and sending data off the host stay
-      blocked.
-    - **Credential Presence Check**: testing whether a credential exists,
-      its length, variable *names* and the `AGENT_AUTH_*` name lists, never
-      a value or part of one. Fetching stays with the default rules and the
-      grant flow.
+  - it adds exceptions in the classifier's own wording, with no pattern
+    rule (`permissions.allow`/`ask`/`deny`), so the classifier judges every
+    command:
+    - **Read-Only Inspection**: an exhaustive list of commands that only
+      report state (`docker ps|logs|stats`, `docker inspect --format` of
+      enumerated non-environment fields, `ss`, `netstat`, `git
+      status|log|diff|show|branch`, `gh pr view|list|checks|diff`, `gh run
+      view`, and a credential-free GET to `127.0.0.1` or `localhost` with no
+      body or added headers) is not *Modify Shared Resources* or *Interfere
+      With Workloads*. A command it does not name is not covered. Every
+      other `docker` subcommand, a whole-object or `.Config.Env` inspect,
+      Komodo, Infisical, metadata addresses, non-GET requests, other
+      processes' environments, printing a secret and sending data off the
+      host stay blocked; *Data Exfiltration* and *Production Reads* are
+      never cleared.
+    - **Credential Presence Check**: whether a credential this session
+      already holds is set or unset, and nothing else: not its length, a
+      substring, a hash or a comparison. Only the session's own environment
+      and files and the `AGENT_AUTH_*` name lists; never `/proc/*/environ`,
+      the engine's or core's environment, `/run/secrets`, another credential
+      store or the vault. Fetching stays with the manifest and the grant
+      flow.
     - **Own Green PR Merge**: merging a pull request the agent opened for its
       task, in a repository listed under `Autonomous-merge repositories`,
       after its required checks pass, with the plain merge command.

@@ -157,13 +157,19 @@ a credential variable is set as credential materialization. The shipped
 policy adds two exceptions in the classifier's own wording, and no pattern
 rule:
 
-- **Read-Only Inspection** clears those two rules for commands that only
-  report state. It does not cover secret printing, environment dumps
-  (`.Config.Env` included), `docker exec`, or any create, start, stop or
-  remove.
-- **Credential Presence Check** covers existence and length tests and
-  variable names, never a value. Fetching stays with the default rules and
-  the grant flow (WI-973).
+- **Read-Only Inspection** clears those two rules for an exhaustive list
+  of commands that only report state; a command it does not name is not
+  covered. It does not cover secret printing, environment dumps
+  (`.Config.Env` or a whole-object inspect), `docker exec`, any other
+  `docker` subcommand, Komodo, Infisical, non-loopback or non-GET requests.
+- **Credential Presence Check** yields only set or unset for a credential
+  the session already holds: never a length, substring, hash or comparison,
+  and never another process's environment, `/run/secrets` or the vault.
+  Fetching stays with the default rules and the grant flow (WI-973).
+
+Both texts are golden-pinned by the engine's `driven_policy_tests`, so a
+rewording is a deliberate, reviewed change. A deployment's own policy file
+replaces the image's, so it has to carry the same rules for them to apply.
 
 Pattern allow rules were rejected because they resolve before the
 classifier and cannot tell a harmless `docker inspect --format` from an
