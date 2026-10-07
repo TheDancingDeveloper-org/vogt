@@ -1645,7 +1645,7 @@ const App: Component = () => {
                   draggable={true}
                   aria-current={tabsStore.active === `term:${s.id}` ? "page" : undefined}
                   aria-label={`${s.name}${isOversight(s) ? ", oversight" : ""}, ${activityLabel(s.activity, s.exit_code)}`}
-                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" ? "waiting" : ""} ${isOversight(s) ? "oversight" : ""}`}
+                  class={`session-row ${tabsStore.active === `term:${s.id}` ? "active" : ""} ${s.activity === "waiting-for-input" ? "waiting" : ""} ${isOversight(s) ? "session-row--oversight" : ""}`}
                   onDragStart={(event) => {
                     // Drag a session into the terminal workspace to mirror it as
                     // a split. The dedicated mime keeps the workspace from
