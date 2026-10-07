@@ -1,4 +1,4 @@
-//! Text side of the live call (WI-960, WI-966): cutting a streamed reply into
+//! Text side of a call: cutting a streamed reply into
 //! the pieces that are spoken one at a time, and making each piece sayable.
 //!
 //! Text-to-speech engines synthesize a whole input before returning any of
