@@ -11313,11 +11313,68 @@ a.vogt-projects-tag:hover {
 }
 /* Hands-free conversation (WI-174): the head toggle, the live status chip, and
    the mic's muted state. */
-.assistant-convo[aria-pressed="true"] {
+.assistant-convo[aria-pressed="true"],
+.assistant-call-toggle[aria-pressed="true"] {
   color: var(--accent);
   border-color: var(--accent);
 }
-.assistant-convo:disabled {
+
+/* The live call (WI-960): a panel above the composer while a call is up. */
+.assistant-call {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 12px 0;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 14px;
+  background: var(--bg-elev);
+}
+.assistant-call__status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-bright);
+  font-size: 13px;
+  font-weight: 600;
+}
+.assistant-call__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--activity-idle);
+}
+.assistant-call[data-phase="listening"] .assistant-call__dot { background: var(--accent); }
+.assistant-call[data-phase="user_speaking"] .assistant-call__dot {
+  background: var(--accent);
+  animation: assistant-call-pulse 0.9s ease-in-out infinite;
+}
+.assistant-call[data-phase="thinking"] .assistant-call__dot,
+.assistant-call[data-phase="speaking"] .assistant-call__dot { background: var(--activity-running); }
+.assistant-call[data-phase="awaiting_approval"] .assistant-call__dot { background: var(--activity-waiting, var(--activity-running)); }
+@keyframes assistant-call-pulse {
+  50% { transform: scale(1.35); opacity: 0.7; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .assistant-call[data-phase="user_speaking"] .assistant-call__dot { animation: none; }
+}
+.assistant-call__heard,
+.assistant-call__reply {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.assistant-call__heard { color: var(--fg); }
+.assistant-call__heard[data-partial="true"] { opacity: 0.7; font-style: italic; }
+.assistant-call__reply { color: var(--fg-bright); }
+.assistant-call__error { margin: 0; color: var(--activity-errored, var(--fg-bright)); font-size: 13px; }
+.assistant-call__controls { display: flex; flex-wrap: wrap; gap: 8px; }
+.assistant-call__controls button { flex: 1; min-height: 44px; border-radius: 10px; font-size: 14px; font-weight: 600; }
+.assistant-call__controls .assistant-call__hangup { color: var(--on-accent); background: var(--activity-errored, #c0392b); border-color: transparent; }
+.assistant-call__latency { color: var(--activity-idle); font-size: 11px; }
+.assistant-convo:disabled,
+.assistant-call-toggle:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }

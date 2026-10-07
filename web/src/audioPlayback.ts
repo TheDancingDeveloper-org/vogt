@@ -132,6 +132,14 @@ export function suspendAudio(): void {
   }
 }
 
+/**
+ * The shared playback context, for a player that schedules clips itself (the
+ * live call's queue). Prime it in a gesture first (`primeAudio`).
+ */
+export function sharedAudioContext(): AudioContext {
+  return getContext();
+}
+
 /** Test seam: forget the shared context. */
 export function resetAudioForTests(): void {
   context = null;
