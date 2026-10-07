@@ -574,10 +574,25 @@ one, and it transcribes the moment you pause rather than waiting until the
 turn is declared over. Live captions while you are still talking are off
 (`ENGINE_ASSISTANT_CALL_PARTIAL_INTERVAL_MS=0`): on a small CPU model each
 caption is another full transcription of everything said so far, and that
-work queues behind the transcription that actually answers you. A self-hosted
-faster-whisper `small` on CPU is a few seconds from the end of your speech to
-the first sound of the reply; a smaller model or a GPU is what shortens that,
-not a tighter silence window. The knobs are in [`ENGINE.md`](ENGINE.md) §6.
+work queues behind the transcription that actually answers you. Opening a
+call also transcribes a moment of silence, so a backend that unloaded its
+model while idle has it loaded again before your first turn.
+
+The model is the rest of it. The early transcription is hidden only when it
+finishes inside the half second between your pause and the end of your turn.
+On a 24-core CPU with speaches, measured warm, a two-second turn took 1.4 s on
+faster-whisper `small` and 0.46 s on `base.en`, both at `int8`. A six-second
+turn took 1.9 s and 0.67 s. Neither model got a word of the test turns wrong.
+So for a CPU host:
+
+- Use `Systran/faster-whisper-base.en` (`ENGINE_ASSISTANT_STT_MODEL`).
+- Set speaches' `WHISPER__COMPUTE_TYPE=int8` and `WHISPER__CPU_THREADS=8`.
+- Set `WHISPER__TTL=-1`, so speaches keeps the model loaded rather than
+  dropping it after five idle minutes. A cold load added more than four
+  seconds to a turn.
+
+A tighter silence window does not shorten a slow decode; a faster model or a
+GPU does. The knobs are in [`ENGINE.md`](ENGINE.md) §6.
 
 When the deployment offers server-side transcription, Settings shows
 **Transcribe voice on the server**. On by default a phone uses its own
