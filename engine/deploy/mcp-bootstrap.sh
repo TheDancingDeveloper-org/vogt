@@ -133,6 +133,17 @@ install_vogt_opencode() {
         -- "$VOGT_WRAPPER" >/dev/null
 }
 
+# Klaudia (WI-974) reads MCP servers only from its own `.mcp.json` and has no
+# `mcp add` to write one, so `vogt-klaudia-mcp` does it. Without this a Klaudia
+# session ran with no Vogt tools at all, though its token was valid.
+# Overridable only so the registration logic can be exercised outside the image.
+readonly KLAUDIA_MCP="${VOGT_KLAUDIA_MCP:-/usr/local/bin/vogt-klaudia-mcp}"
+
+install_vogt_klaudia() {
+    command -v klaudia >/dev/null 2>&1 || return 0
+    "$KLAUDIA_MCP" set vogt "$VOGT_WRAPPER"
+}
+
 # Optional read-only MCP servers (docs/ENGINE.md §4). Each is registered only
 # while this session holds its token, and unregistered when it does not, so a
 # deployment opts in by adding the token to its agent-auth manifest and opts
@@ -208,6 +219,34 @@ readonly_claude() {
     claude mcp add --scope user "$name" -- "$READONLY_WRAPPER" "$arg" >/dev/null
 }
 
+readonly_opencode() {
+    local name="$1" arg="$2" config_dir
+    command -v opencode >/dev/null 2>&1 || return 0
+    # opencode has no `mcp remove`, and its config is JSONC an operator edits
+    # by hand, so an unwanted entry is left where it is: without its token
+    # the wrapper refuses to start, so a stale entry is one failed server,
+    # never a credential (WI-975).
+    [[ "$3" == "yes" ]] || return 0
+    config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/opencode"
+    # opencode passes a local server the session's own environment, so the
+    # registration carries no `--env`. `mcp add` upserts, so a present name
+    # that does not yet run the wrapper is simply overwritten.
+    if grep -qsF "\"$name\"" "$config_dir/opencode.json" "$config_dir/opencode.jsonc" \
+        && grep -qsF "$READONLY_WRAPPER" "$config_dir/opencode.json" "$config_dir/opencode.jsonc"; then
+        return 0
+    fi
+    opencode mcp add "$name" -- "$READONLY_WRAPPER" "$arg" >/dev/null
+}
+
+readonly_klaudia() {
+    command -v klaudia >/dev/null 2>&1 || return 0
+    if [[ "$3" == "yes" ]]; then
+        "$KLAUDIA_MCP" set "$1" "$READONLY_WRAPPER" "$2"
+    else
+        "$KLAUDIA_MCP" remove "$1" "$READONLY_WRAPPER"
+    fi
+}
+
 install_readonly_servers() {
     local entry name arg bin required optional wanted
     for entry in "${READONLY_SERVERS[@]}"; do
@@ -225,6 +264,10 @@ install_readonly_servers() {
             || printf 'mcp-bootstrap: codex registration of %s failed\n' "$name" >&2
         readonly_claude "$name" "$arg" "$wanted" \
             || printf 'mcp-bootstrap: claude registration of %s failed\n' "$name" >&2
+        readonly_opencode "$name" "$arg" "$wanted" \
+            || printf 'mcp-bootstrap: opencode registration of %s failed\n' "$name" >&2
+        readonly_klaudia "$name" "$arg" "$wanted" \
+            || printf 'mcp-bootstrap: klaudia registration of %s failed\n' "$name" >&2
     done
 }
 
@@ -234,6 +277,7 @@ install_vogt_bridge
 install_vogt_codex
 install_vogt_claude
 install_vogt_opencode
+install_vogt_klaudia || printf 'mcp-bootstrap: klaudia registration of vogt failed\n' >&2
 install_readonly_servers
 
 # stderr, like every other message in this script, because of who calls it.
