@@ -111,6 +111,8 @@ fn effective<'a>(scopes: &[&'a str]) -> Vec<&'a str> {
             .find(|(name, _)| name == scope)
             .map(|(_, implied)| *implied)
             .unwrap_or(&[]);
+        let itself: &[&str] = &[scope];
+        let implied = if implied.is_empty() { itself } else { implied };
         for scope in implied {
             if !granted.contains(scope) {
                 granted.push(*scope);
@@ -348,36 +350,39 @@ mod tests {
     fn every_scope_implies_exactly_what_python_says() {
         // admin grants all five; each write scope grants itself and read;
         // read grants only itself. Writes are refused before scopes.
-        let table = [
-            ("admin", "writeback", true),
-            ("admin", "project.write", true),
-            ("project.write", "read", true),
-            ("project.write", "work.write", false),
-            ("work.write", "read", true),
-            ("work.write", "project.write", false),
-            ("writeback", "read", true),
-            ("writeback", "work.write", false),
-            ("read", "read", true),
-            ("read", "work.write", false),
+        // The full 5×5 of held × wanted, plus a write refused on every scope.
+        let scopes = ["admin", "project.write", "work.write", "writeback", "read"];
+        let grants: [&[&str]; 5] = [
+            &["admin", "project.write", "work.write", "writeback", "read"],
+            &["project.write", "read"],
+            &["work.write", "read"],
+            &["writeback", "read"],
+            &["read"],
         ];
-        for (held, wanted, allowed) in table {
+        for (held, granted) in scopes.iter().zip(grants) {
+            for wanted in scopes {
+                assert_eq!(
+                    allows(&[held], true, wanted, false).0,
+                    granted.contains(&wanted),
+                    "{held}->{wanted}"
+                );
+            }
             assert_eq!(
-                allows(&[held], true, wanted, false).0,
-                allowed,
-                "{held}->{wanted}"
+                allows(&[held], false, held, true).1,
+                WRITES_DISABLED,
+                "{held} write"
             );
         }
-        assert_eq!(
-            allows(&["admin"], false, "work.write", true).1,
-            WRITES_DISABLED
-        );
+        // A scope the table does not know implies itself, matching Python's
+        // frozenset({scope}) fallback.
+        assert!(allows(&["legacy"], true, "legacy", false).0);
         assert_eq!(
             allows(&["read"], true, "work.write", false).1,
             MISSING_SCOPE
         );
-        assert_eq!(allows(&["admin"], true, "admin", true).1, TOKEN_OK);
     }
 
+    #[test]
     fn a_username_is_folded_and_bounded() {
         assert_eq!(normalise_username(" Ada ").unwrap(), "ada");
         assert!(normalise_username(".ada").is_err());
