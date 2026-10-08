@@ -26,6 +26,14 @@ keys = [
 why = "each run writes under its own temporary root"
 tokens = [{ needle_kind = "root", token = "<root>" }, { needle_kind = "data", token = "<data>" }]
 
+[version]
+# The product version is stamped at build time. A dev build of vogt-core
+# reports "local/dev" while Python reports the release, so the two answers
+# differ on nothing but when they were built. Only this key is blanked, and
+# only so the rest of the answer still compares.
+why = "the version names the build, not the behaviour under test"
+keys = ["version"]
+
 [schema]
 # pydantic emits a `title` per model and orders `anyOf` by declaration. Those
 # are properties of a schema document, not of an answer: dropping `title` from

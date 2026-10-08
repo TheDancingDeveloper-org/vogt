@@ -3,7 +3,7 @@
     "operation": "http.health.live",
     "result": {
       "status": "ok",
-      "version": "local/dev"
+      "version": "<version>"
     },
     "status": 200
   },
@@ -13,7 +13,7 @@
       "declared_schema_expected": 19,
       "declared_schema_version": 19,
       "detail": null,
-      "instance_id": null,
+      "instance_id": "ins_01M4EWY7CK1RNTB74N52NDSE8H",
       "observed_schema_expected": 6,
       "observed_schema_version": 6,
       "status": "ready"
@@ -24,7 +24,7 @@
     "operation": "http.version",
     "result": {
       "name": "vogt",
-      "version": "local/dev"
+      "version": "<version>"
     },
     "status": 200
   },
@@ -42,7 +42,7 @@
         "2024-11-05"
       ],
       "url": null,
-      "version": "local/dev",
+      "version": "<version>",
       "writes_enabled": true
     },
     "status": 200

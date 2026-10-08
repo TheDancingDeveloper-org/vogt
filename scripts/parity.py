@@ -154,6 +154,8 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if init.returncode != 0:
             raise SystemExit(f"init exited {init.returncode}: {init.stderr.strip()}")
         for step in steps:
+            if "params" not in step:
+                continue
             params = _substitute(step["params"], seen, root)
             argv = [binary, "--json", *step["operation"].split("."), *_flags(params)]
             completed = subprocess.run(
@@ -209,32 +211,45 @@ def _substitute(
 
 
 def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Drive the steps over HTTP against a served instance.
+    """Drive the steps that name a route over HTTP against a served instance.
 
-    A step names its route through ``http``: ``{"method", "path", "headers"}``.
-    Only routes the binary actually serves can be recorded; an operation the
-    registry has not ported yet is a gap, not a step.
+    Steps without an ``http`` block are CLI steps and are skipped, so a run
+    without ``--only`` does not fail on them. The data directory goes through
+    ``VOGT_DATA_DIR`` rather than a flag, because Python takes ``--data-dir``
+    before the subcommand and the two binaries do not yet share that shape.
     """
     import socket
     import urllib.request
 
+    steps = [step for step in steps if "http" in step]
     recorded: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="vogt-parity-http-") as scratch:
+        data = Path(scratch) / "instance"
+        env = {
+            **os.environ,
+            "VOGT_DATA_DIR": str(data),
+            "VOGT_TEST_CLOCK_START": CLOCK_START,
+            "VOGT_TEST_IDS": "sequential",
+            # The CLI honours VOGT_TEST_IDS and the golden records ins_0001. The
+            # HTTP server built from the installed package does not, so it mints
+            # a fresh id per process. The golden carries the recording run's id,
+            # and a later run differs on it until the server reads the hook. That
+            # difference is the signal the check exists to show, not noise.
+            "USER": "parity",
+            "LOGNAME": "parity",
+        }
+        env.pop("VOGT_CORE_URL", None)
+        init = subprocess.run(
+            [binary, "--json", "init"], env=env, capture_output=True, text=True, check=False
+        )
+        if init.returncode != 0:
+            raise SystemExit(f"init exited {init.returncode}: {init.stderr.strip()}")
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         server = subprocess.Popen(
-            [
-                binary,
-                "serve",
-                "--host",
-                "127.0.0.1",
-                "--port",
-                str(port),
-                "--data-dir",
-                scratch,
-                "--no-auth",
-            ],
+            [binary, "serve", "--host", "127.0.0.1", "--port", str(port), "--no-auth"],
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -259,7 +274,7 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     {
                         "operation": step["operation"],
                         "status": status,
-                        "result": result,
+                        "result": _normalise(result, Path(scratch), data),
                     }
                 )
         finally:
@@ -280,7 +295,7 @@ def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> 
                 reason = (server.stderr.read() if server.stderr else "") or "exited"
                 raise SystemExit(f"server exited before answering {url}: {reason}")
             time.sleep(0.1)
-    raise SystemExit(f"server never answered {url}: {reason}")
+    raise SystemExit(f"server never answered {url}")
 
 
 def _normalise(value: Any, root: Path, data: Path) -> Any:
@@ -303,7 +318,13 @@ def _walk(value: Any, rules: dict[str, Any], paths: dict[str, str]) -> Any:
         in_schema = any(marker in value for marker in schema["schema_markers"])
         drop = set(schema["drop_keys"]) if in_schema else set()
         walked = {
-            key: ("<volatile>" if key in volatile else _walk(item, rules, paths))
+            key: (
+                "<version>"
+                if key in set(rules.get("version", {}).get("keys", []))
+                else "<volatile>"
+                if key in volatile
+                else _walk(item, rules, paths)
+            )
             for key, item in value.items()
             if key not in drop
         }
