@@ -2030,6 +2030,122 @@ piece → its audio), `speech_end_to_first_audio_ms` (the headline: last voice
 under `vogt::call`. `scripts/call_latency.py` measures a deployment with a
 WAV file and no microphone.
 
+### Quick chat APIs
+
+A **quick chat** (WI-1097) is a persistent text conversation with an agent
+CLI, run without a terminal. The agent is Klaudia, driven over its stream-json
+protocol (msp-klaudia `docs/embedding.md`): each message is a `user` line on
+its stdin, and its replies, tool calls and the `result` that ends a turn come
+back on stdout. The engine picks the conversation id, which is the chat's own
+id: `--session-id` on the first launch and `--resume` on every later one. A
+chat's process is therefore disposable. It is stopped after
+`ENGINE_CHAT_IDLE_AFTER`, and on the next message it is relaunched with the
+whole conversation. Chats are kept for good in `state_dir/chats.db`. There is
+no retention sweep, and archiving only hides a chat from the default list.
+
+Every route needs the `sessions` capability, because a chat starts an agent
+and its transcript is a shared record. They all answer 404 when chats are off
+(`ENGINE_CHAT_ENABLED=0`, or no Klaudia launch configured), and `/api/config`
+advertises `chat: {drivers: [{name, label, models}]}` only when they are on.
+The core's `chat.*` operations are the MCP/CLI/REST counterparts.
+
+- `GET /api/chats?q=&archived=false|true|all&limit=` -> `ChatSummary[]`, newest
+  first. `q` is full-text search over titles and over what people and the
+  agent said. Tool inputs and results are not indexed.
+- `POST /api/chats` `{title?, model?, message?, work_item?}` -> `ChatSendResult`.
+- `GET /api/chats/:id?tail=` -> `ChatDetail`, i.e. the summary plus `entries`
+  (`user`, `assistant`, `tool-call`, `tool-result`, `notice`, `error`,
+  `approval`) and `approvals` still pending.
+- `POST /api/chats/:id/messages` `{text, wait_secs?}` -> `ChatSendResult`.
+  `wait_secs` (≤ 300) waits for the turn to end. A promoted chat answers 409.
+  An `error` entry with `retryable: true` (a provider refusal mid-turn,
+  WI-1007, or a stopped agent) is answered by sending the message again.
+- `POST /api/chats/:id/approvals/:approval_id` `{allow, message?, person?}` ->
+  `ChatApproval`. **Only a person may answer** (the WI-983 rule,
+  `person_gate::is_person`). Anyone else gets `403 person required`.
+- `POST /api/chats/:id/model` `{model}`: a configured id, or `default`. It takes
+  effect from the next turn (`set_model` to a running agent, `--model` on a
+  relaunch).
+- `POST /api/chats/:id/interrupt`: stops the running turn.
+- `POST /api/chats/:id/archive` `{archived}`.
+- `POST /api/chats/:id/promote` `{cwd?, name?, template?, work_item?}` ->
+  `{chat, session}`. This stops the chat's agent and starts a terminal session
+  from the chat's template with `resume: <chat id>`. The session continues the
+  same conversation with the session's own credentials. The chat takes no
+  further messages.
+- `GET /api/chats/:id/events`: an SSE stream of `ChatEvent` (`entry`,
+  `progress`, `approval`, `chat`, `lagged`). `/api/events` also carries a
+  thin `chat-changed {id}`.
+- `POST /api/chats/:id/gate` is **outside the bearer gate**. Only the chat's own
+  agent calls it (below), with the per-process token the engine gave that
+  agent.
+
+**What a chat's agent can do.** A chat reads pages and documents nobody
+vetted, so the engine assumes its agent can be talked into anything:
+
+- **Its environment holds no secrets.** The agent starts from a cleared
+  environment plus an allowlist (`PATH`, `HOME`, locale, `TZ`, proxy and CA
+  variables), its gate's URL and token, and the one provider key that
+  `ENGINE_CHAT_PROVIDER_KEY` names. The engine resolves that key through the
+  agent-auth manifest's `get` when the deployment brokers it, or else from its
+  own environment. The template's credential wrapper is dropped, so a chat has
+  no Vogt token, no brokered service tokens and no secrets-manager identity.
+  **Its MCP servers therefore start without credentials. The POC has no MCP
+  in chats (decision D1 on WI-1097).**
+- **Only its own directory is free.** Each chat runs in
+  `state_dir/chats/<id>/`, whose `.klaudia/config.toml` (loaded with
+  `--trusted-project-config`) declares a `PreToolUse` hook. The hook posts
+  every tool call to the gate. Two kinds of call run at once: a read whose
+  every path resolves, lexically and through symlinks, inside that directory,
+  and a tool that touches nothing outside the agent (`ToolSearch`, `TodoWrite`
+  and the like). **Everything else waits on an approval card that a person
+  answers.** That includes any read elsewhere (`/proc/self/environ`, the
+  engine's state, `~`), every web, browser and MCP call (**decision D2:
+  every web call is carded**), every command and every edit. A prompt
+  injection therefore cannot read something and send it out in one unseen
+  step, because each half is a card naming what it would do. Klaudia's own
+  `can_use_tool` asks (host changes) become cards too. `ask_user` and
+  `exit_plan` are answered "not supported in a chat".
+- **The gate fails closed where it can.** On any failure to get an answer, the
+  hook exits 2, which is Klaudia's "block". The engine denies a card at
+  `ENGINE_CHAT_APPROVAL_TIMEOUT`, which is before curl gives up and before the
+  hook's own timeout, after which Klaudia would let the call through. When
+  Klaudia asks whether the chat's hooks may run, the engine allows that only
+  for its own file, byte for byte as it wrote it. If a gated call succeeds
+  without the gate having seen exactly that call, the chat's agent is stopped
+  with an error. The gate is a driver's gate, not a sandbox. A command a person
+  allows runs unconfined, which is what WI-982's uid separation is for.
+- **It is bounded.** Limits on chat processes:
+  - at most `ENGINE_CHAT_MAX_PROCESSES` (4) at once, and
+    `ENGINE_CHAT_MAX_PER_CREATOR` (2) per person; a launch first stops the least
+    recently active idle chat, and gets a 409 when every running chat is busy;
+  - a turn past `ENGINE_CHAT_TURN_TIMEOUT` (20m) is stopped, and killed if it
+    does not stop;
+  - a process tree over `ENGINE_CHAT_MAX_RSS` (2GiB) is killed;
+  - each process group is killed when its agent exits, and at boot the engine
+    ends any that a previous process left running (a pidfile with the start
+    time, so a reused pid is never hit).
+
+  `/api/status` reports `chats: {running, rss_bytes}`. Chats are not sessions:
+  they appear in no session list and never hibernate.
+- **What is kept** is text: what was said, tool calls (600 characters), tool
+  results (4 000), approvals, notices and errors, with what looks like a
+  credential redacted. Klaudia's own JSONL transcript under
+  `~/.klaudia/sessions` is what `--resume` continues from.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ENGINE_CHAT_ENABLED` | `1` | `0` turns chats off |
+| `ENGINE_CHAT_TEMPLATE` | first Klaudia template | the session template whose driver a chat runs, and that promotion uses |
+| `ENGINE_CHAT_COMMAND` | — | the driver command instead (words, or a JSON array) |
+| `ENGINE_CHAT_MODELS_JSON` | `[]` | `[{"id","label"}]` for the model picker; the first is a new chat's default; empty offers only the driver's own default |
+| `ENGINE_CHAT_PROVIDER_KEY` | — | the name of the provider-key variable the driver reads (its `apiKeyEnv`) |
+| `ENGINE_CHAT_IDLE_AFTER` | `10m` | stop an idle chat's process |
+| `ENGINE_CHAT_APPROVAL_TIMEOUT` | `10m` | deny an unanswered card |
+| `ENGINE_CHAT_TURN_TIMEOUT` | `20m` | stop a turn running longer |
+| `ENGINE_CHAT_MAX_PROCESSES` / `_MAX_PER_CREATOR` | `4` / `2` | process caps |
+| `ENGINE_CHAT_MAX_RSS` | `2GiB` | kill a chat's process tree past this |
+
 ### File APIs
 
 Every path is relative to `workspace_root` and resolved against it by
