@@ -1,0 +1,264 @@
+[
+  {
+    "body": {
+      "clone": null,
+      "counts": {
+        "actors": 1,
+        "audit": 1,
+        "events": 0,
+        "initiatives": 0,
+        "projects": 0,
+        "work_items": 0
+      },
+      "data_dir": "<volatile>",
+      "declared_schema_version": 19,
+      "instance_id": "<volatile>",
+      "observed_schema_version": 6,
+      "principal": "local:sprooty",
+      "revision": 0,
+      "vogt_version": "0.7.7"
+    },
+    "exit": 0,
+    "operation": "status"
+  },
+  {
+    "body": {
+      "workflows": [
+        {
+          "initial_state": "open",
+          "kind": "feature",
+          "states": [
+            "blocked",
+            "done",
+            "in_progress",
+            "open",
+            "review",
+            "wont_do"
+          ],
+          "transitions": {
+            "blocked": [
+              "open",
+              "in_progress",
+              "wont_do"
+            ],
+            "done": [
+              "open"
+            ],
+            "in_progress": [
+              "review",
+              "blocked",
+              "open",
+              "wont_do"
+            ],
+            "open": [
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "review": [
+              "done",
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "wont_do": [
+              "open"
+            ]
+          }
+        },
+        {
+          "initial_state": "open",
+          "kind": "bug",
+          "states": [
+            "blocked",
+            "done",
+            "in_progress",
+            "open",
+            "review",
+            "wont_do"
+          ],
+          "transitions": {
+            "blocked": [
+              "open",
+              "in_progress",
+              "wont_do"
+            ],
+            "done": [
+              "open"
+            ],
+            "in_progress": [
+              "review",
+              "blocked",
+              "open",
+              "wont_do"
+            ],
+            "open": [
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "review": [
+              "done",
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "wont_do": [
+              "open"
+            ]
+          }
+        },
+        {
+          "initial_state": "open",
+          "kind": "chore",
+          "states": [
+            "blocked",
+            "done",
+            "in_progress",
+            "open",
+            "review",
+            "wont_do"
+          ],
+          "transitions": {
+            "blocked": [
+              "open",
+              "in_progress",
+              "wont_do"
+            ],
+            "done": [
+              "open"
+            ],
+            "in_progress": [
+              "review",
+              "blocked",
+              "open",
+              "wont_do"
+            ],
+            "open": [
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "review": [
+              "done",
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "wont_do": [
+              "open"
+            ]
+          }
+        },
+        {
+          "initial_state": "open",
+          "kind": "question",
+          "states": [
+            "blocked",
+            "done",
+            "in_progress",
+            "open",
+            "review",
+            "wont_do"
+          ],
+          "transitions": {
+            "blocked": [
+              "open",
+              "in_progress",
+              "wont_do"
+            ],
+            "done": [
+              "open"
+            ],
+            "in_progress": [
+              "review",
+              "blocked",
+              "open",
+              "wont_do"
+            ],
+            "open": [
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "review": [
+              "done",
+              "in_progress",
+              "blocked",
+              "wont_do"
+            ],
+            "wont_do": [
+              "open"
+            ]
+          }
+        }
+      ]
+    },
+    "exit": 0,
+    "operation": "workflow.list"
+  },
+  {
+    "body": {
+      "actor": {
+        "created_at": "<volatile>",
+        "disabled": false,
+        "display_name": "Parity Agent",
+        "id": "<volatile>",
+        "identity_ref": "agent:parity",
+        "kind": "agent"
+      }
+    },
+    "exit": 0,
+    "operation": "actor.create"
+  },
+  {
+    "body": {
+      "actors": [
+        {
+          "created_at": "<volatile>",
+          "disabled": false,
+          "display_name": "Parity Agent",
+          "id": "<volatile>",
+          "identity_ref": "agent:parity",
+          "kind": "agent"
+        },
+        {
+          "created_at": "<volatile>",
+          "disabled": false,
+          "display_name": "sprooty",
+          "id": "<volatile>",
+          "identity_ref": "local:sprooty",
+          "kind": "human"
+        }
+      ]
+    },
+    "exit": 0,
+    "operation": "actor.list"
+  },
+  {
+    "body": {
+      "label": {
+        "color": "#d73a4a",
+        "created_at": "<volatile>",
+        "id": "<volatile>",
+        "name": "parity"
+      }
+    },
+    "exit": 0,
+    "operation": "label.create"
+  },
+  {
+    "body": {
+      "labels": [
+        {
+          "color": "#d73a4a",
+          "created_at": "<volatile>",
+          "id": "<volatile>",
+          "name": "parity"
+        }
+      ]
+    },
+    "exit": 0,
+    "operation": "label.list"
+  }
+]
