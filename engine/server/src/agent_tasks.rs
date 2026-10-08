@@ -5194,6 +5194,7 @@ mod tests {
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,
             metrics_bind: None,
+            chat: Default::default(),
         }
     }
 

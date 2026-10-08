@@ -82,6 +82,7 @@ fn test_config() -> Config {
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         metrics_bind: None,
+        chat: Default::default(),
     }
 }
 
@@ -12110,4 +12111,569 @@ async fn an_agent_cannot_approve_an_assistant_card_onto_a_permission_prompt() {
     let approved = approve_typing_one(&person, &base, &script, &id).await;
     assert_eq!(approved.status(), StatusCode::OK);
     live_output_containing(&operator, &base, &id, &["chose 1"]).await;
+}
+
+// ── Quick chats (WI-1097) ────────────────────────────────────────────────
+
+/// A test engine whose chats are driven by the scripted stand-in
+/// (`tests/fixtures/fake-klaudia.py`), reached through a symlink named
+/// `klaudia` so the engine recognises the driver. `None` without python3.
+async fn boot_chats() -> Option<(
+    String,
+    reqwest::Client,
+    Arc<AppState>,
+    ServerGuard,
+    tempfile::TempDir,
+)> {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: the stand-in driver is written in python3");
+        return None;
+    }
+    let bin = tempfile::tempdir().unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-klaudia.py")
+        .canonicalize()
+        .unwrap();
+    let driver = bin.path().join("klaudia");
+    std::os::unix::fs::symlink(&fixture, &driver).unwrap();
+    let cfg = Config {
+        chat: vogt_engine_server::chats::ChatPolicy {
+            enabled: true,
+            command: Some(vec![driver.to_string_lossy().into_owned()]),
+            models: vec![
+                vogt_engine_contract::ChatModel {
+                    id: "grok-4.7".into(),
+                    label: "Grok 4.7".into(),
+                },
+                vogt_engine_contract::ChatModel {
+                    id: "deepseek-v4-pro".into(),
+                    label: "DeepSeek V4 Pro".into(),
+                },
+            ],
+            approval_timeout: Duration::from_secs(10),
+            ..Default::default()
+        },
+        session_templates: vec![],
+        ..test_config()
+    };
+    let (base, state, guard) = boot_with_state(cfg).await;
+    state
+        .chats
+        .as_ref()
+        .expect("chats are configured")
+        .set_gate_base(base.clone());
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    Some((base, client, state, guard, bin))
+}
+
+async fn chat_send(client: &reqwest::Client, base: &str, id: &str, text: &str) -> Value {
+    let sent = client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": text, "wait_secs": 20 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        sent.status(),
+        StatusCode::OK,
+        "{}",
+        sent.text().await.unwrap()
+    );
+    sent.json().await.unwrap()
+}
+
+/// Wait until the chat shows a pending approval, and return it.
+async fn pending_approval(client: &reqwest::Client, base: &str, id: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let chat: Value = client
+                .get(format!("{base}/api/chats/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if let Some(first) = chat["approvals"].as_array().and_then(|a| a.first()) {
+                break first.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("an approval should be raised")
+}
+
+fn texts(entries: &Value, kind: &str) -> Vec<String> {
+    entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == kind)
+        .map(|e| e["text"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_chat_answers_switches_model_and_resumes_after_its_process_stops() {
+    let Some((base, client, state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    // Advertised, with the configured models.
+    let config: Value = reqwest::get(format!("{base}/api/config"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["chat"]["drivers"][0]["name"], "klaudia", "{config}");
+    assert_eq!(
+        config["chat"]["drivers"][0]["models"][1]["id"],
+        "deepseek-v4-pro"
+    );
+
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "work_item": "WI-1097" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        created["chat"]["model"], "grok-4.7",
+        "the first model is the default"
+    );
+    assert_eq!(created["chat"]["creator"], "primary");
+
+    let first = chat_send(&client, &base, &id, "is bedrock in sydney?").await;
+    assert_eq!(first["finished"], true, "{first}");
+    assert_eq!(
+        texts(&first["entries"], "assistant"),
+        ["grok-4.7: is bedrock in sydney?"]
+    );
+    assert_eq!(first["chat"]["title"], "is bedrock in sydney?");
+
+    // Mid-chat switch: the live process is told, and says so on its next turn.
+    let switched = client
+        .post(format!("{base}/api/chats/{id}/model"))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(switched.status(), StatusCode::OK);
+    let second = chat_send(&client, &base, &id, "and now?").await;
+    assert_eq!(
+        texts(&second["entries"], "assistant"),
+        ["deepseek-v4-pro: and now?"]
+    );
+    let refused = client
+        .post(format!("{base}/api/chats/{id}/model"))
+        .json(&json!({ "model": "gpt-unknown" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    // The process stops (an idle exit, a restart); the next message resumes
+    // the same conversation by the chat's id, on the chosen model.
+    let runtime = state.chats.clone().unwrap();
+    let dir = state.config.state_dir.join("chats").join(&id);
+    runtime_stop(&runtime, &id).await;
+    let third = chat_send(&client, &base, &id, "still there?").await;
+    assert_eq!(
+        texts(&third["entries"], "assistant"),
+        ["deepseek-v4-pro: still there?"]
+    );
+    let launches: Vec<Vec<String>> = std::fs::read_to_string(dir.join("launches.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    let has = |argv: &[String], pair: [&str; 2]| {
+        argv.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1])
+    };
+    assert!(has(&launches[0], ["--session-id", &id]), "{launches:?}");
+    assert!(has(&launches[1], ["--resume", &id]), "{launches:?}");
+    assert!(
+        has(&launches[1], ["--model", "deepseek-v4-pro"]),
+        "{launches:?}"
+    );
+    assert!(launches[0].contains(&"--trusted-project-config".to_string()));
+    // The gate is the chat's own config, regenerated at launch.
+    assert!(std::fs::read_to_string(dir.join(".klaudia/config.toml"))
+        .unwrap()
+        .contains("PreToolUse"));
+
+    // Kept and found: listed, searchable by what was said, archivable.
+    let found: Value = client
+        .get(format!("{base}/api/chats?q=bedrock"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
+    assert_eq!(found[0]["message_count"], 6);
+    client
+        .post(format!("{base}/api/chats/{id}/archive"))
+        .json(&json!({ "archived": true }))
+        .send()
+        .await
+        .unwrap();
+    let open: Value = client
+        .get(format!("{base}/api/chats"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(open.as_array().unwrap().is_empty(), "{open}");
+    let all: Value = client
+        .get(format!("{base}/api/chats?archived=all"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 1);
+}
+
+async fn runtime_stop(runtime: &Arc<vogt_engine_server::chats::ChatRuntime>, id: &str) {
+    runtime
+        .stop_for_test(uuid::Uuid::parse_str(id).unwrap())
+        .await;
+}
+
+#[tokio::test]
+async fn a_write_waits_for_a_person_and_reads_do_not() {
+    let Some((base, client, _state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+
+    // A command waits on a card. Sent without waiting, so the test can answer.
+    let sent = client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "run:make test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sent.status(), StatusCode::OK);
+    let approval = pending_approval(&client, &base, &id).await;
+    assert_eq!(approval["tool_name"], "Bash");
+    assert_eq!(approval["summary"], "make test");
+    assert_eq!(approval["source"], "gate");
+    let chat: Value = client
+        .get(format!("{base}/api/chats/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(chat["state"], "awaiting-approval");
+
+    // An agent may not answer it: the break-glass token relaying a
+    // non-person is refused, and nothing is decided.
+    let approval_id = approval["id"].as_str().unwrap();
+    let by_agent = client
+        .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+        .json(&json!({ "allow": true, "person": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(by_agent.status(), StatusCode::FORBIDDEN);
+    assert!(by_agent.text().await.unwrap().contains("person required"));
+
+    // A person denies it; the agent is told and the turn ends.
+    let denied = client
+        .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+        .json(&json!({ "allow": false, "message": "not now" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::OK);
+    let detail = wait_chat_idle(&client, &base, &id).await;
+    let results: Vec<&Value> = detail["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "tool-result")
+        .collect();
+    assert_eq!(results.len(), 1, "{detail}");
+    assert_eq!(results[0]["is_error"], true);
+    assert_eq!(results[0]["text"], "not now");
+    assert_eq!(results[0]["tool_name"], "Bash");
+
+    // Allowed, it runs.
+    client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "run:ls" }))
+        .send()
+        .await
+        .unwrap();
+    let approval = pending_approval(&client, &base, &id).await;
+    let approval_id = approval["id"].as_str().unwrap();
+    client
+        .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+        .json(&json!({ "allow": true }))
+        .send()
+        .await
+        .unwrap();
+    let detail = wait_chat_idle(&client, &base, &id).await;
+    assert!(
+        texts(&detail["entries"], "tool-result").contains(&"ran ls".to_string()),
+        "{detail}"
+    );
+
+    // The gate refuses a caller without the process's token.
+    let forged = reqwest::Client::new()
+        .post(format!("{base}/api/chats/{id}/gate"))
+        .bearer_auth(TEST_TOKEN)
+        .json(&json!({ "tool_name": "Bash", "tool_input": {"command": "id"} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::UNAUTHORIZED);
+}
+
+async fn wait_chat_idle(client: &reqwest::Client, base: &str, id: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let chat: Value = client
+                .get(format!("{base}/api/chats/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if chat["state"] == "idle" {
+                break chat;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the chat should go idle")
+}
+
+#[tokio::test]
+async fn a_write_that_skipped_the_gate_stops_the_chat() {
+    let Some((base, client, _state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "message": "hello" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    wait_chat_idle(&client, &base, &id).await;
+    client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "sneak:rm -rf build" }))
+        .send()
+        .await
+        .unwrap();
+    let detail = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let chat: Value = client
+                .get(format!("{base}/api/chats/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if chat["live"] == false
+                && texts(&chat["entries"], "error")
+                    .iter()
+                    .any(|t| t.contains("approval gate"))
+            {
+                break chat;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the chat should be stopped with a named error");
+    assert_eq!(detail["state"], "idle");
+}
+
+#[tokio::test]
+async fn driver_asks_go_to_a_person_its_own_hooks_do_not_and_errors_are_retryable() {
+    let Some((base, client, state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    let dir = state.config.state_dir.join("chats").join(&id);
+
+    // Klaudia asks whether the chat's own hooks may run: allowed, unasked.
+    let hooks = chat_send(&client, &base, &id, "hooks").await;
+    assert_eq!(texts(&hooks["entries"], "assistant"), ["hooks answered"]);
+    let responses = std::fs::read_to_string(dir.join("responses.jsonl")).unwrap();
+    assert!(responses.contains("\"behavior\": \"allow\""), "{responses}");
+
+    // A host change goes to a person, as a `driver` card.
+    client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "hostask" }))
+        .send()
+        .await
+        .unwrap();
+    let approval = pending_approval(&client, &base, &id).await;
+    assert_eq!(approval["source"], "driver");
+    assert_eq!(approval["summary"], "systemctl restart nginx");
+    let approval_id = approval["id"].as_str().unwrap();
+    client
+        .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+        .json(&json!({ "allow": false }))
+        .send()
+        .await
+        .unwrap();
+    wait_chat_idle(&client, &base, &id).await;
+    let responses = std::fs::read_to_string(dir.join("responses.jsonl")).unwrap();
+    assert!(responses.contains("\"behavior\": \"deny\""), "{responses}");
+
+    // A provider error is a failed reply the person can send again.
+    let failed = chat_send(&client, &base, &id, "fail").await;
+    let errors: Vec<&Value> = failed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "error")
+        .collect();
+    assert_eq!(errors.len(), 1, "{failed}");
+    assert_eq!(errors[0]["retryable"], true);
+    assert!(errors[0]["text"].as_str().unwrap().contains("400"));
+
+    // Stop ends a running turn as a stop, not an error.
+    client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "slow" }))
+        .send()
+        .await
+        .unwrap();
+    let stopped = client
+        .post(format!("{base}/api/chats/{id}/interrupt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let detail = wait_chat_idle(&client, &base, &id).await;
+    let notices = texts(&detail["entries"], "notice");
+    assert!(notices.contains(&"Stopped.".to_string()), "{detail}");
+}
+
+#[tokio::test]
+async fn a_promoted_chat_continues_in_a_session_and_takes_no_more_messages() {
+    let Some((base, client, _state, guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "message": "plan the fix" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    wait_chat_idle(&client, &base, &id).await;
+    let promoted = client
+        .post(format!("{base}/api/chats/{id}/promote"))
+        .json(&json!({ "name": "fix it" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted.status(), StatusCode::OK);
+    let promoted: Value = promoted.json().await.unwrap();
+    let session = promoted["session"]["id"].as_str().unwrap();
+    assert_eq!(promoted["chat"]["promoted_session"], session);
+    assert_eq!(promoted["session"]["name"], "fix it");
+    // The session runs the same conversation, by the chat's id.
+    assert_eq!(
+        promoted["session"]["conversation"]["id"],
+        id.as_str(),
+        "{promoted}"
+    );
+    assert_eq!(promoted["session"]["conversation"]["agent"], "klaudia");
+    assert!(
+        promoted["chat"]["live"] == false,
+        "the chat's own process is gone"
+    );
+
+    let refused = client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "more" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    drop(guard);
+}
+
+#[tokio::test]
+async fn chats_need_the_sessions_capability_and_404_when_off() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // The test config turns chats off: every route is absent, and the
+    // config does not advertise them.
+    let off = client
+        .get(format!("{base}/api/chats"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(off.status(), StatusCode::NOT_FOUND);
+    let config: Value = reqwest::get(format!("{base}/api/config"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(config.get("chat").is_none(), "{config}");
+    // Unauthenticated: refused before anything else.
+    let anonymous = reqwest::get(format!("{base}/api/chats")).await.unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
 }

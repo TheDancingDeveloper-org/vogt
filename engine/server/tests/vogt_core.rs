@@ -213,6 +213,7 @@ fn base_config() -> Config {
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         metrics_bind: None,
+        chat: Default::default(),
     }
 }
 

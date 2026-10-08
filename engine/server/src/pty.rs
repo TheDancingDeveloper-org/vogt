@@ -842,7 +842,7 @@ pub(crate) fn identity_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
 /// nothing, and `agent-auth.sh` unsets `VOGT_HTTP_TOKEN` — a session with no
 /// Vogt/git/gh credentials. The templates name the helper either by its full
 /// configured path or by just its basename on `PATH`, so accept both (#727).
-fn is_agent_auth_helper_command(argv0: &str, helper: &Path) -> bool {
+pub(crate) fn is_agent_auth_helper_command(argv0: &str, helper: &Path) -> bool {
     Path::new(argv0) == helper
         || helper
             .file_name()

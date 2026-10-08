@@ -564,6 +564,13 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path.starts_with("/api/sessions/") {
         return Some(TokenCapability::Sessions);
     }
+    // A quick chat starts an agent, and its transcript is a shared record,
+    // so every chat route — reads included — needs what a session does
+    // (WI-1097). The gate is not under this rule: it is outside the bearer
+    // gate and checks its own per-process token.
+    if path == "/api/chats" || path.starts_with("/api/chats/") {
+        return Some(TokenCapability::Sessions);
+    }
     // Reading the durable interaction log is scope-gated even though it is a
     // GET: it is a cross-conversation record attributable to
     // each actor, not the caller's own live transcript, so it takes the
