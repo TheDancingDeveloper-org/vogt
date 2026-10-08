@@ -16,8 +16,10 @@ clock and predictable identifiers are a test aid, not a deployment mode.
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 from datetime import datetime, timedelta
+from pathlib import Path
 
 from vogt.core.clock import Clock, from_iso
 from vogt.core.ids import IdFactory
@@ -41,13 +43,26 @@ class StepClock:
 
 
 class SequentialIds:
-    """Deterministic ids, so two fresh instances agree on the same script."""
+    """Deterministic ids, so two fresh instances agree on the same script.
 
-    def __init__(self) -> None:
+    `path` persists the counters. A CLI invocation is its own process, so an
+    in-memory counter would hand every invocation the same first id and the
+    second write of a script would collide with the first.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        self._path = path
         self._counts: dict[str, int] = {}
+        if path is not None and path.is_file():
+            self._counts = {
+                key: int(value) for key, value in json.loads(path.read_text()).items()
+            }
 
     def __call__(self, prefix: str) -> str:
         self._counts[prefix] = self._counts.get(prefix, 0) + 1
+        if self._path is not None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(json.dumps(self._counts, sort_keys=True))
         return f"{prefix}_{self._counts[prefix]:04d}"
 
 
@@ -70,7 +85,9 @@ def clock_from_env(environ: os._Environ[str] | None = None) -> Clock | None:
     return StepClock(start)
 
 
-def ids_from_env(environ: os._Environ[str] | None = None) -> IdFactory | None:
+def ids_from_env(
+    environ: os._Environ[str] | None = None, path: Path | None = None
+) -> IdFactory | None:
     """The sequential id factory, or `None` when unset or set to anything else."""
     env = os.environ if environ is None else environ
     raw = env.get(IDS_ENV)
@@ -79,7 +96,7 @@ def ids_from_env(environ: os._Environ[str] | None = None) -> IdFactory | None:
     if raw.strip() != SEQUENTIAL:
         msg = f"{IDS_ENV} must be {SEQUENTIAL!r} when set, not {raw!r}"
         raise InvalidRequest(msg)
-    return SequentialIds()
+    return SequentialIds(path)
 
 
 def hooks_active(environ: os._Environ[str] | None = None) -> tuple[str, ...]:

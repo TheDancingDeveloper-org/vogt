@@ -122,7 +122,7 @@ def build_context(
         if override is not None:
             resolved_clock = override
     if id_factory is new_id:
-        override_ids = ids_from_env()
+        override_ids = ids_from_env(path=resolved_config.data_dir / "test-ids.json")
         if override_ids is not None:
             resolved_ids = override_ids
     active = hooks_active()
