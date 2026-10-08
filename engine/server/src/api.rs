@@ -391,18 +391,12 @@ pub async fn answer_session(
     let person = crate::person_gate::is_person(identity, req.person);
     if crate::person_gate::needs_person(dialog.kind) && !person {
         let who = identity.map_or("unidentified", |i| i.name.as_str());
-        tracing::warn!(
-            target: "vogt::audit",
-            event = "session.permission_answer",
-            outcome = "refused",
-            via = "answer",
-            session_id = %id,
-            principal = %who,
-            kind = dialog.kind,
-            question = %dialog.question,
-            "refused an agent's answer to a permission prompt; only a person answers one"
-        );
-        return Err(crate::person_gate::refusal(who, &dialog));
+        return Err(crate::person_gate::refuse(
+            &session,
+            who,
+            &dialog,
+            crate::person_gate::Via::Answer,
+        ));
     }
     if let Some(expected) = req.expect_question.as_deref() {
         if dialog.question.trim() != expected.trim() {
