@@ -107,6 +107,9 @@ jobs:
           uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/golden"
           uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/again"
           diff -q "$RUNNER_TEMP/golden/cli.json" "$RUNNER_TEMP/again/cli.json"
+          uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http"
+          uv run python scripts/parity.py record --impl python --transport http --out "$RUNNER_TEMP/http-again"
+          diff -q "$RUNNER_TEMP/http/http.json" "$RUNNER_TEMP/http-again/http.json"
           # Against the committed golden, not the recording just made: a
           # recording that agrees with itself proves nothing about drift.
           # The golden is named for the main this branch was rebased onto, not
@@ -115,6 +118,7 @@ jobs:
           golden="tests/parity/golden/${base:0:7}"
           test -d "$golden" || { echo "no golden for $base" >&2; exit 1; }
           uv run python scripts/parity.py check --impl python --golden "$golden"
+          uv run python scripts/parity.py check --impl python --transport http --golden "$golden"
           uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
           uv run python scripts/parity.py selftest --golden "$golden"
 

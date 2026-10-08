@@ -396,7 +396,16 @@ def _selftest(golden_dir: Path) -> int:
     if _diff(normalised, _normalise(dropped, root, data), "") != 0:
         print("selftest: mutating a schema title was not dropped", file=sys.stderr)
         return 1
-    print("selftest passed: id and answer title caught, schema title dropped")
+
+    http = json.loads((golden_dir / "http.json").read_text())
+    http_golden = _normalise(http, root, data)
+    if not _mutate(http, "instance_id"):
+        print("selftest: no 'instance_id' to mutate in the HTTP golden", file=sys.stderr)
+        return 1
+    if _diff(http_golden, _normalise(http, root, data), "") == 0:
+        print("selftest: mutating 'instance_id' was not caught", file=sys.stderr)
+        return 1
+    print("selftest passed: id, answer title and instance_id caught, schema title dropped")
     return 0
 
 
