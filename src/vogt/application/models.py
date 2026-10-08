@@ -344,6 +344,39 @@ class CloneInfo(Result):
     )
 
 
+class RegistryDumpParams(Params):
+    """`registry.dump` takes nothing: the registry is the whole answer."""
+
+
+class RegistryOperationManifest(Result):
+    """One operation as every transport sees it.
+
+    The schemas are the JSON schema of the parameter and result models, so a
+    consumer that is not this process — the parity harness, and later a Rust
+    core — can compare contracts without importing the models.
+    """
+
+    name: str
+    summary: str
+    scope: str
+    mutating: bool
+    reason_required: bool
+    http_method: str
+    http_path: str
+    mcp_tool: str
+    cli_path: list[str]
+    params_schema: dict[str, object]
+    result_schema: dict[str, object]
+    #: `all`, or the one transport the operation is confined to.
+    transports: list[str]
+    exclusion: str | None = None
+    exclusion_reason: str | None = None
+
+
+class RegistryDumpResult(Result):
+    operations: list[RegistryOperationManifest]
+
+
 class StatusResult(Result):
     vogt_version: str
     instance_id: str

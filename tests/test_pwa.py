@@ -27,6 +27,7 @@ from pathlib import Path
 import pytest
 
 from vogt.adapters.http.app import API_PREFIX
+from vogt.application.context import build_context
 from vogt.registry import default_registry
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +62,20 @@ def source(path: Path) -> str:
     return "\n".join(kept)
 
 
+def operation_routes() -> dict[str, str]:
+    """Operation name to HTTP path, from the registry manifest.
+
+    The PWA's route table is checked against this rather than against the
+    registry objects directly, so the same assertion can later take a Rust
+    core's `registry.dump` in place of the in-process one.
+    """
+    from vogt.application.models import RegistryDumpParams
+    from vogt.application.services.instance import registry_dump
+
+    manifest = registry_dump(build_context(), RegistryDumpParams())
+    return {operation.name: operation.http_path for operation in manifest.operations}
+
+
 def client_routes() -> dict[str, str]:
     block = re.search(
         r"export const ROUTES = \{(.*?)\n\} as const;", source(VOGT_CLIENT), re.S
@@ -77,12 +92,12 @@ def client_routes() -> dict[str, str]:
 def test_every_vogt_path_in_the_pwa_is_a_registered_operation() -> None:
     registry = default_registry()
     registered = {op.name: op for op in registry.for_transport("http")}
+    manifest_routes = operation_routes()
 
     for name, path in client_routes().items():
         assert name in registered, f"the PWA names {name}, which is not an operation"
-        assert registered[name].route.path == path, (
-            f"{name} is served at {registered[name].route.path}, "
-            f"but the PWA asks for {path}"
+        assert manifest_routes[name] == path, (
+            f"{name} is served at {manifest_routes[name]}, but the PWA asks for {path}"
         )
 
 
