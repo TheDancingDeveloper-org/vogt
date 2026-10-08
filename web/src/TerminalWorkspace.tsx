@@ -19,7 +19,10 @@ import {
   killSession,
   sessionsStore,
   isConnected,
+  refreshSessions,
 } from "./store";
+import { setSessionRole } from "./sessionHibernation";
+import { sessionRoleAction } from "./sessionRoleMenu";
 import {
   formatTerminalInputLimit,
   terminalInputTooLarge,
@@ -1130,8 +1133,42 @@ const TerminalWorkspace: Component<Props> = (props) => {
 
   // The pane-management actions. Rendered inline on a wide toolbar and inside
   // the `···` menu on a phone, so the button logic lives in exactly one place.
+  // The session the "⋯" menu acts on: the paged one on a phone, the active
+  // pane's on a desk.
+  const menuSession = (mobile: boolean) => (mobile ? mobileSelected() : activeSession());
+  // Make or remove oversight (WI-1091), through the core's person-only
+  // `session.set_role`. The role publishes no event, so read the list again:
+  // the rail, the Sessions list and the pager reorder from it.
+  const changeRole = async (session: SessionSummary, role: "oversight" | "worker") => {
+    setOverflowOpen(false);
+    try {
+      await setSessionRole(session.id, role);
+      setError(null);
+      await refreshSessions();
+    } catch (e) {
+      setError(`changing the role failed: ${(e as Error).message}`);
+    }
+  };
+
   const overflowActions = (mobile = false) => (
     <>
+      <Show when={menuSession(mobile)}>
+        {(session) => (
+          <Show when={sessionRoleAction(session())}>
+            {(action) => (
+              <button
+                type="button"
+                role="menuitem"
+                data-testid="session-role-action"
+                title={action().title}
+                onClick={() => void changeRole(session(), action().role)}
+              >
+                {action().label}
+              </button>
+            )}
+          </Show>
+        )}
+      </Show>
       <Show when={mobile}>
         <div class="terminal-mobile-display-controls" role="group" aria-label="Terminal display">
           <button

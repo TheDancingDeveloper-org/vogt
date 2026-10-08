@@ -11427,3 +11427,83 @@ async fn every_attached_client_is_told_the_pty_size() {
     late.close(None).await.ok();
     kill_session(&client, &base, &id).await;
 }
+
+#[tokio::test]
+async fn removing_oversight_lifts_its_pin_but_keeps_a_workers_own_pin() {
+    // WI-1091: oversight pins a session awake; making it a worker again must
+    // put it back under the ordinary idle policy, or a demoted overseer stays
+    // pinned for good. A worker pinned on its own is left pinned.
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let create = |name: &'static str| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({ "name": name, "command": ["/bin/cat"] }))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()["id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        }
+    };
+    let post = |path: String, body: Value| {
+        let client = client.clone();
+        async move {
+            client
+                .post(path)
+                .json(&body)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let overseer = create("overseer").await;
+    let promoted = post(
+        format!("{base}/api/sessions/{overseer}/role"),
+        json!({ "role": "oversight" }),
+    )
+    .await;
+    assert_eq!(promoted["keep_awake"], true);
+    let demoted = post(
+        format!("{base}/api/sessions/{overseer}/role"),
+        json!({ "role": "worker" }),
+    )
+    .await;
+    assert!(demoted.get("role").is_none(), "a worker again: {demoted}");
+    assert!(
+        demoted.get("keep_awake").is_none(),
+        "removing oversight lifts its pin: {demoted}"
+    );
+
+    let pinned = create("pinned worker").await;
+    post(
+        format!("{base}/api/sessions/{pinned}/keep-awake"),
+        json!({ "keep_awake": true }),
+    )
+    .await;
+    let still = post(
+        format!("{base}/api/sessions/{pinned}/role"),
+        json!({ "role": "worker" }),
+    )
+    .await;
+    assert_eq!(
+        still["keep_awake"], true,
+        "a worker's own pin stays: {still}"
+    );
+
+    kill_session(&client, &base, &overseer).await;
+    kill_session(&client, &base, &pinned).await;
+}

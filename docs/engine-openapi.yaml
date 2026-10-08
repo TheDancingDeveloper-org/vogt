@@ -525,8 +525,10 @@ paths:
       description: >-
         WI-957. `oversight` marks a session that supervises the others; it is
         also pinned awake (`keep_awake`), so a restart wakes it by itself.
-        `worker` clears the role and leaves the pin as it is. Live or
-        hibernated; the role is kept in the session's record.
+        `worker` clears the role; on a session that was oversight it also
+        lifts the pin oversight set, so the ordinary idle/hibernate policy
+        applies again (WI-1091). A worker pinned on its own keeps its pin.
+        Live or hibernated; the role is kept in the session's record.
       operationId: setSessionRole
       x-capability: sessions
       requestBody:

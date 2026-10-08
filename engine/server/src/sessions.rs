@@ -1203,21 +1203,38 @@ impl SessionRegistry {
     /// Nominate a session as oversight, or make it an ordinary worker again
     /// (WI-957), live or hibernated, and in its record so a wake and a
     /// redeploy keep the answer. Becoming oversight also pins the session
-    /// awake; going back to worker leaves the pin as it is, for the caller to
-    /// lift with keep-awake if it wants to.
+    /// awake; removing oversight lifts that pin again, so the session is back
+    /// under the ordinary idle/hibernate policy (WI-1091). Only the move from
+    /// oversight to worker unpins: a worker pinned on its own stays pinned
+    /// when told it is a worker.
     pub fn set_role(&self, id: Uuid, role: SessionRole) -> Result<SessionSummary> {
         let live = self.sessions.get(&id).map(|s| Arc::clone(s.value()));
         let oversight = role == SessionRole::Oversight;
+        let was_oversight = match live.as_ref() {
+            Some(session) => session.role() == SessionRole::Oversight,
+            None => self
+                .records
+                .get(&id)
+                .is_some_and(|record| record.role == SessionRole::Oversight),
+        };
+        // The pin to set, if this change moves it.
+        let pin = if oversight {
+            Some(true)
+        } else if was_oversight {
+            Some(false)
+        } else {
+            None
+        };
         if let Some(session) = live.as_ref() {
             session.set_role(role);
-            if oversight {
-                session.set_keep_awake(true);
+            if let Some(keep) = pin {
+                session.set_keep_awake(keep);
             }
         }
         let updated = self.records.get_mut(&id).map(|mut record| {
             record.role = role;
-            if oversight {
-                record.keep_awake = true;
+            if let Some(keep) = pin {
+                record.keep_awake = keep;
             }
             record.clone()
         });

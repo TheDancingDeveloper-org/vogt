@@ -73,7 +73,18 @@ engine has forgotten the session.
 
 Becoming oversight also **pins the session awake**. The overseer is the
 session that brings the others back, so it has to come back by itself.
-Demoting it to worker leaves the pin, which `session.keep_awake` can lift.
+Removing oversight (back to worker) lifts that pin again, so the session
+falls back under the ordinary idle/hibernate policy (WI-1091). A worker
+pinned on its own with `session.keep_awake` keeps its pin when told it is a
+worker.
+
+In the PWA, the session menu offers **Make oversight** on a worker and
+**Remove oversight** on an oversight session. That is the rail row's menu on
+a desk, and the terminal's "⋯" menu on both a desk and a phone. Both call
+the core's `session.set_role`, which only a person may do. Without it, the
+only way to stop a session being the overseer was to kill it. The rail, the
+phone's Sessions list and its pager list oversight sessions first and
+reorder once the role changes; the phone terminal pager keeps attention order.
 
 A name-based fallback ("a session called Oversight") was rejected. The
 incident's decoy shell is the counter-example.

@@ -3989,8 +3989,9 @@ class SetSessionRoleParams(Params):
     role: SessionRole = Field(
         description=(
             "`oversight` nominates the session to supervise others (and pins "
-            "it awake); `worker` makes it an ordinary session again (the pin "
-            "stays until session.keep_awake lifts it)."
+            "it awake); `worker` makes it an ordinary session again and, for a "
+            "session that was oversight, lifts that pin so the idle policy "
+            "applies again."
         )
     )
     reason: Reason = Field(description="Why this write is being made (audited).")

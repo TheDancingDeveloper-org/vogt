@@ -1084,7 +1084,8 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "Nominate a session as oversight (role=oversight): one that "
                 "supervises other sessions. It is pinned awake, so it comes "
                 "back by itself after a redeploy, and the GUI lists it first. "
-                "role=worker makes it an ordinary session again. Takes either "
+                "role=worker makes it an ordinary session again and lifts the "
+                "pin oversight set. Person-only. Takes either "
                 "id."
             ),
             scope="work.write",

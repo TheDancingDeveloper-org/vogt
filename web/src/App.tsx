@@ -145,6 +145,7 @@ import {
   setSessionRole,
   wakeSession,
 } from "./sessionHibernation";
+import { sessionRoleAction } from "./sessionRoleMenu";
 
 // -- what the first screen does not have to carry -----------
 //
@@ -1160,9 +1161,9 @@ const App: Component = () => {
 
   // Nominate a session as oversight (WI-957): pinned awake, listed first.
   // The role publishes no event, so read the list again, as keep-awake does.
-  const onToggleOversight = async (s: SessionSummary) => {
+  const onSetRole = async (s: SessionSummary, role: "oversight" | "worker") => {
     try {
-      await setSessionRole(s.id, isOversight(s) ? "worker" : "oversight");
+      await setSessionRole(s.id, role);
       void refreshSessions();
     } catch (e) {
       showToast(`changing the role failed: ${(e as Error).message}`, { kind: "error" });
@@ -1896,18 +1897,19 @@ const App: Component = () => {
                       }}
                     >{s.keep_awake ? "✓ Keep awake" : "Keep awake"}</button>
                   </Show>
-                  <Show when={s.exit_code === null}>
-                    <button
-                      type="button"
-                      role="menuitemcheckbox"
-                      aria-checked={isOversight(s)}
-                      aria-label={`Oversight session: ${s.name}`}
-                      title="An oversight session supervises the others: it is pinned awake and listed first"
-                      onClick={() => {
-                        setOpenMenuId(null);
-                        void onToggleOversight(s);
-                      }}
-                    >{isOversight(s) ? "✓ Oversight" : "Oversight"}</button>
+                  <Show when={sessionRoleAction(s)}>
+                    {(action) => (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        aria-label={`${action().label}: ${s.name}`}
+                        title={action().title}
+                        onClick={() => {
+                          setOpenMenuId(null);
+                          void onSetRole(s, action().role);
+                        }}
+                      >{action().label}</button>
+                    )}
                   </Show>
                   <div class="row-menu-list-sep" role="separator" />
                   <button
