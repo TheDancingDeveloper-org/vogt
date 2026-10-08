@@ -547,6 +547,122 @@ pub fn contract_from_settings(
     }
 }
 
+pub const VERSION_MISMATCH: &str = "version_mismatch";
+pub const AUTO_ACCEPTABLE_KINDS: &[&str] = &[VERSION_MISMATCH, "forge_state_mismatch"];
+
+pub const HUMAN_GATED_REASON: &[(&str, &str)] = &[
+    ("unresolved_dependency", "accepting this asserts the target is not a project; usually it is a project nobody has registered yet"),
+    ("vanished_upstream", "accepting this asserts an upstream object is gone for good; a repo transfer or a permissions change looks identical from here"),
+    ("ci_red_vs_healthy", "a red build is a fact about the build, not a decision about the project's lifecycle state — somebody has to say which is wrong"),
+    ("update_automation_gap", "turning on a security toggle is a change to the repository's settings, not to Vogt's data; accepting only records the judgement"),
+    ("broken_path_dependency", "the target is inside this project and is not there; only somebody who knows whether it moved or was deleted can say what to do"),
+    ("referenced_issue_state_mismatch", "the reference was read out of the item's own text rather than adopted as a link, and only somebody who knows which register is right can say whether to close the issue or reopen the item"),
+    ("initiative_checkbox_drift", "a checkbox was ticked upstream and the member's workflow state was not; only somebody who knows which is right can say whether to move the item or let the next re-render restore the box"),
+    ("initiative_tracking_close", "the initiative is closed here; whether its tracking issue should be closed upstream is a person's call — Vogt proposes it, never writes it"),
+];
+
+pub fn normalise_version(value: &str) -> String {
+    let stripped = value.trim();
+    stripped.trim_start_matches(['v', 'V']).to_string()
+}
+
+pub fn auto_acceptable(kind: &str) -> bool {
+    AUTO_ACCEPTABLE_KINDS.contains(&kind)
+}
+
+/// Subject keys a text names, as `gh:owner/repo#number`. Bare `#44` is not a
+/// reference: it is the least decidable form, and WI-16's title uses it for a
+/// pull request.
+pub fn issue_references(text: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    for (owner, repo, number) in find_references(text) {
+        let repo = repo.strip_suffix(".git").unwrap_or(repo);
+        let key = format!("gh:{owner}/{repo}#{number}");
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+fn find_references(text: &str) -> Vec<(&str, &str, &str)> {
+    let mut found = Vec::new();
+    let bytes = text.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some((end, parts)) = match_url(&text[index..]) {
+            found.push(parts);
+            index += end;
+            continue;
+        }
+        if let Some((end, parts)) = match_qualified(&text[index..]) {
+            found.push(parts);
+            index += end;
+            continue;
+        }
+        index += text[index..].chars().next().unwrap().len_utf8();
+    }
+    found
+}
+
+fn match_url(text: &str) -> Option<(usize, (&str, &str, &str))> {
+    let rest = text
+        .strip_prefix("https://")
+        .or_else(|| text.strip_prefix("http://"))?;
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let rest = rest.strip_prefix("github.com/")?;
+    let (owner, rest) = take_name(rest)?;
+    let rest = rest.strip_prefix('/')?;
+    let (repo, rest) = take_name(rest)?;
+    let rest = rest.strip_prefix("/issues/")?;
+    let (number, rest) = take_digits(rest)?;
+    if owner.is_empty() || repo.is_empty() || number.is_empty() {
+        return None;
+    }
+    let consumed = text.len() - rest.len();
+    Some((consumed, (owner, repo, number)))
+}
+
+fn match_qualified(text: &str) -> Option<(usize, (&str, &str, &str))> {
+    if !text.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let (owner, rest) = take_name(text)?;
+    let rest = rest.strip_prefix('/')?;
+    let (repo, rest) = take_name(rest)?;
+    let rest = rest.strip_prefix('#')?;
+    let (number, rest) = take_digits(rest)?;
+    if number.is_empty() {
+        return None;
+    }
+    let boundary = rest.chars().next();
+    if boundary.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    Some((text.len() - rest.len(), (owner, repo, number)))
+}
+
+fn take_name(text: &str) -> Option<(&str, &str)> {
+    let mut end = 0;
+    for (index, ch) in text.char_indices() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-') {
+            end = index + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    (end > 0).then(|| (&text[..end], &text[end..]))
+}
+
+fn take_digits(text: &str) -> Option<(&str, &str)> {
+    let end = text
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .map(char::len_utf8)
+        .sum();
+    (end > 0).then(|| (&text[..end], &text[end..]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,6 +912,60 @@ mod tests {
         assert_ne!(one.version, different.version);
     }
 
+    #[test]
+    fn a_leading_v_is_not_a_different_version() {
+        for (declared, observed) in [
+            ("1.4.0", "v1.4.0"),
+            ("v1.4.0", "1.4.0"),
+            ("V1.4.0", "1.4.0"),
+        ] {
+            assert_eq!(
+                normalise_version(declared),
+                normalise_version(observed),
+                "{declared}"
+            );
+        }
+        assert_ne!(normalise_version("1.4.0"), normalise_version("1.5.0"));
+    }
+
+    #[test]
+    fn a_qualified_reference_names_an_issue() {
+        let cases = [
+            (
+                "GitHub: https://github.com/TheDancingDeveloper-org/vogt/issues/44",
+                vec!["gh:TheDancingDeveloper-org/vogt#44"],
+            ),
+            (
+                "see TheDancingDeveloper-org/vogt#44 for context",
+                vec!["gh:TheDancingDeveloper-org/vogt#44"],
+            ),
+            ("http://www.github.com/o/r/issues/7", vec!["gh:o/r#7"]),
+            (
+                "https://github.com/o/r/issues/7 and again o/r#7",
+                vec!["gh:o/r#7"],
+            ),
+        ];
+        for (text, expected) in cases {
+            assert_eq!(issue_references(text), expected, "{text}");
+        }
+        for text in [
+            "Regression from #43 (WI-2): dep-refs emits a ref_kind storage rejects",
+            "fix in PR https://github.com/TheDancingDeveloper-org/vogt/pull/45",
+            "issue 44 is the one",
+            "#44",
+        ] {
+            assert!(issue_references(text).is_empty(), "{text}");
+        }
+    }
+
+    #[test]
+    fn forge_state_is_auto_acceptable_in_both_directions() {
+        assert!(auto_acceptable("version_mismatch"));
+        assert!(auto_acceptable("forge_state_mismatch"));
+        assert!(!auto_acceptable("vanished_upstream"));
+        assert!(!auto_acceptable("referenced_issue_state_mismatch"));
+        assert_eq!(HUMAN_GATED_REASON.len(), 8);
+    }
     fn observed_guesses_match_the_python() {
         let base = Observation {
             id: "o".into(),
