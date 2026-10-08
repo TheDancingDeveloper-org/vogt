@@ -9,7 +9,9 @@ import {
 } from "solid-js";
 import { useNavigate } from "@solidjs/router";
 import {
+  ApiError,
   api,
+  WORKSPACE_READ_FORBIDDEN,
   type GitBranch,
   type GitOpRequest,
   type GitOpResponse,
@@ -97,6 +99,13 @@ const EMPTY_BRANCH_INFO: GitBranch = {
 function formatApiError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message.replace(/^HTTP \d+:\s*/, "").trim() || message;
+}
+
+/** A failed Git *read*: a 403 means the token cannot read the workspace at
+ *  all (WI-1020). Writes keep `formatApiError`, whose 403 names the write. */
+function formatReadError(error: unknown): string {
+  if (error instanceof ApiError && error.status === 403) return WORKSPACE_READ_FORBIDDEN;
+  return formatApiError(error);
 }
 
 const DiffView: Component<{
@@ -196,7 +205,7 @@ const DiffView: Component<{
     } catch (e) {
       if (!disposed && generation === loadGeneration) {
         if (displayedKey !== key) disposeModels();
-        setErr(formatApiError(e));
+        setErr(formatReadError(e));
       }
     } finally {
       if (!disposed && generation === loadGeneration) setLoading(false);
@@ -258,17 +267,17 @@ const GitTab: Component<Props> = (props) => {
   const statusRead = createRetainedRead(
     () => props.repo || false,
     (repo) => api.gitStatus(repo),
-    (error) => formatApiError(error),
+    (error) => formatReadError(error),
   );
   const branchesRead = createRetainedRead(
     () => props.repo || false,
     (repo) => api.gitBranch(repo),
-    (error) => formatApiError(error),
+    (error) => formatReadError(error),
   );
   const logRead = createRetainedRead(
     () => props.repo || false,
     (repo) => api.gitLog(repo, 30),
-    (error) => formatApiError(error),
+    (error) => formatReadError(error),
   );
   const projectsRead = createRetainedRead(
     () => !props.repo,

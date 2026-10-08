@@ -454,6 +454,20 @@ export class ApiError extends Error {
   }
 }
 
+/** What a reader sees when the engine refuses a workspace read: the files,
+ *  file viewer, search and Git reads need the `sessions` capability
+ *  (WI-1020), which a read-only device token does not hold. */
+export const WORKSPACE_READ_FORBIDDEN =
+  "This token cannot read files. Use a token that can open sessions.";
+
+/** The message for a failed workspace read (file, folder, search or Git
+ *  read): a 403 is the credential lacking the capability, said plainly rather
+ *  than as an HTTP error; anything else keeps its own message. */
+export function workspaceReadError(error: unknown): string {
+  if (error instanceof ApiError && error.status === 403) return WORKSPACE_READ_FORBIDDEN;
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * The error for a refused response, reporting a rejected credential on the
  * way out. Every authenticated call in this module raises its failure through

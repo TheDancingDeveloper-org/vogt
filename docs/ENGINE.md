@@ -447,9 +447,10 @@ section that documents it.
   will do. The capabilities are `sessions`, `filesystem-write`, `git-write`,
   `gui-control`, `agent-tasks-write`, `push-write`, `history-write`, `history`,
   `assistant`, `vogt-write` and `agent-clis-write` (`sessions` also gates
-  reading a session's detail and scrollback; `history` gates reading archived
-  session history — both reads, gated because they expose other callers'
-  output). They derive from core scopes (`capabilities_for_scopes`): `admin`
+  reading a session's detail and scrollback, and every read of the workspace
+  tree — files, downloads, listings, the tree, both searches and the git
+  reads; `history` gates reading archived session history — all reads, gated
+  because they expose other callers' output or work). They derive from core scopes (`capabilities_for_scopes`): `admin`
   holds all eleven; `work.write` or `project.write` holds everything except
   `gui-control` and `agent-clis-write`; `read` alone holds `push-write`, so a
   viewer can subscribe to notifications; `writeback` adds nothing. The
@@ -1941,6 +1942,12 @@ absolute path and a root component are rejected up front, and the canonicalised
 result must still start with the root, so a symlink pointing outward is `400`
 too. Paths come back relative to the same root, so a client never learns the
 absolute layout.
+
+Every read below — `dir`, `tree`, `files`, `files/download`, both searches
+and the four git reads — requires `sessions`, so a `read`-only device token or
+a zero-scope credential is refused with `403` before the handler runs. The
+workspace is a shared record of every session's work, gated like the
+scrollback and history that describe it.
 
 Confinement decides where a path may point; `workspace_path::may_show`
 decides whether its bytes may leave the engine. Every route that returns file
