@@ -280,7 +280,9 @@ impl ChatStore {
         .execute(&mut *tx)
         .await
         .map_err(|e| ApiError::Internal(format!("append entry: {e}")))?;
-        if !entry.text.trim().is_empty() {
+        // What people and the agent said is searchable; tool inputs and
+        // results are not, so a file the agent read is not one search away.
+        if matches!(entry.kind.as_str(), "user" | "assistant") && !entry.text.trim().is_empty() {
             sqlx::query("INSERT INTO chat_fts (chat_id, text) VALUES (?, ?)")
                 .bind(chat.to_string())
                 .bind(&entry.text)

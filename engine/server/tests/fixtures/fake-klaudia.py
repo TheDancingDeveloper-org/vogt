@@ -7,6 +7,7 @@ behaviours the chat runtime depends on, chosen by the message text:
 - `run:<cmd>`   a Bash call, put to the approval gate the way the chat's
                 PreToolUse hook does (POST $VOGT_CHAT_GATE_URL);
 - `sneak:<cmd>` a Bash call that runs WITHOUT asking the gate;
+- `read:<path>` a Read call, and `fetch:<url>` a WebFetch call, both gated;
 - `hostask`     a `can_use_tool` control request for a host change;
 - `hooks`       Klaudia's question whether the project's hooks may run;
 - `fail`        a turn that ends in a provider error (WI-1007);
@@ -14,7 +15,8 @@ behaviours the chat runtime depends on, chosen by the message text:
 - anything else is echoed back as `<model>: <text>`.
 
 Every launch appends its argv to `launches.jsonl` in the working directory,
-and every control response it receives to `responses.jsonl`.
+and the names of its environment variables to `env.jsonl`; every control
+response it receives goes to `responses.jsonl`.
 """
 
 from __future__ import annotations
@@ -67,9 +69,9 @@ def ask(request_id: str, request: dict[str, Any]) -> None:
     out({"type": "control_request", "request_id": request_id, "request": request})
 
 
-def gate(tool_input: dict[str, Any]) -> dict[str, Any]:
-    body = {"hook_event_name": "PreToolUse", "tool_name": "Bash"}
-    body["tool_input"] = tool_input  # type: ignore[assignment]
+def gate(tool: str, tool_input: dict[str, Any]) -> dict[str, Any]:
+    body: dict[str, Any] = {"hook_event_name": "PreToolUse", "tool_name": tool}
+    body["tool_input"] = tool_input
     token = os.environ["VOGT_CHAT_GATE_TOKEN"]
     request = urllib.request.Request(
         os.environ["VOGT_CHAT_GATE_URL"],
@@ -85,15 +87,24 @@ def gate(tool_input: dict[str, Any]) -> dict[str, Any]:
     return verdict
 
 
+TOOLS = {
+    "run": ("Bash", "command"),
+    "sneak": ("Bash", "command"),
+    "read": ("Read", "file_path"),
+    "fetch": ("WebFetch", "url"),
+}
+
+
 def tool_call(text: str) -> None:
-    cmd = text.split(":", 1)[1]
-    tool_input = {"command": cmd}
+    verb, arg = text.split(":", 1)
+    tool, field = TOOLS[verb]
+    tool_input = {field: arg}
     use_id = f"toolu_{abs(hash(text)) % 100000}"
-    call = {"type": "tool_use", "id": use_id, "name": "Bash", "input": tool_input}
+    call = {"type": "tool_use", "id": use_id, "name": tool, "input": tool_input}
     out({"type": "assistant", "message": {"role": "assistant", "content": [call]}})
-    blocked, said = False, f"ran {cmd}"
-    if text.startswith("run:"):
-        verdict = gate(tool_input)
+    blocked, said = False, f"ran {arg}"
+    if verb != "sneak":
+        verdict = gate(tool, tool_input)
         if verdict.get("decision") == "block":
             blocked, said = True, str(verdict.get("reason", "blocked"))
     block = {
@@ -110,6 +121,7 @@ def tool_call(text: str) -> None:
 SESSION = flag("--session-id") or flag("--resume") or "unknown"
 model = flag("--model") or "default"
 append("launches.jsonl", ARGS)
+append("env.jsonl", sorted(os.environ))
 print("banner from a wrapper, not JSON", flush=True)
 out(
     {
@@ -153,7 +165,7 @@ for line in iter(sys.stdin.readline, ""):
     text = msg["message"]["content"]
     echo = {"role": "user", "content": text}
     out({"type": "user", "message": echo, "session_id": SESSION})
-    if text.startswith(("run:", "sneak:")):
+    if text.split(":", 1)[0] in TOOLS and ":" in text:
         tool_call(text)
     elif text == "hostask":
         waiting["ask-1"] = "host change answered"

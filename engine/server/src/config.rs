@@ -1359,9 +1359,29 @@ fn chat_policy_from_env() -> Result<crate::chats::ChatPolicy> {
             })?;
         }
     }
+    policy.provider_key = engine_env("ENGINE_CHAT_PROVIDER_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if let Some(n) = parse_usize_env("ENGINE_CHAT_MAX_PROCESSES")? {
+        policy.max_processes = n;
+    }
+    if let Some(n) = parse_usize_env("ENGINE_CHAT_MAX_PER_CREATOR")? {
+        policy.max_per_creator = n;
+    }
+    if let Ok(v) = engine_env("ENGINE_CHAT_MAX_RSS") {
+        if !v.trim().is_empty() {
+            policy.max_rss_bytes = crate::hibernate_policy::parse_size(&v).ok_or_else(|| {
+                ApiError::Config(format!(
+                    "ENGINE_CHAT_MAX_RSS={v:?} is not a size like 2GiB or 512M"
+                ))
+            })?;
+        }
+    }
     for (name, slot) in [
         ("ENGINE_CHAT_IDLE_AFTER", &mut policy.idle_after),
         ("ENGINE_CHAT_APPROVAL_TIMEOUT", &mut policy.approval_timeout),
+        ("ENGINE_CHAT_TURN_TIMEOUT", &mut policy.turn_timeout),
     ] {
         if let Ok(v) = engine_env(name) {
             if !v.trim().is_empty() {

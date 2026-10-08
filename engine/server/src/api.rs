@@ -930,6 +930,16 @@ pub struct OperationalStatus {
     /// Event subscribers that have fallen behind since start, by name, with
     /// how often and how many events they missed (WI-920). Empty is healthy.
     pub event_lag: std::collections::BTreeMap<&'static str, crate::events::LagCount>,
+    /// Quick chats (WI-1097): agent processes running now and their total
+    /// resident memory. Absent when chats are off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chats: Option<ChatStatus>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChatStatus {
+    pub running: usize,
+    pub rss_bytes: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -981,6 +991,15 @@ pub async fn operational_status(
         release_url: crate::product::release_url(),
         session_count: state.sessions.list().len(),
         event_lag: state.bus.lags(),
+        chats: match state.chats.clone() {
+            Some(chats) => {
+                let (running, rss_bytes) = tokio::task::spawn_blocking(move || chats.usage())
+                    .await
+                    .unwrap_or((0, 0));
+                Some(ChatStatus { running, rss_bytes })
+            }
+            None => None,
+        },
         push_subscription_count: state.push.list().len(),
         gui_process_count: state.gui.count_alive(),
         gui_stream_configured: state.config.gui_stream_url.is_some(),
