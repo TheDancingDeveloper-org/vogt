@@ -1,6 +1,233 @@
 [
   {
     "body": {
+      "declared": {
+        "actors": [
+          {
+            "created_at": "2026-01-02T03:04:07+00:00",
+            "disabled": 0,
+            "display_name": "parity",
+            "id": "act_0001",
+            "identity_ref": "local:parity",
+            "kind": "human"
+          }
+        ],
+        "audit": [
+          {
+            "actor_id": "act_0001",
+            "at": "2026-01-02T03:04:07+00:00",
+            "entity_id": "ins_0001",
+            "entity_kind": "instance",
+            "id": "aud_0001",
+            "operation": "instance.init",
+            "payload_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+            "reason": "instance bootstrap",
+            "revision": 0,
+            "txn_id": "txn_0001"
+          }
+        ],
+        "meta": [
+          {
+            "key": "instance_id",
+            "value": "ins_0001"
+          },
+          {
+            "key": "revision",
+            "value": "0"
+          },
+          {
+            "key": "work_ref_seq",
+            "value": "0"
+          },
+          {
+            "key": "created_at",
+            "value": "2026-01-02T03:04:07+00:00"
+          }
+        ],
+        "migration_lock": [
+          {
+            "acquired_at": null,
+            "holder": null,
+            "id": 1
+          }
+        ],
+        "migrations": [
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "83cf77f4abe04e89c2efa22271c6d9275532f1dd37a270b7667226b3748ae643",
+            "id": "0001_foundation"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "f690b73e4b9523cd85b818ac11c6fecf086c020683324dccbc03ec3d7b59627d",
+            "id": "0002_work"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "9032649fc02951fe5d6340a6f9576a45b8d7197057990c68dca834a1d26f48b8",
+            "id": "0003_observed_first"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "cc588f67774949d31caf0305200e557cc666617b8f5a2469f958f511944ee3f4",
+            "id": "0004_drift"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "0e2adf0935fc90a6810710297ab3490edb430b47d9d169a2166ae189c24223b2",
+            "id": "0005_tokens"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "37b95c74c33d9d7c5ee649ab72b265b4de517b41a40cb3a2c768099f210b0f58",
+            "id": "0006_writeback"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "47c82ee427931ca7c0a3a8d047298ffe5c2b2ad49ff06f83b00acf59306a1ff6",
+            "id": "0007_sessions"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "f533369dd3625830341933caac68f4611a02d0e4055b9d37a62db9c59f731ce3",
+            "id": "0008_superseded_drift"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "b0ca1559346b05c6ef818b3b65c2ae798f05c755c7a0dd326c73227da770c226",
+            "id": "0009_inbox_triage"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "de3f70faf7ccb5fd276455a9a56eb7a731c8334fb6964ea6d5eb2407dbcb03f5",
+            "id": "0010_session_model"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "7b4ab541ce8b97e31f1871373c6400e7a6390bdc70356fe703f3aa5e29211582",
+            "id": "0011_contract_adoption"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "c819361c246e6c76035ed27c1a296d723235259c449a2ee2ce192163b8cb8a3a",
+            "id": "0012_forge_accounts"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "fa8e380cd0761fe49bf3a46fd7e9305799fe8f142fdc331c71d2a0836fa00c3f",
+            "id": "0013_upstream_truth"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "2fef3fae64abd522ef65b21eef63f5a93d2b44ded81e5836da1288639a59a70d",
+            "id": "0014_native_migration"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "6f60bd5cae2d90f79cfb72228c88b21927958bdeedc7f00da59835c3e18a928c",
+            "id": "0015_work_overlay_branches"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "e9d6f101a8d95929b51b6dd9a4d1ccc0e3a732e49fd605c60de3ee849be7a113",
+            "id": "0016_perf_indexes"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "3131bbedaed1c58d3997598f18e8f30d103ec6f1447d38dcaa2a2846f1b7d8f8",
+            "id": "0017_password_credentials"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "a04732a0b920af03fc8731b513260caf81d25216533efb8c8eac030185371c00",
+            "id": "0018_actor_preferences"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "2c307b06be247b5b5739230750785d9209dee953a22da0354952ebe1cf45811d",
+            "id": "0019_session_grants"
+          }
+        ],
+        "workflow_defs": [
+          {
+            "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+            "kind": "feature",
+            "updated_at": "2026-01-02T03:04:05+00:00"
+          },
+          {
+            "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+            "kind": "bug",
+            "updated_at": "2026-01-02T03:04:05+00:00"
+          },
+          {
+            "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+            "kind": "chore",
+            "updated_at": "2026-01-02T03:04:05+00:00"
+          },
+          {
+            "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+            "kind": "question",
+            "updated_at": "2026-01-02T03:04:05+00:00"
+          }
+        ]
+      },
+      "observed": {
+        "meta": [
+          {
+            "key": "instance_id",
+            "value": "ins_0001"
+          },
+          {
+            "key": "created_at",
+            "value": "2026-01-02T03:04:08+00:00"
+          }
+        ],
+        "migration_lock": [
+          {
+            "acquired_at": null,
+            "holder": null,
+            "id": 1
+          }
+        ],
+        "migrations": [
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "c050f9e4dba983119f045b8fb4ccbe8b1ee97473170eead7d28279e99468de4b",
+            "id": "0001_foundation"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "9cdc9c9179740af96606bab0b557c7b35639eaabc78faf16630c7705f1d368f5",
+            "id": "0002_evidence"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "8bf0b8533774a156762fddc2e56bbb9656ba3b6bf0e38ec85a66c9dc9c325ed1",
+            "id": "0003_inherited_dep_refs"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "8d5cffbb2acb6ff18099ad73384eaa4ea5ebca7a6f45afb79d353fb4cbbcaee6",
+            "id": "0004_forge_sync"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "e6902e6616ab9948f9d222b2763ce9bc421a136b6acb1422240e5957683e5e45",
+            "id": "0005_perf_indexes"
+          },
+          {
+            "applied_at": "<applied_at>",
+            "checksum": "e0e959f4bf4f39db47d5e41ac11391d5f80a0b73bcce57d36168572062b1ab66",
+            "id": "0006_agent_activity"
+          }
+        ]
+      }
+    },
+    "exit": 0,
+    "operation": "dump.after_init"
+  },
+  {
+    "body": {
       "clone": null,
       "counts": {
         "actors": 1,

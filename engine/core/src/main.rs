@@ -111,7 +111,7 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
         };
     }
     let now = iso_now();
-    match application::instance::init(&data_dir, &now) {
+    match application::instance::init(&data_dir, &now, &clock_after(&now, 1)) {
         Ok(outcome) => {
             let applied = outcome.declared.applied.len() + outcome.observed.applied.len();
             if json {
@@ -145,7 +145,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
         return ExitCode::from(1);
     };
     let now = iso_now();
-    if let Err(err) = application::instance::init(&data_dir, &now) {
+    if let Err(err) = application::instance::init(&data_dir, &now, &clock_after(&now, 1)) {
         eprintln!("vogt-core serve: {err}");
         return ExitCode::from(1);
     }
@@ -220,7 +220,20 @@ async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+fn clock_after(start: &str, steps: i64) -> String {
+    core::from_iso(start)
+        .map(|moment| core::to_iso(core::Moment::from_unix(moment.unix_seconds() + steps, 0)))
+        .unwrap_or_else(|_| start.to_string())
+}
+
 fn iso_now() -> String {
+    // The step clock, when the harness asks for one. Python reads it for the
+    // migration timestamp, so a recorded init and a live one agree on applied_at.
+    if let Ok(start) = std::env::var("VOGT_TEST_CLOCK_START") {
+        if let Ok(moment) = core::from_iso(&start) {
+            return core::to_iso(moment);
+        }
+    }
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_secs())

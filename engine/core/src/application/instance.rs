@@ -18,7 +18,11 @@ pub struct InitOutcome {
     pub created: bool,
 }
 
-pub fn init(data_dir: &Path, now: &str) -> Result<InitOutcome, migrator::MigrateError> {
+pub fn init(
+    data_dir: &Path,
+    now: &str,
+    observed_now: &str,
+) -> Result<InitOutcome, migrator::MigrateError> {
     std::fs::create_dir_all(data_dir)?;
     let root = migrator::migrations_root();
     let declared_existed = declared_path(data_dir).exists();
@@ -29,12 +33,13 @@ pub fn init(data_dir: &Path, now: &str) -> Result<InitOutcome, migrator::Migrate
         "vogt-core",
         now,
     )?;
+    seed_workflows(data_dir, now)?;
     let observed = migrator::open_and_migrate(
         &observed_path(data_dir),
         "observed",
         root.as_deref().map(|path| path.join("observed")).as_deref(),
         "vogt-core",
-        now,
+        observed_now,
     )?;
     if let Some(token) = std::env::var_os("VOGT_BOOTSTRAP_TOKEN") {
         let path = data_dir.join("token");
@@ -43,7 +48,8 @@ pub fn init(data_dir: &Path, now: &str) -> Result<InitOutcome, migrator::Migrate
         }
     }
     if !declared_existed {
-        bootstrap(data_dir, now)?;
+        let instance_id = bootstrap(data_dir, now)?;
+        bind_instance(data_dir, &instance_id, now)?;
     }
     Ok(InitOutcome {
         created: !declared_existed,
@@ -70,6 +76,51 @@ pub fn pending(data_dir: &Path) -> Result<(usize, usize), migrator::MigrateError
     ))
 }
 
+const WORKFLOW_DEFINITION: &str = concat!(
+    r#"{"initial_state": "open", "transitions": {"blocked": ["open", "in_progress", "wont_do"], "#,
+    r#""done": ["open"], "in_progress": ["review", "blocked", "open", "wont_do"], "#,
+    r#""open": ["in_progress", "blocked", "wont_do"], "#,
+    r#""review": ["done", "in_progress", "blocked", "wont_do"], "wont_do": ["open"]}}"#,
+);
+const WORK_KINDS: [&str; 4] = ["feature", "bug", "chore", "question"];
+
+/// The machine every kind starts with. Python seeds it after every migrate, so
+/// a fresh instance and an upgraded one both carry the rows. An existing kind
+/// is left untouched.
+fn seed_workflows(data_dir: &Path, now: &str) -> Result<(), migrator::MigrateError> {
+    use rusqlite::params;
+
+    let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
+    let at = clock_stamp(now, 0);
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let written = (|| -> rusqlite::Result<()> {
+        for kind in WORK_KINDS {
+            let present: bool = conn
+                .query_row(
+                    "SELECT 1 FROM workflow_defs WHERE kind = ?1",
+                    params![kind],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if present {
+                continue;
+            }
+            conn.execute(
+                "INSERT INTO workflow_defs (kind, definition, updated_at) VALUES (?1, ?2, ?3)",
+                params![kind, WORKFLOW_DEFINITION, at],
+            )?;
+        }
+        Ok(())
+    })();
+    match written {
+        Ok(()) => conn.execute("COMMIT", []).map(|_| ()).map_err(Into::into),
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(err.into())
+        }
+    }
+}
+
 fn pending_in(
     store: &str,
     path: &Path,
@@ -88,17 +139,19 @@ const EMPTY_DIGEST: &str =
 
 /// The instance id, the initiating actor and one audit row. A database that
 /// already carries an instance id is left alone, so a second init is safe.
-fn bootstrap(data_dir: &Path, now: &str) -> Result<(), migrator::MigrateError> {
+fn bootstrap(data_dir: &Path, now: &str) -> Result<String, migrator::MigrateError> {
     use rusqlite::params;
 
     let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
-    let exists: bool = conn
-        .query_row("SELECT 1 FROM meta WHERE key = 'instance_id'", [], |_| {
-            Ok(true)
-        })
-        .unwrap_or(false);
-    if exists {
-        return Ok(());
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'instance_id'",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(instance_id) = existing {
+        return Ok(instance_id);
     }
     let mut ids = SequentialIds::load(&data_dir.join("test-ids.json"));
     let user = os_user();
@@ -149,7 +202,51 @@ fn bootstrap(data_dir: &Path, now: &str) -> Result<(), migrator::MigrateError> {
             return Err(err.into());
         }
     }
-    ids.save()
+    ids.save()?;
+    Ok(instance_id)
+}
+
+/// Stamp the observed store with the instance it belongs to. The two stores are
+/// backed up and restored independently, so a restore that pairs mismatched
+/// files is then a detectable error. Python inserts once and never retries, so
+/// a store that already carries the key is left alone. The stamp is the third
+/// clock read, one after the declared bootstrap.
+fn bind_instance(
+    data_dir: &Path,
+    instance_id: &str,
+    now: &str,
+) -> Result<(), migrator::MigrateError> {
+    use rusqlite::params;
+
+    let conn = crate::storage::sqlite::connection::connect(&observed_path(data_dir))?;
+    let exists: bool = conn
+        .query_row("SELECT 1 FROM meta WHERE key = 'instance_id'", [], |_| {
+            Ok(true)
+        })
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    let at = clock_stamp(now, 3);
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let written = (|| -> rusqlite::Result<()> {
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('instance_id', ?1)",
+            params![instance_id],
+        )?;
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('created_at', ?1)",
+            params![at],
+        )?;
+        Ok(())
+    })();
+    match written {
+        Ok(()) => conn.execute("COMMIT", []).map(|_| ()).map_err(Into::into),
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(err.into())
+        }
+    }
 }
 
 /// `LOGNAME`, then `USER`, then a fallback. `getpass.getuser` reads `LOGNAME`.

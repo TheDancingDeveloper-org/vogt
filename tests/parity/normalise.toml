@@ -37,6 +37,14 @@ why = "the build stamp names the build, not the behaviour, and only these answer
 operations = ["http.health.live", "http.version", "http.connection_info"]
 key = "version"
 
+[applied_at]
+# The migrator stamps each file with the clock it reads at the moment it applies
+# it. Two stores therefore carry different instants, and a second init against
+# an existing database writes nothing. The row's identity is its id and
+# checksum, which still compare.
+why = "applied_at is the migrator's own clock read, not a product timestamp"
+columns = ["applied_at"]
+
 [schema]
 # pydantic emits a `title` per model and orders `anyOf` by declaration. Those
 # are properties of a schema document, not of an answer: dropping `title` from

@@ -245,7 +245,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("vogt-health-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let now = "2026-10-08T12:00:00+00:00";
-        crate::application::instance::init(&dir, now).unwrap();
+        crate::application::instance::init(&dir, now, now).unwrap();
 
         let body = readiness(&dir).unwrap();
         let json = serde_json::to_value(&body).unwrap();

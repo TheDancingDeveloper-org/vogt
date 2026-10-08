@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
 
     binary = _resolve(args.impl)
     steps = _load_steps(args.only)
-    if not steps:
+    if not steps and args.only != "dump":
         print(f"no steps match --only {args.only!r}", file=sys.stderr)
         return 2
     recorded = _run(binary, steps, args.transport)
@@ -85,7 +85,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     golden = json.loads((args.golden / f"{args.transport}.json").read_text())
-    if args.only:
+    if args.only == "dump":
+        golden = [step for step in golden if step["operation"].startswith("dump.")]
+    elif args.only:
         golden = [step for step in golden if step["operation"].startswith(args.only)]
     return _diff(golden, recorded, args.only)
 
@@ -153,6 +155,13 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
         if init.returncode != 0:
             raise SystemExit(f"init exited {init.returncode}: {init.stderr.strip()}")
+        answers.append(
+            {
+                "operation": "dump.after_init",
+                "exit": 0,
+                "body": _dump(data),
+            }
+        )
         for step in steps:
             if "params" not in step:
                 continue
@@ -179,6 +188,41 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     finally:
         shutil.rmtree(root, ignore_errors=True)
     return answers
+
+
+def _dump(data: Path) -> dict[str, Any]:
+    """Every non-empty table in both stores, after init.
+
+    `migrations.applied_at` and the data directory are the two values a fresh
+    process cannot make identical: the first because the migrator stamps each
+    file at the clock it reads, and the second because the run owns a temporary
+    root. Both are blanked by the rules in `normalise.toml`, which say why.
+    """
+    import sqlite3
+
+    stores: dict[str, Any] = {}
+    for name in ("declared", "observed"):
+        path = data / f"{name}.sqlite3"
+        conn = sqlite3.connect(path)
+        conn.row_factory = sqlite3.Row
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+        ]
+        dumped: dict[str, Any] = {}
+        for table in tables:
+            rows = [
+                _normalise(dict(row), data.parent, data)
+                for row in conn.execute(f"SELECT * FROM {table}")
+            ]
+            if rows:
+                dumped[table] = rows
+        conn.close()
+        stores[name] = dumped
+    return stores
 
 
 def _flags(params: dict[str, Any]) -> list[str]:
@@ -315,9 +359,10 @@ def _walk(
     operation: str | None = None,
     top: bool = False,
 ) -> Any:
-    volatile = set(rules["volatile"]["keys"])
-    schema = rules["schema"]
     if isinstance(value, dict):
+        volatile = set(rules["volatile"]["keys"])
+        applied_at = set(rules.get("applied_at", {}).get("columns", []))
+        schema = rules["schema"]
         in_schema = any(marker in value for marker in schema["schema_markers"])
         drop = set(schema["drop_keys"]) if in_schema else set()
         version = rules.get("version", {})
@@ -326,6 +371,8 @@ def _walk(
             key: (
                 "<version>"
                 if blank_version and key == version.get("key")
+                else "<applied_at>"
+                if key in applied_at
                 else "<volatile>"
                 if key in volatile
                 else _walk(item, rules, paths, operation, False)
