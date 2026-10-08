@@ -47,6 +47,12 @@ pub enum VogtError {
     InvalidParams(String),
     MigrationError(String),
     MigrationLocked(String),
+    /// `TransitionRejected` in `core/workflow.py`. The message already starts
+    /// with the rule, and `rule` is the field the workflow tests read.
+    TransitionRejected {
+        rule: String,
+        message: String,
+    },
 }
 
 impl VogtError {
@@ -86,6 +92,7 @@ impl VogtError {
             | Self::InvalidParams(m)
             | Self::MigrationError(m)
             | Self::MigrationLocked(m) => m,
+            Self::TransitionRejected { message, .. } => message,
         }
     }
 
@@ -126,6 +133,7 @@ impl VogtError {
             Self::InvalidParams(_) => "invalid_params",
             Self::MigrationError(_) => "migration_error",
             Self::MigrationLocked(_) => "migration_locked",
+            Self::TransitionRejected { .. } => "transition_rejected",
         }
     }
 
@@ -165,6 +173,7 @@ impl VogtError {
             Self::InvalidParams(_) => 422,
             Self::MigrationError(_) => 500,
             Self::MigrationLocked(_) => 503,
+            Self::TransitionRejected { .. } => 409,
         }
     }
 
@@ -223,6 +232,7 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("invalid_params", 422),
         ("migration_error", 500),
         ("migration_locked", 503),
+        ("transition_rejected", 409),
     ]
 }
 
@@ -267,13 +277,17 @@ mod tests {
             "invalid_params" => VogtError::InvalidParams(message),
             "migration_error" => VogtError::MigrationError(message),
             "migration_locked" => VogtError::MigrationLocked(message),
+            "transition_rejected" => VogtError::TransitionRejected {
+                rule: "transition.not_allowed".to_string(),
+                message,
+            },
             other => panic!("unmapped code {other}"),
         }
     }
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 34);
+        assert_eq!(error_table().len(), 35);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");
