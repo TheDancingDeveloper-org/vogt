@@ -479,6 +479,74 @@ fn labels_of(observation: &Observation) -> Vec<String> {
     }
 }
 
+pub const DEFAULT_CONTRACT_VERSION: &str = "v1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contract {
+    pub version: String,
+    pub required_files: Vec<String>,
+    pub required_dirs: Vec<String>,
+    pub required_meta: Vec<String>,
+}
+
+impl Contract {
+    pub fn stock() -> Self {
+        Self {
+            version: DEFAULT_CONTRACT_VERSION.to_string(),
+            required_files: vec!["AGENTS.md".into(), "README.md".into(), "LICENSE".into()],
+            required_dirs: vec!["docs".into(), "design".into(), "src".into()],
+            required_meta: vec!["name".into(), "lifecycle_state".into(), "owner".into()],
+        }
+    }
+}
+
+pub fn rules_digest(contract: &Contract) -> String {
+    let material = [
+        &contract.required_files,
+        &contract.required_dirs,
+        &contract.required_meta,
+    ]
+    .iter()
+    .map(|part| {
+        let mut sorted: Vec<&str> = part.iter().map(String::as_str).collect();
+        sorted.sort_unstable();
+        sorted.join(",")
+    })
+    .collect::<Vec<_>>()
+    .join("|");
+    let mut hasher = Sha256::new();
+    hasher.update(material.as_bytes());
+    format!("{:x}", hasher.finalize())[..6].to_string()
+}
+
+/// A contract whose rules differ from stock while still carrying the default
+/// version gets `v1+<digest>`. A named version is kept as given.
+pub fn contract_from_settings(
+    version: &str,
+    required_files: &[&str],
+    required_dirs: &[&str],
+    required_meta: &[&str],
+) -> Contract {
+    let contract = Contract {
+        version: version.to_string(),
+        required_files: required_files.iter().map(|s| s.to_string()).collect(),
+        required_dirs: required_dirs.iter().map(|s| s.to_string()).collect(),
+        required_meta: required_meta.iter().map(|s| s.to_string()).collect(),
+    };
+    let stock = Contract::stock();
+    let stock_rules = contract.required_files == stock.required_files
+        && contract.required_dirs == stock.required_dirs
+        && contract.required_meta == stock.required_meta;
+    if stock_rules || version != DEFAULT_CONTRACT_VERSION {
+        contract
+    } else {
+        Contract {
+            version: format!("{version}+{}", rules_digest(&contract)),
+            ..contract
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +773,29 @@ mod tests {
     }
 
     #[test]
+    fn a_contract_names_itself_honestly() {
+        let stock = contract_from_settings(
+            "v1",
+            &["AGENTS.md", "README.md", "LICENSE"],
+            &["docs", "design", "src"],
+            &["name", "lifecycle_state", "owner"],
+        );
+        assert_eq!(stock.version, "v1");
+
+        let edited = contract_from_settings("v1", &["README.md"], &["src"], &[]);
+        assert!(edited.version.starts_with("v1+"), "{}", edited.version);
+        assert_ne!(edited.version, "v1");
+
+        let named = contract_from_settings("acme-2026.1", &["README.md"], &["src"], &[]);
+        assert_eq!(named.version, "acme-2026.1");
+
+        let one = contract_from_settings("v1", &["b.md", "a.md"], &["src"], &[]);
+        let other = contract_from_settings("v1", &["a.md", "b.md"], &["src"], &[]);
+        assert_eq!(one.version, other.version);
+        let different = contract_from_settings("v1", &["c.md"], &["src"], &[]);
+        assert_ne!(one.version, different.version);
+    }
+
     fn observed_guesses_match_the_python() {
         let base = Observation {
             id: "o".into(),
