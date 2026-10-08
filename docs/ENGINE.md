@@ -1228,8 +1228,10 @@ check any agent could approve another session's prompt, or its own
 nothing typed, input from anyone but a person that lands while a
 **permission** dialog is on the screen: `approval.kind` `permission` or
 `read-outside-cwd`. It covers every way in — `POST /answer`, a raw
-`POST /input`, and a WebSocket keystroke (dropped, with an `input-refused`
-frame; see [Attach protocol](#attach-protocol)). A TUI dialog is modal, so
+`POST /input`, a WebSocket keystroke (dropped, with an `input-refused`
+frame; see [Attach protocol](#attach-protocol)), and an approved assistant
+`send_input` card, which is typed as whoever approved it (refused at
+delivery, and the model is told `person required:`). A TUI dialog is modal, so
 at that moment any keystroke is an answer to it, `Esc` and `Ctrl-C`
 included. The screen is read fresh for the check, the same read `/answer`
 aims by.

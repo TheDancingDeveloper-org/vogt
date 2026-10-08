@@ -67,6 +67,8 @@ pub enum Via {
     Answer,
     Input,
     Attach,
+    /// An assistant `send_input` card, approved on screen (WI-983).
+    Assistant,
 }
 
 impl Via {
@@ -75,6 +77,7 @@ impl Via {
             Via::Answer => "answer",
             Via::Input => "input",
             Via::Attach => "attach",
+            Via::Assistant => "assistant",
         }
     }
 }
@@ -99,13 +102,26 @@ pub fn guard(
     asserted: Option<bool>,
     via: Via,
 ) -> Result<(), ApiError> {
-    if is_person(identity, asserted) {
+    let who = identity.map_or("unidentified", |i| i.name.as_str());
+    guard_as(session, is_person(identity, asserted), who, via)
+}
+
+/// `guard` for a caller already reduced to whether it is a person and its
+/// name — the assistant's `Caller`, which no longer holds the identity.
+pub fn guard_as(session: &Session, person: bool, who: &str, via: Via) -> Result<(), ApiError> {
+    if person {
         return Ok(());
     }
     let Some(dialog) = permission_dialog(session) else {
         return Ok(());
     };
-    let who = identity.map_or("unidentified", |i| i.name.as_str());
+    Err(refuse(session, who, &dialog, via))
+}
+
+/// Write the audit line for a refused answer to `dialog` and return the
+/// refusal. For a route that has already read the dialog itself (`/answer`
+/// aims by it), so its refusal and `guard`'s cannot drift apart.
+pub fn refuse(session: &Session, who: &str, dialog: &Detected, via: Via) -> ApiError {
     tracing::warn!(
         target: "vogt::audit",
         event = "session.permission_answer",
@@ -117,7 +133,7 @@ pub fn guard(
         question = %truncate(&dialog.question, 300),
         "refused an agent's answer to a permission prompt; only a person answers one"
     );
-    Err(refusal(who, &dialog))
+    refusal(who, dialog)
 }
 
 /// Record a person's answer to a permission prompt: who, which session,

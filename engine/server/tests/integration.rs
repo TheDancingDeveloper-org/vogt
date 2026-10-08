@@ -11843,3 +11843,142 @@ async fn an_overseer_still_drives_a_session_that_is_not_asking_permission() {
     assert_eq!(answered.status(), StatusCode::OK);
     live_output_containing(&operator, &base, &gated, &["chose 1"]).await;
 }
+
+/// What the stand-in chat provider will answer, in order, and every
+/// request body it was sent.
+#[derive(Default)]
+struct ChatStub {
+    replies: Vec<Value>,
+    requests: Vec<Value>,
+}
+
+type ChatScript = Arc<Mutex<ChatStub>>;
+
+/// A stand-in chat provider that answers `/chat/completions` with each
+/// message pushed onto the returned script in turn (a `choices[0].message`),
+/// then a plain "done".
+async fn stand_in_chat() -> (String, ChatScript) {
+    use axum::{extract::State, routing::post, Router};
+    async fn chat(
+        State(script): State<ChatScript>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        let message = {
+            let mut script = script.lock().unwrap();
+            script.requests.push(body);
+            if script.replies.is_empty() {
+                json!({"role": "assistant", "content": "done"})
+            } else {
+                script.replies.remove(0)
+            }
+        };
+        axum::Json(json!({"choices": [{"message": message}]}))
+    }
+    let script: ChatScript = Arc::default();
+    let app = Router::new()
+        .route("/chat/completions", post(chat))
+        .with_state(Arc::clone(&script));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), script)
+}
+
+/// Ask the assistant, as `client`, to type "1" and Enter into `session`,
+/// then approve the card it proposes. Returns the approval's response.
+async fn approve_typing_one(
+    client: &reqwest::Client,
+    base: &str,
+    script: &ChatScript,
+    session: &str,
+) -> reqwest::Response {
+    script.lock().unwrap().replies.extend([
+        json!({"role": "assistant", "content": null, "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "send_input",
+                "arguments": json!({"session_id": session, "text": "1", "submit": true})
+                    .to_string(),
+            },
+        }]}),
+        json!({"role": "assistant", "content": "turn over"}),
+    ]);
+    let proposed = client
+        .post(format!("{base}/api/assistant/message"))
+        .json(&json!({ "text": "type 1 and Enter into the asking session" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proposed.status(), StatusCode::OK);
+    let proposed: Value = proposed.json().await.unwrap();
+    let card = &proposed["pending_action"];
+    assert_eq!(card["kind"], "send_input", "{proposed}");
+    let card = card["id"].as_str().unwrap();
+    client
+        .post(format!("{base}/api/assistant/actions/{card}"))
+        .json(&json!({ "approve": true }))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The assistant's `send_input` card types as whoever approves it, so an
+/// agent driving the assistant with its own token cannot approve its way
+/// past a permission prompt; a person's approval is typed.
+#[tokio::test]
+async fn an_agent_cannot_approve_an_assistant_card_onto_a_permission_prompt() {
+    let core = stand_in_core_knowing(vec![
+        (
+            WI983_SESSION,
+            "agent:session:ses_overseer",
+            vec!["work.write"],
+        ),
+        (WI983_PERSON, "human:ada", vec!["work.write"]),
+    ])
+    .await;
+    let (chat, script) = stand_in_chat().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.vogt_core_url = Some(core);
+    cfg.vogt_core_token = Some(WI983_STACK.into());
+    cfg.assistant_api_key = Some("sk-test".into());
+    cfg.assistant_base_url = chat;
+    let (base, _guard) = boot_with_config(cfg).await;
+    let operator = client_for(TEST_TOKEN);
+    let dialog = dialog_script(tmp.path(), "ask.py", "Do you want to proceed?");
+    let (id, approval) = session_showing_dialog(&operator, &base, "asking", &dialog).await;
+    assert_eq!(approval["kind"], "permission", "{approval}");
+
+    // The agent's approval is refused at delivery: the model is told so and
+    // nothing reaches the terminal.
+    let agent = client_for(WI983_SESSION);
+    let approved = approve_typing_one(&agent, &base, &script, &id).await;
+    assert_eq!(approved.status(), StatusCode::OK);
+    let told = script.lock().unwrap().requests.last().unwrap().to_string();
+    assert!(
+        told.contains("person required"),
+        "the refusal is what the model saw: {told}"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let screen: Value = operator
+        .get(format!("{base}/api/sessions/{id}/screen"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(screen["activity"], "awaiting-approval", "{screen}");
+    let shown = screen.to_string();
+    assert!(
+        !shown.contains("typed") && !shown.contains("chose"),
+        "nothing was typed: {screen}"
+    );
+
+    // A person's approval of the same card is typed.
+    let person = client_for(WI983_PERSON);
+    let approved = approve_typing_one(&person, &base, &script, &id).await;
+    assert_eq!(approved.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &id, &["chose 1"]).await;
+}

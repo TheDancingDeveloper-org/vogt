@@ -173,6 +173,10 @@ pub struct Caller {
     /// bearer, which the core resolved to them, or the stack secret for the
     /// break-glass token.
     pub core_token: Option<String>,
+    /// Whether this caller answers as a person (`person_gate::is_person`).
+    /// An approved `send_input` card is typed as this caller, so it may land
+    /// on a permission prompt only when this is true (WI-983).
+    pub person: bool,
 }
 
 impl Caller {
@@ -184,12 +188,14 @@ impl Caller {
     pub fn from_identity(identity: Option<AuthorizedIdentity>) -> Self {
         match identity {
             Some(identity) => Self {
+                person: crate::person_gate::is_person(Some(&identity), None),
                 token_name: identity.name,
                 core_token: identity.core_bearer,
             },
             None => Self {
                 token_name: "unidentified".to_string(),
                 core_token: None,
+                person: false,
             },
         }
     }
@@ -199,6 +205,7 @@ impl Caller {
         Self {
             token_name: token_name.to_string(),
             core_token: core_token.map(str::to_owned),
+            person: false,
         }
     }
 }
