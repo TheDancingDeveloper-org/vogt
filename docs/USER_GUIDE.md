@@ -631,7 +631,33 @@ no shared "assistant" actor to fall back to; the only caller with nothing to
 write as is the break-glass token on a front door with no stack secret, and
 it is refused by name.
 
-### 2.6 Terminals
+### 2.6 Quick chat
+
+**Chat** (in the rail's Machine group, the Sessions tools, and a phone's
+**More** sheet) is for a quick question you don't want a terminal for, such
+as "is this AWS service available in Sydney?". Each chat is kept: the list
+on the left is searchable by anything said in it, and **Archive** only hides
+a chat. The button is absent when the deployment has chats turned off.
+
+- **New chat** picks a model (the deployment lists the ones it offers), and
+  the picker in a chat's header switches models from the next message.
+- The agent can read files in its own scratch folder without asking.
+  Anything else waits for you: reading other files, every web search or
+  page fetch, every MCP tool, commands and edits. You get a card showing
+  exactly what it would do, with **Allow** and **Deny**. A card nobody
+  answers is denied after ten minutes. Only a person can answer a card. An
+  agent's answer is refused.
+- **Stop** ends a reply in progress. A reply that failed (a provider
+  hiccup) shows an error with **Retry**.
+- **Continue in session** opens a terminal session that carries on the same
+  conversation, with the full tools a session has. The chat then points at
+  that session and takes no more messages.
+
+A chat's agent holds no credentials but its model key, so MCP tools (Vogt,
+GitHub, Grafana and so on) do not work in a chat yet. Continue in a session
+when you need them.
+
+### 2.7 Terminals
 
 Sessions are owned by the server, so closing a browser does not end them and
 several devices can watch one session at once. On attach you get a scrollback
@@ -793,7 +819,7 @@ command is just `docker run -it <image>` — so one template per image turns thi
 picker into an image picker; see
 [CUSTOMISATION — per-session containers](CUSTOMISATION.md#running-terminal-sessions-in-your-own-image-per-session-containers).
 
-### 2.7 Scheduled agent tasks
+### 2.8 Scheduled agent tasks
 
 A task is a command, a prompt, a schedule (`manual`, `interval`, or UTC
 `daily`) and a persistent context file. Running one spawns a real PTY session,
