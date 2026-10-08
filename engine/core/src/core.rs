@@ -65,9 +65,11 @@ pub struct Moment {
 
 impl Moment {
     pub fn from_unix(unix_seconds: i64, nanos: u32) -> Self {
+        // Python's datetime resolves to microseconds, so a value below that
+        // would render as ".000000", which fromisoformat never produced.
         Self {
             unix_seconds,
-            nanos,
+            nanos: nanos - nanos % 1000,
         }
     }
 

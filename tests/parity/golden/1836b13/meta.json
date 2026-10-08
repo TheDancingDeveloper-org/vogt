@@ -1,8 +1,0 @@
-{
-  "main_sha": "1836b13c5523946800c76d294d774e858603625a",
-  "recorded_at": "2026-10-08",
-  "recorder": "scripts/parity.py",
-  "transports": ["cli"],
-  "steps": 6,
-  "note": "Recorded with the WI-1044 hooks (f145e78 on wi-1044-hooks-and-manifest), which are not in 1836b13. Re-recording from that same tree produced no diff. Schema, OpenAPI, MCP tools/list, CLI help and negative steps are not in this set: the harness drives the CLI only, and the rest of the script needs the out-of-process forge double that WI-1045 left out."
-}

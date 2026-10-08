@@ -15,10 +15,127 @@ use sha2::{Digest, Sha256};
 
 use crate::core::{Moment, Observation, WorkItem, WorkOverlay, DONE, TERMINAL_STATES};
 
+/// `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)`.
+///
+/// serde_json writes non-ASCII raw and renders floats in a different form, so
+/// a digest computed here would not match one Python stored. Non-ASCII becomes
+/// `\uXXXX`, with a surrogate pair above U+FFFF. Floats use Python's
+/// `repr`: six significant digits, switched to scientific notation the way
+/// CPython does.
 pub fn canonical_json(payload: &Value) -> String {
-    // serde_json::Value sorts object keys on serialisation and emits no
-    // insignificant whitespace, which is `sort_keys=True, separators=(",", ":")`.
-    payload.to_string()
+    let mut out = String::new();
+    write_python_json(&mut out, payload);
+    out
+}
+
+fn write_python_json(out: &mut String, value: &Value) {
+    match value {
+        Value::Null => out.push_str("null"),
+        Value::Bool(true) => out.push_str("true"),
+        Value::Bool(false) => out.push_str("false"),
+        Value::Number(number) => out.push_str(&python_number(number)),
+        Value::String(text) => write_python_string(out, text),
+        Value::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_python_json(out, item);
+            }
+            out.push(']');
+        }
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            out.push('{');
+            for (index, key) in keys.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                write_python_string(out, key);
+                out.push(':');
+                write_python_json(out, &map[*key]);
+            }
+            out.push('}');
+        }
+    }
+}
+
+fn write_python_string(out: &mut String, text: &str) {
+    out.push('"');
+    for ch in text.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 || (ch as u32) > 0x7F => push_escaped(out, ch),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
+fn push_escaped(out: &mut String, ch: char) {
+    let code = ch as u32;
+    if code <= 0xFFFF {
+        out.push_str(&format!("\\u{code:04x}"));
+    } else {
+        let adjusted = code - 0x10000;
+        let high = 0xD800 + (adjusted >> 10);
+        let low = 0xDC00 + (adjusted & 0x3FF);
+        out.push_str(&format!("\\u{high:04x}\\u{low:04x}"));
+    }
+}
+
+fn python_number(number: &serde_json::Number) -> String {
+    if let Some(value) = number.as_i64() {
+        return value.to_string();
+    }
+    if let Some(value) = number.as_u64() {
+        return value.to_string();
+    }
+    let Some(value) = number.as_f64() else {
+        return "null".to_string();
+    };
+    if value.is_nan() || value.is_infinite() {
+        return "null".to_string();
+    }
+    let repr = format!("{value:.16}");
+    let trimmed = trim_float(&repr);
+    let scientific = format!("{value:.16e}");
+    // CPython picks the shorter form, breaking ties toward the plain one.
+    if scientific.len() < trimmed.len() {
+        scientific_python(&scientific)
+    } else {
+        trimmed
+    }
+}
+
+fn trim_float(rendered: &str) -> String {
+    if !rendered.contains('.') {
+        return format!("{rendered}.0");
+    }
+    let trimmed = rendered.trim_end_matches('0');
+    if trimmed.ends_with('.') {
+        format!("{trimmed}0")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn scientific_python(rendered: &str) -> String {
+    // `1.0000000000000000e-05` -> `1e-05`, keeping the sign and two-digit exponent.
+    let (mantissa, exponent) = rendered.split_once('e').unwrap_or((rendered, "+00"));
+    format!(
+        "{}e{}",
+        trim_float(mantissa).trim_end_matches(".0"),
+        exponent
+    )
 }
 
 pub fn digest_of(payload: &Value) -> String {
@@ -690,6 +807,17 @@ mod tests {
         let right = serde_json::json!({"a": 2, "b": 1});
         assert_eq!(canonical_json(&left), r#"{"a":2,"b":1}"#);
         assert_eq!(digest_of(&left), digest_of(&right));
+        // Pinned against Python json.dumps(ensure_ascii=True): the em dash and
+        // the accented e must be \u escapes or the digest diverges.
+        let titled = serde_json::json!({"title": "fix — crash é"});
+        assert_eq!(
+            canonical_json(&titled),
+            r#"{"title":"fix \u2014 crash \u00e9"}"#
+        );
+        assert_eq!(
+            digest_of(&titled),
+            "sha256:14a825749356e438d4550bc8fee0c6c45cbd801d78ccf96a5432571a2c8790b4"
+        );
         assert_ne!(
             digest_of(&left),
             digest_of(&serde_json::json!({"a": 2, "b": 3}))
@@ -966,6 +1094,7 @@ mod tests {
         assert!(!auto_acceptable("referenced_issue_state_mismatch"));
         assert_eq!(HUMAN_GATED_REASON.len(), 8);
     }
+    #[test]
     fn observed_guesses_match_the_python() {
         let base = Observation {
             id: "o".into(),

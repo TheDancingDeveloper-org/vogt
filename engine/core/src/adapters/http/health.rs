@@ -15,6 +15,8 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 
+use sha2::{Digest, Sha256};
+
 use crate::storage::sqlite::connection::connect;
 use crate::storage::sqlite::migrator::{self, MigrateError};
 use crate::storage::sqlite::{declared_path, observed_path};
@@ -61,18 +63,28 @@ async fn ready(State(state): State<Arc<HealthState>>) -> (StatusCode, Json<Readi
     match readiness(&state.data_dir) {
         Ok(body) if body.status == "ready" => (StatusCode::OK, Json(body)),
         Ok(body) => (StatusCode::SERVICE_UNAVAILABLE, Json(body)),
-        Err(err) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(Readiness {
-                status: "not_ready",
-                detail: Some(err.to_string()),
-                declared_schema_version: 0,
-                observed_schema_version: 0,
-                declared_schema_expected: 0,
-                observed_schema_expected: 0,
-            }),
-        ),
+        Err(err) => {
+            let reference = error_reference(&err.to_string());
+            eprintln!("vogt-core health: {err} (ref {reference})");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(Readiness {
+                    status: "not_ready",
+                    detail: Some(format!("internal error (ref {reference})")),
+                    declared_schema_version: 0,
+                    observed_schema_version: 0,
+                    declared_schema_expected: 0,
+                    observed_schema_expected: 0,
+                }),
+            )
+        }
     }
+}
+
+fn error_reference(detail: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(detail.as_bytes());
+    format!("{:x}", hasher.finalize())[..12].to_string()
 }
 
 fn readiness(data_dir: &std::path::Path) -> Result<Readiness, MigrateError> {

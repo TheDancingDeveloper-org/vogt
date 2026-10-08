@@ -14,7 +14,7 @@
       "declared_schema_version": 19,
       "instance_id": "<volatile>",
       "observed_schema_version": 6,
-      "principal": "local:sprooty",
+      "principal": "local:parity",
       "revision": 0,
       "vogt_version": "0.7.7"
     },
@@ -200,10 +200,10 @@
   {
     "body": {
       "actor": {
-        "created_at": "<volatile>",
+        "created_at": "2026-01-02T03:04:05Z",
         "disabled": false,
         "display_name": "Parity Agent",
-        "id": "<volatile>",
+        "id": "act_0002",
         "identity_ref": "agent:parity",
         "kind": "agent"
       }
@@ -215,19 +215,19 @@
     "body": {
       "actors": [
         {
-          "created_at": "<volatile>",
+          "created_at": "2026-01-02T03:04:05Z",
           "disabled": false,
           "display_name": "Parity Agent",
-          "id": "<volatile>",
+          "id": "act_0002",
           "identity_ref": "agent:parity",
           "kind": "agent"
         },
         {
-          "created_at": "<volatile>",
+          "created_at": "2026-01-02T03:04:07Z",
           "disabled": false,
-          "display_name": "sprooty",
-          "id": "<volatile>",
-          "identity_ref": "local:sprooty",
+          "display_name": "parity",
+          "id": "act_0001",
+          "identity_ref": "local:parity",
           "kind": "human"
         }
       ]
@@ -239,8 +239,8 @@
     "body": {
       "label": {
         "color": "#d73a4a",
-        "created_at": "<volatile>",
-        "id": "<volatile>",
+        "created_at": "2026-01-02T03:04:05Z",
+        "id": "lbl_0001",
         "name": "parity"
       }
     },
@@ -252,8 +252,8 @@
       "labels": [
         {
           "color": "#d73a4a",
-          "created_at": "<volatile>",
-          "id": "<volatile>",
+          "created_at": "2026-01-02T03:04:05Z",
+          "id": "lbl_0001",
           "name": "parity"
         }
       ]

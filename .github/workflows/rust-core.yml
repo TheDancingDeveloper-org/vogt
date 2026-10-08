@@ -73,8 +73,12 @@ jobs:
           uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/golden"
           uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/again"
           diff -q "$RUNNER_TEMP/golden/cli.json" "$RUNNER_TEMP/again/cli.json"
-          uv run python scripts/parity.py check --impl python --golden "$RUNNER_TEMP/golden"
-          uv run python scripts/parity.py check --impl python --golden "$RUNNER_TEMP/golden" --only actor
+          # Against the committed golden, not the recording just made: a
+          # recording that agrees with itself proves nothing about drift.
+          golden=$(find tests/parity/golden -mindepth 1 -maxdepth 1 -type d | sort | tail -1)
+          uv run python scripts/parity.py check --impl python --golden "$golden"
+          uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
+          uv run python scripts/parity.py selftest --golden "$golden"
 
       - name: drift ledger (report only)
         run: uv run python scripts/drift_ledger.py

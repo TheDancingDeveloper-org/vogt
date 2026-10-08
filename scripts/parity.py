@@ -53,7 +53,12 @@ def main(argv: list[str] | None = None) -> int:
             cmd.add_argument("--out", type=Path, required=True)
         else:
             cmd.add_argument("--golden", type=Path, required=True)
+    probe = sub.add_parser("selftest")
+    probe.add_argument("--golden", type=Path, required=True)
     args = parser.parse_args(argv)
+
+    if args.command == "selftest":
+        return _selftest(args.golden)
 
     binary = _resolve(args.impl)
     steps = _load_steps(args.only)
@@ -96,6 +101,11 @@ def _run(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "VOGT_DATA_DIR": str(data),
         "VOGT_TEST_CLOCK_START": CLOCK_START,
         "VOGT_TEST_IDS": "sequential",
+        # The local principal is `local:$USER`. Pinning it keeps a golden
+        # recorded by one account comparable to a run under another, including
+        # CI's `runner` user.
+        "USER": "parity",
+        "LOGNAME": "parity",
     }
     # A session may export VOGT_CORE_URL for the engine front door. The CLI
     # this harness spawns uses its own local store, and the hint that variable
@@ -183,14 +193,20 @@ def _rules() -> dict[str, Any]:
 
 def _walk(value: Any, rules: dict[str, Any], paths: dict[str, str]) -> Any:
     volatile = set(rules["volatile"]["keys"])
-    drop = set(rules["schema"]["drop_keys"])
+    schema = rules["schema"]
     if isinstance(value, dict):
+        in_schema = any(marker in value for marker in schema["schema_markers"])
+        drop = set(schema["drop_keys"]) if in_schema else set()
         walked = {
             key: ("<volatile>" if key in volatile else _walk(item, rules, paths))
             for key, item in value.items()
             if key not in drop
         }
-        if rules["schema"]["sort_any_of"] and isinstance(walked.get("anyOf"), list):
+        if (
+            in_schema
+            and schema["sort_any_of"]
+            and isinstance(walked.get("anyOf"), list)
+        ):
             walked["anyOf"] = sorted(
                 walked["anyOf"], key=lambda item: json.dumps(item, sort_keys=True)
             )
@@ -201,9 +217,47 @@ def _walk(value: Any, rules: dict[str, Any], paths: dict[str, str]) -> Any:
         for needle, token in paths.items():
             value = value.replace(needle, token)
         return value
+    # Floats are rounded to 3 decimal places because ranking totals carry more
+    # precision than two runs agree on once staleness is involved. Integers
+    # and everything else compare verbatim.
     if isinstance(value, float):
         return round(value, 3)
     return value
+
+
+def _selftest(golden_dir: Path) -> int:
+    """A mutated recording must fail the check.
+
+    The normaliser used to blank every id and drop every title, so a port that
+    minted the wrong identifier or deleted a title still passed. This mutates
+    one id and one title in the committed golden and asserts both diffs are
+    caught. It compares the golden to itself, so it needs no binary.
+    """
+    golden = json.loads((golden_dir / "cli.json").read_text())
+    if _diff(golden, golden, "") != 0:
+        print("selftest: the golden disagrees with itself", file=sys.stderr)
+        return 1
+    for key in ("id", "title"):
+        mutated = json.loads(json.dumps(golden))
+        if not _mutate(mutated, key):
+            print(f"selftest: no {key!r} to mutate in the golden", file=sys.stderr)
+            return 1
+        if _diff(golden, mutated, "") == 0:
+            print(f"selftest: mutating {key!r} was not caught", file=sys.stderr)
+            return 1
+    print("selftest passed: a mutated id and a mutated title both fail the check")
+    return 0
+
+
+def _mutate(value: Any, key: str) -> bool:
+    if isinstance(value, dict):
+        if isinstance(value.get(key), str):
+            value[key] = value[key] + "-mutated"
+            return True
+        return any(_mutate(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_mutate(item, key) for item in value)
+    return False
 
 
 def _diff(

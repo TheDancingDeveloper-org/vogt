@@ -84,213 +84,41 @@ pub fn current_actor() -> Option<String> {
 /// `_REDACTIONS` patterns: URL userinfo, bearer/basic, `vogt_` tokens, GitHub
 /// token shapes, and `key=value` for secret-shaped keys.
 pub fn redact(text: &str) -> String {
-    redact_assignments(&redact_github(&redact_prefixed(
-        &redact_authorization(&redact_url_userinfo(text)),
-        "vogt_",
-    )))
+    let mut current = text.to_string();
+    for (pattern, replacement) in redactions() {
+        current = pattern.replace_all(&current, replacement).into_owned();
+    }
+    current
 }
 
-fn redact_url_userinfo(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if let Some(scheme) = url_scheme_at(text, index) {
-            if let Some(at) = text[index + scheme..].find('@') {
-                let userinfo = &text[index + scheme..index + scheme + at];
-                if !userinfo.contains('/') && !userinfo.contains(' ') {
-                    out.push_str(&text[index..index + scheme]);
-                    out.push_str("[redacted]@");
-                    index += scheme + at + 1;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[index] as char);
-        index += 1;
-    }
-    out
-}
-
-fn url_scheme_at(text: &str, index: usize) -> Option<usize> {
-    let rest = text.as_bytes().get(index..)?;
-    if !rest.first()?.is_ascii_alphabetic() {
-        return None;
-    }
-    let mut end = 1;
-    while end < rest.len()
-        && (rest[end].is_ascii_alphanumeric() || matches!(rest[end], b'+' | b'-' | b'.'))
-    {
-        end += 1;
-    }
-    text[index + end..].starts_with("://").then_some(end + 3)
-}
-
-fn redact_authorization(text: &str) -> String {
-    let lower = text.to_ascii_lowercase();
-    let mut out = String::new();
-    let mut index = 0;
-    while index < text.len() {
-        let needle = ["bearer ", "basic "]
-            .iter()
-            .find(|needle| lower[index..].starts_with(*needle));
-        if let Some(needle) = needle {
-            out.push_str(&text[index..index + needle.len()]);
-            out.push_str("[redacted]");
-            index += needle.len();
-            while text
-                .as_bytes()
-                .get(index)
-                .is_some_and(|b| is_token_char(*b))
-            {
-                index += 1;
-            }
-        } else {
-            let ch = text[index..].chars().next().unwrap();
-            out.push(ch);
-            index += ch.len_utf8();
-        }
-    }
-    out
-}
-
-fn is_token_char(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'+' | b'/' | b'=' | b'-')
-}
-
-fn redact_prefixed(text: &str, prefix: &str) -> String {
-    let mut out = String::new();
-    let mut index = 0;
-    while let Some(found) = text[index..].find(prefix) {
-        let start = index + found;
-        let after = start + prefix.len();
-        let tail: String = text[after..]
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
-            .collect();
-        out.push_str(&text[index..start]);
-        if tail.len() >= 8 {
-            out.push_str("[redacted]");
-            index = after + tail.len();
-        } else {
-            out.push_str(prefix);
-            index = after;
-        }
-    }
-    out.push_str(&text[index..]);
-    out
-}
-
-fn redact_github(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if let Some(skip) = github_token_len(&text[index..]) {
-            out.push_str("[redacted]");
-            index += skip;
-        } else {
-            out.push(bytes[index] as char);
-            index += 1;
-        }
-    }
-    out
-}
-
-fn github_token_len(text: &str) -> Option<usize> {
-    for prefix in ["ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_"] {
-        if let Some(rest) = text.strip_prefix(prefix) {
-            let body = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .count();
-            let bytes: usize = rest.chars().take(body).map(char::len_utf8).sum();
-            if body >= 20 {
-                return Some(prefix.len() + bytes);
-            }
-        }
-    }
-    None
-}
-
-fn redact_assignments(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if let Some(value_end) = secret_assignment(&text[index..]) {
-            let eq = text[index..index + value_end]
-                .find(['=', ':'])
-                .map(|at| index + at + 1)
-                .unwrap_or(index);
-            let mut value_at = eq;
-            while text.as_bytes().get(value_at) == Some(&b' ')
-                || text.as_bytes().get(value_at) == Some(&b'"')
-            {
-                value_at += 1;
-            }
-            out.push_str(&text[index..value_at]);
-            out.push_str("[redacted]");
-            index += value_end;
-        } else {
-            out.push(bytes[index] as char);
-            index += 1;
-        }
-    }
-    out
-}
-
-fn secret_assignment(text: &str) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let first = *bytes.first()?;
-    if !first.is_ascii_alphabetic() && first != b'_' {
-        return None;
-    }
-    let mut key_end = 1;
-    while bytes
-        .get(key_end)
-        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_')
-    {
-        key_end += 1;
-    }
-    let key = text[..key_end].to_ascii_lowercase();
-    let secret = [
-        "token",
-        "secret",
-        "password",
-        "passwd",
-        "api_key",
-        "apikey",
-        "authorization",
-        "cookie",
-    ]
-    .iter()
-    .any(|needle| key.contains(needle));
-    if !secret {
-        return None;
-    }
-    let mut cursor = key_end;
-    if bytes.get(cursor) == Some(&b'"') {
-        cursor += 1;
-    }
-    while bytes.get(cursor) == Some(&b' ') {
-        cursor += 1;
-    }
-    if !matches!(bytes.get(cursor), Some(b'=') | Some(b':')) {
-        return None;
-    }
-    cursor += 1;
-    while bytes.get(cursor) == Some(&b' ') || bytes.get(cursor) == Some(&b'"') {
-        cursor += 1;
-    }
-    let value_start = cursor;
-    while bytes
-        .get(cursor)
-        .is_some_and(|b| !matches!(b, b' ' | b'"' | b',' | b';' | b'&'))
-    {
-        cursor += 1;
-    }
-    (cursor > value_start).then_some(cursor)
+fn redactions() -> Vec<(regex::Regex, String)> {
+    // The five `_REDACTIONS` in observability.py, in the same order. Applied
+    // with the regex crate so a multibyte character cannot split a slice.
+    let pairs = [
+        (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@", "$1[redacted]@"),
+        (
+            r"(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+",
+            "$1 [redacted]",
+        ),
+        (r"\bvogt_[A-Za-z0-9_-]{8,}", "[redacted]"),
+        (
+            r"\b(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})",
+            "[redacted]",
+        ),
+        (
+            r#"(?i)\b([a-z_]*(?:token|secret|password|passwd|api[_-]?key|authorization|cookie)[a-z_]*)("?\s*[:=]\s*"?)[^\s",;&]+"#,
+            "$1$2[redacted]",
+        ),
+    ];
+    pairs
+        .into_iter()
+        .map(|(pattern, replacement)| {
+            (
+                regex::Regex::new(pattern).expect("redaction pattern"),
+                replacement.to_string(),
+            )
+        })
+        .collect()
 }
 
 pub fn recent_problems(limit: usize) -> Vec<String> {
@@ -393,16 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn redaction_removes_credential_shapes() {
-        let line = redact(
-            "saw vogt_abcdefghijk and bearer abc.def and url https://user:secret@host/x token=hunter2 ghp_abcdefghijklmnopqrst",
+    fn redaction_matches_the_python_shapes() {
+        assert_eq!(redact(&format!("ghp_{}", "a".repeat(30))), "[redacted]");
+        assert_eq!(
+            redact(r#"{"password": "hunter2"}"#),
+            r#"{"password": "[redacted]"}"#
         );
-        assert!(!line.contains("abcdefghijk"), "{line}");
-        assert!(!line.contains("abc.def"), "{line}");
-        assert!(!line.contains("user:secret"), "{line}");
-        assert!(!line.contains("hunter2"), "{line}");
-        assert!(!line.contains("ghp_abc"), "{line}");
-        assert!(line.contains("[redacted]"), "{line}");
+        assert_eq!(redact("https://u:p@host/x"), "https://[redacted]@host/x");
+        assert_eq!(redact("nothing secret here"), "nothing secret here");
+        // A multibyte character must not panic: the old walker indexed bytes.
+        assert!(redact("café token=s3cret").contains("[redacted]"));
+        assert!(!redact("café token=s3cret").contains("s3cret"));
     }
 
     #[test]
