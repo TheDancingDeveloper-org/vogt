@@ -93,6 +93,11 @@ def wait_for(url: str, process: subprocess.Popen[str], what: str) -> None:
 def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
     """Vogt and the engine, both real, wired the way the stack wires them."""
     root = tmp_path_factory.mktemp("front-door")
+    # The engine refuses a state_dir inside workspace_root, because the file
+    # API would then serve the engine's own state. The workspace is the tree
+    # the test registers as a project; state lives beside it.
+    workspace = root / "workspace"
+    workspace.mkdir()
     data_dir = root / "vogt"
     data_dir.mkdir()
     # The one secret both halves share. The core adopts it at init as its
@@ -175,7 +180,7 @@ def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
         "--name",
         "alpha",
         "--root-path",
-        str(root / "tree"),
+        str(workspace),
         "--reason",
         "front door test",
         data_dir=data_dir,
@@ -206,7 +211,7 @@ def pair(tmp_path_factory: pytest.TempPathFactory) -> Iterator[dict[str, str]]:
         "\n".join(
             [
                 f'token = "{BREAK_GLASS}"',
-                f'workspace_root = "{root}"',
+                f'workspace_root = "{workspace}"',
                 f'state_dir = "{root / "engine-state"}"',
                 f'vogt_core_url = "{core_url}"',
                 f'vogt_core_token_file = "{stack_secret}"',
