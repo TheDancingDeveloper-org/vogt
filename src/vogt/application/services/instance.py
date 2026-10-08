@@ -23,6 +23,9 @@ from vogt.application.models import (
     MigrateResult,
     PeerDiagnostics,
     RecentLog,
+    RegistryDumpParams,
+    RegistryDumpResult,
+    RegistryOperationManifest,
     ServeParams,
     ServeResult,
     StatusParams,
@@ -34,6 +37,7 @@ from vogt.application.services.auth import (
     adopt_bootstrap_agent_token,
     adopt_bootstrap_core_token,
 )
+from vogt.application.test_hooks import refuse_hooks_off_loopback
 from vogt.errors import InvalidRequest, VogtError
 from vogt.observability import (
     PROCESS_STARTED_AT,
@@ -121,6 +125,53 @@ def migrate_instance(ctx: AppContext, params: MigrateParams) -> MigrateResult:
             *(f"observed:{name}" for name in observed_report.applied),
         ],
     )
+
+
+def registry_dump(ctx: AppContext, params: RegistryDumpParams) -> RegistryDumpResult:
+    """Every registered operation, as a manifest any core can be checked against.
+
+    Read-only and instance-independent: it describes the build, not the data.
+    The exclusion lists live with the registry, so the justification a parity
+    test reads is the same sentence this returns.
+    """
+    del ctx, params
+    from vogt.registry import HTTP_ONLY, LOCAL_ONLY, default_registry
+
+    registry = default_registry()
+    operations: list[RegistryOperationManifest] = []
+    for operation in registry:
+        reason_field = operation.params_model.model_fields.get("reason")
+        if operation.name in LOCAL_ONLY:
+            transports = ["cli"]
+            exclusion: str | None = "local_only"
+            exclusion_reason: str | None = LOCAL_ONLY[operation.name]
+        elif operation.name in HTTP_ONLY:
+            transports = ["http"]
+            exclusion = "http_only"
+            exclusion_reason = HTTP_ONLY[operation.name]
+        else:
+            transports = ["cli", "http", "mcp"]
+            exclusion = None
+            exclusion_reason = None
+        operations.append(
+            RegistryOperationManifest(
+                name=operation.name,
+                summary=operation.summary,
+                scope=operation.scope,
+                mutating=operation.mutating,
+                reason_required=reason_field is not None and reason_field.is_required(),
+                http_method=operation.route.method,
+                http_path=operation.route.path,
+                mcp_tool=operation.mcp_tool_name,
+                cli_path=list(operation.cli.path),
+                params_schema=operation.params_model.model_json_schema(),
+                result_schema=operation.result_model.model_json_schema(),
+                transports=transports,
+                exclusion=exclusion,
+                exclusion_reason=exclusion_reason,
+            )
+        )
+    return RegistryDumpResult(operations=operations)
 
 
 def status(ctx: AppContext, params: StatusParams) -> StatusResult:
@@ -317,6 +368,7 @@ def serve(ctx: AppContext, params: ServeParams) -> ServeResult:
     from vogt.adapters.http.server import ServeOptions, run
     from vogt.adapters.mcp.http import MCP_PATH
 
+    refuse_hooks_off_loopback(params.host)
     options = ServeOptions(
         host=params.host,
         port=params.port,

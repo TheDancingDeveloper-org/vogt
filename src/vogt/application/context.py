@@ -15,14 +15,22 @@ from vogt.adapters.git import Cloner, Pusher, clone_repository, push_branch
 from vogt.adapters.github.client import Transport
 from vogt.adapters.peer import PeerClient
 from vogt.application.identity import PublicIdentity, identity_from_config
+from vogt.application.test_hooks import clock_from_env, hooks_active, ids_from_env
 from vogt.config import VogtConfig, load_config
 from vogt.core.clock import Clock, utc_now
 from vogt.core.entities import Token
 from vogt.core.ids import IdFactory, new_id
 from vogt.core.principal import Principal, local_principal
+from vogt.observability import logger
 from vogt.storage.interface import DeclaredStore, ObservedStore
 from vogt.storage.sqlite.declared import SqliteDeclaredStore
 from vogt.storage.sqlite.observed import SqliteObservedStore
+
+log = logger("context")
+#: Announced once per process: `build_context` runs per request, and a warning
+#: per request would bury the one fact that matters, which is that the process
+#: is not using wall-clock time.
+_hooks_announced = False
 
 
 @dataclass(frozen=True)
@@ -103,23 +111,46 @@ def build_context(
     own answer keeps the core-only shape exactly as it was.
     """
     resolved_config = config if config is not None else load_config()
+    # The defaults are the wall clock and random ids. A process started for
+    # golden recording overrides them from the environment, and only from
+    # there: a caller that passed its own clock or factory is a test, and a
+    # test must not be silently redirected by whatever the suite exported.
+    resolved_clock = clock
+    resolved_ids = id_factory
+    if clock is utc_now:
+        override = clock_from_env()
+        if override is not None:
+            resolved_clock = override
+    if id_factory is new_id:
+        override_ids = ids_from_env()
+        if override_ids is not None:
+            resolved_ids = override_ids
+    active = hooks_active()
+    if active:
+        global _hooks_announced
+        if not _hooks_announced:
+            _hooks_announced = True
+            log.warning(
+                "deterministic test hooks are active: %s",
+                ", ".join(active),
+            )
     return AppContext(
         config=resolved_config,
         declared=SqliteDeclaredStore(
             resolved_config.declared_db_path,
-            clock=clock,
-            id_factory=id_factory,
+            clock=resolved_clock,
+            id_factory=resolved_ids,
             synchronous=resolved_config.sqlite_synchronous,
         ),
         observed=SqliteObservedStore(
             resolved_config.observed_db_path,
-            clock=clock,
+            clock=resolved_clock,
             synchronous=resolved_config.sqlite_synchronous,
         ),
         principal=principal if principal is not None else local_principal(),
         token=token,
-        clock=clock,
-        id_factory=id_factory,
+        clock=resolved_clock,
+        id_factory=resolved_ids,
         cloner=cloner,
         pusher=pusher,
         forge_transport=forge_transport,

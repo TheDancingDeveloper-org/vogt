@@ -158,6 +158,8 @@ from vogt.application.models import (
     PublishInitiativeParams,
     PublishInitiativeResult,
     RegisterProjectParams,
+    RegistryDumpParams,
+    RegistryDumpResult,
     RelateWorkParams,
     RemoveUserParams,
     RemoveUserResult,
@@ -264,6 +266,20 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.status,
             route=HttpRoute("GET", "/status"),
             cli=CliBinding(("status",)),
+        ),
+        Operation(
+            name="registry.dump",
+            summary=(
+                "The operation registry as a manifest: every operation's "
+                "scope, bindings, schemas and transport exclusion."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=RegistryDumpParams,
+            result_model=RegistryDumpResult,
+            handler=services.registry_dump,
+            route=HttpRoute("GET", "/registry"),
+            cli=CliBinding(("registry", "dump")),
         ),
         Operation(
             name="instance.diagnostics",
