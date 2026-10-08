@@ -2095,11 +2095,15 @@ vetted, so the engine assumes its agent can be talked into anything:
 - **Only its own directory is free.** Each chat runs in
   `state_dir/chats/<id>/`, whose `.klaudia/config.toml` (loaded with
   `--trusted-project-config`) declares a `PreToolUse` hook. The hook posts
-  every tool call to the gate. Two kinds of call run at once: a read whose
-  every path resolves, lexically and through symlinks, inside that directory,
-  and a tool that touches nothing outside the agent (`ToolSearch`, `TodoWrite`
-  and the like). **Everything else waits on an approval card that a person
-  answers.** That includes any read elsewhere (`/proc/self/environ`, the
+  every tool call to the gate. The free path is an allowlist, and it fails
+  closed. A call runs at once only in two cases: it is a tool that touches
+  nothing outside the agent (`ToolSearch`, `TodoWrite` and the like), or it is
+  a read tool the engine knows argument by argument (`Read`, `Glob`, `Grep`
+  and the LSP tools, from Klaudia's own schemas) whose every argument is one
+  it knows and whose every path resolves, lexically and through symlinks,
+  inside that directory. An unknown tool, an unknown argument, or a missing
+  or non-string path is a card. **Everything else waits on an approval card
+  that a person answers.** That includes any read elsewhere (`/proc/self/environ`, the
   engine's state, `~`), every web, browser and MCP call (**decision D2:
   every web call is carded**), every command and every edit. A prompt
   injection therefore cannot read something and send it out in one unseen

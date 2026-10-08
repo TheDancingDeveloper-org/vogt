@@ -13,6 +13,10 @@ fn only_reads_of_the_chats_own_directory_and_inert_tools_run_free() {
     ));
     assert!(free("Glob", json!({"pattern": "**/*.md"})));
     assert!(free("Grep", json!({"pattern": "TODO"})));
+    assert!(free(
+        "Read",
+        json!({"file_path": "notes.txt", "offset": 1, "limit": 5})
+    ));
     assert!(free("ToolSearch", json!({"query": "anything"})));
     assert!(free("TodoWrite", json!({})));
     // Out of the directory, however it is spelled.
@@ -55,6 +59,56 @@ fn only_reads_of_the_chats_own_directory_and_inert_tools_run_free() {
 }
 
 #[test]
+fn the_free_path_is_an_allowlist_and_anything_it_cannot_classify_asks() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("main.go"), "package main").unwrap();
+    let here = dir.path();
+    let free = |tool: &str, input: Value| classify(tool, &input, here) == ToolClass::Free;
+    // Klaudia's LSP tools name their path `file` (review round 2).
+    for tool in ["Hover", "Diagnostics", "DocumentSymbols"] {
+        if tool == "Hover" {
+            assert!(free(
+                tool,
+                json!({"file": "main.go", "line": 1, "character": 1})
+            ));
+        }
+        assert!(
+            !free(
+                tool,
+                json!({"file": "/proc/self/environ", "line": 1, "character": 1})
+            ),
+            "{tool}"
+        );
+        assert!(!free(tool, json!({"file": "/proc/self/environ"})), "{tool}");
+    }
+    assert!(free("Diagnostics", json!({"file": "main.go"})));
+    assert!(free("WorkspaceSymbol", json!({"query": "Pool"})));
+    assert!(!free(
+        "WorkspaceSymbol",
+        json!({"query": "Pool", "file": "/etc/passwd"})
+    ));
+    // An unknown tool with a path argument asks, whatever the path.
+    assert!(!free("ReadFile", json!({"file_path": "main.go"})));
+    assert!(!free("Peek", json!({"file": "main.go"})));
+    // An argument the table does not know asks, even beside a local path.
+    assert!(!free(
+        "Read",
+        json!({"file_path": "main.go", "follow": "/etc/passwd"})
+    ));
+    // A required path that is missing, empty or not a string asks.
+    assert!(!free("Read", json!({})));
+    assert!(!free("Read", json!({"file_path": ""})));
+    assert!(!free("Read", json!({"file_path": ["/etc/passwd"]})));
+    assert!(!free("Hover", json!({"line": 1})));
+    assert!(!free("Read", Value::Null));
+    // A Grep pattern is a regex, not a path; its `path` and `glob` are.
+    assert!(free("Grep", json!({"pattern": "^/etc/passwd", "-i": true})));
+    assert!(!free("Grep", json!({"pattern": "x", "glob": "/etc/*"})));
+    // Glob and Grep with no path search the working directory, the chat's.
+    assert!(free("Glob", json!({"pattern": "**/*.go"})));
+}
+
+#[test]
 fn redaction_masks_what_looks_like_a_credential() {
     let text = "401 from api: Authorization: Bearer abcdef0123456789 \
                 api_key=sk-live-1234567890abcdef token: \"zzzzzzzzzzzz\" \
@@ -69,6 +123,12 @@ fn redaction_masks_what_looks_like_a_credential() {
         assert!(!out.contains(secret), "{secret} survived: {out}");
     }
     assert!(out.contains("plain words stay"), "{out}");
+    // A git SHA and a long single-case identifier are not secrets.
+    let sha = "9faaef2c1d3b4e5f60718293a4b5c6d7e8f90a1b";
+    assert!(redact(&format!("commit {sha}")).contains(sha));
+    let ident = "a_very_long_snake_case_identifier_name_here";
+    assert!(redact(ident).contains(ident));
+    assert!(!redact("key AbCdEf0123456789GhIjKl0123456789MnOp").contains("AbCdEf0123456789"));
 }
 
 #[test]
