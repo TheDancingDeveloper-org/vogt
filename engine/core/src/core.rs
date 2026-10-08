@@ -293,6 +293,10 @@ pub fn from_iso(text: &str) -> Result<Moment, String> {
 /// bytes the date consumed, including its trailing separator.
 fn parse_iso_date(bytes: &[u8]) -> Result<(i32, u32, u32, usize), String> {
     let year = fixed(bytes, 0, 4).ok_or_else(|| "not a timestamp".to_string())? as i32;
+    // CPython's datetime starts at year 1 and ends at 9999.
+    if !(1..=9999).contains(&year) {
+        return Err("not a timestamp".to_string());
+    }
     if bytes.len() >= 7 && bytes[4] == b'W' {
         let week = fixed(bytes, 5, 2).ok_or_else(|| "not a timestamp".to_string())?;
         let weekday = fixed(bytes, 7, 1).ok_or_else(|| "not a timestamp".to_string())?;
@@ -1082,6 +1086,8 @@ mod tests {
             }
         }
         assert!(from_iso("20261x12").is_err());
+        assert!(from_iso("0000-01-01").is_err());
+        assert!(from_iso("10000-01-01").is_err());
     }
 
     fn the_step_clock_advances_one_second_a_read() {
