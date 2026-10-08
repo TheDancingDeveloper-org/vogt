@@ -450,6 +450,146 @@ pub fn check_lifecycle_transition(from_state: &str, to_state: &str) -> Result<()
     Ok(())
 }
 
+/// Declared-store shapes. Ports `src/vogt/core/entities.py`.
+///
+/// Closed structs stand in for pydantic's `extra="forbid"`. Timestamps are the
+/// `Moment` above. Maps are `serde_json::Value` because the Python side stores
+/// `dict[str, object]`. No model carries a secret: `Token` has no hash and
+/// `ForgeAccount` has no token, matching the Python models.
+pub const DECLARABLE_RELATION_KINDS: &[&str] =
+    &["depends_on", "relates_to", "duplicate_of", "parent_of"];
+
+pub fn require_text(value: &str) -> Result<String, String> {
+    let stripped = value.trim();
+    if stripped.is_empty() {
+        Err("must not be blank".to_string())
+    } else {
+        Ok(stripped.to_string())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Actor {
+    pub id: String,
+    pub kind: ActorKind,
+    pub display_name: String,
+    pub identity_ref: String,
+    pub disabled: bool,
+    pub created_at: Moment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Project {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub root_path: String,
+    pub repo_url: Option<String>,
+    pub lifecycle_state: String,
+    pub current_version: Option<String>,
+    pub contract_version: Option<String>,
+    pub compliance_status: String,
+    pub compliance_checked_at: Option<Moment>,
+    pub contract_adopted_at: Option<Moment>,
+    pub write_back: String,
+    pub link_state: String,
+    pub exclusions: Vec<String>,
+    pub trust_state: String,
+    pub created_at: Moment,
+    pub updated_at: Moment,
+}
+
+impl Project {
+    pub fn new(id: &str, slug: &str, name: &str, root_path: &str, now: Moment) -> Self {
+        Self {
+            id: id.to_string(),
+            slug: slug.to_string(),
+            name: name.to_string(),
+            root_path: root_path.to_string(),
+            repo_url: None,
+            lifecycle_state: "active".to_string(),
+            current_version: None,
+            contract_version: None,
+            compliance_status: "not_checked".to_string(),
+            compliance_checked_at: None,
+            contract_adopted_at: None,
+            write_back: "none".to_string(),
+            link_state: "unlinked".to_string(),
+            exclusions: Vec::new(),
+            trust_state: "unverified".to_string(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkItem {
+    pub id: String,
+    pub reference: String,
+    pub kind: String,
+    pub title: String,
+    pub body: String,
+    pub state: String,
+    pub priority: String,
+    pub effort: Option<String>,
+    pub project_id: Option<String>,
+    pub initiative_id: Option<String>,
+    pub origin: String,
+    pub trust_state: String,
+    pub superseded_by: Option<String>,
+    pub created_at: Moment,
+    pub updated_at: Moment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observation {
+    pub id: String,
+    pub sweep_id: String,
+    pub collector: String,
+    pub kind: String,
+    pub project_id: Option<String>,
+    pub subject_key: String,
+    pub payload: serde_json::Value,
+    pub content_digest: String,
+    pub promoted: bool,
+    pub observed_at: Moment,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkOverlay {
+    pub subject_key: String,
+    pub project_id: String,
+    pub rank: Option<f64>,
+    pub workflow_state: Option<String>,
+    pub priority: Option<String>,
+    pub effort: Option<String>,
+    pub branches: Vec<String>,
+    pub created_at: Moment,
+    pub updated_at: Moment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionGrant {
+    pub id: String,
+    pub state: String,
+    pub expires_at: Option<Moment>,
+}
+
+impl SessionGrant {
+    /// `expired` for an approved grant past its expiry, else the stored state.
+    pub fn effective_state(&self, now: Moment) -> &str {
+        if self.state == "approved" {
+            if let Some(expires) = self.expires_at {
+                if expires <= now {
+                    return "expired";
+                }
+            }
+        }
+        &self.state
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,6 +690,39 @@ mod tests {
         assert!(err.message().contains("WI-2 (open)"), "{}", err.message());
         assert!(check_completion_allowed("done", &[]).is_ok());
         assert!(check_completion_allowed("wont_do", &[("WI-2", "open")]).is_ok());
+    }
+
+    #[test]
+    fn entities_carry_the_python_defaults() {
+        let now = Moment::from_unix(1_700_000_000, 0);
+        let project = Project::new("prj_1", "vogt", "Vogt", "/src", now);
+        assert_eq!(project.lifecycle_state, "active");
+        assert_eq!(project.compliance_status, "not_checked");
+        assert_eq!(project.link_state, "unlinked");
+        assert_eq!(project.write_back, "none");
+        assert!(require_text("  ").is_err());
+        assert_eq!(require_text("  because  ").unwrap(), "because");
+        assert!(!DECLARABLE_RELATION_KINDS.contains(&"implemented_by"));
+
+        let grant = SessionGrant {
+            id: "g".into(),
+            state: "approved".into(),
+            expires_at: Some(now),
+        };
+        assert_eq!(grant.effective_state(now), "expired");
+        assert_eq!(
+            grant.effective_state(Moment::from_unix(1_699_999_999, 0)),
+            "approved"
+        );
+        let pending = SessionGrant {
+            state: "pending".into(),
+            expires_at: Some(now),
+            ..grant
+        };
+        assert_eq!(
+            pending.effective_state(Moment::from_unix(1_800_000_000, 0)),
+            "pending"
+        );
     }
 
     #[test]
