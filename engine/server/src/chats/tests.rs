@@ -114,15 +114,23 @@ fn redaction_masks_what_looks_like_a_credential() {
                 api_key=sk-live-1234567890abcdef token: \"zzzzzzzzzzzz\" \
                 ghp_ABCDEFGHIJKLMNOPQRSTUV and plain words stay";
     let out = redact(text);
-    for secret in [
+    // The assertion messages name the sample by position only: a test must
+    // not write a credential-shaped value into its output.
+    for (i, sample) in [
         "abcdef0123456789",
         "sk-live-1234567890abcdef",
         "zzzzzzzzzzzz",
         "ghp_ABCDEFGHIJKLMNOPQRSTUV",
-    ] {
-        assert!(!out.contains(secret), "{secret} survived: {out}");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(!out.contains(sample), "sample {i} survived redaction");
     }
-    assert!(out.contains("plain words stay"), "{out}");
+    assert!(
+        out.contains("plain words stay"),
+        "plain text was redacted too"
+    );
     // A git SHA and a long single-case identifier are not secrets.
     let sha = "9faaef2c1d3b4e5f60718293a4b5c6d7e8f90a1b";
     assert!(redact(&format!("commit {sha}")).contains(sha));
