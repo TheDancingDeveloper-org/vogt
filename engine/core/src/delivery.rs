@@ -25,6 +25,11 @@ pub struct Verdict {
     pub evidence: String,
 }
 
+use std::sync::LazyLock;
+
+static QUEUED_HINT: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)queued messages?|message(?:s)? queued").unwrap());
+
 pub fn judge(submitted: bool, before: Option<&str>, after: &[Observation]) -> Verdict {
     if !submitted {
         return Verdict {
@@ -32,10 +37,9 @@ pub fn judge(submitted: bool, before: Option<&str>, after: &[Observation]) -> Ve
             evidence: "no Enter was pressed: the text is in the input, not sent".to_string(),
         };
     }
-    let hint = regex::Regex::new(r"(?i)queued messages?|message(?:s)? queued").expect("constant");
     if after
         .iter()
-        .any(|seen| seen.lines.iter().any(|line| hint.is_match(line)))
+        .any(|seen| seen.lines.iter().any(|line| QUEUED_HINT.is_match(line)))
     {
         return Verdict {
             delivery: Delivery::Queued,

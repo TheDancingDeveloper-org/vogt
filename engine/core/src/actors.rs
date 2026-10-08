@@ -60,6 +60,25 @@ pub fn normalise_bot_logins(logins: &[&str]) -> Vec<String> {
     out
 }
 
+/// Read the `actor` block a collector wrote. Anything that is not an object is
+/// none, and a blank string is none: Python's `not value` treats both as absent.
+pub fn facts_from_payload(raw: &serde_json::Value) -> Option<ActorFacts> {
+    let object = raw.as_object()?;
+    let text = |key: &str| {
+        object
+            .get(key)
+            .and_then(|value| value.as_str())
+            .filter(|text| !text.is_empty())
+            .map(str::to_string)
+    };
+    Some(ActorFacts {
+        login: text("login"),
+        user_type: text("user_type"),
+        association: text("association"),
+        org_member: object.get("org_member").and_then(|value| value.as_bool()),
+    })
+}
+
 pub fn is_bot(login: Option<&str>, user_type: Option<&str>, bots: &[String]) -> bool {
     if user_type.is_some_and(|kind| kind.eq_ignore_ascii_case("bot")) {
         return true;
@@ -71,7 +90,9 @@ pub fn is_bot(login: Option<&str>, user_type: Option<&str>, bots: &[String]) -> 
 }
 
 pub fn classify(facts: &ActorFacts, bots: &[String]) -> ActorClass {
-    if facts.login.is_none() && facts.user_type.is_none() {
+    if facts.login.as_deref().unwrap_or("").is_empty()
+        && facts.user_type.as_deref().unwrap_or("").is_empty()
+    {
         return ActorClass {
             login: None,
             kind: None,
@@ -116,10 +137,11 @@ fn relation(facts: &ActorFacts) -> ActorRelation {
 }
 
 fn base_login(login: &str) -> String {
-    login
-        .trim()
-        .to_lowercase()
-        .trim_end_matches("[bot]")
+    // removesuffix strips once. trim_end_matches would strip a second [bot].
+    let lowered = login.trim().to_lowercase();
+    lowered
+        .strip_suffix("[bot]")
+        .unwrap_or(&lowered)
         .to_string()
 }
 
@@ -193,5 +215,12 @@ mod tests {
         assert!(matches(&member, "org"));
         assert!(!matches(&member, "external"));
         assert!(matches(&system_actor(), "bot"));
+        // A blank string is absent, as Python's `not value` says.
+        let blank =
+            facts_from_payload(&serde_json::json!({"login": "", "user_type": "User"})).unwrap();
+        assert_eq!(classify(&blank, &bots).kind, Some(ActorKind::Human));
+        assert!(facts_from_payload(&serde_json::json!("not an object")).is_none());
+        // removesuffix strips one [bot], so a doubled suffix still matches the list.
+        assert!(is_bot(Some("dependabot[bot][bot]"), None, &bots));
     }
 }
