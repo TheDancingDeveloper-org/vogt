@@ -558,7 +558,10 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path.starts_with("/api/assistant") && *method != Method::GET {
         return Some(TokenCapability::Assistant);
     }
+    // The streaming upload writes a file as surely as the JSON write does;
+    // it shipped without a rule, so any accepted token could write the tree.
     if (path == "/api/files" && *method == Method::PUT)
+        || (path == "/api/files/upload" && *method == Method::PUT)
         || (path == "/api/files/op" && *method == Method::POST)
     {
         return Some(TokenCapability::FilesystemWrite);
@@ -902,5 +905,22 @@ mod tests {
             required_capability(&Method::POST, "/api/git/op"),
             Some(TokenCapability::GitWrite)
         );
+    }
+
+    /// Every route that writes the tree needs `filesystem-write`, the
+    /// streaming upload included.
+    #[test]
+    fn every_workspace_write_needs_filesystem_write() {
+        for (method, path) in [
+            (Method::PUT, "/api/files"),
+            (Method::PUT, "/api/files/upload"),
+            (Method::POST, "/api/files/op"),
+        ] {
+            assert_eq!(
+                required_capability(&method, path),
+                Some(TokenCapability::FilesystemWrite),
+                "{method} {path}"
+            );
+        }
     }
 }

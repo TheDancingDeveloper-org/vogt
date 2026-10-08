@@ -11228,3 +11228,56 @@ async fn workspace_reads_need_the_sessions_capability() {
         }
     }
 }
+
+/// The streaming upload needs `filesystem-write`, like every other write of
+/// the tree: a read-only token is refused and nothing lands on disk, while a
+/// writer's upload succeeds.
+#[tokio::test]
+async fn streaming_upload_needs_filesystem_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let core = stand_in_core_knowing(vec![
+        (
+            "reader-token-1234567890abcdef",
+            "human:reader",
+            vec!["read"],
+        ),
+        (
+            "writer-token-1234567890abcdef",
+            "human:writer",
+            vec!["read", "work.write"],
+        ),
+    ])
+    .await;
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.vogt_core_url = Some(core);
+    let (base, _h) = boot_with_config(cfg).await;
+
+    let upload = |token: &'static str, name: &'static str| {
+        let url = format!("{base}/api/files/upload?path={name}");
+        async move {
+            reqwest::Client::new()
+                .put(url)
+                .headers(auth_for(token))
+                .body("uploaded\n")
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    assert_eq!(
+        upload("reader-token-1234567890abcdef", "reader.txt").await,
+        StatusCode::FORBIDDEN
+    );
+    assert!(!tmp.path().join("reader.txt").exists());
+    assert_eq!(
+        upload("writer-token-1234567890abcdef", "writer.txt").await,
+        StatusCode::OK
+    );
+    assert_eq!(
+        std::fs::read_to_string(tmp.path().join("writer.txt")).unwrap(),
+        "uploaded\n"
+    );
+}
