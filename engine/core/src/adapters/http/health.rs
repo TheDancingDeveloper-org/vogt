@@ -93,8 +93,14 @@ fn readiness(data_dir: &std::path::Path) -> Result<Readiness, MigrateError> {
     let observed = connect(&observed_path(data_dir))?;
     let declared_version = migrator::applied_version(&declared)?;
     let observed_version = migrator::applied_version(&observed)?;
-    let declared_expected = migrator::bundled_version(&root.join("declared"))?;
-    let observed_expected = migrator::bundled_version(&root.join("observed"))?;
+    let declared_expected = migrator::bundled_version(
+        "declared",
+        root.as_deref().map(|path| path.join("declared")).as_deref(),
+    )?;
+    let observed_expected = migrator::bundled_version(
+        "observed",
+        root.as_deref().map(|path| path.join("observed")).as_deref(),
+    )?;
     let mut behind = Vec::new();
     if declared_version < declared_expected {
         behind.push(format!(

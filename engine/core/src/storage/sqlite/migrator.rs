@@ -5,9 +5,9 @@
 //! Python-written database must upgrade without a second table. Checksums are
 //! SHA-256 of the stripped SQL, matching `checksum_of`.
 //!
-//! SQL is read from the checkout at runtime (`VOGT_MIGRATIONS_DIR`, else a
-//! path relative to this crate) so a migration added on `main` is picked up
-//! without regenerating embedded strings.
+//! SQL is embedded at compile time (`embedded.rs`), because the stack image
+//! ships the binary without `src/vogt`. `VOGT_MIGRATIONS_DIR` still overrides
+//! that for a checkout ahead of the binary.
 
 use std::path::{Path, PathBuf};
 
@@ -15,6 +15,7 @@ use rusqlite::{Connection, OptionalExtension};
 use sha2::{Digest, Sha256};
 
 use super::connection::{connect, split_statements};
+use super::embedded;
 
 const FRAMEWORK: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS migrations (
@@ -31,6 +32,10 @@ const FRAMEWORK: &[&str] = &[
      SELECT 1, NULL, NULL
      WHERE NOT EXISTS (SELECT 1 FROM migration_lock WHERE id = 1)",
 ];
+
+/// A lock older than this is stolen. A crashed process must not wedge the
+/// instance forever; Python's `DEFAULT_STALE_AFTER` is the same fifteen minutes.
+const STALE_AFTER_SECONDS: i64 = 15 * 60;
 
 #[derive(Debug)]
 pub struct Migration {
@@ -91,15 +96,50 @@ pub fn checksum_of(sql: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Directory holding `declared/` and `observed/`.
-pub fn migrations_root() -> PathBuf {
-    if let Some(dir) = std::env::var_os("VOGT_MIGRATIONS_DIR") {
-        return PathBuf::from(dir);
-    }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src/vogt/storage/sqlite/migrations")
+/// Directory holding `declared/` and `observed/`, when `VOGT_MIGRATIONS_DIR`
+/// points at a checkout ahead of this binary. Absent, the embedded SQL is used.
+pub fn migrations_root() -> Option<PathBuf> {
+    std::env::var_os("VOGT_MIGRATIONS_DIR").map(PathBuf::from)
 }
 
-pub fn load_migrations(directory: &Path) -> Result<Vec<Migration>, MigrateError> {
+fn from_pairs(pairs: &[(&str, &str)]) -> Result<Vec<Migration>, MigrateError> {
+    let mut migrations = Vec::new();
+    let mut seen = Vec::new();
+    for (id, sql) in pairs {
+        let migration = Migration {
+            checksum: checksum_of(sql),
+            id: (*id).to_string(),
+            sql: (*sql).to_string(),
+        };
+        if seen.contains(&migration.number()) {
+            return Err(MigrateError::Message(format!(
+                "duplicate migration number: {}",
+                migration.id
+            )));
+        }
+        seen.push(migration.number());
+        migrations.push(migration);
+    }
+    Ok(migrations)
+}
+
+/// The migrations for one store. `directory` wins when given, so a checkout
+/// ahead of the binary is tested against its own files; otherwise the SQL
+/// embedded in the binary is used.
+pub fn load_migrations(
+    store: &str,
+    directory: Option<&Path>,
+) -> Result<Vec<Migration>, MigrateError> {
+    if let Some(directory) = directory {
+        return load_directory(directory);
+    }
+    from_pairs(match store {
+        "observed" => embedded::OBSERVED,
+        _ => embedded::DECLARED,
+    })
+}
+
+fn load_directory(directory: &Path) -> Result<Vec<Migration>, MigrateError> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(directory)?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "sql"))
@@ -132,8 +172,8 @@ pub fn load_migrations(directory: &Path) -> Result<Vec<Migration>, MigrateError>
     Ok(migrations)
 }
 
-pub fn bundled_version(directory: &Path) -> Result<i64, MigrateError> {
-    Ok(load_migrations(directory)?
+pub fn bundled_version(store: &str, directory: Option<&Path>) -> Result<i64, MigrateError> {
+    Ok(load_migrations(store, directory)?
         .iter()
         .map(Migration::number)
         .max()
@@ -174,12 +214,12 @@ pub fn table_exists(conn: &Connection, name: &str) -> Result<bool, MigrateError>
 pub fn migrate(
     conn: &mut Connection,
     store: &str,
-    directory: &Path,
+    directory: Option<&Path>,
     holder: &str,
     now: &str,
 ) -> Result<Report, MigrateError> {
     ensure_framework(conn)?;
-    let available = load_migrations(directory)?;
+    let available = load_migrations(store, directory)?;
     acquire_lock(conn, store, holder, now)?;
     let result: Result<Report, MigrateError> = (|| {
         verify_forward_only(conn, store, &available)?;
@@ -298,14 +338,21 @@ fn acquire_lock(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    // A held lock is refused rather than stolen. Python steals one older than
-    // fifteen minutes; this skeleton migrates its own databases and never holds
-    // a lock across a process, so the steal path is not needed yet.
+    // A lock younger than fifteen minutes is refused. An older one is stolen:
+    // the holder crashed, and leaving it would wedge the instance forever.
+    // Python compares `now - acquired_at < stale_after` the same way.
     if let Some((Some(current), Some(acquired_at))) = &row {
-        let _ = conn.execute_batch("ROLLBACK");
-        return Err(MigrateError::Message(format!(
-            "{store}: migration lock held by {current} since {acquired_at}"
-        )));
+        match (parse_iso(now), parse_iso(acquired_at)) {
+            (Some(now_secs), Some(acquired_secs))
+                if now_secs.saturating_sub(acquired_secs) < STALE_AFTER_SECONDS =>
+            {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(MigrateError::Message(format!(
+                    "{store}: migration lock held by {current} since {acquired_at}"
+                )));
+            }
+            _ => {}
+        }
     }
     if let Err(err) = conn.execute(
         "UPDATE migration_lock SET holder = ?1, acquired_at = ?2 WHERE id = 1",
@@ -334,10 +381,116 @@ fn release_lock(conn: &Connection, holder: &str) -> Result<(), MigrateError> {
 pub fn open_and_migrate(
     path: &Path,
     store: &str,
-    directory: &Path,
+    directory: Option<&Path>,
     holder: &str,
     now: &str,
 ) -> Result<Report, MigrateError> {
     let mut conn = connect(path)?;
     migrate(&mut conn, store, directory, holder, now)
+}
+
+/// Seconds since the epoch for a UTC timestamp written as
+/// `YYYY-MM-DDTHH:MM:SS`, optionally with a fraction and a `Z` or `+00:00`
+/// suffix — the shapes `to_iso` and Python's `isoformat` produce. Anything else
+/// is unreadable, and the caller treats that as stale rather than wedging.
+fn parse_iso(text: &str) -> Option<i64> {
+    let body = text.trim().trim_end_matches('Z');
+    let (date, time) = body.split_once('T')?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: u32 = date_parts.next()?.parse().ok()?;
+    let day: u32 = date_parts.next()?.parse().ok()?;
+    let time = time.split(['+', '-']).next()?;
+    let (clock, _fraction) = time.split_once('.').unwrap_or((time, ""));
+    let mut clock_parts = clock.split(':');
+    let hour: u32 = clock_parts.next()?.parse().ok()?;
+    let minute: u32 = clock_parts.next()?.parse().ok()?;
+    let second: u32 = clock_parts.next()?.parse().ok()?;
+    let days = days_from_civil(year, month, day)?;
+    Some(days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second))
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || day == 0 || day > 31 {
+        return None;
+    }
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let yoe = year.rem_euclid(400) as u64;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp as u64 + 2) / 5 + day as u64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146_097 + doe as i64 - 719_468)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_embedded_sql_matches_the_checkout() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../src/vogt/storage/sqlite/migrations");
+        for (store, pairs) in [
+            ("declared", embedded::DECLARED),
+            ("observed", embedded::OBSERVED),
+        ] {
+            let directory = root.join(store);
+            let from_disk = load_directory(&directory).expect("checkout migrations");
+            let embedded = from_pairs(pairs).expect("embedded migrations");
+            let disk_ids: Vec<&str> = from_disk.iter().map(|m| m.id.as_str()).collect();
+            let embedded_ids: Vec<&str> = embedded.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(disk_ids, embedded_ids, "{store} ids");
+            for (disk, embedded) in from_disk.iter().zip(&embedded) {
+                assert_eq!(disk.checksum, embedded.checksum, "{}", disk.id);
+            }
+        }
+    }
+
+    fn hold(conn: &Connection, holder: &str, acquired_at: &str) {
+        ensure_framework(conn).unwrap();
+        conn.execute(
+            "UPDATE migration_lock SET holder = ?1, acquired_at = ?2 WHERE id = 1",
+            (holder, acquired_at),
+        )
+        .unwrap();
+    }
+
+    fn holder_of(conn: &Connection) -> Option<String> {
+        conn.query_row(
+            "SELECT holder FROM migration_lock WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_fresh_lock_is_refused_and_a_fifteen_minute_old_one_is_stolen() {
+        let dir = std::env::temp_dir().join(format!("vogt-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("declared.sqlite3");
+        let now = "2026-10-08T12:15:00+00:00";
+
+        let conn = connect(&path).unwrap();
+        hold(&conn, "crashed", "2026-10-08T12:00:01+00:00");
+        drop(conn);
+        let mut conn = connect(&path).unwrap();
+        let refused = migrate(&mut conn, "declared", None, "vogt-core", now);
+        assert!(refused.unwrap_err().to_string().contains("held by crashed"));
+        assert_eq!(holder_of(&conn).as_deref(), Some("crashed"));
+
+        // Exactly fifteen minutes is not younger, so it is stolen.
+        hold(&conn, "crashed", "2026-10-08T12:00:00+00:00");
+        let stolen = migrate(&mut conn, "declared", None, "vogt-core", now);
+        assert!(stolen.is_ok(), "{stolen:?}");
+        assert_eq!(holder_of(&conn), None);
+
+        // A fractional timestamp and a Z suffix parse the same instant.
+        assert_eq!(
+            parse_iso("2026-10-08T12:00:00.500000+00:00"),
+            parse_iso("2026-10-08T12:00:00Z")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

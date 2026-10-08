@@ -1,6 +1,7 @@
 //! SQLite storage. Ports `src/vogt/storage/sqlite/`.
 
 pub mod connection;
+pub mod embedded;
 pub mod migrator;
 
 use std::path::{Path, PathBuf};

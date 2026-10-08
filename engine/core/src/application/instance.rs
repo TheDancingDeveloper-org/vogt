@@ -24,14 +24,14 @@ pub fn init(data_dir: &Path, now: &str) -> Result<InitOutcome, migrator::Migrate
     let declared = migrator::open_and_migrate(
         &declared_path(data_dir),
         "declared",
-        &root.join("declared"),
+        root.as_deref().map(|path| path.join("declared")).as_deref(),
         "vogt-core",
         now,
     )?;
     let observed = migrator::open_and_migrate(
         &observed_path(data_dir),
         "observed",
-        &root.join("observed"),
+        root.as_deref().map(|path| path.join("observed")).as_deref(),
         "vogt-core",
         now,
     )?;
@@ -53,14 +53,26 @@ pub fn init(data_dir: &Path, now: &str) -> Result<InitOutcome, migrator::Migrate
 pub fn pending(data_dir: &Path) -> Result<(usize, usize), migrator::MigrateError> {
     let root = migrator::migrations_root();
     Ok((
-        pending_in(&declared_path(data_dir), &root.join("declared"))?,
-        pending_in(&observed_path(data_dir), &root.join("observed"))?,
+        pending_in(
+            "declared",
+            &declared_path(data_dir),
+            root.as_deref().map(|path| path.join("declared")).as_deref(),
+        )?,
+        pending_in(
+            "observed",
+            &observed_path(data_dir),
+            root.as_deref().map(|path| path.join("observed")).as_deref(),
+        )?,
     ))
 }
 
-fn pending_in(path: &Path, directory: &Path) -> Result<usize, migrator::MigrateError> {
+fn pending_in(
+    store: &str,
+    path: &Path,
+    directory: Option<&Path>,
+) -> Result<usize, migrator::MigrateError> {
     let conn = crate::storage::sqlite::connection::connect(path)?;
     let applied = migrator::applied_version(&conn)?;
-    let bundled = migrator::bundled_version(directory)?;
+    let bundled = migrator::bundled_version(store, directory)?;
     Ok(usize::try_from(bundled.saturating_sub(applied)).unwrap_or(0))
 }
