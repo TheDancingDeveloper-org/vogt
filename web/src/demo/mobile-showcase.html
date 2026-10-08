@@ -150,9 +150,10 @@
         <p class="eyebrow">Interactive implementation preview</p>
         <h1 id="mobile-demo-title">Vogt in your hand.</h1>
         <p class="lede">
-          Sessions, terminal paging and Assistant approvals at the same phone
-          viewport used by the Capacitor app. Choose a view and interact with
-          the real responsive PWA inside the device.
+          Sessions with their oversight badge and work-item chip, a work item
+          listing the sessions on it, the terminal pager, and the Assistant
+          with its tap-to-talk mic — the same phone viewport the Capacitor app
+          uses. Choose a view and interact with the real responsive PWA.
         </p>
         <div class="truth">
           This is not a screenshot recreation. The frame loads the same Solid
@@ -160,13 +161,15 @@
         </div>
         <nav aria-label="Mobile demo views">
           <a href="/index.html#/sessions" target="vogt-mobile">Sessions</a>
+          <a href="/index.html#/w/WI-101" target="vogt-mobile">Work item</a>
           <a href="/index.html#/t/demo-server" target="vogt-mobile">Terminal pager</a>
-          <a href="/index.html#/assistant" target="vogt-mobile">Assistant</a>
+          <a href="/index.html#/assistant" target="vogt-mobile">Assistant mic</a>
           <a href="/index.html#/inbox" target="vogt-mobile">Inbox</a>
         </nav>
         <p class="note">
-          Native-only push and microphone plumbing are outside a browser demo;
-          the WebView UI shown here is the implementation the Android shell loads.
+          The microphone is the composer's tap-to-talk: a tap records and silence
+          sends, a long press is push-to-talk. Native push delivery is the one
+          thing a browser frame cannot show.
         </p>
       </section>
       <div class="device" aria-label="Phone frame">

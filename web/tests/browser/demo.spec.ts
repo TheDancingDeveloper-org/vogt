@@ -141,6 +141,29 @@ test("phone Sessions overview exposes waiting and non-waiting work", async ({ pa
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
 
+test("a work item lists the sessions working it, both ways", async ({ page }) => {
+  await installDemo(page);
+  await page.goto("/#/w/WI-101");
+  const hero = page.getByTestId("worked-by");
+  await expect(hero).toBeVisible();
+  // The hero lists the live sessions bound to WI-101, capped at three, each
+  // linking back to its terminal — the other direction of the rail chip.
+  await expect(hero).toContainText("vogt-session-demo-agent");
+  await expect(hero.locator('a[href="#/t/demo-agent"]')).toBeVisible();
+  // The body renders markdown with a clickable file path and a fenced block.
+  await expect(page.locator(".wid-body button.md-file-link")).toContainText("web/src/demo/fixtures.ts");
+  await expect(page.locator(".wid-body pre.md-pre code.md-lang-ts")).toContainText("mode: 'demo'");
+});
+
+test("the assistant composer offers tap-to-talk", async ({ page }) => {
+  await installDemo(page);
+  await page.goto("/#/assistant");
+  const mic = page.getByTestId("mic");
+  await expect(mic).toBeVisible();
+  await expect(mic).toHaveAttribute("aria-label", "Speak a message");
+  await expect(mic).toHaveAttribute("title", /hold to talk/);
+});
+
 test("phone terminal uses the implemented attention pager", async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== "phone", "phone project only");
   await installDemo(page);

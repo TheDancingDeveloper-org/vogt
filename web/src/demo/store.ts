@@ -155,7 +155,7 @@ export class DemoStore {
     const lines: Record<string, string> = {
       "demo-build": "\x1b[1;36mVogt demo · Build PWA\x1b[0m\r\n$ pnpm build\r\n✓ TypeScript checked\r\n✓ 19 routes bundled\r\ntransforming modules… 812/812\r\nrendering chunks…\r\n",
       "demo-tests": "\x1b[1;35mVogt demo · Test suite\x1b[0m\r\n$ vitest run\r\n✓ transport  12 tests\r\n✓ terminal layout  18 tests\r\n✓ demo fixture contract  31 tests\r\nTest Files  27 passed\r\n",
-      "demo-agent": "\x1b[1;33mAgent review · WI-104\x1b[0m\r\nI compared desktop, breakpoint, and phone compositions.\r\nFinding: the demo disclosure remains above the first fold.\r\n\r\n? Approve the updated phone composition [y/N]\r\n",
+      "demo-agent": "\x1b[1;33mAgent review · WI-101\x1b[0m\r\nI compared desktop, breakpoint, and phone compositions.\r\nFinding: the disclosure in web/src/demo/mobile-showcase.html stays above the first fold.\r\nThe store behind it is web/src/demo/store.ts.\r\n\r\n? Approve the updated phone composition [y/N]\r\n",
       "demo-server": "VITE v8.0.14  ready in 312 ms\r\n➜ Local: http://127.0.0.1:4173/\r\nGET /#/board 200 18ms\r\nGET /#/t/demo-agent 200 11ms\r\n",
       "demo-logs": "14:48:02 info request route=/api/events mode=demo\r\n14:48:10 info session id=demo-agent state=waiting-for-input\r\n14:48:14 info browser width=390 route=/inbox\r\n",
       "demo-metrics": "route_sweep_ok 19\nfailed_requests 0\nhorizontal_overflow 0\nactive_demo_tabs 1\n",
