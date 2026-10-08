@@ -18,6 +18,9 @@ export class DemoSocket extends EventTarget implements RuntimeSocket {
   binaryType: BinaryType = "arraybuffer";
   private input = "";
   private timers: number[] = [];
+  /** Bytes of transcript already delivered. A reconnect replays only the
+   *  buffered delta past this point (WI-128), not the snapshot again. */
+  private replayedBytes = 0;
 
   constructor(private readonly store: DemoStore, private readonly sessionId: string) {
     super();
@@ -39,13 +42,15 @@ export class DemoSocket extends EventTarget implements RuntimeSocket {
     this.dispatchEvent(new Event("open"));
     const transcript = this.store.terminalTranscript(this.sessionId);
     const bytes = encoder.encode(transcript);
+    const delta = bytes.subarray(this.replayedBytes);
+    this.replayedBytes = bytes.byteLength;
     this.emitMessage(JSON.stringify({
       type: "snapshot-start",
-      scrollback_bytes: bytes.byteLength,
+      scrollback_bytes: delta.byteLength,
       scrollback_pos: bytes.byteLength,
-      reset: true,
+      reset: delta.byteLength === bytes.byteLength,
     }));
-    if (bytes.byteLength) this.emitMessage(bytes.buffer);
+    if (delta.byteLength) this.emitMessage(delta.buffer);
     this.emitMessage(JSON.stringify({ type: "snapshot-done" }));
     for (const [delay, line] of this.store.liveTerminalFrames(this.sessionId)) {
       this.timers.push(window.setTimeout(() => this.output(line), delay));
