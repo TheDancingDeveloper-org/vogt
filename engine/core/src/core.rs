@@ -71,6 +71,10 @@ impl Moment {
         }
     }
 
+    pub fn seconds_since(self, earlier: Self) -> i64 {
+        self.unix_seconds - earlier.unix_seconds
+    }
+
     pub fn to_iso(self) -> String {
         let (year, month, day, hour, minute, second) = civil(self.unix_seconds);
         if self.nanos == 0 {

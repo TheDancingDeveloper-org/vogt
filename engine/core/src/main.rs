@@ -9,6 +9,7 @@ mod collectors;
 #[allow(dead_code)]
 mod config;
 mod core;
+mod decisions;
 mod errors;
 mod observability;
 mod registry;
