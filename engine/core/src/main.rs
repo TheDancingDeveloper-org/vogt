@@ -6,6 +6,7 @@
 mod adapters;
 mod application;
 mod collectors;
+#[allow(dead_code)]
 mod config;
 mod core;
 mod errors;
