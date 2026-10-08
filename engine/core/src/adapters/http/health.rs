@@ -1,8 +1,8 @@
 //! Health routes. Ports `src/vogt/adapters/http/health.py`.
 //!
-//! `/health` and `/health/live` are liveness. `/health/ready` reports both
-//! schema versions and the instance id. `detail` is always present: pydantic
-//! emits it as `null` when unset, and dropping the key is a wire difference.
+//! `/health/live` is liveness. `/health/ready` reports both schema versions and
+//! the instance id. `/version` and `/connection-info` are what the engine proxies
+//! and the Setup Wizard points at. Python has no bare `/health`, so neither do we.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -23,13 +23,18 @@ use crate::storage::sqlite::{declared_path, observed_path};
 pub struct HealthState {
     pub data_dir: PathBuf,
     pub version: String,
+    /// Whether bearer authentication is on. Reported by `/connection-info`.
+    pub auth_enabled: bool,
+    /// Whether writes are accepted. Reported by `/connection-info`.
+    pub writes_enabled: bool,
 }
 
 pub fn router(state: HealthState) -> Router {
     Router::new()
-        .route("/health", get(live))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .route("/version", get(version))
+        .route("/connection-info", get(connection_info))
         .with_state(Arc::new(state))
 }
 
@@ -43,6 +48,47 @@ async fn live(State(state): State<Arc<HealthState>>) -> Json<Liveness> {
     Json(Liveness {
         status: "ok",
         version: state.version.clone(),
+    })
+}
+
+#[derive(Serialize)]
+struct VersionBody {
+    version: String,
+    name: &'static str,
+}
+
+async fn version(State(state): State<Arc<HealthState>>) -> Json<VersionBody> {
+    Json(VersionBody {
+        version: state.version.clone(),
+        name: "vogt",
+    })
+}
+
+#[derive(Serialize)]
+struct ConnectionInfo {
+    url: Option<String>,
+    api_path: &'static str,
+    mcp_path: &'static str,
+    health_path: &'static str,
+    supported_mcp_protocol_versions: &'static [&'static str],
+    authentication: &'static str,
+    writes_enabled: bool,
+}
+
+const SUPPORTED_MCP_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+async fn connection_info(State(state): State<Arc<HealthState>>) -> Json<ConnectionInfo> {
+    let url = crate::config::load_config(&serde_json::Map::new())
+        .ok()
+        .and_then(|config| config.public_url.clone());
+    Json(ConnectionInfo {
+        url,
+        api_path: "/api/v1",
+        mcp_path: "/mcp",
+        health_path: "/health/ready",
+        supported_mcp_protocol_versions: &SUPPORTED_MCP_PROTOCOL_VERSIONS,
+        authentication: if state.auth_enabled { "bearer" } else { "none" },
+        writes_enabled: state.writes_enabled,
     })
 }
 
@@ -168,5 +214,54 @@ mod tests {
         assert!(json["declared_schema_version"].as_i64().unwrap() > 0);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_and_connection_info_match_python() {
+        let state = HealthState {
+            data_dir: PathBuf::from("/unused"),
+            version: "0.7.7".to_string(),
+            auth_enabled: false,
+            writes_enabled: true,
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let get = |path: &str| -> String {
+            let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            use std::io::{Read, Write};
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut buf = String::new();
+            stream.read_to_string(&mut buf).unwrap();
+            buf
+        };
+        let version = get("/version");
+        let body = version.split("\r\n\r\n").nth(1).unwrap();
+        let version: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(version["version"], "0.7.7");
+        assert_eq!(version["name"], "vogt");
+
+        let info = get("/connection-info");
+        let body = info.split("\r\n\r\n").nth(1).unwrap();
+        let info: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(info["api_path"], "/api/v1");
+        assert_eq!(info["mcp_path"], "/mcp");
+        assert_eq!(info["health_path"], "/health/ready");
+        assert_eq!(info["authentication"], "none");
+        assert_eq!(info["writes_enabled"], true);
+        assert_eq!(info["supported_mcp_protocol_versions"][0], "2025-06-18");
+
+        // Python has no bare /health.
+        assert!(get("/health").starts_with("HTTP/1.1 404"));
     }
 }

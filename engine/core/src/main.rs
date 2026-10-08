@@ -151,9 +151,18 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool) -> ExitCo
             return ExitCode::from(1);
         }
     };
+    let loaded = match config::load_config(&serde_json::Map::new()) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("vogt-core serve: {err}");
+            return ExitCode::from(1);
+        }
+    };
     let router = adapters::http::health::router(adapters::http::health::HealthState {
         data_dir: data_dir.clone(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
+        version: PRODUCT_VERSION.to_string(),
+        auth_enabled: loaded.bootstrap_core_token_file.is_some(),
+        writes_enabled: true,
     });
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -183,20 +192,27 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool) -> ExitCo
     }
 }
 
+const PRODUCT_VERSION: &str = match option_env!("VOGT_PRODUCT_VERSION") {
+    Some(value) if !value.is_empty() => value,
+    _ => "local/dev",
+};
+
+/// Where the instance lives. An explicit `--data-dir` wins, then `VOGT_DATA_DIR`,
+/// then the TOML file named by `VOGT_CONFIG_FILE`, then the XDG default. That is
+/// the order `load_config` applies, so a stack that sets `data_dir` in its config
+/// file lands in the same place as Python.
 fn resolve_data_dir(given: Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(dir) = given {
-        return Some(dir);
+    let mut overrides = serde_json::Map::new();
+    if let Some(dir) = &given {
+        overrides.insert(
+            "data_dir".to_string(),
+            serde_json::Value::String(dir.display().to_string()),
+        );
     }
-    if let Some(dir) = std::env::var_os("VOGT_DATA_DIR") {
-        return Some(PathBuf::from(dir));
-    }
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
-    match base {
-        Some(dir) => Some(dir.join("vogt")),
-        None => {
-            eprintln!("vogt-core: no data directory — pass --data-dir or set VOGT_DATA_DIR");
+    match config::load_config(&overrides) {
+        Ok(config) => Some(config.resolved_data_dir().to_path_buf()),
+        Err(err) => {
+            eprintln!("vogt-core: {err}");
             None
         }
     }
