@@ -19,8 +19,9 @@ left a fresh install with no way to sign in short of `vogt user create`
 inside the container.
 
 Install mode is deliberately a *property of the credential store*, not a
-flag an operation flips: the store latches it closed by itself (migration
-0020's triggers) the moment a person is given a login or a token, by any
+flag an operation flips: the declared store latches it closed by itself
+(`install_latch`, migration 0020; set in the same transaction by every write
+that gives a credential) the moment a person is given a login or a token, by any
 path, and nothing reopens it short of deleting the store. The same migration
 latched every store that already held a token when it was upgraded, so a
 running instance operated only through agent-bound tokens and the engine's
