@@ -1,0 +1,61 @@
+name: rust-core
+
+# Gate for the long-lived `rust-core` branch, where the Python core is being
+# ported into engine/core. Main's CI does not run on this branch; this
+# workflow does not run on main. The parity job is a placeholder until the
+# black-box harness (P0.3) exists.
+
+on:
+  push:
+    branches: [rust-core]
+  pull_request:
+    branches: [rust-core]
+  workflow_dispatch:
+
+concurrency:
+  group: rust-core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: fmt, clippy, test
+    # `bigmem` is node-b-gha-public-bigmem, the same runner CodeQL uses for
+    # the Rust analysis. A label no online runner advertises queues forever.
+    runs-on: [self-hosted, bigmem]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: cargo fmt
+        working-directory: engine
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        working-directory: engine
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo test (vogt-core)
+        working-directory: engine
+        run: cargo test -p vogt-core
+
+  parity:
+    name: parity
+    # Placeholder. P0.3 fills this job with `scripts/parity.py check --impl rust`.
+    # Until then it records that the harness is not here yet and succeeds, so
+    # the branch is not blocked on a script that does not exist.
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: parity harness not yet present
+        run: |
+          set -euo pipefail
+          if [ -f scripts/parity.py ]; then
+            echo "scripts/parity.py exists; this placeholder must be replaced"
+            exit 1
+          fi
+          echo "parity harness not present yet (P0.3); skipping"
