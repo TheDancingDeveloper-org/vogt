@@ -251,54 +251,143 @@ const INERT: &[&str] = &[
     "ExitPlanMode",
 ];
 
-/// Tools that read files, free only inside the chat's own directory.
-const LOCAL_READS: &[&str] = &[
-    "Read",
-    "Glob",
-    "Grep",
-    "LS",
-    "Diagnostics",
-    "DocumentSymbols",
-    "Hover",
-    "WorkspaceSymbol",
+/// How an argument of a read tool is treated.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Arg {
+    /// A path to a file or directory: it must resolve inside the chat's
+    /// directory.
+    Path,
+    /// A glob: its literal prefix must resolve inside the chat's directory.
+    Glob,
+    /// Not a path (an offset, a regex, a line number): no bearing on what
+    /// is read.
+    Other,
+}
+
+/// A read tool the gate understands argument by argument, from Klaudia's
+/// own schemas (msp-klaudia `internal/tools/{read,glob,grep,lsp_tools}.go`
+/// at 601e714).
+struct ReadTool {
+    name: &'static str,
+    args: &'static [(&'static str, Arg)],
+    /// The path argument that must be present. `None` where omitting every
+    /// path means the working directory, which is the chat's own.
+    required: Option<&'static str>,
+}
+
+const READ_TOOLS: &[ReadTool] = &[
+    ReadTool {
+        name: "Read",
+        args: &[
+            ("file_path", Arg::Path),
+            ("offset", Arg::Other),
+            ("limit", Arg::Other),
+        ],
+        required: Some("file_path"),
+    },
+    ReadTool {
+        name: "Glob",
+        args: &[("pattern", Arg::Glob), ("path", Arg::Path)],
+        required: None,
+    },
+    ReadTool {
+        name: "Grep",
+        args: &[
+            ("pattern", Arg::Other),
+            ("path", Arg::Path),
+            ("glob", Arg::Glob),
+            ("output_mode", Arg::Other),
+            ("-i", Arg::Other),
+            ("-n", Arg::Other),
+            ("multiline", Arg::Other),
+            ("type", Arg::Other),
+            ("-A", Arg::Other),
+            ("-B", Arg::Other),
+            ("-C", Arg::Other),
+            ("head_limit", Arg::Other),
+        ],
+        required: None,
+    },
+    ReadTool {
+        name: "Diagnostics",
+        args: &[("file", Arg::Path)],
+        required: Some("file"),
+    },
+    ReadTool {
+        name: "Hover",
+        args: &[
+            ("file", Arg::Path),
+            ("line", Arg::Other),
+            ("character", Arg::Other),
+        ],
+        required: Some("file"),
+    },
+    ReadTool {
+        name: "DocumentSymbols",
+        args: &[("file", Arg::Path)],
+        required: Some("file"),
+    },
+    ReadTool {
+        name: "WorkspaceSymbol",
+        args: &[("query", Arg::Other), ("file", Arg::Path)],
+        required: None,
+    },
 ];
 
-/// The input fields a file tool names a path in.
-const PATH_FIELDS: &[&str] = &["file_path", "path", "notebook_path", "pattern", "glob"];
-
-/// Classify a tool call for the gate (WI-1097 review round 1).
+/// Classify a tool call for the gate (WI-1097 review rounds 1 and 2).
 ///
-/// Only what cannot carry data out of the chat, or read anything but the
-/// chat's own scratch directory, runs free. A read anywhere else — the
+/// Fail-closed by construction: a call runs free only when the tool is on an
+/// explicit allowlist — [`INERT`], or a [`READ_TOOLS`] entry whose every
+/// argument is one the table knows and whose every path argument is a string
+/// that resolves (lexically, then through symlinks) inside the chat's own
+/// directory. An unknown tool, an unknown argument, a missing required path
+/// or a path that is not a string is a card. So a read anywhere else — the
 /// process's own `/proc/self/environ`, the engine's state, another person's
 /// files — waits for a person, and so does every tool that reaches the
 /// network (web fetch and search, the browser, every MCP call: an argument
-/// sent to a server is data leaving the chat). So a prompt injection in a
-/// page the chat was shown cannot read a secret and send it somewhere in one
+/// sent to a server is data leaving the chat). A prompt injection in a page
+/// the chat was shown cannot read a secret and send it somewhere in one
 /// unseen step: each half is a card naming what it would do.
 pub fn classify(tool: &str, input: &Value, chat_dir: &Path) -> ToolClass {
     if INERT.contains(&tool) {
         return ToolClass::Free;
     }
-    if LOCAL_READS.contains(&tool) && paths_inside(input, chat_dir) {
-        return ToolClass::Free;
+    match READ_TOOLS.iter().find(|t| t.name == tool) {
+        Some(spec) if read_is_local(spec, input, chat_dir) => ToolClass::Free,
+        _ => ToolClass::Ask,
     }
-    ToolClass::Ask
 }
 
-/// Whether every path a file tool's input names resolves inside `dir`.
-fn paths_inside(input: &Value, dir: &Path) -> bool {
-    let Some(fields) = input.as_object() else {
-        return input.is_null();
+fn read_is_local(spec: &ReadTool, input: &Value, dir: &Path) -> bool {
+    let empty = serde_json::Map::new();
+    let fields = match input {
+        Value::Object(fields) => fields,
+        Value::Null => &empty,
+        _ => return false,
     };
+    if let Some(required) = spec.required {
+        if !fields
+            .get(required)
+            .and_then(Value::as_str)
+            .is_some_and(|p| !p.trim().is_empty())
+        {
+            return false;
+        }
+    }
     let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    fields
-        .iter()
-        .filter(|(key, _)| PATH_FIELDS.contains(&key.as_str()))
-        .all(|(_, value)| match value.as_str() {
-            Some(raw) => inside(raw, &root),
-            None => value.is_null(),
-        })
+    fields.iter().all(|(key, value)| {
+        match spec
+            .args
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, kind)| *kind)
+        {
+            // An argument the table does not know could name anything.
+            None => false,
+            Some(Arg::Other) => true,
+            Some(Arg::Path | Arg::Glob) => value.as_str().is_some_and(|raw| inside(raw, &root)),
+        }
+    })
 }
 
 fn inside(raw: &str, root: &Path) -> bool {
@@ -359,7 +448,6 @@ struct Launch {
     driver: Vec<String>,
     /// The template the command came from, which promotion reuses.
     template: Option<String>,
-    env: Vec<(String, String)>,
 }
 
 /// The command from the agent binary on (after a wrapper's `--`).
@@ -416,7 +504,6 @@ fn resolve_launch(
                 driver: driver_of(&argv),
                 argv,
                 template: None,
-                env: Vec::new(),
             },
         );
     }
@@ -435,7 +522,6 @@ fn resolve_launch(
         driver: driver_of(&argv),
         argv,
         template: Some(template.name.clone()),
-        env: template.env.clone(),
     })
 }
 
@@ -1346,11 +1432,8 @@ impl ChatRuntime {
                 cmd.env(k, v);
             }
         }
-        for (k, v) in &self.launch.env {
-            if !crate::pty::is_secret_env(k) {
-                cmd.env(k, v);
-            }
-        }
+        // The template's own variables are not carried over: a chat's
+        // environment is the allowlist, and a name heuristic is no allowlist.
         if let Some((name, value)) = self.provider_key().await {
             cmd.env(name, value);
         }
@@ -2129,13 +2212,10 @@ pub fn redact(text: &str) -> String {
         .collect()
     });
     static BARE: once_cell::sync::Lazy<Vec<regex::Regex>> = once_cell::sync::Lazy::new(|| {
-        [
-            r"\b(?:sk|pk|rk|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9_-]{12,}",
-            r"\b[A-Za-z0-9_-]{40,}\b",
-        ]
-        .iter()
-        .map(|p| regex::Regex::new(p).expect("redaction pattern"))
-        .collect()
+        [r"\b(?:sk|pk|rk|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9_-]{12,}"]
+            .iter()
+            .map(|p| regex::Regex::new(p).expect("redaction pattern"))
+            .collect()
     });
     let mut out = text.to_string();
     for pattern in PREFIXED.iter() {
@@ -2144,6 +2224,24 @@ pub fn redact(text: &str) -> String {
     for pattern in BARE.iter() {
         out = pattern.replace_all(&out, "[redacted]").into_owned();
     }
+    // A long token mixing upper case, lower case and digits reads as a key;
+    // a git SHA or a long identifier in one case does not, and stays.
+    static LONG: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::Regex::new(r"\b[A-Za-z0-9_\-+/=]{32,}").expect("pattern")
+    });
+    out = LONG
+        .replace_all(&out, |m: &regex::Captures<'_>| {
+            let t = &m[0];
+            let mixed = t.chars().any(|c| c.is_ascii_uppercase())
+                && t.chars().any(|c| c.is_ascii_lowercase())
+                && t.chars().any(|c| c.is_ascii_digit());
+            if mixed {
+                "[redacted]".to_string()
+            } else {
+                t.to_string()
+            }
+        })
+        .into_owned();
     out
 }
 
