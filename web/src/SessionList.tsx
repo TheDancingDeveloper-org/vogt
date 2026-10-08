@@ -62,7 +62,7 @@ export const SessionList: Component<Props> = (props) => {
                     {session.name}
                     <Show when={session.work_item}>
                       {(ref) => (
-                        <span class="session-work-chip" data-testid="session-work-chip">{ref()}</span>
+                        <span class="session-work-chip">{ref()}</span>
                       )}
                     </Show>
                   </span>
