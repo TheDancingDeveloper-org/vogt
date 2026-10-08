@@ -5,6 +5,7 @@
 
 mod adapters;
 mod application;
+mod auth;
 mod collectors;
 #[allow(dead_code)]
 mod config;

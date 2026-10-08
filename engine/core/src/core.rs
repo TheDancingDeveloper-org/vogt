@@ -77,6 +77,10 @@ impl Moment {
         self.unix_seconds
     }
 
+    pub fn nanos(self) -> u32 {
+        self.nanos
+    }
+
     pub fn seconds_since(self, earlier: Self) -> f64 {
         // ranking.py uses datetime.total_seconds(), which keeps the fraction.
         let seconds = (self.unix_seconds - earlier.unix_seconds) as f64;
