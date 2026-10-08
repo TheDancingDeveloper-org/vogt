@@ -9282,6 +9282,10 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
     let tooling = "#!/bin/sh\nsh -c 'sleep 300' &\nprintf 'helper=[%s]\\n> ' \"$!\"\nwait\n";
     // A turn that keeps printing.
     let busy = "#!/bin/sh\nprintf 'helper=[0]\\n'\nwhile :; do printf .; sleep 0.02; done\n";
+    // A turn whose only sign of life is a colour-cycled prompt (WI-1090):
+    // the screen's text never changes, so activity reads idle, but its bytes
+    // keep coming and a live turn must not be hibernated on that misreading.
+    let shimmer = "#!/bin/sh\nprintf 'helper=[0]\\n> '\nwhile :; do printf '\\r\\033[7m>\\033[0m '; sleep 0.02; printf '\\r\\033[2m>\\033[0m '; sleep 0.02; done\n";
     let ids = start_stub_agents(
         &client,
         &base,
@@ -9292,10 +9296,12 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
             ("blocked", quiet),
             ("tooling", tooling),
             ("busy", busy),
+            ("shimmer", shimmer),
         ],
     )
     .await;
-    let [quiet_id, pinned, blocked, tooling_id, busy_id] = [0, 1, 2, 3, 4].map(|i| ids[i].clone());
+    let [quiet_id, pinned, blocked, tooling_id, busy_id, shimmer_id] =
+        [0, 1, 2, 3, 4, 5].map(|i| ids[i].clone());
     let ok = client
         .post(format!("{base}/api/sessions/{pinned}/keep-awake"))
         .json(&json!({ "keep_awake": true }))
@@ -9330,6 +9336,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
             && why(&blocked).as_deref() == Some("blocked on a person")
             && why(&tooling_id).is_some_and(|w| w.contains("shell is running below the agent"))
             && why(&busy_id).as_deref() == Some("a turn is running")
+            && why(&shimmer_id).as_deref() == Some("output is still arriving")
     };
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !settled() && std::time::Instant::now() < deadline {
@@ -9344,6 +9351,15 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
         why(&tooling_id)
     );
     assert_eq!(why(&busy_id).as_deref(), Some("a turn is running"));
+    let shimmering = state.sessions.get(shimmer_id.parse().unwrap()).unwrap();
+    assert_eq!(
+        shimmering.activity(),
+        vogt_engine_contract::ActivityState::Idle
+    );
+    assert_eq!(
+        why(&shimmer_id).as_deref(),
+        Some("output is still arriving")
+    );
 
     run_once(
         &state.sessions,
@@ -9375,7 +9391,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
         .find(|s| s["id"] == quiet_id.as_str())
         .unwrap();
     assert_eq!(row["hibernation"]["trigger"], "idle");
-    for id in [&pinned, &blocked, &tooling_id, &busy_id] {
+    for id in [&pinned, &blocked, &tooling_id, &busy_id, &shimmer_id] {
         assert_ne!(activity(id), "hibernated", "{id} should have been exempt");
     }
 }

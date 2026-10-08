@@ -263,6 +263,15 @@ pub fn shows_prompt(lines: &[String]) -> bool {
 
 fn shows_glyph_prompt(lines: &[String]) -> bool {
     const BORDER: &[char] = &['│', '┃', '║', '|', ' ', '\u{a0}'];
+    // Claude Code and Codex keep their input box drawn mid-turn, with an
+    // `esc to interrupt` working line beside it: a turn is at work, however
+    // quiet its output (WI-1090).
+    if bottom_lines(lines, 10)
+        .iter()
+        .any(|l| l.to_lowercase().contains("esc to interrupt"))
+    {
+        return false;
+    }
     lines
         .iter()
         .rev()
@@ -372,7 +381,13 @@ pub fn shows_klaudia_prompt(lines: &[String]) -> bool {
             .is_some_and(|body| body == "›" || body.starts_with("› "));
         gutter && line.ends_with('│') && pair[1].trim_start().starts_with('╰')
     });
-    // What Klaudia shows only while it works or waits on an answer.
+    boxed_input && !klaudia_busy(lines)
+}
+
+/// Whether the bottom of the screen shows something Klaudia draws only while
+/// it works or waits on an answer: its working line, a permission ask, a
+/// question or a confirmation.
+pub fn klaudia_busy(lines: &[String]) -> bool {
     const BUSY: &[&str] = &[
         "esc to interrupt",
         "ctrl+c to force quit",
@@ -380,11 +395,10 @@ pub fn shows_klaudia_prompt(lines: &[String]) -> bool {
         "(y)es / (n)o",
         "choose 1-",
     ];
-    let busy = tail.iter().any(|l| {
+    bottom_lines(lines, 10).iter().any(|l| {
         let l = l.to_lowercase();
         BUSY.iter().any(|b| l.contains(b))
-    });
-    boxed_input && !busy
+    })
 }
 
 /// Whether Klaudia's own goal loop is driving the session (WI-950): its
@@ -438,8 +452,10 @@ pub fn is_ready(
         return match klaudia_title(title) {
             // The agent's own word. The activity reads `idle` already (the
             // title overrides output recency in `pty::compute_activity`)
-            // unless a dialog the engine recognises is open.
-            Some(KlaudiaTitle::Ready) => at_rest,
+            // unless a dialog the engine recognises is open. Anything in the
+            // session can set a title (a `cat` of a file holding the escape),
+            // so a screen that shows a turn at work outranks it.
+            Some(KlaudiaTitle::Ready) => at_rest && !klaudia_busy(lines),
             Some(_) => false,
             None => at_rest && shows_klaudia_prompt(lines),
         };
@@ -729,6 +745,21 @@ mod tests {
         assert!(shows_prompt(&[">>> ".to_string()]));
         assert!(shows_prompt(&["❯".to_string()]));
         assert!(!shows_prompt(&["compiling foo v0.1.0".to_string()]));
+        // The input box stays drawn mid-turn beside a working line (WI-1090).
+        let working = vec![
+            "✻ Running… (12s · esc to interrupt)".to_string(),
+            "╭──────────────╮".to_string(),
+            "│ >            │".to_string(),
+            "╰──────────────╯".to_string(),
+        ];
+        assert!(!shows_prompt(&working));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &working,
+            Some("claude"),
+            None
+        ));
         assert!(!shows_prompt(&["->x".to_string()]));
         assert!(!shows_prompt(&[]));
     }
@@ -1055,6 +1086,22 @@ mod klaudia_tests {
             ActivityState::AwaitingApproval,
             true,
             &[],
+            K,
+            ready
+        ));
+        // Anything in the session can set the title: a spoofed `ready` over
+        // a screen that shows a turn at work is not ready.
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::mid_turn(),
+            K,
+            ready
+        ));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::approval(),
             K,
             ready
         ));

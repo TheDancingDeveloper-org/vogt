@@ -307,9 +307,27 @@ impl Session {
         crate::agent_cli::agent_name(&argv)
     }
 
+    /// How long since any byte crossed the terminal: the last input, the
+    /// last output of any kind, or the spawn, whichever is latest. What the
+    /// hibernation policy weighs (WI-1090 review): an agent whose mid-turn
+    /// animation changes only colours reads `idle` on the change clock, and
+    /// a live turn must never be hibernated on that misreading.
+    pub fn output_quiet_for(&self) -> std::time::Duration {
+        let latest = [*self.last_input.lock(), *self.last_output.lock()]
+            .into_iter()
+            .flatten()
+            .fold(self.spawned_at, |a, b| a.max(b));
+        latest.elapsed()
+    }
+
+    /// The quiet window before a running session collapses to idle.
+    pub fn idle_after(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.idle_after_ms)
+    }
+
     /// How long since anything happened in the terminal: the last input,
     /// the last output that changed the screen, or the spawn, whichever is
-    /// latest.
+    /// latest. What autopilot waits on before it nudges.
     pub fn quiet_for(&self) -> std::time::Duration {
         let latest = [*self.last_input.lock(), self.last_change()]
             .into_iter()
@@ -1320,7 +1338,8 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
             let elapsed_ms = reference.elapsed().as_millis() as u64;
             if elapsed_ms >= session.idle_after_ms {
                 let new_state = if session.last_output.lock().is_some() {
-                    session.last_change();
+                    // Settle pending output before classifying.
+                    let _ = session.last_change();
                     compute_activity(&session)
                 } else {
                     ActivityState::Idle
@@ -1345,7 +1364,8 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                         break;
                     }
                     let new_state = if session.last_output.lock().is_some() {
-                        session.last_change();
+                        // Settle pending output before classifying.
+                        let _ = session.last_change();
                         compute_activity(&session)
                     } else {
                         ActivityState::Idle
@@ -1393,10 +1413,13 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // outranks output recency: whatever it still draws there is not a turn.
     // Only ever towards rest — a `running` the title would force could not
     // collapse when the output stops, and the watcher would spin on it.
+    // A title anything in the session could have set is checked against the
+    // screen: no working line or question showing under it.
     let state = if state == ActivityState::Running
         && crate::screen::klaudia_title(session.title().as_deref())
             == Some(crate::screen::KlaudiaTitle::Ready)
         && session.agent().as_deref() == Some("klaudia")
+        && !crate::screen::klaudia_busy(&session.render_screen(0).0.lines)
     {
         ActivityState::Idle
     } else {
