@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
         cmd = sub.add_parser(name)
         cmd.add_argument("--impl", choices=sorted(BINS), required=True)
         cmd.add_argument("--only", default="", help="operation prefix, e.g. actor")
-        cmd.add_argument("--transport", default="cli", choices=["cli"])
+        cmd.add_argument("--transport", default="cli", choices=["cli", "http"])
         if name == "record":
             cmd.add_argument("--out", type=Path, required=True)
         else:
@@ -66,11 +67,11 @@ def main(argv: list[str] | None = None) -> int:
     if not steps:
         print(f"no steps match --only {args.only!r}", file=sys.stderr)
         return 2
-    recorded = _run(binary, steps)
+    recorded = _run(binary, steps, args.transport)
 
     if args.command == "record":
         args.out.mkdir(parents=True, exist_ok=True)
-        target = args.out / "cli.json"
+        target = args.out / f"{args.transport}.json"
         target.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n")
         meta = {
             "main_sha": _merge_base(),
@@ -83,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"recorded {len(recorded)} steps to {target}")
         return 0
 
-    golden = json.loads((args.golden / "cli.json").read_text())
+    golden = json.loads((args.golden / f"{args.transport}.json").read_text())
     if args.only:
         golden = [step for step in golden if step["operation"].startswith(args.only)]
     return _diff(golden, recorded, args.only)
@@ -116,7 +117,13 @@ def _load_steps(prefix: str) -> list[dict[str, Any]]:
     return [step for step in document["steps"] if step["operation"].startswith(prefix)]
 
 
-def _run(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _run(binary: str, steps: list[dict[str, Any]], transport: str) -> list[dict[str, Any]]:
+    if transport == "http":
+        return _run_http(binary, steps)
+    return _run_cli(binary, steps)
+
+
+def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     root = Path(tempfile.mkdtemp(prefix="vogt-parity-"))
     data = root / "instance"
     env = {
@@ -199,6 +206,81 @@ def _substitute(
         return value
 
     return {key: one(value) for key, value in params.items()}
+
+
+def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drive the steps over HTTP against a served instance.
+
+    A step names its route through ``http``: ``{"method", "path", "headers"}``.
+    Only routes the binary actually serves can be recorded; an operation the
+    registry has not ported yet is a gap, not a step.
+    """
+    import socket
+    import urllib.request
+
+    recorded: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="vogt-parity-http-") as scratch:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        server = subprocess.Popen(
+            [
+                binary,
+                "serve",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--data-dir",
+                scratch,
+                "--no-auth",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            base = f"http://127.0.0.1:{port}"
+            _wait_until(f"{base}/health/live", server)
+            for step in steps:
+                spec = step["http"]
+                request = urllib.request.Request(
+                    f"{base}{spec['path']}",
+                    method=spec["method"],
+                    headers=spec.get("headers") or {},
+                )
+                try:
+                    with urllib.request.urlopen(request) as response:
+                        status, payload = response.status, response.read()
+                except urllib.error.HTTPError as error:
+                    status, payload = error.code, error.read()
+                result: Any = json.loads(payload) if payload else None
+                recorded.append(
+                    {
+                        "operation": step["operation"],
+                        "status": status,
+                        "result": result,
+                    }
+                )
+        finally:
+            server.terminate()
+            server.wait(timeout=10)
+    return recorded
+
+
+def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> None:
+    import urllib.request
+
+    for _ in range(attempts):
+        try:
+            with urllib.request.urlopen(url):
+                return
+        except (urllib.error.URLError, ConnectionError):
+            if server.poll() is not None:
+                reason = (server.stderr.read() if server.stderr else "") or "exited"
+                raise SystemExit(f"server exited before answering {url}: {reason}")
+            time.sleep(0.1)
+    raise SystemExit(f"server never answered {url}: {reason}")
 
 
 def _normalise(value: Any, root: Path, data: Path) -> Any:
