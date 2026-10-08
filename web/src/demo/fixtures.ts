@@ -38,23 +38,29 @@ export interface DemoState {
 }
 
 export function createDemoState(): DemoState {
-  // role, work_item and pane are what the rail sorts and chips from at v0.7.6.
-  // Oversight sorts first; a dormant pane is parked, not gone.
+  // What the rail, the phone list and the Oversight board read at v0.7.6:
+  // role (oversight sorts first), the work item it serves, the pane, the
+  // agent it is actually running, its permission posture, and a resource sample.
   const sessions = [
-    ["demo-agent", "Agent review", "waiting-for-input", null, "/Working/orbit", "worker", "WI-101", "live"],
-    ["demo-oversight", "Oversight", "idle", null, "/Working/orbit", "oversight", "WI-104", "live"],
-    ["demo-build", "Build PWA", "running", null, "/Working/orbit/web", "worker", "WI-102", "live"],
-    ["demo-tests", "Test suite", "running", null, "/Working/orbit", "worker", "WI-101", "dormant"],
-    ["demo-server", "Preview server", "idle", null, "/Working/orbit/web", null, null, "live"],
-    ["demo-logs", "Live logs", "running", null, "/Working/orbit", null, null, "live"],
-    ["demo-metrics", "Metrics watch", "running", null, "/Working/lighthouse", "worker", "WI-104", "parked"],
-    ["demo-shell", "Scratch shell", "idle", null, "/Working/orbit", null, null, "live"],
-    ["demo-finished", "Release check", "idle", 0, "/Working/lighthouse", null, null, "live"],
-  ].map(([id, name, activity, exit_code, cwd, role, work_item, pane], index) => [id, {
+    ["demo-agent", "Agent review", "waiting-for-input", null, "/Working/orbit", "worker", "WI-101", "live", "claude", "claude-opus-4-6", "high", null, false],
+    ["demo-oversight", "Oversight", "idle", null, "/Working/orbit", "oversight", "WI-104", "live", "claude", "claude-opus-4-6", "medium", null, true],
+    ["demo-build", "Build PWA", "running", null, "/Working/orbit/web", "worker", "WI-102", "live", "codex", "gpt-5", "medium", "accept-edits", false],
+    ["demo-approval", "Deploy approval", "awaiting-approval", null, "/Working/orbit", "worker", "WI-104", "live", "claude", "claude-sonnet-4-6", "low", "bypass", false],
+    ["demo-tests", "Test suite", "running", null, "/Working/orbit", "worker", "WI-101", "dormant", "codex", "gpt-5", null, null, false],
+    ["demo-server", "Preview server", "idle", null, "/Working/orbit/web", null, null, "live", null, null, null, null, false],
+    ["demo-logs", "Live logs", "running", null, "/Working/orbit", null, null, "live", null, null, null, null, false],
+    ["demo-metrics", "Metrics watch", "running", null, "/Working/lighthouse", "worker", "WI-104", "parked", "opencode", "demo-model", null, null, true],
+    ["demo-shell", "Scratch shell", "idle", null, "/Working/orbit", null, null, "live", null, null, null, null, false],
+    ["demo-finished", "Release check", "idle", 0, "/Working/lighthouse", null, null, "live", null, null, null, null, false],
+  ].map(([id, name, activity, exit_code, cwd, role, work_item, pane, agent, model, effort, permission_mode, autopilot], index) => [id, {
     id, name, activity, exit_code, cwd, scrollback_bytes: 131072,
-    ...(role ? { role } : {}),
+    ...(role ? { role, keep_awake: role === "oversight" } : {}),
     ...(work_item ? { work_item } : {}),
     pane,
+    ...(agent ? { running: { agent, model, effort, model_basis: "session flag", effort_basis: "session flag" } } : {}),
+    ...(permission_mode ? { permission_mode } : {}),
+    ...(autopilot ? { autopilot: true, autopilot_nudges: 2 } : {}),
+    resources: { rss_bytes: 180_000_000 + index * 40_000_000, cpu_pct: activity === "running" ? 35 + index : 2, processes: 3 + index, sampled_at: "2026-08-24T14:59:00Z", over_threshold: index === 7 },
     created_at: `2026-08-24T${String(12 + Math.floor(index / 2)).padStart(2, "0")}:${index % 2 ? "30" : "00"}:00Z`,
     activity_changed_at: `2026-08-24T14:${String(10 + index).padStart(2, "0")}:00Z`,
   }]);
@@ -115,7 +121,7 @@ export function createDemoState(): DemoState {
         },
         {
           role: "assistant",
-          text: "The **Agent review** session is waiting at the mobile composition approval. The terminal follows the real snapshot protocol, but its input is canned and never reaches a process.",
+          text: "The **Agent review** session is waiting at the mobile composition approval. The layout it is holding lives in web/src/demo/mobile-showcase.html, and the terminal follows the real snapshot protocol — its input is canned and never reaches a process.",
           tool_trace: ["listed sessions", "read Agent review tail"],
           created_at: "2026-08-24T14:49:25Z",
           session_refs: [
