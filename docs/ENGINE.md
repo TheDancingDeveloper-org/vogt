@@ -3017,6 +3017,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `preference.get` | Operator-only | Unavailable: Per-person UI settings (saved filters); the assistant has no use for them. |
 | `preference.set` | Operator-only | Unavailable: Changes a person's saved UI settings; set them in the surface they belong to. |
 | `audit.list` | Voice-readable | Available: Query the audit log. |
+| `registry.dump` | Voice-readable | Available: The operation registry as a manifest — every operation's scope, bindings and schemas. |
 <!-- voice-capabilities:end -->
 
 ### Threat model

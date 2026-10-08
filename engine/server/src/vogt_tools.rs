@@ -89,6 +89,7 @@ pub const CURATED_READS: &[&str] = &[
     "forge.actions",
     "events.list",
     "audit.list",
+    "registry.dump",
 ];
 
 pub const CURATED_WRITES: &[&str] = &[
