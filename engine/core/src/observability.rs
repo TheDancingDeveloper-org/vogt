@@ -16,7 +16,7 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 
 use tracing::field::{Field, Visit};
 use tracing::{Level, Subscriber};
@@ -85,15 +85,16 @@ pub fn current_actor() -> Option<String> {
 /// token shapes, and `key=value` for secret-shaped keys.
 pub fn redact(text: &str) -> String {
     let mut current = text.to_string();
-    for (pattern, replacement) in redactions() {
-        current = pattern.replace_all(&current, replacement).into_owned();
+    for (pattern, replacement) in REDACTIONS.iter() {
+        current = pattern.replace_all(&current, *replacement).into_owned();
     }
     current
 }
 
-fn redactions() -> Vec<(regex::Regex, String)> {
-    // The five `_REDACTIONS` in observability.py, in the same order. Applied
-    // with the regex crate so a multibyte character cannot split a slice.
+// The five `_REDACTIONS` in observability.py, in the same order. Compiled once:
+// building them per log line dominated nothing yet, but the layer calls this
+// on every event.
+static REDACTIONS: LazyLock<[(regex::Regex, &'static str); 5]> = LazyLock::new(|| {
     let pairs = [
         (r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@", "$1[redacted]@"),
         (
@@ -110,16 +111,13 @@ fn redactions() -> Vec<(regex::Regex, String)> {
             "$1$2[redacted]",
         ),
     ];
-    pairs
-        .into_iter()
-        .map(|(pattern, replacement)| {
-            (
-                regex::Regex::new(pattern).expect("redaction pattern"),
-                replacement.to_string(),
-            )
-        })
-        .collect()
-}
+    pairs.map(|(pattern, replacement)| {
+        (
+            regex::Regex::new(pattern).expect("redaction pattern"),
+            replacement,
+        )
+    })
+});
 
 pub fn recent_problems(limit: usize) -> Vec<String> {
     if limit == 0 {

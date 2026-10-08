@@ -233,16 +233,19 @@ def _selftest(golden_dir: Path) -> int:
     one id and one title in the committed golden and asserts both diffs are
     caught. It compares the golden to itself, so it needs no binary.
     """
-    golden = json.loads((golden_dir / "cli.json").read_text())
+    # Both sides go through the real normaliser. Diffing the raw golden against
+    # a raw mutation would pass even if the rules blanked every id and title.
+    root, data = Path("/parity/root"), Path("/parity/data")
+    golden = _normalise(json.loads((golden_dir / "cli.json").read_text()), root, data)
     if _diff(golden, golden, "") != 0:
         print("selftest: the golden disagrees with itself", file=sys.stderr)
         return 1
     for key in ("id", "title"):
-        mutated = json.loads(json.dumps(golden))
+        mutated = json.loads((golden_dir / "cli.json").read_text())
         if not _mutate(mutated, key):
             print(f"selftest: no {key!r} to mutate in the golden", file=sys.stderr)
             return 1
-        if _diff(golden, mutated, "") == 0:
+        if _diff(golden, _normalise(mutated, root, data), "") == 0:
             print(f"selftest: mutating {key!r} was not caught", file=sys.stderr)
             return 1
     print("selftest passed: a mutated id and a mutated title both fail the check")

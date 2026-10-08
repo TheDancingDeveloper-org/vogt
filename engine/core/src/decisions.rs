@@ -18,10 +18,11 @@ use crate::core::{Moment, Observation, WorkItem, WorkOverlay, DONE, TERMINAL_STA
 /// `json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)`.
 ///
 /// serde_json writes non-ASCII raw and renders floats in a different form, so
-/// a digest computed here would not match one Python stored. Non-ASCII becomes
-/// `\uXXXX`, with a surrogate pair above U+FFFF. Floats use Python's
-/// `repr`: six significant digits, switched to scientific notation the way
-/// CPython does.
+/// a digest computed here would not match one Python stored. Everything outside
+/// 0x20..=0x7E becomes `\uXXXX`, with a surrogate pair above U+FFFF — DEL
+/// (`\x7f`) included. Floats follow CPython's `repr`: the shortest round-trip
+/// digit string, fixed notation for an exponent in `-4..=15`, otherwise
+/// `d.ddde±XX` with an exponent of at least two digits, and `.0` on an integer.
 pub fn canonical_json(payload: &Value) -> String {
     let mut out = String::new();
     write_python_json(&mut out, payload);
@@ -73,7 +74,7 @@ fn write_python_string(out: &mut String, text: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            ch if (ch as u32) < 0x20 || (ch as u32) > 0x7F => push_escaped(out, ch),
+            ch if !('\u{0020}'..='\u{007e}').contains(&ch) => push_escaped(out, ch),
             ch => out.push(ch),
         }
     }
@@ -105,37 +106,47 @@ fn python_number(number: &serde_json::Number) -> String {
     if value.is_nan() || value.is_infinite() {
         return "null".to_string();
     }
-    let repr = format!("{value:.16}");
-    let trimmed = trim_float(&repr);
-    let scientific = format!("{value:.16e}");
-    // CPython picks the shorter form, breaking ties toward the plain one.
-    if scientific.len() < trimmed.len() {
-        scientific_python(&scientific)
-    } else {
-        trimmed
+    // CPython's `repr`: shortest round-trip digits, fixed notation while the
+    // exponent sits in -4..=15, otherwise scientific with a signed exponent of
+    // at least two digits. `{:e}` is not that — it omits the '+' and the
+    // zero-padding, and `{:.16}` is not shortest.
+    let negative = value.is_sign_negative();
+    let magnitude = value.abs();
+    let raw = format!("{magnitude:e}");
+    let (digits, exponent) = raw.split_once('e').expect("debug exponent form");
+    let mut significant: String = digits.chars().filter(|ch| *ch != '.').collect();
+    significant = significant.trim_end_matches('0').to_string();
+    if significant.is_empty() {
+        significant.push('0');
     }
+    let exp: i32 = exponent.parse().expect("debug exponent");
+    let mut rendered = if (-4..16).contains(&exp) {
+        fixed_notation(&significant, exp)
+    } else {
+        let mantissa = if significant.len() == 1 {
+            significant
+        } else {
+            format!("{}.{}", &significant[..1], &significant[1..])
+        };
+        format!("{mantissa}e{exp:+03}")
+    };
+    if negative {
+        rendered.insert(0, '-');
+    }
+    rendered
 }
 
-fn trim_float(rendered: &str) -> String {
-    if !rendered.contains('.') {
-        return format!("{rendered}.0");
+/// `digits` is the shortest significant digit string; `exp` is its order.
+fn fixed_notation(digits: &str, exp: i32) -> String {
+    if exp < 0 {
+        return format!("0.{}{digits}", "0".repeat((-exp - 1) as usize));
     }
-    let trimmed = rendered.trim_end_matches('0');
-    if trimmed.ends_with('.') {
-        format!("{trimmed}0")
+    let point = exp as usize + 1;
+    if point >= digits.len() {
+        format!("{digits}{}.0", "0".repeat(point - digits.len()))
     } else {
-        trimmed.to_string()
+        format!("{}.{}", &digits[..point], &digits[point..])
     }
-}
-
-fn scientific_python(rendered: &str) -> String {
-    // `1.0000000000000000e-05` -> `1e-05`, keeping the sign and two-digit exponent.
-    let (mantissa, exponent) = rendered.split_once('e').unwrap_or((rendered, "+00"));
-    format!(
-        "{}e{}",
-        trim_float(mantissa).trim_end_matches(".0"),
-        exponent
-    )
 }
 
 pub fn digest_of(payload: &Value) -> String {
@@ -817,6 +828,29 @@ mod tests {
         assert_eq!(
             digest_of(&titled),
             "sha256:14a825749356e438d4550bc8fee0c6c45cbd801d78ccf96a5432571a2c8790b4"
+        );
+        // Pinned against CPython 3.12 json.dumps. `{:.16}` and Rust's `{:e}`
+        // both disagree with these.
+        let floats = [
+            (1e-05, "1e-05"),
+            (0.0001, "0.0001"),
+            (1e16, "1e+16"),
+            (0.1 + 0.2, "0.30000000000000004"),
+            (1e22, "1e+22"),
+            (123.0, "123.0"),
+            (-0.0, "-0.0"),
+            (5e-324, "5e-324"),
+        ];
+        for (value, expected) in floats {
+            assert_eq!(
+                canonical_json(&serde_json::json!(value)),
+                expected,
+                "{value}"
+            );
+        }
+        assert_eq!(
+            canonical_json(&serde_json::json!("\u{007f}")),
+            r#""\u007f""#
         );
         assert_ne!(
             digest_of(&left),
