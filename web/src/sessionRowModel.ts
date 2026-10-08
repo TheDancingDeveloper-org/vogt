@@ -146,7 +146,7 @@ export function sortSessionsByAttention(sessions: SessionSummary[]): SessionSumm
 }
 
 /** Whether a session was nominated to supervise the others (WI-957). */
-export function isOversight(s: SessionSummary): boolean {
+export function isOversight(s: Pick<SessionSummary, "role">): boolean {
   return s.role === "oversight";
 }
 
@@ -160,6 +160,13 @@ export function sortSessionsForRail(
 ): SessionSummary[] {
   const partition = (s: SessionSummary) => (isOversight(s) ? 0 : bookmarked.has(s.id) ? 1 : 2);
   return sortSessionsByAttention(sessions).sort((left, right) => partition(left) - partition(right));
+}
+
+/** Attention order with oversight sessions floated first (WI-957, WI-1091):
+ *  the Sessions list, which has no bookmarks partition. The phone's terminal
+ *  pager stays in plain attention order. */
+export function sortSessionsOversightFirst(sessions: SessionSummary[]): SessionSummary[] {
+  return sortSessionsForRail(sessions, new Set());
 }
 
 /**

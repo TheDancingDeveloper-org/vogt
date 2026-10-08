@@ -24,7 +24,7 @@ import {
 import SurfaceHeader from "./SurfaceHeader";
 import WaitingSessionCard from "./WaitingSession";
 import SessionList from "./SessionList";
-import { sortSessionsByAttention } from "./sessionRowModel";
+import { sortSessionsOversightFirst } from "./sessionRowModel";
 import { createNarrow } from "./narrow";
 
 interface Props {
@@ -76,14 +76,15 @@ const Sessions: Component<Props> = (props) => {
   const [reasonDraft, setReasonDraft] = createSignal("");
   const [reasonBusy, setReasonBusy] = createSignal(false);
   const sessions = createMemo(() => {
-    // Attention order is the shared spine (the rail orders the same way); a
-    // stable partition then floats the session awaiting this reader's input to
-    // the very top without disturbing the attention order beneath it.
+    // Attention order is the shared spine, oversight sessions first (the rail
+    // orders the same way); a stable partition then floats the session
+    // awaiting this reader's input to the very top without disturbing the
+    // order beneath it.
     const currentPending = pendingAction();
     const pendingSession = currentPending?.kind === "send_input"
       ? currentPending.session_id
       : null;
-    return sortSessionsByAttention(
+    return sortSessionsOversightFirst(
       sessionsStore.order
         .map((id) => sessionsStore.sessions[id])
         .filter((session): session is SessionSummary => Boolean(session)),

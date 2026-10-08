@@ -276,3 +276,43 @@ test("canonical demo compositions stay visually stable at target widths", async 
   await page.waitForTimeout(250);
   await expect(page).toHaveScreenshot("demo-agent-390.png", { animations: "disabled" });
 });
+
+test("phone session menu makes a session oversight and removes it again", async ({ page }, testInfo) => {
+  // WI-1091: the phone had no way to nominate an overseer, and nothing could
+  // demote one short of killing it.
+  test.skip(testInfo.project.name !== "phone", "phone project only");
+  await installDemo(page);
+  const rowIds = () =>
+    page.locator(".session-list a.session-row").evaluateAll((rows) =>
+      rows.map((row) => row.getAttribute("href")),
+    );
+  const openMenu = async () => {
+    await page.goto("/#/t/demo-server");
+    const workspace = page.locator('[data-tab-id="term:demo-server"]');
+    await expect(workspace.locator(".terminal-mobile-session strong")).toHaveText("Preview server");
+    await workspace.locator(".terminal-mobile-header").getByRole("button", { name: "More terminal actions" }).click();
+    return workspace.locator(".terminal-mobile-overflow").getByTestId("session-role-action");
+  };
+
+  const make = await openMenu();
+  await expect(make).toHaveText("Make oversight");
+  await make.click();
+  await page.goto("/#/sessions");
+  const server = page.locator('.session-list a[href="#/t/demo-server"]');
+  await expect(server.locator(".session-role-badge")).toHaveText("oversight");
+  // Listed with the overseers, above every worker.
+  const promoted = await rowIds();
+  expect(promoted.indexOf("#/t/demo-server")).toBeLessThan(promoted.indexOf("#/t/demo-build"));
+
+  const remove = await openMenu();
+  await expect(remove).toHaveText("Remove oversight");
+  await remove.click();
+  await page.goto("/#/sessions");
+  await expect(server.locator(".session-role-badge")).toHaveCount(0);
+  await expect(page.locator('.session-list a[href="#/t/demo-oversight"] .session-role-badge')).toHaveText("oversight");
+  const demoted = await rowIds();
+  expect(demoted.indexOf("#/t/demo-server")).toBeGreaterThan(demoted.indexOf("#/t/demo-oversight"));
+
+  const again = await openMenu();
+  await expect(again).toHaveText("Make oversight");
+});

@@ -474,6 +474,10 @@ export class DemoStore {
       if (!row) return refusal("Session not found", 404);
       const role = body.role == null || body.role === "" ? null : String(body.role);
       if (role !== null && role !== "worker" && role !== "oversight") return refusal("Unknown role", 422);
+      // As the engine does (WI-1091): oversight pins the session awake, and
+      // removing oversight lifts that pin.
+      if (role === "oversight") row.keep_awake = true;
+      else if (row.role === "oversight") row.keep_awake = false;
       row.role = role;
       this.audit("session.role", "session", String(body.id), String(body.reason ?? "set the session role"));
       this.changed("session.role_changed", "session", String(body.id));

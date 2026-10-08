@@ -149,8 +149,10 @@ class Engine:
             if payload.get("role") == "oversight":
                 self.oversight.add(engine_id)
                 self.keep_awake.add(engine_id)
-            else:
+            elif engine_id in self.oversight:
+                # Removing oversight lifts the pin it set (WI-1091).
                 self.oversight.discard(engine_id)
+                self.keep_awake.discard(engine_id)
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "POST" and verb == "input":
             if asleep:
@@ -474,4 +476,4 @@ def test_set_role_nominates_any_session_and_is_audited(
         wired, SetSessionRoleParams(id=ses_id, role="worker", reason=WHY)
     )
     assert back.session.role == "worker"
-    assert back.session.keep_awake is True, "demoting leaves the pin alone"
+    assert back.session.keep_awake is False, "removing oversight lifts its pin"

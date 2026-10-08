@@ -17,7 +17,7 @@ import {
   isOversight,
   sessionStateWord,
   sessionRuntimeHint,
-  sortSessionsByAttention,
+  sortSessionsOversightFirst,
 } from "./sessionRowModel";
 
 interface Props {
@@ -33,7 +33,7 @@ export const SessionList: Component<Props> = (props) => {
   const now = createNow(30_000);
   const rows = createMemo(() => {
     const omit = new Set(props.omit ?? []);
-    return sortSessionsByAttention(
+    return sortSessionsOversightFirst(
       props.sessions.filter((session) => !omit.has(session.id)),
     );
   });
