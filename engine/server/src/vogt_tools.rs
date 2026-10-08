@@ -621,7 +621,7 @@ pub fn describe_target(args: &Value) -> String {
 fn digest(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::files::hex_digest(hasher.finalize())
 }
 
 /// Accept only an explicit HTTP(S) URL with a host. Redirects are disabled

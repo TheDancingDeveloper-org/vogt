@@ -42,7 +42,7 @@ fn hash_bytes(bytes: &[u8]) -> String {
 /// Hex-encode a finalised SHA-256 digest. Split out so a streaming write can
 /// hash chunk-by-chunk and still produce the same content-based ETag as
 /// [`hash_bytes`], without ever holding the whole file in memory.
-fn hex_digest(digest: impl AsRef<[u8]>) -> String {
+pub(crate) fn hex_digest(digest: impl AsRef<[u8]>) -> String {
     let digest = digest.as_ref();
     let mut out = String::with_capacity(digest.len() * 2);
     for b in digest {
