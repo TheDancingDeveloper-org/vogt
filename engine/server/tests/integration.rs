@@ -1902,6 +1902,119 @@ async fn session_activity_becomes_idle_after_quiet_window() {
         .await;
 }
 
+/// WI-1090: Klaudia's idle input box repaints its blinking cursor faster
+/// than the quiet window, forever. Output that leaves the screen as it was
+/// is not activity, so the session settles to `idle` and its screen reads
+/// `ready`, while a TUI whose repaints do change the screen (a spinner)
+/// stays `running`.
+#[tokio::test]
+async fn an_identical_repaint_is_not_activity_but_a_spinner_is() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // Named `klaudia`, so the engine reads its screen by Klaudia's rules.
+    let fake = |name: &str, body: &str| {
+        let sub = dir.path().join(name);
+        std::fs::create_dir_all(&sub).unwrap();
+        let path = sub.join("klaudia");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    // The idle frame: a footer, the input box, the status bar.
+    let frame = r"printf '\033[2J\033[H  done in 9m07s\r\n\342\225\255\342\224\200\342\224\200\342\225\256\r\n\342\224\202 \342\200\272 Ask Klaudia\342\200\246 \342\224\202\r\n\342\225\260\342\224\200\342\224\200\342\225\257\r\n  grok-4.7 \302\267 3 turns\r'";
+    // Then the blink: the cursor cell flips between reverse video and dim
+    // every 80 ms, under the suite's 200 ms quiet window.
+    let idle = fake(
+        "idle",
+        &format!(
+            "{frame}\nn=0\nwhile :; do n=$((n+1)); if [ $((n%2)) = 0 ]; then a='\\033[7m'; else a='\\033[2m'; fi\n\
+             printf \"\\033[3;1H\\342\\224\\202 \\342\\200\\272 ${{a}}A\\033[0msk Klaudia\\342\\200\\246 \\342\\224\\202\\033[K\\033[5;1H\"; sleep 0.08; done"
+        ),
+    );
+    let spinning = fake(
+        "spinning",
+        &format!(
+            "{frame}\nn=0\nwhile :; do n=$((n+1)); printf \"\\033[1;1H  thinking $n (esc to interrupt)\\033[K\\033[5;1H\"; sleep 0.08; done"
+        ),
+    );
+
+    let start = |command: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({ "name": "klaudia-repaint", "command": [command] }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let idle_id = start(idle).await;
+    let spinning_id = start(spinning).await;
+
+    let screen = |id: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}/api/sessions/{id}/screen"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let settled = loop {
+        let view = screen(idle_id.clone()).await;
+        if view["activity"] == "idle" && view["ready"] == true {
+            break view;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a repainting idle Klaudia never settled: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        settled["lines"][2]
+            .as_str()
+            .unwrap()
+            .contains("Ask Klaudia"),
+        "{settled}"
+    );
+    // It is still repainting: its output clock keeps moving while it reads idle.
+    let before = settled["last_output_at"].clone();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let later = screen(idle_id.clone()).await;
+    assert_ne!(later["last_output_at"], before, "{later}");
+    assert_eq!(later["activity"], "idle", "{later}");
+    assert_eq!(later["ready"], true, "{later}");
+
+    let spinner = screen(spinning_id.clone()).await;
+    assert_eq!(spinner["activity"], "running", "{spinner}");
+    assert_eq!(spinner["ready"], false, "{spinner}");
+
+    for id in [idle_id, spinning_id] {
+        let _ = client
+            .delete(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await;
+    }
+}
+
 #[tokio::test]
 async fn get_session_returns_typed_detail_shape() {
     let (base, _h) = boot().await;

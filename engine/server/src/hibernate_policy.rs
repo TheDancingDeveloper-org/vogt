@@ -12,7 +12,8 @@
 //! - a session that cannot be at all (no conversation to resume, an
 //!   agent-task run, exited) — `SessionRegistry::hibernate_refusal`;
 //! - one pinned with `keep_awake`;
-//! - one whose turn is running, or that shows a permission dialog;
+//! - one whose turn is running, or that shows a permission dialog (Klaudia's
+//!   own, which the engine reads from its title, included);
 //! - one whose agent reported itself blocked on a person;
 //! - by the idle trigger only, one on autopilot (WI-949): it is meant to be
 //!   working through a backlog unattended, and the pause at the end of each
@@ -109,6 +110,15 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
         ActivityState::Running => return Some("a turn is running".into()),
         ActivityState::AwaitingApproval => return Some("a permission dialog is open".into()),
         _ => {}
+    }
+    // Klaudia's permission asks, questions and plan approvals are not dialogs
+    // the engine recognises, and a quiet Klaudia waiting on one reads `idle`.
+    // Its title says so (WI-1090).
+    if crate::screen::klaudia_title(session.title().as_deref())
+        == Some(crate::screen::KlaudiaTitle::AwaitingApproval)
+        && session.agent().as_deref() == Some("klaudia")
+    {
+        return Some("a permission dialog is open".into());
     }
     if session.blocked().is_some() {
         return Some("blocked on a person".into());

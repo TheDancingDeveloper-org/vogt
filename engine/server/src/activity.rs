@@ -98,6 +98,61 @@ pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
     out
 }
 
+/// When a session's output last changed what its screen shows (WI-1090).
+///
+/// Output recency is how `classify` tells a turn at work from one at rest,
+/// and output that repaints an identical frame fooled it: Klaudia's idle
+/// input box redraws its blinking cursor twice a second, so an idle Klaudia
+/// read `running` for ten hours and was never nudged. This clock moves only
+/// when the rendered screen (its text and title, see
+/// `screen::Terminal::fingerprint`) differs from the last time it was looked
+/// at, so an identical repaint counts the same as silence.
+///
+/// Fingerprinting reads the whole grid, so it is not done for every chunk:
+/// output within `interval` of the last change is only noted as pending, and
+/// is settled the next time the clock is read or a chunk arrives after the
+/// interval. A pending change is stamped with the time of the latest output,
+/// so the clock is never early and is late by at most about one interval.
+#[derive(Debug, Default)]
+pub struct ChangeClock {
+    fingerprint: Option<u64>,
+    pending: Option<Instant>,
+    changed: Option<Instant>,
+}
+
+impl ChangeClock {
+    /// Note output at `at`. True when it should be settled now, because the
+    /// last change is at least `interval` old (or there was none).
+    pub fn output(&mut self, at: Instant, interval: std::time::Duration) -> bool {
+        self.pending = Some(at);
+        !self
+            .changed
+            .is_some_and(|changed| at.saturating_duration_since(changed) < interval)
+    }
+
+    /// When the screen last changed, as far as has been settled. Output still
+    /// pending is newer than this, and no older than one interval after it.
+    pub fn changed(&self) -> Option<Instant> {
+        self.changed
+    }
+
+    /// Compare pending output against the screen, and return when it last
+    /// changed. `fingerprint` is called only when output is pending; `None`
+    /// (no grid to look at) counts every output as a change.
+    pub fn settle(&mut self, fingerprint: impl FnOnce() -> Option<u64>) -> Option<Instant> {
+        if let Some(at) = self.pending.take() {
+            match fingerprint() {
+                Some(now) if self.fingerprint == Some(now) => {}
+                now => {
+                    self.fingerprint = now;
+                    self.changed = Some(at);
+                }
+            }
+        }
+        self.changed
+    }
+}
+
 /// The terminal state an exit code maps to: `exited` for 0, `errored` for
 /// anything else. `None` while the child is still running.
 pub fn exit_state(exit_code: Option<i32>) -> Option<ActivityState> {
@@ -233,5 +288,43 @@ mod tests {
     fn recent_output_is_running() {
         let s = classify(Some(Instant::now()), b"hello", 1500, None);
         assert_eq!(s, ActivityState::Running);
+    }
+}
+
+#[cfg(test)]
+mod change_clock_tests {
+    use super::ChangeClock;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn only_output_that_changes_the_screen_moves_the_clock() {
+        let interval = Duration::from_millis(100);
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut clock = ChangeClock::default();
+        assert_eq!(clock.settle(|| unreachable!("nothing pending")), None);
+
+        // The first frame is a change.
+        assert!(clock.output(at(0), interval));
+        assert_eq!(clock.settle(|| Some(1)), Some(at(0)));
+        // The same frame repainted, however often, is not.
+        for ms in [500, 1000, 1500] {
+            assert!(clock.output(at(ms), interval));
+            assert_eq!(clock.settle(|| Some(1)), Some(at(0)));
+        }
+        // A different one is, stamped when it arrived.
+        assert!(clock.output(at(2000), interval));
+        assert_eq!(clock.settle(|| Some(2)), Some(at(2000)));
+        // Output right after a change is only noted; settling later stamps
+        // it with the latest output, never earlier.
+        assert!(!clock.output(at(2050), interval));
+        assert!(!clock.output(at(2080), interval));
+        assert_eq!(clock.changed(), Some(at(2000)));
+        assert_eq!(clock.settle(|| Some(3)), Some(at(2080)));
+        // With no grid to look at, every output counts.
+        assert!(clock.output(at(3000), interval));
+        assert_eq!(clock.settle(|| None), Some(at(3000)));
+        assert!(clock.output(at(4000), interval));
+        assert_eq!(clock.settle(|| None), Some(at(4000)));
     }
 }

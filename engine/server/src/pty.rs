@@ -62,6 +62,10 @@ pub struct Session {
     size_tx: watch::Sender<(u16, u16)>,
     spawned_at: Instant,
     last_output: Mutex<Option<Instant>>,
+    /// When output last changed what the screen shows, which is what activity
+    /// and quiet time are measured from: an identical repaint is not
+    /// activity (WI-1090).
+    screen_change: Mutex<crate::activity::ChangeClock>,
     activity: Mutex<ActivityState>,
     /// When `activity` last changed. Used by the idle-stall watcher to tell
     /// "just went idle" apart from "has been idle for a long time".
@@ -263,10 +267,51 @@ impl Session {
         self.hibernating.store(true, Ordering::Release);
     }
 
+    /// Note output that just arrived, settling it against the screen now
+    /// unless the screen changed too recently to be worth fingerprinting.
+    fn note_output(&self, at: Instant) {
+        let interval = std::time::Duration::from_millis(self.idle_after_ms / 4).clamp(
+            std::time::Duration::from_millis(50),
+            std::time::Duration::from_secs(1),
+        );
+        let mut clock = self.screen_change.lock();
+        if clock.output(at, interval) {
+            clock.settle(|| self.terminal.lock().as_ref().map(|t| t.fingerprint()));
+        }
+    }
+
+    /// When output last changed what the screen shows (see
+    /// [`crate::activity::ChangeClock`]), settling any output still pending.
+    pub fn last_change(&self) -> Option<Instant> {
+        self.screen_change
+            .lock()
+            .settle(|| self.terminal.lock().as_ref().map(|t| t.fingerprint()))
+    }
+
+    /// The window title the program last set, from the live grid.
+    pub fn title(&self) -> Option<String> {
+        self.terminal.lock().as_ref().and_then(|t| t.title())
+    }
+
+    /// The agent CLI the session runs, from its conversation or its command.
+    pub fn agent(&self) -> Option<String> {
+        if let Some(conversation) = self.conversation() {
+            return Some(conversation.agent);
+        }
+        let argv: Vec<String> = self
+            .command
+            .as_deref()?
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        crate::agent_cli::agent_name(&argv)
+    }
+
     /// How long since anything happened in the terminal: the last input,
-    /// the last output, or the spawn, whichever is latest.
+    /// the last output that changed the screen, or the spawn, whichever is
+    /// latest.
     pub fn quiet_for(&self) -> std::time::Duration {
-        let latest = [*self.last_input.lock(), *self.last_output.lock()]
+        let latest = [*self.last_input.lock(), self.last_change()]
             .into_iter()
             .flatten()
             .fold(self.spawned_at, |a, b| a.max(b));
@@ -948,6 +993,7 @@ pub fn spawn(
         size_tx: watch::Sender::new((size.cols, size.rows)),
         spawned_at: Instant::now(),
         last_output: Mutex::new(None),
+        screen_change: Mutex::new(crate::activity::ChangeClock::default()),
         activity: Mutex::new(ActivityState::Running),
         activity_since: Mutex::new(Instant::now()),
         activity_epoch: AtomicU64::new(0),
@@ -1031,8 +1077,10 @@ fn spawn_reader_thread(
                             sb.total_written()
                         };
                         let pos = pos_after - n as u64;
-                        *session.last_output.lock() = Some(Instant::now());
+                        let now = Instant::now();
+                        *session.last_output.lock() = Some(now);
                         *session.last_output_at.lock() = Some(time::OffsetDateTime::now_utc());
+                        session.note_output(now);
                         if !session.first_output_seen.swap(true, Ordering::AcqRel) {
                             crate::launch::record_first_output(
                                 &session,
@@ -1266,10 +1314,13 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                 continue;
             }
 
-            let reference = (*session.last_output.lock()).unwrap_or(session.spawned_at);
+            // Measured from the last change to the screen, not the last
+            // byte: an identical repaint is not work (WI-1090).
+            let reference = session.last_change().unwrap_or(session.spawned_at);
             let elapsed_ms = reference.elapsed().as_millis() as u64;
             if elapsed_ms >= session.idle_after_ms {
                 let new_state = if session.last_output.lock().is_some() {
+                    session.last_change();
                     compute_activity(&session)
                 } else {
                     ActivityState::Idle
@@ -1294,6 +1345,7 @@ fn spawn_activity_watcher(session: Arc<Session>, bus: EventBus) {
                         break;
                     }
                     let new_state = if session.last_output.lock().is_some() {
+                        session.last_change();
                         compute_activity(&session)
                     } else {
                         ActivityState::Idle
@@ -1320,7 +1372,12 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
         let sb = session.scrollback.lock();
         sb.tail(APPROVAL_SCAN_BYTES).to_vec()
     };
-    let last = *session.last_output.lock();
+    // Not settled here: this runs for every chunk the reader takes, and
+    // `note_output` has already settled any chunk that arrived when the last
+    // change was old enough to matter. Output still pending is within one
+    // interval of a change, which reads `running` either way. The watcher
+    // settles before it asks.
+    let last = session.screen_change.lock().changed();
     let classify_from = tail.len().saturating_sub(2048);
     let state = classify(
         last,
@@ -1332,6 +1389,19 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
         *session.approval.lock() = None;
         return session.terminal_state().unwrap_or(state);
     }
+    // Klaudia says when it is at rest in its title (WI-1090), and its word
+    // outranks output recency: whatever it still draws there is not a turn.
+    // Only ever towards rest — a `running` the title would force could not
+    // collapse when the output stops, and the watcher would spin on it.
+    let state = if state == ActivityState::Running
+        && crate::screen::klaudia_title(session.title().as_deref())
+            == Some(crate::screen::KlaudiaTitle::Ready)
+        && session.agent().as_deref() == Some("klaudia")
+    {
+        ActivityState::Idle
+    } else {
+        state
+    };
     // A permission dialog overrides whatever the tail heuristics said: its
     // countdown keeps redrawing (so it reads `running`) and its menu ends in
     // `❯ 1.` (so it reads `waiting-for-input`), and either way a driver must
