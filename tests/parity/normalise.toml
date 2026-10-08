@@ -1,0 +1,33 @@
+# What two independent runs of the same script may differ on, and why.
+# Applied to answers, audit trails, OpenAPI and MCP tools/list.
+
+[volatile]
+# Fresh instances mint their own identifiers and timestamps. The hooks make
+# them deterministic within one process lifetime, but two recordings taken
+# against different data directories still carry those directories' paths,
+# and a recording taken before the hooks landed does not. Blank the keys.
+why = "identifiers and timestamps are instance-local even when the script is identical"
+keys = [
+  "id", "sweep_id", "observation_id", "content_digest", "observed_at",
+  "last_swept_at", "age_seconds", "oldest_relevant_sweep", "collectors",
+  "suppression", "opened_at", "resolved_at", "checked_at", "evidence_snapshot",
+  "evidence_observation_id", "subject_id", "path", "secret", "last_used_at",
+  "expires_at", "token_id", "revoked_at", "instance_id", "entity_id",
+  "actor_id", "audit_id", "txn_id", "assignee_actor_id", "initiative_id",
+  "project_id", "related_id", "work_item_id", "created_at", "updated_at",
+  "compliance_checked_at", "contract_adopted_at", "adopted_at", "declared_at",
+  "at", "data_dir", "payload_digest",
+]
+
+[paths]
+# Absolute paths name the temporary root of that run.
+why = "each run writes under its own temporary root"
+tokens = [{ needle_kind = "root", token = "<root>" }, { needle_kind = "data", token = "<data>" }]
+
+[schema]
+# pydantic emits a `title` per model and orders `anyOf` by declaration.
+# A Rust manifest will not. Drop the title and sort anyOf by a stable key
+# before comparing schemas.
+why = "pydantic titles and anyOf order are generator accidents, not contract"
+drop_keys = ["title"]
+sort_any_of = true

@@ -116,6 +116,8 @@ known-local-folder = ["tests"]
 # The fixture-reset script speaks raw GitHub JSON, which is `Any` at the
 # boundary — the same reason the client above carries this ignore.
 "scripts/fixture_reset.py" = ["ANN401"]
+# The parity harness walks arbitrary recorded JSON. `Any` is the boundary.
+"scripts/parity.py" = ["ANN401"]
 "src/vogt/adapters/forge/forgejo.py" = ["ANN401"]
 "src/vogt/adapters/github/collectors.py" = ["ANN401"]
 "src/vogt/collectors/dep_refs.py" = ["ANN401"]

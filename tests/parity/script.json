@@ -1,0 +1,24 @@
+{
+  "why": "A slice of the in-process SCRIPT that a fresh process can replay without a stand-in forge. The full script stays in tests/test_parity.py until the forge stand-in has an out-of-process form.",
+  "steps": [
+    {"operation": "status", "params": {}, "expect": {"exit": 0}},
+    {"operation": "workflow.list", "params": {}, "expect": {"exit": 0}},
+    {
+      "operation": "actor.create",
+      "params": {
+        "identity_ref": "agent:parity",
+        "kind": "agent",
+        "display_name": "Parity Agent",
+        "reason": "parity harness"
+      },
+      "expect": {"exit": 0}
+    },
+    {"operation": "actor.list", "params": {}, "expect": {"exit": 0}},
+    {
+      "operation": "label.create",
+      "params": {"name": "parity", "color": "#d73a4a", "reason": "parity harness"},
+      "expect": {"exit": 0}
+    },
+    {"operation": "label.list", "params": {}, "expect": {"exit": 0}}
+  ]
+}

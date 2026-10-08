@@ -53,19 +53,25 @@ jobs:
 
   parity:
     name: parity
-    # Placeholder. P0.3 fills this job with `scripts/parity.py check --impl rust`.
-    # Until then it records that the harness is not here yet and succeeds, so
-    # the branch is not blocked on a script that does not exist.
+    # Proves the harness against the Python core. The Rust side joins once
+    # vogt-core can serve the script; until then a missing Rust binary is not
+    # a failure of this job.
     runs-on: [self-hosted]
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
-      - name: parity harness not yet present
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: "0.11.23"
+
+      - name: record then check the Python core
         run: |
           set -euo pipefail
-          if [ -f scripts/parity.py ]; then
-            echo "scripts/parity.py exists; this placeholder must be replaced"
-            exit 1
-          fi
-          echo "parity harness not present yet (P0.3); skipping"
+          uv sync --locked --group dev
+          export VOGT_PARITY_PYTHON_BIN="$PWD/.venv/bin/vogt"
+          uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/golden"
+          uv run python scripts/parity.py record --impl python --out "$RUNNER_TEMP/again"
+          diff -q "$RUNNER_TEMP/golden/cli.json" "$RUNNER_TEMP/again/cli.json"
+          uv run python scripts/parity.py check --impl python --golden "$RUNNER_TEMP/golden"
+          uv run python scripts/parity.py check --impl python --golden "$RUNNER_TEMP/golden" --only actor
