@@ -437,20 +437,17 @@ impl Session {
     /// Snapshot only output newer than a client cursor. The boolean tells the
     /// client whether its existing terminal state must be reset.
     ///
-    /// `tail_bytes` is the replay **budget**, and it now bounds *every* path,
-    /// not just a cold attach (F1, WI-125). A client's xterm keeps only a fixed
-    /// scrollback (5000 lines); shipping more than the budget is wasted parse
-    /// on the client's single message thread, and on a stale reattach it is
-    /// parsed *above* a screen the client already has out of date. So:
+    /// `tail_bytes` is the replay **budget** (F1, WI-125), and a live session
+    /// answers from its grid rather than the raw ring (WI-121):
     ///
-    /// - Cold attach (no `resume_from`): bound the full snapshot to the budget.
     /// - Warm reattach whose cursor is still retained and whose delta fits the
-    ///   budget: the delta is sent byte-for-byte with `reset: false`, so a
-    ///   switch-away/switch-back that produced little still appends cleanly.
-    /// - Warm reattach whose cursor aged out of the ring, **or** whose delta
-    ///   exceeds the budget: a ground-state-aligned tail of at most the budget,
-    ///   with `reset: true`. Never the whole untrimmed ring — that was the
-    ///   4 MiB flood, 4x worse than a cold attach.
+    ///   budget: the delta, byte-for-byte, with `reset: false`.
+    /// - Anything else on a live session — a cold attach, a cursor that aged
+    ///   out, or a delta over budget: the grid's frame (`reset: true`), the
+    ///   current screen plus its scrollback as escape codes. That is a few KiB
+    ///   where the raw path shipped up to the whole budget, and it carries the
+    ///   frame a tail replay loses (WI-990).
+    /// - A session with no live grid falls back to the bounded raw tail.
     ///
     /// The returned position is always `total_written`, unaffected by trimming
     /// the front, so the live stream resumes with no gap. When `tail_bytes` is
@@ -461,37 +458,66 @@ impl Session {
         resume_from: Option<u64>,
         tail_bytes: Option<usize>,
     ) -> (Bytes, u64, bool) {
-        let sb = self.scrollback.lock();
-        let pos = sb.total_written();
+        let pos = self.scrollback.lock().total_written();
         if let Some(cursor) = resume_from {
-            if let Some(delta) = sb.snapshot_since(cursor) {
+            let delta = self.scrollback.lock().snapshot_since(cursor);
+            if let Some(delta) = delta {
                 // A retained delta within budget is byte-exact and appends
-                // (reset:false). An oversized delta is capped to a bounded tail
-                // and reset:true — the client's xterm cannot keep more than its
-                // scrollback anyway, so an over-budget delta would only waste
-                // parse above an already-stale screen.
-                match tail_bytes {
-                    Some(limit) if delta.len() > limit => {
-                        return (sb.snapshot_tail(limit), pos, true);
-                    }
-                    _ => return (delta, pos, false),
+                // (reset:false), so a switch-away that produced little still
+                // catches up without repainting the screen.
+                let over = match tail_bytes {
+                    Some(limit) => delta.len() > limit,
+                    None => false,
+                };
+                if !over {
+                    return (delta, pos, false);
                 }
             }
-            // Cursor aged out of the ring: a bounded, ground-state-aligned tail
-            // and a reset — never the whole untrimmed ring.
+            // Cold attach, an aged-out cursor, or a delta over budget: the
+            // live grid's frame, not a tail of the raw ring (WI-121). The
+            // frame is the current screen plus the scrollback the grid holds,
+            // a few KiB where the raw tail was up to the whole budget.
+            if let Some(frame) = self.grid_frame() {
+                return (self.bounded_frame(frame, tail_bytes), pos, true);
+            }
+            // No live grid (a session restored without one): the bounded tail
+            // replay, exactly as a hibernated attach does.
             let snapshot = match tail_bytes {
-                Some(limit) => sb.snapshot_tail(limit),
-                None => sb.snapshot(),
+                Some(limit) => self.scrollback.lock().snapshot_tail(limit),
+                None => self.scrollback.lock().snapshot(),
             };
             return (snapshot, pos, true);
         }
-        // Cold attach: bound the snapshot to the client's tail hint so first
-        // open never ships the whole ring buffer.
+        if let Some(frame) = self.grid_frame() {
+            return (self.bounded_frame(frame, tail_bytes), pos, true);
+        }
         let snapshot = match tail_bytes {
-            Some(limit) => sb.snapshot_tail(limit),
-            None => sb.snapshot(),
+            Some(limit) => self.scrollback.lock().snapshot_tail(limit),
+            None => self.scrollback.lock().snapshot(),
         };
         (snapshot, pos, true)
+    }
+
+    /// The live grid's frame, when this session has one.
+    fn grid_frame(&self) -> Option<Vec<u8>> {
+        self.terminal.lock().as_mut().map(|t| t.frame())
+    }
+
+    /// The frame, cut to `tail_bytes` when one was given and the frame is
+    /// larger. The cut keeps the tail — the visible screen is emitted last —
+    /// and moves forward to a ground-state boundary, so it never starts inside
+    /// an escape sequence. A frame is a few KiB in practice; the bound only
+    /// bites for a grid holding a deep scrollback or a very small budget.
+    fn bounded_frame(&self, frame: Vec<u8>, tail_bytes: Option<usize>) -> Bytes {
+        let Some(limit) = tail_bytes else {
+            return Bytes::from(frame);
+        };
+        if frame.len() <= limit {
+            return Bytes::from(frame);
+        }
+        let mut sb = crate::scrollback::Scrollback::new(frame.len());
+        sb.push(&frame);
+        sb.snapshot_tail(limit)
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<OutputChunk> {
