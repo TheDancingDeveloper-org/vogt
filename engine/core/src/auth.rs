@@ -38,11 +38,11 @@ pub fn matches(secret: &str, token_hash: &str) -> bool {
 /// Take an operator-supplied secret as a credential. Under 24 characters is
 /// refused, with the message `adopt` raises.
 pub fn adopt(secret: &str) -> Result<String, String> {
-    if secret.len() < MIN_ADOPTED_SECRET_LEN {
+    if secret.chars().count() < MIN_ADOPTED_SECRET_LEN {
         return Err(format!(
             "a supplied token must be at least {MIN_ADOPTED_SECRET_LEN} characters, not {} — \
              generate one with `openssl rand -hex 32`",
-            secret.len()
+            secret.chars().count()
         ));
     }
     Ok(hash_token(secret))
@@ -68,6 +68,56 @@ pub fn parse_scopes(raw: &str) -> Result<Vec<&str>, String> {
         return Err("a token needs at least one scope".to_string());
     }
     Ok(parsed)
+}
+
+/// What each scope grants, including itself. `admin` grants everything; the
+/// three write scopes each grant `read` and nothing else.
+const IMPLIED: [(&str, &[&str]); 5] = [
+    ("admin", &ALL_SCOPES),
+    ("project.write", &["project.write", "read"]),
+    ("work.write", &["work.write", "read"]),
+    ("writeback", &["writeback", "read"]),
+    ("read", &["read"]),
+];
+
+pub const WRITES_DISABLED: &str = "writes_disabled";
+pub const MISSING_SCOPE: &str = "missing_scope";
+pub const TOKEN_OK: &str = "token_valid";
+
+/// Whether a grant permits an operation. Writes are refused before scopes are
+/// consulted, because no token can grant a write the process refuses to make.
+pub fn allows(
+    scopes: &[&str],
+    writes_enabled: bool,
+    scope: &str,
+    mutating: bool,
+) -> (bool, &'static str) {
+    if mutating && !writes_enabled {
+        return (false, WRITES_DISABLED);
+    }
+    let granted = effective(scopes);
+    if granted.iter().any(|held| held == &scope) {
+        (true, TOKEN_OK)
+    } else {
+        (false, MISSING_SCOPE)
+    }
+}
+
+fn effective<'a>(scopes: &[&'a str]) -> Vec<&'a str> {
+    let mut granted = Vec::new();
+    for scope in scopes {
+        let implied: &[&str] = IMPLIED
+            .iter()
+            .find(|(name, _)| name == scope)
+            .map(|(_, implied)| *implied)
+            .unwrap_or(&[]);
+        for scope in implied {
+            if !granted.contains(scope) {
+                granted.push(*scope);
+            }
+        }
+    }
+    granted
 }
 
 pub fn is_expired(expires_at: Option<crate::core::Moment>, now: crate::core::Moment) -> bool {
@@ -156,12 +206,12 @@ fn parse_stored(stored: &str) -> Result<StoredPassword, String> {
 }
 
 fn check_password_length(password: &str) -> Result<(), String> {
-    if password.len() < MIN_PASSWORD_LEN {
+    if password.chars().count() < MIN_PASSWORD_LEN {
         return Err(format!(
             "a password must be at least {MIN_PASSWORD_LEN} characters"
         ));
     }
-    if password.len() > MAX_PASSWORD_LEN {
+    if password.chars().count() > MAX_PASSWORD_LEN {
         return Err(format!(
             "a password must be at most {MAX_PASSWORD_LEN} characters"
         ));
@@ -170,6 +220,16 @@ fn check_password_length(password: &str) -> Result<(), String> {
 }
 
 fn scrypt_of(password: &str, salt: &[u8], n: u32, r: u32, p: u32) -> Result<Vec<u8>, String> {
+    // hashlib.scrypt refuses an n that is not a power of two of at least 2, and
+    // bounds memory with maxmem=128*n*r*2. The rust crate has no such bound, so
+    // a stored row — which is untrusted — is refused before it can allocate.
+    if n < 2 || !n.is_power_of_two() || r == 0 || p == 0 {
+        return Err("scrypt parameters rejected".to_string());
+    }
+    let memory = 128u128 * n as u128 * r as u128 * 2;
+    if memory > 128 * (PASSWORD_SCRYPT_N as u128) * (PASSWORD_SCRYPT_R as u128) * 2 {
+        return Err("scrypt parameters exceed the memory cap".to_string());
+    }
     let params = scrypt::Params::new(n.ilog2() as u8, r, p).map_err(|err| err.to_string())?;
     let mut out = vec![0u8; PASSWORD_HASH_BYTES];
     scrypt::scrypt(password.as_bytes(), salt, &params, &mut out).map_err(|err| err.to_string())?;
@@ -196,10 +256,10 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 /// starting with a letter or digit.
 pub fn normalise_username(raw: &str) -> Result<String, String> {
     let username = raw.trim().to_lowercase();
-    if !(USERNAME_MIN_LEN..=USERNAME_MAX_LEN).contains(&username.len()) {
+    if !(USERNAME_MIN_LEN..=USERNAME_MAX_LEN).contains(&username.chars().count()) {
         return Err(format!(
             "a username is {USERNAME_MIN_LEN} to {USERNAME_MAX_LEN} characters, not {}",
-            username.len()
+            username.chars().count()
         ));
     }
     let ok = username
@@ -245,6 +305,22 @@ mod tests {
         assert!(!verify_password("wrong horse", stored));
         assert!(!verify_password("correct horse", "not-a-hash"));
         assert!(!verify_password("correct horse", "bcrypt$1$2$3$aa$bb"));
+        // n=0 panics in ilog2, and n=32769 is not a power of two. Python
+        // returns False for both; so must this.
+        let tail = stored.split_once('$').unwrap().1.split_once('$').unwrap().1;
+        assert!(!verify_password(
+            "correct horse",
+            &format!("scrypt$0${tail}")
+        ));
+        assert!(!verify_password(
+            "correct horse",
+            &format!("scrypt$32769${tail}")
+        ));
+        // A stored n above the shipped parameters would allocate without bound.
+        assert!(!verify_password(
+            "correct horse",
+            &format!("scrypt$65536${tail}")
+        ));
     }
 
     #[test]
@@ -260,6 +336,48 @@ mod tests {
     }
 
     #[test]
+    fn lengths_count_characters_not_bytes() {
+        // Seven characters, fourteen bytes. Python refuses it; so must this.
+        assert!(hash_password("äääääää", b"0123456789abcdef").is_err());
+        assert!(adopt("ääääääääääää").is_err());
+        let err = normalise_username("ä").unwrap_err();
+        assert!(err.contains("not 1"), "{err}");
+    }
+
+    #[test]
+    fn every_scope_implies_exactly_what_python_says() {
+        // admin grants all five; each write scope grants itself and read;
+        // read grants only itself. Writes are refused before scopes.
+        let table = [
+            ("admin", "writeback", true),
+            ("admin", "project.write", true),
+            ("project.write", "read", true),
+            ("project.write", "work.write", false),
+            ("work.write", "read", true),
+            ("work.write", "project.write", false),
+            ("writeback", "read", true),
+            ("writeback", "work.write", false),
+            ("read", "read", true),
+            ("read", "work.write", false),
+        ];
+        for (held, wanted, allowed) in table {
+            assert_eq!(
+                allows(&[held], true, wanted, false).0,
+                allowed,
+                "{held}->{wanted}"
+            );
+        }
+        assert_eq!(
+            allows(&["admin"], false, "work.write", true).1,
+            WRITES_DISABLED
+        );
+        assert_eq!(
+            allows(&["read"], true, "work.write", false).1,
+            MISSING_SCOPE
+        );
+        assert_eq!(allows(&["admin"], true, "admin", true).1, TOKEN_OK);
+    }
+
     fn a_username_is_folded_and_bounded() {
         assert_eq!(normalise_username(" Ada ").unwrap(), "ada");
         assert!(normalise_username(".ada").is_err());
