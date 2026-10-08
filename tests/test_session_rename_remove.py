@@ -49,6 +49,8 @@ class RenamingEngine(Engine):
     def __init__(self) -> None:
         super().__init__()
         self.names: dict[str, str] = {}
+        #: Killed but still listed, as the engine keeps them until a DELETE.
+        self.exited: set[str] = set()
         self.status: tuple[int, bytes] = (
             200,
             json.dumps(
@@ -71,6 +73,8 @@ class RenamingEngine(Engine):
         row["name"] = self.names.get(engine_id, row["name"])
         row["template"] = "claude"
         row["command"] = "claude"
+        if engine_id in self.exited:
+            row.update(activity="stopped", alive=False, exit_code=-9)
         return row
 
     def __call__(
@@ -84,7 +88,15 @@ class RenamingEngine(Engine):
         if path == "/api/status":
             return self.status
         parts = path.split("/")
-        known = self.live | self.hibernated
+        known = self.live | self.hibernated | self.exited
+        if method == "POST" and path.endswith("/kill") and parts[3] in known:
+            self.sent.append({"path": path, "method": method, "body": json.loads(body)})
+            self.live.discard(parts[3])
+            self.hibernated.discard(parts[3])
+            self.exited.add(parts[3])
+            return 200, b'{"ok":true}'
+        if method == "GET" and len(parts) == 4 and parts[3] in self.exited:
+            return 200, json.dumps({"summary": self.summary(parts[3])}).encode()
         if method in ("PATCH", "DELETE") and len(parts) == 4:
             payload = json.loads(body.decode("utf-8")) if body else {}
             self.sent.append({"path": path, "method": method, "body": payload})
@@ -99,6 +111,7 @@ class RenamingEngine(Engine):
             else:
                 self.live.discard(engine_id)
                 self.hibernated.discard(engine_id)
+                self.exited.discard(engine_id)
             return 200, b'{"ok":true}'
         return super().__call__(url, headers, body, method)
 
@@ -169,8 +182,13 @@ def test_remove_forgets_a_live_linked_session_and_closes_its_record(
     ses_id, engine_id = _started(wired)
     secret = engine.start_env()["VOGT_HTTP_TOKEN"]
     result = remove_session(wired, RemoveSessionParams(id=ses_id, reason=WHY))
-    assert engine_id not in engine.live
-    assert "DELETE " in engine.calls(engine_id)
+    assert engine_id not in engine.live | engine.exited
+    # Killed with who and why first, so the exit reads `stopped` (WI-913);
+    # only then forgotten.
+    calls = engine.calls(engine_id)
+    assert calls.index("POST kill") < calls.index("DELETE ")
+    kill = next(r for r in engine.sent if r["path"].endswith(f"{engine_id}/kill"))
+    assert kill["body"] == {"reason": WHY, "by": wired.principal.identity_ref}
     assert result.session.stopped_at is not None
     assert _token_revoked(wired, secret)
     audit = list_audit(wired, ListAuditParams(limit=5)).records
@@ -182,9 +200,11 @@ def test_remove_after_stop_only_forgets_the_engine_copy(
 ) -> None:
     ses_id, engine_id = _started(wired)
     stop_session(wired, StopSessionParams(id=ses_id, reason=WHY))
-    engine.live.add(engine_id)  # a killed session stays listed until removed
+    assert engine_id in engine.exited, "a killed session stays listed"
+    kills = engine.calls(engine_id).count("POST kill")
     result = remove_session(wired, RemoveSessionParams(id=ses_id, reason=WHY))
-    assert engine_id not in engine.live
+    assert engine_id not in engine.exited
+    assert engine.calls(engine_id).count("POST kill") == kills, "not killed twice"
     assert result.session.id == ses_id
 
 
@@ -200,7 +220,9 @@ def test_remove_closes_a_linked_record_the_engine_already_forgot(
 def test_remove_an_unlinked_session(wired: AppContext, engine: RenamingEngine) -> None:
     engine.live.add(UNLINKED)
     result = remove_session(wired, RemoveSessionParams(id=UNLINKED, reason=WHY))
-    assert UNLINKED not in engine.live
+    assert UNLINKED not in engine.live | engine.exited
+    calls = engine.calls(UNLINKED)
+    assert calls.index("POST kill") < calls.index("DELETE ")
     assert result.session.linked is False
     assert result.session.alive is False
     with pytest.raises(NotFound):

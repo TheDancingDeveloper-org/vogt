@@ -142,6 +142,10 @@ jobs:
           # than a neighbour of it: a web-only change changes what the engine
           # serves, and is checked by rebuilding the engine.
           matches '^(engine/|web/)' && engine=true
+          # The engine compiles `docs/ENGINE.md` in with `include_str!` (its
+          # voice-policy test reads the capability matrix), so the document is
+          # an engine input too.
+          matches '^docs/ENGINE\.md$' && engine=true
           matches '^voice/' && voice=true
           # The shell wraps a remote URL, not the PWA bundle — `webDir` is
           # `mobile/web/`, a one-file offline fallback — so a `web/` change
