@@ -67,7 +67,7 @@ test("canonical terminal links restore split layouts with responsive chrome", as
   await expect(incident.locator(".terminal-pane")).toHaveCount(3, { timeout: 15_000 });
   if (testInfo.project.name === "phone") {
     await expect(incident.locator(".terminal-mobile-header")).toBeVisible();
-    await expect(incident.locator(".terminal-mobile-counter")).toHaveText("3 / 8");
+    await expect(incident.locator(".terminal-mobile-counter")).toHaveText("4 / 10");
     await expect(incident.getByRole("button", { name: "Show Metrics watch" })).toBeVisible();
   } else {
     await expect(incident.getByText("Input fan-out", { exact: true })).toBeVisible();
