@@ -87,7 +87,7 @@ test("a saved Inbox filter stays applied and the Inbox badge counts under it", a
   if (phone) {
     await page.getByRole("group", { name: "From filter" }).getByRole("button", { name: "External people only" }).click();
   } else {
-    await page.getByLabel("From").selectOption("external");
+    await page.locator("label.inbox-facet-actor").getByLabel("From").selectOption("external");
   }
   await expect(entries).toHaveCount(1);
   await expect(entries.first()).toContainText("From river-contributor · external person");
