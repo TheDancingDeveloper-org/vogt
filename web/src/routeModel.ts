@@ -19,7 +19,8 @@ export type SessionTool =
   | "oversight"
   | "tasks"
   | "gui"
-  | "assistant";
+  | "assistant"
+  | "chat";
 
 export type RouteOutcome =
   | { kind: "place"; place: PrimaryPlace }
@@ -41,6 +42,8 @@ export interface RouteCapabilities {
   sessionsState: "loading" | "ready" | "unavailable";
   sessionExists: (id: string) => boolean;
   assistantEnabled: boolean;
+  /** Quick chats are configured on the engine (WI-1097). */
+  chatEnabled?: boolean;
   guiAvailable: boolean;
 }
 
@@ -134,6 +137,24 @@ export function describeRoute(
           message: "This deployment has no Assistant provider configured.",
         };
   }
+  if (pathname === "/chat" || pathname.startsWith("/chat/")) {
+    if (!capabilities.configReady) {
+      return {
+        kind: "loading",
+        place: "sessions",
+        title: "Loading Chat",
+        message: "Checking whether this deployment provides chats.",
+      };
+    }
+    return capabilities.chatEnabled
+      ? { kind: "tool", place: "sessions", tool: "chat" }
+      : {
+          kind: "unavailable",
+          place: "sessions",
+          title: "Chat is unavailable",
+          message: "This deployment has chats turned off, or no chat agent installed.",
+        };
+  }
   if (pathname === "/gui") {
     if (!capabilities.configReady) {
       return {
@@ -184,6 +205,7 @@ const TOOL_TITLES: Record<SessionTool, string> = {
   tasks: "Tasks",
   gui: "GUI stream",
   assistant: "Assistant",
+  chat: "Chat",
 };
 
 /**

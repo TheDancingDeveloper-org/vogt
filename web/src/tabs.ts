@@ -11,6 +11,7 @@ export type Tab =
   | { id: string; kind: "oversight"; label: string }
   | { id: string; kind: "tasks"; label: string; dirty?: boolean }
   | { id: string; kind: "assistant"; label: string }
+  | { id: string; kind: "chat"; label: string }
   | { id: string; kind: "workitem"; ref: string; label: string };
 
 export interface TabsStateSnapshot {
@@ -85,6 +86,7 @@ function normalizeTab(value: unknown): Tab | null {
     case "history":
     case "oversight":
     case "assistant":
+    case "chat":
       if (typeof raw.label !== "string") return null;
       return {
         id: raw.id,
@@ -406,6 +408,26 @@ export function openTasksTab(): Tab {
     return existing;
   }
   const tab: Tab = { id, kind: "tasks", label: "Tasks" };
+  setStore(
+    produce((s) => {
+      s.tabs.push(tab);
+      s.active = id;
+    }),
+  );
+  persist();
+  return tab;
+}
+
+/** The Chat panel (WI-1097): one tab, whichever chat it shows. */
+export function openChatTab(): Tab {
+  const id = "chat";
+  const existing = store.tabs.find((t) => t.id === id);
+  if (existing) {
+    setStore("active", id);
+    persist();
+    return existing;
+  }
+  const tab: Tab = { id, kind: "chat", label: "Chat" };
   setStore(
     produce((s) => {
       s.tabs.push(tab);

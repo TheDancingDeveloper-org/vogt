@@ -5730,3 +5730,127 @@ for (const mouseTracking of [false, true]) {
     expect(await firstRow()).toBe(held);
   });
 }
+
+// ── Quick chat (WI-1097) ─────────────────────────────────────────────────
+
+const CHAT_CONFIG = {
+  chat: {
+    drivers: [{
+      name: "klaudia",
+      label: "Klaudia",
+      models: [
+        { id: "grok-4.7", label: "Grok 4.7" },
+        { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" },
+      ],
+    }],
+  },
+};
+
+/** A stand-in engine chat API: one chat, a reply per message, and a pending
+ *  approval for a message that starts `run:`. */
+async function installChatApi(page: Page) {
+  const chatId = "0c0c0c0c-0000-4000-8000-000000000001";
+  const state = {
+    chat: null as null | Record<string, unknown>,
+    entries: [] as Record<string, unknown>[],
+    approvals: [] as Record<string, unknown>[],
+    decisions: [] as Record<string, unknown>[],
+    models: [] as string[],
+  };
+  const summary = () => ({ ...state.chat, message_count: state.entries.length });
+  const say = (kind: string, text: string, extra: Record<string, unknown> = {}) =>
+    state.entries.push({ seq: state.entries.length + 1, at: "2026-10-08T09:00:00Z", kind, text, ...extra });
+  const reply = (text: string) => {
+    say("user", text, { by: "human:ada" });
+    if (text.startsWith("run:")) {
+      say("tool-call", text.slice(4), { tool_name: "Bash" });
+      state.approvals = [{
+        id: "a1", tool_name: "Bash", summary: text.slice(4), source: "gate", status: "pending",
+        requested_at: "2026-10-08T09:00:00Z", expires_at: "2026-10-08T09:10:00Z",
+      }];
+      state.chat = { ...state.chat, state: "awaiting-approval" };
+    } else {
+      say("assistant", `**${state.chat?.model}**: ${text}`);
+    }
+  };
+  await page.route("**/api/chats**", async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const method = request.method();
+    const body = method === "POST" ? (request.postDataJSON() as Record<string, unknown>) : {};
+    if (path.endsWith("/events")) {
+      return route.fulfill({ status: 200, headers: { "content-type": "text/event-stream" }, body: "" });
+    }
+    if (path === "/api/chats" && method === "GET") {
+      return route.fulfill({ json: state.chat ? [summary()] : [] });
+    }
+    if (path === "/api/chats" && method === "POST") {
+      state.chat = {
+        id: chatId, title: String(body.message ?? "New chat"), driver: "klaudia",
+        model: body.model ?? "grok-4.7", creator: "human:ada",
+        created_at: "2026-10-08T09:00:00Z", updated_at: "2026-10-08T09:00:00Z",
+        archived: false, state: "idle", live: true, message_count: 0,
+      };
+      if (body.message) reply(String(body.message));
+      return route.fulfill({ json: { chat: summary(), entries: state.entries, finished: true } });
+    }
+    if (path.endsWith("/messages")) {
+      reply(String(body.text));
+      return route.fulfill({ json: { chat: summary(), entries: state.entries.slice(-2), finished: true } });
+    }
+    if (path.includes("/approvals/")) {
+      state.decisions.push(body);
+      state.approvals = [];
+      say("tool-result", body.allow ? "ok" : "A person denied this in Vogt.", { tool_name: "Bash", is_error: !body.allow });
+      state.chat = { ...state.chat, state: "idle" };
+      return route.fulfill({ json: { id: "a1", status: body.allow ? "allowed" : "denied" } });
+    }
+    if (path.endsWith("/model")) {
+      state.models.push(String(body.model));
+      state.chat = { ...state.chat, model: body.model };
+      return route.fulfill({ json: summary() });
+    }
+    // GET /api/chats/{id}
+    return route.fulfill({ json: { ...summary(), entries: state.entries, approvals: state.approvals } });
+  });
+  return state;
+}
+
+test("Chat: ask, switch model, answer an approval, find it again", async ({ page }) => {
+  await installFixtures(page, CHAT_CONFIG);
+  const chat = await installChatApi(page);
+  await page.goto("/#/chat");
+  await page.getByRole("button", { name: "New chat" }).click();
+  await page.getByLabel("Model for the new chat").selectOption("deepseek-v4-pro");
+  await page.getByLabel("Message").fill("is bedrock in sydney?");
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page).toHaveURL(/#\/chat\/0c0c0c0c-/);
+  await expect(page.locator(".chat-bubble--assistant")).toContainText("deepseek-v4-pro: is bedrock in sydney?");
+
+  await page.getByLabel("Model", { exact: true }).selectOption("grok-4.7");
+  await expect.poll(() => chat.models).toEqual(["grok-4.7"]);
+
+  await page.getByLabel("Message").fill("run:make test");
+  await page.getByLabel("Message").press("Enter");
+  const card = page.getByRole("region", { name: "Approval: Bash" });
+  await expect(card).toContainText("make test");
+  await card.getByRole("button", { name: "Deny" }).click();
+  await expect.poll(() => chat.decisions).toEqual([{ allow: false }]);
+  await expect(card).toHaveCount(0);
+
+  // No horizontal scroll at either size.
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+
+  // Back to the list (on a phone, the conversation replaced it).
+  if (await page.getByRole("button", { name: "Back to chats" }).isVisible()) {
+    await page.getByRole("button", { name: "Back to chats" }).click();
+  }
+  await expect(page.locator(".chat-list__item")).toContainText("is bedrock in sydney?");
+});
+
+test("Chat is hidden when the engine has chats off", async ({ page }) => {
+  await installFixtures(page);
+  await page.goto("/#/chat");
+  await expect(page.getByText("Chat is unavailable")).toBeVisible();
+});

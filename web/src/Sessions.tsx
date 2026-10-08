@@ -31,6 +31,7 @@ interface Props {
   currentTool?: SessionTool | null;
   guiEnabled?: boolean;
   assistantEnabled?: boolean;
+  chatEnabled?: boolean;
   children?: JSX.Element;
   hasActiveWorkspace?: boolean;
   /** Create a session. `promptForName` (Shift held) asks for a name first. */
@@ -52,6 +53,9 @@ export const SessionTools: Component<Props> = (props) => (
     <a href="#/tasks" aria-current={props.currentTool === "tasks" ? "page" : undefined}>Tasks</a>
     <Show when={props.guiEnabled}>
       <a href="#/gui" aria-current={props.currentTool === "gui" ? "page" : undefined}>GUI stream</a>
+    </Show>
+    <Show when={props.chatEnabled}>
+      <a href="#/chat" aria-current={props.currentTool === "chat" ? "page" : undefined}>Chat</a>
     </Show>
     <Show when={props.assistantEnabled}>
       <a href="#/assistant" aria-current={props.currentTool === "assistant" ? "page" : undefined}>Assistant</a>
@@ -188,7 +192,9 @@ const Sessions: Component<Props> = (props) => {
   // either of these phone compositions.
   const mobileWorkspaceOwnsHeader = () =>
     Boolean(props.hasActiveWorkspace) &&
-    (props.currentTool === "terminal" || props.currentTool === "assistant");
+    (props.currentTool === "terminal" ||
+      props.currentTool === "assistant" ||
+      props.currentTool === "chat");
   return (
     <section
       class={`sessions-place ${props.hasActiveWorkspace ? "has-workspace" : ""}${mobileWorkspaceOwnsHeader() ? " mobile-workspace-owns-header" : ""}`}
@@ -234,6 +240,7 @@ const Sessions: Component<Props> = (props) => {
             currentTool={props.currentTool}
             guiEnabled={props.guiEnabled}
             assistantEnabled={props.assistantEnabled}
+            chatEnabled={props.chatEnabled}
           />
         )}
         action={props.onCreateSession ? (

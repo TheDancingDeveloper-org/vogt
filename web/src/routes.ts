@@ -33,4 +33,6 @@ export const APP_ROUTES = [
   "/w/:ref",
   "/assistant",
   "/assistant/*path",
+  "/chat",
+  "/chat/*path",
 ] as const;
