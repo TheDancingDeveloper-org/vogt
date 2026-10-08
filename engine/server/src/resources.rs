@@ -170,6 +170,19 @@ pub fn measure(
     })
 }
 
+/// Resident memory of `root` and everything under it, in bytes: one read of
+/// `/proc`, for a caller that watches a single process tree (quick chats).
+pub fn tree_rss_bytes(root: u32) -> u64 {
+    let table = read_table();
+    let children = children_of(&table);
+    subtree(&table, &children, root)
+        .iter()
+        .filter_map(|pid| table.get(pid))
+        .map(|proc| proc.rss_pages)
+        .sum::<u64>()
+        .saturating_mul(sysconf(libc::_SC_PAGESIZE, 4096))
+}
+
 fn sysconf(name: libc::c_int, fallback: u64) -> u64 {
     // SAFETY: sysconf has no preconditions.
     let value = unsafe { libc::sysconf(name) };

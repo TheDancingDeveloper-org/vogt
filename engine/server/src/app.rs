@@ -226,13 +226,8 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         }
     }
 
-    let chats = ChatRuntime::from_config(
-        Arc::clone(&cfg),
-        bus.clone(),
-        Arc::clone(&sessions),
-        vogt_core.clone(),
-    )
-    .await;
+    let chats =
+        ChatRuntime::from_config(Arc::clone(&cfg), bus.clone(), Arc::clone(&sessions)).await;
     if chats.is_some() {
         tracing::info!("quick chats enabled");
     }

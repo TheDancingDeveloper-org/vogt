@@ -1,59 +1,109 @@
 use super::*;
 
 #[test]
-fn reads_run_and_everything_else_waits_for_a_person() {
-    for read in [
+fn only_reads_of_the_chats_own_directory_and_inert_tools_run_free() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("notes.txt"), "x").unwrap();
+    let here = dir.path();
+    let free = |tool: &str, input: Value| classify(tool, &input, here) == ToolClass::Free;
+    assert!(free("Read", json!({"file_path": "notes.txt"})));
+    assert!(free(
         "Read",
-        "Grep",
-        "Glob",
+        json!({"file_path": here.join("notes.txt").to_str().unwrap()})
+    ));
+    assert!(free("Glob", json!({"pattern": "**/*.md"})));
+    assert!(free("Grep", json!({"pattern": "TODO"})));
+    assert!(free("ToolSearch", json!({"query": "anything"})));
+    assert!(free("TodoWrite", json!({})));
+    // Out of the directory, however it is spelled.
+    for path in [
+        "/proc/self/environ",
+        "../../chats.db",
+        "~/.ssh/id_rsa",
+        "sub/../../x",
+    ] {
+        assert!(!free("Read", json!({ "file_path": path })), "{path}");
+    }
+    assert!(!free("Glob", json!({"pattern": "/proc/*/environ"})));
+    assert!(!free("Grep", json!({"pattern": "x", "path": "/etc"})));
+    // Through a symlink that leaves it.
+    std::os::unix::fs::symlink("/etc", here.join("out")).unwrap();
+    assert!(!free("Read", json!({"file_path": "out/passwd"})));
+    // Anything that reaches the network or changes something asks.
+    for tool in [
+        "WebFetch",
+        "WebSearch",
         "BrowserFetch",
         "BrowserSearch",
-        "ToolSearch",
-    ] {
-        assert_eq!(tool_class(read), ToolClass::Read, "{read}");
-    }
-    for write in [
         "Bash",
         "Edit",
         "Write",
-        "NotebookEdit",
         "Agent",
-        "Memory",
-        "SomethingNew",
     ] {
-        assert_eq!(tool_class(write), ToolClass::Write, "{write}");
+        assert!(
+            !free(tool, json!({"url": "https://example.com", "query": "q"})),
+            "{tool}"
+        );
+    }
+    for tool in [
+        "mcp__vogt__work_get",
+        "mcp__github-ro__search_code",
+        "mcp__cadastre__lookup",
+    ] {
+        assert!(!free(tool, json!({})), "{tool}");
     }
 }
 
 #[test]
-fn an_mcp_tool_reads_by_its_verbs_and_unknown_ones_ask() {
-    for read in [
-        "mcp__vogt__work_get",
-        "mcp__vogt__session_list",
-        "mcp__vogt__session_screen",
-        "mcp__cadastre__lookup",
-        "mcp__cadastre__brief",
-        "mcp__vogt__status",
-        // A server named read-only is read-only whatever the tool is called.
-        "mcp__github-ro__pull_request_review_write",
+fn redaction_masks_what_looks_like_a_credential() {
+    let text = "401 from api: Authorization: Bearer abcdef0123456789 \
+                api_key=sk-live-1234567890abcdef token: \"zzzzzzzzzzzz\" \
+                ghp_ABCDEFGHIJKLMNOPQRSTUV and plain words stay";
+    let out = redact(text);
+    for secret in [
+        "abcdef0123456789",
+        "sk-live-1234567890abcdef",
+        "zzzzzzzzzzzz",
+        "ghp_ABCDEFGHIJKLMNOPQRSTUV",
     ] {
-        assert_eq!(tool_class(read), ToolClass::Read, "{read}");
+        assert!(!out.contains(secret), "{secret} survived: {out}");
     }
-    for write in [
-        "mcp__vogt__work_create",
-        "mcp__vogt__work_comment",
-        "mcp__vogt__session_start",
-        "mcp__vogt__session_input",
-        "mcp__komodo__deploy_stack",
-        "mcp__komodo__write_stack_file",
-        // A read verb beside a write verb is a write.
-        "mcp__vogt__drift_list_and_resolve",
-        // Nothing recognisable: ask.
-        "mcp__vogt__frobnicate",
-        "mcp__malformed",
-    ] {
-        assert_eq!(tool_class(write), ToolClass::Write, "{write}");
-    }
+    assert!(out.contains("plain words stay"), "{out}");
+}
+
+#[test]
+fn a_wrapper_in_front_of_the_driver_is_dropped_for_a_chat() {
+    let argv: Vec<String> = ["vogt-agent-auth", "run", "--", "klaudia", "--x"]
+        .map(String::from)
+        .to_vec();
+    assert_eq!(driver_of(&argv), ["klaudia", "--x"]);
+    let bare: Vec<String> = vec!["/opt/bin/klaudia".into()];
+    assert_eq!(driver_of(&bare), bare);
+}
+
+#[test]
+fn an_orphaned_chat_process_group_is_ended_at_boot_and_a_reused_pid_is_not() {
+    let chats = tempfile::tempdir().unwrap();
+    let dir = chats.path().join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut child = std::process::Command::new("sleep");
+    child.arg("300");
+    std::os::unix::process::CommandExt::process_group(&mut child, 0);
+    let mut child = child.spawn().unwrap();
+    write_pidfile(&dir, child.id());
+    // A record whose start time does not match is someone else's process.
+    let stranger = chats.path().join("stranger");
+    std::fs::create_dir_all(&stranger).unwrap();
+    std::fs::write(
+        stranger.join(PIDFILE),
+        format!("{} 1\n", std::process::id()),
+    )
+    .unwrap();
+    sweep_orphans(chats.path());
+    let status = child.wait().unwrap();
+    assert!(!status.success(), "the orphan was killed");
+    assert!(!dir.join(PIDFILE).exists());
+    assert!(!stranger.join(PIDFILE).exists());
 }
 
 #[test]

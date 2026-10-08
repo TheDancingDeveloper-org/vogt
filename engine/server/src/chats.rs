@@ -4,9 +4,8 @@
 //! ## Shape
 //!
 //! A chat is a row in [`ChatStore`] plus, while it is being talked to, one
-//! child process: the deployment's Klaudia launch (by default the
-//! `Klaudia (protected)` session template, so it gets the same brokered
-//! credentials and MCP servers a Klaudia session does) with
+//! child process: Klaudia (the driver of the configured launch, by default
+//! the `Klaudia (protected)` template's, without its credential wrapper) with
 //! `--input-format stream-json --output-format stream-json`. Each message is
 //! a `user` line on its stdin; the agent's messages, tool calls and the
 //! `result` that ends a turn come back on stdout (msp-klaudia
@@ -16,25 +15,41 @@
 //! on the first launch and `--resume` on every later one, so a process that
 //! was stopped for being idle, or lost to an engine restart, is relaunched on
 //! the next message with the whole conversation. Promotion hands the same id
-//! to a terminal session's `resume`, which continues it there.
+//! to a terminal session's `resume`, which continues it there, with the
+//! session's own (full) credentials.
 //!
-//! Chats are not sessions: they do not count against hibernation or session
-//! lists, and an idle chat's process simply exits (stdin EOF) after
-//! [`ChatPolicy::idle_after`].
+//! ## What a chat's agent holds
+//!
+//! A chat reads pages and documents nobody vetted, so it is built on the
+//! assumption that its agent can be talked into anything (review round 1):
+//!
+//! - **No secrets in its environment.** It starts from `env_clear()`, the
+//!   [`CHAT_ENV_ALLOWLIST`], its gate's URL and token, and the one provider
+//!   key [`ChatPolicy::provider_key`] names — no Vogt token, no brokered
+//!   service tokens, no secrets-manager identity. So its MCP servers start
+//!   without credentials: no MCP in chats (decision D1 on WI-1097).
+//! - **Only its own directory is free.** [`classify`] lets through reads of
+//!   the chat's scratch directory and tools that touch nothing; every other
+//!   read, every network call (web, browser, MCP — decision D2), every command
+//!   and edit waits for a person.
+//! - **Bounded.** At most [`ChatPolicy::max_processes`] processes, and
+//!   [`ChatPolicy::max_per_creator`] per person, with an idle one stopped to
+//!   make room; a turn past [`ChatPolicy::turn_timeout`] is stopped; a tree
+//!   over [`ChatPolicy::max_rss_bytes`] is killed; a previous engine's
+//!   leftovers are ended at boot ([`sweep_orphans`]).
 //!
 //! ## The approval gate
 //!
-//! Klaudia's own permission modes cannot express "reads run, writes ask":
-//! `autonomous` runs project work without asking and asks only before a
-//! change to the machine, and `plan` refuses MCP and the network as well, so
-//! a chat in it could not look anything up. So the engine adds the gate
-//! itself. Each chat runs in a directory of its own under `state_dir` whose
-//! `.klaudia/config.toml` (passed with `--trusted-project-config`) declares a
-//! `PreToolUse` hook that posts every tool call to
-//! `POST /api/chats/{id}/gate` with a per-process token. The engine lets a
-//! read through at once ([`tool_class`]) and holds anything else on an
-//! approval card that only a person can answer (the WI-983 rule), denying it
-//! when [`ChatPolicy::approval_timeout`] passes.
+//! Klaudia's own permission modes cannot express that rule: `autonomous`
+//! runs project work without asking, and `plan` refuses MCP and the network,
+//! so a chat in it could not look anything up even with a person's leave.
+//! So the engine gates calls itself. Each chat runs in a directory of its own
+//! under `state_dir` whose `.klaudia/config.toml` (passed with
+//! `--trusted-project-config`) declares a `PreToolUse` hook that posts every
+//! tool call to `POST /api/chats/{id}/gate` with a per-process token. The
+//! engine answers at once for a free call and holds anything else on an
+//! approval card only a person can answer (the WI-983 rule), denying it when
+//! [`ChatPolicy::approval_timeout`] passes.
 //!
 //! A hook is not a sandbox, and Klaudia runs a project's hooks only once
 //! they are approved, so the gate is built to fail closed where it can:
@@ -43,12 +58,12 @@
 //! - the engine answers before the hook's own timeout, after which Klaudia
 //!   would let the call through;
 //! - Klaudia asks the driver whether this chat's hooks may run; the engine
-//!   allows exactly its own file and nothing else;
-//! - a successful result of a write-class tool call the gate never saw stops
-//!   the chat with an error rather than carrying on ([`Live::gated`]).
+//!   allows exactly its own file, byte for byte as it wrote it;
+//! - a successful result of a gated call the gate never saw stops the chat
+//!   with an error rather than carrying on ([`Live::gated`]).
 //!
-//! The gate is a driver's gate, not a boundary against an agent that can
-//! already run commands; that is WI-982's uid separation.
+//! The gate is a driver's gate, not a boundary against an agent a person has
+//! let run commands; that is WI-982's uid separation.
 
 use std::{
     collections::HashMap,
@@ -81,7 +96,6 @@ use crate::{
     error::{ApiError, Result},
     events::EventBus,
     sessions::SessionRegistry,
-    vogt_core::VogtCore,
 };
 
 /// How chats are run (`ENGINE_CHAT_*`).
@@ -105,6 +119,23 @@ pub struct ChatPolicy {
     /// `ENGINE_CHAT_APPROVAL_TIMEOUT` (10m): an approval nobody answers is
     /// denied after this.
     pub approval_timeout: Duration,
+    /// `ENGINE_CHAT_PROVIDER_KEY`: the name of the one credential the
+    /// driver needs (its model provider's API key, e.g. `THECLAWBAY_API_KEY`).
+    /// The engine resolves it — through the agent-auth manifest when the
+    /// deployment brokers it, else from its own environment — and hands the
+    /// chat that variable and nothing else secret.
+    pub provider_key: Option<String>,
+    /// `ENGINE_CHAT_MAX_PROCESSES` (4): chat processes running at once,
+    /// engine-wide. A new one first stops the least recently active idle one.
+    pub max_processes: usize,
+    /// `ENGINE_CHAT_MAX_PER_CREATOR` (2): the same, per person.
+    pub max_per_creator: usize,
+    /// `ENGINE_CHAT_TURN_TIMEOUT` (20m): a turn running longer is stopped,
+    /// and its process killed if it does not stop.
+    pub turn_timeout: Duration,
+    /// `ENGINE_CHAT_MAX_RSS` (2GiB): a chat whose process tree's resident
+    /// memory passes this is killed.
+    pub max_rss_bytes: u64,
 }
 
 impl Default for ChatPolicy {
@@ -116,6 +147,11 @@ impl Default for ChatPolicy {
             models: Vec::new(),
             idle_after: Duration::from_secs(600),
             approval_timeout: Duration::from_secs(600),
+            provider_key: None,
+            max_processes: 4,
+            max_per_creator: 2,
+            turn_timeout: Duration::from_secs(20 * 60),
+            max_rss_bytes: 2 << 30,
         }
     }
 }
@@ -126,6 +162,23 @@ impl ChatPolicy {
             || self.approval_timeout > Duration::from_secs(3600)
         {
             return Err("ENGINE_CHAT_APPROVAL_TIMEOUT must be between 10s and 1h".into());
+        }
+        if self.max_processes == 0 || self.max_per_creator == 0 {
+            return Err("ENGINE_CHAT_MAX_PROCESSES and _MAX_PER_CREATOR must be at least 1".into());
+        }
+        if self.turn_timeout < self.approval_timeout {
+            return Err(
+                "ENGINE_CHAT_TURN_TIMEOUT must be at least ENGINE_CHAT_APPROVAL_TIMEOUT, or a turn \
+                 waiting on an approval would be stopped before it could be answered"
+                    .into(),
+            );
+        }
+        if let Some(name) = self.provider_key.as_deref() {
+            if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') || name.is_empty() {
+                return Err(format!(
+                    "ENGINE_CHAT_PROVIDER_KEY={name:?} is not a variable name"
+                ));
+            }
         }
         if self.idle_after < Duration::from_secs(10) {
             return Err("ENGINE_CHAT_IDLE_AFTER must be at least 10s".into());
@@ -175,182 +228,180 @@ command = '''curl -sS -f --max-time {wait} -X POST -H "Authorization: Bearer $VO
     )
 }
 
-/// Whether a tool only reads. Reads run without asking; everything else —
-/// and anything this does not recognise — waits for a person.
-pub fn tool_class(name: &str) -> ToolClass {
-    const READS: &[&str] = &[
-        "Read",
-        "Glob",
-        "Grep",
-        "LS",
-        "ToolSearch",
-        "TodoWrite",
-        "TaskGet",
-        "TaskList",
-        "Jobs",
-        "BashOutput",
-        "Diagnostics",
-        "DocumentSymbols",
-        "Hover",
-        "WorkspaceSymbol",
-        "WebFetch",
-        "WebSearch",
-        "BrowserFetch",
-        "BrowserSearch",
-        "BrowserNavigate",
-        "BrowserSnapshot",
-        "Skill",
-        "AskUserQuestion",
-        "ExitPlanMode",
-    ];
-    if READS.contains(&name) {
-        return ToolClass::Read;
-    }
-    if let Some(rest) = name.strip_prefix("mcp__") {
-        let Some((server, tool)) = rest.split_once("__") else {
-            return ToolClass::Write;
-        };
-        // A server registered read-only by its name (`github-ro`).
-        if server.ends_with("-ro") {
-            return ToolClass::Read;
-        }
-        return mcp_tool_class(tool);
-    }
-    ToolClass::Write
-}
-
-/// An MCP tool by the verbs in its name: it reads when one of its words is a
-/// read verb and none is a write verb. Unknown words ask.
-fn mcp_tool_class(tool: &str) -> ToolClass {
-    const READ: &[&str] = &[
-        "get",
-        "list",
-        "read",
-        "search",
-        "query",
-        "lookup",
-        "brief",
-        "check",
-        "status",
-        "why",
-        "find",
-        "describe",
-        "show",
-        "fetch",
-        "view",
-        "screen",
-        "tail",
-        "context",
-        "observations",
-        "backlog",
-        "bugs",
-        "coverage",
-        "compliance",
-        "deps",
-        "whoami",
-        "diagnostics",
-        "summary",
-        "history",
-        "logs",
-        "health",
-        "info",
-        "analyze",
-        "versions",
-        "applicable",
-        "evaluate",
-    ];
-    const WRITE: &[&str] = &[
-        "create",
-        "update",
-        "delete",
-        "set",
-        "write",
-        "start",
-        "stop",
-        "input",
-        "answer",
-        "comment",
-        "transition",
-        "relate",
-        "unrelate",
-        "link",
-        "unlink",
-        "publish",
-        "deploy",
-        "archive",
-        "restore",
-        "snooze",
-        "adopt",
-        "bind",
-        "import",
-        "register",
-        "scaffold",
-        "decide",
-        "revoke",
-        "request",
-        "hibernate",
-        "wake",
-        "keep",
-        "logout",
-        "resolve",
-        "suppress",
-        "accept",
-        "acknowledge",
-        "annotate",
-        "add",
-        "remove",
-        "rename",
-        "merge",
-        "push",
-        "run",
-        "trigger",
-        "execute",
-        "send",
-        "post",
-        "cancel",
-        "manage",
-        "onboard",
-        "writeback",
-        "sweep",
-        "connect",
-        "report",
-        "upload",
-        "edit",
-        "kill",
-        "restart",
-        "decline",
-        "inapplicable",
-        "leave",
-        "question",
-        "drift_resolve",
-    ];
-    let words: Vec<String> = tool
-        .split(['_', '-', '.'])
-        .map(str::to_ascii_lowercase)
-        .collect();
-    if words.iter().any(|w| WRITE.contains(&w.as_str())) {
-        return ToolClass::Write;
-    }
-    if words.iter().any(|w| READ.contains(&w.as_str())) {
-        return ToolClass::Read;
-    }
-    ToolClass::Write
-}
-
+/// What the gate does with a tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolClass {
-    Read,
-    Write,
+    /// Runs without asking: a read of the chat's own scratch directory, or a
+    /// tool that touches nothing outside the agent.
+    Free,
+    /// Waits for a person.
+    Ask,
+}
+
+/// Tools that touch nothing outside the agent itself.
+const INERT: &[&str] = &[
+    "ToolSearch",
+    "TodoWrite",
+    "TaskGet",
+    "TaskList",
+    "Jobs",
+    "BashOutput",
+    "Skill",
+    "AskUserQuestion",
+    "ExitPlanMode",
+];
+
+/// Tools that read files, free only inside the chat's own directory.
+const LOCAL_READS: &[&str] = &[
+    "Read",
+    "Glob",
+    "Grep",
+    "LS",
+    "Diagnostics",
+    "DocumentSymbols",
+    "Hover",
+    "WorkspaceSymbol",
+];
+
+/// The input fields a file tool names a path in.
+const PATH_FIELDS: &[&str] = &["file_path", "path", "notebook_path", "pattern", "glob"];
+
+/// Classify a tool call for the gate (WI-1097 review round 1).
+///
+/// Only what cannot carry data out of the chat, or read anything but the
+/// chat's own scratch directory, runs free. A read anywhere else — the
+/// process's own `/proc/self/environ`, the engine's state, another person's
+/// files — waits for a person, and so does every tool that reaches the
+/// network (web fetch and search, the browser, every MCP call: an argument
+/// sent to a server is data leaving the chat). So a prompt injection in a
+/// page the chat was shown cannot read a secret and send it somewhere in one
+/// unseen step: each half is a card naming what it would do.
+pub fn classify(tool: &str, input: &Value, chat_dir: &Path) -> ToolClass {
+    if INERT.contains(&tool) {
+        return ToolClass::Free;
+    }
+    if LOCAL_READS.contains(&tool) && paths_inside(input, chat_dir) {
+        return ToolClass::Free;
+    }
+    ToolClass::Ask
+}
+
+/// Whether every path a file tool's input names resolves inside `dir`.
+fn paths_inside(input: &Value, dir: &Path) -> bool {
+    let Some(fields) = input.as_object() else {
+        return input.is_null();
+    };
+    let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    fields
+        .iter()
+        .filter(|(key, _)| PATH_FIELDS.contains(&key.as_str()))
+        .all(|(_, value)| match value.as_str() {
+            Some(raw) => inside(raw, &root),
+            None => value.is_null(),
+        })
+}
+
+fn inside(raw: &str, root: &Path) -> bool {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return true;
+    }
+    // `~` is the home directory, which is not the chat's.
+    if raw.starts_with('~') {
+        return false;
+    }
+    let joined = root.join(raw);
+    // Lexically first, so `..` cannot climb out of a path that does not
+    // exist yet; then through symlinks, for one that does.
+    let mut lexical = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                if !lexical.pop() {
+                    return false;
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => lexical.push(other),
+        }
+    }
+    if !lexical.starts_with(root) {
+        return false;
+    }
+    // A glob is not a path; its literal prefix is what can be resolved.
+    let literal: PathBuf = lexical
+        .components()
+        .take_while(|c| {
+            !c.as_os_str()
+                .to_string_lossy()
+                .contains(['*', '?', '[', '{'])
+        })
+        .collect();
+    let mut probe = literal.as_path();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(probe) {
+            return real.starts_with(root);
+        }
+        match probe.parent() {
+            Some(parent) if parent.starts_with(root) => probe = parent,
+            _ => return probe.starts_with(root),
+        }
+    }
 }
 
 /// How the driver is launched, resolved once at boot.
 #[derive(Debug, Clone)]
 struct Launch {
     argv: Vec<String>,
+    /// `argv` from the driver on: a chat runs the driver itself, never a
+    /// credential wrapper in front of it (`vogt-agent-auth run --`), which
+    /// would hand it the deployment's whole manifest.
+    driver: Vec<String>,
     /// The template the command came from, which promotion reuses.
     template: Option<String>,
     env: Vec<(String, String)>,
 }
+
+/// The command from the agent binary on (after a wrapper's `--`).
+fn driver_of(argv: &[String]) -> Vec<String> {
+    match argv.iter().position(|a| a == "--") {
+        Some(i) if i + 1 < argv.len() => argv[i + 1..].to_vec(),
+        _ => argv.to_vec(),
+    }
+}
+
+/// The engine's environment variables a chat's agent is given: enough to
+/// run, resolve names, reach the network through a proxy and verify TLS.
+/// Nothing else of the engine's — no tokens, no secrets-manager identity.
+const CHAT_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "TZ",
+    "TERM",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "KLAUDIA_CONFIG_DIR",
+];
 
 fn resolve_launch(
     policy: &ChatPolicy,
@@ -362,6 +413,7 @@ fn resolve_launch(
     if let Some(argv) = policy.command.clone() {
         return (crate::agent_cli::agent_name(&argv).as_deref() == Some(DRIVER)).then_some(
             Launch {
+                driver: driver_of(&argv),
                 argv,
                 template: None,
                 env: Vec::new(),
@@ -380,6 +432,7 @@ fn resolve_launch(
     };
     let argv = template.command.clone()?;
     (crate::agent_cli::agent_name(&argv).as_deref() == Some(DRIVER)).then(|| Launch {
+        driver: driver_of(&argv),
         argv,
         template: Some(template.name.clone()),
         env: template.env.clone(),
@@ -425,6 +478,10 @@ struct Live {
     allowed: Vec<(String, Value, Instant)>,
     /// The turn is being interrupted: its error result is a stop, not a fault.
     interrupting: bool,
+    /// Who the chat is for, for the per-creator process cap.
+    creator: String,
+    /// When the running turn began, for the turn time limit.
+    turn_started: Option<Instant>,
 }
 
 impl Live {
@@ -452,9 +509,9 @@ pub struct ChatRuntime {
     store: ChatStore,
     bus: EventBus,
     sessions: Arc<SessionRegistry>,
-    core: Option<Arc<VogtCore>>,
     launch: Launch,
     handles: DashMap<Uuid, Arc<ChatHandle>>,
+    launching: tokio::sync::Mutex<()>,
     generation: AtomicU64,
     gate_base: parking_lot::RwLock<String>,
 }
@@ -474,7 +531,6 @@ impl ChatRuntime {
         cfg: Arc<Config>,
         bus: EventBus,
         sessions: Arc<SessionRegistry>,
-        core: Option<Arc<VogtCore>>,
     ) -> Option<Arc<Self>> {
         let launch = resolve_launch(&cfg.chat, &cfg.session_templates)?;
         let store = match ChatStore::new(&cfg.state_dir).await {
@@ -486,8 +542,10 @@ impl ChatRuntime {
         };
         let gate_base = crate::sessions::engine_self_url(cfg.bind)
             .unwrap_or_else(|| sessions.secret_broker().loopback_url());
+        // A previous engine's chat processes have no reader now: end them.
+        sweep_orphans(&cfg.state_dir.join("chats"));
         Some(Self::with_parts(
-            cfg, store, bus, sessions, core, launch, gate_base,
+            cfg, store, bus, sessions, launch, gate_base,
         ))
     }
 
@@ -496,7 +554,6 @@ impl ChatRuntime {
         store: ChatStore,
         bus: EventBus,
         sessions: Arc<SessionRegistry>,
-        core: Option<Arc<VogtCore>>,
         launch: Launch,
         gate_base: String,
     ) -> Arc<Self> {
@@ -505,9 +562,9 @@ impl ChatRuntime {
             store,
             bus,
             sessions,
-            core,
             launch,
             handles: DashMap::new(),
+            launching: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
             gate_base: parking_lot::RwLock::new(gate_base),
         });
@@ -802,6 +859,9 @@ impl ChatRuntime {
         {
             let mut live = handle.live.lock();
             live.turns += 1;
+            if live.turns == 1 {
+                live.turn_started = Some(Instant::now());
+            }
             live.last_activity = Some(Instant::now());
         }
         if stdin.send(line.to_string()).is_err() {
@@ -1059,7 +1119,7 @@ impl ChatRuntime {
                 "the approval gate was asked about a call with no tool name",
             ));
         }
-        if tool_class(&tool) == ToolClass::Read {
+        if classify(&tool, &input, &self.chat_dir(id)) == ToolClass::Free {
             return Ok(gate_allow());
         }
         {
@@ -1226,7 +1286,13 @@ impl ChatRuntime {
         if let Some(proc) = handle.live.lock().proc.as_ref() {
             return Ok(proc.stdin.clone());
         }
+        // One launch at a time, so two can never both see room for one.
+        let _launching = self.launching.lock().await;
+        if let Some(proc) = handle.live.lock().proc.as_ref() {
+            return Ok(proc.stdin.clone());
+        }
         let record = self.record(id).await?;
+        self.make_room(&record.creator).await?;
         let dir = self.chat_dir(id);
         std::fs::create_dir_all(dir.join(".klaudia"))?;
         std::fs::write(
@@ -1234,7 +1300,7 @@ impl ChatRuntime {
             hook_config(self.cfg.chat.approval_timeout),
         )?;
 
-        let mut argv = self.launch.argv.clone();
+        let mut argv = self.launch.driver.clone();
         argv.extend(
             [
                 "--input-format",
@@ -1270,34 +1336,28 @@ impl ChatRuntime {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
+            // Nothing of the engine's environment by default (WI-1097 review
+            // round 1): a chat's agent reads untrusted pages, so what it could
+            // be talked into reading out of `/proc/self/environ` is limited to
+            // the allowlist below, its gate token and its one provider key.
             .env_clear();
-        for (k, v) in crate::pty::sanitized_child_env() {
-            cmd.env(k, v);
-        }
-        if crate::pty::is_agent_auth_helper_command(&argv[0], &self.cfg.agent_auth_helper) {
-            for (k, v) in crate::pty::agent_auth_helper_env() {
-                cmd.env(k, v);
-            }
-        }
-        if crate::pty::identity_passthrough_enabled() {
-            for (k, v) in crate::pty::identity_env() {
+        for (k, v) in std::env::vars_os() {
+            if k.to_str().is_some_and(|k| CHAT_ENV_ALLOWLIST.contains(&k)) {
                 cmd.env(k, v);
             }
         }
         for (k, v) in &self.launch.env {
-            cmd.env(k, v);
-        }
-        if let Some(env) = self.credential(id).await {
-            for (k, v) in env {
+            if !crate::pty::is_secret_env(k) {
                 cmd.env(k, v);
             }
+        }
+        if let Some((name, value)) = self.provider_key().await {
+            cmd.env(name, value);
         }
         let base = self.gate_base.read().clone();
         cmd.env("VOGT_CHAT_ID", id.to_string())
             .env("VOGT_CHAT_GATE_URL", format!("{base}/api/chats/{id}/gate"))
-            .env("VOGT_CHAT_GATE_TOKEN", &gate_token)
-            .env("VOGT_URL", &base)
-            .env(crate::sessions::ENGINE_URL_ENV, &base);
+            .env("VOGT_CHAT_GATE_TOKEN", &gate_token);
         #[cfg(unix)]
         cmd.process_group(0);
 
@@ -1305,16 +1365,24 @@ impl ChatRuntime {
             .spawn()
             .map_err(|e| ApiError::Internal(format!("launching {}: {e}", argv[0])))?;
         let pid = child.id();
+        if let Some(pid) = pid {
+            write_pidfile(&dir, pid);
+        }
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
         let mut child_stdin = child.stdin.take().expect("piped stdin");
         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-        handle.live.lock().proc = Some(Proc {
-            generation,
-            stdin: tx.clone(),
-            gate_token,
-            pid,
-        });
+        {
+            let mut live = handle.live.lock();
+            live.proc = Some(Proc {
+                generation,
+                stdin: tx.clone(),
+                gate_token,
+                pid,
+            });
+            live.creator = record.creator.clone();
+            live.last_activity = Some(Instant::now());
+        }
         tracing::info!(
             target: "vogt::audit",
             event = "chat.launched",
@@ -1345,7 +1413,7 @@ impl ChatRuntime {
                 if n == 0 {
                     break;
                 }
-                let text = String::from_utf8_lossy(&buf[..n]);
+                let text = redact(&String::from_utf8_lossy(&buf[..n]));
                 tracing::debug!(chat = %id, stderr = %text.trim_end(), "chat agent stderr");
                 let mut tail = stderr_tail.lock();
                 tail.push_str(&text);
@@ -1365,6 +1433,9 @@ impl ChatRuntime {
                 runtime.on_line(id, generation, &line).await;
             }
             let status = child.wait().await.ok();
+            // The group too: MCP servers and shells the agent started outlive
+            // it otherwise.
+            kill_group(pid);
             let stderr = tail.lock().clone();
             runtime
                 .on_exit(id, generation, status.and_then(|s| s.code()), stderr)
@@ -1373,56 +1444,79 @@ impl ChatRuntime {
         Ok(tx)
     }
 
-    /// A credential of the chat's own, bound to `agent:engine:<chat id>`, so
-    /// the agent's Vogt writes are an agent's (WI-926). `None` with no core.
-    async fn credential(&self, id: Uuid) -> Option<Vec<(String, String)>> {
-        let core = self.core.as_ref()?;
-        let answer = core
-            .post_json_answer(
-                "/sessions/token",
-                &json!({
-                    "engine_session_id": id.to_string(),
-                    "reason": "quick chat agent launched by the engine (WI-1097)",
-                }),
-            )
-            .await;
-        match answer
-            .as_ref()
-            .ok()
-            .and_then(|a| a.get("token"))
-            .and_then(Value::as_str)
-        {
-            Some(token) => Some(vec![
-                ("VOGT_HTTP_TOKEN".into(), token.to_string()),
-                ("VOGT_SESSION_ID".into(), id.to_string()),
-            ]),
-            None => {
-                tracing::warn!(
-                    chat = %id,
-                    error = %answer.err().unwrap_or_else(|| "no token in the answer".into()),
-                    "could not mint the chat's credential; its agent has no Vogt token of its own"
-                );
-                None
+    /// The driver's provider key, by the name `ENGINE_CHAT_PROVIDER_KEY`
+    /// gives: through the agent-auth manifest when the deployment brokers it
+    /// (the engine-side `get`, one entry, manifest-checked), else from the
+    /// engine's own environment. `None` leaves the driver to its own config.
+    async fn provider_key(&self) -> Option<(String, String)> {
+        let name = self.cfg.chat.provider_key.clone()?;
+        let broker = self.sessions.secret_broker();
+        if let Some(entry) = broker.permitted(&name) {
+            match broker.fetch(&entry).await {
+                Ok(value) => return Some((name, value.trim_end_matches(['\r', '\n']).to_string())),
+                Err(e) => {
+                    tracing::warn!(var = %name, error = %e, "could not fetch the chat provider key")
+                }
             }
         }
+        std::env::var(&name).ok().map(|value| (name, value))
     }
 
-    async fn revoke_credential(&self, id: Uuid) {
-        if let Some(core) = self.core.as_ref() {
-            if let Err(e) = core
-                .post_json(
-                    "/sessions/token",
-                    &json!({
-                        "engine_session_id": id.to_string(),
-                        "revoke": true,
-                        "reason": "the chat's agent stopped",
-                    }),
-                )
-                .await
-            {
-                tracing::warn!(chat = %id, error = %e, "could not revoke the chat's credential");
+    /// Keep under the process caps: stop the least recently active idle chat
+    /// of the same creator (per-creator cap), then of anyone (global cap);
+    /// refuse when every running chat is busy.
+    async fn make_room(&self, creator: &str) -> Result<()> {
+        for scope in [Some(creator), None] {
+            let cap = if scope.is_some() {
+                self.cfg.chat.max_per_creator
+            } else {
+                self.cfg.chat.max_processes
+            };
+            loop {
+                let mut running = 0usize;
+                let mut idle: Option<(Uuid, Instant)> = None;
+                for entry in self.handles.iter() {
+                    let live = entry.live.lock();
+                    if live.proc.is_none() || scope.is_some_and(|c| live.creator != c) {
+                        continue;
+                    }
+                    running += 1;
+                    if live.turns == 0 && live.approvals.is_empty() {
+                        let at = live.last_activity.unwrap_or_else(Instant::now);
+                        if idle.is_none_or(|(_, oldest)| at < oldest) {
+                            idle = Some((*entry.key(), at));
+                        }
+                    }
+                }
+                if running < cap {
+                    break;
+                }
+                let Some((oldest, _)) = idle else {
+                    return Err(ApiError::Conflict(format!(
+                        "{running} chats are already working{}; wait for one to finish, or stop one",
+                        if scope.is_some() { " for you" } else { "" }
+                    )));
+                };
+                tracing::info!(chat = %oldest, "stopping an idle chat to make room for another");
+                self.stop_process(oldest, Duration::from_secs(10)).await;
             }
         }
+        Ok(())
+    }
+
+    /// Resident memory of a chat's process tree, in bytes.
+    fn rss_of(pid: u32) -> u64 {
+        crate::resources::tree_rss_bytes(pid)
+    }
+
+    /// Running chat processes and their total resident memory, for status.
+    pub fn usage(&self) -> (usize, u64) {
+        let pids: Vec<u32> = self
+            .handles
+            .iter()
+            .filter_map(|h| h.live.lock().proc.as_ref().and_then(|p| p.pid))
+            .collect();
+        (pids.len(), pids.into_iter().map(Self::rss_of).sum())
     }
 
     fn chat_dir(&self, id: Uuid) -> PathBuf {
@@ -1492,7 +1586,7 @@ impl ChatRuntime {
                             if let Some(use_id) = use_id.clone() {
                                 let mut live = handle.live.lock();
                                 live.tool_names.insert(use_id.clone(), name.clone());
-                                if tool_class(&name) == ToolClass::Write {
+                                if classify(&name, &input, &self.chat_dir(id)) == ToolClass::Ask {
                                     live.write_calls
                                         .insert(use_id, (name.clone(), input.clone()));
                                 }
@@ -1529,7 +1623,10 @@ impl ChatRuntime {
                         .get("is_error")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    let text = truncate_chars(&result_text(block.get("content")), RESULT_CHARS);
+                    let text = redact(&truncate_chars(
+                        &result_text(block.get("content")),
+                        RESULT_CHARS,
+                    ));
                     let bypassed = use_id
                         .as_deref()
                         .is_some_and(|u| self.check_gated(&handle, u, is_error));
@@ -1634,8 +1731,9 @@ impl ChatRuntime {
         let position = live
             .gated
             .iter()
-            .position(|(n, v)| *n == name && *v == input)
-            .or_else(|| live.gated.iter().position(|(n, _)| *n == name));
+            // The exact call: a gated `Bash ls` must not stand in for an
+            // ungated `Bash rm`.
+            .position(|(n, v)| *n == name && *v == input);
         match position {
             Some(at) => {
                 live.gated.remove(at);
@@ -1723,8 +1821,13 @@ impl ChatRuntime {
                 || std::fs::canonicalize(path).ok() == std::fs::canonicalize(&own).ok()
                     && path.exists()
         };
-        (!named.is_empty() && named.iter().all(|p| same(p)))
-            || (named.is_empty() && specifier.is_some_and(same))
+        let named_ours = (!named.is_empty() && named.iter().all(|p| same(p)))
+            || (named.is_empty() && specifier.is_some_and(same));
+        // And still exactly what the engine wrote: an approved edit to the
+        // file must not get its new hooks waved through.
+        named_ours
+            && std::fs::read_to_string(&own).ok().as_deref()
+                == Some(hook_config(self.cfg.chat.approval_timeout).as_str())
     }
 
     async fn on_result(self: &Arc<Self>, id: Uuid, handle: &ChatHandle, msg: &Value) {
@@ -1753,6 +1856,8 @@ impl ChatRuntime {
         {
             let mut live = handle.live.lock();
             live.turns = live.turns.saturating_sub(1);
+            // The next queued turn, if any, starts its own clock.
+            live.turn_started = (live.turns > 0).then(Instant::now);
             if live.turns == 0 {
                 live.interrupting = false;
             }
@@ -1775,6 +1880,7 @@ impl ChatRuntime {
             live.proc = None;
             let turns = live.turns;
             live.interrupting = false;
+            live.turn_started = None;
             live.write_calls.clear();
             live.tool_names.clear();
             live.gated.clear();
@@ -1824,7 +1930,7 @@ impl ChatRuntime {
             .await;
         }
         handle.live.lock().turns = 0;
-        self.revoke_credential(id).await;
+        let _ = std::fs::remove_file(self.chat_dir(id).join(PIDFILE));
         self.changed(id).await;
     }
 
@@ -1869,6 +1975,82 @@ impl ChatRuntime {
         }
     }
 
+    /// One pass of the limits: stop a process idle for `idle_after`, stop a
+    /// turn past `turn_timeout` (and kill it if it will not stop), kill a
+    /// process tree over `max_rss_bytes`.
+    async fn police(self: &Arc<Self>) {
+        let policy = &self.cfg.chat;
+        let mut idle = Vec::new();
+        let mut overdue = Vec::new();
+        let mut running = Vec::new();
+        for h in self.handles.iter() {
+            let live = h.live.lock();
+            let Some(proc) = live.proc.as_ref() else {
+                continue;
+            };
+            if let Some(pid) = proc.pid {
+                running.push((*h.key(), pid));
+            }
+            if live.turns == 0 && live.approvals.is_empty() {
+                if live
+                    .last_activity
+                    .is_none_or(|at| at.elapsed() >= policy.idle_after)
+                {
+                    idle.push(*h.key());
+                }
+            } else if let Some(started) = live.turn_started {
+                let over = started.elapsed().saturating_sub(policy.turn_timeout);
+                if !over.is_zero() {
+                    overdue.push((*h.key(), over, live.interrupting));
+                }
+            }
+        }
+        for id in idle {
+            let runtime = Arc::clone(self);
+            tokio::spawn(async move {
+                runtime.stop_process(id, Duration::from_secs(30)).await;
+            });
+        }
+        for (id, over, interrupting) in overdue {
+            if !interrupting {
+                self.note(
+                    id,
+                    "error",
+                    format!(
+                        "This turn ran past the {} minute limit, so it was stopped.",
+                        policy.turn_timeout.as_secs() / 60
+                    ),
+                    true,
+                )
+                .await;
+                let _ = self.interrupt(id).await;
+            } else if over > Duration::from_secs(30) {
+                // Asked to stop half a minute ago and still going.
+                self.kill_process(id);
+            }
+        }
+        for (id, pid) in running {
+            let rss = tokio::task::spawn_blocking(move || Self::rss_of(pid))
+                .await
+                .unwrap_or(0);
+            if rss > policy.max_rss_bytes {
+                tracing::warn!(chat = %id, rss, "chat process tree over its memory limit; killed");
+                self.note(
+                    id,
+                    "error",
+                    format!(
+                        "The chat's agent used {} MiB, over the {} MiB limit, and was stopped. Send a message to start it again.",
+                        rss >> 20,
+                        policy.max_rss_bytes >> 20
+                    ),
+                    true,
+                )
+                .await;
+                self.kill_process(id);
+            }
+        }
+    }
+
     /// Stop every chat process that has been idle for `idle_after`.
     fn spawn_reaper(self: &Arc<Self>) {
         let weak = Arc::downgrade(self);
@@ -1879,30 +2061,90 @@ impl ChatRuntime {
                 let Some(runtime) = weak.upgrade() else {
                     return;
                 };
-                let idle_after = runtime.cfg.chat.idle_after;
-                let idle: Vec<Uuid> = runtime
-                    .handles
-                    .iter()
-                    .filter(|h| {
-                        let live = h.live.lock();
-                        live.proc.is_some()
-                            && live.turns == 0
-                            && live.approvals.is_empty()
-                            && live
-                                .last_activity
-                                .is_none_or(|at| at.elapsed() >= idle_after)
-                    })
-                    .map(|h| *h.key())
-                    .collect();
-                for id in idle {
-                    let runtime = Arc::clone(&runtime);
-                    tokio::spawn(async move {
-                        runtime.stop_process(id, Duration::from_secs(30)).await;
-                    });
-                }
+                runtime.police().await;
             }
         });
     }
+}
+
+/// Where a running chat records its process, so the next engine can end
+/// it if this one dies without doing so.
+const PIDFILE: &str = "agent.pid";
+
+fn write_pidfile(dir: &Path, pid: u32) {
+    let started = process_start_ticks(pid).unwrap_or(0);
+    if let Err(e) = std::fs::write(dir.join(PIDFILE), format!("{pid} {started}\n")) {
+        tracing::warn!(error = %e, "could not record a chat's process");
+    }
+}
+
+/// A process's start time, in clock ticks since boot (`/proc/<pid>/stat`
+/// field 22), which tells a pid from a later process that reused it.
+fn process_start_ticks(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after = stat.get(stat.rfind(')')? + 2..)?;
+    after.split_whitespace().nth(19)?.parse().ok()
+}
+
+/// End every chat process group a previous engine left running: each wrote
+/// its pid and start time beside its chat, and one still matching both is
+/// that same process, with no reader and a gate nobody will answer.
+fn sweep_orphans(chats: &Path) {
+    let Ok(dirs) = std::fs::read_dir(chats) else {
+        return;
+    };
+    for dir in dirs.flatten() {
+        let file = dir.path().join(PIDFILE);
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let mut parts = text.split_whitespace();
+        let pid = parts.next().and_then(|p| p.parse::<u32>().ok());
+        let started = parts.next().and_then(|p| p.parse::<u64>().ok());
+        if let (Some(pid), Some(started)) = (pid, started) {
+            if process_start_ticks(pid) == Some(started) {
+                tracing::warn!(
+                    pid,
+                    chat = %dir.file_name().to_string_lossy(),
+                    "ending a chat process a previous engine left running"
+                );
+                kill_group(Some(pid));
+            }
+        }
+        let _ = std::fs::remove_file(&file);
+    }
+}
+
+/// Mask what looks like a credential in text the engine keeps or logs: a
+/// provider error that echoes a key or a header must not land in a
+/// searchable transcript.
+pub fn redact(text: &str) -> String {
+    static PREFIXED: once_cell::sync::Lazy<Vec<regex::Regex>> = once_cell::sync::Lazy::new(|| {
+        [
+            r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{8,}",
+            r#"(?i)((?:api[_-]?key|token|secret|password|authorization)["']?\s*[:=]\s*["']?)[^\s"',;]{6,}"#,
+        ]
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("redaction pattern"))
+        .collect()
+    });
+    static BARE: once_cell::sync::Lazy<Vec<regex::Regex>> = once_cell::sync::Lazy::new(|| {
+        [
+            r"\b(?:sk|pk|rk|ghp|gho|ghs|github_pat|xox[abp])[-_][A-Za-z0-9_-]{12,}",
+            r"\b[A-Za-z0-9_-]{40,}\b",
+        ]
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("redaction pattern"))
+        .collect()
+    });
+    let mut out = text.to_string();
+    for pattern in PREFIXED.iter() {
+        out = pattern.replace_all(&out, "${1}[redacted]").into_owned();
+    }
+    for pattern in BARE.iter() {
+        out = pattern.replace_all(&out, "[redacted]").into_owned();
+    }
+    out
 }
 
 fn kill_group(pid: Option<u32>) {
@@ -1940,6 +2182,10 @@ fn result_text(content: Option<&Value>) -> String {
 /// A tool call as a person reads it: the command, the path, the query —
 /// whichever the tool's input carries — else its arguments.
 pub fn describe_call(tool: &str, input: &Value) -> String {
+    redact(&describe_call_raw(tool, input))
+}
+
+fn describe_call_raw(tool: &str, input: &Value) -> String {
     for key in [
         "command",
         "file_path",

