@@ -19,10 +19,16 @@ left a fresh install with no way to sign in short of `vogt user create`
 inside the container.
 
 Install mode is deliberately a *property of the credential store*, not a
-flag: there is no row to forget to flip and no way to reopen it short of
-deleting the store. Revoked tokens count as "a credential exists" on purpose
-— revoking your last credential is a lockout to be fixed over loopback
-(`vogt token issue`), not a reason to reopen an unauthenticated door on
+flag an operation flips: the store latches it closed by itself (migration
+0020's triggers) the moment a person is given a login or a token, by any
+path, and nothing reopens it short of deleting the store. The same migration
+latched every store that already held a token when it was upgraded, so a
+running instance operated only through agent-bound tokens and the engine's
+break-glass `ENGINE_TOKEN` stays closed — it was closed under the old rule,
+and an upgrade must not hand its port an unauthenticated admin bootstrap.
+Revoked tokens count as "a credential exists" on purpose, and removing a
+user does not undo the latch: a lockout is fixed over loopback (`vogt token
+issue`, `vogt user create`), not by reopening an unauthenticated door on
 whatever network the port is published to.
 
 Why an unauthenticated write is acceptable here: `serve` publishes on
@@ -66,10 +72,11 @@ BOOTSTRAP_SCOPES: tuple[Scope, ...] = ("admin",)
 
 
 def install_mode_active(view: ReadView) -> bool:
-    """Active exactly while no person holds a credential: no token bound to a
-    non-agent actor (revoked included) and no password login. Agent-bound
-    tokens — the adopted stack secret among them — never close it (#903)."""
-    return not view.has_operator_credential()
+    """Active exactly while no person holds a credential — no token bound to
+    a non-agent actor (revoked included), no password login — and the store
+    was never latched closed. Agent-bound tokens, the adopted stack secret
+    among them, never close it (#903); see `ReadView.install_closed`."""
+    return not view.install_closed()
 
 
 def install_status(ctx: AppContext) -> InstallStatusResult:

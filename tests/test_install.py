@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from vogt.application.models import (
     InitParams,
     InstallBootstrapParams,
     IssueTokenParams,
+    RemoveUserParams,
     RevokeTokenParams,
 )
 from vogt.application.services import (
@@ -34,10 +36,18 @@ from vogt.application.services import (
     install_bootstrap,
     install_status,
     issue_token,
+    remove_user,
     revoke_token,
 )
 from vogt.application.services.auth import authenticate
+from vogt.application.services.install import install_mode_active
 from vogt.errors import InstallClosed, InvalidRequest
+from vogt.storage.sqlite.connection import connect
+from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
+from vogt.storage.sqlite.declared import SqliteDeclaredStore
+from vogt.storage.sqlite.migrator import Migrator, load_migrations
+
+from tests.conftest import TEST_PRINCIPAL, StepClock
 
 WHY = "install test"
 PASSWORD = "correct horse battery"
@@ -317,3 +327,103 @@ def test_the_cli_fallback_also_closes_a_quick_start(quick_start: AppContext) -> 
         CreateUserParams(username="ada", password=PASSWORD, scopes="admin", reason=WHY),
     )
     assert install_status(quick_start).install_mode is False
+
+
+# -- the latch: an upgrade, or a removed user, never reopens the door -------
+
+#: The migration that latches install mode closed. Named, not derived from
+#: "the newest one", so this keeps testing that upgrade after later ones land.
+LATCH_MIGRATION = 20
+
+
+def _store_before_the_latch(tmp_path: Path) -> Path:
+    """A declared store migrated with every shipped migration before 0020,
+    the way a v0.7.7 instance's store is."""
+    old = tmp_path / "before-latch"
+    old.mkdir()
+    for migration in load_migrations(DECLARED_MIGRATIONS):
+        if migration.number < LATCH_MIGRATION:
+            (old / f"{migration.id}.sql").write_text(migration.sql, encoding="utf-8")
+    path = tmp_path / "declared.sqlite3"
+    conn = connect(path, create=True)
+    Migrator(store="declared", directory=old, holder="old/1").migrate(
+        conn, now=datetime(2026, 9, 1, tzinfo=UTC)
+    )
+    conn.close()
+    return path
+
+
+def test_an_upgraded_instance_operated_without_a_person_stays_closed(
+    tmp_path: Path,
+) -> None:
+    """The old README quick start had operators drive everything with the
+    engine's break-glass ENGINE_TOKEN, which is no core row: such a store
+    holds the adopted stack secret, session and agent tokens and its work —
+    and no person's credential. Upgrading it must not open an
+    unauthenticated admin bootstrap on its port."""
+    path = _store_before_the_latch(tmp_path)
+    conn = connect(path, create=False)
+    stamp = "2026-09-01T00:00:00+00:00"
+    conn.execute(
+        "INSERT INTO actors (id, kind, display_name, identity_ref, created_at) "
+        "VALUES ('act_engine', 'agent', 'agent:vogt-engine', 'agent:vogt-engine', ?)",
+        (stamp,),
+    )
+    for token_id, name, kind in [
+        ("tok_core", "bootstrap-core-token", "api"),
+        ("tok_session", "session ses_1", "agent"),
+    ]:
+        conn.execute(
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, "
+            "created_at) VALUES (?, 'act_engine', ?, ?, '[\"read\"]', ?, ?)",
+            (token_id, name, f"hash-{token_id}", kind, stamp),
+        )
+    conn.execute(
+        "INSERT INTO projects (id, slug, name, root_path, lifecycle_state, "
+        "compliance_status, exclusions, trust_state, created_at, updated_at) "
+        "VALUES ('prj_1', 'months-of-work', 'Months of work', '/srv/w', 'active', "
+        "'not_checked', '[]', 'unverified', ?, ?)",
+        (stamp, stamp),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteDeclaredStore(path, clock=StepClock())
+    store.bootstrap(TEST_PRINCIPAL)
+    assert "0020_install_latch" in store.migrate().applied
+    with store.read() as view:
+        assert not view.list_password_credentials()
+    with store.read() as view:
+        assert install_mode_active(view) is False
+
+
+def test_an_upgraded_store_with_no_tokens_is_still_a_fresh_install(
+    tmp_path: Path,
+) -> None:
+    """The latch copies the old rule exactly: a store that held no token at
+    all was in install mode before the upgrade and still is."""
+    store = SqliteDeclaredStore(_store_before_the_latch(tmp_path), clock=StepClock())
+    store.bootstrap(TEST_PRINCIPAL)
+    store.migrate()
+    with store.read() as view:
+        assert install_mode_active(view) is True
+
+
+def test_removing_the_only_operator_does_not_reopen_install_mode(
+    quick_start: AppContext,
+) -> None:
+    """A login made with `vogt user create` and never used holds no token;
+    removing it (say, to fix a typo in the username) leaves no person
+    credential — and the door stays shut regardless."""
+    create_user(
+        quick_start,
+        CreateUserParams(
+            username="adda", password=PASSWORD, scopes="admin", reason=WHY
+        ),
+    )
+    remove_user(quick_start, RemoveUserParams(username="adda", reason=WHY))
+    with quick_start.declared.read() as view:
+        assert view.list_password_credentials() == []
+    assert install_status(quick_start).install_mode is False
+    with pytest.raises(InstallClosed):
+        install_bootstrap(quick_start, InstallBootstrapParams(display_name="Eve"))
