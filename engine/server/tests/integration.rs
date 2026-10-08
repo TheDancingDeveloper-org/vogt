@@ -4112,14 +4112,17 @@ async fn lagging_subscriber_recovers_in_band_bounded_and_without_duplicates() {
     let mut ws = ws_attach(&base, &id).await;
     // Do not read at all: the initial snapshot and the live stream both queue
     // in the socket buffer, the outbound task blocks on a full socket, and the
-    // broadcast channel overflows behind it. Wait for the producer to finish
-    // rather than a fixed 1.5 s: locally the flood is done well inside that,
-    // but on a slow runner it was not, the channel never overflowed, and the
-    // test saw no resync segment.
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // broadcast channel overflows behind it. Wait until the producer has
+    // written far past the 1024-slot channel, then until it stops — a fixed
+    // sleep raced the producer on a slow runner, where the channel never
+    // overflowed and the test saw no resync segment.
+    let _ = poll_scrollback_at_least(&client, &base, &id, 8 * 1024 * 1024).await;
     wait_until_scrollback_stable(&client, &base, &id).await;
-    // Resume and drain everything, including the in-band resync.
-    let segs = read_segments_until_idle(&mut ws, Duration::from_millis(1500)).await;
+    // Drain until the stream goes quiet, then once more: the resync is sent
+    // only after the server notices the lag, which can be after the first
+    // quiet spell, and a single idle window cut the drain off mid-delivery.
+    let mut segs = read_segments_until_idle(&mut ws, Duration::from_millis(1500)).await;
+    segs.extend(read_segments_until_idle(&mut ws, Duration::from_millis(1500)).await);
 
     assert!(
         segs.len() >= 2,

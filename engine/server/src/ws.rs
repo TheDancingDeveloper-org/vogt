@@ -194,6 +194,20 @@ enum Recovery {
     GiveUp,
 }
 
+/// Where an in-band resync must resume from: the first byte that has not
+/// actually reached the socket yet.
+///
+/// `sent_pos` is the logical end of the last frame handed to the sink, but a
+/// sink that coalesces or buffers can accept a frame and then fail to flush it
+/// — the bytes are counted as sent while the client never sees them. Resuming
+/// from that cursor would skip them. `flushed_through` is the end of the last
+/// frame whose write completed, so it is the latest cursor that is safe to
+/// resume from: bytes the client already has are de-duplicated by the client's
+/// own rendering, and nothing unsent is skipped.
+fn resync_from(flushed_through: u64, sent_pos: u64) -> u64 {
+    flushed_through.min(sent_pos)
+}
+
 /// Attempt an in-band resync, tripping the circuit breaker after too many in a
 /// row. Increments `resyncs`; the caller resets it whenever live output flows.
 async fn recover_from_lag<S>(
@@ -516,6 +530,10 @@ async fn handle_socket(
         // forward after an in-band resync.
         let mut snap_pos = snap_pos;
         let mut sent_pos = snap_pos;
+        // End of the last frame whose `send` completed. A failed send leaves
+        // `sent_pos` ahead of what the client has, and the resync must not
+        // resume from there.
+        let mut flushed_through = snap_pos;
         // Consecutive resyncs with no normal live send in between. Reset on any
         // live output; a client that trips the ceiling is handed back to a
         // clean reattach instead of driving unbounded resnapshotting.
@@ -554,7 +572,7 @@ async fn handle_socket(
                             match recover_from_lag(
                                 &mut sink,
                                 &outbound_session,
-                                sent_pos,
+                                resync_from(flushed_through, sent_pos),
                                 &mut resyncs,
                             )
                             .await
@@ -603,6 +621,8 @@ async fn handle_socket(
                         if sink.send(Message::Binary(frame.into())).await.is_err() {
                             break;
                         }
+                        // The write completed, so the client has these bytes.
+                        flushed_through = sent_pos;
                         // Live output flowed: the client is keeping up again.
                         resyncs = 0;
                     }
@@ -614,7 +634,7 @@ async fn handle_socket(
                         match recover_from_lag(
                             &mut sink,
                             &outbound_session,
-                            sent_pos,
+                            resync_from(flushed_through, sent_pos),
                             &mut resyncs,
                         )
                         .await
