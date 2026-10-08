@@ -303,7 +303,7 @@ fn parse_iso_date(bytes: &[u8]) -> Result<(i32, u32, u32, usize), String> {
         return Ok((year, month, day, 8));
     }
     if bytes.len() >= 8 && bytes[4].is_ascii_digit() {
-        let month = fixed(bytes, 4, 2).unwrap();
+        let month = fixed(bytes, 4, 2).ok_or_else(|| "not a timestamp".to_string())?;
         let day = fixed(bytes, 6, 2).ok_or_else(|| "not a timestamp".to_string())?;
         return Ok((year, month, day, 8));
     }
@@ -1054,6 +1054,36 @@ mod tests {
     }
 
     #[test]
+    fn a_mangled_timestamp_is_an_error_never_a_panic() {
+        // Every truncation and every single-byte corruption of a value the
+        // table accepts. `20261x12` used to panic in the basic-date branch.
+        let accepted = [
+            "2026-01-02T03:04:05Z",
+            "2026-01-02T03:04:05+00:00",
+            "2026-01-02",
+            "20260102T030405",
+            "2026-01-02T03:04:05+05:30:15",
+            "2026W331",
+            "2026-08-12T0500",
+            "2026-08-12T05:00:00 +05:00",
+            "2026-08-12T05:00:00+05:30:15.5",
+        ];
+        for text in accepted {
+            let bytes = text.as_bytes();
+            for end in 0..=bytes.len() {
+                let _ = from_iso(&text[..end]);
+            }
+            for index in 0..bytes.len() {
+                for replacement in *b"x-:+ ." {
+                    let mut mangled = bytes.to_vec();
+                    mangled[index] = replacement;
+                    let _ = from_iso(&String::from_utf8(mangled).unwrap());
+                }
+            }
+        }
+        assert!(from_iso("20261x12").is_err());
+    }
+
     fn the_step_clock_advances_one_second_a_read() {
         let start = from_iso("2026-01-02T03:04:05Z").unwrap();
         let mut clock = StepClock::new(start);

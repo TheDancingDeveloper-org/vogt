@@ -12,7 +12,7 @@
       },
       "data_dir": "<volatile>",
       "declared_schema_version": 19,
-      "instance_id": "<volatile>",
+      "instance_id": "ins_0001",
       "observed_schema_version": 6,
       "principal": "local:parity",
       "revision": 0,

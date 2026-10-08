@@ -2,17 +2,22 @@
 # Applied to answers, audit trails, OpenAPI and MCP tools/list.
 
 [volatile]
-# A fresh instance mints timestamps and the ids of things the script did not
-# name. The hooks make both deterministic, so an id or a timestamp that
-# *differs* between two runs is a real divergence and must fail the check.
-# What stays blanked is evidence the collectors observed, which names the
-# machine the sweep ran on.
-why = "collector evidence names the machine; ids and timestamps are deterministic under the hooks and must compare verbatim"
+# A fresh instance mints nothing the hooks do not fix. Ids, timestamps and
+# digests are deterministic, so a difference between two runs is a real
+# divergence and must fail the check. What stays blanked is evidence the
+# collectors observed, which names the machine the sweep ran on.
+#
+# Compared verbatim, and why each is safe to compare:
+#   content_digest, payload_digest — pure functions of their input.
+#   last_used_at, expires_at — written by the clock, which the step clock fixes.
+#   instance_id — minted by the id factory, which sequential ids fixes.
+#   path — tokenised to <root>/<data> by the path rule below, so the remainder
+#     is comparable.
+why = "collector evidence names the machine; everything the hooks make deterministic compares verbatim"
 keys = [
-  "content_digest", "observed_at", "last_swept_at", "age_seconds",
-  "oldest_relevant_sweep", "collectors", "suppression", "evidence_snapshot",
-  "evidence_observation_id", "path", "secret", "last_used_at", "expires_at",
-  "instance_id", "payload_digest", "data_dir",
+  "observed_at", "last_swept_at", "age_seconds", "oldest_relevant_sweep",
+  "collectors", "suppression", "evidence_snapshot", "evidence_observation_id",
+  "secret", "data_dir",
 ]
 
 [paths]
