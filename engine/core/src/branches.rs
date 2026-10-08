@@ -55,20 +55,49 @@ pub fn match_branch(name: &str, patterns: &[regex::Regex]) -> Option<BranchMatch
     None
 }
 
-/// Python's `\d` and `int()` accept any Unicode decimal digit, and the number
-/// is unbounded. Fold to ASCII so the reference matches what Python builds.
+/// Python's `\d` matches any Unicode decimal digit and `int()` strips leading
+/// zeros. `char::to_digit` is ASCII only, so each Nd block is mapped from its
+/// zero codepoint. A captured group that contains no digit returns none.
 fn normalise_digits(raw: &str) -> String {
-    raw.chars()
-        .filter_map(|ch| ch.to_digit(10))
-        .map(|digit| char::from(b'0' + digit as u8))
-        .collect()
+    let digits: String = raw
+        .chars()
+        .filter_map(decimal_digit)
+        .map(|digit| char::from(b'0' + digit))
+        .collect();
+    let trimmed = digits.trim_start_matches('0');
+    if trimmed.is_empty() && !digits.is_empty() {
+        "0".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// The value of a Unicode decimal digit, or none. Every Nd block runs zero to
+/// nine contiguously, so the offset from its block's zero is the value.
+fn decimal_digit(ch: char) -> Option<u8> {
+    const ZEROS: &[u32] = &[
+        0x30, 0x660, 0x6F0, 0x7C0, 0x966, 0x9E6, 0xA66, 0xAE6, 0xB66, 0xBE6, 0xC66, 0xCE6, 0xD66,
+        0xDE6, 0xE50, 0xED0, 0xF20, 0x1040, 0x1090, 0x17E0, 0x1810, 0x1946, 0x19D0, 0x1A80, 0x1A90,
+        0x1B50, 0x1BB0, 0x1C40, 0x1C50, 0xA620, 0xA8D0, 0xA900, 0xA9D0, 0xA9F0, 0xAA50, 0xABF0,
+        0xFF10, 0x104A0, 0x10D30, 0x11066, 0x110F0, 0x11136, 0x111D0, 0x112F0, 0x11450, 0x114D0,
+        0x11650, 0x116C0, 0x11730, 0x118E0, 0x11950, 0x11C50, 0x11D50, 0x11DA0, 0x16A60, 0x16AC0,
+        0x16B50, 0x1D7CE, 0x1D7D8, 0x1D7E2, 0x1D7EC, 0x1D7F6, 0x1E140, 0x1E2F0, 0x1E4F0, 0x1E950,
+        0x1FBF0,
+    ];
+    let code = ch as u32;
+    ZEROS.iter().find_map(|&zero| {
+        (zero..=zero + 9)
+            .contains(&code)
+            .then_some((code - zero) as u8)
+    })
 }
 
 /// Compile the configured patterns once. One that does not compile is dropped.
 pub fn compile_patterns(patterns: &[&str]) -> Vec<regex::Regex> {
+    // `(?u)` makes `\d` match Unicode decimal digits, as Python's `\d` does.
     patterns
         .iter()
-        .filter_map(|raw| regex::Regex::new(raw).ok())
+        .filter_map(|raw| regex::Regex::new(&format!("(?u){raw}")).ok())
         .collect()
 }
 
@@ -120,6 +149,33 @@ mod tests {
         );
         // A pattern that does not compile is skipped, not fatal.
         assert!(compile_patterns(&["(unclosed"]).is_empty());
+        // Pinned against vogt.core.branches: leading zeros collapse, and
+        // Unicode decimal digits fold to their value.
+        assert_eq!(
+            match_branch("wi-007-fix", &patterns)
+                .unwrap()
+                .work_ref
+                .as_deref(),
+            Some("WI-7")
+        );
+        assert_eq!(
+            match_branch("wi-\u{0667}", &patterns)
+                .unwrap()
+                .work_ref
+                .as_deref(),
+            Some("WI-7")
+        );
+        assert_eq!(
+            match_branch("wi-1\u{0667}", &patterns)
+                .unwrap()
+                .work_ref
+                .as_deref(),
+            Some("WI-17")
+        );
+        assert_eq!(
+            match_branch("wi-0", &patterns).unwrap().work_ref.as_deref(),
+            Some("WI-0")
+        );
         // A number bigger than u64 still binds, as Python's int() does.
         let huge = format!("wi-{}", "9".repeat(25));
         assert_eq!(
