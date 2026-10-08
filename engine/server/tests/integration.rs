@@ -11323,3 +11323,107 @@ async fn streaming_upload_needs_filesystem_write() {
         "uploaded\n"
     );
 }
+
+/// Read frames until a text control frame of `kind` arrives; return it.
+async fn next_control(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    kind: &str,
+) -> Value {
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap_or_else(|_| panic!("a {kind} frame arrives"))
+            .unwrap()
+            .unwrap();
+        if let Message::Text(s) = m {
+            let v: Value = serde_json::from_str(&s).unwrap();
+            if v["type"].as_str() == Some(kind) {
+                return v;
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_attached_client_is_told_the_pty_size() {
+    // WI-1089: two clients on one PTY with different pane sizes. The snapshot
+    // names the size it is drawn at, and when one client resizes the PTY the
+    // other is told, so it renders the stream at the program's width instead
+    // of its own (which wraps a diff-painting TUI into stacked ghost frames).
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let id: String = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "sizes", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let mut desk = ws_attach(&base, &id).await;
+    let start = next_control(&mut desk, "snapshot-start").await;
+    assert!(
+        start["cols"].as_u64().is_some(),
+        "snapshot-start carries cols: {start}"
+    );
+    assert!(
+        start["rows"].as_u64().is_some(),
+        "snapshot-start carries rows: {start}"
+    );
+    next_control(&mut desk, "snapshot-done").await;
+
+    let mut phone = ws_attach(&base, &id).await;
+    next_control(&mut phone, "snapshot-done").await;
+
+    desk.send(Message::Text(
+        json!({ "type": "resize", "cols": 178, "rows": 32 })
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    let told = next_control(&mut phone, "resize").await;
+    assert_eq!(
+        (told["cols"].as_u64(), told["rows"].as_u64()),
+        (Some(178), Some(32))
+    );
+    let echoed = next_control(&mut desk, "resize").await;
+    assert_eq!(echoed["cols"].as_u64(), Some(178));
+
+    phone
+        .send(Message::Text(
+            json!({ "type": "resize", "cols": 66, "rows": 40 })
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    let told = next_control(&mut desk, "resize").await;
+    assert_eq!(
+        (told["cols"].as_u64(), told["rows"].as_u64()),
+        (Some(66), Some(40))
+    );
+
+    // A later attach is handed the size its snapshot was drawn at.
+    let mut late = ws_attach(&base, &id).await;
+    let start = next_control(&mut late, "snapshot-start").await;
+    assert_eq!(
+        (start["cols"].as_u64(), start["rows"].as_u64()),
+        (Some(66), Some(40))
+    );
+
+    desk.close(None).await.ok();
+    phone.close(None).await.ok();
+    late.close(None).await.ok();
+    kill_session(&client, &base, &id).await;
+}
