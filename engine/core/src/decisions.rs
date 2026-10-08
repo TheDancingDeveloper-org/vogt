@@ -365,7 +365,7 @@ pub fn score_item(item: &Rankable, inputs: &RankingInputs) -> Score {
         priority,
     ));
 
-    let age_days = ((inputs.now.seconds_since(item.updated_at)) as f64 / 86_400.0).max(0.0);
+    let age_days = (inputs.now.seconds_since(item.updated_at) / 86_400.0).max(0.0);
     let capped = age_days.min(STALENESS_CAP_DAYS);
     let staleness = capped * STALENESS_POINTS_PER_DAY;
     let mut detail = format!("{age_days:.1} days since last change");
@@ -970,22 +970,13 @@ mod tests {
         let low = score_item(&item("p4", now), &RankingInputs::at(now));
         assert_eq!(high.total - low.total, 100.0);
 
-        let ancient = item(
-            "p3",
-            Moment::from_unix(
-                now.seconds_since(Moment::from_unix(0, 0)) - 3650 * 86_400,
-                0,
-            ),
-        );
+        let ancient = item("p3", Moment::from_unix(now.unix_seconds - 3650 * 86_400, 0));
         assert!(
             score_item(&item("p0", now), &RankingInputs::at(now)).total
                 > score_item(&ancient, &RankingInputs::at(now)).total
         );
 
-        let stale = item(
-            "p2",
-            Moment::from_unix(now.seconds_since(Moment::from_unix(0, 0)) - 30 * 86_400, 0),
-        );
+        let stale = item("p2", Moment::from_unix(now.unix_seconds - 30 * 86_400, 0));
         assert!(
             score_item(&stale, &RankingInputs::at(now)).total
                 > score_item(&item("p2", now), &RankingInputs::at(now)).total
@@ -1000,10 +991,7 @@ mod tests {
         inputs.initiative_weight = 40;
         let subject = Rankable {
             has_initiative: true,
-            ..item(
-                "p1",
-                Moment::from_unix(now.seconds_since(Moment::from_unix(0, 0)) - 5 * 86_400, 0),
-            )
+            ..item("p1", Moment::from_unix(now.unix_seconds - 5 * 86_400, 0))
         };
         let score = score_item(&subject, &inputs);
         let sum: f64 = score

@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +72,14 @@ def main(argv: list[str] | None = None) -> int:
         args.out.mkdir(parents=True, exist_ok=True)
         target = args.out / "cli.json"
         target.write_text(json.dumps(recorded, indent=2, sort_keys=True) + "\n")
+        meta = {
+            "main_sha": _merge_base(),
+            "recorded_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "recorder": "scripts/parity.py",
+        }
+        (args.out / "meta.json").write_text(
+            json.dumps(meta, indent=2, sort_keys=True) + "\n"
+        )
         print(f"recorded {len(recorded)} steps to {target}")
         return 0
 
@@ -78,6 +87,20 @@ def main(argv: list[str] | None = None) -> int:
     if args.only:
         golden = [step for step in golden if step["operation"].startswith(args.only)]
     return _diff(golden, recorded, args.only)
+
+
+def _merge_base() -> str:
+    """The main SHA this tree was rebased onto, which names the golden."""
+    completed = subprocess.run(
+        ["git", "merge-base", "HEAD", "origin/main"],
+        cwd=REPO,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return "unknown"
+    return completed.stdout.strip()
 
 
 def _resolve(impl: str) -> str:

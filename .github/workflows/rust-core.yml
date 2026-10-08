@@ -81,7 +81,11 @@ jobs:
           diff -q "$RUNNER_TEMP/golden/cli.json" "$RUNNER_TEMP/again/cli.json"
           # Against the committed golden, not the recording just made: a
           # recording that agrees with itself proves nothing about drift.
-          golden=$(find tests/parity/golden -mindepth 1 -maxdepth 1 -type d | sort | tail -1)
+          # The golden is named for the main this branch was rebased onto, not
+          # for whichever directory sorts last.
+          base=$(git merge-base HEAD origin/main)
+          golden="tests/parity/golden/${base:0:7}"
+          test -d "$golden" || { echo "no golden for $base" >&2; exit 1; }
           uv run python scripts/parity.py check --impl python --golden "$golden"
           uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
           uv run python scripts/parity.py selftest --golden "$golden"

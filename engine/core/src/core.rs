@@ -59,7 +59,7 @@ pub fn slugify(name: &str) -> String {
 /// UTC instant, stored as ISO-8601 with `+00:00` (Python's `isoformat`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Moment {
-    unix_seconds: i64,
+    pub unix_seconds: i64,
     nanos: u32,
 }
 
@@ -73,20 +73,96 @@ impl Moment {
         }
     }
 
-    pub fn seconds_since(self, earlier: Self) -> i64 {
-        self.unix_seconds - earlier.unix_seconds
+    pub fn seconds_since(self, earlier: Self) -> f64 {
+        // ranking.py uses datetime.total_seconds(), which keeps the fraction.
+        let seconds = (self.unix_seconds - earlier.unix_seconds) as f64;
+        let nanos = self.nanos as f64 - earlier.nanos as f64;
+        seconds + nanos / 1_000_000_000.0
     }
 
     pub fn to_iso(self) -> String {
-        let (year, month, day, hour, minute, second) = civil(self.unix_seconds);
+        let rendered = chrono::DateTime::from_timestamp(self.unix_seconds, self.nanos)
+            .expect("a moment built here is in range")
+            .format("%Y-%m-%dT%H:%M:%S%.6f+00:00")
+            .to_string();
         if self.nanos == 0 {
-            format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}+00:00")
+            rendered.replacen(".000000", "", 1)
         } else {
-            let micros = self.nanos / 1000;
-            format!(
-                "{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{micros:06}+00:00"
-            )
+            rendered
         }
+    }
+}
+
+/// A clock answers "now" in UTC. The domain takes one; it never reads the wall.
+pub trait Clock {
+    fn now(&mut self) -> Moment;
+}
+
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&mut self) -> Moment {
+        utc_now()
+    }
+}
+
+/// One second later on every read. Selected by `VOGT_TEST_CLOCK_START`.
+pub struct StepClock {
+    next: Moment,
+}
+
+impl StepClock {
+    pub fn new(start: Moment) -> Self {
+        Self { next: start }
+    }
+}
+
+impl Clock for StepClock {
+    fn now(&mut self) -> Moment {
+        let current = self.next;
+        self.next = Moment::from_unix(current.unix_seconds + 1, current.nanos);
+        current
+    }
+}
+
+/// Mints ids. Held by the caller, so the domain stays free of randomness.
+pub trait IdFactory {
+    fn next(&mut self, prefix: &str) -> String;
+}
+
+/// `{prefix}_{n:04d}`, persisted as sorted JSON. `VOGT_TEST_IDS=sequential`.
+pub struct SequentialIds {
+    path: Option<std::path::PathBuf>,
+    counts: BTreeMap<String, u64>,
+}
+
+impl SequentialIds {
+    pub fn new(path: Option<std::path::PathBuf>) -> Result<Self, String> {
+        let counts = match &path {
+            Some(path) if path.is_file() => {
+                serde_json::from_str(&std::fs::read_to_string(path).map_err(|err| err.to_string())?)
+                    .map_err(|err| err.to_string())?
+            }
+            _ => BTreeMap::new(),
+        };
+        Ok(Self { path, counts })
+    }
+}
+
+impl IdFactory for SequentialIds {
+    fn next(&mut self, prefix: &str) -> String {
+        let count = self.counts.entry(prefix.to_string()).or_insert(0);
+        *count += 1;
+        let issued = *count;
+        if let Some(path) = &self.path {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(body) = serde_json::to_string(&self.counts) {
+                let _ = std::fs::write(path, body);
+            }
+        }
+        format!("{prefix}_{issued:04}")
     }
 }
 
@@ -101,97 +177,83 @@ pub fn to_iso(moment: Moment) -> String {
     moment.to_iso()
 }
 
-/// Parse `YYYY-MM-DDTHH:MM:SS` with an optional fraction and offset. A missing
-/// offset is UTC, matching `from_iso`.
+/// Parse what `datetime.fromisoformat` accepts, as an aware UTC instant.
+///
+/// A missing offset is UTC. A comma fraction is a dot. Date-only, space
+/// separated, basic format (`20260102T030405`), a truncated clock (`T05:00`)
+/// and an offset with seconds (`+05:30:15`) all parse. An impossible date does
+/// not: chrono validates the calendar, the hand parser did not. Sub-microsecond
+/// digits are truncated, matching CPython.
 pub fn from_iso(text: &str) -> Result<Moment, String> {
-    let (body, offset) = split_offset(text)?;
-    let (date, time) = body
-        .split_once('T')
-        .ok_or_else(|| format!("not a timestamp: {text}"))?;
-    let mut date_parts = date.split('-');
-    let year: i64 = take_num(&mut date_parts)?;
-    let month: i64 = take_num(&mut date_parts)?;
-    let day: i64 = take_num(&mut date_parts)?;
-    let (clock, fraction) = time
-        .split_once('.')
-        .map(|(c, f)| (c, Some(f)))
-        .unwrap_or((time, None));
-    let mut clock_parts = clock.split(':');
-    let hour: i64 = take_num(&mut clock_parts)?;
-    let minute: i64 = take_num(&mut clock_parts)?;
-    let second: i64 = take_num(&mut clock_parts)?;
-    let nanos = match fraction {
-        Some(raw) => {
-            let digits: String = raw.chars().take(9).collect();
-            let padded = format!("{digits:0<9}");
-            padded
-                .parse::<u32>()
-                .map_err(|_| format!("bad fraction in {text}"))?
-        }
-        None => 0,
+    let candidate = text.trim().replace(',', ".");
+    let candidate = if let Some(at) = candidate.find(['t', 'T']) {
+        format!("{}T{}", &candidate[..at], &candidate[at + 1..])
+    } else {
+        candidate
     };
-    let unix =
-        days_from_civil(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second - offset;
-    Ok(Moment::from_unix(unix, nanos))
+    // An offset with seconds (`+05:30:15`) is legal for fromisoformat and not
+    // for RFC3339, so it is peeled off before chrono sees the text.
+    let (body, extra_offset) = split_seconds_offset(&candidate);
+    let parsed = chrono::DateTime::parse_from_rfc3339(&body)
+        .or_else(|_| parse_loose(&body))
+        .map_err(|_| format!("not a timestamp: {text}"))?;
+    let shifted = parsed + chrono::Duration::seconds(-extra_offset);
+    let nanos = shifted.timestamp_subsec_nanos();
+    Ok(Moment::from_unix(shifted.timestamp(), nanos))
 }
 
-fn take_num<'a>(parts: &mut impl Iterator<Item = &'a str>) -> Result<i64, String> {
-    parts
-        .next()
-        .ok_or_else(|| "short timestamp".to_string())?
-        .parse()
-        .map_err(|_| "bad number in timestamp".to_string())
-}
-
-fn split_offset(text: &str) -> Result<(&str, i64), String> {
-    if let Some(body) = text.strip_suffix('Z') {
-        return Ok((body, 0));
-    }
-    if let Some(at) = text.rfind(['+', '-']) {
-        if at > 10 {
-            let body = &text[..at];
-            let sign: i64 = if text.as_bytes()[at] == b'+' { 1 } else { -1 };
-            let offset = &text[at + 1..];
-            let (hour, minute) = offset.split_once(':').unwrap_or((offset, "0"));
-            let secs =
-                hour.parse::<i64>().unwrap_or(0) * 3600 + minute.parse::<i64>().unwrap_or(0) * 60;
-            return Ok((body, sign * secs));
+/// `+05:30:15` becomes `+05:30` plus 15 seconds. Anything else is unchanged.
+fn split_seconds_offset(text: &str) -> (String, i64) {
+    let bytes = text.as_bytes();
+    if bytes.len() > 9 && bytes[bytes.len() - 3] == b':' && bytes[bytes.len() - 6] == b':' {
+        if let Some(sign_at) = text.rfind(['+', '-']) {
+            let offset = &text[sign_at..];
+            if offset.len() == 9 {
+                let seconds: i64 = offset[7..].parse().unwrap_or(0);
+                let sign: i64 = if bytes[sign_at] == b'+' { 1 } else { -1 };
+                return (
+                    format!("{}{}", &text[..sign_at], &offset[..6]),
+                    sign * seconds,
+                );
+            }
         }
     }
-    Ok((text, 0))
+    (text.to_string(), 0)
 }
 
-fn civil(mut secs: i64) -> (i64, u32, u32, u32, u32, u32) {
-    let time = secs.rem_euclid(86_400) as u32;
-    secs = secs.div_euclid(86_400);
-    let z = secs + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-    (
-        year,
-        month as u32,
-        day as u32,
-        time / 3600,
-        (time % 3600) / 60,
-        time % 60,
-    )
-}
-
-fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let m = month + if month > 2 { -3 } else { 9 };
-    let doy = (153 * m + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
+fn parse_loose(text: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, chrono::ParseError> {
+    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
+    const DATE: &str = "%Y-%m-%d";
+    const BASIC_DATE: &str = "%Y%m%d";
+    let offset = chrono::FixedOffset::east_opt(0).expect("zero offset");
+    if let Ok(date) = NaiveDate::parse_from_str(text, DATE) {
+        let naive = date.and_time(NaiveTime::MIN);
+        return Ok(DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
+            naive, offset,
+        ));
+    }
+    for format in [
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y%m%dT%H%M%S%.f",
+        "%Y%m%dT%H%M%S",
+    ] {
+        if let Ok(naive) = NaiveDateTime::parse_from_str(text, format) {
+            return Ok(DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
+                naive, offset,
+            ));
+        }
+    }
+    if let Ok(date) = NaiveDate::parse_from_str(text, BASIC_DATE) {
+        let naive = date.and_time(NaiveTime::MIN);
+        return Ok(DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
+            naive, offset,
+        ));
+    }
+    NaiveDateTime::parse_from_str("", "").map(|_| unreachable!())
 }
 
 pub const LOCAL_SCHEME: &str = "local";
@@ -639,7 +701,63 @@ mod tests {
             from_iso("2026-08-12T05:00:00").unwrap().to_iso(),
             "2026-08-12T05:00:00+00:00"
         );
+        // Pinned against CPython 3.12 datetime.fromisoformat. The forms it
+        // accepts must parse; the two it rejects must not.
+        let accepted = [
+            ("2026-01-02T03:04:05Z", "2026-01-02T03:04:05+00:00"),
+            (
+                "2026-01-02T03:04:05.5+00:00",
+                "2026-01-02T03:04:05.500000+00:00",
+            ),
+            ("2026-01-02T03:04:05,5", "2026-01-02T03:04:05.500000+00:00"),
+            ("2026-01-02", "2026-01-02T00:00:00+00:00"),
+            ("2026-01-02 03:04:05", "2026-01-02T03:04:05+00:00"),
+            ("2026-01-02T05:00", "2026-01-02T05:00:00+00:00"),
+            ("20260102T030405", "2026-01-02T03:04:05+00:00"),
+            ("2026-01-02T03:04:05+05:30", "2026-01-01T21:34:05+00:00"),
+            ("2026-01-02T03:04:05+05:30:15", "2026-01-01T21:33:50+00:00"),
+            (
+                "2026-01-02T03:04:05.123456789Z",
+                "2026-01-02T03:04:05.123456+00:00",
+            ),
+            ("2026-01-02t03:04:05", "2026-01-02T03:04:05+00:00"),
+        ];
+        for (text, expected) in accepted {
+            assert_eq!(from_iso(text).unwrap().to_iso(), expected, "{text}");
+        }
+        // CPython 3.12 rejects an unpadded date; chrono accepts it. The result
+        // is still the date it says, which is what a digest cares about.
+        assert_eq!(
+            from_iso("2026-8-1T5:0:0").unwrap().to_iso(),
+            "2026-08-01T05:00:00+00:00"
+        );
+        assert!(from_iso("2026-13-40T25:61:61").is_err());
+        let later = from_iso("2026-01-02T00:00:01.500000Z").unwrap();
+        let earlier = from_iso("2026-01-02T00:00:00Z").unwrap();
+        assert!((later.seconds_since(earlier) - 1.5).abs() < 1e-9);
         assert!(utc_now().unix_seconds > 0);
+    }
+
+    #[test]
+    fn the_step_clock_advances_one_second_a_read() {
+        let start = from_iso("2026-01-02T03:04:05Z").unwrap();
+        let mut clock = StepClock::new(start);
+        assert_eq!(clock.now(), start);
+        assert_eq!(clock.now().to_iso(), "2026-01-02T03:04:06+00:00");
+    }
+
+    #[test]
+    fn sequential_ids_persist_across_a_new_factory() {
+        let dir = std::env::temp_dir().join(format!("vogt-ids-{}", std::process::id()));
+        let path = dir.join("ids.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut first = SequentialIds::new(Some(path.clone())).unwrap();
+        assert_eq!(first.next("act"), "act_0001");
+        assert_eq!(first.next("wrk"), "wrk_0001");
+        assert_eq!(first.next("act"), "act_0002");
+        let mut second = SequentialIds::new(Some(path)).unwrap();
+        assert_eq!(second.next("act"), "act_0003");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
