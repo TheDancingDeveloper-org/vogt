@@ -3869,44 +3869,71 @@ async fn read_snapshot_payload(
     (reset, payload)
 }
 
-/// One delivered snapshot/resync sequence: whether it reset the terminal and
-/// the payload bytes that followed it.
+/// One delivered snapshot/resync sequence: whether it reset the terminal, its
+/// payload (between `snapshot-start` and `snapshot-done`), and the live bytes
+/// that followed it until the next `snapshot-start`.
 struct SnapSegment {
     reset: bool,
-    bytes: Vec<u8>,
+    payload: Vec<u8>,
+    live: Vec<u8>,
 }
 
 /// Drain frames, grouping the payload after each `snapshot-start` into its own
-/// segment, until no frame arrives for `idle`. Returns the initial snapshot,
-/// the live bytes that followed it, and any in-band resync the server sent —
-/// each `snapshot-start` opens a new segment, so a resync is a fresh segment.
-async fn read_segments_until_idle(
+/// segment (the initial snapshot plus the live bytes after it, then each
+/// in-band resync), until the client's own cursor reaches `target`. The cursor
+/// is what a client tracks:
+/// each `snapshot-start` sets it to that snapshot's `scrollback_pos`, and live
+/// binary frames after `snapshot-done` advance it by their length. Waiting on
+/// the cursor rather than an idle window means a slow runner cannot cut the
+/// drain off before the in-band resync arrives. Fails on a deadline.
+async fn read_segments_until_pos(
     ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
-    idle: Duration,
+    target: u64,
 ) -> Vec<SnapSegment> {
+    let deadline = tokio::time::Instant::now() + LOAD_DEADLINE;
     let mut segs: Vec<SnapSegment> = Vec::new();
-    loop {
-        match tokio::time::timeout(idle, ws.next()).await {
-            Err(_) | Ok(None) | Ok(Some(Err(_))) => break,
-            Ok(Some(Ok(m))) => match m {
-                Message::Text(s) => {
-                    let v: Value = serde_json::from_str(&s).unwrap();
-                    if v["type"] == "snapshot-start" {
+    let mut cursor = 0u64;
+    let mut in_snapshot = false;
+    while !(cursor >= target && !in_snapshot) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let m = match tokio::time::timeout(remaining, ws.next()).await {
+            Ok(Some(Ok(m))) => m,
+            other => panic!(
+                "stream ended before the client cursor reached {target} \
+                 (cursor {cursor}, {} segment(s)): {other:?}",
+                segs.len()
+            ),
+        };
+        match m {
+            Message::Text(s) => {
+                let v: Value = serde_json::from_str(&s).unwrap();
+                match v["type"].as_str() {
+                    Some("snapshot-start") => {
+                        in_snapshot = true;
+                        cursor = v["scrollback_pos"].as_u64().unwrap();
                         segs.push(SnapSegment {
                             reset: v["reset"].as_bool().unwrap_or(true),
-                            bytes: Vec::new(),
+                            payload: Vec::new(),
+                            live: Vec::new(),
                         });
                     }
+                    Some("snapshot-done") => in_snapshot = false,
+                    _ => {}
                 }
-                Message::Binary(b) => {
-                    if let Some(seg) = segs.last_mut() {
-                        seg.bytes.extend_from_slice(&b);
+            }
+            Message::Binary(b) => {
+                if let Some(seg) = segs.last_mut() {
+                    if in_snapshot {
+                        seg.payload.extend_from_slice(&b);
+                    } else {
+                        cursor += b.len() as u64;
+                        seg.live.extend_from_slice(&b);
                     }
                 }
-                _ => {}
-            },
+            }
+            _ => {}
         }
     }
     segs
@@ -4117,12 +4144,10 @@ async fn lagging_subscriber_recovers_in_band_bounded_and_without_duplicates() {
     // sleep raced the producer on a slow runner, where the channel never
     // overflowed and the test saw no resync segment.
     let _ = poll_scrollback_at_least(&client, &base, &id, 8 * 1024 * 1024).await;
-    wait_until_scrollback_stable(&client, &base, &id).await;
-    // Drain until the stream goes quiet, then once more: the resync is sent
-    // only after the server notices the lag, which can be after the first
-    // quiet spell, and a single idle window cut the drain off mid-delivery.
-    let mut segs = read_segments_until_idle(&mut ws, Duration::from_millis(1500)).await;
-    segs.extend(read_segments_until_idle(&mut ws, Duration::from_millis(1500)).await);
+    let end = wait_until_scrollback_stable(&client, &base, &id).await;
+    // Drain until the client's cursor reaches the end of the output, however
+    // long the resync takes to arrive — an idle window raced a slow runner.
+    let segs = read_segments_until_pos(&mut ws, end).await;
 
     assert!(
         segs.len() >= 2,
@@ -4135,16 +4160,30 @@ async fn lagging_subscriber_recovers_in_band_bounded_and_without_duplicates() {
     );
     for s in &segs {
         assert!(
-            s.bytes.len() <= CAP + CAP / 16,
+            s.payload.len() <= CAP + CAP / 16,
             "a resync/snapshot payload must be bounded by the ring; got {}",
-            s.bytes.len()
+            s.payload.len()
         );
     }
-    // The resync snapshots from the client's last sent position, so it never
-    // re-sends bytes already delivered: the spine is strictly increasing.
+    // The delivered spine. Live bytes and a `reset:false` delta are the raw
+    // byte stream, so every SEQ in them counts, in order. A `reset:true`
+    // payload is the grid's frame, a paint of the screen: the producer homes
+    // the cursor every 64 lines, so rows below the cursor legitimately hold
+    // older lines and the frame's own order is not a stream. What it must
+    // never do is carry output past its `scrollback_pos` — that is the
+    // duplicate — so it contributes its newest SEQ, which has to precede the
+    // first one streamed after it. A resync snapshots from the client's last
+    // sent position, so it never re-sends bytes already delivered: the spine
+    // is strictly increasing.
     let mut all = Vec::new();
     for s in &segs {
-        all.extend(seq_numbers(&s.bytes));
+        let payload = seq_numbers(&s.payload);
+        if s.reset {
+            all.extend(payload.into_iter().max());
+        } else {
+            all.extend(payload);
+        }
+        all.extend(seq_numbers(&s.live));
     }
     assert!(
         all.len() > 100,
