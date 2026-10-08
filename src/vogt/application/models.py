@@ -1093,6 +1093,36 @@ class SessionSummary(Result):
         ),
     )
     stopped_at: datetime | None = None
+    name: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the session's display name, as the GUI "
+            "shows it (session.rename changes it). None when the engine "
+            "could not be asked."
+        ),
+    )
+    command: str | None = Field(
+        default=None,
+        description="Live from the engine: the command the session runs.",
+    )
+    exit_code: int | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the process's exit code once it has "
+            "ended; null while it runs."
+        ),
+    )
+    activity_changed_at: datetime | None = Field(
+        default=None,
+        description="Live from the engine: when `activity` last changed.",
+    )
+    conversation_agent: str | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the agent CLI whose conversation the "
+            "session runs (with `conversation_id`), when known."
+        ),
+    )
     activity: str | None = Field(
         default=None,
         description=(
@@ -4017,6 +4047,23 @@ class KeepSessionAwakeParams(Params):
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
+class RenameSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    name: str = Field(
+        min_length=1,
+        description=(
+            "The new display name. Trimmed by the engine, which refuses an "
+            "empty one or one over its byte limit."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class RemoveSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
 class SetSessionRoleParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     role: SessionRole = Field(
@@ -4309,6 +4356,79 @@ _AGENT_CLI_ENGINE_FIELD_DESC = (
     "returned rather than an error, so an outage never reads as 'no agent "
     "CLIs'."
 )
+
+
+class EngineStatusParams(Params):
+    pass
+
+
+class EngineHistoryStatus(Result):
+    """The engine's session-history archive, when it keeps one."""
+
+    enabled: bool = False
+    archived_session_count: int | None = None
+    log_file_count: int | None = None
+    log_bytes: int | None = None
+    db_bytes: int | None = None
+
+
+class EngineAgentTaskStatus(Result):
+    """The engine's scheduled agent tasks and the prompt files they left."""
+
+    task_count: int = 0
+    prompt_task_dir_count: int = 0
+    prompt_file_count: int = 0
+    context_file_count: int = 0
+    session_prompt_file_count: int = 0
+    prompt_bytes: int = 0
+    orphan_task_dir_count: int = 0
+
+
+class EngineLag(Result):
+    """How often one event subscriber fell behind, and by how much."""
+
+    episodes: int = 0
+    events_skipped: int = 0
+
+
+class EngineStatusResult(Result):
+    """The session engine's operational report, as the GUI's Settings shows it.
+
+    `engine` is set, and the rest left at its defaults, when the engine is not
+    configured or could not be asked: an outage is said, never rendered as an
+    idle engine.
+    """
+
+    engine: str | None = Field(
+        default=None,
+        description="Why the engine could not be asked; null when it answered.",
+    )
+    version: str | None = None
+    source_ref: str | None = None
+    source_sha: str | None = None
+    release_url: str | None = None
+    session_count: int | None = None
+    push_subscription_count: int | None = None
+    gui_process_count: int | None = None
+    gui_stream_configured: bool | None = None
+    fcm_enabled: bool | None = None
+    auto_agent_auth: bool | None = Field(
+        default=None,
+        description="Whether the engine resolves agent credentials at launch.",
+    )
+    state_dir: str | None = None
+    workspace_root: str | None = Field(
+        default=None, description="The root every session and file path is under."
+    )
+    history: EngineHistoryStatus | None = None
+    agent_tasks: EngineAgentTaskStatus | None = None
+    event_lag: dict[str, EngineLag] = Field(
+        default_factory=dict,
+        description=(
+            "Event subscribers that fell behind since the engine started, by "
+            "name. Empty is healthy."
+        ),
+    )
 
 
 class AgentCliListParams(Params):

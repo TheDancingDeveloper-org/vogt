@@ -624,6 +624,12 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
 
 #### Routes
 
+Each route below has a core operation that is its MCP counterpart, or a
+stated reason it has none, in `src/vogt/registry/engine_routes.py`
+(`tests/test_engine_parity.py` enforces it; `API.md` has the table). An agent
+should use those operations — they take either id and are audited — rather
+than these routes.
+
 - `GET /api/sessions` -> `SessionSummary[]` — any valid bearer. Exited
   sessions are included until deleted; filter on `alive`.
 - `POST /api/sessions` `SessionSpec` -> `SessionSummary` (requires the
@@ -647,7 +653,7 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   screen as `blocked`, publishes a `session-blocked` event and (when set)
   sends a push. Cleared when the session exits. Requires `sessions`.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
-  `sessions` capability)
+  `sessions` capability). MCP: `session_rename`.
 - `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `OkResponse`
   (SIGKILL to the child; the session stays in the registry so its
   scrollback is still readable, which is what makes this different from
@@ -659,7 +665,7 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   the `sessions` capability)
 - `DELETE /api/sessions/:id` -> `OkResponse` — kills the child if it is still
   running, then forgets the session and its prompt file (requires the
-  `sessions` capability)
+  `sessions` capability). MCP: `session_remove`.
 - `GET /api/sessions/:id/attach` — the WebSocket stream (see
   [Attach protocol](#attach-protocol)); a driver does not need it.
 - `POST /api/sessions/:id/answer` `{"option": N | "label": "...",
@@ -1673,7 +1679,8 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   subscription count, live GUI process count, whether the GUI stream and FCM
   are configured, and nested `history`, `agent_tasks`, `auth_broker` and
   `storage` blocks. Storage numbers are counts and byte totals, never paths
-  into the workspace beyond the two roots themselves.
+  into the workspace beyond the two roots themselves. MCP: `engine_status`
+  (`engine.status`), through the core's engine credential.
 - `GET /api/agent-clis[?upstream=true]` -> `AgentCliReport` — the
   runtime-pinned agent CLIs and the Go toolchain ([`DEPLOYMENT.md`](DEPLOYMENT.md)
   §3): for each tool in the image's table its package (an npm package, or
@@ -2900,6 +2907,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `migrate` | Operator-only | Unavailable: Local schema maintenance; no remote MCP tool. |
 | `status` | Voice-readable | Available: Report instance identity, schema versions, and row counts. |
 | `instance.diagnostics` | Operator-only | Unavailable: Deploy diagnostics (version, digest, readiness, migrations, redacted error log, optional peer probe) are for operators and agents over MCP, not the assistant. |
+| `engine.status` | Operator-only | Unavailable: The engine's operational report (build, counts, storage, event lag) is for operators and agents over MCP, not the assistant. |
 | `place.metrics` | Voice-readable | Available: Read all bounded shell navigation counts in one response. |
 | `connect` | Operator-only | Unavailable: Client and connection configuration belongs to operator setup. |
 | `mcp.stdio` | Operator-only | Unavailable: Local process transport; no remote MCP tool. |
@@ -2977,6 +2985,8 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
 | `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |
 | `session.set_role` | Operator-only | Unavailable: Nominates the overseeing session; for the GUI and for agents over MCP/CLI/REST. |
+| `session.rename` | Operator-only | Unavailable: Renames a session as the GUI does; for the GUI and for agents over MCP/CLI/REST. |
+| `session.remove` | Operator-only | Unavailable: Kills and forgets a session as the GUI's Remove does; for the GUI and for agents over MCP/CLI/REST. |
 | `session.bind_work` | Operator-only | Unavailable: Declares which work item a session serves; for the GUI and for agents over MCP/CLI/REST. |
 | `session.grant_request` | Operator-only | Unavailable: Asks a person to approve a credential for a session; for agents over MCP/CLI/REST. |
 | `session.grant_decide` | Operator-only | Unavailable: A person's approval of a grant, made deliberately in the Inbox, never by voice. |

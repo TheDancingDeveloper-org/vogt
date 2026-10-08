@@ -306,6 +306,12 @@ Rules:
   with for now but may come back to, use `session_hibernate` rather than
   `session_stop`. `session_keep_awake` pins one that must never be
   hibernated, such as a long-running driver.
+- **Naming and tidying:** `session_rename` gives a session the name the GUI
+  shows (`session_list` returns it as `name`). `session_remove` is the GUI's
+  Remove: it kills a session if it still runs and forgets it, output
+  included, where `session_stop` keeps it listed and readable. Every
+  session action the GUI offers has a tool; you should not need the engine's
+  own routes.
 - **If you are the overseer**, say so: start as one with
   `session_start(..., role="oversight")`. The role is a person's nomination —
   `session_set_role` refuses an agent — so if you were not started as one,

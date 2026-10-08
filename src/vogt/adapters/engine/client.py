@@ -792,6 +792,27 @@ class EngineClient:
         )
         return payload is not None
 
+    def rename_session(self, session_id: str, *, name: str) -> bool:
+        """Rename a session, live or hibernated. `False` when the engine no
+        longer had it; a name the engine refuses is its 400, said."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}",
+            method="PATCH",
+            payload={"name": name},
+            allow_missing=True,
+        )
+        return payload is not None
+
+    def remove_session(self, session_id: str) -> bool:
+        """Kill a session if it still runs and forget it: its record, its
+        kept screen and its brief. `False` when the engine no longer had it."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}",
+            method="DELETE",
+            allow_missing=True,
+        )
+        return payload is not None
+
     def archived_session(self, session_id: str) -> EngineArchivedSession | None:
         """What the engine's history says about a terminal that has ended.
 
@@ -1137,6 +1158,14 @@ class EngineClient:
     def healthz(self) -> None:
         """Raise `EngineUnavailable` unless the engine answers its liveness probe."""
         self._call("/healthz")
+
+    def operational_status(self) -> dict[str, Any]:
+        """The engine's own operational report (`GET /api/status`)."""
+        payload = self._call("/api/status")
+        if not isinstance(payload, dict):
+            msg = f"the {self.label} answered GET /api/status with no object"
+            raise EngineUnavailable(msg)
+        return payload
 
     # -- runtime-pinned agent CLIs ------------------------------------
 
