@@ -98,8 +98,24 @@ ready when the core is absent — restarting the container would not revive a
 core and would kill every live terminal — so read its body, not just the
 status. Then open `http://localhost:8910/`: the first-run wizard asks for
 your name, a username and a password, creates your `admin` login and signs
-you in. Later people are added with `vogt user create` and agents get API
-tokens from `vogt token issue`, both run inside the container (§3).
+you in. The wizard stays open until the first *person* has a login: the
+stack secret is bound to an agent actor and does not count, so supplying it
+before `up` no longer closes the wizard (releases up to v0.7.7 did, #903).
+`GET /api/install/status` says which: `{"install_mode": true}` while the
+wizard is offered. If it answers `false` with nobody able to sign in — an
+older release, or `VOGT_INSTALL_BOOTSTRAP_ENABLED=false` — create the first
+operator in the container instead; it prompts for the password:
+
+```console
+docker compose -f deploy/stack.compose.yml exec vogt \
+  vogt user create --username <name> --scopes admin --reason "Create first operator"
+```
+
+The wizard is an unauthenticated door until it closes, so on a stack
+published beyond loopback (§4) either finish it before opening the port up,
+or set `VOGT_INSTALL_BOOTSTRAP_ENABLED=false` in an overlay and use the
+command above. Later people are added with `vogt user create` and agents
+get API tokens from `vogt token issue`, both run inside the container (§3).
 [`USER_GUIDE.md`](USER_GUIDE.md) is the tour from there.
 
 Three named volumes — `vogt-data`, `engine-home` and `engine-agent-clis`
@@ -159,8 +175,9 @@ error, not a silent default provider.
 **Credentials for people and agents.** The core authenticates every request
 and is the only identity authority; the engine holds no token table and asks
 the core who a bearer is. **People sign in with a username and password.**
-The first operator chooses theirs in the browser wizard; every later person
-is created from the container that owns the data:
+The first operator chooses theirs in the browser wizard (or, where the
+wizard is off, with the `vogt user create --scopes admin` command in §2);
+every later person is created from the container that owns the data:
 
 ```console
 docker compose -f deploy/stack.compose.yml exec vogt \
