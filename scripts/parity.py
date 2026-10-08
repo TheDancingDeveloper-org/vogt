@@ -193,10 +193,10 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _dump(data: Path) -> dict[str, Any]:
     """Every non-empty table in both stores, after init.
 
-    `migrations.applied_at` and the data directory are the two values a fresh
-    process cannot make identical: the first because the migrator stamps each
-    file at the clock it reads, and the second because the run owns a temporary
-    root. Both are blanked by the rules in `normalise.toml`, which say why.
+    The data directory is blanked because the run owns a temporary root.
+    Everything else compares verbatim: the step clock fixes `applied_at` the
+    same way it fixes every other timestamp, so blanking it would hide a
+    regression to wall-clock stamping.
     """
     import sqlite3
 
@@ -361,7 +361,6 @@ def _walk(
 ) -> Any:
     if isinstance(value, dict):
         volatile = set(rules["volatile"]["keys"])
-        applied_at = set(rules.get("applied_at", {}).get("columns", []))
         schema = rules["schema"]
         in_schema = any(marker in value for marker in schema["schema_markers"])
         drop = set(schema["drop_keys"]) if in_schema else set()
@@ -371,8 +370,6 @@ def _walk(
             key: (
                 "<version>"
                 if blank_version and key == version.get("key")
-                else "<applied_at>"
-                if key in applied_at
                 else "<volatile>"
                 if key in volatile
                 else _walk(item, rules, paths, operation, False)
@@ -425,6 +422,16 @@ def _selftest(golden_dir: Path) -> int:
         print("selftest: mutating 'id' was not caught", file=sys.stderr)
         return 1
 
+    # The dump is a row store, not an answer, so a change to one cell must fail
+    # the check the same way a changed id does. Mutating the seeded workflow
+    # definition is the case that would otherwise pass silently.
+    dumped = json.loads((golden_dir / "cli.json").read_text())
+    definition = dumped[0]["body"]["declared"]["workflow_defs"][0]["definition"]
+    dumped[0]["body"]["declared"]["workflow_defs"][0]["definition"] = definition + "-mutated"
+    if _diff(golden, _normalise(dumped, root, data), "") == 0:
+        print("selftest: mutating a dumped workflow definition was not caught", file=sys.stderr)
+        return 1
+
     fixture = {
         "answer": {"id": "wrk_0001", "title": "the real title"},
         "schema": {"properties": {"name": {"type": "string"}}, "title": "ModelName"},
@@ -452,7 +459,7 @@ def _selftest(golden_dir: Path) -> int:
     if _diff(http_golden, _normalise(http, root, data), "") == 0:
         print("selftest: mutating 'instance_id' was not caught", file=sys.stderr)
         return 1
-    print("selftest passed: id, answer title and instance_id caught, schema title dropped")
+    print("selftest passed: id, dumped workflow definition, answer title and instance_id caught, schema title dropped")
     return 0
 
 
