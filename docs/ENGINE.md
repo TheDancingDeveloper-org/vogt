@@ -1968,6 +1968,9 @@ contains `$HOME`, or contains `state_dir`.
   `filesystem-write`) — `content` or `content_base64`, and `create_parents`
   to mkdir the parent first. A bad base64 body fails before any directory is
   created.
+- `PUT /api/files/upload?path=&create_parents=&if_match=` (raw body) ->
+  `WriteFileResponse` (requires `filesystem-write`) — the streaming upload:
+  the body is spooled to disk beside the target and renamed into place.
 - `POST /api/files/op` `FileOpReq` -> `{"ok": true, "path"?: string}`
   (requires `filesystem-write`) — one of four operations, tagged by `op`:
   `move`, `delete`, `mkdir`, `duplicate`. An existing destination is `409`,
