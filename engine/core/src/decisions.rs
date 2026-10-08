@@ -970,13 +970,16 @@ mod tests {
         let low = score_item(&item("p4", now), &RankingInputs::at(now));
         assert_eq!(high.total - low.total, 100.0);
 
-        let ancient = item("p3", Moment::from_unix(now.unix_seconds - 3650 * 86_400, 0));
+        let ancient = item(
+            "p3",
+            Moment::from_unix(now.unix_seconds() - 3650 * 86_400, 0),
+        );
         assert!(
             score_item(&item("p0", now), &RankingInputs::at(now)).total
                 > score_item(&ancient, &RankingInputs::at(now)).total
         );
 
-        let stale = item("p2", Moment::from_unix(now.unix_seconds - 30 * 86_400, 0));
+        let stale = item("p2", Moment::from_unix(now.unix_seconds() - 30 * 86_400, 0));
         assert!(
             score_item(&stale, &RankingInputs::at(now)).total
                 > score_item(&item("p2", now), &RankingInputs::at(now)).total
@@ -991,7 +994,7 @@ mod tests {
         inputs.initiative_weight = 40;
         let subject = Rankable {
             has_initiative: true,
-            ..item("p1", Moment::from_unix(now.unix_seconds - 5 * 86_400, 0))
+            ..item("p1", Moment::from_unix(now.unix_seconds() - 5 * 86_400, 0))
         };
         let score = score_item(&subject, &inputs);
         let sum: f64 = score

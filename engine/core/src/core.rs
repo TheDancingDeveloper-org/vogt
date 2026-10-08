@@ -59,7 +59,7 @@ pub fn slugify(name: &str) -> String {
 /// UTC instant, stored as ISO-8601 with `+00:00` (Python's `isoformat`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Moment {
-    pub unix_seconds: i64,
+    unix_seconds: i64,
     nanos: u32,
 }
 
@@ -71,6 +71,10 @@ impl Moment {
             unix_seconds,
             nanos: nanos - nanos % 1000,
         }
+    }
+
+    pub fn unix_seconds(self) -> i64 {
+        self.unix_seconds
     }
 
     pub fn seconds_since(self, earlier: Self) -> f64 {
@@ -107,6 +111,7 @@ impl Clock for SystemClock {
 }
 
 /// One second later on every read. Selected by `VOGT_TEST_CLOCK_START`.
+#[derive(Debug)]
 pub struct StepClock {
     next: Moment,
 }
@@ -131,6 +136,7 @@ pub trait IdFactory {
 }
 
 /// `{prefix}_{n:04d}`, persisted as sorted JSON. `VOGT_TEST_IDS=sequential`.
+#[derive(Debug)]
 pub struct SequentialIds {
     path: Option<std::path::PathBuf>,
     counts: BTreeMap<String, u64>,
@@ -156,14 +162,92 @@ impl IdFactory for SequentialIds {
         let issued = *count;
         if let Some(path) = &self.path {
             if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                std::fs::create_dir_all(parent)
+                    .unwrap_or_else(|err| panic!("creating {}: {err}", parent.display()));
             }
-            if let Ok(body) = serde_json::to_string(&self.counts) {
-                let _ = std::fs::write(path, body);
-            }
+            // A swallowed write hands the next process the same ids.
+            let body = serde_json::to_string(&self.counts).expect("counts are strings and numbers");
+            std::fs::write(path, body)
+                .unwrap_or_else(|err| panic!("writing {}: {err}", path.display()));
         }
         format!("{prefix}_{issued:04}")
     }
+}
+
+pub const CLOCK_ENV: &str = "VOGT_TEST_CLOCK_START";
+pub const IDS_ENV: &str = "VOGT_TEST_IDS";
+
+/// `VOGT_TEST_CLOCK_START`. Empty is unset. Anything that is not a timestamp is
+/// an `InvalidRequest`, naming the value.
+pub fn clock_from_env(value: Option<&str>) -> Result<Option<StepClock>, VogtError> {
+    let Some(raw) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    let start = from_iso(raw).map_err(|_| {
+        VogtError::InvalidRequest(format!(
+            "{CLOCK_ENV} must be an RFC3339 timestamp, not '{raw}'"
+        ))
+    })?;
+    Ok(Some(StepClock::new(start)))
+}
+
+/// `VOGT_TEST_IDS`. Only `sequential` is a mode; anything else is refused.
+pub fn ids_from_env(
+    value: Option<&str>,
+    path: Option<std::path::PathBuf>,
+) -> Result<Option<SequentialIds>, VogtError> {
+    let Some(raw) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+        return Ok(None);
+    };
+    if raw != "sequential" {
+        return Err(VogtError::InvalidRequest(format!(
+            "{IDS_ENV} must be 'sequential', not '{raw}'"
+        )));
+    }
+    SequentialIds::new(path)
+        .map(Some)
+        .map_err(VogtError::InvalidRequest)
+}
+
+/// The hook names that are set, for the one startup warning.
+pub fn hooks_active(clock: Option<&str>, ids: Option<&str>) -> Vec<&'static str> {
+    let mut active = Vec::new();
+    if clock.is_some_and(|value| !value.trim().is_empty()) {
+        active.push(CLOCK_ENV);
+    }
+    if ids.is_some_and(|value| !value.trim().is_empty()) {
+        active.push(IDS_ENV);
+    }
+    active
+}
+
+/// A name is loopback only when it is literally `localhost`. Resolving it would
+/// make the answer depend on DNS, and a test aid must not.
+pub fn is_loopback(host: &str) -> bool {
+    let candidate = host.trim().trim_matches(|ch| ch == '[' || ch == ']');
+    if candidate.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    candidate
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
+/// A deterministic clock or id factory is only honoured on a loopback bind.
+pub fn refuse_hooks_off_loopback(
+    host: &str,
+    clock: Option<&str>,
+    ids: Option<&str>,
+) -> Result<(), VogtError> {
+    let active = hooks_active(clock, ids);
+    if !active.is_empty() && !is_loopback(host) {
+        return Err(VogtError::InvalidRequest(format!(
+            "refusing to serve on {host}: {} selects a deterministic test clock or id \
+             factory, which is only honoured on a loopback bind",
+            active.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 pub fn utc_now() -> Moment {
@@ -177,88 +261,215 @@ pub fn to_iso(moment: Moment) -> String {
     moment.to_iso()
 }
 
-/// Parse what `datetime.fromisoformat` accepts, as an aware UTC instant.
+/// Parse what CPython 3.12 `datetime.fromisoformat` accepts, as aware UTC.
 ///
-/// A missing offset is UTC. A comma fraction is a dot. Date-only, space
-/// separated, basic format (`20260102T030405`), a truncated clock (`T05:00`)
-/// and an offset with seconds (`+05:30:15`) all parse. An impossible date does
-/// not: chrono validates the calendar, the hand parser did not. Sub-microsecond
-/// digits are truncated, matching CPython.
+/// The grammar is `_parse_isoformat_date` and `_parse_isoformat_time`: fixed
+/// width fields, never variable ones. A missing offset is UTC. A comma is a
+/// dot in the fraction, which is truncated to microseconds. Whitespace, a leap
+/// second and an unpadded field are rejected, because Python rejects them.
 pub fn from_iso(text: &str) -> Result<Moment, String> {
-    let candidate = text.trim().replace(',', ".");
-    let candidate = if let Some(at) = candidate.find(['t', 'T']) {
-        format!("{}T{}", &candidate[..at], &candidate[at + 1..])
-    } else {
-        candidate
-    };
-    // An offset with seconds (`+05:30:15`) is legal for fromisoformat and not
-    // for RFC3339, so it is peeled off before chrono sees the text.
-    let (body, extra_offset) = split_seconds_offset(&candidate);
-    let parsed = chrono::DateTime::parse_from_rfc3339(&body)
-        .or_else(|_| parse_loose(&body))
-        .map_err(|_| format!("not a timestamp: {text}"))?;
-    let shifted = parsed + chrono::Duration::seconds(-extra_offset);
-    let nanos = shifted.timestamp_subsec_nanos();
-    Ok(Moment::from_unix(shifted.timestamp(), nanos))
-}
-
-/// `+05:30:15` becomes `+05:30` plus 15 seconds. Anything else is unchanged.
-fn split_seconds_offset(text: &str) -> (String, i64) {
     let bytes = text.as_bytes();
-    if bytes.len() > 9 && bytes[bytes.len() - 3] == b':' && bytes[bytes.len() - 6] == b':' {
-        if let Some(sign_at) = text.rfind(['+', '-']) {
-            let offset = &text[sign_at..];
-            if offset.len() == 9 {
-                let seconds: i64 = offset[7..].parse().unwrap_or(0);
-                let sign: i64 = if bytes[sign_at] == b'+' { 1 } else { -1 };
-                return (
-                    format!("{}{}", &text[..sign_at], &offset[..6]),
-                    sign * seconds,
-                );
-            }
-        }
-    }
-    (text.to_string(), 0)
+    let (year, month, day, consumed) = parse_iso_date(bytes)?;
+    let (hour, minute, second, micros, offset) = if consumed == bytes.len() {
+        (0, 0, 0, 0, 0)
+    } else {
+        parse_iso_time(&bytes[consumed..])?
+    };
+    let date = chrono::NaiveDate::from_ymd_opt(year, month, day)
+        .ok_or_else(|| format!("not a timestamp: {text}"))?;
+    let time = chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros)
+        .ok_or_else(|| format!("not a timestamp: {text}"))?;
+    let naive = chrono::NaiveDateTime::new(date, time);
+    let utc = naive.and_utc() - chrono::Duration::seconds(offset);
+    Ok(Moment::from_unix(
+        utc.timestamp(),
+        utc.timestamp_subsec_nanos(),
+    ))
 }
 
-fn parse_loose(text: &str) -> Result<chrono::DateTime<chrono::FixedOffset>, chrono::ParseError> {
-    use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime};
-    const DATE: &str = "%Y-%m-%d";
-    const BASIC_DATE: &str = "%Y%m%d";
-    let offset = chrono::FixedOffset::east_opt(0).expect("zero offset");
-    if let Ok(date) = NaiveDate::parse_from_str(text, DATE) {
-        let naive = date.and_time(NaiveTime::MIN);
-        return Ok(DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
-            naive, offset,
-        ));
+/// `YYYY-MM-DD`, `YYYYMMDD`, or an ISO week date `YYYY-Www-D`. Returns how many
+/// bytes the date consumed, including its trailing separator.
+fn parse_iso_date(bytes: &[u8]) -> Result<(i32, u32, u32, usize), String> {
+    let year = fixed(bytes, 0, 4).ok_or_else(|| "not a timestamp".to_string())? as i32;
+    if bytes.len() >= 8 && bytes[4].is_ascii_digit() {
+        let month = fixed(bytes, 4, 2).unwrap();
+        let day = fixed(bytes, 6, 2).ok_or_else(|| "not a timestamp".to_string())?;
+        return Ok((year, month, day, 8));
     }
-    for format in [
-        "%Y-%m-%dT%H:%M:%S%.f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M",
-        "%Y-%m-%d %H:%M:%S%.f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y%m%dT%H%M%S%.f",
-        "%Y%m%dT%H%M%S",
-    ] {
-        if let Ok(naive) = NaiveDateTime::parse_from_str(text, format) {
-            return Ok(DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
-                naive, offset,
-            ));
+    if bytes.len() >= 10 && bytes[4] == b'-' && bytes[5] == b'W' {
+        let week = fixed(bytes, 6, 2).ok_or_else(|| "not a timestamp".to_string())?;
+        if bytes.len() < 10 || bytes[8] != b'-' {
+            return Err("not a timestamp".to_string());
+        }
+        let weekday = fixed(bytes, 9, 1).ok_or_else(|| "not a timestamp".to_string())?;
+        let (year, month, day) = week_date(year, week, weekday)?;
+        return Ok((year, month, day, 10));
+    }
+    if bytes.len() >= 10 && bytes[4] == b'-' {
+        let month = fixed(bytes, 5, 2).ok_or_else(|| "not a timestamp".to_string())?;
+        if bytes.len() < 10 || bytes[7] != b'-' {
+            return Err("not a timestamp".to_string());
+        }
+        let day = fixed(bytes, 8, 2).ok_or_else(|| "not a timestamp".to_string())?;
+        return Ok((year, month, day, 10));
+    }
+    Err("not a timestamp".to_string())
+}
+
+/// The time half, starting at its separator. Any single byte separates the
+/// date from the time, so `T`, `t` and `X` all work.
+fn parse_iso_time(bytes: &[u8]) -> Result<(u32, u32, u32, u32, i64), String> {
+    if bytes.is_empty() {
+        return Err("not a timestamp".to_string());
+    }
+    let rest = &bytes[1..];
+    let (hour, minute, second, at) = parse_hms(rest)?;
+    let (micros, at) = parse_fraction(rest, at)?;
+    let offset = if at == rest.len() {
+        0
+    } else {
+        parse_offset(&rest[at..])?
+    };
+    Ok((hour, minute, second, micros, offset))
+}
+
+fn parse_hms(bytes: &[u8]) -> Result<(u32, u32, u32, usize), String> {
+    let hour = fixed(bytes, 0, 2).ok_or_else(|| "not a timestamp".to_string())?;
+    if bytes.len() == 2 || starts_fraction_or_offset(bytes, 2) {
+        return Ok((hour, 0, 0, 2));
+    }
+    if bytes.len() >= 6 && bytes[2].is_ascii_digit() {
+        let minute = fixed(bytes, 2, 2).unwrap();
+        let second = fixed(bytes, 4, 2).ok_or_else(|| "not a timestamp".to_string())?;
+        return Ok((hour, minute, second, 6));
+    }
+    if bytes.len() >= 5 && bytes[2] == b':' {
+        let minute = fixed(bytes, 3, 2).ok_or_else(|| "not a timestamp".to_string())?;
+        if bytes.len() == 5 || starts_fraction_or_offset(bytes, 5) {
+            return Ok((hour, minute, 0, 5));
+        }
+        if bytes.len() >= 8 && bytes[5] == b':' {
+            let second = fixed(bytes, 6, 2).ok_or_else(|| "not a timestamp".to_string())?;
+            return Ok((hour, minute, second, 8));
         }
     }
-    if let Ok(date) = NaiveDate::parse_from_str(text, BASIC_DATE) {
-        let naive = date.and_time(NaiveTime::MIN);
-        return Ok(DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
-            naive, offset,
-        ));
+    Err("not a timestamp".to_string())
+}
+
+fn starts_fraction_or_offset(bytes: &[u8], at: usize) -> bool {
+    matches!(bytes.get(at), Some(b'.' | b',' | b'+' | b'-' | b'Z' | b'z'))
+}
+
+fn parse_fraction(bytes: &[u8], at: usize) -> Result<(u32, usize), String> {
+    if !matches!(bytes.get(at), Some(b'.' | b',')) {
+        return Ok((0, at));
     }
-    NaiveDateTime::parse_from_str("", "").map(|_| unreachable!())
+    let mut digits = String::new();
+    let mut index = at + 1;
+    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+        if digits.len() < 6 {
+            digits.push(bytes[index] as char);
+        }
+        index += 1;
+    }
+    if digits.is_empty() {
+        return Err("not a timestamp".to_string());
+    }
+    Ok((format!("{digits:0<6}").parse().unwrap_or(0), index))
+}
+
+/// `Z`, `±HH`, `±HHMM`, `±HH:MM`, `±HH:MM:SS`.
+fn parse_offset(bytes: &[u8]) -> Result<i64, String> {
+    if bytes == b"Z" || bytes == b"z" {
+        return Ok(0);
+    }
+    if bytes.is_empty() || !matches!(bytes[0], b'+' | b'-') {
+        return Err("not a timestamp".to_string());
+    }
+    let sign: i64 = if bytes[0] == b'+' { 1 } else { -1 };
+    let body = &bytes[1..];
+    let (hour, minute, second) = match body.len() {
+        2 => (fixed(body, 0, 2).unwrap(), 0, 0),
+        4 => (fixed(body, 0, 2).unwrap(), fixed(body, 2, 2).unwrap(), 0),
+        5 if body[2] == b':' => (fixed(body, 0, 2).unwrap(), fixed(body, 3, 2).unwrap(), 0),
+        8 if body[2] == b':' && body[5] == b':' => (
+            fixed(body, 0, 2).unwrap(),
+            fixed(body, 3, 2).unwrap(),
+            fixed(body, 6, 2).unwrap(),
+        ),
+        _ => return Err("not a timestamp".to_string()),
+    };
+    Ok(sign * (hour as i64 * 3600 + minute as i64 * 60 + second as i64))
+}
+
+/// ISO week date to a calendar date. Week 1 holds January 4th and starts Monday.
+fn week_date(year: i32, week: u32, weekday: u32) -> Result<(i32, u32, u32), String> {
+    if !(1..=53).contains(&week) || !(1..=7).contains(&weekday) {
+        return Err("not a timestamp".to_string());
+    }
+    let jan4 = days_from_civil(year, 1, 4);
+    let monday = jan4 - (jan4 + 3).rem_euclid(7);
+    let days = monday + ((week - 1) * 7 + (weekday - 1)) as i64;
+    let (y, m, d) = civil_date(days);
+    if y != year {
+        return Err("not a timestamp".to_string());
+    }
+    Ok((y, m, d))
+}
+
+/// Days since the Unix epoch for a civil date. Howard Hinnant's algorithm.
+fn days_from_civil(year: i32, month: u32, day: u32) -> i64 {
+    let y = if month <= 2 {
+        year as i64 - 1
+    } else {
+        year as i64
+    };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let m = month as i64 + if month > 2 { -3 } else { 9 };
+    let doy = (153 * m + 2) / 5 + day as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+fn civil_date(days: i64) -> (i32, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    (year as i32, month as u32, day as u32)
+}
+
+fn fixed(bytes: &[u8], at: usize, width: usize) -> Option<u32> {
+    let slice = bytes.get(at..at + width)?;
+    if !slice.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(slice).ok()?.parse().ok()
+}
+
+impl serde::Serialize for Moment {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_iso())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Moment {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = <String as serde::Deserialize>::deserialize(deserializer)?;
+        from_iso(&text).map_err(serde::de::Error::custom)
+    }
 }
 
 pub const LOCAL_SCHEME: &str = "local";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActorKind {
     Human,
     Agent,
@@ -273,7 +484,7 @@ impl ActorKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Principal {
     pub identity_ref: String,
     pub kind: ActorKind,
@@ -334,7 +545,7 @@ pub fn transition_rejected(rule: &str, text: &str) -> VogtError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Workflow {
     pub kind: String,
     pub initial_state: String,
@@ -536,7 +747,7 @@ pub fn require_text(value: &str) -> Result<String, String> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Actor {
     pub id: String,
     pub kind: ActorKind,
@@ -546,7 +757,7 @@ pub struct Actor {
     pub created_at: Moment,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Project {
     pub id: String,
     pub slug: String,
@@ -591,7 +802,7 @@ impl Project {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkItem {
     pub id: String,
     pub reference: String,
@@ -610,7 +821,7 @@ pub struct WorkItem {
     pub updated_at: Moment,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Observation {
     pub id: String,
     pub sweep_id: String,
@@ -637,7 +848,7 @@ pub struct WorkOverlay {
     pub updated_at: Moment,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionGrant {
     pub id: String,
     pub state: String,
@@ -725,17 +936,45 @@ mod tests {
         for (text, expected) in accepted {
             assert_eq!(from_iso(text).unwrap().to_iso(), expected, "{text}");
         }
-        // CPython 3.12 rejects an unpadded date; chrono accepts it. The result
-        // is still the date it says, which is what a digest cares about.
-        assert_eq!(
-            from_iso("2026-8-1T5:0:0").unwrap().to_iso(),
-            "2026-08-01T05:00:00+00:00"
-        );
-        assert!(from_iso("2026-13-40T25:61:61").is_err());
+        // The rows the chrono formats got wrong. None is a rejection.
+        let rejected = [
+            "2026-8-1T5:0:0",
+            "2026-13-40T25:61:61",
+            "2026-08-12T23:59:60",
+            " 2026-01-02T03:04:05Z",
+            "2026-01-02T03:04:05Z ",
+            "2026-08-12T24:00:00",
+        ];
+        for text in rejected {
+            assert!(from_iso(text).is_err(), "{text}");
+        }
+        let more = [
+            ("2026-01-02T03:04:05+0530", "2026-01-01T21:34:05+00:00"),
+            ("2026-01-02T03:04:05+05", "2026-01-01T22:04:05+00:00"),
+            ("2026-01-02T05:00+05:00", "2026-01-02T00:00:00+00:00"),
+            ("2026-01-02T05", "2026-01-02T05:00:00+00:00"),
+            ("2026-01-02T050000", "2026-01-02T05:00:00+00:00"),
+            ("2026-W33-3", "2026-08-12T00:00:00+00:00"),
+            ("2026-08-12X05:00:00", "2026-08-12T05:00:00+00:00"),
+            (
+                "2026-08-12T05:00:00.123",
+                "2026-08-12T05:00:00.123000+00:00",
+            ),
+            (
+                "2026-08-12T05:00:00.1234567",
+                "2026-08-12T05:00:00.123456+00:00",
+            ),
+            ("20260812", "2026-08-12T00:00:00+00:00"),
+            ("2026-08-12T05:00:00-05:30", "2026-08-12T10:30:00+00:00"),
+            ("2026-08-12T05:00:00.0Z", "2026-08-12T05:00:00+00:00"),
+        ];
+        for (text, expected) in more {
+            assert_eq!(from_iso(text).unwrap().to_iso(), expected, "{text}");
+        }
         let later = from_iso("2026-01-02T00:00:01.500000Z").unwrap();
         let earlier = from_iso("2026-01-02T00:00:00Z").unwrap();
         assert!((later.seconds_since(earlier) - 1.5).abs() < 1e-9);
-        assert!(utc_now().unix_seconds > 0);
+        assert!(utc_now().unix_seconds() > 0);
     }
 
     #[test]
@@ -761,6 +1000,40 @@ mod tests {
     }
 
     #[test]
+    fn the_hook_selection_matches_the_python_messages() {
+        assert!(clock_from_env(Some("  ")).unwrap().is_none());
+        let bad = clock_from_env(Some("tomorrow")).unwrap_err().to_string();
+        assert!(
+            bad.contains("VOGT_TEST_CLOCK_START must be an RFC3339 timestamp, not 'tomorrow'"),
+            "{bad}"
+        );
+        let mut clock = clock_from_env(Some("2026-01-02T03:04:05Z"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(clock.now().to_iso(), "2026-01-02T03:04:05+00:00");
+
+        let bad = ids_from_env(Some("random"), None).unwrap_err().to_string();
+        assert!(
+            bad.contains("VOGT_TEST_IDS must be 'sequential', not 'random'"),
+            "{bad}"
+        );
+
+        assert!(is_loopback("localhost") && is_loopback("[::1]") && is_loopback("127.0.0.1"));
+        assert!(!is_loopback("localhost.example") && !is_loopback("0.0.0.0"));
+        assert!(refuse_hooks_off_loopback("127.0.0.1", Some("x"), None).is_ok());
+        let refused = refuse_hooks_off_loopback("0.0.0.0", Some("x"), Some("sequential"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.contains("refusing to serve on 0.0.0.0"),
+            "{refused}"
+        );
+        assert!(
+            refused.contains("VOGT_TEST_CLOCK_START, VOGT_TEST_IDS"),
+            "{refused}"
+        );
+    }
+
     fn a_principal_needs_an_identity() {
         assert!(Principal::new("  ", ActorKind::Human, "nobody").is_err());
         let local = local_principal("sprooty");
