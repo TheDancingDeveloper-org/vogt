@@ -67,6 +67,11 @@ fn number_match(raw: &str, work_item: bool) -> Option<BranchMatch> {
 /// Python's `\d` matches any Unicode decimal digit and `int()` strips leading
 /// zeros. `char::to_digit` is ASCII only, so each Nd block is mapped from its
 /// zero codepoint. A captured group that contains no digit returns none.
+///
+/// `ZEROS` follows the regex crate's Unicode tables, which include blocks
+/// Python 3.12's unicodedata 15.0 does not (`0x10D40`, `0x116D0`, `0x11BF0`,
+/// `0x16130`, `0x16D70`, `0x1CCF0`, `0x1E5F0` and their neighbours). Rust
+/// therefore binds a few digits Python's `\d` will not; that is harmless.
 fn normalise_digits(raw: &str) -> String {
     let digits: String = raw
         .chars()

@@ -15,6 +15,7 @@ mod core;
 mod decisions;
 mod delivery;
 mod errors;
+mod git_story;
 mod merge;
 mod observability;
 mod registry;
