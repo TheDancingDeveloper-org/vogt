@@ -301,6 +301,23 @@ def build_operations() -> list[Operation[Any, Any]]:
             cli=CliBinding(("diagnostics",)),
         ),
         Operation(
+            name="engine.status",
+            summary=(
+                "The session engine's operational report, as the GUI's "
+                "Settings shows it: build, session / push / GUI-process "
+                "counts, history archive and agent-task storage, workspace "
+                "root, and event subscribers that fell behind. `engine` says "
+                "why when it could not be asked."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=EngineStatusParams,
+            result_model=EngineStatusResult,
+            handler=services.engine_status,
+            route=HttpRoute("GET", "/engine/status"),
+            cli=CliBinding(("engine", "status")),
+        ),
+        Operation(
             name="place.metrics",
             summary="Read all bounded shell navigation counts in one response.",
             scope="read",
@@ -1360,23 +1377,6 @@ def build_operations() -> list[Operation[Any, Any]]:
         # agent can say what it runs and an operator can move the pin with a
         # reason, without an image build. `admin` for the move: it downloads
         # and executes a package from npm inside the pod.
-        Operation(
-            name="engine.status",
-            summary=(
-                "The session engine's operational report, as the GUI's "
-                "Settings shows it: build, session / push / GUI-process "
-                "counts, history archive and agent-task storage, workspace "
-                "root, and event subscribers that fell behind. `engine` says "
-                "why when it could not be asked."
-            ),
-            scope="read",
-            mutating=False,
-            params_model=EngineStatusParams,
-            result_model=EngineStatusResult,
-            handler=services.engine_status,
-            route=HttpRoute("GET", "/engine/status"),
-            cli=CliBinding(("engine", "status")),
-        ),
         Operation(
             name="agent_cli.list",
             summary="Report the pod's agent CLIs: active, baked and upstream versions.",

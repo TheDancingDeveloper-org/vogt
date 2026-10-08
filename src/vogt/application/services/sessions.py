@@ -1362,10 +1362,14 @@ def rename_session(ctx: AppContext, params: RenameSessionParams) -> SessionResul
     one the GUI started are renamed the same way and read back the same way.
     """
     reason = writes.validate_reason(params.reason)
+    name = params.name.strip()
+    if not name:
+        msg = "name must not be empty: give the session a name to show"
+        raise InvalidRequest(msg)
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
-    if not engine.rename_session(engine_id, name=params.name):
+    if not engine.rename_session(engine_id, name=name):
         msg = f"the engine has no session {params.id!r}"
         raise NotFound(msg)
     audited_action(
@@ -1377,7 +1381,7 @@ def rename_session(ctx: AppContext, params: RenameSessionParams) -> SessionResul
         outcome={
             "engine_session_id": engine_id,
             "linked": target.session is not None,
-            "name": params.name.strip(),
+            "name": name,
         },
         event_kind=SESSION_RENAMED_EVENT,
     )
@@ -1403,13 +1407,19 @@ def remove_session(ctx: AppContext, params: RemoveSessionParams) -> SessionResul
     a stop closes them, unless a stop already did; Vogt's record and the
     audit trail stay. An engine that had already forgotten a linked session
     is not an error: the record is closed all the same.
+
+    A live session is killed through the stop path first, carrying the
+    reason and who asked, so its exit reads `stopped` with both rather than
+    `errored` (WI-913) — the engine's DELETE kills without them.
     """
     reason = writes.validate_reason(params.reason)
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
+    before = engine.get_session(engine_id)
+    if before is not None and before.alive:
+        engine.kill_session(engine_id, reason=reason, by=ctx.principal.identity_ref)
     if target.session is None:
-        before = engine.get_session(engine_id)
         if before is None or not engine.remove_session(engine_id):
             msg = f"no session {engine_id!r}"
             raise NotFound(msg)

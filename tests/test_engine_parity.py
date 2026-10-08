@@ -140,7 +140,10 @@ def test_every_engine_path_the_pwa_calls_is_accounted_for() -> None:
         for entry in (*ENGINE_COUNTERPARTS, *ENGINE_ONLY)
     }
     literals: set[str] = set()
-    for path in sorted(WEB_SRC.glob("*.ts")) + sorted(WEB_SRC.glob("*.tsx")):
+    sources = sorted(WEB_SRC.rglob("*.ts")) + sorted(WEB_SRC.rglob("*.tsx"))
+    for path in sources:
+        if "__tests__" in path.parts:
+            continue
         literals |= set(
             re.findall(r"""["'`](/api/[A-Za-z0-9/_.$\-{}]*)""", path.read_text("utf-8"))
         )
