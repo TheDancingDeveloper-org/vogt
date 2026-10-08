@@ -16,6 +16,7 @@ pub struct InitOutcome {
     pub declared: Report,
     pub observed: Report,
     pub created: bool,
+    pub instance_id: String,
 }
 
 pub fn init(
@@ -47,14 +48,18 @@ pub fn init(
             std::fs::write(&path, token.as_encoded_bytes())?;
         }
     }
-    if !declared_existed {
+    let instance_id = if !declared_existed {
         let instance_id = bootstrap(data_dir, now)?;
         bind_instance(data_dir, &instance_id, now)?;
-    }
+        instance_id
+    } else {
+        instance_id_of(data_dir)?
+    };
     Ok(InitOutcome {
         created: !declared_existed,
         declared,
         observed,
+        instance_id,
     })
 }
 
@@ -136,6 +141,18 @@ const INIT_OPERATION: &str = "instance.init";
 const INIT_REASON: &str = "instance bootstrap";
 const EMPTY_DIGEST: &str =
     "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The instance id a previous init wrote. Empty when the database carries none.
+fn instance_id_of(data_dir: &Path) -> Result<String, migrator::MigrateError> {
+    let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
+    Ok(conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'instance_id'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_default())
+}
 
 /// The instance id, the initiating actor and one audit row. A database that
 /// already carries an instance id is left alone, so a second init is safe.

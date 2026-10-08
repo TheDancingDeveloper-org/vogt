@@ -38,6 +38,11 @@ struct Cli {
     /// every command rather than being restated on each.
     #[arg(long, global = true)]
     json: bool,
+    /// Data directory. Falls back to `VOGT_DATA_DIR`, then `$XDG_DATA_HOME/vogt`,
+    /// then `~/.local/share/vogt`. Global so the argv matches Python's
+    /// `vogt --data-dir … <command>`.
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -53,10 +58,6 @@ enum Command {
         /// Listen port. No default, for the same reason as host.
         #[arg(long)]
         port: u16,
-        /// Data directory. Falls back to `VOGT_DATA_DIR`, then to
-        /// `$XDG_DATA_HOME/vogt`, then `~/.local/share/vogt`.
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
         /// Do not require a bearer token. The default is to require one, which
         /// is what `/connection-info` reports as "bearer token".
         #[arg(long)]
@@ -64,9 +65,6 @@ enum Command {
     },
     /// Create or migrate the instance in a data directory.
     Init {
-        /// Data directory. Same fallback as `serve`. Created if absent.
-        #[arg(long)]
-        data_dir: Option<PathBuf>,
         /// Report pending migrations and change nothing. Exits 0 when none.
         #[arg(long)]
         check: bool,
@@ -79,10 +77,9 @@ fn main() -> ExitCode {
         Command::Serve {
             host,
             port,
-            data_dir,
             no_auth,
-        } => serve(&host, port, data_dir, cli.json, no_auth),
-        Command::Init { data_dir, check } => init(data_dir, check, cli.json),
+        } => serve(&host, port, cli.data_dir, cli.json, no_auth),
+        Command::Init { check } => init(cli.data_dir, check, cli.json),
     }
 }
 
@@ -113,10 +110,18 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
     let now = iso_now();
     match application::instance::init(&data_dir, &now, &clock_after(&now, 1)) {
         Ok(outcome) => {
-            let applied = outcome.declared.applied.len() + outcome.observed.applied.len();
+            let applied = outcome
+                .declared
+                .applied
+                .iter()
+                .chain(&outcome.observed.applied)
+                .map(|id| format!("\"{id}\""))
+                .collect::<Vec<_>>()
+                .join(",");
             if json {
                 println!(
-                    "{{\"data_dir\":\"{}\",\"created\":{},\"declared\":{},\"observed\":{},\"applied\":{applied}}}",
+                    "{{\"instance_id\":\"{}\",\"data_dir\":\"{}\",\"created\":{},\"declared_schema_version\":{},\"observed_schema_version\":{},\"migrations_applied\":[{applied}]}}",
+                    outcome.instance_id,
                     data_dir.display(),
                     outcome.created,
                     outcome.declared.version,
@@ -124,7 +129,8 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
                 );
             } else {
                 println!(
-                    "data_dir={} created={} declared={} observed={} applied={applied}",
+                    "instance_id={} data_dir={} created={} declared_schema_version={} observed_schema_version={} migrations_applied={applied}",
+                    outcome.instance_id,
                     data_dir.display(),
                     outcome.created,
                     outcome.declared.version,

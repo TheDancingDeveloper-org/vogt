@@ -130,7 +130,6 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     data = root / "instance"
     env = {
         **os.environ,
-        "VOGT_DATA_DIR": str(data),
         "VOGT_TEST_CLOCK_START": CLOCK_START,
         "VOGT_TEST_IDS": "sequential",
         # The local principal is `local:$USER`. Pinning it keeps a golden
@@ -147,7 +146,7 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     seen: dict[str, Any] = {}
     try:
         init = subprocess.run(
-            [binary, "--json", "init"],
+            [binary, "--json", "--data-dir", str(data), "init"],
             env=env,
             capture_output=True,
             text=True,
@@ -166,7 +165,7 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if "params" not in step:
                 continue
             params = _substitute(step["params"], seen, root)
-            argv = [binary, "--json", *step["operation"].split("."), *_flags(params)]
+            argv = [binary, "--json", "--data-dir", str(data), *step["operation"].split("."), *_flags(params)]
             completed = subprocess.run(
                 argv, env=env, capture_output=True, text=True, check=False
             )
@@ -258,9 +257,8 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drive the steps that name a route over HTTP against a served instance.
 
     Steps without an ``http`` block are CLI steps and are skipped, so a run
-    without ``--only`` does not fail on them. The data directory goes through
-    ``VOGT_DATA_DIR`` rather than a flag, because Python takes ``--data-dir``
-    before the subcommand and the two binaries do not yet share that shape.
+    without ``--only`` does not fail on them. The data directory goes on
+    ``--data-dir``, which both binaries take before the subcommand.
     """
     import socket
     import urllib.request
@@ -271,7 +269,6 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         data = Path(scratch) / "instance"
         env = {
             **os.environ,
-            "VOGT_DATA_DIR": str(data),
             "VOGT_TEST_CLOCK_START": CLOCK_START,
             "VOGT_TEST_IDS": "sequential",
             "USER": "parity",
@@ -279,7 +276,8 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         env.pop("VOGT_CORE_URL", None)
         init = subprocess.run(
-            [binary, "--json", "init"], env=env, capture_output=True, text=True, check=False
+            [binary, "--json", "--data-dir", str(data), "init"],
+            env=env, capture_output=True, text=True, check=False,
         )
         if init.returncode != 0:
             raise SystemExit(f"init exited {init.returncode}: {init.stderr.strip()}")
@@ -287,7 +285,7 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         server = subprocess.Popen(
-            [binary, "serve", "--host", "127.0.0.1", "--port", str(port), "--no-auth"],
+            [binary, "--data-dir", str(data), "serve", "--host", "127.0.0.1", "--port", str(port), "--no-auth"],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

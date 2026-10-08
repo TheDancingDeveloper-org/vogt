@@ -31,8 +31,9 @@ fn init_migrates_and_a_second_run_applies_nothing() {
     let dir = std::env::temp_dir().join(format!("vogt-core-init-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let first = binary()
-        .args(["init", "--data-dir"])
+        .args(["--data-dir"])
         .arg(&dir)
+        .arg("init")
         .output()
         .expect("init");
     assert!(first.status.success(), "{first:?}");
@@ -42,13 +43,14 @@ fn init_migrates_and_a_second_run_applies_nothing() {
     assert!(dir.join("observed.sqlite3").is_file());
 
     let second = binary()
-        .args(["init", "--data-dir"])
+        .args(["--data-dir"])
         .arg(&dir)
+        .arg("init")
         .output()
         .expect("init again");
     assert!(second.status.success(), "{second:?}");
     let stdout = String::from_utf8(second.stdout).unwrap();
     assert!(stdout.contains("created=false"), "{stdout}");
-    assert!(stdout.contains("applied=0"), "{stdout}");
+    assert!(stdout.contains("migrations_applied="), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }

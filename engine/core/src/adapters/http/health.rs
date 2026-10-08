@@ -242,8 +242,10 @@ mod tests {
 
     #[test]
     fn a_ready_probe_carries_detail_null_and_the_instance_id() {
+        let _guard = ENV.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("vogt-health-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        unsafe { std::env::set_var("VOGT_TEST_IDS", "sequential") };
         let now = "2026-10-08T12:00:00+00:00";
         crate::application::instance::init(&dir, now, now).unwrap();
 
