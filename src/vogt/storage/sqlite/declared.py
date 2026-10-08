@@ -931,6 +931,14 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_token(row) for row in rows]
 
+    def has_operator_credential(self) -> bool:
+        row = self._conn.execute(
+            "SELECT EXISTS (SELECT 1 FROM tokens t JOIN actors a "
+            "ON a.id = t.actor_id WHERE a.kind <> 'agent') "
+            "OR EXISTS (SELECT 1 FROM password_credentials)"
+        ).fetchone()
+        return bool(row[0])
+
     def list_auth_decisions(
         self, *, decision: str | None = None, limit: int = 100
     ) -> list[AuthDecision]:

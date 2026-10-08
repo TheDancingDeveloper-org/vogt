@@ -228,7 +228,7 @@ How long a session minted by a password login (`auth.login`) stays valid without
 
 ### `install_bootstrap_enabled`
 
-Whether the unauthenticated first-run install bootstrap (`POST /api/install/bootstrap`) may mint the first admin token while the token store is empty. It is safe on the loopback topology `serve` defaults to — only parties who could already mint a token over loopback reach it — but a fronted deployment proxies it through the public front door, so on every fresh deploy or store reset there is a window where any internet caller can take the instance. A deployment that provisions its first credential another way (`bootstrap_core_token_file`, or an operator-adopted token) never needs the HTTP bootstrap: set this `false` to refuse it outright and close that window. When disabled the status route reports the mode closed.
+Whether the unauthenticated first-run install bootstrap (`POST /api/install/bootstrap`) may mint the first admin token while no person holds a credential (agent-bound tokens such as the adopted stack secret do not count). It is safe on the loopback topology `serve` defaults to — only parties who could already mint a token over loopback reach it — but a fronted deployment proxies it through the public front door, so on every fresh deploy or store reset there is a window where any internet caller can take the instance. A deployment that creates its first operator another way (`vogt user create --scopes admin` in the container) never needs the HTTP bootstrap: set this `false` to refuse it outright and close that window. When disabled the status route reports the mode closed.
 
 ### `sqlite_synchronous`
 

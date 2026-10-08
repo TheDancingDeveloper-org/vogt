@@ -235,8 +235,10 @@ that is its MCP counterpart or says why it has none, and
 
 Three routes sit beside the registry rather than in it: the unauthenticated
 health probes; the first-run install surface (`GET /api/install/status`,
-`POST /api/install/bootstrap`), which names the first operator only while the
-token store holds no rows at all and refuses with `install_closed` forever
+`POST /api/install/bootstrap`), which names the first operator only while no
+person holds a credential — no token bound to a human actor, revoked
+included, and no password login; agent-bound tokens such as the adopted
+stack secret do not count (#903) — and refuses with `install_closed` forever
 after — given a `password` it creates that person's `admin` login and returns
 an expiring session, which is what the browser wizard rides, and without one
 it returns an `admin` API token shown once, the headless shape; and

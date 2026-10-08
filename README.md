@@ -29,13 +29,23 @@ secrets, start it:
 ```console
 git clone https://github.com/TheDancingDeveloper-org/vogt.git
 cd vogt
-cp deploy/stack.env.example deploy/.env      # set ENGINE_TOKEN
+cp deploy/stack.env.example deploy/.env      # optional: port, bind
 openssl rand -hex 32 > deploy/vogt-core-token
 docker compose -f deploy/stack.compose.yml up -d --wait
 ```
 
-Open `http://localhost:8910/` and paste the `ENGINE_TOKEN` you chose into
-**Settings (⚙)**. Voice is on out of the box — the bundled sidecar transcribes
+Open `http://localhost:8910/`: the first-run wizard asks for your name, a
+username and a password and signs you in as the first (`admin`) operator.
+If the page offers only **Sign in**, create that operator inside the
+container instead and sign in with it — the command prompts for the
+password:
+
+```console
+docker compose -f deploy/stack.compose.yml exec vogt \
+  vogt user create --username <name> --scopes admin --reason "Create first operator"
+```
+
+Voice is on out of the box — the bundled sidecar transcribes
 the microphone and speaks replies with no account. From there,
 [Getting started](docs/GETTING_STARTED.md) covers the first project, tokens for
 agents, backup and upgrade, and [Deployment](docs/DEPLOYMENT.md) covers running

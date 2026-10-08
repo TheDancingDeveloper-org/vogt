@@ -390,6 +390,16 @@ class ReadView(Protocol):
         """
         ...
 
+    def has_operator_credential(self) -> bool:
+        """Whether any person (a non-agent actor) holds a credential: a token
+        row, revoked included, or a password login.
+
+        What first-run install mode keys on (#903). Tokens bound to agent
+        actors — the adopted stack/core and agent tokens, coding-session
+        tokens — are machinery, not an operator, so they never count.
+        """
+        ...
+
     def list_auth_decisions(
         self, *, decision: str | None = None, limit: int = 100
     ) -> list[AuthDecision]: ...

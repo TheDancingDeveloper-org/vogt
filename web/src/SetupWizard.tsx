@@ -1,6 +1,7 @@
 /**
- * The first-run wizard: what an operator sees at `/` while the
- * instance has no tokens at all.
+ * The first-run wizard: what an operator sees at `/` while no person
+ * holds a credential on the instance (agent-bound tokens, such as the
+ * adopted stack secret, do not count — #903).
  *
  * The core's install mode is the gate — `App` shows this only when
  * `/api/install/status` said so — and the bootstrap it drives is

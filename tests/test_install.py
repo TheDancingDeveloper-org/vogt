@@ -1,14 +1,18 @@
-"""First-run install mode: a door that exists only while no token does.
+"""First-run install mode: a door that exists only while no operator does.
 
 The security model these tests pin down: install mode is a property of the
-token store — active exactly while it holds no rows at all — so the first
-token, however issued, closes the unauthenticated bootstrap for good, and
-nothing (not even revoking every token) reopens it.
+credential store — active exactly while no person holds a token (revoked
+included) or a password login — so the first person's credential, however
+issued, closes the unauthenticated bootstrap for good, and nothing (not even
+revoking every token) reopens it. Tokens bound to agent actors — the stack
+secret adopted at init above all — are machinery and never close it (#903).
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,20 +21,28 @@ from vogt.adapters.http.server import ServeOptions, build_server
 from vogt.application.context import AppContext
 from vogt.application.models import (
     CreateActorParams,
+    CreateUserParams,
+    InitParams,
     InstallBootstrapParams,
     IssueTokenParams,
     RevokeTokenParams,
 )
 from vogt.application.services import (
     create_actor,
+    create_user,
+    init_instance,
     install_bootstrap,
     install_status,
     issue_token,
     revoke_token,
 )
+from vogt.application.services.auth import authenticate
 from vogt.errors import InstallClosed, InvalidRequest
 
 WHY = "install test"
+PASSWORD = "correct horse battery"
+#: The stack secret a Docker quick start writes to deploy/vogt-core-token.
+CORE_SECRET = "vogt_stack_secret_that_is_long_enough_0123456789"
 
 
 @pytest.fixture
@@ -41,19 +53,20 @@ def authed(instance: AppContext) -> Iterator[TestClient]:
         yield client
 
 
-def _issue_any_token(instance: AppContext) -> None:
+def _issue_token(instance: AppContext, *, kind: str) -> None:
+    identity_ref = f"{kind}:someone"
     create_actor(
         instance,
         CreateActorParams(
-            identity_ref="agent:someone",
-            kind="agent",
+            identity_ref=identity_ref,
+            kind=kind,
             display_name="Someone",
             reason=WHY,
         ),
     )
     issue_token(
         instance,
-        IssueTokenParams(actor="agent:someone", name="t", scopes="read", reason=WHY),
+        IssueTokenParams(actor=identity_ref, name="t", scopes="read", reason=WHY),
     )
 
 
@@ -109,9 +122,27 @@ def test_bootstrap_closes_install_mode(instance: AppContext) -> None:
         install_bootstrap(instance, InstallBootstrapParams(display_name="Eve"))
 
 
-def test_any_token_closes_install_mode(instance: AppContext) -> None:
-    """The gate is "zero tokens", not "the wizard has not run"."""
-    _issue_any_token(instance)
+def test_a_persons_token_closes_install_mode(instance: AppContext) -> None:
+    """The gate is "no person holds a credential", not "the wizard has not
+    run": a token minted over loopback for a person closes it too."""
+    _issue_token(instance, kind="human")
+    assert install_status(instance).install_mode is False
+    with pytest.raises(InstallClosed):
+        install_bootstrap(instance, InstallBootstrapParams(display_name="Eve"))
+
+
+def test_an_agents_token_leaves_install_mode_open(instance: AppContext) -> None:
+    """An agent's token is not an operator: nobody could sign in with it."""
+    _issue_token(instance, kind="agent")
+    assert install_status(instance).install_mode is True
+
+
+def test_a_password_login_closes_install_mode(instance: AppContext) -> None:
+    """`vogt user create` — the CLI fallback — is a first operator too."""
+    create_user(
+        instance,
+        CreateUserParams(username="ada", password=PASSWORD, scopes="admin", reason=WHY),
+    )
     assert install_status(instance).install_mode is False
     with pytest.raises(InstallClosed):
         install_bootstrap(instance, InstallBootstrapParams(display_name="Eve"))
@@ -143,7 +174,7 @@ def test_the_bootstrap_is_audited_and_attributed_to_the_new_actor(
 
 def test_a_failed_bootstrap_leaves_no_actor_behind(instance: AppContext) -> None:
     """The loser of the race rolls back everything, auto-registration included."""
-    _issue_any_token(instance)
+    _issue_token(instance, kind="human")
     with pytest.raises(InstallClosed):
         install_bootstrap(instance, InstallBootstrapParams(display_name="Eve"))
     with instance.declared.read() as view:
@@ -204,3 +235,85 @@ def test_the_bootstrap_validates_its_body(authed: TestClient) -> None:
     response = authed.post("/api/install/bootstrap", json={})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_arguments"
+
+
+# -- #903: the Docker quick start supplies the stack secret first ----------
+
+
+@pytest.fixture
+def quick_start(instance: AppContext, tmp_path: Path) -> AppContext:
+    """A fresh instance booted the way the published stack boots it: the
+    operator wrote the stack secret before `docker compose up`, so `init`
+    adopted it as the core token, and no person exists yet."""
+    secret_file = tmp_path / "vogt-core-token"
+    secret_file.write_text(CORE_SECRET, encoding="utf-8")
+    ctx = replace(
+        instance,
+        config=instance.config.model_copy(
+            update={"bootstrap_core_token_file": secret_file}
+        ),
+    )
+    assert init_instance(ctx, InitParams()).bootstrap_core_token == "adopted"
+    return ctx
+
+
+def test_the_adopted_core_token_leaves_install_mode_open(
+    quick_start: AppContext,
+) -> None:
+    with quick_start.declared.read() as view:
+        assert view.list_tokens(include_revoked=True, limit=10), "a token row exists"
+        assert view.list_password_credentials() == []
+    assert install_status(quick_start).install_mode is True
+
+
+def test_a_quick_start_reaches_a_first_operator_end_to_end(
+    quick_start: AppContext,
+) -> None:
+    """Over HTTP, as the wizard does it: install mode is on, the bootstrap
+    creates a login, the password signs in, and the door then shuts — while
+    the core token keeps exactly the identity and scopes it was adopted with."""
+    options = ServeOptions(host="127.0.0.1", port=18099, require_auth=True)
+    with TestClient(build_server(options, config=quick_start.config)) as client:
+        assert client.get("/api/install/status").json() == {"install_mode": True}
+
+        created = client.post(
+            "/api/install/bootstrap",
+            json={"display_name": "Ada", "username": "ada", "password": PASSWORD},
+        )
+        assert created.status_code == 200, created.text
+        assert created.json()["username"] == "ada"
+
+        signed_in = client.post(
+            "/api/auth/login", json={"username": "ada", "password": PASSWORD}
+        )
+        assert signed_in.status_code == 200, signed_in.text
+        session = signed_in.json()["secret"]
+        whoami = client.get(
+            "/api/auth/whoami", headers={"Authorization": f"Bearer {session}"}
+        )
+        assert whoami.status_code == 200
+        assert whoami.json()["identity_ref"] == "human:ada"
+
+        assert client.get("/api/install/status").json() == {"install_mode": False}
+        again = client.post(
+            "/api/install/bootstrap",
+            json={"display_name": "Eve", "username": "eve", "password": PASSWORD},
+        )
+        assert again.status_code == 409
+        assert again.json()["error"]["code"] == "install_closed"
+
+    core = authenticate(quick_start, bearer=CORE_SECRET)
+    assert core.principal.identity_ref == "agent:vogt-engine"
+    assert core.principal.kind == "agent"
+    assert core.token is not None
+    assert sorted(core.token.scopes) == ["project.write", "read", "work.write"]
+
+
+def test_the_cli_fallback_also_closes_a_quick_start(quick_start: AppContext) -> None:
+    """`vogt user create --scopes admin` inside the container is the
+    documented alternative to the wizard; it closes the door the same way."""
+    create_user(
+        quick_start,
+        CreateUserParams(username="ada", password=PASSWORD, scopes="admin", reason=WHY),
+    )
+    assert install_status(quick_start).install_mode is False
