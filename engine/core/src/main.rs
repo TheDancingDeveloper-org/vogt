@@ -34,6 +34,10 @@ use clap::{Parser, Subcommand};
     about = "Vogt core — drop-in replacement for the Python vogt process"
 )]
 struct Cli {
+    /// Emit results as JSON. Global, as on the Python CLI, so it applies to
+    /// every command rather than being restated on each.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -42,21 +46,23 @@ struct Cli {
 enum Command {
     /// Run the core HTTP server.
     Serve {
-        /// Bind address. Defaults to loopback.
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
-        /// Bind port.
-        #[arg(long, default_value_t = 8080)]
-        port: u16,
-        /// Data directory holding the two SQLite files.
+        /// Listen address. No default: it encodes exposure, and the deployment
+        /// supplies it.
         #[arg(long)]
-        data_dir: PathBuf,
+        host: String,
+        /// Listen port. No default, for the same reason as host.
+        #[arg(long)]
+        port: u16,
+        /// Data directory. Falls back to `VOGT_DATA_DIR`, then to
+        /// `$XDG_DATA_HOME/vogt`, then `~/.local/share/vogt`.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
     },
     /// Create or migrate the instance in a data directory.
     Init {
-        /// Data directory. Created if it does not exist.
+        /// Data directory. Same fallback as `serve`. Created if absent.
         #[arg(long)]
-        data_dir: PathBuf,
+        data_dir: Option<PathBuf>,
         /// Report pending migrations and change nothing. Exits 0 when none.
         #[arg(long)]
         check: bool,
@@ -64,21 +70,29 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    match cli.command {
         Command::Serve {
             host,
             port,
             data_dir,
-        } => serve(&host, port, data_dir),
-        Command::Init { data_dir, check } => init(data_dir, check),
+        } => serve(&host, port, data_dir, cli.json),
+        Command::Init { data_dir, check } => init(data_dir, check, cli.json),
     }
 }
 
-fn init(data_dir: PathBuf, check: bool) -> ExitCode {
+fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
+    let Some(data_dir) = resolve_data_dir(data_dir) else {
+        return ExitCode::from(1);
+    };
     if check {
         return match application::instance::pending(&data_dir) {
             Ok((declared, observed)) => {
-                println!("pending declared={declared} observed={observed}");
+                if json {
+                    println!("{{\"pending\":{{\"declared\":{declared},\"observed\":{observed}}}}}");
+                } else {
+                    println!("pending declared={declared} observed={observed}");
+                }
                 if declared == 0 && observed == 0 {
                     ExitCode::SUCCESS
                 } else {
@@ -94,14 +108,24 @@ fn init(data_dir: PathBuf, check: bool) -> ExitCode {
     let now = iso_now();
     match application::instance::init(&data_dir, &now) {
         Ok(outcome) => {
-            println!(
-                "data_dir={} created={} declared={} observed={} applied={}",
-                data_dir.display(),
-                outcome.created,
-                outcome.declared.version,
-                outcome.observed.version,
-                outcome.declared.applied.len() + outcome.observed.applied.len()
-            );
+            let applied = outcome.declared.applied.len() + outcome.observed.applied.len();
+            if json {
+                println!(
+                    "{{\"data_dir\":\"{}\",\"created\":{},\"declared\":{},\"observed\":{},\"applied\":{applied}}}",
+                    data_dir.display(),
+                    outcome.created,
+                    outcome.declared.version,
+                    outcome.observed.version
+                );
+            } else {
+                println!(
+                    "data_dir={} created={} declared={} observed={} applied={applied}",
+                    data_dir.display(),
+                    outcome.created,
+                    outcome.declared.version,
+                    outcome.observed.version
+                );
+            }
             ExitCode::SUCCESS
         }
         Err(err) => {
@@ -111,7 +135,10 @@ fn init(data_dir: PathBuf, check: bool) -> ExitCode {
     }
 }
 
-fn serve(host: &str, port: u16, data_dir: PathBuf) -> ExitCode {
+fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool) -> ExitCode {
+    let Some(data_dir) = resolve_data_dir(data_dir) else {
+        return ExitCode::from(1);
+    };
     let now = iso_now();
     if let Err(err) = application::instance::init(&data_dir, &now) {
         eprintln!("vogt-core serve: {err}");
@@ -125,7 +152,7 @@ fn serve(host: &str, port: u16, data_dir: PathBuf) -> ExitCode {
         }
     };
     let router = adapters::http::health::router(adapters::http::health::HealthState {
-        data_dir,
+        data_dir: data_dir.clone(),
         version: env!("CARGO_PKG_VERSION").to_string(),
     });
     let runtime = match tokio::runtime::Runtime::new() {
@@ -135,6 +162,12 @@ fn serve(host: &str, port: u16, data_dir: PathBuf) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if json {
+        println!(
+            "{{\"url\":\"http://{host}:{port}\",\"data_dir\":\"{}\"}}",
+            data_dir.display()
+        );
+    }
     let result = runtime.block_on(async move {
         let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, router)
@@ -146,6 +179,25 @@ fn serve(host: &str, port: u16, data_dir: PathBuf) -> ExitCode {
         Err(err) => {
             eprintln!("vogt-core serve: {err}");
             ExitCode::from(1)
+        }
+    }
+}
+
+fn resolve_data_dir(given: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(dir) = given {
+        return Some(dir);
+    }
+    if let Some(dir) = std::env::var_os("VOGT_DATA_DIR") {
+        return Some(PathBuf::from(dir));
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")));
+    match base {
+        Some(dir) => Some(dir.join("vogt")),
+        None => {
+            eprintln!("vogt-core: no data directory — pass --data-dir or set VOGT_DATA_DIR");
+            None
         }
     }
 }

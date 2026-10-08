@@ -1,10 +1,8 @@
 //! Health routes. Ports `src/vogt/adapters/http/health.py`.
 //!
 //! `/health` and `/health/live` are liveness. `/health/ready` reports both
-//! schema versions. `detail` is omitted when ready, matching the Python model
-//! where it defaults to null and is excluded from the response only when unset
-//! — here it is simply absent, and the golden comparison for this chunk is the
-//! field set, not pydantic's null policy.
+//! schema versions and the instance id. `detail` is always present: pydantic
+//! emits it as `null` when unset, and dropping the key is a wire difference.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -51,12 +49,12 @@ async fn live(State(state): State<Arc<HealthState>>) -> Json<Liveness> {
 #[derive(Serialize)]
 struct Readiness {
     status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
     declared_schema_version: i64,
     observed_schema_version: i64,
     declared_schema_expected: i64,
     observed_schema_expected: i64,
+    instance_id: Option<String>,
 }
 
 async fn ready(State(state): State<Arc<HealthState>>) -> (StatusCode, Json<Readiness>) {
@@ -75,6 +73,7 @@ async fn ready(State(state): State<Arc<HealthState>>) -> (StatusCode, Json<Readi
                     observed_schema_version: 0,
                     declared_schema_expected: 0,
                     observed_schema_expected: 0,
+                    instance_id: None,
                 }),
             )
         }
@@ -127,5 +126,47 @@ fn readiness(data_dir: &std::path::Path) -> Result<Readiness, MigrateError> {
         observed_schema_version: observed_version,
         declared_schema_expected: declared_expected,
         observed_schema_expected: observed_expected,
+        instance_id: instance_id(data_dir),
     })
+}
+
+/// The id bootstrap wrote into `meta`. Absent until that chunk lands, which is
+/// reported as null rather than invented.
+fn instance_id(data_dir: &std::path::Path) -> Option<String> {
+    let conn = connect(&declared_path(data_dir)).ok()?;
+    conn.query_row(
+        "SELECT value FROM meta WHERE key = 'instance_id'",
+        [],
+        |row| row.get(0),
+    )
+    .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ready_probe_carries_detail_null_and_the_instance_id() {
+        let dir = std::env::temp_dir().join(format!("vogt-health-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let now = "2026-10-08T12:00:00+00:00";
+        crate::application::instance::init(&dir, now).unwrap();
+        let conn = connect(&declared_path(&dir)).unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('instance_id', 'ins_01TEST')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let body = readiness(&dir).unwrap();
+        let json = serde_json::to_value(&body).unwrap();
+        assert_eq!(json["status"], "ready");
+        assert!(json["detail"].is_null());
+        assert_eq!(json["instance_id"], "ins_01TEST");
+        assert!(json["declared_schema_version"].as_i64().unwrap() > 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

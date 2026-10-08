@@ -78,9 +78,10 @@ jobs:
           copy engine/core/src core/src
           mkdir -p "$stage/src/vogt/storage/sqlite" "$stage/web/dist"
           cp -a src/vogt/storage/sqlite/migrations "$stage/src/vogt/storage/sqlite/migrations"
-          # The stage builds -p vogt-engine-server, which embeds web/dist. An
-          # empty bundle is enough to prove the workspace loads.
-          ( cd "$stage/engine" && cargo metadata --offline --no-deps --format-version 1 >/dev/null )
+          # metadata proves the workspace loads; cargo check proves the embedded SQL
+          # resolves, which a missing COPY or a wrong include_str! depth would
+          # not. --offline uses the cache the job already warmed.
+          ( cd "$stage/engine" && cargo check --offline -p vogt-core )
 
   parity:
     name: parity
