@@ -3,15 +3,19 @@
 //! This chunk serves health and applies the shared SQL migrations. Product
 //! behaviour lands in later port chunks.
 
+mod actors;
 mod adapters;
 mod application;
 mod auth;
+mod branches;
 mod collectors;
 #[allow(dead_code)]
 mod config;
 mod core;
 mod decisions;
+mod delivery;
 mod errors;
+mod merge;
 mod observability;
 mod registry;
 mod storage;
