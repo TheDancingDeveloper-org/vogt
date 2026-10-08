@@ -25,6 +25,17 @@ from vogt.application.services.auth import (
     whoami,
 )
 from vogt.application.services.board import list_board
+from vogt.application.services.chats import (
+    chat_archive,
+    chat_create,
+    chat_decide,
+    chat_get,
+    chat_interrupt,
+    chat_list,
+    chat_promote,
+    chat_send,
+    chat_set_model,
+)
 from vogt.application.services.collect import coverage, deps, observations, sweep
 from vogt.application.services.connect import connect
 from vogt.application.services.contracts import (
@@ -171,6 +182,15 @@ __all__ = [
     "bind_session_work",
     "brief_project",
     "bugs",
+    "chat_archive",
+    "chat_create",
+    "chat_decide",
+    "chat_get",
+    "chat_interrupt",
+    "chat_list",
+    "chat_promote",
+    "chat_send",
+    "chat_set_model",
     "clone",
     "comment_work",
     "compliance",

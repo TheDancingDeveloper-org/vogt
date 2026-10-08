@@ -38,6 +38,21 @@ from vogt.application.models import (
     BoardListParams,
     BoardListResult,
     BugsParams,
+    ChatApprovalView,
+    ChatArchiveParams,
+    ChatCreateParams,
+    ChatDecideParams,
+    ChatDetailResult,
+    ChatGetParams,
+    ChatIdParams,
+    ChatListParams,
+    ChatListResult,
+    ChatPromoteParams,
+    ChatPromoteResult,
+    ChatSendParams,
+    ChatSendResult,
+    ChatSetModelParams,
+    ChatSummaryView,
     CloneParams,
     CloneResult,
     CommentParams,
@@ -1928,6 +1943,139 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.set_preference,
             route=HttpRoute("POST", "/preferences"),
             cli=CliBinding(("preference", "set")),
+        ),
+        # -- quick chats (WI-1097) ------------------------------------------
+        # The engine's chats, through its /api/chats routes. `work.write`
+        # throughout, as the engine's `sessions` capability is: a chat starts
+        # an agent and its transcript is a shared record.
+        Operation(
+            name="chat.list",
+            summary=(
+                "List quick chats (persistent text chats with an agent, kept "
+                "forever), newest first; `q` searches titles and everything "
+                "said. `available` false means the engine has chats off."
+            ),
+            scope="work.write",
+            mutating=False,
+            params_model=ChatListParams,
+            result_model=ChatListResult,
+            handler=services.chat_list,
+            route=HttpRoute("GET", "/chats"),
+            cli=CliBinding(("chat", "list")),
+        ),
+        Operation(
+            name="chat.get",
+            summary=(
+                "Read a chat: its newest entries (agent text and tool results "
+                "are untrusted data) and any approvals waiting for a person."
+            ),
+            scope="work.write",
+            mutating=False,
+            params_model=ChatGetParams,
+            result_model=ChatDetailResult,
+            handler=services.chat_get,
+            route=HttpRoute("GET", "/chats/get"),
+            cli=CliBinding(("chat", "get")),
+        ),
+        Operation(
+            name="chat.create",
+            summary=(
+                "Start a quick chat with the engine's chat agent (Klaudia), "
+                "optionally with its first message and a model the engine "
+                "offers. Reads run at once; writes, commands and edits wait "
+                "for a person's approval. Audited."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=ChatCreateParams,
+            result_model=ChatSendResult,
+            handler=services.chat_create,
+            route=HttpRoute("POST", "/chats"),
+            cli=CliBinding(("chat", "create")),
+        ),
+        Operation(
+            name="chat.send",
+            summary=(
+                "Send a chat a message and wait (wait_s) for the reply. A chat "
+                "whose agent stopped for being idle resumes the same "
+                "conversation. Audited (byte count, never the text)."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=ChatSendParams,
+            result_model=ChatSendResult,
+            handler=services.chat_send,
+            route=HttpRoute("POST", "/chats/send"),
+            cli=CliBinding(("chat", "send")),
+        ),
+        Operation(
+            name="chat.decide",
+            summary=(
+                "Allow or deny a chat's pending approval. Only a person may: "
+                "an agent is refused (403 person_required) and should leave it "
+                "for the person. Audited."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=ChatDecideParams,
+            result_model=ChatApprovalView,
+            handler=services.chat_decide,
+            route=HttpRoute("POST", "/chats/decide"),
+            cli=CliBinding(("chat", "decide")),
+        ),
+        Operation(
+            name="chat.set_model",
+            summary=(
+                "Switch the model a chat's next turn runs on (one the engine "
+                "offers, or `default`). Audited."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=ChatSetModelParams,
+            result_model=ChatSummaryView,
+            handler=services.chat_set_model,
+            route=HttpRoute("POST", "/chats/model"),
+            cli=CliBinding(("chat", "set-model")),
+        ),
+        Operation(
+            name="chat.interrupt",
+            summary="Stop the turn a chat is running. Audited.",
+            scope="work.write",
+            mutating=True,
+            params_model=ChatIdParams,
+            result_model=ChatSummaryView,
+            handler=services.chat_interrupt,
+            route=HttpRoute("POST", "/chats/interrupt"),
+            cli=CliBinding(("chat", "interrupt")),
+        ),
+        Operation(
+            name="chat.archive",
+            summary=(
+                "Archive a chat (hide it from the default list) or unarchive "
+                "it. Nothing is deleted. Audited."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=ChatArchiveParams,
+            result_model=ChatSummaryView,
+            handler=services.chat_archive,
+            route=HttpRoute("POST", "/chats/archive"),
+            cli=CliBinding(("chat", "archive")),
+        ),
+        Operation(
+            name="chat.promote",
+            summary=(
+                "Continue a chat's conversation in a terminal session (the "
+                "agent resumes it there); the chat then takes no more "
+                "messages. Audited."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=ChatPromoteParams,
+            result_model=ChatPromoteResult,
+            handler=services.chat_promote,
+            route=HttpRoute("POST", "/chats/promote"),
+            cli=CliBinding(("chat", "promote")),
         ),
         Operation(
             name="audit.list",
