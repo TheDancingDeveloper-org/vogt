@@ -1,5 +1,4 @@
-//! The skeleton's only contract: it builds, prints a version, and its `serve`
-//! subcommand has help. Behaviour arrives with later chunks.
+//! Shape of this chunk: version, help, init migrates, serve answers health.
 
 use std::process::Command;
 
@@ -16,20 +15,40 @@ fn version_names_the_binary() {
 }
 
 #[test]
-fn serve_help_succeeds_and_names_the_command() {
+fn serve_help_names_the_flags() {
     let output = binary()
         .args(["serve", "--help"])
         .output()
         .expect("run help");
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("vogt-core serve"), "{stdout}");
+    assert!(stdout.contains("--data-dir"), "{stdout}");
+    assert!(stdout.contains("--port"), "{stdout}");
 }
 
 #[test]
-fn serve_is_not_implemented_yet() {
-    let output = binary().arg("serve").output().expect("run serve");
-    assert_eq!(output.status.code(), Some(2), "{output:?}");
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert!(stderr.contains("not implemented"), "{stderr}");
+fn init_migrates_and_a_second_run_applies_nothing() {
+    let dir = std::env::temp_dir().join(format!("vogt-core-init-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let first = binary()
+        .args(["init", "--data-dir"])
+        .arg(&dir)
+        .output()
+        .expect("init");
+    assert!(first.status.success(), "{first:?}");
+    let stdout = String::from_utf8(first.stdout).unwrap();
+    assert!(stdout.contains("created=true"), "{stdout}");
+    assert!(dir.join("declared.sqlite3").is_file());
+    assert!(dir.join("observed.sqlite3").is_file());
+
+    let second = binary()
+        .args(["init", "--data-dir"])
+        .arg(&dir)
+        .output()
+        .expect("init again");
+    assert!(second.status.success(), "{second:?}");
+    let stdout = String::from_utf8(second.stdout).unwrap();
+    assert!(stdout.contains("created=false"), "{stdout}");
+    assert!(stdout.contains("applied=0"), "{stdout}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
