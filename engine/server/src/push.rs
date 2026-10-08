@@ -206,7 +206,7 @@ impl Subscription {
             Subscription::WebPush { endpoint, .. } => h.update(endpoint.as_bytes()),
             Subscription::Fcm { token } => h.update(token.as_bytes()),
         }
-        format!("{:x}", h.finalize())
+        crate::files::hex_digest(h.finalize())
     }
 }
 
@@ -792,6 +792,22 @@ mod tests {
             token: "abc".into(),
         };
         assert_eq!(a.id(), b.id());
+    }
+
+    /// Subscription ids are persisted, so the hex encoding must stay the
+    /// lowercase SHA-256 digest 0.10's `LowerHex` produced. digest 0.11's
+    /// output type has no `LowerHex`, so the id goes through `hex_digest`.
+    #[test]
+    fn subscription_id_is_lowercase_sha256_hex() {
+        let sub = Subscription::WebPush {
+            endpoint: "https://push.example/abc".into(),
+            p256dh: "k".into(),
+            auth: "a".into(),
+        };
+        assert_eq!(
+            sub.id(),
+            "f7a263f8786e9f9540c48a757245e31290708979548c369f207cbcff9e23bb86"
+        );
     }
 
     #[test]
