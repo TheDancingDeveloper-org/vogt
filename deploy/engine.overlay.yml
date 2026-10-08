@@ -119,6 +119,12 @@ services:
       ENGINE_ASSISTANT_BASE_URL: "${ENGINE_ASSISTANT_BASE_URL:-}"
       ENGINE_ASSISTANT_API_KEY: "${ENGINE_ASSISTANT_API_KEY:-}"
       ENGINE_ASSISTANT_MODEL: "${ENGINE_ASSISTANT_MODEL:-}"
+      # More named providers beside that one, as a JSON array of profile
+      # objects (`docs/ENGINE.md`, "Configuring the assistant provider"); the
+      # PWA offers a profile picker once there are two. Empty means none, and
+      # an empty default profile means the implicit one above.
+      ENGINE_ASSISTANT_PROFILES_JSON: "${ENGINE_ASSISTANT_PROFILES_JSON:-}"
+      ENGINE_ASSISTANT_DEFAULT_PROFILE: "${ENGINE_ASSISTANT_DEFAULT_PROFILE:-}"
       # Server-side speech (optional), configured independently of the chat
       # profile. Empty base-URL lists mean off — no localhost fallbacks are
       # assumed here, so a public build points at nothing until you name an

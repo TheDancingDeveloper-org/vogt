@@ -289,6 +289,30 @@ def test_the_engine_overlay_builds_the_engine_and_fronts_the_core() -> None:
     assert re.search(r"ENGINE_TOKEN:\s*\"\$\{ENGINE_TOKEN:-\}\"", overlay)
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        "ENGINE_ASSISTANT_BASE_URL",
+        "ENGINE_ASSISTANT_API_KEY",
+        "ENGINE_ASSISTANT_MODEL",
+        "ENGINE_ASSISTANT_PROFILES_JSON",
+        "ENGINE_ASSISTANT_DEFAULT_PROFILE",
+    ],
+)
+def test_the_engine_overlay_passes_every_assistant_provider_setting_through(
+    name: str,
+) -> None:
+    """Every provider setting the engine reads reaches it from `.env`.
+
+    A setting the overlay does not name never reaches the container, so a
+    second assistant profile written into `.env` would be silently ignored
+    and the PWA's profile picker would never appear. Each defaults to empty,
+    which the engine reads as unset.
+    """
+    overlay = _without_comments(ENGINE_OVERLAY.read_text(encoding="utf-8"))
+    assert re.search(rf'{name}:\s*"\$\{{{name}:-\}}"', overlay), name
+
+
 @pytest.mark.parametrize("path", PUBLIC_DEPLOY_FILES, ids=lambda p: p.name)
 def test_the_public_deploy_files_publish_to_loopback_unless_told_otherwise(
     path: Path,
