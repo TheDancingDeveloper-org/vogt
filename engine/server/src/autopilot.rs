@@ -20,9 +20,12 @@
 //!   driven forever.
 //!
 //! What is never nudged: a session blocked on a person (it said so; a person
-//! acts next), one at a permission dialog or mid-turn, a plain shell, and
-//! Klaudia, which runs its own goal loop (`/goal run`) — two drivers of one
-//! loop would interleave prompts into its turns (WI-950).
+//! acts next), one at a permission dialog or mid-turn, a plain shell, and a
+//! Klaudia session whose own goal loop (`/goal run`) is driving it — two
+//! drivers of one loop would interleave prompts into its turns (WI-950). A
+//! Klaudia session working an ordinary task is an interactive turn like any
+//! other, and is nudged like one (WI-1090): it says it is in its goal loop in
+//! its title (`klaudia: goal-loop`) or, on older builds, in its status bar.
 //!
 //! A nudge is input, so it resets the session's quiet clock: the next one
 //! cannot come sooner than `nudge_after` after the agent last stopped.
@@ -64,7 +67,7 @@ If no unblocked work is left, say so and end your reply with the autopilot done 
 line your brief describes.";
 
 /// Agents the engine knows how to re-drive at their prompt.
-const REDRIVEN: &[&str] = &["claude", "codex", "opencode"];
+const REDRIVEN: &[&str] = &["claude", "codex", "opencode", "klaudia"];
 
 /// Whether the visible screen ends with the agent saying it is done: a line,
 /// among the last ten that are not blank, that reads exactly the marker once
@@ -79,16 +82,6 @@ pub fn says_done(lines: &[String]) -> bool {
         .any(|l| l.trim_start_matches(|c: char| !c.is_ascii_alphanumeric()) == DONE_MARKER)
 }
 
-/// The agent CLI a live session runs, from its conversation or its command.
-fn agent_of(session: &Session) -> Option<String> {
-    if let Some(conversation) = session.conversation() {
-        return Some(conversation.agent);
-    }
-    let command = session.summary().command?;
-    let argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
-    crate::agent_cli::agent_name(&argv)
-}
-
 /// What one tick decides for one session.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Step {
@@ -98,20 +91,35 @@ pub enum Step {
     Capped,
 }
 
+/// What one session showed, as [`decide`] weighs it.
+#[derive(Debug, Clone, Copy)]
+pub struct Seen {
+    pub activity: ActivityState,
+    pub blocked: bool,
+    pub quiet_for: Duration,
+    pub ready: bool,
+    pub done: bool,
+    /// The agent's own loop is driving it (Klaudia's goal loop).
+    pub own_loop: bool,
+    pub nudges: u32,
+}
+
 /// The decision, pure over what was read.
-pub fn decide(
-    policy: &Policy,
-    activity: ActivityState,
-    blocked: bool,
-    quiet_for: Duration,
-    ready: bool,
-    done: bool,
-    nudges: u32,
-) -> Step {
+pub fn decide(policy: &Policy, seen: Seen) -> Step {
+    let Seen {
+        activity,
+        blocked,
+        quiet_for,
+        ready,
+        done,
+        own_loop,
+        nudges,
+    } = seen;
     if done {
         return Step::Done;
     }
     if blocked
+        || own_loop
         || !matches!(
             activity,
             ActivityState::Idle | ActivityState::WaitingForInput
@@ -134,7 +142,7 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
         if !session.autopilot() || !session.is_alive() {
             continue;
         }
-        let Some(agent) = agent_of(&session) else {
+        let Some(agent) = session.agent() else {
             continue;
         };
         if !REDRIVEN.contains(&agent.as_str()) {
@@ -156,14 +164,19 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
         let Ok(view) = screen::session_screen(Arc::clone(&session), 0).await else {
             continue;
         };
+        let own_loop =
+            agent == "klaudia" && screen::klaudia_goal_loop(view.title.as_deref(), &view.lines);
         let step = decide(
             policy,
-            view.activity,
-            blocked,
-            quiet_for,
-            view.ready,
-            says_done(&view.lines),
-            session.autopilot_nudges(),
+            Seen {
+                activity: view.activity,
+                blocked,
+                quiet_for,
+                ready: view.ready,
+                done: says_done(&view.lines),
+                own_loop,
+                nudges: session.autopilot_nudges(),
+            },
         );
         match step {
             Step::Leave => {}
@@ -271,7 +284,18 @@ mod tests {
         };
         let quiet = Duration::from_secs(61);
         let go = |activity, blocked, quiet_for, ready, done, nudges| {
-            decide(&policy, activity, blocked, quiet_for, ready, done, nudges)
+            decide(
+                &policy,
+                Seen {
+                    activity,
+                    blocked,
+                    quiet_for,
+                    ready,
+                    done,
+                    own_loop: false,
+                    nudges,
+                },
+            )
         };
         assert_eq!(
             go(ActivityState::Idle, false, quiet, true, false, 0),
@@ -324,5 +348,86 @@ mod tests {
             ),
             Step::Leave
         );
+    }
+
+    /// WI-1090: Klaudia's screens, from readiness to the decision. An idle
+    /// Klaudia is nudged, by its title or (older builds) by its box; one at
+    /// work, at a permission ask or in its own goal loop is left alone.
+    #[test]
+    fn klaudia_is_nudged_at_its_prompt_and_never_in_its_goal_loop() {
+        use crate::screen::{is_ready, klaudia_frames as frames, klaudia_goal_loop};
+        let policy = Policy::default();
+        let quiet = policy.nudge_after + Duration::from_secs(1);
+        let step = |activity, lines: &[String], title: Option<&str>| {
+            decide(
+                &policy,
+                Seen {
+                    activity,
+                    blocked: false,
+                    quiet_for: quiet,
+                    ready: is_ready(activity, true, lines, Some("klaudia"), title),
+                    done: says_done(lines),
+                    own_loop: klaudia_goal_loop(title, lines),
+                    nudges: 0,
+                },
+            )
+        };
+        // Idle: an old build by its box, a new one by its title.
+        assert_eq!(
+            step(ActivityState::Idle, &frames::idle(), None),
+            Step::Nudge
+        );
+        assert_eq!(
+            step(ActivityState::Idle, &frames::idle(), Some("klaudia: ready")),
+            Step::Nudge
+        );
+        // Mid-turn: running, and its box does not make it ready even if the
+        // activity were to read idle.
+        assert_eq!(
+            step(ActivityState::Running, &frames::mid_turn(), None),
+            Step::Leave
+        );
+        assert_eq!(
+            step(ActivityState::Idle, &frames::mid_turn(), None),
+            Step::Leave
+        );
+        assert_eq!(
+            step(
+                ActivityState::Idle,
+                &frames::idle(),
+                Some("klaudia: working")
+            ),
+            Step::Leave
+        );
+        // A permission ask, by its caption or its title.
+        assert_eq!(
+            step(ActivityState::Idle, &frames::approval(), None),
+            Step::Leave
+        );
+        assert_eq!(
+            step(
+                ActivityState::Idle,
+                &frames::idle(),
+                Some("klaudia: awaiting approval")
+            ),
+            Step::Leave
+        );
+        // Its own goal loop, by its status bar or its title, even at rest.
+        assert_eq!(
+            step(ActivityState::Idle, &frames::goal_loop(), None),
+            Step::Leave
+        );
+        assert_eq!(
+            step(
+                ActivityState::Idle,
+                &frames::idle(),
+                Some("klaudia: goal-loop")
+            ),
+            Step::Leave
+        );
+        // And it is done when it says so, as any agent is.
+        let mut done = frames::idle();
+        done.insert(3, "AUTOPILOT: DONE".to_string());
+        assert_eq!(step(ActivityState::Idle, &done, None), Step::Done);
     }
 }
