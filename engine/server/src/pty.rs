@@ -458,10 +458,16 @@ impl Session {
         resume_from: Option<u64>,
         tail_bytes: Option<usize>,
     ) -> (Bytes, u64, bool) {
-        let pos = self.scrollback.lock().total_written();
+        // One guard for the whole snapshot. The reader thread pushes to the
+        // ring and feeds the grid under this lock, so `pos` and the payload
+        // describe the same instant. Reading `pos` and then building the
+        // payload under a second acquisition let the reader land output in
+        // between: the payload carried bytes past `pos`, the live stream
+        // resumed from `pos`, and the client got those bytes twice (WI-891).
+        let sb = self.scrollback.lock();
+        let pos = sb.total_written();
         if let Some(cursor) = resume_from {
-            let delta = self.scrollback.lock().snapshot_since(cursor);
-            if let Some(delta) = delta {
+            if let Some(delta) = sb.snapshot_since(cursor) {
                 // A retained delta within budget is byte-exact and appends
                 // (reset:false), so a switch-away that produced little still
                 // catches up without repainting the screen.
@@ -477,23 +483,17 @@ impl Session {
             // live grid's frame, not a tail of the raw ring (WI-121). The
             // frame is the current screen plus the scrollback the grid holds,
             // a few KiB where the raw tail was up to the whole budget.
-            if let Some(frame) = self.grid_frame() {
-                return (self.bounded_frame(frame, tail_bytes), pos, true);
-            }
-            // No live grid (a session restored without one): the bounded tail
-            // replay, exactly as a hibernated attach does.
-            let snapshot = match tail_bytes {
-                Some(limit) => self.scrollback.lock().snapshot_tail(limit),
-                None => self.scrollback.lock().snapshot(),
-            };
-            return (snapshot, pos, true);
         }
+        // Lock order is scrollback, then terminal, as in the reader thread.
         if let Some(frame) = self.grid_frame() {
+            drop(sb);
             return (self.bounded_frame(frame, tail_bytes), pos, true);
         }
+        // No live grid (a session restored without one): the bounded tail
+        // replay, exactly as a hibernated attach does.
         let snapshot = match tail_bytes {
-            Some(limit) => self.scrollback.lock().snapshot_tail(limit),
-            None => self.scrollback.lock().snapshot(),
+            Some(limit) => sb.snapshot_tail(limit),
+            None => sb.snapshot(),
         };
         (snapshot, pos, true)
     }
@@ -1006,12 +1006,15 @@ fn spawn_reader_thread(
                     Ok(0) => break,
                     Ok(n) => {
                         let data = Bytes::copy_from_slice(&buf[..n]);
+                        // Ring and grid advance together under the ring's
+                        // lock, so an attach snapshot (which takes the same
+                        // lock) never sees a grid ahead of `total_written`.
                         let pos_after = {
                             let mut sb = session.scrollback.lock();
                             sb.push(&data);
+                            session.feed_terminal(&data);
                             sb.total_written()
                         };
-                        session.feed_terminal(&data);
                         let pos = pos_after - n as u64;
                         *session.last_output.lock() = Some(Instant::now());
                         *session.last_output_at.lock() = Some(time::OffsetDateTime::now_utc());
