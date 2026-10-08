@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod chat;
+pub use chat::*;
+
 /// What a session's terminal is doing.
 ///
 /// `idle`, `running`, `waiting-for-input` and `awaiting-approval` are the live
@@ -847,6 +850,12 @@ pub enum ServerEvent {
     /// The tag is spelled explicitly rather than left to the container's
     /// kebab-case rule so it reads `task.gate.opened`, the dotted name the PWA
     /// and phone filter on.
+    /// A quick chat (WI-1097) changed: a message, a state, an approval, its
+    /// title or archive flag. Thin like `VogtChanged`: a client showing that
+    /// chat reads it, or follows `/api/chats/{id}/events`.
+    ChatChanged {
+        id: Uuid,
+    },
     #[serde(rename = "task.gate.opened")]
     TaskGateOpened {
         task_id: Uuid,

@@ -795,7 +795,7 @@ impl SessionHistory {
     }
 }
 
-fn user_query_to_fts(query: &str) -> Option<String> {
+pub(crate) fn user_query_to_fts(query: &str) -> Option<String> {
     let tokens: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter_map(|part| {
