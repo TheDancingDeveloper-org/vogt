@@ -38,7 +38,7 @@ fn init_migrates_and_a_second_run_applies_nothing() {
         .expect("init");
     assert!(first.status.success(), "{first:?}");
     let stdout = String::from_utf8(first.stdout).unwrap();
-    assert!(stdout.contains("created=true"), "{stdout}");
+    assert!(stdout.contains("created: yes"), "{stdout}");
     assert!(dir.join("declared.sqlite3").is_file());
     assert!(dir.join("observed.sqlite3").is_file());
 
@@ -50,7 +50,7 @@ fn init_migrates_and_a_second_run_applies_nothing() {
         .expect("init again");
     assert!(second.status.success(), "{second:?}");
     let stdout = String::from_utf8(second.stdout).unwrap();
-    assert!(stdout.contains("created=false"), "{stdout}");
-    assert!(stdout.contains("migrations_applied="), "{stdout}");
+    assert!(stdout.contains("created: no"), "{stdout}");
+    assert!(stdout.contains("migrations_applied: (none)"), "{stdout}");
     let _ = std::fs::remove_dir_all(&dir);
 }

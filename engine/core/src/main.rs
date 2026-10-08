@@ -40,7 +40,9 @@ struct Cli {
     json: bool,
     /// Data directory. Falls back to `VOGT_DATA_DIR`, then `$XDG_DATA_HOME/vogt`,
     /// then `~/.local/share/vogt`. Global so the argv matches Python's
-    /// `vogt --data-dir … <command>`.
+    /// `vogt --data-dir … <command>`. Clap also accepts the flag after the
+    /// subcommand, which Python rejects with exit 2; that leniency is
+    /// deliberate, since the documented position is the one the harness uses.
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -114,28 +116,36 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
                 .declared
                 .applied
                 .iter()
-                .chain(&outcome.observed.applied)
-                .map(|id| format!("\"{id}\""))
-                .collect::<Vec<_>>()
-                .join(",");
+                .map(|id| format!("declared:{id}"))
+                .chain(
+                    outcome
+                        .observed
+                        .applied
+                        .iter()
+                        .map(|id| format!("observed:{id}")),
+                )
+                .collect::<Vec<_>>();
+            let body = serde_json::Value::Object(
+                [
+                    ("instance_id", outcome.instance_id.into()),
+                    ("data_dir", data_dir.display().to_string().into()),
+                    ("created", outcome.created.into()),
+                    ("declared_schema_version", outcome.declared.version.into()),
+                    ("observed_schema_version", outcome.observed.version.into()),
+                    ("migrations_applied", applied.into()),
+                    // Rust does not mint or adopt bootstrap tokens, so both stay
+                    // at the default Python reports when neither file is set.
+                    ("bootstrap_core_token", "not_configured".into()),
+                    ("bootstrap_agent_token", "not_configured".into()),
+                ]
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+            );
             if json {
-                println!(
-                    "{{\"instance_id\":\"{}\",\"data_dir\":\"{}\",\"created\":{},\"declared_schema_version\":{},\"observed_schema_version\":{},\"migrations_applied\":[{applied}]}}",
-                    outcome.instance_id,
-                    data_dir.display(),
-                    outcome.created,
-                    outcome.declared.version,
-                    outcome.observed.version
-                );
+                println!("{}", serde_json::to_string_pretty(&body).expect("json"));
             } else {
-                println!(
-                    "instance_id={} data_dir={} created={} declared_schema_version={} observed_schema_version={} migrations_applied={applied}",
-                    outcome.instance_id,
-                    data_dir.display(),
-                    outcome.created,
-                    outcome.declared.version,
-                    outcome.observed.version
-                );
+                println!("{}", render_text(&body));
             }
             ExitCode::SUCCESS
         }
@@ -144,6 +154,37 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Python's `cli/render.py`: `key: value`, booleans as `yes`/`no`, an empty
+/// list as `(none)` and each list entry on its own indented line.
+fn render_text(body: &serde_json::Value) -> String {
+    fn scalar(value: &serde_json::Value) -> String {
+        match value {
+            serde_json::Value::Bool(true) => "yes".to_string(),
+            serde_json::Value::Bool(false) => "no".to_string(),
+            serde_json::Value::Null => "-".to_string(),
+            serde_json::Value::String(text) => text.clone(),
+            other => other.to_string(),
+        }
+    }
+    let mut lines = Vec::new();
+    let object = body.as_object().expect("init result is an object");
+    for (key, value) in object {
+        match value {
+            serde_json::Value::Array(items) if items.is_empty() => {
+                lines.push(format!("{key}: (none)"));
+            }
+            serde_json::Value::Array(items) => {
+                lines.push(format!("{key}:"));
+                for item in items {
+                    lines.push(format!("  - {}", scalar(item)));
+                }
+            }
+            other => lines.push(format!("{key}: {}", scalar(other))),
+        }
+    }
+    lines.join("\n")
 }
 
 fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: bool) -> ExitCode {
