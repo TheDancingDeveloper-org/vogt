@@ -8,6 +8,10 @@
 
 /// The derived phase ladder, in order. Shown beside the workflow state, never
 /// as it.
+///
+/// Wire values are snake_case (`in_review`). `PrState` is kebab-case
+/// (`in-review`), so the serde pass must give the two enums different
+/// `rename_all` settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GitPhase {
     NoBranch,
