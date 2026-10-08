@@ -75,3 +75,6 @@ jobs:
           diff -q "$RUNNER_TEMP/golden/cli.json" "$RUNNER_TEMP/again/cli.json"
           uv run python scripts/parity.py check --impl python --golden "$RUNNER_TEMP/golden"
           uv run python scripts/parity.py check --impl python --golden "$RUNNER_TEMP/golden" --only actor
+
+      - name: drift ledger (report only)
+        run: uv run python scripts/drift_ledger.py
