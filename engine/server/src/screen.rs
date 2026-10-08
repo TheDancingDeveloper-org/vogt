@@ -1,8 +1,7 @@
 //! The rendered terminal screen of a session, for programs that drive it.
 //!
-//! A session's output lives as raw bytes in its scrollback ring, and every
-//! client (xterm.js in the PWA) renders it by replaying that ring on attach.
-//! The engine also keeps its own terminal: the PTY reader feeds each chunk
+//! A session's output lives as raw bytes in its scrollback ring. The engine
+//! also keeps its own terminal: the PTY reader feeds each chunk
 //! into a per-session `vt100` grid ([`Terminal`]), and `GET
 //! /api/sessions/{id}/screen` reads that grid rather than replaying a tail of
 //! the ring. A diff-painting TUI (opencode / OpenTUI) draws one full frame and
@@ -81,6 +80,51 @@ impl Terminal {
     /// The visible screen and up to `scrollback_lines` lines above it.
     pub fn render(&mut self, scrollback_lines: usize) -> (Rendered, Vec<String>) {
         read_parser(&mut self.parser, scrollback_lines)
+    }
+
+    /// Escape codes that reproduce the grid's current screen, the scrollback
+    /// it holds above it, and the modes and cursor, so a client can paint the
+    /// whole frame with one write instead of replaying the raw byte history
+    /// (WI-121).
+    ///
+    /// Scrollback is emitted oldest first, one `contents_formatted` per
+    /// screenful, and the screen last with the cursor restored — the same
+    /// order a tail replay would have produced it, so xterm's own scrollback
+    /// ends up holding it. Every sequence here is one `vt100` already
+    /// consumed while building the grid, so nothing reaches the client that
+    /// the grid did not accept (WI-987).
+    pub fn frame(&mut self) -> Vec<u8> {
+        let (rows, _cols) = self.parser.screen().size();
+        let mut out = Vec::new();
+        // Clear the visible screen only. RIS (`ESC c`) would also wipe the
+        // client's scrollback, which is exactly where the history below has
+        // to land, and the client already resets its terminal on reset:true.
+        // History rows, oldest first, one per line. Read straight off the
+        // grid rather than sliced out of a formatted dump: a scrolled view
+        // overlaps the next one, and slicing that overlap off dropped rows.
+        let history: Vec<Vec<u8>> = {
+            let screen = self.parser.screen_mut();
+            screen.set_scrollback(usize::MAX);
+            let total = screen.scrollback();
+            let mut rows_out = Vec::with_capacity(total);
+            let mut off = total;
+            while off > 0 {
+                let take = off.min(rows as usize);
+                screen.set_scrollback(off);
+                rows_out.extend(screen.rows_formatted(0, u16::MAX).take(take));
+                off -= take;
+            }
+            rows_out
+        };
+        for row in &history {
+            out.extend_from_slice(row);
+            out.extend_from_slice(b"\r\n");
+        }
+        self.parser.screen_mut().set_scrollback(0);
+        let screen = self.parser.screen();
+        out.extend_from_slice(&screen.state_formatted());
+        out.extend_from_slice(&screen.cursor_state_formatted());
+        out
     }
 }
 
@@ -336,6 +380,48 @@ pub async fn kept_screen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WI-121: the frame reproduces the screen a raw replay would, in a
+    /// handful of bytes, including a frame the tail replay loses.
+    #[test]
+    fn the_frame_reproduces_the_grid_and_stays_small() {
+        let mut term = Terminal::new(4, 20);
+        // A full paint, then far more than a screenful of cell diffs — the
+        // shape that makes a tail replay blank (WI-990).
+        term.process(b"\x1b[2J\x1b[1;1Hbuild ok");
+        for n in 0..4000 {
+            term.process(format!("\x1b[4;1Hspin {n:04}").as_bytes());
+        }
+        let frame = term.frame();
+        // The raw history is tens of KiB; the frame is the current cells.
+        assert!(frame.len() < 4_096, "frame is {} bytes", frame.len());
+        let again = render(&frame, 4, 20);
+        assert_eq!(again.lines[0], "build ok");
+        assert_eq!(again.lines[3], "spin 3999");
+        assert_eq!(again.cursor, ScreenCursor { row: 3, col: 9 });
+    }
+
+    #[test]
+    fn the_frame_keeps_scrollback_above_the_screen() {
+        let mut term = Terminal::new(2, 10);
+        term.process(b"one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        let frame = term.frame();
+        let text = String::from_utf8_lossy(&frame);
+        let plain: String = text
+            .chars()
+            .filter(|c| *c == '\n' || !c.is_control())
+            .collect();
+        // Oldest history first, then the visible screen, each on its own line.
+        // History rows come first, oldest first, then the visible screen.
+        let screen_at = plain.find("four").expect("screen missing");
+        let history = &plain[..screen_at];
+        assert!(history.contains("one"), "{plain:?}");
+        assert!(history.contains("two"), "{plain:?}");
+        assert!(history.contains("three"), "{plain:?}");
+        assert!(history.find("one") < history.find("two"), "{plain:?}");
+        assert!(history.find("two") < history.find("three"), "{plain:?}");
+        assert!(plain[screen_at..].contains("five"), "{plain:?}");
+    }
 
     #[test]
     fn cursor_positioned_text_keeps_its_spaces() {

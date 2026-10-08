@@ -4286,20 +4286,20 @@ async fn ws_attach_echoes_input_and_replays_on_reattach() {
     let v: Value = serde_json::from_str(&s).unwrap();
     assert_eq!(v["type"], "snapshot-start");
 
-    // 2) snapshot-done (no binary frames in between since nothing has been written yet)
-    let m = tokio::time::timeout(Duration::from_secs(2), ws.next())
-        .await
-        .unwrap()
-        .unwrap()
-        .unwrap();
-    let s = match m {
-        Message::Text(s) => s,
-        other => panic!("expected snapshot-done, got {other:?}"),
-    };
-    assert_eq!(
-        serde_json::from_str::<Value>(&s).unwrap()["type"],
-        "snapshot-done"
-    );
+    // 2) snapshot-done. A live session's cold attach sends the grid's frame
+    // (WI-121), so binary frames may precede it even before any input.
+    loop {
+        let m = tokio::time::timeout(Duration::from_secs(2), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Message::Text(s) = m {
+            if serde_json::from_str::<Value>(&s).unwrap()["type"] == "snapshot-done" {
+                break;
+            }
+        }
+    }
 
     // 3) Write input → expect to see it echoed back.
     ws.send(Message::Binary(b"hello-mydevenv\n".to_vec().into()))

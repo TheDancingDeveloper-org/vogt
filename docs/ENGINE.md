@@ -1131,10 +1131,9 @@ lines, which bounds what one session's emulator holds; parsing a chunk is the
 cost added to the PTY reader's hot path.
 
 A hibernated session has no live grid — it was dropped with the process — so
-its screen is still rendered by replaying the tail of output it kept, and an
-attach still replays the raw ring into the client's own xterm.js. The two
-agree for as long as the replay window contains a full frame, which is the
-case for anything that redraws in lines.
+its screen is still rendered by replaying the tail of output it kept. A live
+session's attach sends the grid's frame instead of the raw ring (WI-121); see
+[Attach protocol](#attach-protocol).
 
 **Readiness for a driver.** Watch `GET /api/events` for the `activity` event
 of your session: `waiting-for-input` is the push signal that a prompt is up,
@@ -1591,17 +1590,23 @@ suspect to confirm with a second probe, not an immediate reconnect.
 client's terminal keeps only a fixed scrollback, so the server never ships more
 than the client can hold:
 
-- **Cold attach** (no `resume_from`): a ground-state-aligned tail of at most the
-  budget, `reset` true.
+- **Cold attach** (no `resume_from`), and a **warm reattach whose cursor aged
+  out or whose delta exceeds the budget:** the live grid's frame — escape
+  codes for the current screen, the scrollback the grid holds and the cursor
+  (`Terminal::frame` in `screen.rs`) — `reset` true, cut to the budget on a
+  ground-state boundary when the frame is larger. This is a few kilobytes
+  where the raw ring was up to the whole budget, and it carries the frame a
+  tail of raw bytes loses (WI-990, WI-121). `reset: true` may therefore follow
+  a `resume_from`. The client discards its stale cursor and re-anchors to
+  `scrollback_pos - scrollback_bytes`, so after replaying the frame its
+  position is `scrollback_pos` again and live traffic resumes with no gap.
 - **Warm reattach whose cursor is retained and whose delta fits the budget:**
   `reset` false and the binary snapshot contains only the newer bytes,
   byte-for-byte — an ordinary switch-away/switch-back appends without a clear.
-- **Warm reattach whose cursor aged out of the ring, or whose delta exceeds the
-  budget:** a ground-state-aligned tail of at most the budget, `reset` true.
-  `reset: true` may therefore follow a `resume_from`. The client discards its
-  stale cursor and re-anchors to `scrollback_pos - scrollback_bytes` (the start
-  of the tail), so after replaying the tail its position is `scrollback_pos`
-  again and live traffic resumes with no gap.
+- **No live grid** (a session restored without one, and every hibernated
+  attach): the ground-state-aligned tail of the raw ring, at most the budget,
+  `reset` true. A hibernated attach ignores `resume_from` and `snapshot_tail_bytes`
+  and replays the output it kept.
 
 The returned `scrollback_pos` is always the absolute end position, unaffected by
 trimming the front. Omitting `snapshot_tail_bytes` (the in-band lag resync,
