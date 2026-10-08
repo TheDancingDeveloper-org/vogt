@@ -160,12 +160,15 @@ where
 {
     // A resync always carries the client's cursor, so this is the warm/delta
     // path; the cold-attach tail cap never applies here.
+    let (cols, rows) = *session.watch_size().borrow();
     let (payload, pos, reset) = session.snapshot_for_attach(Some(from_pos), None);
     let meta = ServerControl::SnapshotStart {
         session_id: Some(session.id),
         scrollback_bytes: payload.len() as u64,
         scrollback_pos: pos,
         reset,
+        cols: Some(cols),
+        rows: Some(rows),
     };
     sink.send(Message::Text(serde_json::to_string(&meta).unwrap().into()))
         .await
@@ -343,12 +346,20 @@ async fn authenticate(
 
 /// The attach exchange for a hibernated session: a full snapshot of its kept
 /// output, `snapshot-done`, `hibernated`, and a normal close.
-async fn send_hibernated(socket: &mut WebSocket, id: Uuid, bytes: bytes::Bytes) {
+async fn send_hibernated(
+    socket: &mut WebSocket,
+    id: Uuid,
+    bytes: bytes::Bytes,
+    rows: u16,
+    cols: u16,
+) {
     let frames = [ServerControl::SnapshotStart {
         session_id: Some(id),
         scrollback_bytes: bytes.len() as u64,
         scrollback_pos: bytes.len() as u64,
         reset: true,
+        cols: Some(cols),
+        rows: Some(rows),
     }];
     for frame in frames {
         if socket
@@ -397,8 +408,8 @@ async fn handle_socket(
     // closes: there is nothing live to stream, and attaching must not wake
     // it — the PWA pre-warms panes, so attach-to-wake would bring back every
     // hibernated session the first time anybody opened the GUI.
-    if let Some((bytes, _, _, _)) = state.sessions.hibernated_screen(id) {
-        send_hibernated(&mut socket, id, bytes).await;
+    if let Some((bytes, rows, cols, _)) = state.sessions.hibernated_screen(id) {
+        send_hibernated(&mut socket, id, bytes, rows, cols).await;
         return;
     }
     let session = match state.sessions.get(id) {
@@ -418,6 +429,10 @@ async fn handle_socket(
 
     // Subscribe BEFORE snapshotting so no broadcast chunks are missed in the gap.
     let mut rx = session.subscribe();
+    // Likewise the size: read it before the snapshot, marked seen, so a resize
+    // landing after this point still reaches the client as a `resize` frame.
+    let mut size_rx = session.watch_size();
+    let (cols, rows) = *size_rx.borrow_and_update();
     let (snapshot, snap_pos, reset) = session.snapshot_for_attach(
         auth.resume_from,
         auth.snapshot_tail_bytes.map(|b| b as usize),
@@ -429,6 +444,8 @@ async fn handle_socket(
         scrollback_bytes: snapshot.len() as u64,
         scrollback_pos: snap_pos,
         reset,
+        cols: Some(cols),
+        rows: Some(rows),
     };
     if sink
         .send(Message::Text(serde_json::to_string(&meta).unwrap().into()))
@@ -527,6 +544,43 @@ async fn handle_socket(
 
         loop {
             tokio::select! {
+                Ok(()) = size_rx.changed() => {
+                    // Another client (or this one) resized the PTY. Flush the
+                    // output already queued — it was painted before the
+                    // resize — then tell this client the new size, so it
+                    // renders what follows at the width the program paints
+                    // for (WI-1089).
+                    let Ok(lagged) =
+                        flush_available(&mut sink, &mut rx, snap_pos, &mut sent_pos).await
+                    else {
+                        break;
+                    };
+                    if lagged {
+                        match recover_from_lag(
+                            &mut sink,
+                            &outbound_session,
+                            sent_pos,
+                            &mut resyncs,
+                        )
+                        .await
+                        {
+                            Recovery::Resynced(pos) => {
+                                snap_pos = pos;
+                                sent_pos = pos;
+                            }
+                            Recovery::GiveUp => break,
+                        }
+                    }
+                    let (cols, rows) = *size_rx.borrow_and_update();
+                    let frame = ServerControl::Resize { cols, rows };
+                    if sink
+                        .send(Message::Text(serde_json::to_string(&frame).unwrap().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 Some(ping_id) = ping_rx.recv() => {
                     // Flush anything already queued for this socket, then answer
                     // the probe with `sent_pos` — the byte offset actually

@@ -756,8 +756,10 @@ paths:
         A WebSocket upgrade, outside the bearer middleware: the first text
         frame must be `{"type":"auth","token":"…","resume_from"?:N,
         "snapshot_tail_bytes"?:N}` and the token needs the `sessions`
-        capability. The server replies `snapshot-start`, binary scrollback
-        chunks, `snapshot-done`, then live output. Client binary frames (and
+        capability. The server replies `snapshot-start` (with the PTY's
+        `cols`/`rows`), binary scrollback chunks, `snapshot-done`, then live
+        output, plus a `{"type":"resize","cols":N,"rows":N}` frame to every
+        attached socket whenever any client changes the PTY's size. Client binary frames (and
         text frames that are not control messages) go to PTY stdin; control
         frames are `resize` and `ping`. Close codes: 4408 no auth frame within
         five seconds, 4401 bad auth, 4404 no such session. A hibernated

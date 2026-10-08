@@ -1565,12 +1565,25 @@ Client text control frames:
 Server text control frames:
 
 ```json
-{"type":"snapshot-start","session_id":"uuid","scrollback_bytes":0,"scrollback_pos":0,"reset":true}
+{"type":"snapshot-start","session_id":"uuid","scrollback_bytes":0,"scrollback_pos":0,"reset":true,"cols":120,"rows":40}
 {"type":"snapshot-done"}
+{"type":"resize","cols":120,"rows":40}
 {"type":"pong","id":1,"pos":123}
 {"type":"lag","note":"client too slow; reattach"}
 {"type":"hibernated"}
 ```
+
+One PTY has one size, however many clients attach. `snapshot-start` carries
+the size its payload is drawn at, and every attached socket gets a `resize`
+frame whenever any client's `resize` changes the PTY's size (the one that
+asked included; a resize to the current size sends nothing). Pending output is
+flushed before the frame, so output after it is painted for the new size. A
+client draws the stream at that size, not the size its own pane fits: a
+diff-painting TUI (Bubble Tea, Ink) repaints with relative cursor moves, and a
+narrower client wraps each line so the moves land on the wrong rows and leave
+ghost frames (WI-1089). The PWA asks for its own size only from the pane the
+person is using — on open, on input or focus, on a resize while focused, or
+from its "Fit to this screen" chip — and follows otherwise.
 
 `hibernated` follows `snapshot-done` when the session is hibernated. The
 snapshot was its kept output (always `reset`, whatever `resume_from` said).

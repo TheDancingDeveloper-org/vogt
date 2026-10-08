@@ -1140,8 +1140,24 @@ pub enum ServerControl {
         /// applying this snapshot. False means the payload is a resume delta.
         #[serde(default = "default_true")]
         reset: bool,
+        /// The PTY size the payload is drawn at. The client sizes its
+        /// terminal to this before applying the payload: a frame replayed at
+        /// any other width wraps, and a diff-painting TUI's relative
+        /// cursor moves then land on the wrong rows (WI-1089).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cols: Option<u16>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows: Option<u16>,
     },
     SnapshotDone,
+    /// The PTY was resized — by any attached client. Every attached client
+    /// renders the stream at this size, whatever size its own pane fits, so a
+    /// second viewer never draws a narrower or wider screen than the program
+    /// paints for (WI-1089).
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     /// Response to a client liveness probe. `pos` is the server's absolute
     /// scrollback position, allowing the client to notice output it missed
     /// even when the WebSocket still answers.

@@ -43,6 +43,7 @@ import { acquireDormantSlot, releaseDormantSlot } from "./dormantSlots";
 // a deep scroll on reload (WI-129).
 const SERIALIZE_MAX_SCROLLBACK = 2000;
 import { beginForegroundReplay } from "./terminalPrewarm";
+import { TerminalSizeTracker, type TermSize } from "./terminalSize";
 import {
   clampTerminalFontSize,
   DEFAULT_TERMINAL_FONT_SIZE,
@@ -153,6 +154,15 @@ const TerminalView: Component<Props> = (props) => {
   let search: SearchAddon | null = null;
   let serializeAddon: SerializeAddon | null = null;
   let resizeObserver: ResizeObserver | null = null;
+  // The PTY's size versus this pane's, and whether this pane may set it
+  // (WI-1089): every viewer draws at the PTY's size, and only the one the
+  // person is using asks for its own.
+  const size = new TerminalSizeTracker();
+  const [foreignSize, setForeignSize] = createSignal<TermSize | null>(null);
+  // A `resize` frame that arrived while a snapshot was still parsing, and the
+  // live output after it, in arrival order: that output is painted for the new
+  // size, so it waits until the snapshot has drained and the size is applied.
+  let heldForResize: (Uint8Array | TermSize)[] | null = null;
   let inSnapshot = true;
   let outputPosition: number | undefined;
   let snapshotEndPosition: number | undefined;
@@ -427,18 +437,48 @@ const TerminalView: Component<Props> = (props) => {
     // characters: `Ctrl` armed + `r` typed → `^R`.
     const next = applyStickyMods(data);
     if (props.interceptInput?.(next)) return;
+    // Typing here is using this pane: it takes the PTY's size.
+    claimSize();
     sendToPty(next);
   };
 
+  /** Ask the PTY for this pane's fitted size, when this pane owns the size. */
   const sendResize = () => {
     if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(
-      JSON.stringify({
-        type: "resize",
-        cols: term.cols,
-        rows: term.rows,
-      }),
-    );
+    // A pane nobody can see — parked, or in a hidden tab — never resizes the
+    // PTY out from under the viewer someone is using.
+    if (isParked() || document.visibilityState === "hidden") return;
+    const want = size.request();
+    if (!want) return;
+    ws.send(JSON.stringify({ type: "resize", cols: want.cols, rows: want.rows }));
+  };
+
+  /** Draw at the PTY's size (or the fitted one, before the engine names it). */
+  const applyTargetSize = () => {
+    setForeignSize(size.foreign());
+    const target = size.target();
+    if (!term || !target) return;
+    if (term.cols === target.cols && term.rows === target.rows) return;
+    try {
+      term.resize(target.cols, target.rows);
+    } catch {
+      /* xterm can throw while its DOM is detaching or hidden */
+    }
+  };
+
+  /** The engine announced the PTY's size: draw at it from here on. */
+  const applyAnnouncedSize = (next: TermSize, fromSnapshot: boolean) => {
+    if (!(next.cols > 0 && next.rows > 0)) return;
+    size.announce(next, fromSnapshot);
+    applyTargetSize();
+  };
+
+  /** The person acted in this pane: it takes the PTY's size. */
+  const claimSize = () => {
+    if (size.owner) return;
+    size.claim();
+    setForeignSize(null);
+    sendResize();
   };
 
   const checkWatchdog = (forceProbe = false) => {
@@ -483,7 +523,23 @@ const TerminalView: Component<Props> = (props) => {
       return;
     }
     try {
-      fit.fit();
+      const proposed = fit.proposeDimensions();
+      if (
+        proposed &&
+        Number.isFinite(proposed.cols) &&
+        Number.isFinite(proposed.rows) &&
+        proposed.cols > 0 &&
+        proposed.rows > 0
+      ) {
+        // A pane resized while the person is typing in it (window, split,
+        // soft keyboard) is a pane in use: it takes the size. Layout settling
+        // around an unfocused pane, or a refit at the same size, takes nothing.
+        const resized = size.fit({ cols: proposed.cols, rows: proposed.rows });
+        if (resized && term.textarea && document.activeElement === term.textarea) {
+          size.claim();
+        }
+      }
+      applyTargetSize();
       sendResize();
       // Repaint after a (re)fit. A pane opened or resumed while its host had no
       // size buffers writes without painting; the fit restores a valid cell
@@ -653,6 +709,9 @@ const TerminalView: Component<Props> = (props) => {
     });
     term.open(hostRef);
     configureTerminalTextarea(term.textarea);
+    // Focusing the terminal (a click, a tap that raises the keyboard, the
+    // window coming back to front) is using it: it takes the PTY's size.
+    term.textarea?.addEventListener("focus", () => claimSize());
     fitAndResize();
 
     // Track whether the viewport is behind the live tail, so the jump-to-bottom
@@ -1118,13 +1177,28 @@ const TerminalView: Component<Props> = (props) => {
                 scrollback_bytes?: number;
                 scrollback_pos?: number;
                 reset?: boolean;
+                cols?: number;
+                rows?: number;
               }
             | { type: "snapshot-done" }
+            | { type: "resize"; cols: number; rows: number }
             | { type: "pong"; id: number; pos: number }
             | { type: "lag"; note?: string }
             | { type: "hibernated" };
           if (ctrl.type === "snapshot-start") {
             replay?.cancel();
+            // A new snapshot supersedes output held behind a resize; keep only
+            // the size it carried.
+            const held = heldForResize;
+            heldForResize = null;
+            for (const item of held ?? []) {
+              if (!(item instanceof Uint8Array)) applyAnnouncedSize(item, false);
+            }
+            // The payload is drawn at the PTY's size: size the terminal to it
+            // before a byte of it is parsed.
+            if (typeof ctrl.cols === "number" && typeof ctrl.rows === "number") {
+              applyAnnouncedSize({ cols: ctrl.cols, rows: ctrl.rows }, true);
+            }
             replay = createReplayQueue(
               props.sessionId,
               (chunk, done) => {
@@ -1181,6 +1255,27 @@ const TerminalView: Component<Props> = (props) => {
               initialAttachDone = true;
               if (isParked()) parkSocket();
             });
+          } else if (ctrl.type === "resize") {
+            // Some viewer — this one or another — resized the PTY. Output
+            // after this frame is painted for the new size; queued after any
+            // snapshot still parsing, so the snapshot keeps its own size.
+            const next = { cols: ctrl.cols, rows: ctrl.rows };
+            if (heldForResize) {
+              heldForResize.push(next);
+            } else if (replay && inSnapshot) {
+              const held: (Uint8Array | TermSize)[] = [next];
+              heldForResize = held;
+              void replay.done.then(() => {
+                if (heldForResize !== held) return;
+                heldForResize = null;
+                for (const item of held) {
+                  if (item instanceof Uint8Array) term?.write(item);
+                  else applyAnnouncedSize(item, false);
+                }
+              });
+            } else {
+              applyAnnouncedSize(next, false);
+            }
           } else if (ctrl.type === "hibernated") {
             hibernated = true;
             setReconnectView(null);
@@ -1221,7 +1316,10 @@ const TerminalView: Component<Props> = (props) => {
         scheduleCachePersist();
         return;
       }
-      if (inSnapshot) {
+      if (heldForResize) {
+        // Painted for a size not applied yet: waits behind the snapshot.
+        heldForResize.push(buf);
+      } else if (inSnapshot) {
         // Snapshot and immediately-following live frames share one ordered
         // queue until the snapshot parser has drained.
         if (!replay?.enqueue(buf)) term?.write(buf);
@@ -1483,7 +1581,29 @@ const TerminalView: Component<Props> = (props) => {
             </a>
           )}
         </Show>
-        <div class="terminal-host" ref={hostRef} />
+        <div
+          class="terminal-host"
+          classList={{ "terminal-host--foreign-size": foreignSize() !== null }}
+          ref={hostRef}
+        />
+        <Show when={foreignSize()}>
+          {(pty) => (
+            <button
+              type="button"
+              class="terminal-size-chip"
+              data-testid="terminal-size-chip"
+              title="Another screen set this terminal's size. Resize it to fit this one."
+              onPointerDown={(event) => {
+                // Take the tap before xterm's pointer handling, as the other
+                // chips do.
+                event.preventDefault();
+                claimSize();
+              }}
+            >
+              {pty().cols}×{pty().rows} · Fit to this screen
+            </button>
+          )}
+        </Show>
         <Show when={reconnectView()}>
           {(info) => (
             <div class="terminal-status-overlay terminal-reconnect-overlay" role="status">

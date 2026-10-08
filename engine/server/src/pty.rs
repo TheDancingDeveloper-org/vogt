@@ -12,7 +12,7 @@ use std::{
 use bytes::Bytes;
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, PtySize};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{broadcast, watch, Notify};
 use uuid::Uuid;
 pub use vogt_engine_contract::{SessionSpec, SessionSummary};
 
@@ -57,6 +57,9 @@ pub struct Session {
     pid: Option<u32>,
 
     output_tx: broadcast::Sender<OutputChunk>,
+    /// The PTY's size as `(cols, rows)`, published so every attached socket
+    /// tells its client when another client resizes the PTY (WI-1089).
+    size_tx: watch::Sender<(u16, u16)>,
     spawned_at: Instant,
     last_output: Mutex<Option<Instant>>,
     activity: Mutex<ActivityState>,
@@ -551,7 +554,18 @@ impl Session {
         // Reflow the grid to match, so a screen read before the program's own
         // repaint arrives is already the new size.
         self.resize_terminal(rows, cols);
+        self.size_tx.send_if_modified(|size| {
+            let changed = *size != (cols, rows);
+            *size = (cols, rows);
+            changed
+        });
         Ok(())
+    }
+
+    /// Follow the PTY's `(cols, rows)`: the receiver's current value is the
+    /// size now, and `changed()` fires on every resize that alters it.
+    pub fn watch_size(&self) -> watch::Receiver<(u16, u16)> {
+        self.size_tx.subscribe()
     }
 
     pub fn rename(&self, new_name: String) {
@@ -931,6 +945,7 @@ pub fn spawn(
         child: Mutex::new(Some(child)),
         pid,
         output_tx: tx.clone(),
+        size_tx: watch::Sender::new((size.cols, size.rows)),
         spawned_at: Instant::now(),
         last_output: Mutex::new(None),
         activity: Mutex::new(ActivityState::Running),
