@@ -27,12 +27,15 @@ why = "each run writes under its own temporary root"
 tokens = [{ needle_kind = "root", token = "<root>" }, { needle_kind = "data", token = "<data>" }]
 
 [version]
-# The product version is stamped at build time. A dev build of vogt-core
-# reports "local/dev" while Python reports the release, so the two answers
-# differ on nothing but when they were built. Only this key is blanked, and
-# only so the rest of the answer still compares.
-why = "the version names the build, not the behaviour under test"
-keys = ["version"]
+# The product version is stamped at build time, and only the answers that
+# report the build itself carry it. A dev build of vogt-core says "local/dev"
+# where Python says the release. Blanking every key named `version` would also
+# hide a wrong contract version, a deployed version, or a version_mismatch
+# payload, so the rule names the operations it applies to and only their
+# top-level `version`.
+why = "the build stamp names the build, not the behaviour, and only these answers carry it"
+operations = ["http.health.live", "http.version", "http.connection_info"]
+key = "version"
 
 [schema]
 # pydantic emits a `title` per model and orders `anyOf` by declaration. Those

@@ -173,7 +173,7 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 {
                     "operation": step["operation"],
                     "exit": completed.returncode,
-                    "body": _normalise(body, root, data),
+                    "body": _normalise(body, root, data, step["operation"]),
                 }
             )
     finally:
@@ -230,11 +230,6 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "VOGT_DATA_DIR": str(data),
             "VOGT_TEST_CLOCK_START": CLOCK_START,
             "VOGT_TEST_IDS": "sequential",
-            # The CLI honours VOGT_TEST_IDS and the golden records ins_0001. The
-            # HTTP server built from the installed package does not, so it mints
-            # a fresh id per process. The golden carries the recording run's id,
-            # and a later run differs on it until the server reads the hook. That
-            # difference is the signal the check exists to show, not noise.
             "USER": "parity",
             "LOGNAME": "parity",
         }
@@ -274,7 +269,9 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                     {
                         "operation": step["operation"],
                         "status": status,
-                        "result": _normalise(result, Path(scratch), data),
+                        "result": _normalise(
+                            result, Path(scratch), data, step["operation"]
+                        ),
                     }
                 )
         finally:
@@ -298,9 +295,9 @@ def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> 
     raise SystemExit(f"server never answered {url}")
 
 
-def _normalise(value: Any, root: Path, data: Path) -> Any:
+def _normalise(value: Any, root: Path, data: Path, operation: str | None = None) -> Any:
     rules = _rules()
-    return _walk(value, rules, {str(root): "<root>", str(data): "<data>"})
+    return _walk(value, rules, {str(root): "<root>", str(data): "<data>"}, operation, True)
 
 
 def _rules() -> dict[str, Any]:
@@ -311,19 +308,27 @@ def _rules() -> dict[str, Any]:
     return tomllib.loads(RULES_PATH.read_text())
 
 
-def _walk(value: Any, rules: dict[str, Any], paths: dict[str, str]) -> Any:
+def _walk(
+    value: Any,
+    rules: dict[str, Any],
+    paths: dict[str, str],
+    operation: str | None = None,
+    top: bool = False,
+) -> Any:
     volatile = set(rules["volatile"]["keys"])
     schema = rules["schema"]
     if isinstance(value, dict):
         in_schema = any(marker in value for marker in schema["schema_markers"])
         drop = set(schema["drop_keys"]) if in_schema else set()
+        version = rules.get("version", {})
+        blank_version = top and operation in set(version.get("operations", []))
         walked = {
             key: (
                 "<version>"
-                if key in set(rules.get("version", {}).get("keys", []))
+                if blank_version and key == version.get("key")
                 else "<volatile>"
                 if key in volatile
-                else _walk(item, rules, paths)
+                else _walk(item, rules, paths, operation, False)
             )
             for key, item in value.items()
             if key not in drop
@@ -338,7 +343,7 @@ def _walk(value: Any, rules: dict[str, Any], paths: dict[str, str]) -> Any:
             )
         return walked
     if isinstance(value, list):
-        return [_walk(item, rules, paths) for item in value]
+        return [_walk(item, rules, paths, operation, False) for item in value]
     if isinstance(value, str):
         for needle, token in paths.items():
             value = value.replace(needle, token)
