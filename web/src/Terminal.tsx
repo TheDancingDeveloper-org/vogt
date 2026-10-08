@@ -34,6 +34,8 @@ import {
   type ReplayHandle,
   type ReplayTail,
 } from "./terminalReplay";
+import { planDormantResume } from "./terminalDormancy";
+import { acquireDormantSlot, releaseDormantSlot } from "./dormantSlots";
 
 // Cap on the scrollback the serialized cache persists. A 5000-line scrollback
 // full of wide chars and colour serializes large; 2000 lines keeps the cache
@@ -176,6 +178,12 @@ const TerminalView: Component<Props> = (props) => {
   let hiddenTimer: ReturnType<typeof setTimeout> | null = null;
   const [hiddenParked, setHiddenParked] = createSignal(false);
   let socketParked = false;
+  // Dormant (WI-128): the pane is hidden but keeps its socket. Frames are
+  // appended to the ring and counted here, and not written to xterm, so resume
+  // replays only this delta (or a bounded tail when it outgrows the budget).
+  let socketDormant = false;
+  let dormantBytes = 0;
+  let dormantSlotHeld = false;
   let pingId = 0;
   let destroyed = false;
   let sessionGone = false;
@@ -1206,6 +1214,13 @@ const TerminalView: Component<Props> = (props) => {
       watchdog.noteOutput(Date.now());
       outputPosition = (outputPosition ?? 0) + buf.byteLength;
       appendToCache(buf);
+      // Dormant (WI-128): hidden, so keep the bytes but do not render them.
+      // Resume writes this delta, or a bounded tail if it outgrows the budget.
+      if (socketDormant) {
+        dormantBytes += buf.byteLength;
+        scheduleCachePersist();
+        return;
+      }
       if (inSnapshot) {
         // Snapshot and immediately-following live frames share one ordered
         // queue until the snapshot parser has drained.
@@ -1251,8 +1266,67 @@ const TerminalView: Component<Props> = (props) => {
     scheduleReconnect(100);
   }
 
+  function holdDormantSlot(): boolean {
+    if (dormantSlotHeld) return true;
+    if (!acquireDormantSlot(props.sessionId)) return false;
+    dormantSlotHeld = true;
+    return true;
+  }
+
+  function dropDormantSlot() {
+    if (!dormantSlotHeld) return;
+    releaseDormantSlot(props.sessionId);
+    dormantSlotHeld = false;
+  }
+
+  // Hidden but within the socket budget (WI-128): keep the socket, stop
+  // rendering. A visible pane never takes this path, so an unfocused split
+  // half keeps drawing and never shows "Suspended".
+  function goDormant() {
+    if (socketParked || socketDormant) return;
+    if (!initialAttachDone) return;
+    if (!holdDormantSlot()) {
+      parkSocket();
+      return;
+    }
+    socketDormant = true;
+    dormantBytes = 0;
+    setStatusText(null);
+  }
+
+  // Back to visible. A small buffer is written as-is; past the budget the
+  // screen resets to a ground-state tail. Neither opens a new socket.
+  function resumeDormant() {
+    if (!socketDormant) return;
+    socketDormant = false;
+    dropDormantSlot();
+    const buffered = dormantBytes;
+    dormantBytes = 0;
+    if (buffered === 0 || !term) return;
+    const ring = cachedBytes();
+    const plan = planDormantResume(ring.subarray(ring.byteLength - buffered), ring, outputPosition ?? 0);
+    replay?.cancel();
+    if (plan.kind === "reset") term.reset();
+    replay = createReplayQueue(
+      props.sessionId,
+      (chunk, done) => {
+        if (!term) { done(); return; }
+        term.write(chunk, done);
+      },
+      { kind: "cache" },
+    );
+    replay.enqueue(plan.data);
+    replay.finish();
+  }
+
   function parkSocket() {
     if (socketParked) return;
+    // Leaving dormancy for a real park: the socket closes below.
+    if (socketDormant) {
+      socketDormant = false;
+      dormantBytes = 0;
+      dropDormantSlot();
+    }
     // Render-then-park (WI-170): a pane parked before its first attach has
     // finished must still render its initial snapshot once, so its retained
     // scrollback is on screen under the "Suspended" overlay (matching main's
@@ -1279,6 +1353,10 @@ const TerminalView: Component<Props> = (props) => {
   }
 
   function resumeSocket() {
+    if (socketDormant) {
+      resumeDormant();
+      return;
+    }
     if (!socketParked) return;
     socketParked = false;
     if (destroyed || !readyToConnect() || isParked()) return;
@@ -1302,8 +1380,16 @@ const TerminalView: Component<Props> = (props) => {
 
   createEffect(() => {
     if (!readyToConnect()) return;
-    if (isParked()) parkSocket();
-    else resumeSocket();
+    // A visible pane is never dormant (WI-128): an unfocused split half stays
+    // rendered. Only a truly hidden pane — another tab, or the document hidden
+    // past its timer — buffers without rendering, and only while a dormant
+    // slot is free. Past the budget it parks exactly as before.
+    if (!isParked()) {
+      if (socketDormant) resumeDormant();
+      resumeSocket();
+    } else if (hiddenParked() || props.parked) {
+      goDormant();
+    }
   });
 
   // A woken session starts a new process whose output begins at 0: attach
@@ -1330,6 +1416,7 @@ const TerminalView: Component<Props> = (props) => {
     if (hiddenTimer !== null) clearTimeout(hiddenTimer);
     if (cacheTimer !== null) { clearTimeout(cacheTimer); cacheTimer = null; }
     persistCache();
+    dropDormantSlot();
     if (fitFrame !== null) {
       cancelAnimationFrame(fitFrame);
       fitFrame = null;

@@ -1612,6 +1612,14 @@ The returned `scrollback_pos` is always the absolute end position, unaffected by
 trimming the front. Omitting `snapshot_tail_bytes` (the in-band lag resync,
 which carries its own cursor) leaves a retained delta unbounded and byte-exact.
 
+A hidden pane does not attach again to catch up (WI-128). While it is hidden it
+keeps the socket it already holds open and buffers the frames, writing nothing
+to the terminal; on return it writes that buffer when it is within the budget,
+or resets and writes a ground-state tail when it is not. Only a pane past the
+per-document cap (four) closes its socket, and it comes back through the bounded
+attach above. A pane that is unfocused but still visible keeps rendering, so
+this never applies to the other half of a split.
+
 A text frame that does not parse as a control message is treated as raw input,
 because some tools send keystrokes as text. Snapshot chunks are capped at
 64 KiB each. Close codes a client should recognize: `4408` no auth frame

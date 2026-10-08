@@ -641,7 +641,16 @@ cursor and receive only what it missed.
 The Sessions place keeps an attention-sorted live roster beside an internal
 tool bar. Terminal panes stay attached while you visit History, Tasks or
 another place; inactive non-terminal tools unmount so their network requests,
-listeners and large editor surfaces do not run in the background. Editor text
+listeners and large editor surfaces do not run in the background.
+
+**"Suspended" means the socket was closed.** A pane you cannot see — another
+tab, or the app backgrounded for more than half a minute — keeps its socket
+open and buffers what arrives, so switching back shows only what you missed
+and never re-reads the whole history. That only holds for the few most
+recently used hidden panes; beyond that a pane closes its socket and reads
+**Suspended**, and reopening it fetches a fresh, bounded view of the screen.
+A pane you can still see, such as the other half of a split, is never
+suspended and keeps drawing live output. Editor text
 and view position are retained while switching tools, and any dirty editor
 also activates the browser/PWA exit confirmation until it is saved.
 
