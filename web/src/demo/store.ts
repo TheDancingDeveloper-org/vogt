@@ -193,8 +193,12 @@ export class DemoStore {
   private sessionsForVogt(): Record<string, unknown>[] {
     return Object.values(this.state.sessions).map((session, index) => ({
       id: `vogt-session-${String(session.id)}`, engine_session_id: session.id,
-      project: index % 3 === 0 ? "lighthouse" : "orbit", work_item: index % 2 === 0 ? "WI-101" : "WI-102",
-      actor: "demo:visitor", cwd: session.cwd, template: index === 0 ? "Agent review" : "Shell",
+      project: index % 3 === 0 ? "lighthouse" : "orbit",
+      // The rail chips and sorts from these. A session with none stays unbound.
+      work_item: session.work_item ?? null,
+      role: session.role ?? null,
+      pane: session.pane ?? "live",
+      actor: "demo:visitor", cwd: session.cwd, template: session.role === "oversight" ? "Oversight" : index === 0 ? "Agent review" : "Shell",
       model: index === 0 ? "demo-model" : null, effort: index === 0 ? "medium" : null,
       reason: "show the public demo", started_at: session.created_at,
       stopped_at: session.exit_code === null ? null : "2026-08-24T14:30:00Z",
@@ -235,10 +239,10 @@ export class DemoStore {
     };
     if (path === "/api/auth/check") return json({ ...product, ok: true, storage: { state_dir: "browser sessionStorage (ephemeral)", workspace_root: "/Working (simulated)" } });
     if (path === "/api/status") return json({ ...product, session_count: Object.keys(this.state.sessions).length, push_subscription_count: 1, gui_process_count: 1, gui_stream_configured: true, fcm_enabled: false, history: { enabled: true, archived_session_count: 4, log_file_count: 4, log_bytes: 184320, db_bytes: 49152 }, agent_tasks: { task_count: this.state.tasks.length, prompt_task_dir_count: 3, prompt_file_count: 8, context_file_count: 6, prompt_bytes: 24576, orphan_task_dir_count: 0 }, auth_broker: { auto_agent_auth: false, helper: "not configured in public demo" }, storage: { state_dir: "browser sessionStorage (ephemeral)", workspace_root: "/Working (simulated)" } });
-    if (path === "/api/config") return json({ ...product, gui_stream_url: "/demo-gui.html", gui_stream_available: true, assistant_enabled: true, assistant_stt_enabled: false, assistant_tts_enabled: false, assistant_model: "demo-model", assistant_profiles: [{ name: "Guided demo", model: "demo-model", default: true }, { name: "Concise", model: "demo-model-mini", default: false }], features: { demo: "full-demo-v1" }, vogt: { configured: true, api_prefix: "/api/vogt", mcp_prefix: "/mcp" }, session_templates: [{ name: "Shell", description: "A safe simulated shell with canned commands", command: null, cwd: "/Working/orbit", env: [], default_name: "Demo shell" }, { name: "Agent review", description: "Waiting-for-input review session", command: ["demo-agent"], cwd: "/Working/orbit", env: [], default_name: "Agent review" }] });
+    if (path === "/api/config") return json({ ...product, gui_stream_url: "/demo-gui.html", gui_stream_available: true, assistant_enabled: true, assistant_stt_enabled: true, assistant_tts_enabled: false, assistant_model: "demo-model", assistant_profiles: [{ name: "Guided demo", model: "demo-model", default: true }, { name: "Concise", model: "demo-model-mini", default: false }], features: { demo: "full-demo-v1" }, vogt: { configured: true, api_prefix: "/api/vogt", mcp_prefix: "/mcp" }, session_templates: [{ name: "Shell", description: "A safe simulated shell with canned commands", command: null, cwd: "/Working/orbit", env: [], default_name: "Demo shell" }, { name: "Agent review", description: "Waiting-for-input review session", command: ["demo-agent"], cwd: "/Working/orbit", env: [], default_name: "Agent review" }] });
     if (path === "/api/install/status") return json({ install_mode: false });
     if (path === "/healthz") return json({ ok: true });
-    if (path === "/api/sessions" && method === "GET") return json(Object.values(this.state.sessions));
+    if (path === "/api/sessions" && method === "GET") return json(Object.values(this.state.sessions).map((session) => ({ ...session, role: session.role ?? null, work_item: session.work_item ?? null, pane: session.pane ?? "live" })));
     if (path === "/api/sessions" && method === "POST") {
       const id = `demo-new-${this.state.next_id++}`;
       const row = { id, name: String(body.name || "Demo session"), activity: "idle", exit_code: null, scrollback_bytes: Number(body.scrollback_bytes ?? 131072), cwd: String(body.cwd || "/Working/orbit"), command: Array.isArray(body.command) ? body.command.join(" ") : null, created_at: this.now(), activity_changed_at: this.now() };
@@ -458,8 +462,27 @@ export class DemoStore {
       for (const row of rows) counts[row.attention] = (counts[row.attention] ?? 0) + 1;
       return json({ rows, counts, swept_at: this.now(), engine: null });
     }
-    if (["/sessions/hibernate", "/sessions/wake", "/sessions/keep-awake", "/sessions/role", "/sessions/answer"].includes(path)) return refusal("The demo's terminals are simulated in the browser: there is no process to hibernate or wake.");
-    if (path === "/sessions/work-item") return refusal("The demo's terminals are simulated in the browser: there is no session to bind to a work item.");
+    if (path === "/sessions/role") {
+      const row = this.state.sessions[String(body.id)];
+      if (!row) return refusal("Session not found", 404);
+      const role = body.role == null || body.role === "" ? null : String(body.role);
+      if (role !== null && role !== "worker" && role !== "oversight") return refusal("Unknown role", 422);
+      row.role = role;
+      this.audit("session.role", "session", String(body.id), String(body.reason ?? "set the session role"));
+      this.changed("session.role_changed", "session", String(body.id));
+      return json({ session: this.sessionsForVogt().find((session) => session.engine_session_id === body.id) });
+    }
+    if (path === "/sessions/work-item") {
+      const row = this.state.sessions[String(body.id)];
+      if (!row) return refusal("Session not found", 404);
+      const ref = body.work_item == null || body.work_item === "" ? null : String(body.work_item);
+      if (ref !== null && !this.state.work.some((item) => item.ref === ref)) return refusal("Work item not found", 404);
+      row.work_item = ref;
+      this.audit("session.work_item", "session", String(body.id), String(body.reason ?? "bind the session to a work item"));
+      this.changed("session.work_item_changed", "session", String(body.id));
+      return json({ session: this.sessionsForVogt().find((session) => session.engine_session_id === body.id) });
+    }
+    if (["/sessions/hibernate", "/sessions/wake", "/sessions/keep-awake", "/sessions/answer"].includes(path)) return refusal("The demo's terminals are simulated in the browser: there is no process to hibernate or wake.");
     if (path === "/sessions/grants/decide") return refusal("The demo has no secrets to grant: its sessions are simulated in the browser.");
     return json({ error: { code: "demo.unhandled", message: `No demo responder for ${method} ${path}` } }, { status: 404 });
   }

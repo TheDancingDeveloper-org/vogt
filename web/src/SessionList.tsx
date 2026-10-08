@@ -14,6 +14,7 @@ import { isConnected, sessionsStore } from "./store";
 import {
   activityClass,
   activityLabel,
+  isOversight,
   sessionStateWord,
   sessionRuntimeHint,
   sortSessionsByAttention,
@@ -46,7 +47,7 @@ export const SessionList: Component<Props> = (props) => {
               <a
                 class={`session-row ${activityClass(session)}${session.exit_code === null && (session.activity === "waiting-for-input" || session.activity === "awaiting-approval") ? " waiting" : ""}${sessionsStore.ready && !isConnected() ? " session-row--stale" : ""}`}
                 href={`#/t/${session.id}`}
-                aria-label={`${session.name}, ${activityLabel(session.activity, session.exit_code)}`}
+                aria-label={`${session.name}${isOversight(session) ? ", oversight" : ""}, ${activityLabel(session.activity, session.exit_code)}`}
                 title={`${session.name}\ncwd: ${session.cwd}${sessionRuntimeHint(session) ? `\n${sessionRuntimeHint(session)}` : ""}`}
               >
                 <span
@@ -54,7 +55,17 @@ export const SessionList: Component<Props> = (props) => {
                   aria-hidden="true"
                 />
                 <div class="session-row-body">
-                  <span class="name">{session.name}</span>
+                  <span class="name">
+                    <Show when={isOversight(session)}>
+                      <span class="session-role-badge" title="Oversight session: supervises the others; pinned awake">oversight</span>
+                    </Show>
+                    {session.name}
+                    <Show when={session.work_item}>
+                      {(ref) => (
+                        <span class="session-work-chip" data-testid="session-work-chip">{ref()}</span>
+                      )}
+                    </Show>
+                  </span>
                   <span class="session-row-meta">
                     <span
                       class={`state state--${activityClass(session)}`}

@@ -8,7 +8,7 @@ beforeEach(() => {
 });
 
 function body(reason = "exercise a browser-only demo write") {
-  return { reason, ref: "WI-101", id: "demo-version", entry_key: "ci:orbit-main", resolution: "rejected", to_state: "in_progress", name: "Demo project", subject: "demo:subject" };
+  return { reason, ref: "WI-101", id: "demo-agent", entry_key: "ci:orbit-main", resolution: "rejected", to_state: "in_progress", name: "Demo project", subject: "demo:subject", role: "oversight", work_item: "WI-101" };
 }
 
 const WRITES = new Set([

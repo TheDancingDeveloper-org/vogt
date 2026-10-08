@@ -38,17 +38,23 @@ export interface DemoState {
 }
 
 export function createDemoState(): DemoState {
+  // role, work_item and pane are what the rail sorts and chips from at v0.7.6.
+  // Oversight sorts first; a dormant pane is parked, not gone.
   const sessions = [
-    ["demo-agent", "Agent review", "waiting-for-input", null, "/Working/orbit"],
-    ["demo-build", "Build PWA", "running", null, "/Working/orbit/web"],
-    ["demo-tests", "Test suite", "running", null, "/Working/orbit"],
-    ["demo-server", "Preview server", "idle", null, "/Working/orbit/web"],
-    ["demo-logs", "Live logs", "running", null, "/Working/orbit"],
-    ["demo-metrics", "Metrics watch", "running", null, "/Working/lighthouse"],
-    ["demo-shell", "Scratch shell", "idle", null, "/Working/orbit"],
-    ["demo-finished", "Release check", "idle", 0, "/Working/lighthouse"],
-  ].map(([id, name, activity, exit_code, cwd], index) => [id, {
+    ["demo-agent", "Agent review", "waiting-for-input", null, "/Working/orbit", "worker", "WI-101", "live"],
+    ["demo-oversight", "Oversight", "idle", null, "/Working/orbit", "oversight", "WI-104", "live"],
+    ["demo-build", "Build PWA", "running", null, "/Working/orbit/web", "worker", "WI-102", "live"],
+    ["demo-tests", "Test suite", "running", null, "/Working/orbit", "worker", "WI-101", "dormant"],
+    ["demo-server", "Preview server", "idle", null, "/Working/orbit/web", null, null, "live"],
+    ["demo-logs", "Live logs", "running", null, "/Working/orbit", null, null, "live"],
+    ["demo-metrics", "Metrics watch", "running", null, "/Working/lighthouse", "worker", "WI-104", "parked"],
+    ["demo-shell", "Scratch shell", "idle", null, "/Working/orbit", null, null, "live"],
+    ["demo-finished", "Release check", "idle", 0, "/Working/lighthouse", null, null, "live"],
+  ].map(([id, name, activity, exit_code, cwd, role, work_item, pane], index) => [id, {
     id, name, activity, exit_code, cwd, scrollback_bytes: 131072,
+    ...(role ? { role } : {}),
+    ...(work_item ? { work_item } : {}),
+    pane,
     created_at: `2026-08-24T${String(12 + Math.floor(index / 2)).padStart(2, "0")}:${index % 2 ? "30" : "00"}:00Z`,
     activity_changed_at: `2026-08-24T14:${String(10 + index).padStart(2, "0")}:00Z`,
   }]);

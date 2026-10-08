@@ -133,6 +133,10 @@ test("phone Sessions overview exposes waiting and non-waiting work", async ({ pa
   await expect(page.getByRole("article", { name: /Agent review is waiting for input/ })).toBeVisible();
   await expect(page.locator('.session-list a[href="#/t/demo-build"]')).toContainText("Build PWA");
   await expect(page.locator('.session-list a[href="#/t/demo-server"]')).toContainText("Preview server");
+  // v0.7.6 rail: the oversight badge sorts first and a session chips its work item.
+  const oversight = page.locator('.session-list a[href="#/t/demo-oversight"]');
+  await expect(oversight.locator(".session-role-badge")).toHaveText("oversight");
+  await expect(oversight.locator(".session-work-chip")).toContainText("WI-104");
   await expect(page.locator(".phone-bottom-nav")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
 });
