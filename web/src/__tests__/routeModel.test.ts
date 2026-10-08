@@ -66,6 +66,20 @@ describe("route truth", () => {
     });
   });
 
+  it("routes a chat and its list to the Chat tool only when chats are on (WI-1097)", () => {
+    expect(describeRoute("/chat", capabilities)).toMatchObject({
+      kind: "unavailable",
+      title: "Chat is unavailable",
+    });
+    for (const path of ["/chat", "/chat/0c0c0c0c-0000-4000-8000-000000000001"]) {
+      expect(describeRoute(path, { ...capabilities, chatEnabled: true })).toMatchObject({
+        kind: "tool",
+        place: "sessions",
+        tool: "chat",
+      });
+    }
+  });
+
   it("retains configured capabilities and Settings return candidates", () => {
     expect(describeRoute("/assistant/chat", {
       ...capabilities,

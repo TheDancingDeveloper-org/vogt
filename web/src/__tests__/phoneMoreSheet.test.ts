@@ -55,6 +55,13 @@ describe("the phone More sheet inventory", () => {
       .toContain("Assistant");
   });
 
+  it("shows the Chat row only when the engine offers chats (WI-1097)", () => {
+    const off = { vogtConfigured: true, guiEnabled: false, assistantEnabled: false };
+    expect(labels(off)).not.toContain("Chat");
+    const on = moreSheetPlaces({ ...off, chatEnabled: true });
+    expect(on.find((place) => place.id === "chat")?.href).toBe("#/chat");
+  });
+
   it("routes each place at the same hash the desktop rail uses", () => {
     const byId = new Map(
       moreSheetPlaces({ vogtConfigured: true, guiEnabled: true, assistantEnabled: true })

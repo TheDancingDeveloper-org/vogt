@@ -14,6 +14,8 @@ export interface MoreSheetInput {
   guiEnabled: boolean;
   /** `publicCfg()?.assistant_enabled` — gates the Assistant row. */
   assistantEnabled: boolean;
+  /** `publicCfg()?.chat` present — gates the Chat row (WI-1097). */
+  chatEnabled?: boolean;
 }
 
 export type MoreSheetItem =
@@ -40,6 +42,9 @@ export function moreSheetItems(input: MoreSheetInput): MoreSheetItem[] {
   items.push({ kind: "place", id: "tasks", label: "Tasks", href: "#/tasks" });
   if (input.guiEnabled) {
     items.push({ kind: "place", id: "gui", label: "GUI stream", href: "#/gui" });
+  }
+  if (input.chatEnabled) {
+    items.push({ kind: "place", id: "chat", label: "Chat", href: "#/chat" });
   }
   if (input.assistantEnabled) {
     items.push({ kind: "place", id: "assistant", label: "Assistant", href: "#/assistant" });
