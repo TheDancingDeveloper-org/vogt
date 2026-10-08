@@ -11139,3 +11139,92 @@ async fn file_content_routes_refuse_hidden_and_secret_files() {
     }
     assert!(!repo.join("notes.txt").exists());
 }
+
+/// WI-1020: reading the workspace — the viewer, the download, a listing, the
+/// tree, both searches and every git read — needs the `sessions` capability.
+/// A `read`-only device token and a zero-scope credential are refused before
+/// the handler runs; a writer and the stack secret still read.
+#[tokio::test]
+async fn workspace_reads_need_the_sessions_capability() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let sh = |cmd: &str| {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{cmd}: {:?}", out);
+    };
+    sh("git init -q -b main");
+    sh("git config user.email t@t");
+    sh("git config user.name t");
+    std::fs::write(repo.join("ok.txt"), "needle-ok\n").unwrap();
+    sh("git add ok.txt && git commit -q -m init");
+    std::fs::write(repo.join("ok.txt"), "needle-ok\nmore\n").unwrap();
+
+    let core = stand_in_core_knowing(vec![
+        (
+            "reader-token-1234567890abcdef",
+            "human:reader",
+            vec!["read"],
+        ),
+        ("noscope-token-1234567890abcdef", "human:nobody", vec![]),
+        (
+            "writer-token-1234567890abcdef",
+            "human:writer",
+            vec!["read", "work.write"],
+        ),
+    ])
+    .await;
+    let mut cfg = test_config();
+    cfg.default_cwd = repo.to_path_buf();
+    cfg.workspace_root = repo.canonicalize().unwrap();
+    cfg.vogt_core_url = Some(core);
+    let (base, _h) = boot_with_config(cfg).await;
+
+    let routes = [
+        "files?path=ok.txt",
+        "files/download?path=ok.txt",
+        "dir",
+        "tree?depth=1",
+        "search?q=needle",
+        "search/files?q=ok",
+        "git/status",
+        "git/diff?path=ok.txt",
+        "git/log?n=5",
+        "git/branch",
+    ];
+    let status = |token: &'static str, route: &'static str| {
+        let url = format!("{base}/api/{route}");
+        async move {
+            reqwest::Client::new()
+                .get(url)
+                .headers(auth_for(token))
+                .send()
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    for route in routes {
+        for token in [
+            "reader-token-1234567890abcdef",
+            "noscope-token-1234567890abcdef",
+        ] {
+            assert_eq!(
+                status(token, route).await,
+                StatusCode::FORBIDDEN,
+                "{token} must not read /api/{route}"
+            );
+        }
+        for token in ["writer-token-1234567890abcdef", TEST_TOKEN] {
+            assert_eq!(
+                status(token, route).await,
+                StatusCode::OK,
+                "{token} must still read /api/{route}"
+            );
+        }
+    }
+}

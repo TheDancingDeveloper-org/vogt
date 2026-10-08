@@ -102,7 +102,9 @@ pub const ALL_CAPABILITIES: [TokenCapability; 11] = [
 ///   trusted to change the estate's declared state is trusted to drive the
 ///   pod that holds its checkouts.
 /// - `read` alone → `push-write` only, so a read-only device can still
-///   subscribe to notifications. Reads on ungated routes need no capability.
+///   subscribe to notifications. Reads on ungated routes need no capability;
+///   the workspace tree and git reads are not among them (they need
+///   `sessions`).
 /// - `writeback` adds nothing here; it is a core-side grant.
 pub fn capabilities_for_scopes(scopes: &[String]) -> Vec<TokenCapability> {
     if scopes.iter().any(|s| s == "admin") {
@@ -564,6 +566,16 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     if path == "/api/git/op" && *method == Method::POST {
         return Some(TokenCapability::GitWrite);
     }
+    // Reading the workspace — a file, a download, a listing, the tree, a
+    // search, or git's view of it — needs `sessions`, for the reason session
+    // scrollback and archived history are gated: the tree is a shared record
+    // of every session's work, not this caller's own. The content policy
+    // (hidden paths, credential names) still applies on top; this decides
+    // which tokens may read the tree at all. A `read`-only device loses the
+    // file browser and Git panel, as it already cannot open sessions (WI-1020).
+    if *method == Method::GET && is_workspace_read(path) {
+        return Some(TokenCapability::Sessions);
+    }
     if path.starts_with("/api/agent-clis/") && *method == Method::POST {
         return Some(TokenCapability::AgentClisWrite);
     }
@@ -605,6 +617,20 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
         return Some(TokenCapability::VogtWrite);
     }
     None
+}
+
+/// The routes that read the workspace tree or its git state. Every git GET
+/// is one, so a git read added later is gated without another rule.
+fn is_workspace_read(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/files"
+            | "/api/files/download"
+            | "/api/dir"
+            | "/api/tree"
+            | "/api/search"
+            | "/api/search/files"
+    ) || path.starts_with("/api/git/")
 }
 
 /// The 403 message for a credential that lacks `required`: which identity
@@ -836,6 +862,45 @@ mod tests {
         assert_eq!(
             required_capability(&Method::GET, "/api/assistant/log"),
             Some(TokenCapability::Assistant)
+        );
+    }
+
+    /// Every workspace read needs `sessions` (WI-1020), so a `read`-only or
+    /// zero-capability token cannot read the tree; the writer set keeps it.
+    #[test]
+    fn workspace_reads_need_the_sessions_capability() {
+        let reads = [
+            "/api/files",
+            "/api/files/download",
+            "/api/dir",
+            "/api/tree",
+            "/api/search",
+            "/api/search/files",
+            "/api/git/status",
+            "/api/git/diff",
+            "/api/git/log",
+            "/api/git/branch",
+        ];
+        let reader = capabilities_for_scopes(&scopes(&["read"]));
+        let writer = capabilities_for_scopes(&scopes(&["read", "work.write"]));
+        for path in reads {
+            assert_eq!(
+                required_capability(&Method::GET, path),
+                Some(TokenCapability::Sessions),
+                "GET {path}"
+            );
+            assert!(!reader.contains(&TokenCapability::Sessions), "GET {path}");
+            assert!(writer.contains(&TokenCapability::Sessions), "GET {path}");
+        }
+        assert!(STACK_SECRET_CAPABILITIES.contains(&TokenCapability::Sessions));
+        // The write routes beside them keep their own, narrower capability.
+        assert_eq!(
+            required_capability(&Method::PUT, "/api/files"),
+            Some(TokenCapability::FilesystemWrite)
+        );
+        assert_eq!(
+            required_capability(&Method::POST, "/api/git/op"),
+            Some(TokenCapability::GitWrite)
         );
     }
 }

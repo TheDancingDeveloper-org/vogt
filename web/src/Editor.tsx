@@ -1,5 +1,5 @@
 import { Component, createSignal, onCleanup, onMount, Show, For } from "solid-js";
-import { api, ApiError } from "./api";
+import { api, ApiError, workspaceReadError } from "./api";
 import {
   languageFor,
   loadLanguage,
@@ -140,7 +140,7 @@ const Editor: Component<Props> = (props) => {
       setError(null);
     } catch (e) {
       if (disposed) return;
-      setError((e as Error).message);
+      setError(workspaceReadError(e));
       setStatus("error");
     }
   };
@@ -252,7 +252,7 @@ const Editor: Component<Props> = (props) => {
       setStatus("ready");
     } catch (e) {
       if (disposed) return;
-      setError((e as Error).message);
+      setError(workspaceReadError(e));
       setStatus("error");
     }
   });

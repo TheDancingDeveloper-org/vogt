@@ -12,6 +12,7 @@ import {
 import { useNavigate } from "@solidjs/router";
 import {
   api,
+  workspaceReadError,
   type FileSearchResult,
   type GitStatusEntry,
   type GitStatusKind,
@@ -145,7 +146,7 @@ const TreeNodeView: Component<NodeProps> = (props) => {
       // A failed expand must not become an unhandled rejection (the effect
       // calls this with `void`): report it in place and leave the folder open
       // with a notice rather than throwing out of the render tree.
-      setLoadError(`Could not open this folder: ${(cause as Error).message}`);
+      setLoadError(`Could not open this folder: ${workspaceReadError(cause)}`);
       setKids([]);
     } finally {
       setLoading(false);
@@ -666,14 +667,16 @@ const FileTree: Component<Props> = (props) => {
       </div>
       <Show when={tree.error}>
         <div style={{ padding: "8px 10px", color: "var(--danger)", "font-size": "12px" }}>
-          {String(tree.error)}
+          {workspaceReadError(tree.error)}
         </div>
       </Show>
       <div class="tree-scroll" hidden={!filesShown()}>
         <Show
           when={searchActive()}
           fallback={
-            <For each={tree() ?? []}>
+            // An errored resource throws when read; the banner above says
+            // why, so an empty tree stands in rather than an uncaught error.
+            <For each={tree.error ? [] : (tree() ?? [])}>
               {(node) => (
                 <TreeNodeView
                   node={node}

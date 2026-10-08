@@ -1,7 +1,7 @@
 import { Route, Router } from "@solidjs/router";
 import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api } from "../api";
+import { api, ApiError, WORKSPACE_READ_FORBIDDEN, workspaceReadError } from "../api";
 import FileTree, { buildStatusMap, statusForPath } from "../FileTree";
 import { writeClipboardText } from "../clipboard";
 import { joinWorkspacePath, resetWorkspaceRootForTests } from "../workspaceRoot";
@@ -120,6 +120,27 @@ describe("FileTree", () => {
       "Could not open this folder: permission denied",
     );
     expect(screen.getByText("source")).toBeVisible();
+  });
+
+  it("says plainly when the token cannot read the workspace (WI-1020)", async () => {
+    const forbidden = new ApiError(403, '{"error":"forbidden: it lacks the Sessions capability"}');
+    vi.spyOn(api, "tree").mockRejectedValue(forbidden);
+    vi.spyOn(api, "gitStatus").mockRejectedValue(forbidden);
+
+    render(() => (
+      <Router>
+        <Route path="*" component={() => <FileTree />} />
+      </Router>
+    ));
+
+    await fireEvent.click(screen.getByRole("button", { name: "Files" }));
+    expect(await screen.findByText(WORKSPACE_READ_FORBIDDEN)).toBeVisible();
+    expect(screen.queryByText(/HTTP 403/)).not.toBeInTheDocument();
+  });
+
+  it("keeps any other read failure's own message", () => {
+    expect(workspaceReadError(new ApiError(404, "not found"))).toBe("HTTP 404: not found");
+    expect(workspaceReadError(new Error("offline"))).toBe("offline");
   });
 
   it("dismisses a folder's actions picker on collapse, outside-click and Escape", async () => {
