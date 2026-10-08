@@ -1,10 +1,11 @@
-//! Instance lifecycle. Ports `init_instance` in
-//! `src/vogt/application/services/instance.py`.
+//! Instance lifecycle. Ports `init_instance` and the bootstrap it performs.
 //!
-//! Creates the data directory and migrates both databases. Does not bootstrap
-//! an actor or issue a token: those need the declared store, which is a later
-//! chunk. The token file is written only when `VOGT_BOOTSTRAP_TOKEN` is set,
-//! so a recorded run can place a known secret without this binary minting one.
+//! Creates the data directory, migrates both databases, then writes the
+//! instance: its id, the initiating actor, and one audit row. No event is
+//! emitted and the revision stays 0, so a client that connects afterwards sees
+//! an empty feed rather than an instance-creation event it cannot act on. The
+//! token file is written only when `VOGT_BOOTSTRAP_TOKEN` is set, so a recorded
+//! run can place a known secret without this binary minting one.
 
 use std::path::Path;
 
@@ -41,6 +42,9 @@ pub fn init(data_dir: &Path, now: &str) -> Result<InitOutcome, migrator::Migrate
             std::fs::write(&path, token.as_encoded_bytes())?;
         }
     }
+    if !declared_existed {
+        bootstrap(data_dir, now)?;
+    }
     Ok(InitOutcome {
         created: !declared_existed,
         declared,
@@ -75,4 +79,156 @@ fn pending_in(
     let applied = migrator::applied_version(&conn)?;
     let bundled = migrator::bundled_version(store, directory)?;
     Ok(usize::try_from(bundled.saturating_sub(applied)).unwrap_or(0))
+}
+
+const INIT_OPERATION: &str = "instance.init";
+const INIT_REASON: &str = "instance bootstrap";
+const EMPTY_DIGEST: &str =
+    "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+/// The instance id, the initiating actor and one audit row. A database that
+/// already carries an instance id is left alone, so a second init is safe.
+fn bootstrap(data_dir: &Path, now: &str) -> Result<(), migrator::MigrateError> {
+    use rusqlite::params;
+
+    let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
+    let exists: bool = conn
+        .query_row("SELECT 1 FROM meta WHERE key = 'instance_id'", [], |_| {
+            Ok(true)
+        })
+        .unwrap_or(false);
+    if exists {
+        return Ok(());
+    }
+    let mut ids = SequentialIds::load(&data_dir.join("test-ids.json"));
+    let user = os_user();
+    let instance_id = ids.next("ins");
+    let actor_id = ids.next("act");
+    let audit_id = ids.next("aud");
+    let txn_id = ids.next("txn");
+    let at = clock_stamp(now, 2);
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    let written = (|| -> rusqlite::Result<()> {
+        for (key, value) in [
+            ("instance_id", instance_id.as_str()),
+            ("revision", "0"),
+            ("work_ref_seq", "0"),
+            ("created_at", at.as_str()),
+        ] {
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?1, ?2)",
+                params![key, value],
+            )?;
+        }
+        conn.execute(
+            "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at)
+             VALUES (?1, 'human', ?2, ?3, 0, ?4)",
+            params![actor_id, &user, format!("local:{user}"), &at],
+        )?;
+        conn.execute(
+            "INSERT INTO audit (id, txn_id, revision, actor_id, operation, entity_kind,
+                                entity_id, reason, payload_digest, at)
+             VALUES (?1, ?2, 0, ?3, ?4, 'instance', ?5, ?6, ?7, ?8)",
+            params![
+                audit_id,
+                txn_id,
+                actor_id,
+                INIT_OPERATION,
+                instance_id,
+                INIT_REASON,
+                EMPTY_DIGEST,
+                at
+            ],
+        )?;
+        Ok(())
+    })();
+    match written {
+        Ok(()) => conn.execute("COMMIT", []).map(|_| ())?,
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", []);
+            return Err(err.into());
+        }
+    }
+    ids.save()
+}
+
+/// `LOGNAME`, then `USER`, then a fallback. `getpass.getuser` reads `LOGNAME`.
+fn os_user() -> String {
+    std::env::var("LOGNAME")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// The instant bootstrap stamps, two seconds after the clock start. `init`
+/// reads the clock twice before bootstrap does — once is the harness, once is
+/// the migration `now` — so the rows land where Python's step clock puts them.
+fn clock_stamp(fallback: &str, steps: i64) -> String {
+    let start = std::env::var("VOGT_TEST_CLOCK_START")
+        .ok()
+        .and_then(|text| crate::core::from_iso(&text).ok())
+        .map(|moment| moment.unix_seconds());
+    match start {
+        Some(seconds) => crate::core::to_iso(crate::core::Moment::from_unix(seconds + steps, 0)),
+        None => fallback.to_string(),
+    }
+}
+
+/// Sequential ids persisted across processes when `VOGT_TEST_IDS=sequential`,
+/// so `init` and the `serve` that follows agree. Ports `SequentialIds`.
+struct SequentialIds {
+    path: std::path::PathBuf,
+    counts: std::collections::BTreeMap<String, u32>,
+    persist: bool,
+}
+
+impl SequentialIds {
+    fn load(path: &Path) -> Self {
+        let persist = std::env::var("VOGT_TEST_IDS").ok().as_deref() == Some("sequential");
+        let counts = if persist {
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|text| {
+                    text.trim_matches(|c| c == '{' || c == '}')
+                        .split(',')
+                        .filter_map(|pair| {
+                            let (key, value) = pair.split_once(':')?;
+                            let key = key.trim().trim_matches('"').to_string();
+                            let value = value.trim().parse().ok()?;
+                            Some((key, value))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::BTreeMap::new()
+        };
+        Self {
+            path: path.to_path_buf(),
+            counts,
+            persist,
+        }
+    }
+
+    fn next(&mut self, prefix: &str) -> String {
+        let count = self.counts.entry(prefix.to_string()).or_insert(0);
+        *count += 1;
+        format!("{prefix}_{count:04}")
+    }
+
+    fn save(&self) -> Result<(), migrator::MigrateError> {
+        if !self.persist {
+            return Ok(());
+        }
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let body = self
+            .counts
+            .iter()
+            .map(|(key, value)| format!("\"{key}\":{value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(&self.path, format!("{{{body}}}"))?;
+        Ok(())
+    }
 }

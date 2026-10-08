@@ -221,8 +221,8 @@ fn readiness(data_dir: &std::path::Path) -> Result<Readiness, MigrateError> {
     })
 }
 
-/// The id bootstrap wrote into `meta`. Absent until that chunk lands, which is
-/// reported as null rather than invented.
+/// The id bootstrap wrote into `meta`. Null only on a database that was never
+/// bootstrapped.
 fn instance_id(data_dir: &std::path::Path) -> Option<String> {
     let conn = connect(&declared_path(data_dir)).ok()?;
     conn.query_row(
@@ -246,19 +246,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let now = "2026-10-08T12:00:00+00:00";
         crate::application::instance::init(&dir, now).unwrap();
-        let conn = connect(&declared_path(&dir)).unwrap();
-        conn.execute(
-            "INSERT INTO meta (key, value) VALUES ('instance_id', 'ins_01TEST')",
-            [],
-        )
-        .unwrap();
-        drop(conn);
 
         let body = readiness(&dir).unwrap();
         let json = serde_json::to_value(&body).unwrap();
         assert_eq!(json["status"], "ready");
         assert!(json["detail"].is_null());
-        assert_eq!(json["instance_id"], "ins_01TEST");
+        assert_eq!(json["instance_id"], "ins_0001");
         assert!(json["declared_schema_version"].as_i64().unwrap() > 0);
 
         let _ = std::fs::remove_dir_all(&dir);
