@@ -57,6 +57,21 @@ ENGINE_COUNTERPARTS: Mapping[str, str] = {
     "GET /api/history/{id}": "session.history_list",
     "GET /api/history/{id}/log": "session.log_tail",
     "GET /api/history/{id}/download": "session.log_tail",
+    # Quick chats (WI-1097).
+    "GET /api/chats": "chat.list",
+    "POST /api/chats": "chat.create",
+    "GET /api/chats/{id}": "chat.get",
+    "POST /api/chats/{id}/messages": "chat.send",
+    # Only a person answers; an agent's chat.decide is refused, as its
+    # session.answer to a permission prompt is.
+    "POST /api/chats/{id}/approvals/{approval_id}": "chat.decide",
+    "POST /api/chats/{id}/model": "chat.set_model",
+    "POST /api/chats/{id}/interrupt": "chat.interrupt",
+    "POST /api/chats/{id}/archive": "chat.archive",
+    "POST /api/chats/{id}/promote": "chat.promote",
+    # The live event stream; chat.send waits for the reply and chat.get
+    # reads the same record, which is MCP's request/response shape for it.
+    "GET /api/chats/{id}/events": "chat.get",
 }
 
 _PROBE = (
@@ -120,6 +135,12 @@ _HISTORY_WRITE = (
     "sessions — agents included — did, so erasing it is a person's call, and "
     "`history-write` is deliberately not held by the core's engine "
     "credential."
+)
+_CHAT_GATE = (
+    "A quick chat's approval gate: the chat's own agent's PreToolUse hook "
+    "asks it, with the per-process token the engine gave that agent, whether "
+    "a tool call may run. Not a person's or another agent's call; the "
+    "decision itself is `chat.decide`, which only a person may make."
 )
 _SESSION_SELF = (
     "A session's own calls with its per-session broker token (secret "
@@ -206,4 +227,5 @@ ENGINE_ONLY: Mapping[str, str] = {
     "POST /api/agent-auth/launch-report": _SESSION_SELF,
     "POST /api/agent-auth/conversation": _SESSION_SELF,
     "GET /api/agent-auth/grants": _SESSION_SELF,
+    "POST /api/chats/{id}/gate": _CHAT_GATE,
 }

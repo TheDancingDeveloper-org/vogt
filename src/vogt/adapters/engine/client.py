@@ -1169,6 +1169,104 @@ class EngineClient:
 
     # -- transport ---------------------------------------------------------
 
+    # -- quick chats (WI-1097) ---------------------------------------------
+
+    def chat_list(
+        self, *, q: str | None, archived: str, limit: int
+    ) -> list[dict[str, Any]] | None:
+        """The engine's chats, or `None` when it has chats off (404)."""
+        query = {"archived": archived, "limit": str(limit)}
+        if q:
+            query["q"] = q
+        payload = self._call(
+            f"/api/chats?{urllib.parse.urlencode(query)}", allow_missing=True
+        )
+        if payload is None:
+            return None
+        return (
+            [row for row in payload if isinstance(row, dict)]
+            if isinstance(payload, list)
+            else []
+        )
+
+    def chat_get(self, chat_id: str, *, tail: int) -> dict[str, Any] | None:
+        return self._chat_call(f"/{_quote(chat_id)}?tail={tail}")
+
+    def chat_create(
+        self, body: dict[str, Any], *, wait_s: int
+    ) -> dict[str, Any] | None:
+        return self._chat_call("", method="POST", payload=body, wait_s=wait_s)
+
+    def chat_send(self, chat_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
+        wait = int(body.get("wait_secs") or 0)
+        return self._chat_call(
+            f"/{_quote(chat_id)}/messages", method="POST", payload=body, wait_s=wait
+        )
+
+    def chat_decide(
+        self,
+        chat_id: str,
+        approval_id: str,
+        *,
+        allow: bool,
+        message: str | None,
+        person: bool,
+    ) -> dict[str, Any] | None:
+        """A person's answer to a chat's approval. `person` says whether the
+        principal behind it is one; the engine refuses anyone else
+        (`PersonRequired`), as for a session's permission prompt."""
+        body: dict[str, Any] = {"allow": allow, "person": person}
+        if message:
+            body["message"] = message
+        return self._chat_call(
+            f"/{_quote(chat_id)}/approvals/{_quote(approval_id)}",
+            method="POST",
+            payload=body,
+        )
+
+    def chat_set_model(self, chat_id: str, model: str) -> dict[str, Any] | None:
+        return self._chat_call(
+            f"/{_quote(chat_id)}/model", method="POST", payload={"model": model}
+        )
+
+    def chat_interrupt(self, chat_id: str) -> dict[str, Any] | None:
+        return self._chat_call(
+            f"/{_quote(chat_id)}/interrupt", method="POST", payload={}
+        )
+
+    def chat_archive(self, chat_id: str, *, archived: bool) -> dict[str, Any] | None:
+        return self._chat_call(
+            f"/{_quote(chat_id)}/archive",
+            method="POST",
+            payload={"archived": archived},
+        )
+
+    def chat_promote(self, chat_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
+        return self._chat_call(
+            f"/{_quote(chat_id)}/promote", method="POST", payload=body
+        )
+
+    def _chat_call(
+        self,
+        suffix: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        wait_s: int = 0,
+    ) -> dict[str, Any] | None:
+        """One `/api/chats` call; `None` on a 404 (no such chat, or chats off)."""
+        answer = self._call(
+            f"/api/chats{suffix}",
+            method=method,
+            payload=payload,
+            allow_missing=True,
+            # A send that waits for its reply outlasts the ordinary timeout.
+            timeout=(wait_s + DEFAULT_TIMEOUT_SECONDS) if wait_s else None,
+        )
+        if answer is None:
+            return None
+        return answer if isinstance(answer, dict) else {}
+
     def healthz(self) -> None:
         """Raise `EngineUnavailable` unless the engine answers its liveness probe."""
         self._call("/healthz")
@@ -1311,6 +1409,10 @@ class EngineClient:
             # sessions are unavailable while everything else still works.
             msg = f"the {self.label} is not answering: {exc}"
             raise EngineUnavailable(msg) from exc
+
+
+def _quote(value: str) -> str:
+    return urllib.parse.quote(value, safe="")
 
 
 def _engine_error_text(text: str) -> str:

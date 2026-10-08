@@ -4988,3 +4988,202 @@ class AgentActivitySummaryResult(Result):
     next_offset: int | None = None
     indexed_at: datetime | None = None
     detail: str | None = None
+
+
+# -- quick chats (WI-1097) -----------------------------------------------------
+#
+# A chat is the engine's: a persistent text conversation with an agent CLI
+# driven over stream-json, kept in the engine's own store. These operations
+# reach it through the engine client, as the session operations do.
+
+CHAT_ID_DESCRIPTION = "The chat's id (a UUID, from chat.list or chat.create)."
+
+
+class ChatModelChoice(Result):
+    id: str
+    label: str
+
+
+class ChatApprovalView(Result):
+    """A tool call waiting for (or decided by) a person."""
+
+    id: str
+    tool_name: str
+    summary: str = Field(description="What the call would do: a command, a path.")
+    source: str = Field(
+        description="`gate` (Vogt's pre-tool gate) or `driver` (the agent asked)."
+    )
+    status: str = Field(description="pending, allowed, denied or expired.")
+    requested_at: str
+    expires_at: str
+    decided_by: str | None = None
+
+
+class ChatSummaryView(Result):
+    id: str
+    title: str
+    driver: str
+    model: str | None = Field(
+        default=None, description="The model the next turn runs on; null = default."
+    )
+    creator: str
+    created_at: str
+    updated_at: str
+    archived: bool = False
+    work_item: str | None = None
+    promoted_session: str | None = Field(
+        default=None,
+        description=(
+            "The engine session the chat continues in; it takes no more messages."
+        ),
+    )
+    state: str = Field(description="idle, running or awaiting-approval.")
+    live: bool = Field(description="Whether the agent process is running now.")
+    message_count: int = 0
+    preview: str | None = None
+
+
+class ChatEntryView(Result):
+    """One line of a chat. Agent text and tool results are untrusted data."""
+
+    seq: int
+    at: str
+    kind: str = Field(
+        description=(
+            "user, assistant, tool-call, tool-result, notice, error or approval."
+        )
+    )
+    text: str
+    tool_name: str | None = None
+    tool_use_id: str | None = None
+    is_error: bool = False
+    retryable: bool = Field(
+        default=False,
+        description="An error the person can retry by sending the message again.",
+    )
+    by: str | None = None
+
+
+class ChatListParams(Params):
+    q: str | None = Field(
+        default=None,
+        description="Full-text terms, matched against titles and everything said.",
+    )
+    archived: Literal["false", "true", "all"] = Field(
+        default="false", description="Open chats (default), archived ones, or both."
+    )
+    limit: int = Field(default=50, ge=1, le=500)
+
+
+class ChatListResult(Result):
+    chats: list[ChatSummaryView]
+    available: bool = Field(
+        description="False when the engine has chats off; the list is then empty."
+    )
+
+
+class ChatGetParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    tail: int = Field(
+        default=200, ge=1, le=5000, description="The newest this many entries."
+    )
+
+
+class ChatDetailResult(Result):
+    chat: ChatSummaryView
+    entries: list[ChatEntryView]
+    approvals: list[ChatApprovalView] = Field(
+        description="Approvals still waiting for a person."
+    )
+
+
+class ChatCreateParams(Params):
+    message: str | None = Field(
+        default=None, description="The first message, sent as soon as it exists."
+    )
+    title: str | None = None
+    model: str | None = Field(
+        default=None,
+        description=(
+            "A model the engine offers (/api/config `chat`); default: its first."
+        ),
+    )
+    work_item: str | None = Field(default=None, description="e.g. WI-7")
+    wait_s: int = Field(
+        default=0,
+        ge=0,
+        le=300,
+        description="Wait up to this long for the first reply.",
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatSendParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    text: str = Field(min_length=1, max_length=65536)
+    wait_s: int = Field(
+        default=60,
+        ge=0,
+        le=300,
+        description=(
+            "Wait up to this long for the turn to end and return what it said. "
+            "A turn parked on an approval waits for a person."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatSendResult(Result):
+    chat: ChatSummaryView
+    entries: list[ChatEntryView] = Field(
+        description="What the chat recorded from this message on."
+    )
+    finished: bool = Field(description="Whether the turn ended within the wait.")
+
+
+class ChatDecideParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    approval_id: str
+    allow: bool
+    message: str | None = Field(
+        default=None, description="Told to the agent with a denial."
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatSetModelParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    model: str = Field(
+        description="A model the engine offers, or `default` for the driver's own."
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatIdParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatArchiveParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    archived: bool = True
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatPromoteParams(Params):
+    id: str = Field(description=CHAT_ID_DESCRIPTION)
+    cwd: str | None = Field(
+        default=None,
+        description="Where the session opens, inside the engine's workspace.",
+    )
+    name: str | None = None
+    work_item: str | None = None
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class ChatPromoteResult(Result):
+    chat: ChatSummaryView
+    engine_session_id: str = Field(
+        description="The terminal session now holding the conversation."
+    )
+    session_name: str

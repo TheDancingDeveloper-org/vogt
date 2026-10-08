@@ -3102,6 +3102,15 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `inbox.restore` | Confirmation-gated | Available after approval: Restore one archived or snoozed Inbox occurrence. |
 | `preference.get` | Operator-only | Unavailable: Per-person UI settings (saved filters); the assistant has no use for them. |
 | `preference.set` | Operator-only | Unavailable: Changes a person's saved UI settings; set them in the surface they belong to. |
+| `chat.list` | Operator-only | Unavailable: Quick chats are a separate agent (Klaudia) with its own transcript; the assistant is not a client of them. For the Chat panel and agents over MCP/CLI/REST. |
+| `chat.get` | Operator-only | Unavailable: Reads a quick chat's transcript; for the Chat panel and agents over MCP/CLI/REST. |
+| `chat.create` | Operator-only | Unavailable: Starts another agent; the assistant starts sessions instead. |
+| `chat.send` | Operator-only | Unavailable: Talks to another agent; for the Chat panel and agents over MCP/CLI/REST. |
+| `chat.decide` | Operator-only | Unavailable: Only a person answers a chat's approval, in the Chat panel; an agent's call is refused. |
+| `chat.set_model` | Operator-only | Unavailable: A chat's model is the person's choice in the Chat panel. |
+| `chat.interrupt` | Operator-only | Unavailable: Stops a chat's turn; for the Chat panel and agents over MCP/CLI/REST. |
+| `chat.archive` | Operator-only | Unavailable: Files a chat away; for the Chat panel and agents over MCP/CLI/REST. |
+| `chat.promote` | Operator-only | Unavailable: Turns a chat into a terminal session; for the Chat panel and agents over MCP/CLI/REST. |
 | `audit.list` | Voice-readable | Available: Query the audit log. |
 | `registry.dump` | Voice-readable | Available: The operation registry as a manifest — every operation's scope, bindings and schemas. |
 <!-- voice-capabilities:end -->
