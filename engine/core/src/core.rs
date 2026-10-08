@@ -270,8 +270,8 @@ pub fn to_iso(moment: Moment) -> String {
 pub fn from_iso(text: &str) -> Result<Moment, String> {
     let bytes = text.as_bytes();
     let (year, month, day, consumed) = parse_iso_date(bytes)?;
-    let (hour, minute, second, micros, offset) = if consumed == bytes.len() {
-        (0, 0, 0, 0, 0)
+    let (hour, minute, second, micros, offset_seconds, offset_micros) = if consumed == bytes.len() {
+        (0, 0, 0, 0, 0, 0)
     } else {
         parse_iso_time(&bytes[consumed..])?
     };
@@ -280,7 +280,9 @@ pub fn from_iso(text: &str) -> Result<Moment, String> {
     let time = chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros)
         .ok_or_else(|| format!("not a timestamp: {text}"))?;
     let naive = chrono::NaiveDateTime::new(date, time);
-    let utc = naive.and_utc() - chrono::Duration::seconds(offset);
+    let utc = naive.and_utc()
+        - chrono::Duration::seconds(offset_seconds)
+        - chrono::Duration::microseconds(offset_micros);
     Ok(Moment::from_unix(
         utc.timestamp(),
         utc.timestamp_subsec_nanos(),
@@ -291,6 +293,15 @@ pub fn from_iso(text: &str) -> Result<Moment, String> {
 /// bytes the date consumed, including its trailing separator.
 fn parse_iso_date(bytes: &[u8]) -> Result<(i32, u32, u32, usize), String> {
     let year = fixed(bytes, 0, 4).ok_or_else(|| "not a timestamp".to_string())? as i32;
+    if bytes.len() >= 7 && bytes[4] == b'W' {
+        let week = fixed(bytes, 5, 2).ok_or_else(|| "not a timestamp".to_string())?;
+        let weekday = fixed(bytes, 7, 1).ok_or_else(|| "not a timestamp".to_string())?;
+        if bytes.len() != 8 {
+            return Err("not a timestamp".to_string());
+        }
+        let (year, month, day) = week_date(year, week, weekday)?;
+        return Ok((year, month, day, 8));
+    }
     if bytes.len() >= 8 && bytes[4].is_ascii_digit() {
         let month = fixed(bytes, 4, 2).unwrap();
         let day = fixed(bytes, 6, 2).ok_or_else(|| "not a timestamp".to_string())?;
@@ -318,7 +329,7 @@ fn parse_iso_date(bytes: &[u8]) -> Result<(i32, u32, u32, usize), String> {
 
 /// The time half, starting at its separator. Any single byte separates the
 /// date from the time, so `T`, `t` and `X` all work.
-fn parse_iso_time(bytes: &[u8]) -> Result<(u32, u32, u32, u32, i64), String> {
+fn parse_iso_time(bytes: &[u8]) -> Result<(u32, u32, u32, u32, i64, i64), String> {
     if bytes.is_empty() {
         return Err("not a timestamp".to_string());
     }
@@ -326,11 +337,11 @@ fn parse_iso_time(bytes: &[u8]) -> Result<(u32, u32, u32, u32, i64), String> {
     let (hour, minute, second, at) = parse_hms(rest)?;
     let (micros, at) = parse_fraction(rest, at)?;
     let offset = if at == rest.len() {
-        0
+        (0, 0)
     } else {
         parse_offset(&rest[at..])?
     };
-    Ok((hour, minute, second, micros, offset))
+    Ok((hour, minute, second, micros, offset.0, offset.1))
 }
 
 fn parse_hms(bytes: &[u8]) -> Result<(u32, u32, u32, usize), String> {
@@ -338,8 +349,11 @@ fn parse_hms(bytes: &[u8]) -> Result<(u32, u32, u32, usize), String> {
     if bytes.len() == 2 || starts_fraction_or_offset(bytes, 2) {
         return Ok((hour, 0, 0, 2));
     }
-    if bytes.len() >= 6 && bytes[2].is_ascii_digit() {
-        let minute = fixed(bytes, 2, 2).unwrap();
+    if bytes.len() >= 4 && bytes[2].is_ascii_digit() {
+        let minute = fixed(bytes, 2, 2).ok_or_else(|| "not a timestamp".to_string())?;
+        if bytes.len() == 4 || starts_fraction_or_offset(bytes, 4) {
+            return Ok((hour, minute, 0, 4));
+        }
         let second = fixed(bytes, 4, 2).ok_or_else(|| "not a timestamp".to_string())?;
         return Ok((hour, minute, second, 6));
     }
@@ -378,28 +392,67 @@ fn parse_fraction(bytes: &[u8], at: usize) -> Result<(u32, usize), String> {
     Ok((format!("{digits:0<6}").parse().unwrap_or(0), index))
 }
 
-/// `Z`, `±HH`, `±HHMM`, `±HH:MM`, `±HH:MM:SS`.
-fn parse_offset(bytes: &[u8]) -> Result<i64, String> {
+/// `Z`, `±HH`, `±HHMM`, `±HH:MM`, `±HH:MM:SS`, with an optional fraction on the
+/// offset seconds. Returns whole seconds and leftover microseconds. A field
+/// that is not two digits is an error, never a panic, and 24 hours or more is
+/// rejected the way Python rejects it.
+fn parse_offset(bytes: &[u8]) -> Result<(i64, i64), String> {
     if bytes == b"Z" || bytes == b"z" {
-        return Ok(0);
+        return Ok((0, 0));
     }
+    let bytes = bytes.strip_prefix(b" ").unwrap_or(bytes);
     if bytes.is_empty() || !matches!(bytes[0], b'+' | b'-') {
         return Err("not a timestamp".to_string());
     }
     let sign: i64 = if bytes[0] == b'+' { 1 } else { -1 };
     let body = &bytes[1..];
-    let (hour, minute, second) = match body.len() {
-        2 => (fixed(body, 0, 2).unwrap(), 0, 0),
-        4 => (fixed(body, 0, 2).unwrap(), fixed(body, 2, 2).unwrap(), 0),
-        5 if body[2] == b':' => (fixed(body, 0, 2).unwrap(), fixed(body, 3, 2).unwrap(), 0),
-        8 if body[2] == b':' && body[5] == b':' => (
-            fixed(body, 0, 2).unwrap(),
-            fixed(body, 3, 2).unwrap(),
-            fixed(body, 6, 2).unwrap(),
-        ),
-        _ => return Err("not a timestamp".to_string()),
+    let bad = || "not a timestamp".to_string();
+    let (hour, minute, second, micros, consumed) =
+        if body.len() >= 8 && body[2] == b':' && body[5] == b':' {
+            (
+                fixed(body, 0, 2).ok_or_else(bad)?,
+                fixed(body, 3, 2).ok_or_else(bad)?,
+                fixed(body, 6, 2).ok_or_else(bad)?,
+                0,
+                8,
+            )
+        } else if body.len() >= 5 && body[2] == b':' {
+            (
+                fixed(body, 0, 2).ok_or_else(bad)?,
+                fixed(body, 3, 2).ok_or_else(bad)?,
+                0,
+                0,
+                5,
+            )
+        } else if body.len() >= 4 && body[0].is_ascii_digit() && body[2].is_ascii_digit() {
+            (
+                fixed(body, 0, 2).ok_or_else(bad)?,
+                fixed(body, 2, 2).ok_or_else(bad)?,
+                0,
+                0,
+                4,
+            )
+        } else if body.len() >= 2 {
+            (fixed(body, 0, 2).ok_or_else(bad)?, 0, 0, 0, 2)
+        } else {
+            return Err(bad());
+        };
+    let micros = if matches!(body.get(consumed), Some(b'.' | b',')) {
+        let (fraction, end) = parse_fraction(body, consumed)?;
+        if end != body.len() {
+            return Err(bad());
+        }
+        fraction
+    } else if consumed != body.len() {
+        return Err(bad());
+    } else {
+        micros
     };
-    Ok(sign * (hour as i64 * 3600 + minute as i64 * 60 + second as i64))
+    let total = hour as i64 * 3600 + minute as i64 * 60 + second as i64;
+    if total >= 24 * 3600 {
+        return Err(bad());
+    }
+    Ok((sign * total, sign * micros as i64))
 }
 
 /// ISO week date to a calendar date. Week 1 holds January 4th and starts Monday.
@@ -470,6 +523,7 @@ impl<'de> serde::Deserialize<'de> for Moment {
 pub const LOCAL_SCHEME: &str = "local";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActorKind {
     Human,
     Agent,
@@ -805,6 +859,7 @@ impl Project {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkItem {
     pub id: String,
+    #[serde(rename = "ref")]
     pub reference: String,
     pub kind: String,
     pub title: String,
@@ -934,10 +989,20 @@ mod tests {
             ("2026-01-02t03:04:05", "2026-01-02T03:04:05+00:00"),
         ];
         for (text, expected) in accepted {
-            assert_eq!(from_iso(text).unwrap().to_iso(), expected, "{text}");
+            assert_eq!(
+                from_iso(text)
+                    .map(|m| m.to_iso())
+                    .unwrap_or_else(|e| format!("ERR {e}")),
+                expected,
+                "{text}"
+            );
         }
         // The rows the chrono formats got wrong. None is a rejection.
         let rejected = [
+            "2026-08-12T05:00:00+5:30",
+            "2026-08-12T05:00:00+05:3",
+            "2026-08-12T05:00:00+24:00",
+            "2026-08-12T05:00:00-24:00",
             "2026-8-1T5:0:0",
             "2026-13-40T25:61:61",
             "2026-08-12T23:59:60",
@@ -967,9 +1032,20 @@ mod tests {
             ("20260812", "2026-08-12T00:00:00+00:00"),
             ("2026-08-12T05:00:00-05:30", "2026-08-12T10:30:00+00:00"),
             ("2026-08-12T05:00:00.0Z", "2026-08-12T05:00:00+00:00"),
+            (
+                "2026-08-12T05:00:00+05:30:15.5",
+                "2026-08-11T23:29:44.500000+00:00",
+            ),
+            ("2026-08-12T05:00:00 +05:00", "2026-08-12T00:00:00+00:00"),
+            ("2026W331", "2026-08-10T00:00:00+00:00"),
+            ("2026-08-12T0500", "2026-08-12T05:00:00+00:00"),
         ];
         for (text, expected) in more {
-            assert_eq!(from_iso(text).unwrap().to_iso(), expected, "{text}");
+            assert_eq!(
+                from_iso(text).map(|m| m.to_iso()).ok().as_deref(),
+                Some(expected),
+                "{text}"
+            );
         }
         let later = from_iso("2026-01-02T00:00:01.500000Z").unwrap();
         let earlier = from_iso("2026-01-02T00:00:00Z").unwrap();
@@ -1032,6 +1108,40 @@ mod tests {
             refused.contains("VOGT_TEST_CLOCK_START, VOGT_TEST_IDS"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn the_json_names_match_python() {
+        // ActorKind is snake_case and WorkItem's handle is "ref", as pydantic
+        // emits them. The moment stays in the storage form (+00:00); the "Z"
+        // form belongs to the API surface, which is not this type.
+        assert_eq!(
+            serde_json::to_string(&ActorKind::Human).unwrap(),
+            "\"human\""
+        );
+        let item = WorkItem {
+            id: "wrk_0001".to_string(),
+            reference: "WI-1".to_string(),
+            kind: "bug".to_string(),
+            title: "a title".to_string(),
+            body: String::new(),
+            state: "open".to_string(),
+            priority: "p2".to_string(),
+            effort: None,
+            project_id: None,
+            initiative_id: None,
+            origin: "created".to_string(),
+            trust_state: "unverified".to_string(),
+            superseded_by: None,
+            created_at: from_iso("2026-01-02T03:04:05Z").unwrap(),
+            updated_at: from_iso("2026-01-02T03:04:05Z").unwrap(),
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["ref"], "WI-1");
+        assert!(json.get("reference").is_none());
+        assert_eq!(json["created_at"], "2026-01-02T03:04:05+00:00");
+        let back: WorkItem = serde_json::from_value(json).unwrap();
+        assert_eq!(back, item);
     }
 
     fn a_principal_needs_an_identity() {
