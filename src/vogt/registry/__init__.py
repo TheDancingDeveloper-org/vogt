@@ -10,6 +10,7 @@ are derived (ARCHITECTURE.md).
 
 from __future__ import annotations
 
+from vogt.registry.engine_routes import ENGINE_COUNTERPARTS, ENGINE_ONLY
 from vogt.registry.operation import CliBinding, HttpRoute, Operation, Scope
 from vogt.registry.registry import (
     HTTP_ONLY,
@@ -19,6 +20,8 @@ from vogt.registry.registry import (
 )
 
 __all__ = [
+    "ENGINE_COUNTERPARTS",
+    "ENGINE_ONLY",
     "HTTP_ONLY",
     "LOCAL_ONLY",
     "CliBinding",

@@ -68,6 +68,7 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("status", {}),
     ("registry.dump", {}),
     ("instance.diagnostics", {}),
+    ("engine.status", {}),
     ("place.metrics", {}),
     ("connect", {}),
     ("workflow.list", {}),
@@ -509,6 +510,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    (
+        "session.rename",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "name": "parity renamed",
+            "reason": WHY,
+        },
+    ),
     # Re-declare the item the session serves (WI-998): the core row, then
     # the stand-in engine's label.
     (
@@ -555,6 +564,15 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
             "reason": "the harness is finished with it",
+        },
+    ),
+    # Forget it engine-side once stopped, as the GUI's Remove does: the
+    # record is already closed, so only the engine's copy goes.
+    (
+        "session.remove",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "reason": "the harness is done with its output too",
         },
     ),
     (
@@ -915,11 +933,13 @@ def _stand_in_engine() -> EngineClient:
     counter = itertools.count(1)
     #: Sessions the stand-in has hibernated, so a wake takes its real path.
     asleep: set[str] = set()
+    #: Names given by a rename, so the summary after it reads the new one.
+    names: dict[str, str] = {}
 
     def summary(engine_id: str) -> dict[str, object]:
         return {
             "id": engine_id,
-            "name": "parity",
+            "name": names.get(engine_id, "parity"),
             "activity": "hibernated" if engine_id in asleep else "idle",
             "alive": engine_id not in asleep,
             "cwd": "/tmp",
@@ -955,6 +975,11 @@ def _stand_in_engine() -> EngineClient:
                     "exit_code": None,
                 }
             ).encode()
+        if method == "PATCH" and "/api/sessions/eng-" in path:
+            names[path.rsplit("/", 1)[-1]] = spec["name"].strip()
+            return 200, b'{"ok":true}'
+        if method == "DELETE" and "/api/sessions/eng-" in path:
+            return 200, b'{"ok":true}'
         if method == "POST" and url.endswith("/kill"):
             return 200, b'{"ok":true}'
         if method == "POST" and path.endswith("/hibernate"):
@@ -1098,6 +1123,26 @@ def _stand_in_engine() -> EngineClient:
                     "bytes": 13,
                     "total_bytes": 13,
                     "truncated": False,
+                }
+            ).encode()
+        if method == "GET" and path.endswith("/api/status"):
+            return 200, json.dumps(
+                {
+                    "version": "0.0.0",
+                    "product_version": "0.0.0",
+                    "source_ref": "main",
+                    "source_sha": "abc123",
+                    "release_url": None,
+                    "session_count": 0,
+                    "push_subscription_count": 0,
+                    "gui_process_count": 0,
+                    "gui_stream_configured": False,
+                    "fcm_enabled": False,
+                    "history": {"enabled": False},
+                    "agent_tasks": {"task_count": 0},
+                    "auth_broker": {"auto_agent_auth": True, "helper": "x"},
+                    "storage": {"state_dir": "/state", "workspace_root": "/ws"},
+                    "event_lag": {"assistant": {"episodes": 1, "events_skipped": 3}},
                 }
             ).encode()
         # Runtime-pinned agent CLIs: one canned report, whichever

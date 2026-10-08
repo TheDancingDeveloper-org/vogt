@@ -78,6 +78,8 @@ from vogt.application.models import (
     DriftResult,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
+    EngineStatusParams,
+    EngineStatusResult,
     EventListResult,
     ExportParams,
     ExportResult,
@@ -161,8 +163,10 @@ from vogt.application.models import (
     RegistryDumpParams,
     RegistryDumpResult,
     RelateWorkParams,
+    RemoveSessionParams,
     RemoveUserParams,
     RemoveUserResult,
+    RenameSessionParams,
     ReportBlockedParams,
     ReportUnblockedParams,
     RequestGrantParams,
@@ -1095,6 +1099,37 @@ def build_operations() -> list[Operation[Any, Any]]:
             cli=CliBinding(("session", "keep-awake")),
         ),
         Operation(
+            name="session.rename",
+            summary=(
+                "Rename a session, live or hibernated: the display name the "
+                "GUI shows and session_list returns as `name`. Takes either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=RenameSessionParams,
+            result_model=SessionResult,
+            handler=services.rename_session,
+            route=HttpRoute("POST", "/sessions/rename"),
+            cli=CliBinding(("session", "rename")),
+        ),
+        Operation(
+            name="session.remove",
+            summary=(
+                "Remove a session: kill it if it still runs and have the "
+                "engine forget it — its record, kept screen and brief — as the "
+                "GUI's Remove does. session_stop keeps it listed with its "
+                "output readable; this drops it. A linked session's record is "
+                "closed and its token revoked as a stop would. Takes either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=RemoveSessionParams,
+            result_model=SessionResult,
+            handler=services.remove_session,
+            route=HttpRoute("POST", "/sessions/remove"),
+            cli=CliBinding(("session", "remove")),
+        ),
+        Operation(
             name="session.set_role",
             summary=(
                 "Nominate a session as oversight (role=oversight): one that "
@@ -1325,6 +1360,23 @@ def build_operations() -> list[Operation[Any, Any]]:
         # agent can say what it runs and an operator can move the pin with a
         # reason, without an image build. `admin` for the move: it downloads
         # and executes a package from npm inside the pod.
+        Operation(
+            name="engine.status",
+            summary=(
+                "The session engine's operational report, as the GUI's "
+                "Settings shows it: build, session / push / GUI-process "
+                "counts, history archive and agent-task storage, workspace "
+                "root, and event subscribers that fell behind. `engine` says "
+                "why when it could not be asked."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=EngineStatusParams,
+            result_model=EngineStatusResult,
+            handler=services.engine_status,
+            route=HttpRoute("GET", "/engine/status"),
+            cli=CliBinding(("engine", "status")),
+        ),
         Operation(
             name="agent_cli.list",
             summary="Report the pod's agent CLIs: active, baked and upstream versions.",

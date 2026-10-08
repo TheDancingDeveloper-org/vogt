@@ -42,6 +42,7 @@ from vogt.application.services.drift_service import (
     list_drift,
     resolve_drift,
 )
+from vogt.application.services.engine_status import engine_status
 from vogt.application.services.forge_accounts import (
     link_forge_account,
     status_forge_account,
@@ -116,6 +117,8 @@ from vogt.application.services.sessions import (
     last_reply,
     list_sessions,
     log_tail,
+    remove_session,
+    rename_session,
     report_blocked,
     report_unblocked,
     search_output,
@@ -190,6 +193,7 @@ __all__ = [
     "deps",
     "detect_drift",
     "engine_session_token",
+    "engine_status",
     "export_instance",
     "get_preferences",
     "get_project",
@@ -241,7 +245,9 @@ __all__ = [
     "register_project",
     "registry_dump",
     "relate_work",
+    "remove_session",
     "remove_user",
+    "rename_session",
     "report_blocked",
     "report_unblocked",
     "reproject_initiative",

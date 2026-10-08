@@ -59,6 +59,8 @@ from vogt.application.models import (
     ListSessionsParams,
     LogTailParams,
     LogTailResult,
+    RemoveSessionParams,
+    RenameSessionParams,
     ReportBlockedParams,
     ReportUnblockedParams,
     SearchOutputParams,
@@ -135,6 +137,10 @@ SESSION_KEEP_AWAKE = "session.keep_awake"
 SESSION_KEEP_AWAKE_EVENT = "session.keep_awake"
 SESSION_SET_ROLE = "session.set_role"
 SESSION_ROLE_EVENT = "session.role_set"
+SESSION_RENAME = "session.rename"
+SESSION_RENAMED_EVENT = "session.renamed"
+SESSION_REMOVE = "session.remove"
+SESSION_REMOVED_EVENT = "session.removed"
 SESSION_BIND_WORK = "session.bind_work"
 SESSION_WORK_BOUND_EVENT = "session.work_bound"
 SESSION_WORK_UNBOUND_EVENT = "session.work_unbound"
@@ -1349,6 +1355,108 @@ def keep_session_awake(
         )
 
 
+def rename_session(ctx: AppContext, params: RenameSessionParams) -> SessionResult:
+    """Rename a session, live or hibernated — the GUI's rename, audited.
+
+    The name is the engine's: the core keeps no copy, so a linked session and
+    one the GUI started are renamed the same way and read back the same way.
+    """
+    reason = writes.validate_reason(params.reason)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    if not engine.rename_session(engine_id, name=params.name):
+        msg = f"the engine has no session {params.id!r}"
+        raise NotFound(msg)
+    audited_action(
+        ctx,
+        operation=SESSION_RENAME,
+        reason=reason,
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": target.session is not None,
+            "name": params.name.strip(),
+        },
+        event_kind=SESSION_RENAMED_EVENT,
+    )
+    renamed = engine.get_session(engine_id)
+    if target.session is None:
+        if renamed is None:
+            msg = f"the engine has no session {params.id!r}"
+            raise NotFound(msg)
+        return SessionResult(session=_summarize_engine_only(renamed))
+    with ctx.declared.read() as view:
+        return SessionResult(
+            session=_summarize(view, target.session, engine_session=renamed)
+        )
+
+
+def remove_session(ctx: AppContext, params: RemoveSessionParams) -> SessionResult:
+    """Kill a session if it still runs and have the engine forget it — the
+    GUI's Remove, audited.
+
+    Where `session.stop` keeps the session listed so its output stays
+    readable, this drops the engine's record, its kept screen and its brief.
+    A linked session's own record is closed and its token revoked exactly as
+    a stop closes them, unless a stop already did; Vogt's record and the
+    audit trail stay. An engine that had already forgotten a linked session
+    is not an error: the record is closed all the same.
+    """
+    reason = writes.validate_reason(params.reason)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    if target.session is None:
+        before = engine.get_session(engine_id)
+        if before is None or not engine.remove_session(engine_id):
+            msg = f"no session {engine_id!r}"
+            raise NotFound(msg)
+        audited_action(
+            ctx,
+            operation=SESSION_REMOVE,
+            reason=reason,
+            entity_kind="session",
+            entity_id=engine_id,
+            outcome={"engine_session_id": engine_id, "linked": False},
+            event_kind=SESSION_REMOVED_EVENT,
+            summary={"engine_removed": True, "linked": False},
+        )
+        summary = _summarize_engine_only(before).model_copy(
+            update={"alive": False, "stopped_at": ctx.clock()}
+        )
+        return SessionResult(session=summary)
+
+    session = target.session
+    removed = engine.remove_session(engine_id)
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
+        del actor
+        current = txn.session_by_id(session.id)
+        if current is None:  # pragma: no cover - resolved just above
+            msg = f"no session {params.id!r}"
+            raise NotFound(msg)
+        now = ctx.clock()
+        closed = current.stopped_at is None
+        if closed:
+            txn.mark_session_stopped(current.id, at=now)
+            for token in txn.tokens_for_actor(current.actor_id):
+                txn.revoke_token(token.id, reason=reason, at=now)
+        after = txn.session_by_id(current.id)
+        assert after is not None  # read in this transaction
+        return WriteOutcome(
+            result=SessionResult(session=_summarize(txn, after, engine_session=None)),
+            entity_kind="session",
+            entity_id=after.id,
+            payload=_audited_payload(after),
+            event_kind=SESSION_REMOVED_EVENT,
+            summary={"engine_removed": removed, "record_closed": closed},
+        )
+
+    return audited_write(ctx, operation=SESSION_REMOVE, reason=reason, body=body)
+
+
 def set_session_role(ctx: AppContext, params: SetSessionRoleParams) -> SessionResult:
     """Nominate a session as oversight, or make it a worker again (WI-957).
 
@@ -2278,6 +2386,13 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
     if engine_session is None:
         return {}
     return {
+        "name": engine_session.name or None,
+        "command": engine_session.command,
+        "exit_code": engine_session.exit_code,
+        "activity_changed_at": _parse_engine_timestamp(
+            engine_session.activity_changed_at
+        ),
+        "conversation_agent": engine_session.conversation_agent,
         "turn_started_at": _parse_engine_timestamp(engine_session.turn_started_at),
         "last_output_at": _parse_engine_timestamp(engine_session.last_output_at),
         "approval": _approval(engine_session.approval),
@@ -2352,7 +2467,9 @@ def _summarize_engine_only(
         work_item_state=None if item is None else item.state,
         actor=None,
         cwd=engine_session.cwd,
-        template=None,
+        # The engine's own record of the template, not an audited claim: the
+        # name it was started from, as the GUI's rail shows it.
+        template=engine_session.template,
         model=None,
         effort=None,
         reason=None,
@@ -2389,6 +2506,8 @@ __all__ = [
     "last_reply",
     "list_sessions",
     "log_tail",
+    "remove_session",
+    "rename_session",
     "report_blocked",
     "report_unblocked",
     "search_output",

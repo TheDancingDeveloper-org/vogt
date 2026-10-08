@@ -227,7 +227,11 @@ carrying its reason, and the test fails if either names an operation that
 does not exist: `LOCAL_ONLY` (`init`, `migrate`, `serve`, `backup`,
 `restore`, `clone`, `import`, `mcp.stdio` — each acts on the local process or data
 directory, and none is mounted under `/api` or offered over MCP) and
-`HTTP_ONLY`, which is empty.
+`HTTP_ONLY` (`session.token`, the engine's own call to mint a session's
+credential). The engine's routes are held to the same rule by a third table,
+`src/vogt/registry/engine_routes.py`: each route names the core operation
+that is its MCP counterpart or says why it has none, and
+`tests/test_engine_parity.py` fails on a route in neither (`API.md`).
 
 Three routes sit beside the registry rather than in it: the unauthenticated
 health probes; the first-run install surface (`GET /api/install/status`,
