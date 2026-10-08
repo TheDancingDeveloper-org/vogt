@@ -57,6 +57,10 @@ enum Command {
         /// `$XDG_DATA_HOME/vogt`, then `~/.local/share/vogt`.
         #[arg(long)]
         data_dir: Option<PathBuf>,
+        /// Do not require a bearer token. The default is to require one, which
+        /// is what `/connection-info` reports as "bearer token".
+        #[arg(long)]
+        no_auth: bool,
     },
     /// Create or migrate the instance in a data directory.
     Init {
@@ -76,7 +80,8 @@ fn main() -> ExitCode {
             host,
             port,
             data_dir,
-        } => serve(&host, port, data_dir, cli.json),
+            no_auth,
+        } => serve(&host, port, data_dir, cli.json, no_auth),
         Command::Init { data_dir, check } => init(data_dir, check, cli.json),
     }
 }
@@ -135,7 +140,7 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
     }
 }
 
-fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool) -> ExitCode {
+fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: bool) -> ExitCode {
     let Some(data_dir) = resolve_data_dir(data_dir) else {
         return ExitCode::from(1);
     };
@@ -151,17 +156,10 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool) -> ExitCo
             return ExitCode::from(1);
         }
     };
-    let loaded = match config::load_config(&serde_json::Map::new()) {
-        Ok(config) => config,
-        Err(err) => {
-            eprintln!("vogt-core serve: {err}");
-            return ExitCode::from(1);
-        }
-    };
     let router = adapters::http::health::router(adapters::http::health::HealthState {
         data_dir: data_dir.clone(),
         version: PRODUCT_VERSION.to_string(),
-        auth_enabled: loaded.bootstrap_core_token_file.is_some(),
+        auth_enabled: !no_auth,
         writes_enabled: true,
     });
     let runtime = match tokio::runtime::Runtime::new() {

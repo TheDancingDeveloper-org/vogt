@@ -66,9 +66,11 @@ async fn version(State(state): State<Arc<HealthState>>) -> Json<VersionBody> {
 
 #[derive(Serialize)]
 struct ConnectionInfo {
+    name: &'static str,
+    version: String,
     url: Option<String>,
-    api_path: &'static str,
-    mcp_path: &'static str,
+    api_path: String,
+    mcp_path: String,
     health_path: &'static str,
     supported_mcp_protocol_versions: &'static [&'static str],
     authentication: &'static str,
@@ -77,17 +79,60 @@ struct ConnectionInfo {
 
 const SUPPORTED_MCP_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-async fn connection_info(State(state): State<Arc<HealthState>>) -> Json<ConnectionInfo> {
-    let url = crate::config::load_config(&serde_json::Map::new())
-        .ok()
-        .and_then(|config| config.public_url.clone());
+const API_PATH: &str = "/api";
+const MCP_PATH: &str = "/mcp";
+
+fn clean_url(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim().trim_end_matches('/');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn clean_path(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{trimmed}")
+    })
+}
+
+async fn connection_info(
+    State(state): State<Arc<HealthState>>,
+    headers: axum::http::HeaderMap,
+) -> Json<ConnectionInfo> {
+    let config = crate::config::load_config(&serde_json::Map::new()).ok();
+    let fronted = config.as_ref().is_some_and(|config| config.fronted);
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    // Unfronted, the headers are ignored entirely: anyone who can reach the
+    // core must not be able to tell it that it lives somewhere else.
+    let url = fronted
+        .then(|| clean_url(header("x-vogt-public-url")))
+        .flatten()
+        .or_else(|| clean_url(config.as_ref().and_then(|c| c.public_url.as_deref())));
+    let api_path = fronted
+        .then(|| clean_path(header("x-vogt-api-path")))
+        .flatten()
+        .unwrap_or_else(|| API_PATH.to_string());
+    let mcp_path = fronted
+        .then(|| clean_path(header("x-vogt-mcp-path")))
+        .flatten()
+        .unwrap_or_else(|| MCP_PATH.to_string());
     Json(ConnectionInfo {
+        name: "vogt",
+        version: state.version.clone(),
         url,
-        api_path: "/api/v1",
-        mcp_path: "/mcp",
+        api_path,
+        mcp_path,
         health_path: "/health/ready",
         supported_mcp_protocol_versions: &SUPPORTED_MCP_PROTOCOL_VERSIONS,
-        authentication: if state.auth_enabled { "bearer" } else { "none" },
+        authentication: if state.auth_enabled {
+            "bearer token"
+        } else {
+            "none (loopback)"
+        },
         writes_enabled: state.writes_enabled,
     })
 }
@@ -191,6 +236,9 @@ fn instance_id(data_dir: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn a_ready_probe_carries_detail_null_and_the_instance_id() {
@@ -218,6 +266,7 @@ mod tests {
 
     #[test]
     fn version_and_connection_info_match_python() {
+        let _guard = ENV.lock().unwrap();
         let state = HealthState {
             data_dir: PathBuf::from("/unused"),
             version: "0.7.7".to_string(),
@@ -233,35 +282,104 @@ mod tests {
             axum::serve(listener, router(state)).await.unwrap();
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
-        let get = |path: &str| -> String {
+        let get = |path: &str, extra: &str| -> String {
             let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
             use std::io::{Read, Write};
             write!(
                 stream,
-                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{extra}\r\n"
             )
             .unwrap();
             let mut buf = String::new();
             stream.read_to_string(&mut buf).unwrap();
             buf
         };
-        let version = get("/version");
-        let body = version.split("\r\n\r\n").nth(1).unwrap();
-        let version: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(version["version"], "0.7.7");
-        assert_eq!(version["name"], "vogt");
+        let body = |raw: &str| raw.split("\r\n\r\n").nth(1).unwrap().to_string();
 
-        let info = get("/connection-info");
-        let body = info.split("\r\n\r\n").nth(1).unwrap();
+        let version: serde_json::Value = serde_json::from_str(&body(&get("/version", ""))).unwrap();
+        assert_eq!(
+            version,
+            serde_json::json!({"version": "0.7.7", "name": "vogt"})
+        );
+
+        let info: serde_json::Value =
+            serde_json::from_str(&body(&get("/connection-info", ""))).unwrap();
+        assert_eq!(
+            info,
+            serde_json::json!({
+                "name": "vogt",
+                "version": "0.7.7",
+                "url": null,
+                "api_path": "/api",
+                "mcp_path": "/mcp",
+                "health_path": "/health/ready",
+                "supported_mcp_protocol_versions": ["2025-06-18", "2025-03-26", "2024-11-05"],
+                "authentication": "none (loopback)",
+                "writes_enabled": true
+            })
+        );
+        let ignored: serde_json::Value = serde_json::from_str(&body(&get(
+            "/connection-info",
+            "x-vogt-public-url: https://attacker.example\r\n",
+        )))
+        .unwrap();
+        assert!(
+            ignored["url"].is_null(),
+            "unfronted ignores the door headers"
+        );
+        assert!(get("/health", "").starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn a_fronted_instance_honours_the_door_headers() {
+        let _guard = ENV.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("vogt-fronted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("vogt.toml");
+        std::fs::write(
+            &file,
+            "fronted = true\npublic_url = \"https://config.example\"\n",
+        )
+        .unwrap();
+        // SAFETY: the test runs single-threaded and restores the variable.
+        unsafe { std::env::set_var("VOGT_CONFIG_FILE", &file) };
+
+        let state = HealthState {
+            data_dir: PathBuf::from("/unused"),
+            version: "0.7.7".to_string(),
+            auth_enabled: true,
+            writes_enabled: true,
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.spawn(async move {
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            axum::serve(listener, router(state)).await.unwrap();
+        });
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        use std::io::{Read, Write};
+        write!(
+            stream,
+            "GET /connection-info HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
+             x-vogt-public-url: https://door.example/\r\n\
+             x-vogt-api-path: api/vogt/\r\n\
+             x-vogt-mcp-path: /mcp/\r\n\r\n"
+        )
+        .unwrap();
+        let mut buf = String::new();
+        stream.read_to_string(&mut buf).unwrap();
+        let body = buf.split("\r\n\r\n").nth(1).unwrap();
         let info: serde_json::Value = serde_json::from_str(body).unwrap();
-        assert_eq!(info["api_path"], "/api/v1");
+        // The door wins field by field, and both cleaners strip the slash.
+        assert_eq!(info["url"], "https://door.example");
+        assert_eq!(info["api_path"], "/api/vogt");
         assert_eq!(info["mcp_path"], "/mcp");
-        assert_eq!(info["health_path"], "/health/ready");
-        assert_eq!(info["authentication"], "none");
-        assert_eq!(info["writes_enabled"], true);
-        assert_eq!(info["supported_mcp_protocol_versions"][0], "2025-06-18");
+        assert_eq!(info["authentication"], "bearer token");
 
-        // Python has no bare /health.
-        assert!(get("/health").starts_with("HTTP/1.1 404"));
+        unsafe { std::env::remove_var("VOGT_CONFIG_FILE") };
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
