@@ -102,9 +102,12 @@ you in. The wizard stays open until the first *person* has a login: the
 stack secret is bound to an agent actor and does not count, so supplying it
 before `up` no longer closes the wizard (releases up to v0.7.7 did, #903).
 `GET /api/install/status` says which: `{"install_mode": true}` while the
-wizard is offered. If it answers `false` with nobody able to sign in — an
-older release, or `VOGT_INSTALL_BOOTSTRAP_ENABLED=false` — create the first
-operator in the container instead; it prompts for the password:
+wizard is offered. Once closed it stays closed — the store latches it, and
+an upgrade from v0.7.7 or earlier latches any store that already held a
+token, so a running instance operated only through `ENGINE_TOKEN` is never
+reopened. If it answers `false` with nobody able to sign in — such an
+upgraded instance, or `VOGT_INSTALL_BOOTSTRAP_ENABLED=false` — create the
+first operator in the container instead; it prompts for the password:
 
 ```console
 docker compose -f deploy/stack.compose.yml exec vogt \

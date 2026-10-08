@@ -931,9 +931,10 @@ class SqliteReadView:
         ).fetchall()
         return [_row_to_token(row) for row in rows]
 
-    def has_operator_credential(self) -> bool:
+    def install_closed(self) -> bool:
         row = self._conn.execute(
-            "SELECT EXISTS (SELECT 1 FROM tokens t JOIN actors a "
+            "SELECT EXISTS (SELECT 1 FROM install_latch) "
+            "OR EXISTS (SELECT 1 FROM tokens t JOIN actors a "
             "ON a.id = t.actor_id WHERE a.kind <> 'agent') "
             "OR EXISTS (SELECT 1 FROM password_credentials)"
         ).fetchone()
@@ -1731,6 +1732,21 @@ class SqliteWriteTxn(SqliteReadView):
                 None if token.expires_at is None else to_iso(token.expires_at),
             ),
         )
+        self._latch_install_if_operator(token.created_at)
+
+    def _latch_install_if_operator(self, at: datetime) -> None:
+        """Latch first-run install mode closed once a person (a non-agent
+        actor) holds a token or a login (#903, migration 0020). Called by
+        every write that can give one, in that write's transaction, so the
+        door stays shut even if the credential is later removed."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO install_latch (id, closed_at, reason) "
+            "SELECT 1, ?, 'a person holds a credential' "
+            "WHERE EXISTS (SELECT 1 FROM tokens t JOIN actors a "
+            "ON a.id = t.actor_id WHERE a.kind <> 'agent') "
+            "OR EXISTS (SELECT 1 FROM password_credentials)",
+            (to_iso(at),),
+        )
 
     def carry_credentials(
         self, carried: CarriedCredentials, *, reason: str, at: datetime
@@ -1838,6 +1854,7 @@ class SqliteWriteTxn(SqliteReadView):
                 f"({', '.join('?' for _ in _FORGE_ACCOUNT_CARRY_COLUMNS)})",
                 tuple(row[c] for c in _FORGE_ACCOUNT_CARRY_COLUMNS),
             )
+        self._latch_install_if_operator(at)
         return CarryReport(
             tokens_kept=len(carried.tokens),
             source_tokens_revoked=revoked,
@@ -1890,6 +1907,7 @@ class SqliteWriteTxn(SqliteReadView):
             "updated_at = excluded.updated_at",
             (actor_id, username, password_hash, json.dumps(scopes), stamp, stamp),
         )
+        self._latch_install_if_operator(at)
 
     def delete_password_credential(self, actor_id: str) -> bool:
         cursor = self._conn.execute(

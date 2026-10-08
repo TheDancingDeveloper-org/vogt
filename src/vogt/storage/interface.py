@@ -390,13 +390,17 @@ class ReadView(Protocol):
         """
         ...
 
-    def has_operator_credential(self) -> bool:
-        """Whether any person (a non-agent actor) holds a credential: a token
-        row, revoked included, or a password login.
+    def install_closed(self) -> bool:
+        """Whether first-run install mode is over (#903): a person (a
+        non-agent actor) holds a credential — a token row, revoked included,
+        or a password login — or the store is latched closed.
 
-        What first-run install mode keys on (#903). Tokens bound to agent
-        actors — the adopted stack/core and agent tokens, coding-session
-        tokens — are machinery, not an operator, so they never count.
+        Tokens bound to agent actors — the adopted stack/core and agent
+        tokens, coding-session tokens — are machinery, not an operator, so
+        they never close it. The latch (`install_latch`, migration 0020) is
+        set for a store that already held tokens when it was upgraded, and
+        whenever a person is given a login or a token, so the door never
+        reopens: not on upgrade, and not when a user is removed.
         """
         ...
 
