@@ -208,10 +208,16 @@ COPY engine/contract/Cargo.toml ./contract/Cargo.toml
 COPY engine/contract/src ./contract/src
 COPY engine/voxcall/Cargo.toml ./voxcall/Cargo.toml
 COPY engine/voxcall/src ./voxcall/src
-COPY engine/server/Cargo.toml ./server/Cargo.toml
-COPY engine/server/build.rs ./server/build.rs
-COPY engine/server/src ./server/src
-COPY --from=web-build /app/web/dist /app/web/dist
+	COPY engine/server/Cargo.toml ./server/Cargo.toml
+	COPY engine/server/build.rs ./server/build.rs
+	COPY engine/server/src ./server/src
+	# vogt-core is a workspace member, so the workspace will not load without it,
+	# and its migrations are compiled in from the checkout rather than read at
+	# runtime. The stack image does not ship src/vogt.
+	COPY engine/core/Cargo.toml ./core/Cargo.toml
+	COPY engine/core/src ./core/src
+	COPY src/vogt/storage/sqlite/migrations /app/src/vogt/storage/sqlite/migrations
+	COPY --from=web-build /app/web/dist /app/web/dist
 # BuildKit cache mounts keep registry/git deps + the target dir warm across
 # rebuilds without the brittle "dummy main.rs to prime deps" dance. They are
 # builder-local state (not layers), so they warm a repeat build on the same

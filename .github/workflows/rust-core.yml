@@ -55,6 +55,33 @@ jobs:
         working-directory: engine
         run: cargo test -p vogt-core
 
+      # The stack image's server-build stage copies a subset of the tree and
+      # then runs cargo. rust-core.yml never builds that image, so a workspace
+      # member the stage does not copy fails ci.yml and build.yml on the swap
+      # and nowhere else. This checks the stage's file set loads.
+      - name: server-build stage loads
+        run: |
+          set -euo pipefail
+          stage=$(mktemp -d)
+          trap 'rm -rf "$stage"' EXIT
+          copy() { mkdir -p "$stage/engine/$(dirname "$2")" && cp -a "$1" "$stage/engine/$2"; }
+          copy engine/Cargo.toml Cargo.toml
+          copy engine/Cargo.lock Cargo.lock
+          copy engine/contract/Cargo.toml contract/Cargo.toml
+          copy engine/contract/src contract/src
+          copy engine/voxcall/Cargo.toml voxcall/Cargo.toml
+          copy engine/voxcall/src voxcall/src
+          copy engine/server/Cargo.toml server/Cargo.toml
+          copy engine/server/build.rs server/build.rs
+          copy engine/server/src server/src
+          copy engine/core/Cargo.toml core/Cargo.toml
+          copy engine/core/src core/src
+          mkdir -p "$stage/src/vogt/storage/sqlite" "$stage/web/dist"
+          cp -a src/vogt/storage/sqlite/migrations "$stage/src/vogt/storage/sqlite/migrations"
+          # The stage builds -p vogt-engine-server, which embeds web/dist. An
+          # empty bundle is enough to prove the workspace loads.
+          ( cd "$stage/engine" && cargo metadata --offline --no-deps --format-version 1 >/dev/null )
+
   parity:
     name: parity
     # Proves the harness against the Python core. The Rust side joins once

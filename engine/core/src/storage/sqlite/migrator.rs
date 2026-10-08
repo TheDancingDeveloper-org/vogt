@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 
 use super::connection::{connect, split_statements};
 use super::embedded;
+use crate::core::from_iso;
 
 const FRAMEWORK: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS migrations (
@@ -342,9 +343,12 @@ fn acquire_lock(
     // the holder crashed, and leaving it would wedge the instance forever.
     // Python compares `now - acquired_at < stale_after` the same way.
     if let Some((Some(current), Some(acquired_at))) = &row {
-        match (parse_iso(now), parse_iso(acquired_at)) {
-            (Some(now_secs), Some(acquired_secs))
-                if now_secs.saturating_sub(acquired_secs) < STALE_AFTER_SECONDS =>
+        match (from_iso(now).ok(), from_iso(acquired_at).ok()) {
+            (Some(now_at), Some(acquired))
+                if now_at
+                    .unix_seconds()
+                    .saturating_sub(acquired.unix_seconds())
+                    < STALE_AFTER_SECONDS =>
             {
                 let _ = conn.execute_batch("ROLLBACK");
                 return Err(MigrateError::Message(format!(
@@ -387,40 +391,6 @@ pub fn open_and_migrate(
 ) -> Result<Report, MigrateError> {
     let mut conn = connect(path)?;
     migrate(&mut conn, store, directory, holder, now)
-}
-
-/// Seconds since the epoch for a UTC timestamp written as
-/// `YYYY-MM-DDTHH:MM:SS`, optionally with a fraction and a `Z` or `+00:00`
-/// suffix — the shapes `to_iso` and Python's `isoformat` produce. Anything else
-/// is unreadable, and the caller treats that as stale rather than wedging.
-fn parse_iso(text: &str) -> Option<i64> {
-    let body = text.trim().trim_end_matches('Z');
-    let (date, time) = body.split_once('T')?;
-    let mut date_parts = date.split('-');
-    let year: i64 = date_parts.next()?.parse().ok()?;
-    let month: u32 = date_parts.next()?.parse().ok()?;
-    let day: u32 = date_parts.next()?.parse().ok()?;
-    let time = time.split(['+', '-']).next()?;
-    let (clock, _fraction) = time.split_once('.').unwrap_or((time, ""));
-    let mut clock_parts = clock.split(':');
-    let hour: u32 = clock_parts.next()?.parse().ok()?;
-    let minute: u32 = clock_parts.next()?.parse().ok()?;
-    let second: u32 = clock_parts.next()?.parse().ok()?;
-    let days = days_from_civil(year, month, day)?;
-    Some(days * 86_400 + i64::from(hour) * 3600 + i64::from(minute) * 60 + i64::from(second))
-}
-
-fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
-    if !(1..=12).contains(&month) || day == 0 || day > 31 {
-        return None;
-    }
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year.div_euclid(400);
-    let yoe = year.rem_euclid(400) as u64;
-    let mp = if month > 2 { month - 3 } else { month + 9 };
-    let doy = (153 * mp as u64 + 2) / 5 + day as u64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146_097 + doe as i64 - 719_468)
 }
 
 #[cfg(test)]
@@ -486,10 +456,15 @@ mod tests {
         assert!(stolen.is_ok(), "{stolen:?}");
         assert_eq!(holder_of(&conn), None);
 
-        // A fractional timestamp and a Z suffix parse the same instant.
+        // A non-UTC offset counts: twelve hours later in +12:00 is the same
+        // instant, so the lock is exactly fifteen minutes old and is stolen.
         assert_eq!(
-            parse_iso("2026-10-08T12:00:00.500000+00:00"),
-            parse_iso("2026-10-08T12:00:00Z")
+            from_iso("2026-10-08T12:00:00.500000+00:00")
+                .unwrap()
+                .unix_seconds(),
+            from_iso("2026-10-09T00:00:00+12:00")
+                .unwrap()
+                .unix_seconds()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
