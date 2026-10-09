@@ -22,6 +22,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
+use super::preferences::{optional_i64, optional_string, require_string};
+use super::{dispatch, Built};
+
 use crate::adapters::engine::{
     CreateSession, EngineApproval, EngineBlocked, EngineClient, EngineHibernation, EngineResources,
     EngineScreen, EngineSession, EngineSweepEntry,
@@ -72,6 +75,287 @@ const INPUT_KEYS: [&str; 10] = [
     "ctrl-d",
     "backspace",
 ];
+
+// -- the registry's entry points ----------------------------------------------
+//
+// One wrapper per operation: parse the transport's JSON into the parameter
+// model (defaults matching the Python models), then the service. The table in
+// `registry::service_for` is the only place that names them.
+
+pub fn start_session_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, start_session_json, params)
+}
+pub fn stop_session_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, stop_session_json, params)
+}
+pub fn list_sessions_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, list_sessions_json, params)
+}
+pub fn sweep_sessions_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, sweep_sessions_json, params)
+}
+pub fn log_tail_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, log_tail_json, params)
+}
+pub fn input_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, input_json, params)
+}
+pub fn screen_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, screen_json, params)
+}
+pub fn wait_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, wait_json, params)
+}
+pub fn wake_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, wake_json, params)
+}
+pub fn keep_awake_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, keep_awake_json, params)
+}
+pub fn set_role_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, set_role_json, params)
+}
+pub fn answer_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, answer_json, params)
+}
+pub fn hibernate_op(built: &Built, params: Value) -> Result<Value, VogtError> {
+    dispatch!(built, hibernate_json, params)
+}
+
+fn start_session_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = StartSessionParams {
+        project: optional_string(&params, "project")?,
+        work_item: optional_string(&params, "work_item")?,
+        name: optional_string(&params, "name")?,
+        template: optional_string(&params, "template")?,
+        task: optional_string(&params, "task")?,
+        reason: require_string(&params, "reason")?,
+        model: optional_string(&params, "model")?,
+        effort: optional_string(&params, "effort")?,
+        resume: optional_string(&params, "resume")?,
+        permission_mode: optional_string(&params, "permission_mode")?
+            .unwrap_or_else(|| "default".to_string()),
+        autopilot: optional_bool(&params, "autopilot")?,
+        role: optional_string(&params, "role")?.unwrap_or_else(|| "worker".to_string()),
+    };
+    Ok(serde_json::to_value(start_session(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn stop_session_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = StopSessionParams {
+        id: require_string(&params, "id")?,
+        reason: require_string(&params, "reason")?,
+    };
+    Ok(serde_json::to_value(stop_session(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn list_sessions_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = ListSessionsParams {
+        project: optional_string(&params, "project")?,
+        work_item: optional_string(&params, "work_item")?,
+        include_stopped: optional_bool(&params, "include_stopped")?.unwrap_or(false),
+        limit: optional_i64(&params, "limit", 50)?,
+        offset: optional_i64(&params, "offset", 0)?,
+        order: optional_string(&params, "order")?.unwrap_or_else(|| "started".to_string()),
+    };
+    Ok(serde_json::to_value(list_sessions(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn sweep_sessions_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = SweepSessionsParams {
+        project: optional_string(&params, "project")?,
+        screen_lines: optional_i64(&params, "screen_lines", 8)?,
+        stall_after_minutes: optional_i64(&params, "stall_after_minutes", 10)?,
+    };
+    Ok(serde_json::to_value(sweep_sessions(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn log_tail_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = LogTailParams {
+        id: require_string(&params, "id")?,
+        tail_bytes: optional_i64(&params, "tail_bytes", 64 * 1024)?,
+        strip_ansi: optional_bool(&params, "strip_ansi")?.unwrap_or(true),
+    };
+    Ok(serde_json::to_value(log_tail(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn input_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = InputParams {
+        id: require_string(&params, "id")?,
+        text: optional_string(&params, "text")?,
+        keys: optional_string_list(&params, "keys")?,
+        submit: optional_bool(&params, "submit")?.unwrap_or(false),
+        reason: require_string(&params, "reason")?,
+        confirm: optional_bool(&params, "confirm")?.unwrap_or(true),
+        wake_timeout_s: optional_i64(&params, "wake_timeout_s", 120)?,
+    };
+    Ok(serde_json::to_value(input(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn screen_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = ScreenParams {
+        id: require_string(&params, "id")?,
+        scrollback_lines: optional_i64(&params, "scrollback_lines", 0)?,
+    };
+    Ok(serde_json::to_value(screen(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn wait_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = WaitParams {
+        id: require_string(&params, "id")?,
+        until: optional_string(&params, "until")?.unwrap_or_else(|| "ready".to_string()),
+        timeout_s: optional_i64(&params, "timeout_s", 120)?,
+    };
+    Ok(serde_json::to_value(wait(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn wake_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = WakeParams {
+        id: require_string(&params, "id")?,
+        reason: require_string(&params, "reason")?,
+    };
+    Ok(serde_json::to_value(wake(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn keep_awake_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = KeepAwakeParams {
+        id: require_string(&params, "id")?,
+        keep_awake: require_bool(&params, "keep_awake")?,
+        reason: require_string(&params, "reason")?,
+    };
+    Ok(serde_json::to_value(keep_awake(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn set_role_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = SetRoleParams {
+        id: require_string(&params, "id")?,
+        role: require_string(&params, "role")?,
+        reason: require_string(&params, "reason")?,
+    };
+    Ok(serde_json::to_value(set_role(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+fn answer_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = AnswerParams {
+        id: require_string(&params, "id")?,
+        option: optional_i64_some(&params, "option")?,
+        label: optional_string(&params, "label")?,
+        expect_question: optional_string(&params, "expect_question")?,
+        reason: require_string(&params, "reason")?,
+    };
+    answer(ctx, &parsed)
+}
+
+fn hibernate_json<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let parsed = HibernateParams {
+        id: require_string(&params, "id")?,
+        reason: require_string(&params, "reason")?,
+        allow_shell: optional_bool(&params, "allow_shell")?.unwrap_or(false),
+    };
+    Ok(serde_json::to_value(hibernate(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+/// A bool that may be absent.
+fn optional_bool(params: &Value, field: &str) -> Result<Option<bool>, VogtError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(value)) => Ok(Some(*value)),
+        Some(_) => Err(VogtError::InvalidRequest(format!(
+            "{field} must be a boolean"
+        ))),
+    }
+}
+
+/// A bool the caller must give.
+fn require_bool(params: &Value, field: &str) -> Result<bool, VogtError> {
+    optional_bool(params, field)?
+        .ok_or_else(|| VogtError::InvalidRequest(format!("{field} is required")))
+}
+
+/// An integer that may be absent, unlike `optional_i64` which fills a default.
+fn optional_i64_some(params: &Value, field: &str) -> Result<Option<i64>, VogtError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .map(Some)
+            .ok_or_else(|| VogtError::InvalidRequest(format!("{field} must be an integer"))),
+        Some(_) => Err(VogtError::InvalidRequest(format!(
+            "{field} must be an integer"
+        ))),
+    }
+}
+
+/// A list of strings that may be absent.
+fn optional_string_list(params: &Value, field: &str) -> Result<Option<Vec<String>>, VogtError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| {
+                item.as_str().map(str::to_string).ok_or_else(|| {
+                    VogtError::InvalidRequest(format!("{field} must be a list of strings"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(VogtError::InvalidRequest(format!(
+            "{field} must be a list of strings"
+        ))),
+    }
+}
 
 // -- parameter models ---------------------------------------------------------
 
