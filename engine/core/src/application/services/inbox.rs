@@ -70,11 +70,20 @@ where
     let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(50);
     let cursor = optional_string(&params, "cursor")?;
 
-    let now = now_of(&ctx.clock);
+    let snapshot_at = now_of(&ctx.clock);
     let (declared, observed, _, _, _, config) = context_parts(ctx);
     let view = declared.read()?;
 
     let mut entries = collect(ctx, observed, &view, config)?;
+    let triage = view.inbox_triage_by_keys(
+        &entries
+            .iter()
+            .map(|entry| text_of(entry, "entry_key"))
+            .collect::<Vec<_>>(),
+    )?;
+    for entry in &mut entries {
+        *entry = apply_triage(ctx, &triage, entry.clone());
+    }
     let mut project_ids: BTreeMap<String, String> = view
         .list_projects(MAX_SCAN, 0)?
         .into_iter()
@@ -106,7 +115,7 @@ where
             && work_item_filter.as_ref().is_none_or(|reference| {
                 entry.get("work_item_ref").and_then(Value::as_str) == Some(reference.as_str())
             })
-            && triage_matches(entry, &triage_states, now)
+            && triage_matches(entry, &triage_states, now_of(&ctx.clock))
     });
     let unknown_hidden = if actor == "external" {
         entries.iter().filter(|entry| actor_unknown(entry)).count() as i64
@@ -120,7 +129,7 @@ where
         Some(cursor) => Some(decode_cursor(cursor, &fingerprint)?),
         None => None,
     };
-    let mut snapshot_at = now;
+    let mut snapshot_at = snapshot_at;
     if let Some(cursor_value) = cursor_value.as_ref() {
         snapshot_at = cursor_snapshot(cursor_value)?;
         if let Some(cursor_water) = cursor_high_water(cursor_value)? {
@@ -626,7 +635,11 @@ where
         }
     }
 
-    for grant in view.list_session_grants(Some("pending"), None, MAX_SCAN)? {
+    let grants = view.list_session_grants(Some("pending"), None, MAX_SCAN)?;
+    for grant in grants {
+        // Python's grant view calls `effective_state(ctx.clock())` per row, so the
+        // clock advances once here even though a stored `pending` never expires.
+        let _state = grant.effective_state(now_of(&ctx.clock));
         if grant.state == crate::core::GrantState::Pending {
             entries.push(grant_entry(view, &grant, &projects, &live_by_id)?);
         }
@@ -679,17 +692,7 @@ where
         entries.push(drift_entry(view, &proposal, &projects)?);
     }
 
-    let triage = view.inbox_triage_by_keys(
-        &entries
-            .iter()
-            .map(|entry| text_of(entry, "entry_key"))
-            .collect::<Vec<_>>(),
-    )?;
-    let now = now_of(&ctx.clock);
-    Ok(entries
-        .into_iter()
-        .map(|entry| apply_triage(&triage, entry, now))
-        .collect())
+    Ok(entries)
 }
 
 struct EntrySpec<'a> {
@@ -1393,7 +1396,11 @@ fn freshness<C: Clock, I: IdFactory>(
     (trust.to_string(), freshness)
 }
 
-fn apply_triage(decisions: &BTreeMap<String, InboxTriage>, mut entry: Value, now: Moment) -> Value {
+fn apply_triage<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    decisions: &BTreeMap<String, InboxTriage>,
+    mut entry: Value,
+) -> Value {
     let Some(triage) = entry
         .get("entry_key")
         .and_then(Value::as_str)
@@ -1401,7 +1408,12 @@ fn apply_triage(decisions: &BTreeMap<String, InboxTriage>, mut entry: Value, now
     else {
         return entry;
     };
-    if triage.state == TriageState::Snoozed && triage.snooze_until.is_some_and(|until| until <= now)
+    // Read only for a snooze, as Python does: the `and` chain evaluates the
+    // clock comparison solely when a deadline is set.
+    if triage.state == TriageState::Snoozed
+        && triage
+            .snooze_until
+            .is_some_and(|until| until <= now_of(&ctx.clock))
     {
         return entry;
     }
@@ -1429,7 +1441,21 @@ where
     C: Clock,
     I: IdFactory,
 {
-    Ok(collect(ctx, observed, view, config)?
+    let mut entries = collect(ctx, observed, view, config)?;
+    let triage = view.inbox_triage_by_keys(
+        &entries
+            .iter()
+            .map(|entry| text_of(entry, "entry_key"))
+            .collect::<Vec<_>>(),
+    )?;
+    for entry in &mut entries {
+        let is_target = entry.get("entry_key").and_then(Value::as_str) == Some(key);
+        *entry = apply_triage(ctx, &triage, entry.clone());
+        if is_target {
+            break;
+        }
+    }
+    Ok(entries
         .into_iter()
         .find(|entry| entry.get("entry_key").and_then(Value::as_str) == Some(key)))
 }
