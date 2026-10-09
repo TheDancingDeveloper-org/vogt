@@ -13,6 +13,18 @@ pub enum Delivery {
     Unconfirmed,
 }
 
+impl Delivery {
+    /// The wire value, matching `delivery.py`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Typed => "typed",
+            Self::Delivered => "delivered",
+            Self::Queued => "queued",
+            Self::Unconfirmed => "unconfirmed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Observation {
     pub activity: Option<String>,

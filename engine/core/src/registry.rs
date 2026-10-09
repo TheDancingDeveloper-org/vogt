@@ -179,7 +179,30 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "actor.list" => Some(crate::application::taxonomy::list_actors_op),
         "workflow.list" => Some(crate::application::taxonomy::list_workflows_op),
         "deployed.versions" => Some(crate::application::deployed::deployed_versions_op),
-        other => crate::application::services::service_for(other),
+        "preference.get" => Some(crate::application::services::preferences::preference_get_op),
+        "preference.set" => Some(crate::application::services::preferences::preference_set_op),
+        "notifications" => Some(crate::application::services::notifications::notifications_op),
+        "initiative.create" => {
+            Some(crate::application::services::initiatives::initiative_create_op)
+        }
+        "initiative.list" => Some(crate::application::services::initiatives::initiative_list_op),
+        "initiative.update" => {
+            Some(crate::application::services::initiatives::initiative_update_op)
+        }
+        "initiative.publish" => {
+            Some(crate::application::services::initiatives::initiative_publish_op)
+        }
+        "inbox.list" => Some(crate::application::services::inbox::inbox_list_op),
+        "inbox.archive" => Some(crate::application::services::inbox::inbox_archive_op),
+        "inbox.snooze" => Some(crate::application::services::inbox::inbox_snooze_op),
+        "inbox.restore" => Some(crate::application::services::inbox::inbox_restore_op),
+        "backup" => Some(crate::application::services::lifecycle::backup_op),
+        "restore" => Some(crate::application::services::lifecycle::restore_op),
+        "export" => Some(crate::application::services::lifecycle::export_op),
+        "import" => Some(crate::application::services::import_merge::import_op),
+        "events.list" => Some(crate::application::services::history::events_list_op),
+        "audit.list" => Some(crate::application::services::history::audit_list_op),
+        _ => None,
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

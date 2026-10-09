@@ -38,6 +38,11 @@ pub struct EngineClient {
 }
 
 impl EngineClient {
+    /// The engine's own URL, as configured.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     pub fn new(
         base_url: impl Into<String>,
         token: Option<String>,

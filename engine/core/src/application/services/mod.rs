@@ -12,23 +12,22 @@
 
 pub mod auth;
 pub mod freshness;
-mod history;
+pub mod history;
 pub mod install;
 pub mod work;
 
 pub mod import_merge;
-mod inbox;
-mod initiatives;
+pub mod inbox;
+pub mod initiatives;
 pub mod lifecycle;
-mod notifications;
-mod preferences;
+pub mod notifications;
+pub mod preferences;
 #[allow(dead_code)]
 pub mod sessions;
 
 use crate::application::context::{AppContext, Built};
 use crate::application::writes::WriteContext;
 use crate::core::{Clock, IdFactory, Moment, Principal};
-use crate::errors::VogtError;
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 use std::sync::Arc;
 
@@ -37,34 +36,8 @@ mod services_test;
 
 /// The shape the registry calls. Named operations are `fn` items, not closures,
 /// so the pointer is stable.
-pub type ServiceFn = fn(&Built, serde_json::Value) -> Result<serde_json::Value, VogtError>;
-
-/// The S4 operations this module owns. An unknown name is `None`; the registry
-/// decides what that means.
-pub fn service_for(name: &str) -> Option<ServiceFn> {
-    Some(match name {
-        "preference.get" => preferences::preference_get_op,
-        "preference.set" => preferences::preference_set_op,
-        "notifications" => notifications::notifications_op,
-        "initiative.create" => initiatives::initiative_create_op,
-        "initiative.list" => initiatives::initiative_list_op,
-        "initiative.update" => initiatives::initiative_update_op,
-        "initiative.publish" => initiatives::initiative_publish_op,
-        "inbox.list" => inbox::inbox_list_op,
-        "inbox.archive" => inbox::inbox_archive_op,
-        "inbox.snooze" => inbox::inbox_snooze_op,
-        "inbox.restore" => inbox::inbox_restore_op,
-        "backup" => lifecycle::backup_op,
-        "restore" => lifecycle::restore_op,
-        "export" => lifecycle::export_op,
-        "import" => import_merge::import_op,
-        "events.list" => history::events_list_op,
-        "audit.list" => history::audit_list_op,
-        _ => return None,
-    })
-}
-
-/// Call `path` with the concrete context `built` holds.
+/// Call `path` with the concrete context `built` holds. The operation table
+/// itself lives in `registry::service_for`; this only opens the context.
 macro_rules! dispatch {
     ($built:expr, $path:path, $params:expr) => {{
         match $built {

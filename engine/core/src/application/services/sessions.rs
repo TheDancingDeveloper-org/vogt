@@ -34,9 +34,10 @@ use crate::application::writes::{self, audited_action, audited_write, WriteOutco
 use crate::auth::{self, TOKEN_ENTROPY_BYTES};
 use crate::core::{py_repr, Actor, ActorKind, CodingSession, Moment, Token, TokenKind, WorkItem};
 use crate::core::{Clock, IdFactory};
+use crate::decisions::{self, Attention};
+use crate::delivery::{self};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
-use crate::{input_delivery, oversight, runtime};
 
 const SESSION_START: &str = "session.start";
 const SESSION_STOP: &str = "session.stop";
@@ -47,10 +48,13 @@ const SESSION_WAKE: &str = "session.wake";
 const SESSION_KEEP_AWAKE: &str = "session.keep_awake";
 const SESSION_SET_ROLE: &str = "session.set_role";
 
-/// The screen reads `session.input` takes after a submitted line, and how far
-/// apart, to judge whether it landed.
-const CONFIRM_READS: usize = 4;
-const CONFIRM_INTERVAL: Duration = Duration::from_millis(500);
+/// The longest `session.input` text the engine accepts in one write.
+const SESSION_INPUT_MAX_BYTES: usize = 64 * 1024;
+
+/// How long `session.input` watches for what became of a submitted input: up to
+/// this many screen reads, this far apart.
+const CONFIRM_READS: usize = 10;
+const CONFIRM_INTERVAL: Duration = Duration::from_millis(200);
 
 /// The longest a session's own log tail may be. The engine caps it the same way.
 const LOG_TAIL_MAX_BYTES: i64 = 262_144;
@@ -336,12 +340,15 @@ pub struct SessionWaitResult {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionInputResult {
-    pub session_id: String,
+    pub id: String,
+    pub engine_session_id: String,
+    pub linked: bool,
     pub bytes: i64,
     pub keys: Vec<String>,
     pub submitted: bool,
     pub delivery: String,
     pub delivery_evidence: String,
+    pub woke: bool,
 }
 
 // -- the operations -----------------------------------------------------------
@@ -421,7 +428,7 @@ where
             let payload = serde_json::to_value(&recorded).unwrap_or(Value::Null);
             Ok(WriteOutcome::new(
                 recorded.id.clone(),
-                "coding_session",
+                "session",
                 &recorded.id,
                 payload,
                 "session.started",
@@ -455,8 +462,9 @@ where
 {
     let reason = writes::validate_reason(&params.reason)?;
     let engine = engine_of(ctx)?;
-    let Some(session) = target(ctx, &params.id)? else {
-        return stop_unlinked(ctx, engine, &params.id, &reason);
+    let found = resolve_target(ctx, &params.id)?;
+    let Some(session) = found.session else {
+        return stop_unlinked(ctx, engine, &found.engine_session_id, &reason);
     };
     if session.stopped_at.is_some() {
         return Err(VogtError::Conflict(format!(
@@ -483,7 +491,7 @@ where
         }
         Ok(WriteOutcome::new(
             session_id.clone(),
-            "coding_session",
+            "session",
             &session_id,
             json!({"stopped_at": stopped_at.to_iso()}),
             "session.stopped",
@@ -632,16 +640,16 @@ where
         };
         let (attention, reason) = attention_of(&entry.session, entry.ready, now, stall);
         rows.push(SessionSweepRow {
-            needs_you: oversight::needs_you(attention),
-            attention: attention.to_string(),
+            needs_you: attention.needs_you(),
+            attention: attention_name(attention).to_string(),
             reason,
             screen_tail: entry.screen_tail.clone(),
             session: summary,
         });
     }
     rows.sort_by(|left, right| {
-        oversight::order(&left.attention)
-            .cmp(&oversight::order(&right.attention))
+        attention_rank(&left.attention)
+            .cmp(&attention_rank(&right.attention))
             .then_with(|| right.session.started_at.cmp(&left.session.started_at))
     });
     let needs_you = rows.iter().filter(|row| row.needs_you).count() as i64;
@@ -664,7 +672,7 @@ where
     I: IdFactory + 'static,
 {
     let engine = engine_of(ctx)?;
-    let engine_id = engine_id_of(ctx, &params.id)?;
+    let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
     let bytes = params.tail_bytes.clamp(1, LOG_TAIL_MAX_BYTES);
     let log = engine
         .history_log(&engine_id, bytes, params.strip_ansi)?
@@ -702,77 +710,130 @@ where
             )));
         }
     }
-    if text.is_empty() && keys.is_empty() {
+    // Enter by either route is a submit: `keys: ["enter"]` used to report
+    // `submitted: false` (WI-918).
+    let submitted = params.submit || keys.iter().any(|key| key == "enter");
+    if text.is_empty() && keys.is_empty() && !params.submit {
         return Err(VogtError::InvalidRequest(
-            "session input needs text or keys".to_string(),
+            "nothing to send: give text, keys, or submit".to_string(),
         ));
     }
-    let recorded = target(ctx, &params.id)?;
-    let engine_id = recorded
-        .as_ref()
-        .map(|session| session.engine_session_id.clone())
-        .unwrap_or_else(|| params.id.clone());
-    if bare_acknowledgement(&text, &keys, params.submit) {
-        if let Some(live) = engine.get_session(&engine_id)? {
-            if live.approval.is_some() && ctx.principal.kind == ActorKind::Agent {
-                return Err(VogtError::PersonRequired(
-                    "a permission dialog is showing; only a person may acknowledge it".to_string(),
-                ));
-            }
-        }
-    }
-    let before = params
-        .confirm
-        .then(|| engine.get_session(&engine_id).ok().flatten())
-        .flatten()
-        .map(|session| session.activity);
-    let mut payload = text.clone();
-    for key in &keys {
-        payload.push_str(&key_bytes(key));
-    }
-    // W9 computes the real value (_answers_as_person), WI-983
-    let sent = engine.send_input(&engine_id, &payload, params.submit, false)?;
-    if !sent {
-        return Err(VogtError::NotFound(format!(
-            "no session with id {}",
-            py_repr(&params.id)
+    let size = text.len();
+    if size > SESSION_INPUT_MAX_BYTES {
+        return Err(VogtError::InvalidRequest(format!(
+            "text is {size} bytes; the engine accepts at most {SESSION_INPUT_MAX_BYTES} bytes per write"
         )));
     }
-    let bytes = input_bytes(&text, &keys, params.submit);
-    let (delivery, evidence) = if params.confirm && params.submit {
-        confirm_delivery(engine, &engine_id, before.as_deref())
-    } else if params.submit {
-        (
-            "sent".to_string(),
-            "submitted; delivery was not watched".to_string(),
-        )
+    let found = resolve_target(ctx, &params.id)?;
+    let engine_id = found.engine_session_id.clone();
+    let linked = found.session.is_some();
+
+    // Text, then each named key, then Enter — each its own engine write, so a
+    // terminal reading an Esc does not take the bytes after it as an Alt-chord.
+    let mut writes_in_order: Vec<(String, bool)> = Vec::new();
+    if !text.is_empty() {
+        writes_in_order.push((text.clone(), false));
+    }
+    for key in &keys {
+        writes_in_order.push((key_bytes(key), false));
+    }
+    if params.submit {
+        writes_in_order.push((String::new(), true));
+    }
+    let person = answers_as_person(ctx)?;
+    let confirming = submitted && params.confirm;
+    let mut before = if confirming {
+        engine
+            .get_session(&engine_id)
+            .ok()
+            .flatten()
+            .map(|seen| seen.activity)
     } else {
-        ("typed".to_string(), "no Enter was pressed".to_string())
+        None
     };
-    let detail =
-        json!({"bytes": bytes, "keys": keys, "submitted": params.submit, "delivery": delivery});
-    let why = recorded
+    let mut woke = false;
+    if let Err(refused) = send_all(engine, &engine_id, &params.id, &writes_in_order, person) {
+        // The engine refuses input to a hibernated session. Typing into one is
+        // asking for it back: wake it, wait until it is at its prompt, then
+        // type. Anything else the engine refused stays refused.
+        let VogtError::Conflict(_) = refused else {
+            return Err(refused);
+        };
+        let current = engine.get_session(&engine_id)?;
+        if current.as_ref().is_none_or(|live| !live.hibernated()) {
+            return Err(refused);
+        }
+        wake_resolved(
+            ctx,
+            engine,
+            &found,
+            &format!("woken to deliver input: {reason}"),
+        )?;
+        woke = true;
+        let waited = engine.wait_session(
+            &engine_id,
+            "ready",
+            Duration::from_secs(params.wake_timeout_s.max(0) as u64),
+        )?;
+        let ready = waited
+            .as_ref()
+            .is_some_and(|waited| waited.outcome == "ready");
+        if !ready {
+            let outcome = waited
+                .map(|waited| waited.outcome)
+                .unwrap_or_else(|| "no answer".to_string());
+            return Err(VogtError::Conflict(format!(
+                "woke session {}, but it was not ready for input within {}s ({outcome}); nothing was typed. Read session_screen — it may be showing a dialog — then retry",
+                py_repr(&params.id),
+                params.wake_timeout_s
+            )));
+        }
+        // Freshly woken and at its prompt: nothing was running.
+        before = Some("waiting-for-input".to_string());
+        send_all(engine, &engine_id, &params.id, &writes_in_order, person)?;
+    }
+    let verdict = if confirming {
+        confirm_delivery(engine, &engine_id, before.as_deref())
+    } else {
+        delivery::judge(submitted, None, &[])
+    };
+    let entity = found
+        .session
         .as_ref()
-        .map(|session| session.id.as_str())
-        .unwrap_or(engine_id.as_str());
+        .map(|session| session.id.clone())
+        .unwrap_or_else(|| engine_id.clone());
+    let detail = json!({
+        "engine_session_id": engine_id,
+        "linked": linked,
+        "bytes": size,
+        "keys": keys,
+        "submit": params.submit,
+        "submitted": submitted,
+        "delivery": verdict.delivery.as_str(),
+        "woke": woke,
+        "person": person,
+    });
     let mut writing = write_of(ctx);
     audited_action(
         &mut writing,
         SESSION_INPUT,
         &reason,
-        "coding_session",
-        why,
+        "session",
+        &entity,
         &detail,
         "session.input",
         Some(&detail),
     )?;
     Ok(SessionInputResult {
-        session_id: params.id.clone(),
-        bytes,
+        id: params.id.clone(),
+        engine_session_id: engine_id,
+        linked,
+        bytes: size as i64,
         keys,
-        submitted: params.submit,
-        delivery,
-        delivery_evidence: evidence,
+        submitted,
+        delivery: verdict.delivery.as_str().to_string(),
+        delivery_evidence: verdict.evidence,
+        woke,
     })
 }
 
@@ -786,7 +847,7 @@ where
     I: IdFactory + 'static,
 {
     let engine = engine_of(ctx)?;
-    let engine_id = engine_id_of(ctx, &params.id)?;
+    let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
     let found = engine.session_screen(&engine_id, params.scrollback_lines)?;
     Ok(screen_result(&require_screen(found, &params.id)?))
 }
@@ -801,7 +862,7 @@ where
     I: IdFactory + 'static,
 {
     let engine = engine_of(ctx)?;
-    let engine_id = engine_id_of(ctx, &params.id)?;
+    let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
     let found = engine.wait_session(
         &engine_id,
         &params.until,
@@ -818,7 +879,8 @@ where
     })
 }
 
-/// Wake a hibernated session, issuing it a fresh token first.
+/// Wake a hibernated session. A live session is returned as it is — waking is
+/// idempotent, so a caller that is not sure need not check first.
 pub fn wake<C, I>(ctx: &AppContext<C, I>, params: &WakeParams) -> Result<SessionResult, VogtError>
 where
     C: Clock + 'static,
@@ -826,61 +888,8 @@ where
 {
     let reason = writes::validate_reason(&params.reason)?;
     let engine = engine_of(ctx)?;
-    let Some(session) = target(ctx, &params.id)? else {
-        let woken = engine.wake_session(&params.id, None)?.ok_or_else(|| {
-            VogtError::NotFound(format!("no session with id {}", py_repr(&params.id)))
-        })?;
-        return Ok(SessionResult {
-            session: unlinked_summary(&woken),
-        });
-    };
-    let (secret, token_hash) = minted_token()?;
-    let scopes = session_scopes(ctx)?;
-    let mut writing = write_of(ctx);
-    let now = now(&writing);
-    let token = Token {
-        id: fresh(&writing, "tok"),
-        actor_id: session.actor_id.clone(),
-        actor_identity_ref: None,
-        name: format!("session {} wake", session.id),
-        scopes,
-        kind: TokenKind::Agent,
-        created_at: now,
-        expires_at: None,
-        last_used_at: None,
-        revoked_at: None,
-        revoked_reason: None,
-    };
-    let actor = ctx
-        .declared
-        .read()?
-        .actor_by_id(&session.actor_id)?
-        .map(|actor| actor.identity_ref);
-    {
-        let token = token.clone();
-        let token_hash = token_hash.clone();
-        let session_id = session.id.clone();
-        audited_write(&mut writing, SESSION_WAKE, &reason, move |txn, _actor| {
-            txn.insert_token(&token, &token_hash)?;
-            Ok(WriteOutcome::new(
-                session_id.clone(),
-                "coding_session",
-                &session_id,
-                json!({"token_id": token.id}),
-                "session.woken",
-                json!({}),
-            ))
-        })?;
-    }
-    let mut env = vec![("VOGT_TOKEN".to_string(), secret)];
-    if let Some(actor_ref) = actor {
-        env.push(("VOGT_ACTOR".to_string(), actor_ref));
-    }
-    env.push(("VOGT_ENGINE_SESSION_ID".to_string(), session.id.clone()));
-    let woken = engine.wake_session(&session.engine_session_id, Some(&env))?;
-    Ok(SessionResult {
-        session: summarize(ctx, &session, woken.as_ref())?,
-    })
+    let found = resolve_target(ctx, &params.id)?;
+    wake_resolved(ctx, engine, &found, &reason)
 }
 
 /// Keep a session awake, or let it hibernate again.
@@ -894,14 +903,15 @@ where
 {
     let reason = writes::validate_reason(&params.reason)?;
     let engine = engine_of(ctx)?;
-    let engine_id = engine_id_of(ctx, &params.id)?;
+    let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
     let updated = engine
         .keep_awake(&engine_id, params.keep_awake)?
         .ok_or_else(|| {
             VogtError::NotFound(format!("no session with id {}", py_repr(&params.id)))
         })?;
-    let recorded = target(ctx, &params.id)?;
+    let recorded = resolve_target(ctx, &params.id)?;
     let why = recorded
+        .session
         .as_ref()
         .map(|session| session.id.clone())
         .unwrap_or(engine_id);
@@ -911,13 +921,13 @@ where
         &mut writing,
         SESSION_KEEP_AWAKE,
         &reason,
-        "coding_session",
+        "session",
         &why,
         &detail,
         "session.keep_awake",
         Some(&detail),
     )?;
-    let summary = match &recorded {
+    let summary = match &recorded.session {
         Some(session) => summarize(ctx, session, Some(&updated))?,
         None => unlinked_summary(&updated),
     };
@@ -941,12 +951,13 @@ where
         ));
     }
     let engine = engine_of(ctx)?;
-    let engine_id = engine_id_of(ctx, &params.id)?;
+    let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
     let updated = engine.set_role(&engine_id, &params.role)?.ok_or_else(|| {
         VogtError::NotFound(format!("no session with id {}", py_repr(&params.id)))
     })?;
-    let recorded = target(ctx, &params.id)?;
+    let recorded = resolve_target(ctx, &params.id)?;
     let why = recorded
+        .session
         .as_ref()
         .map(|session| session.id.clone())
         .unwrap_or(engine_id);
@@ -956,63 +967,107 @@ where
         &mut writing,
         SESSION_SET_ROLE,
         &reason,
-        "coding_session",
+        "session",
         &why,
         &detail,
         "session.role_set",
         Some(&detail),
     )?;
-    let summary = match &recorded {
+    let summary = match &recorded.session {
         Some(session) => summarize(ctx, session, Some(&updated))?,
         None => unlinked_summary(&updated),
     };
     Ok(SessionResult { session: summary })
 }
 
-/// Answer the permission dialog a session is showing.
+/// Answer the dialog a session shows — a permission request or a startup gate —
+/// by option, not by keystrokes. Exactly one of `option` or `label`. Whether the
+/// caller counts as a person is the engine's decision: the flag is sent, and a
+/// permission prompt an agent answers is refused there.
 pub fn answer<C, I>(ctx: &AppContext<C, I>, params: &AnswerParams) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
     let reason = writes::validate_reason(&params.reason)?;
-    if ctx.principal.kind == ActorKind::Agent {
-        return Err(VogtError::PersonRequired(
-            "answering a permission dialog can only be done by a person, not by an agent"
-                .to_string(),
+    let label = params
+        .label
+        .as_deref()
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+    if params.option.is_some() == label.is_some() {
+        return Err(VogtError::InvalidRequest(
+            "give exactly one of option (a number) or label".to_string(),
         ));
     }
     let engine = engine_of(ctx)?;
-    let engine_id = engine_id_of(ctx, &params.id)?;
-    // W9 computes the real value (_answers_as_person), WI-983
-    let answered = engine.answer_session(
-        &engine_id,
-        params.option,
-        params.label.as_deref(),
-        params.expect_question.as_deref(),
-        false,
-    )?;
-    let recorded = target(ctx, &params.id)?;
-    let why = recorded
+    let found = resolve_target(ctx, &params.id)?;
+    let engine_id = found.engine_session_id.clone();
+    let person = answers_as_person(ctx)?;
+    let answered = engine
+        .answer_session(&engine_id, params.option, label, params.expect_question.as_deref(), person)?
+        .ok_or_else(|| {
+            VogtError::NotFound(format!(
+                "the engine has no session {}, or predates answering (no POST /api/sessions/{{id}}/answer)",
+                py_repr(&params.id)
+            ))
+        })?;
+    let chosen = answered.get("chosen").cloned().unwrap_or(Value::Null);
+    let number = chosen.get("number").and_then(Value::as_i64).unwrap_or(0);
+    let chosen_label = chosen
+        .get("label")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let question = answered
+        .get("question")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let kind = answered
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("permission")
+        .to_string();
+    let dismissed = answered.get("dismissed") == Some(&Value::Bool(true));
+    let entity = found
+        .session
         .as_ref()
         .map(|session| session.id.clone())
-        .unwrap_or(engine_id);
+        .unwrap_or(engine_id.clone());
+    let detail = json!({
+        "engine_session_id": engine_id,
+        "linked": found.session.is_some(),
+        "question": question.chars().take(300).collect::<String>(),
+        "kind": kind,
+        "option": number,
+        "label": chosen_label.chars().take(200).collect::<String>(),
+        "dismissed": dismissed,
+    });
     let mut writing = write_of(ctx);
-    let detail = json!({"option": params.option, "label": params.label});
     audited_action(
         &mut writing,
         SESSION_ANSWER,
         &reason,
-        "coding_session",
-        &why,
+        "session",
+        &entity,
         &detail,
         "session.answered",
         Some(&detail),
     )?;
-    Ok(answered.unwrap_or(Value::Null))
+    Ok(json!({
+        "id": params.id,
+        "engine_session_id": engine_id,
+        "question": question,
+        "kind": kind,
+        "chosen": {"number": number, "label": chosen_label, "selected": true},
+        "dismissed": dismissed,
+    }))
 }
 
-/// Hibernate a session to free its memory.
+/// Hibernate a session to free its memory, keeping it listed. The session's
+/// token is revoked: nothing runs to hold it, and a wake mints a new one. A
+/// stopped session has nothing to hibernate.
 pub fn hibernate<C, I>(
     ctx: &AppContext<C, I>,
     params: &HibernateParams,
@@ -1023,34 +1078,87 @@ where
 {
     let reason = writes::validate_reason(&params.reason)?;
     let engine = engine_of(ctx)?;
-    let engine_id = engine_id_of(ctx, &params.id)?;
+    let found = resolve_target(ctx, &params.id)?;
+    let engine_id = found.engine_session_id.clone();
+    if found
+        .session
+        .as_ref()
+        .is_some_and(|session| session.stopped_at.is_some())
+    {
+        return Err(VogtError::Conflict(format!(
+            "session {} was stopped; there is nothing to hibernate",
+            py_repr(&params.id)
+        )));
+    }
     let hibernated = engine
         .hibernate_session(&engine_id, Some(&reason), params.allow_shell)?
         .ok_or_else(|| {
-            VogtError::NotFound(format!("no session with id {}", py_repr(&params.id)))
+            VogtError::NotFound(format!(
+                "the engine has no session {}, or predates hibernation (no POST /api/sessions/{{id}}/hibernate)",
+                py_repr(&params.id)
+            ))
         })?;
-    let recorded = target(ctx, &params.id)?;
-    let why = recorded
+    let resumable = hibernated
+        .hibernation
         .as_ref()
-        .map(|session| session.id.clone())
-        .unwrap_or(engine_id);
+        .map(|hibernation| hibernation.resumable);
+    let outcome = json!({
+        "engine_session_id": engine_id,
+        "linked": found.session.is_some(),
+        "allow_shell": params.allow_shell,
+        "resumable": resumable,
+    });
+    let Some(session) = found.session.clone() else {
+        let mut writing = write_of(ctx);
+        audited_action(
+            &mut writing,
+            SESSION_HIBERNATE,
+            &reason,
+            "session",
+            &engine_id,
+            &outcome,
+            "session.hibernated",
+            Some(&outcome),
+        )?;
+        return Ok(SessionResult {
+            session: unlinked_summary(&hibernated),
+        });
+    };
     let mut writing = write_of(ctx);
-    let detail = json!({"allow_shell": params.allow_shell});
-    audited_action(
+    let actor_id = session.actor_id.clone();
+    let session_id = session.id.clone();
+    let why = reason.clone();
+    let recorded = outcome.clone();
+    let revoked_at = now(&writing);
+    audited_write(
         &mut writing,
         SESSION_HIBERNATE,
         &reason,
-        "coding_session",
-        &why,
-        &detail,
-        "session.hibernated",
-        Some(&detail),
+        move |txn, _actor| {
+            let current = txn.session_by_id(&session_id)?.ok_or_else(|| {
+                VogtError::NotFound(format!("no session {}", py_repr(&session_id)))
+            })?;
+            let mut revoked = 0;
+            for token in txn.tokens_for_actor(&actor_id, false)? {
+                if txn.revoke_token(&token.id, &format!("hibernated: {why}"), revoked_at)? {
+                    revoked += 1;
+                }
+            }
+            let mut summary = recorded.clone();
+            summary["tokens_revoked"] = json!(revoked);
+            Ok(WriteOutcome::new(
+                (),
+                "session",
+                &current.id,
+                audited_payload(&current),
+                "session.hibernated",
+                summary,
+            ))
+        },
     )?;
-    let summary = match &recorded {
-        Some(session) => summarize(ctx, session, Some(&hibernated))?,
-        None => unlinked_summary(&hibernated),
-    };
-    Ok(SessionResult { session: summary })
+    Ok(SessionResult {
+        session: summarize(ctx, &session, Some(&hibernated))?,
+    })
 }
 
 // -- shared helpers -----------------------------------------------------------
@@ -1179,31 +1287,48 @@ where
     })
 }
 
-/// The session an operation names, by Vogt's id or the engine's.
-pub(super) fn target<C, I>(
-    ctx: &AppContext<C, I>,
-    reference: &str,
-) -> Result<Option<CodingSession>, VogtError>
-where
-    C: Clock,
-    I: IdFactory,
-{
-    if let Some(session) = ctx.declared.read()?.session_by_id(reference)? {
-        return Ok(Some(session));
-    }
-    ctx.declared.read()?.session_by_engine_id(reference)
+/// A session named by either id form, resolved to the engine's id. `session` is
+/// Vogt's record when there is one; `None` means the engine id names a session
+/// Vogt never linked, which the caller may still read or drive.
+pub(super) struct Target {
+    pub engine_session_id: String,
+    pub session: Option<CodingSession>,
 }
 
-/// The engine id an operation names, which is the reference itself when Vogt
-/// never recorded the session.
-fn engine_id_of<C, I>(ctx: &AppContext<C, I>, reference: &str) -> Result<String, VogtError>
+/// Resolve a `ses_…` id or an engine UUID to the engine's session id.
+///
+/// A `ses_…` id must be one Vogt recorded — otherwise it is a wrong id and says
+/// so. Anything else is the engine's own id, passed through as given and linked
+/// to Vogt's record when one exists. Shared with the grants half (WI-1074).
+pub(super) fn resolve_target<C, I>(
+    ctx: &AppContext<C, I>,
+    session_id: &str,
+) -> Result<Target, VogtError>
 where
     C: Clock,
     I: IdFactory,
 {
-    Ok(target(ctx, reference)?
-        .map(|session| session.engine_session_id)
-        .unwrap_or_else(|| reference.to_string()))
+    let wanted = session_id.trim();
+    if wanted.is_empty() {
+        return Err(VogtError::InvalidRequest(
+            "a session id is required (ses_… or the engine's session UUID)".to_string(),
+        ));
+    }
+    let view = ctx.declared.read()?;
+    if let Some(id) = wanted.strip_prefix("ses_") {
+        let _ = id;
+        let session = view
+            .session_by_id(wanted)?
+            .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(wanted))))?;
+        return Ok(Target {
+            engine_session_id: session.engine_session_id.clone(),
+            session: Some(session),
+        });
+    }
+    Ok(Target {
+        engine_session_id: wanted.to_string(),
+        session: view.session_by_engine_id(wanted)?,
+    })
 }
 
 /// Stop a session Vogt never recorded.
@@ -1227,6 +1352,18 @@ where
     let session = engine
         .get_session(engine_id)?
         .ok_or_else(|| VogtError::NotFound(format!("no session with id {}", py_repr(engine_id))))?;
+    let detail = json!({"engine_session_id": engine_id, "linked": false});
+    let mut writing = write_of(ctx);
+    audited_action(
+        &mut writing,
+        SESSION_STOP,
+        reason,
+        "session",
+        engine_id,
+        &detail,
+        "session.stopped",
+        Some(&detail),
+    )?;
     Ok(SessionResult {
         session: unlinked_summary(&session),
     })
@@ -1385,9 +1522,9 @@ fn runtime_of(
     session: &CodingSession,
     live: Option<&EngineSession>,
     transcript: Option<&transcripts::Transcript>,
-) -> runtime::Resolved {
+) -> decisions::ResolvedRuntime {
     let (model, effort) = transcript.map(transcripts::runtime).unwrap_or((None, None));
-    runtime::resolve(
+    decisions::resolve_runtime(
         live.and_then(|session| session.command.as_deref()),
         live.and_then(|session| session.conversation_agent.as_deref()),
         model.as_deref(),
@@ -1398,7 +1535,11 @@ fn runtime_of(
 }
 
 /// Copy the engine's live fields onto a summary.
-fn apply_live(summary: &mut SessionSummary, live: &EngineSession, resolved: &runtime::Resolved) {
+fn apply_live(
+    summary: &mut SessionSummary,
+    live: &EngineSession,
+    resolved: &decisions::ResolvedRuntime,
+) {
     summary.name = live.name.clone();
     summary.activity = Some(live.activity.clone());
     summary.alive = Some(live.alive);
@@ -1479,7 +1620,7 @@ fn hibernation_of(hibernation: &EngineHibernation) -> SessionHibernation {
 /// A session the engine has and Vogt never recorded, carrying the engine's id
 /// in both id fields.
 fn unlinked_summary(session: &EngineSession) -> SessionSummary {
-    let resolved = runtime::resolve(
+    let resolved = decisions::resolve_runtime(
         session.command.as_deref(),
         session.conversation_agent.as_deref(),
         None,
@@ -1592,12 +1733,12 @@ fn attention_of(
     ready: bool,
     now: Moment,
     stall_after_seconds: i64,
-) -> (&'static str, String) {
+) -> (Attention, String) {
     let last_output = session
         .last_output_at
         .as_deref()
         .and_then(|text| crate::core::from_iso(text).ok());
-    oversight::classify(
+    let verdict = decisions::classify(
         Some(&session.activity),
         Some(session.alive),
         Some(ready),
@@ -1616,7 +1757,36 @@ fn attention_of(
         last_output,
         now,
         stall_after_seconds,
-    )
+    );
+    (verdict.attention, verdict.reason)
+}
+
+fn attention_name(attention: Attention) -> &'static str {
+    match attention {
+        Attention::Approval => "approval",
+        Attention::Blocked => "blocked",
+        Attention::Waiting => "waiting",
+        Attention::Stalled => "stalled",
+        Attention::Running => "running",
+        Attention::Idle => "idle",
+        Attention::Hibernated => "hibernated",
+        Attention::Exited => "exited",
+        Attention::Unknown => "unknown",
+    }
+}
+
+fn attention_rank(name: &str) -> u8 {
+    match name {
+        "approval" => Attention::Approval.order(),
+        "blocked" => Attention::Blocked.order(),
+        "waiting" => Attention::Waiting.order(),
+        "stalled" => Attention::Stalled.order(),
+        "running" => Attention::Running.order(),
+        "idle" => Attention::Idle.order(),
+        "hibernated" => Attention::Hibernated.order(),
+        "exited" => Attention::Exited.order(),
+        _ => Attention::Unknown.order(),
+    }
 }
 
 fn screen_result(screen: &EngineScreen) -> SessionScreenResult {
@@ -1672,14 +1842,17 @@ fn confirm_delivery(
     engine: &EngineClient,
     engine_id: &str,
     before: Option<&str>,
-) -> (String, String) {
+) -> delivery::Verdict {
     let mut seen = Vec::new();
     for _ in 0..CONFIRM_READS {
         std::thread::sleep(CONFIRM_INTERVAL);
         let Ok(Some(screen)) = engine.session_screen(engine_id, 0) else {
             break;
         };
-        seen.push((screen.activity.clone(), screen.lines.clone()));
+        seen.push(delivery::Observation {
+            activity: screen.activity.clone(),
+            lines: screen.lines.clone(),
+        });
         if matches!(
             screen.activity.as_deref(),
             Some("running") | Some("awaiting-approval")
@@ -1687,15 +1860,231 @@ fn confirm_delivery(
             break;
         }
     }
-    let observations: Vec<input_delivery::Observation<'_>> = seen
-        .iter()
-        .map(|(activity, lines)| input_delivery::Observation {
-            activity: activity.as_deref(),
-            lines,
-        })
-        .collect();
-    let (delivery, evidence) = input_delivery::judge(true, before, &observations);
-    (delivery.to_string(), evidence)
+    delivery::judge(true, before, &seen)
+}
+
+/// One engine write per chunk. `Ok(false)` is the engine saying it has no live
+/// session by that id — said with the name the caller used.
+fn send_all(
+    engine: &EngineClient,
+    engine_id: &str,
+    named: &str,
+    chunks: &[(String, bool)],
+    person: bool,
+) -> Result<(), VogtError> {
+    for (text, submit) in chunks {
+        let sent = engine.send_input(engine_id, text, *submit, person)?;
+        if !sent {
+            return Err(VogtError::NotFound(format!(
+                "the engine has no live session {}",
+                py_repr(named)
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Wake `target` if it is hibernated; its summary either way.
+///
+/// For a session Vogt started, a new token is minted for the session's own
+/// actor and handed to the woken process, and every older token of that actor
+/// is revoked in the same write. The process starts before the declared write.
+fn wake_resolved<C, I>(
+    ctx: &AppContext<C, I>,
+    engine: &EngineClient,
+    target: &Target,
+    reason: &str,
+) -> Result<SessionResult, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let engine_id = &target.engine_session_id;
+    let current = engine.get_session(engine_id)?.ok_or_else(|| {
+        VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
+    })?;
+    let session = target.session.clone();
+    if !current.hibernated() {
+        if !current.alive {
+            return Err(VogtError::Conflict(format!(
+                "session {} has exited, not hibernated; start a new one (session_start, with resume to continue its conversation)",
+                py_repr(engine_id)
+            )));
+        }
+        let summary = match &session {
+            Some(session) => summarize(ctx, session, Some(&current))?,
+            None => unlinked_summary(&current),
+        };
+        return Ok(SessionResult { session: summary });
+    }
+    let Some(session) = session else {
+        let woken = engine.wake_session(engine_id, None)?.ok_or_else(|| {
+            VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
+        })?;
+        let detail = json!({"engine_session_id": engine_id, "linked": false});
+        let mut writing = write_of(ctx);
+        audited_action(
+            &mut writing,
+            SESSION_WAKE,
+            reason,
+            "session",
+            engine_id,
+            &detail,
+            "session.woken",
+            Some(&detail),
+        )?;
+        return Ok(SessionResult {
+            session: unlinked_summary(&woken),
+        });
+    };
+    if session.stopped_at.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "session {} was stopped; start a new one instead",
+            py_repr(&session.id)
+        )));
+    }
+    let scopes = session_scopes(ctx)?;
+    let (secret, token_hash) = minted_token()?;
+    let env = session_env(ctx, &session.id, &secret);
+    let woken = engine.wake_session(engine_id, Some(&env))?.ok_or_else(|| {
+        VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
+    })?;
+    let conversation_id = current.conversation_id.clone();
+    let engine_session_id = engine_id.clone();
+    let session_id = session.id.clone();
+    let why = reason.to_string();
+    let mut writing = write_of(ctx);
+    let token_id = fresh(&writing, "tok");
+    let minted_at = now(&writing);
+    audited_write(&mut writing, SESSION_WAKE, reason, move |txn, _actor| {
+        let row = txn.session_by_id(&session_id)?;
+        let holder = row
+            .as_ref()
+            .and_then(|row| txn.actor_by_id(&row.actor_id).ok().flatten());
+        let (Some(row), Some(holder)) = (row, holder) else {
+            return Err(VogtError::NotFound(format!(
+                "no session {}",
+                py_repr(&session_id)
+            )));
+        };
+        let mut revoked = 0;
+        for token in txn.tokens_for_actor(&row.actor_id, false)? {
+            if txn.revoke_token(&token.id, &format!("superseded on wake: {why}"), minted_at)? {
+                revoked += 1;
+            }
+        }
+        txn.insert_token(
+            &Token {
+                id: token_id,
+                actor_id: holder.id.clone(),
+                actor_identity_ref: Some(holder.identity_ref.clone()),
+                name: format!("session {}", row.id),
+                scopes,
+                kind: TokenKind::Api,
+                created_at: minted_at,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            },
+            &token_hash,
+        )?;
+        Ok(WriteOutcome::new(
+            (),
+            "session",
+            &row.id,
+            audited_payload(&row),
+            "session.woken",
+            json!({
+                "engine_session_id": engine_session_id,
+                "conversation_id": conversation_id,
+                "tokens_revoked": revoked,
+            }),
+        ))
+    })?;
+    Ok(SessionResult {
+        session: summarize(ctx, &session, Some(&woken))?,
+    })
+}
+
+/// Whether the caller counts as a person for the engine's person gate: a human
+/// caller who is not the engine's own credential.
+fn answers_as_person<C, I>(ctx: &AppContext<C, I>) -> Result<bool, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    Ok(ctx.principal.kind != ActorKind::Agent && !is_engine_credential(ctx)?)
+}
+
+/// Whether the caller is the session engine: the actor its credential is bound
+/// to by configuration, or the very token it shares with this core.
+fn is_engine_credential<C, I>(ctx: &AppContext<C, I>) -> Result<bool, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    if ctx.principal.identity_ref == ctx.config.bootstrap_core_token_actor {
+        return Ok(true);
+    }
+    let Some(configured) = &ctx.config.bootstrap_core_token_file else {
+        return Ok(false);
+    };
+    let Some(presented) = &ctx.token else {
+        return Ok(false);
+    };
+    let secret = match std::fs::read_to_string(configured) {
+        Ok(text) => text.trim().to_string(),
+        Err(_) => return Ok(false),
+    };
+    if secret.is_empty() {
+        return Ok(false);
+    }
+    let row = ctx
+        .declared
+        .read()?
+        .token_by_hash(&auth::hash_token(&secret))?;
+    Ok(row.is_some_and(|row| row.revoked_at.is_none() && row.id == presented.id))
+}
+
+/// What an agent inside the session needs to reach Vogt.
+fn session_env<C, I>(
+    ctx: &AppContext<C, I>,
+    session_id: &str,
+    secret: &str,
+) -> Vec<(String, String)>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let mut env = vec![
+        ("VOGT_HTTP_TOKEN".to_string(), secret.to_string()),
+        ("VOGT_SESSION_ID".to_string(), session_id.to_string()),
+    ];
+    if let Some(url) = ctx.config.public_url.as_ref().filter(|url| !url.is_empty()) {
+        env.push(("VOGT_URL".to_string(), url.clone()));
+    }
+    if let Some(engine) = &ctx.engine {
+        env.push(("VOGT_ENGINE_URL".to_string(), engine.base_url().to_string()));
+    }
+    env
+}
+
+/// What the audit row records about a session. Everything except the credential.
+fn audited_payload(session: &CodingSession) -> Value {
+    json!({
+        "id": session.id,
+        "engine_session_id": session.engine_session_id,
+        "project_id": session.project_id,
+        "work_item_id": session.work_item_id,
+        "actor_id": session.actor_id,
+        "cwd": session.cwd,
+        "template": session.template,
+        "model": session.model,
+        "effort": session.effort,
+        "started_at": session.started_at.to_iso(),
+        "stopped_at": session.stopped_at.map(|moment| moment.to_iso()),
+    })
 }
 
 fn now<C, I>(

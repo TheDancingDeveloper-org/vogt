@@ -18,16 +18,10 @@ mod decisions;
 mod delivery;
 mod errors;
 mod git_story;
-#[allow(dead_code)]
-mod input_delivery;
 mod merge;
 mod observability;
-#[allow(dead_code)]
-mod oversight;
 #[allow(dead_code)] // Consumed by the HTTP, CLI and MCP adapters (P2.3–P2.5).
 mod registry;
-#[allow(dead_code)]
-mod runtime;
 mod storage;
 
 /// The product version. Nothing sets `VOGT_VERSION` today, so this resolves to
