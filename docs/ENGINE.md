@@ -1910,9 +1910,11 @@ speech routes stubbed.
 ### Live call contract
 
 `GET /api/assistant/call` upgrades to a WebSocket carrying one spoken
-conversation (WI-960). The pipeline is the generic `voxcall` crate
-(`engine/voxcall`, its `DESIGN.md` has the trait boundary); the DTOs are
-`CallClientEvent` / `CallServerEvent` in `voxcall::protocol`, and event names
+conversation (WI-960). The pipeline is the generic
+[`voicepipe`](https://github.com/TheDancingDeveloper-org/voicepipe) crate
+(a crates.io dependency; its `docs/DESIGN.md` has the trait boundary); the
+DTOs are `CallClientEvent` / `CallServerEvent` in `voicepipe::protocol`, and
+event names
 follow the OpenAI Realtime API's where the meaning is the same. Vogt's side —
 the route, authentication, the providers — is `engine/server/src/call.rs`.
 
@@ -1921,7 +1923,8 @@ the route, authentication, the providers — is `engine/server/src/call.rs`.
 `4403` lacking the capability, `4408` too slow). One call at a time per
 engine — the assistant has one conversation — so a second gets an `error`
 event and close `4409`. The server answers `session.created`
-`{call_id, sample_rate: 16000, end_of_turn_ms, barge_in_ms}` and
+`{protocol, call_id, sample_rate: 16000, end_of_turn_ms, barge_in_ms}`
+(`protocol` is voicepipe's wire-protocol version, 1) and
 `call.state {state: "listening"}`.
 
 **Client → server.**
@@ -1960,9 +1963,9 @@ event and close `4409`. The server answers `session.created`
 - `conversation.item.truncated {response_id, text}` — a reply that had
   finished generating was cut while being spoken; the conversation now keeps
   only `text`.
-- `assistant.pending_action {action}` — an approval card (the same
-  `PendingAction` shape as `/api/assistant/history`);
-  `assistant.action_resolved {id, approved}` once its button was pressed.
+- `approval.pending {card}` — an approval card (the same `PendingAction`
+  shape as `/api/assistant/history`); `approval.resolved {id, approved}` once
+  its button was pressed.
 - `error {message}`.
 
 **Turn-taking.** The engine runs voice activity detection on the incoming
@@ -2008,19 +2011,23 @@ default "One moment.") covers the wait.
 **Barge-in.** While a reply is generating or playing, `barge_in_ms` of voice
 (default 500) stops it: the turn is cancelled, `output_audio.clear` is sent,
 and the reply is cut back to what had started playing, flagged `interrupted`
-in the transcript. A shorter sound over a reply (a "mm", or echo) is ignored.
+in the transcript. A shorter sound over a reply that is playing (a "mm", or
+echo) is ignored; said before the reply starts playing, a short word ("no",
+"stop") is a turn of its own and replaces the reply being thought of.
 While the reply plays, the detector demands more of a frame, since what
 the client's echo cancellation leaves of the reply is the likeliest false
 trigger.
 
 **Approvals.** A turn that proposes a change ends at the gate exactly as a
-typed one: the card is sent as `assistant.pending_action` and a short line
+typed one: the card is sent as `approval.pending` and a short line
 says it is on screen. **Nothing spoken approves it.** While a card waits, an
 utterance is answered with a fixed reminder ("That change is waiting on your
 screen…"), recorded in the durable log as an utterance, and never sent to the
 model — so "yes, do it" neither approves the card nor, as a typed message
 would, abandons it. `action.resolve` (a button) resolves it with the call's
-authenticated caller, and the resumed turn is spoken like any other.
+authenticated caller, and the resumed turn is spoken like any other. The
+button works for a card the call has not been sent (one raised by a typed
+turn): the engine checks it against the assistant's waiting card.
 
 **Metrics.** Every `response.done` carries `metrics`: `endpoint_ms` (last
 voice → end of turn), `stt_ms` (end of turn → transcript; near 0 when the
@@ -2739,20 +2746,21 @@ untrusted data like every other cored-derived string.
   the live call: decodes an OpenAI-compatible `stream: true` event stream
   back into the same message the loop consumes, reporting each text delta as
   it arrives (see *Streamed turns* below).
-- `engine/voxcall/` — `voxcall`, the live call's generic pipeline crate, kept
-  free of Vogt types so it can be published on its own (its `DESIGN.md` has
-  the trait boundary). It holds
+- [`voicepipe`](https://github.com/TheDancingDeveloper-org/voicepipe) (a
+  crates.io dependency, `voicepipe = "0.1"`) — the live call's generic
+  pipeline crate, extracted from `engine/voxcall/` and published on its own
+  (its `docs/DESIGN.md` has the trait boundary). It holds
   PCM16/WAV framing; voice activity detection (`EarshotVad`, the default,
   wrapping the `earshot` crate, and `EnergyVad`, an adaptive noise-floor
   detector); the turn endpointer (speech started, sustained, pause, resumed,
   end of turn); and the sentence chunker that cuts a streamed reply into
   pieces to speak, with `speakable` to drop the markdown a listener should
-  not hear read out. `voxcall::chunk` decides where a turn is cut into
-  chunks to transcribe while it is spoken. The pipeline (`voxcall::pipeline`)
+  not hear read out. `voicepipe::chunk` decides where a turn is cut into
+  chunks to transcribe while it is spoken. The pipeline (`voicepipe::pipeline`)
   owns turn-taking, the streamed (or whole-clip) transcription, the streamed
   reply spoken a piece at a time, barge-in and the approval invariant.
 - `engine/server/src/call.rs` — Vogt's side of the live call: the WebSocket
-  route, authentication and the one-call slot, and the `voxcall` providers —
+  route, authentication and the one-call slot, and the `voicepipe` providers —
   the assistant runtime as the turn, the speech proxy as STT/TTS, the pending
   card as approvals (see *Live call contract*, §5).
 - `engine/server/src/assistant_api.rs` — HTTP surface (see §5).

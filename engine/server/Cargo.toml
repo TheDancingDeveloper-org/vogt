@@ -16,8 +16,9 @@ path = "src/lib.rs"
 
 [dependencies]
 vogt-engine-contract = { path = "../contract" }
-# The live call pipeline (WI-960), kept generic so it can be published.
-voxcall = { path = "../voxcall" }
+# The live call pipeline (WI-960), published as its own crate:
+# https://github.com/TheDancingDeveloper-org/voicepipe
+voicepipe = "0.1"
 axum = { version = "0.8", features = ["macros", "ws", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
