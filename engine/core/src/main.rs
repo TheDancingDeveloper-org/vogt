@@ -87,10 +87,6 @@ enum Command {
 }
 
 fn main() -> ExitCode {
-    // One subscriber for the process, installed before anything can log. The
-    // MCP route's audit failure is a `tracing::error!`, and without this it
-    // goes nowhere.
-    observability::configure_logging("info", "text");
     let cli = Cli::parse();
     if let Err(error) = validate_hooks(None) {
         eprintln!("{error}");
@@ -236,6 +232,13 @@ fn render_text(body: &serde_json::Value) -> String {
 }
 
 fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: bool) -> ExitCode {
+    // Logging is a server concern. Python configures it in `serve` from the
+    // resolved config and leaves the CLI and the stdio transport quiet, so a
+    // JSON-log deployment and a `debug` level only apply here. The Rust config
+    // schema is not ported, so the two environment variables stand in for it.
+    let level = std::env::var("VOGT_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
+    let format = std::env::var("VOGT_LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
+    observability::configure_logging(&level, &format);
     if let Err(error) = validate_hooks(Some(host)) {
         eprintln!("error: invalid_request: {error}");
         return ExitCode::from(1);
