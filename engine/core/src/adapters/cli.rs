@@ -125,21 +125,24 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
     // command's own flags start, every remaining token belongs to them,
     // including a value that happens to look like a command word.
     let mut index = 0usize;
-    let mut in_flags = false;
+    let mut command_complete = false;
     while index < argv_rest.len() {
         let flag = &argv_rest[index];
-        if !in_flags && (flag == "--help" || flag == "-h") && positional.is_empty() {
+        if !command_complete && (flag == "--help" || flag == "-h") && positional.is_empty() {
             return ParseOutcome::Result(ok_out(format_top(registry)));
         }
-        if !in_flags && flag == "--version" && positional.is_empty() {
+        if !command_complete && flag == "--version" && positional.is_empty() {
             return ParseOutcome::Result(ok_out(format!("vogt {version}\n")));
         }
-        if flag == "--json" {
+        // Global flags only before the command is complete. Once every token of
+        // the command has been seen, a later `--data-dir` belongs to the
+        // operation and is a usage error, matching argparse.
+        if flag == "--json" && !command_complete {
             json = true;
             index += 1;
             continue;
         }
-        if flag == "--data-dir" {
+        if flag == "--data-dir" && !command_complete {
             let Some(value) = argv_rest.get(index + 1) else {
                 return ParseOutcome::Result(usage(
                     "error: --data-dir requires a value\n".to_string(),
@@ -149,18 +152,18 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             index += 2;
             continue;
         }
-        if !in_flags && flag.starts_with('-') && positional.is_empty() {
+        if !command_complete && flag.starts_with('-') && positional.is_empty() {
             return ParseOutcome::Result(usage(format!(
                 "error: unrecognised argument {flag}\n{}",
                 format_top(registry)
             )));
         }
-        if !in_flags && !flag.starts_with('-') {
+        if !command_complete && !flag.starts_with('-') {
             positional.push(flag.clone());
+            command_complete = command_is_complete(&positional, registry);
             index += 1;
             continue;
         }
-        in_flags = true;
         flags.push(flag.clone());
         index += 1;
     }
@@ -184,7 +187,9 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
                     .first()
                     .is_some_and(|token| token == "--help" || token == "-h");
             if show {
-                return ParseOutcome::Result(ok_out(format_group(registry, &path)));
+                // A bare group is a usage error in argparse (exit 2), even
+                // though it prints the group's help.
+                return ParseOutcome::Result(usage(format_group(registry, &path)));
             }
             return ParseOutcome::Result(usage(format!(
                 "error: unknown command '{}'\n{}",
@@ -227,6 +232,13 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             format_operation(operation)
         ))),
     }
+}
+
+/// True once `words` is itself an operation, so a following flag is that
+/// operation's and not a global. A strict prefix (`work`) is not complete:
+/// `--json` may still sit between the group and the subcommand.
+fn command_is_complete(words: &[String], registry: &OperationRegistry) -> bool {
+    cli_operations(registry).iter().any(|op| op.path == words)
 }
 
 struct CliOp {
@@ -535,9 +547,8 @@ fn parse_bool_text(text: &str) -> Result<bool, String> {
 }
 
 fn coerce(raw: &str, property: &Value) -> Result<Value, String> {
-    if let Some(choices) = property.get("enum").and_then(Value::as_array) {
-        let allowed: Vec<&str> = choices.iter().filter_map(Value::as_str).collect();
-        if !allowed.contains(&raw) {
+    if let Some(allowed) = enum_choices(property) {
+        if !allowed.iter().any(|choice| choice == raw) {
             return Err(format!(
                 "invalid choice {raw}; choose from {}",
                 allowed.join(", ")
@@ -562,15 +573,50 @@ fn coerce(raw: &str, property: &Value) -> Result<Value, String> {
         // A list of objects is one JSON value per repeat, matching the Python
         // CLI. A list of scalars is one element per repeat.
         let items = property.get("items").cloned().unwrap_or(Value::Null);
-        if schema_types(&items).iter().any(|kind| kind == "object") || raw.starts_with('{') {
+        if is_json_value(&items) {
             return serde_json::from_str(raw).map_err(|_| format!("expected JSON, got {raw}"));
         }
         return coerce(raw, &items);
     }
-    if types.iter().any(|kind| kind == "object") || raw.starts_with('{') {
+    // Only an object-typed field is JSON. A string that happens to start with
+    // `{` (`--title '{wip} fix'`) stays a string.
+    if is_json_value(property) {
         return serde_json::from_str(raw).map_err(|_| format!("expected JSON, got {raw}"));
     }
     Ok(Value::String(raw.to_string()))
+}
+
+/// Choices declared as `enum` or, for `Optional[Literal]`, inside `anyOf`.
+fn enum_choices(property: &Value) -> Option<Vec<String>> {
+    if let Some(choices) = property.get("enum").and_then(Value::as_array) {
+        let allowed: Vec<String> = choices
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect();
+        if !allowed.is_empty() {
+            return Some(allowed);
+        }
+    }
+    let options = property.get("anyOf").and_then(Value::as_array)?;
+    for option in options {
+        if let Some(choices) = option.get("enum").and_then(Value::as_array) {
+            let allowed: Vec<String> = choices
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+            if !allowed.is_empty() {
+                return Some(allowed);
+            }
+        }
+    }
+    None
+}
+
+fn is_json_value(property: &Value) -> bool {
+    let types = schema_types(property);
+    types.iter().any(|kind| kind == "object" || kind == "array")
 }
 
 fn format_top(registry: &OperationRegistry) -> String {
@@ -729,7 +775,10 @@ fn to_text(value: &Value) -> String {
 }
 
 fn to_json(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string())
+    // Python `json.dumps`: `", "` / `": "` and `ensure_ascii`. The parity
+    // harness compares `--json` bytes, so serde_json's compact form would not
+    // match.
+    crate::decisions::python_json_dumps(value, false)
 }
 
 /// Console entry used by `main`. Writes the result and returns the exit code.
@@ -864,7 +913,7 @@ mod tests {
             &mut dispatch,
         );
         assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
-        assert!(result.stdout.contains("\"ok\""));
+        assert!(result.stdout.contains("\"ok\": true"), "{}", result.stdout);
         let params = seen.expect("dispatched");
         assert_eq!(params["ref"], "WI-7");
         assert_eq!(params["comment_limit"], 3);
@@ -975,6 +1024,72 @@ mod tests {
         let params = seen.expect("dispatched");
         assert_eq!(params["kind"], "bug");
         assert_eq!(params["local_only"], true);
+    }
+
+    #[test]
+    fn a_brace_in_a_string_field_stays_a_string() {
+        let registry = default_registry();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = run(
+            &argv(&[
+                "work",
+                "create",
+                "--kind",
+                "bug",
+                "--title",
+                "{wip} fix",
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert_eq!(seen.expect("dispatched")["title"], "{wip} fix");
+    }
+
+    #[test]
+    fn an_optional_literal_rejects_a_value_outside_its_choices() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&[
+                "work", "update", "--ref", "WI-7", "--effort", "huge", "--reason", "because",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            result.stderr.contains("invalid choice"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_global_flag_after_the_command_is_usage() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["registry", "dump", "--data-dir", "/tmp/nope"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+    }
+
+    #[test]
+    fn a_bare_group_is_usage() {
+        let registry = default_registry();
+        let result = run(&argv(&["work"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stderr.contains("work"), "{}", result.stderr);
     }
 
     #[test]

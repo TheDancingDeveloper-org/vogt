@@ -112,7 +112,17 @@ fn main() -> ExitCode {
         }
         return ExitCode::SUCCESS;
     }
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut argv = Vec::with_capacity(raw.len());
+    for arg in &raw {
+        match arg.to_str() {
+            Some(text) => argv.push(text.to_string()),
+            None => {
+                eprintln!("error: arguments must be valid UTF-8");
+                return ExitCode::from(2);
+            }
+        }
+    }
     // `init` and `serve` already have a Rust implementation in this binary.
     // The generated CLI must not steal them: a global flag before the command
     // (`--data-dir DIR init`) is still that command, and replacing it with the
