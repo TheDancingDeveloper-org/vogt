@@ -286,12 +286,20 @@ fn os_user() -> String {
 /// reads the clock twice before bootstrap does — once is the harness, once is
 /// the migration `now` — so the rows land where Python's step clock puts them.
 fn clock_stamp(fallback: &str, steps: i64) -> String {
+    // The step clock keeps the fraction. A start of …05.500000 must stamp
+    // …07.500000, not …07, or a hooked comparison disagrees with Python.
     let start = std::env::var("VOGT_TEST_CLOCK_START")
         .ok()
-        .and_then(|text| crate::core::from_iso(&text).ok())
-        .map(|moment| moment.unix_seconds());
+        .and_then(|text| crate::core::from_iso(&text).ok());
     match start {
-        Some(seconds) => crate::core::to_iso(crate::core::Moment::from_unix(seconds + steps, 0)),
+        Some(moment) => {
+            let mut clock = crate::core::StepClock::new(moment);
+            let mut stamped = crate::core::Clock::now(&mut clock);
+            for _ in 0..steps {
+                stamped = crate::core::Clock::now(&mut clock);
+            }
+            crate::core::to_iso(stamped)
+        }
         None => fallback.to_string(),
     }
 }
