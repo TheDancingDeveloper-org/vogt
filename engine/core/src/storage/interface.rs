@@ -592,6 +592,11 @@ pub trait WriteTxn: ReadView {
         record: &WriteBackRecord,
     ) -> Result<(), crate::errors::VogtError>;
     fn insert_session(&mut self, session: &CodingSession) -> Result<(), crate::errors::VogtError>;
+    fn set_session_stopped(
+        &mut self,
+        session_id: &str,
+        stopped_at: Moment,
+    ) -> Result<(), crate::errors::VogtError>;
     fn insert_session_grant(
         &mut self,
         grant: &SessionGrant,

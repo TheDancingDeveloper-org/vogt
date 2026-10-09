@@ -2204,6 +2204,20 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             ],
         ).map(|_| ()).map_err(sql_err)
     }
+    fn set_session_stopped(
+        &mut self,
+        session_id: &str,
+        stopped_at: Moment,
+    ) -> Result<(), VogtError> {
+        self.view
+            .conn
+            .execute(
+                "UPDATE coding_sessions SET stopped_at = ? WHERE id = ?",
+                params![to_iso(stopped_at), session_id],
+            )
+            .map(|_| ())
+            .map_err(sql_err)
+    }
     fn insert_session_grant(&mut self, grant: &SessionGrant) -> Result<(), VogtError> {
         self.view.conn.execute(
             "INSERT INTO session_grants (id, target_engine_session_id, kind, var, project_id, secret_name, capability, uses, ttl_seconds, reason, requested_by, requested_at, state, decided_by, decided_at, decision_reason, expires_at, revoked_by, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

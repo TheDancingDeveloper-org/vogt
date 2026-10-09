@@ -2431,3 +2431,428 @@ fn task_brief(view: &dyn ReadView, item: &WorkItem, session_id: &str) -> Result<
 fn started_at(session: &CodingSession) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(session.started_at.unix_seconds().max(0) as u64)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
+
+    use crate::adapters::engine::EngineClient;
+    use crate::application::context::{build_context, write_of};
+    use crate::application::writes::{audited_write, WriteOutcome};
+    use crate::auth;
+    use crate::core::{
+        ActorKind, CodingSession, Moment, Principal, Project, StepClock, Token, TokenKind,
+    };
+    use crate::errors::VogtError;
+    use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
+    use crate::with_ctx;
+
+    use super::{
+        answers_as_person, hibernate, input, wake, HibernateParams, InputParams, WakeParams,
+    };
+
+    /// An engine that records every request and answers from `script`: each GET
+    /// of a session pops the next payload, and a write echoes its own body so
+    /// the client reads it back as the session's new state.
+    fn engine(
+        script: Vec<Vec<u8>>,
+        seen: Arc<Mutex<Vec<(String, String, String)>>>,
+    ) -> EngineClient {
+        let remaining = Arc::new(Mutex::new(script));
+        EngineClient::new(
+            "http://engine",
+            None,
+            Some(Box::new(move |path, _, body, method| {
+                seen.lock().unwrap().push((
+                    method.to_string(),
+                    path.to_string(),
+                    String::from_utf8_lossy(body).to_string(),
+                ));
+                let answer = if method == "GET" {
+                    remaining
+                        .lock()
+                        .unwrap()
+                        .pop()
+                        .unwrap_or_else(|| b"null".to_vec())
+                } else {
+                    body.to_vec()
+                };
+                (200, answer)
+            })),
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn context(
+        name: &str,
+        principal: Principal,
+        token: Option<Token>,
+        config_extra: impl FnOnce(&mut crate::config::VogtConfig),
+        script: Vec<Vec<u8>>,
+    ) -> (
+        std::path::PathBuf,
+        crate::application::context::Built,
+        Arc<Mutex<Vec<(String, String, String)>>>,
+    ) {
+        let dir = std::env::temp_dir().join(format!("vogt-ses-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut config = crate::config::VogtConfig {
+            data_dir: dir.clone(),
+            ..crate::config::VogtConfig::default()
+        };
+        config_extra(&mut config);
+        let built = build_context(
+            config,
+            Some(principal),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 123_000))),
+            None,
+            token,
+            Some(engine(script, Arc::clone(&seen))),
+            None,
+            None,
+        )
+        .unwrap();
+        (dir, built, seen)
+    }
+
+    fn person() -> Principal {
+        Principal::new("local:ada", ActorKind::Human, "Ada").unwrap()
+    }
+
+    fn agent(identity: &str) -> Principal {
+        Principal::new(identity, ActorKind::Agent, "agent").unwrap()
+    }
+
+    fn live(id: &str) -> Vec<u8> {
+        format!(r#"{{"id":"{id}","alive":true,"activity":"idle","role":"worker"}}"#).into_bytes()
+    }
+
+    fn hibernated(id: &str) -> Vec<u8> {
+        format!(
+            r#"{{"id":"{id}","alive":false,"activity":"hibernated","role":"worker","conversation":{{"id":"conv-1","agent":"claude"}}}}"#
+        )
+        .into_bytes()
+    }
+
+    /// Record a Vogt session and one token for its actor, and return the token's id.
+    fn record_session(
+        built: &crate::application::context::Built,
+        id: &str,
+        engine_id: &str,
+    ) -> String {
+        with_ctx!(built, |ctx| {
+            let mut write = write_of(ctx);
+            let id = id.to_string();
+            let engine_id = engine_id.to_string();
+            let token_id = "tok_old".to_string();
+            let kept = token_id.clone();
+            audited_write(&mut write, "session.start", "test", move |txn, actor| {
+                txn.insert_project(&Project::new(
+                    "prj_1",
+                    "proj",
+                    "Proj",
+                    "/work",
+                    Moment::from_unix(1_700_000_000, 0),
+                ))?;
+                txn.insert_session(&CodingSession {
+                    id: id.clone(),
+                    engine_session_id: engine_id,
+                    project_id: "prj_1".to_string(),
+                    work_item_id: None,
+                    actor_id: actor.id.clone(),
+                    cwd: "/work".to_string(),
+                    template: None,
+                    model: None,
+                    effort: None,
+                    reason: "test".to_string(),
+                    started_at: Moment::from_unix(1_700_000_000, 0),
+                    stopped_at: None,
+                })?;
+                txn.insert_token(
+                    &Token {
+                        id: token_id,
+                        actor_id: actor.id.clone(),
+                        actor_identity_ref: Some(actor.identity_ref.clone()),
+                        name: "session token".to_string(),
+                        scopes: vec!["read".to_string()],
+                        kind: TokenKind::Api,
+                        created_at: Moment::from_unix(1_700_000_000, 0),
+                        expires_at: None,
+                        last_used_at: None,
+                        revoked_at: None,
+                        revoked_reason: None,
+                    },
+                    "hash-old",
+                )?;
+                Ok(WriteOutcome::new(
+                    (),
+                    "session",
+                    &id,
+                    json!({}),
+                    "session.started",
+                    json!({}),
+                ))
+            })
+            .unwrap();
+            kept
+        })
+    }
+
+    fn tokens_of(built: &crate::application::context::Built, actor_ref: &str) -> Vec<Token> {
+        with_ctx!(built, |ctx| {
+            let view = ctx.declared.read().unwrap();
+            let actor = view.actor_by_identity(actor_ref).unwrap().unwrap();
+            view.tokens_for_actor(&actor.id, true).unwrap()
+        })
+    }
+
+    #[test]
+    fn a_person_answers_as_a_person_and_an_agent_does_not() {
+        let (_dir, built, seen) = context("person", person(), None, |_| {}, vec![live("eng-1")]);
+        record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            assert!(answers_as_person(ctx).unwrap());
+            input(
+                ctx,
+                &InputParams {
+                    id: "ses_1".to_string(),
+                    text: Some("hello".to_string()),
+                    keys: None,
+                    submit: true,
+                    reason: "typing".to_string(),
+                    confirm: false,
+                    wake_timeout_s: 120,
+                },
+            )
+            .unwrap();
+        });
+        let calls = seen.lock().unwrap().clone();
+        let writes: Vec<_> = calls
+            .iter()
+            .filter(|(_, _, body)| body.contains("person"))
+            .collect();
+        assert!(
+            writes
+                .iter()
+                .all(|(_, _, body)| body.contains(r#""person":true"#)),
+            "{calls:?}"
+        );
+        drop(built);
+
+        let (_dir, built, seen) = context(
+            "agent",
+            agent("agent:worker"),
+            None,
+            |_| {},
+            vec![live("eng-1")],
+        );
+        record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            assert!(!answers_as_person(ctx).unwrap());
+        });
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_engine_credential_is_not_a_person_even_when_human() {
+        let (_dir, built, _) = context(
+            "engine-actor",
+            Principal::new("agent:vogt-engine", ActorKind::Human, "engine").unwrap(),
+            None,
+            |_| {},
+            vec![],
+        );
+        with_ctx!(&built, |ctx| assert!(!answers_as_person(ctx).unwrap()));
+
+        let secret_path = std::env::temp_dir().join(format!("vogt-secret-{}", std::process::id()));
+        std::fs::write(&secret_path, "the-stack-secret\n").unwrap();
+        let (_dir, built, _) = context(
+            "stack",
+            person(),
+            None,
+            |config| {
+                config.bootstrap_core_token_file = Some(secret_path.clone());
+            },
+            vec![],
+        );
+        // The presented token is the one the stack secret hashes to.
+        with_ctx!(&built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "token.issue", "test", |txn, actor| {
+                txn.insert_token(
+                    &Token {
+                        id: "tok_stack".to_string(),
+                        actor_id: actor.id.clone(),
+                        actor_identity_ref: Some(actor.identity_ref.clone()),
+                        name: "stack".to_string(),
+                        scopes: vec!["admin".to_string()],
+                        kind: TokenKind::Api,
+                        created_at: Moment::from_unix(1_700_000_000, 0),
+                        expires_at: None,
+                        last_used_at: None,
+                        revoked_at: None,
+                        revoked_reason: None,
+                    },
+                    &auth::hash_token("the-stack-secret"),
+                )?;
+                Ok(WriteOutcome::new(
+                    (),
+                    "token",
+                    "tok_stack",
+                    json!({}),
+                    "token.issued",
+                    json!({}),
+                ))
+            })
+            .unwrap();
+        });
+        // Rebuilt over the same store, presenting that token.
+        let presented = with_ctx!(&built, |ctx| ctx
+            .declared
+            .read()
+            .unwrap()
+            .token_by_hash(&auth::hash_token("the-stack-secret"))
+            .unwrap()
+            .unwrap());
+        let dir = with_ctx!(&built, |ctx| ctx.config.data_dir.clone());
+        drop(built);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let rebuilt = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir,
+                bootstrap_core_token_file: Some(secret_path),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(person()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 123_000))),
+            None,
+            Some(presented),
+            Some(engine(vec![], Arc::clone(&seen))),
+            None,
+            None,
+        )
+        .unwrap();
+        with_ctx!(&rebuilt, |ctx| assert!(!answers_as_person(ctx).unwrap()));
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("vogt-secret-{}", std::process::id())),
+        );
+    }
+
+    #[test]
+    fn hibernate_revokes_the_sessions_tokens() {
+        let (_dir, built, seen) = context("hibernate", person(), None, |_| {}, vec![live("eng-1")]);
+        let old = record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            hibernate(
+                ctx,
+                &HibernateParams {
+                    id: "ses_1".to_string(),
+                    reason: "freeing memory".to_string(),
+                    allow_shell: false,
+                },
+            )
+            .unwrap();
+        });
+        let tokens = tokens_of(&built, "local:ada");
+        let revoked = tokens.iter().find(|token| token.id == old).unwrap();
+        assert_eq!(
+            revoked.revoked_reason.as_deref(),
+            Some("hibernated: freeing memory")
+        );
+        assert!(revoked.revoked_at.is_some());
+        assert!(seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, path, _)| path.ends_with("/hibernate")));
+    }
+
+    #[test]
+    fn wake_mints_a_token_and_revokes_the_older_ones() {
+        let (_dir, built, seen) = context(
+            "wake",
+            person(),
+            None,
+            |_| {},
+            vec![hibernated("eng-1"), hibernated("eng-1")],
+        );
+        let old = record_session(&built, "ses_1", "eng-1");
+        with_ctx!(&built, |ctx| {
+            wake(
+                ctx,
+                &WakeParams {
+                    id: "ses_1".to_string(),
+                    reason: "back to work".to_string(),
+                },
+            )
+            .unwrap();
+        });
+        let tokens = tokens_of(&built, "local:ada");
+        let revoked = tokens.iter().find(|token| token.id == old).unwrap();
+        assert_eq!(
+            revoked.revoked_reason.as_deref(),
+            Some("superseded on wake: back to work")
+        );
+        let minted: Vec<_> = tokens
+            .iter()
+            .filter(|token| token.revoked_at.is_none())
+            .collect();
+        assert_eq!(minted.len(), 1, "{tokens:?}");
+        assert!(minted[0].name.contains("ses_1"));
+        let calls = seen.lock().unwrap().clone();
+        let wake_call = calls
+            .iter()
+            .find(|(_, path, _)| path.ends_with("/wake"))
+            .unwrap();
+        assert!(wake_call.2.contains("VOGT_HTTP_TOKEN"), "{}", wake_call.2);
+        assert!(wake_call.2.contains("VOGT_SESSION_ID"), "{}", wake_call.2);
+    }
+
+    #[test]
+    fn waking_a_stopped_session_is_refused_and_revokes_nothing() {
+        let (_dir, built, _) =
+            context("stopped", person(), None, |_| {}, vec![hibernated("eng-1")]);
+        let old = record_session(&built, "ses_1", "eng-1");
+        // Marked stopped directly, not through session.stop: stopping revokes
+        // the token itself, and this test is about wake refusing before it
+        // touches tokens.
+        with_ctx!(&built, |ctx| {
+            let mut write = write_of(ctx);
+            audited_write(&mut write, "session.stop", "test", |txn, _actor| {
+                txn.set_session_stopped("ses_1", Moment::from_unix(1_700_000_001, 0))?;
+                Ok(WriteOutcome::new(
+                    (),
+                    "session",
+                    "ses_1",
+                    json!({}),
+                    "session.stopped",
+                    json!({}),
+                ))
+            })
+            .unwrap();
+            let error = wake(
+                ctx,
+                &WakeParams {
+                    id: "ses_1".to_string(),
+                    reason: "no".to_string(),
+                },
+            )
+            .unwrap_err();
+            assert!(matches!(error, VogtError::Conflict(_)), "{error:?}");
+        });
+        let tokens = tokens_of(&built, "local:ada");
+        assert!(tokens
+            .iter()
+            .find(|token| token.id == old)
+            .unwrap()
+            .revoked_at
+            .is_none());
+    }
+}
