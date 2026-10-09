@@ -543,7 +543,7 @@ def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
     config = codex_home / "config.toml"
     config.parent.mkdir()
     # An operator's own table must survive the rewrite.
-    config.write_text('[other]\nkept = true\n', encoding="utf-8")
+    config.write_text("[other]\nkept = true\n", encoding="utf-8")
     env = {
         "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
         "HOME": str(tmp_path),
