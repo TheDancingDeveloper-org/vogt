@@ -586,7 +586,42 @@ pub fn local_principal(os_user: &str) -> Principal {
     }
 }
 
-pub type WorkKind = &'static str;
+macro_rules! vocab {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+    };
+}
+
+vocab!(WorkKind {
+    Feature,
+    Bug,
+    Chore,
+    Question
+});
+vocab!(Priority { P0, P1, P2, P3, P4 });
+vocab!(Effort { Xs, S, M, L, Xl });
+vocab!(Origin {
+    Created,
+    Adopted,
+    Observed
+});
+vocab!(TrustState {
+    Verified,
+    Stale,
+    Unverified,
+    Disputed
+});
+vocab!(RelationKind {
+    DependsOn,
+    RelatesTo,
+    DuplicateOf,
+    ParentOf,
+    ImplementedBy
+});
+vocab!(InitiativeState { Open, Closed });
+
 pub type LifecycleState = &'static str;
 
 pub const OPEN: &str = "open";
@@ -944,6 +979,45 @@ impl SessionGrant {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Label {
+    pub id: String,
+    pub name: String,
+    pub color: Option<String>,
+    pub created_at: Moment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Initiative {
+    pub id: String,
+    pub slug: String,
+    pub title: String,
+    pub body: String,
+    pub state: InitiativeState,
+    pub weight: i64,
+    pub created_at: Moment,
+    pub updated_at: Moment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Relation {
+    pub kind: RelationKind,
+    pub related_id: String,
+    pub related_ref: String,
+    pub related_title: String,
+    pub related_state: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Comment {
+    pub id: String,
+    pub work_item_id: String,
+    pub actor_id: String,
+    pub actor_display_name: String,
+    pub body: String,
+    pub created_at: Moment,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1160,6 +1234,33 @@ mod tests {
             refused.contains("VOGT_TEST_CLOCK_START, VOGT_TEST_IDS"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn the_vocabulary_serialises_as_pythons_literals() {
+        assert_eq!(
+            serde_json::to_string(&WorkKind::Feature).unwrap(),
+            "\"feature\""
+        );
+        assert_eq!(serde_json::to_string(&Priority::P2).unwrap(), "\"p2\"");
+        assert_eq!(serde_json::to_string(&Effort::Xl).unwrap(), "\"xl\"");
+        assert_eq!(
+            serde_json::to_string(&Origin::Observed).unwrap(),
+            "\"observed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TrustState::Unverified).unwrap(),
+            "\"unverified\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RelationKind::ImplementedBy).unwrap(),
+            "\"implemented_by\""
+        );
+        assert_eq!(
+            serde_json::to_string(&InitiativeState::Closed).unwrap(),
+            "\"closed\""
+        );
+        assert!(serde_json::from_str::<RelationKind>("\"invented\"").is_err());
     }
 
     #[test]
