@@ -22,6 +22,8 @@ mod initiatives;
 pub mod lifecycle;
 mod notifications;
 mod preferences;
+#[allow(dead_code)]
+pub mod sessions;
 
 use crate::application::context::{AppContext, Built};
 use crate::application::writes::WriteContext;
