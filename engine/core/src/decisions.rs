@@ -3381,9 +3381,13 @@ mod runtime_tests {
 
 use std::sync::LazyLock;
 
-/// Python's `\w` is `str.isalnum()` or `_`: a letter or number in any script,
-/// never a combining mark. One character wide so a look-behind stays fixed.
-const PY_WORD: &str = r"[\p{L}\p{N}_]";
+/// Python's `\w` is `str.isalnum()` or `_`. The case-folding is switched off
+/// inside it: under `(?i)` the engine folds U+0345 to ι and then counts that
+/// combining mark as a letter, which erases the word boundary and lets a
+/// credential through. Python never case-folds a character class.
+const PY_WORD: &str = r"(?-i:[\p{L}\p{N}_])";
+/// The same class written inside `[...]`, where a group is not allowed.
+const PY_WORD_CLASS: &str = r"\p{L}\p{N}_";
 /// Python's `\s`: Unicode whitespace plus the C0 controls U+001C to U+001F.
 const PY_SPACE_CLASS: &str = r"\s\x1c-\x1f";
 
@@ -3402,11 +3406,14 @@ fn python_pattern(pattern: &str) -> String {
         if escaped {
             if class {
                 match ch {
-                    'w' => out.push_str(r"\p{L}\p{N}_"),
+                    'w' => out.push_str(PY_WORD_CLASS),
+                    'W' => out.push_str(r"\P{L}\P{N}"),
                     's' => out.push_str(PY_SPACE_CLASS),
+                    'S' => {
+                        out.push_str("][^\\s\\x1c-\\x1f");
+                    }
                     'd' => out.push_str(r"\d"),
                     'D' => out.push_str(r"\D"),
-                    'S' => out.push_str(r"\S"),
                     'b' => out.push('\u{0008}'),
                     other => {
                         out.push('\\');
@@ -3422,6 +3429,7 @@ fn python_pattern(pattern: &str) -> String {
                         r"(?:(?<!{PY_WORD})(?!{PY_WORD})|(?<={PY_WORD})(?={PY_WORD}))"
                     )),
                     'w' => out.push_str(PY_WORD),
+                    'W' => out.push_str(&format!("(?:(?!{PY_WORD}).)")),
                     's' => out.push_str(&format!("[{PY_SPACE_CLASS}]")),
                     'S' => out.push_str(&format!("(?:(?![{PY_SPACE_CLASS}]).)")),
                     'd' => out.push_str(r"\d"),
@@ -4140,6 +4148,22 @@ mod r49 {
         );
         let split = split_command("--effort\\\n\u{1c}\rclaude");
         assert_eq!(split, vec!["--effort\n\u{1c}", "claude"]);
+        // Under case-insensitive matching a combining mark that folds to a
+        // letter must stay a boundary, or the credential after it survives.
+        for leaked in [
+            "\u{345}password=hunter2",
+            "\u{345}Authorization: s3cr3tvalue",
+            "\u{345}Bearer abcdefghijkl",
+        ] {
+            assert!(!activity_redact(leaked).contains("hunter2"), "{leaked}");
+            assert!(!activity_redact(leaked).contains("s3cr3tvalue"), "{leaked}");
+            assert!(
+                !activity_redact(leaked).contains("abcdefghijkl"),
+                "{leaked}"
+            );
+        }
+        assert!(dumps_secrets("\u{345}printenv"));
+        assert!(looks_like_dump("\u{345}kind: Config\nusers:"));
     }
 }
 
