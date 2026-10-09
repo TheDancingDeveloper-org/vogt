@@ -880,6 +880,7 @@ mod tests {
         answers: Vec<(String, ForgeResponse)>,
         writes: Vec<(String, serde_json::Value)>,
         seen: RefCell<Vec<String>>,
+        sent: RefCell<Vec<serde_json::Value>>,
         fail_with: Option<String>,
     }
 
@@ -892,6 +893,7 @@ mod tests {
                     .collect(),
                 writes: Vec::new(),
                 seen: RefCell::new(Vec::new()),
+                sent: RefCell::new(Vec::new()),
                 fail_with: None,
             }
         }
@@ -923,9 +925,12 @@ mod tests {
             &self,
             _method: &str,
             path: &str,
-            _body: Option<&serde_json::Value>,
+            body: Option<&serde_json::Value>,
         ) -> Result<serde_json::Value, VogtError> {
             self.seen.borrow_mut().push(path.to_owned());
+            if let Some(body) = body {
+                self.sent.borrow_mut().push(body.clone());
+            }
             if let Some(message) = &self.fail_with {
                 return Err(VogtError::UpstreamWriteFailed(message.clone()));
             }
@@ -1066,6 +1071,39 @@ mod tests {
     fn set_state_refuses_an_unknown_state() {
         let error = provider().set_state(&repo(), 4, "merged").unwrap_err();
         assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
+    }
+
+    #[test]
+    fn create_repo_omits_an_empty_description() {
+        let mut fixture = Fixture::new(vec![]);
+        fixture.writes.push((
+            "/user/repos".to_owned(),
+            serde_json::json!({"name": "widget", "full_name": "ada/widget", "owner": {"login": "ada"}}),
+        ));
+        let provider = GitHubProvider::new(fixture);
+        provider.create_repo("widget", true, None).unwrap();
+        let sent = provider.transport.sent.borrow();
+        assert!(
+            sent[0].get("description").is_none(),
+            "no description: {}",
+            sent[0]
+        );
+        assert_eq!(sent[0]["auto_init"], false);
+        let provider = GitHubProvider::new({
+            let mut fixture = Fixture::new(vec![]);
+            fixture.writes.push((
+                "/user/repos".to_owned(),
+                serde_json::json!({"name": "widget", "owner": {"login": "ada"}}),
+            ));
+            fixture
+        });
+        provider
+            .create_repo("widget", false, Some("A widget"))
+            .unwrap();
+        assert_eq!(
+            provider.transport.sent.borrow()[0]["description"],
+            "A widget"
+        );
     }
 
     #[test]
