@@ -172,6 +172,12 @@ def verdict(operation, raw: dict) -> dict:
             # The parameters as sent, so a number past 2^63 keeps its digits.
             # JSON parsing rounds it, and the comparison puts the digits back.
             "sent": json.dumps(raw, ensure_ascii=False),
+            # loc mixes strings and ints, and type is the error code. Both are
+            # what FastAPI's 422 detail repeats, so the comparison can check
+            # them instead of parsing them back out of the text.
+            "errors": [
+                {"loc": list(err["loc"]), "type": err["type"]} for err in exc.errors()
+            ],
         }
     return {"ok": True, "dump": model.model_dump(mode="json")}
 

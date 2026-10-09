@@ -7,7 +7,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::errors::{record_validation, FieldError, ValidationReport, VogtError};
+use crate::errors::{record_validation, FieldError, Loc, ValidationReport, VogtError};
 
 /// Apply an operation's parameter schema: fill defaults, reject anything the
 /// schema does not allow, and check types and bounds. A `Null` is an empty
@@ -739,12 +739,26 @@ fn finish(problem: &str, input: &Value) -> FieldError {
         json_type(input)
     );
     FieldError {
-        loc: field.split('.').map(str::to_string).collect(),
+        loc: parse_loc(field),
         error_type: code.to_string(),
         msg: complaint.to_string(),
         input: input.clone(),
         text,
     }
+}
+
+/// A dotted location back into pydantic's steps. `cells.2.lane_key` is a field,
+/// then an index, then a field — the dotted form cannot say which, but the
+/// steps are built here, where an all-digit step is an index.
+fn parse_loc(field: &str) -> Vec<Loc> {
+    field
+        .split('.')
+        .filter(|step| !step.is_empty())
+        .map(|step| match step.parse::<usize>() {
+            Ok(index) if index.to_string() == step => Loc::Index(index),
+            _ => Loc::Field(step.to_string()),
+        })
+        .collect()
 }
 
 /// A string keeps its first 24 and last 23 characters; anything else keeps 25 and
@@ -811,6 +825,14 @@ fn invalid(operation: &str, problems: &[FieldError]) -> VogtError {
 }
 
 #[cfg(test)]
+/// A location step as JSON: a field stays a string, an index becomes a number.
+fn loc_json(step: &crate::errors::Loc) -> serde_json::Value {
+    match step {
+        crate::errors::Loc::Field(name) => serde_json::Value::String(name.clone()),
+        crate::errors::Loc::Index(index) => serde_json::json!(index),
+    }
+}
+
 mod tests {
     use super::*;
 
@@ -1001,6 +1023,29 @@ mod tests {
                             "{op} {tag}:\n  rust: {message}\n  pydantic: {}",
                             expected["text"].as_str().unwrap()
                         ));
+                    }
+                    // The structured half, which the 422 body is built from.
+                    // `loc` mixes field names and list indexes, so it is
+                    // compared as JSON rather than as text.
+                    if let Some(report) = crate::errors::take_validation(&error) {
+                        let got = report
+                            .errors
+                            .iter()
+                            .map(|field| {
+                                serde_json::json!({
+                                    "loc": field.loc.iter().map(loc_json).collect::<Vec<_>>(),
+                                    "type": field.error_type,
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        if got != expected["errors"].as_array().unwrap().as_slice() {
+                            failures.push(format!(
+                                "{op} {tag}: loc/type {got:?} != {}",
+                                expected["errors"]
+                            ));
+                        }
+                    } else {
+                        failures.push(format!("{op} {tag}: no structured report"));
                     }
                 }
             }

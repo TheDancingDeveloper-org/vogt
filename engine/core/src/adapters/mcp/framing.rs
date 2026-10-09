@@ -389,7 +389,12 @@ fn describe(operation: &Operation, error: &crate::errors::VogtError) -> String {
         .errors
         .iter()
         .map(|error| {
-            let location = error.loc.join(".");
+            let location = error
+                .loc
+                .iter()
+                .map(crate::errors::Loc::as_text)
+                .collect::<Vec<_>>()
+                .join(".");
             if error.error_type == "missing" && location == "reason" {
                 format!("missing required parameter 'reason': {REASON_HINT}")
             } else if error.error_type == "missing" {

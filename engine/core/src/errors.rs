@@ -254,12 +254,31 @@ impl fmt::Display for VogtError {
 
 impl std::error::Error for VogtError {}
 
+/// One step of a pydantic location. A field is a string and a list position is
+/// an integer: `["sources", 0]`, `["cells", 2, "lane_key"]`. FastAPI's 422
+/// `detail[].loc` keeps that distinction, so a string `"0"` would not match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Loc {
+    Field(String),
+    Index(usize),
+}
+
+impl Loc {
+    /// The dotted spelling the CLI message uses, where an index is just text.
+    pub fn as_text(&self) -> String {
+        match self {
+            Self::Field(name) => name.clone(),
+            Self::Index(index) => index.to_string(),
+        }
+    }
+}
+
 /// One rejected field, in the shape pydantic's `error` dict carries and
 /// FastAPI's 422 `detail` repeats: where, the error code, the message, and the
 /// value that was refused.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldError {
-    pub loc: Vec<String>,
+    pub loc: Vec<Loc>,
     pub error_type: String,
     /// The complaint without the tail, which is what `detail.msg` carries.
     pub msg: String,
