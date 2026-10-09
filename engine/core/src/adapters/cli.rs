@@ -895,8 +895,8 @@ fn format_operation(operation: &Operation) -> String {
     let max_help_position = 24.min((width.saturating_sub(20)).max(indent * 2));
     let action_max = rows
         .iter()
-        .map(|(flag, _)| flag.len() + indent)
-        .chain(["-h, --help".len() + indent])
+        .map(|(flag, _)| flag.chars().count() + indent)
+        .chain(["-h, --help".chars().count() + indent])
         .max()
         .unwrap_or(0);
     let help_column = (action_max + 2).min(max_help_position);
@@ -962,13 +962,12 @@ fn option_row(flag: &str, help: &str, column: usize, indent: usize) -> String {
     let action_width = column - indent - 2;
     let lines = wrap_text(help, help_width);
     let mut out = String::new();
+    let flag_width = flag.chars().count();
     if help.is_empty() {
         out.push_str(&format!("{:indent$}{flag}\n", ""));
-    } else if flag.len() <= action_width {
-        out.push_str(&format!(
-            "{:indent$}{flag:<action_width$}  {}\n",
-            "", lines[0]
-        ));
+    } else if flag_width <= action_width {
+        let pad = " ".repeat(action_width - flag_width);
+        out.push_str(&format!("{:indent$}{flag}{pad}  {}\n", "", lines[0]));
         for line in lines.iter().skip(1) {
             out.push_str(&format!("{:>column$}{line}\n", ""));
         }
@@ -981,38 +980,48 @@ fn option_row(flag: &str, help: &str, column: usize, indent: usize) -> String {
     out
 }
 
-/// textwrap.wrap: break on whitespace, and after a hyphen whose word has
-/// letters on both sides. A chunk that is itself longer than the width breaks
-/// wherever it has to.
+/// textwrap.wrap, measured in characters: break on whitespace, and after a
+/// hyphen whose word has letters on both sides. A chunk longer than the width
+/// breaks wherever it has to.
 fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.is_empty() {
         return vec![String::new()];
     }
     let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
+    let mut current: Vec<char> = Vec::new();
     for chunk in hyphen_chunks(&text) {
-        let pieces: Vec<String> = chunk
-            .chars()
-            .collect::<Vec<_>>()
-            .chunks(width.max(1))
-            .map(|piece| piece.iter().collect())
-            .collect();
-        for piece in pieces {
+        let mut chars: Vec<char> = chunk.chars().collect();
+        while chars.len() > width.max(1) {
             if current.is_empty() {
-                current = piece;
-            } else if current.len() + piece.len() <= width
-                && !(piece.trim().is_empty() && current.len() + piece.len() == width)
-            {
-                current.push_str(&piece);
+                lines.push(chars.drain(..width.max(1)).collect());
             } else {
-                lines.push(std::mem::take(&mut current));
-                current = piece.trim_start().to_string();
+                break;
             }
+        }
+        if chars.is_empty() {
+            continue;
+        }
+        let whitespace = chars.iter().all(|ch| ch.is_whitespace());
+        if current.is_empty() {
+            current = chars
+                .into_iter()
+                .skip_while(|ch| ch.is_whitespace())
+                .collect();
+        } else if current.len() + chars.len() <= width
+            && !(whitespace && current.len() + chars.len() == width)
+        {
+            current.extend(chars);
+        } else {
+            lines.push(current.iter().collect());
+            current = chars
+                .into_iter()
+                .skip_while(|ch| ch.is_whitespace())
+                .collect();
         }
     }
     if !current.is_empty() {
-        lines.push(current);
+        lines.push(current.iter().collect());
     }
     lines.iter_mut().for_each(|line| {
         *line = line.trim_end().to_string();
@@ -1058,22 +1067,43 @@ fn hyphen_chunks(text: &str) -> Vec<String> {
 
 fn usage_flags(schema: &Value) -> Vec<String> {
     let required = required_fields(schema);
-    flag_help(schema)
-        .into_iter()
-        .map(|(flag, _)| {
-            let name = flag.split_whitespace().next().unwrap_or("");
-            let field = name.trim_start_matches("--").replace('-', "_");
-            let base = field
-                .strip_suffix("_file")
-                .or_else(|| field.strip_suffix("_stdin"))
-                .unwrap_or(&field);
-            if required.iter().any(|item| item == base) {
-                flag
-            } else {
-                format!("[{flag}]")
-            }
-        })
-        .collect()
+    let flags = flag_help(schema);
+    let mut parts = Vec::new();
+    let mut index = 0;
+    while index < flags.len() {
+        let (flag, _) = &flags[index];
+        let name = flag.split_whitespace().next().unwrap_or("");
+        let field = name.trim_start_matches("--").replace('-', "_");
+        let base = field
+            .strip_suffix("_file")
+            .or_else(|| field.strip_suffix("_stdin"))
+            .unwrap_or(&field);
+        if flag.contains("-file ")
+            && flags
+                .get(index + 1)
+                .is_some_and(|(next, _)| next.ends_with("-stdin"))
+        {
+            // A secret's two flags are a mutually exclusive group, so the
+            // usage line offers one or the other. The file dest is
+            // `<name>__file`, which is what argparse uppercases for the metavar.
+            let file_flag = flag.replace(" PATH", " PASSWORD__FILE");
+            let stdin_flag = flags[index + 1].0.clone();
+            parts.push(format!("[{file_flag} | {stdin_flag}]"));
+            index += 2;
+            continue;
+        }
+        if required.iter().any(|item| item == base) {
+            parts.push(flag.clone());
+        } else if let Some((on, off)) = flag.split_once(", ") {
+            // BooleanOptionalAction: the options list joins the pair with a
+            // comma, the usage line joins it with " | ".
+            parts.push(format!("[{on} | {off}]"));
+        } else {
+            parts.push(format!("[{flag}]"));
+        }
+        index += 1;
+    }
+    parts
 }
 
 /// argparse's `part_regexp`: a parenthesised or bracketed group is one part,
@@ -1117,7 +1147,7 @@ fn flag_help(schema: &Value) -> Vec<(String, String)> {
         let dashed = name.replace('_', "-");
         if is_secret(name) {
             lines.push((
-                format!("--{dashed}-file PATH"),
+                format!("--{dashed}-file PASSWORD__FILE"),
                 format!("Read the {dashed} from this file (never pass it in argv)."),
             ));
             lines.push((
