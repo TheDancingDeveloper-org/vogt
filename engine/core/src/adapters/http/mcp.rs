@@ -544,8 +544,8 @@ mod tests {
         assert_eq!(status, 200, "{response}");
         let json: Value = serde_json::from_str(&response).unwrap();
         assert!(json.get("result").is_some(), "{response}");
-        // A ping is not a tool call, so no_auth records nothing for it. The
-        // token_valid row is written only when a tool is called.
+        // --no-auth writes no row: Python records nothing when authentication
+        // is switched off, and a ping is not a tool call either.
         assert!(decisions(&running.dir).is_empty());
     }
 }

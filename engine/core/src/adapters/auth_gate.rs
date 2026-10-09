@@ -75,8 +75,24 @@ pub struct Request<'a> {
     pub decision_id: &'a str,
 }
 
-/// Authenticate, authorize, record, and either grant or deny.
+/// Resolve the credential and nothing more. A refusal is recorded, because a
+/// rejected token is the fact worth keeping; a success is not, because the
+/// authorization that follows records the one row for the request. MCP uses
+/// this so a ping or an initialize writes nothing for a live token.
+pub fn authenticate<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Grant, Denial> {
+    resolve(store, request, false)
+}
+
+/// Authenticate, then authorize, recording the one decision for the request.
 pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Grant, Denial> {
+    resolve(store, request, true)
+}
+
+fn resolve<S: DeclaredStore>(
+    store: &S,
+    request: Request<'_>,
+    record_allow: bool,
+) -> Result<Grant, Denial> {
     let Request {
         operation,
         transport,
@@ -87,21 +103,6 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
         decision_id,
     } = request;
     if no_auth {
-        record(
-            store,
-            decision(Recorded {
-                id: decision_id,
-                at: now,
-                operation,
-                transport,
-                outcome: AuthOutcome::Allow,
-                reason: "no_auth",
-                token: None,
-                scope: None,
-                detail: None,
-                operation_name: operation.name,
-            }),
-        )?;
         return Ok(Grant {
             actor_id: "local".to_string(),
             identity_ref: None,
@@ -121,7 +122,7 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
                     id: decision_id,
                     at: now,
                     operation,
-                    transport,
+                    transport: Transport::Http,
                     outcome: AuthOutcome::Deny,
                     reason: rejection.code,
                     token: rejection.token.as_ref(),
@@ -168,22 +169,26 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
         });
     }
     debug_assert!(reason == TOKEN_OK || reason == MISSING_SCOPE);
-    record(
-        store,
-        decision(Recorded {
-            id: decision_id,
-            at: now,
-            operation,
-            transport,
-            outcome: AuthOutcome::Allow,
-            reason,
-            token: Some(&token),
-            scope: Some(operation.scope),
-            detail: None,
-            operation_name: operation.name,
-        }),
-    )?;
-    slide(store, &token, now);
+    if record_allow {
+        record(
+            store,
+            decision(Recorded {
+                id: decision_id,
+                at: now,
+                operation,
+                transport,
+                outcome: AuthOutcome::Allow,
+                reason,
+                token: Some(&token),
+                scope: Some(operation.scope),
+                detail: None,
+                operation_name: operation.name,
+            }),
+        )?;
+    }
+    if record_allow {
+        slide(store, &token, now);
+    }
     Ok(Grant {
         actor_id: token.actor_id,
         identity_ref: token.actor_identity_ref,
