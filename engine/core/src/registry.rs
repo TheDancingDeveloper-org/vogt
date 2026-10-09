@@ -455,9 +455,9 @@ pub struct OperationManifest {
     pub params_schema: serde_json::Value,
     pub result_schema: serde_json::Value,
     pub transports: Vec<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `None` serialises as `null`, matching pydantic's `model_dump`, which
+    /// emits the field for every operation rather than omitting it.
     pub exclusion: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub exclusion_reason: Option<&'static str>,
 }
 
@@ -561,30 +561,21 @@ mod tests {
 
     #[test]
     fn a_leaf_and_group_cli_path_is_rejected() {
-        let operations = vec![
-            Operation::new(
-                "parent",
-                "a leaf",
-                Scope::Read,
-                false,
-                HttpRoute::new(HttpMethod::Get, "/parent"),
-                CliBinding::new(&["parent"]),
-            ),
-            Operation::new(
-                "parent.child",
-                "a child",
-                Scope::Read,
-                false,
-                HttpRoute::new(HttpMethod::Get, "/parent/child"),
-                CliBinding::new(&["parent", "child"]),
-            ),
-        ];
-        // The exclusion lists name operations this set lacks, so drop them
-        // from the check by using a registry that also satisfies exclusions.
-        // The leaf/group rule is what must fire first once exclusions pass,
-        // so include stand-ins is unnecessary: assert the error kind by
-        // building a set that contains the exclusions and the collision.
-        let _ = operations;
+        let mut operations = operations::build_operations();
+        operations.push(Operation::new(
+            "status.child",
+            "a child of a leaf",
+            Scope::Read,
+            false,
+            HttpRoute::new(HttpMethod::Get, "/status/child"),
+            CliBinding::new(&["status", "x"]),
+        ));
+        let error = OperationRegistry::new(operations).unwrap_err();
+        assert!(
+            error.0.contains("cannot be both a leaf and a group"),
+            "{}",
+            error.0
+        );
     }
 
     #[test]
@@ -643,9 +634,24 @@ mod tests {
             .iter()
             .find(|operation| operation["name"] == "work.get")
             .unwrap();
-        assert!(shared.get("exclusion").is_none());
+        assert!(shared.get("exclusion").unwrap().is_null());
         assert_eq!(shared["mcp_tool"], "work_get");
         assert_eq!(shared["cli_path"], serde_json::json!(["work", "get"]));
+    }
+
+    #[test]
+    fn the_dump_matches_the_python_golden() {
+        // Recorded by `scripts/gen_registry.py` from Python's own registry
+        // dump. Compared with no normaliser, so a drift in any field fails.
+        let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/golden/registry.json");
+        let golden: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+        assert_eq!(
+            dump(),
+            golden,
+            "registry dump drifted from the Python golden"
+        );
     }
 
     #[test]

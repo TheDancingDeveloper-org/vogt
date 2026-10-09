@@ -1,0 +1,3585 @@
+{
+  "operations": [
+    {
+      "name": "init",
+      "summary": "Create or bring forward the instance in the data directory.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "POST",
+      "http_path": "/instance/init",
+      "mcp_tool": "init",
+      "cli_path": [
+        "init"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli"
+      ],
+      "exclusion": "local_only",
+      "exclusion_reason": "Creates the instance in a local data directory. A running server already has one, so there is no meaningful remote semantics."
+    },
+    {
+      "name": "migrate",
+      "summary": "Bring both stores forward to this build's schema.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "POST",
+      "http_path": "/instance/migrate",
+      "mcp_tool": "migrate",
+      "cli_path": [
+        "migrate"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli"
+      ],
+      "exclusion": "local_only",
+      "exclusion_reason": "Brings the schema of the local data directory forward. Over HTTP it would be a request asking the server to change the ground it is standing on mid-flight; the server already migrates at startup , so the remote case is served by restarting it."
+    },
+    {
+      "name": "status",
+      "summary": "Report instance identity, schema versions, and row counts.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/status",
+      "mcp_tool": "status",
+      "cli_path": [
+        "status"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "registry.dump",
+      "summary": "The operation registry as a manifest: every operation's scope, bindings, schemas and transport exclusion.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/registry",
+      "mcp_tool": "registry_dump",
+      "cli_path": [
+        "registry",
+        "dump"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "instance.diagnostics",
+      "summary": "Deploy diagnostics: version, image digest, uptime, readiness checks, migration state and recent error log lines (redacted); peer=true also asks the configured peer instance (e.g. prod).",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/instance/diagnostics",
+      "mcp_tool": "instance_diagnostics",
+      "cli_path": [
+        "diagnostics"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "engine.status",
+      "summary": "The session engine's operational report, as the GUI's Settings shows it: build, session / push / GUI-process counts, history archive and agent-task storage, workspace root, and event subscribers that fell behind. `engine` says why when it could not be asked.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/engine/status",
+      "mcp_tool": "engine_status",
+      "cli_path": [
+        "engine",
+        "status"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "place.metrics",
+      "summary": "Read all bounded shell navigation counts in one response.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/place/metrics",
+      "mcp_tool": "place_metrics",
+      "cli_path": [
+        "place",
+        "metrics"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "connect",
+      "summary": "How to reach this instance, and the client configuration for doing so. Renders the connection document.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/connect",
+      "mcp_tool": "connect",
+      "cli_path": [
+        "connect"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "mcp.stdio",
+      "summary": "Serve MCP over stdin/stdout until the stream closes.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "POST",
+      "http_path": "/mcp/stdio",
+      "mcp_tool": "mcp_stdio",
+      "cli_path": [
+        "mcp",
+        "stdio"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli"
+      ],
+      "exclusion": "local_only",
+      "exclusion_reason": "Takes over this process's stdin and stdout to speak MCP. That is meaningful only where the data directory is; a remote client uses the streamable-HTTP transport at /mcp. Offering it as a REST route would mean a server hijacking its own stdout."
+    },
+    {
+      "name": "project.register",
+      "summary": "Register an existing folder or repository as a project.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/projects",
+      "mcp_tool": "project_register",
+      "cli_path": [
+        "project",
+        "register"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "project.create",
+      "summary": "Scaffold a contract-compliant skeleton, then register it.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/projects/create",
+      "mcp_tool": "project_create",
+      "cli_path": [
+        "project",
+        "create"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "project.import",
+      "summary": "Clone a GitHub repository into the import root, register it, and consolidate its existing forge state.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/projects/import",
+      "mcp_tool": "project_import",
+      "cli_path": [
+        "project",
+        "import"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "project.get",
+      "summary": "Fetch one project by slug.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/projects/get",
+      "mcp_tool": "project_get",
+      "cli_path": [
+        "project",
+        "get"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "project.list",
+      "summary": "List registered projects, each with `writable`: whether a default work.create lands there now, and why not.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/projects",
+      "mcp_tool": "project_list",
+      "cli_path": [
+        "project",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "project.brief",
+      "summary": "The per-repo view: state, work, bugs, version, compliance. mode=summary (default) omits full items from top_backlog.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/projects/brief",
+      "mcp_tool": "project_brief",
+      "cli_path": [
+        "project",
+        "brief"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "project.update",
+      "summary": "Correct a project's declared repo URL or exclusions.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/projects/update",
+      "mcp_tool": "project_update",
+      "cli_path": [
+        "project",
+        "update"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "project.transition",
+      "summary": "Move a project through its lifecycle states.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/projects/transition",
+      "mcp_tool": "project_transition",
+      "cli_path": [
+        "project",
+        "transition"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.create",
+      "summary": "Create a work item (feature / bug / chore / question).",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work",
+      "mcp_tool": "work_create",
+      "cli_path": [
+        "work",
+        "create"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.get",
+      "summary": "Fetch one work item with its relations, labels and comments (`id` is accepted for `ref`).",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/work/get",
+      "mcp_tool": "work_get",
+      "cli_path": [
+        "work",
+        "get"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.list",
+      "summary": "List work items with filters, paged (limit/offset, next_offset). mode=summary (default) returns compact rows; mode=full returns whole items. `query` searches title/body/ref; `status`/`state` alias `states`.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/work",
+      "mcp_tool": "work_list",
+      "cli_path": [
+        "work",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "board.list",
+      "summary": "Read bounded, independently pageable Board cells in one snapshot.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "POST",
+      "http_path": "/board/list",
+      "mcp_tool": "board_list",
+      "cli_path": [
+        "board",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.update",
+      "summary": "Change a work item's fields, assignee, or labels.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work/update",
+      "mcp_tool": "work_update",
+      "cli_path": [
+        "work",
+        "update"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.transition",
+      "summary": "Move a work item to another state, validating the edge; a refusal lists the allowed edges and the shortest path. walk=true takes that path, one audited hop per edge.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work/transition",
+      "mcp_tool": "work_transition",
+      "cli_path": [
+        "work",
+        "transition"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.relate",
+      "summary": "Add a typed relation between two work items.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work/relate",
+      "mcp_tool": "work_relate",
+      "cli_path": [
+        "work",
+        "relate"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.unrelate",
+      "summary": "Remove a typed relation between two work items.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work/unrelate",
+      "mcp_tool": "work_unrelate",
+      "cli_path": [
+        "work",
+        "unrelate"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.bind_branch",
+      "summary": "Declare the git branch a work item is worked on.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work/bind-branch",
+      "mcp_tool": "work_bind_branch",
+      "cli_path": [
+        "work",
+        "bind-branch"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.comment",
+      "summary": "Comment on a work item, attributed to the acting actor.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work/comment",
+      "mcp_tool": "work_comment",
+      "cli_path": [
+        "work",
+        "comment"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "backlog",
+      "summary": "The ranked backlog, globally or for one project, paged (limit/offset, next_offset). mode=summary (default) omits each row's full item; mode=full includes it.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/backlog",
+      "mcp_tool": "backlog",
+      "cli_path": [
+        "backlog"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "bugs",
+      "summary": "Open bugs across every project, ranked.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/bugs",
+      "mcp_tool": "bugs",
+      "cli_path": [
+        "bugs"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "why",
+      "summary": "Per-input score contributions for one ranked item.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/why",
+      "mcp_tool": "why",
+      "cli_path": [
+        "why"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "label.create",
+      "summary": "Define a label.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/labels",
+      "mcp_tool": "label_create",
+      "cli_path": [
+        "label",
+        "create"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "label.list",
+      "summary": "List labels.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/labels",
+      "mcp_tool": "label_list",
+      "cli_path": [
+        "label",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "initiative.create",
+      "summary": "Create a cross-project initiative with a ranking weight.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/initiatives",
+      "mcp_tool": "initiative_create",
+      "cli_path": [
+        "initiative",
+        "create"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "initiative.list",
+      "summary": "List initiatives.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/initiatives",
+      "mcp_tool": "initiative_list",
+      "cli_path": [
+        "initiative",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "initiative.update",
+      "summary": "Correct an initiative's title, body or weight, or close or reopen it.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/initiatives/update",
+      "mcp_tool": "initiative_update",
+      "cli_path": [
+        "initiative",
+        "update"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "initiative.publish",
+      "summary": "Create or adopt one forge tracking issue per linked repo the initiative spans, each carrying a managed checkbox task list of its member work items. Additive and forward-only; a closed initiative proposes closing its tracking issues, never writes it.",
+      "scope": "writeback",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/initiatives/publish",
+      "mcp_tool": "initiative_publish",
+      "cli_path": [
+        "initiative",
+        "publish"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "actor.create",
+      "summary": "Register a human or agent so work can be assigned to it.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/actors",
+      "mcp_tool": "actor_create",
+      "cli_path": [
+        "actor",
+        "create"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "actor.list",
+      "summary": "List actors.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/actors",
+      "mcp_tool": "actor_list",
+      "cli_path": [
+        "actor",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "workflow.list",
+      "summary": "The state machine each work-item kind is governed by.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/workflows",
+      "mcp_tool": "workflow_list",
+      "cli_path": [
+        "workflow",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "sweep",
+      "summary": "Run collectors over the registered projects.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sweep",
+      "mcp_tool": "sweep",
+      "cli_path": [
+        "sweep"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "coverage",
+      "summary": "What has looked at what, and how long ago.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/coverage",
+      "mcp_tool": "coverage",
+      "cli_path": [
+        "coverage"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "observations.list",
+      "summary": "Raw evidence, including subjects ranked views filter out.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/observations",
+      "mcp_tool": "observations_list",
+      "cli_path": [
+        "observations",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "deps",
+      "summary": "Dependency references out of a project, and into it.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/deps",
+      "mcp_tool": "deps",
+      "cli_path": [
+        "deps"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "observations.prune",
+      "summary": "Apply the retention policy to observation history.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/observations/prune",
+      "mcp_tool": "observations_prune",
+      "cli_path": [
+        "observations",
+        "prune"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "suppress",
+      "summary": "Exclude an observed subject from ranked views.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/suppressions",
+      "mcp_tool": "suppress",
+      "cli_path": [
+        "suppress"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "suppression.list",
+      "summary": "List suppressions.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/suppressions",
+      "mcp_tool": "suppression_list",
+      "cli_path": [
+        "suppression",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "suppression.revoke",
+      "summary": "Revoke a suppression, returning the subject to ranked views.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/suppressions/revoke",
+      "mcp_tool": "suppression_revoke",
+      "cli_path": [
+        "suppression",
+        "revoke"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "work.adopt",
+      "summary": "Promote an observed subject into a declared work item.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/work/adopt",
+      "mcp_tool": "work_adopt",
+      "cli_path": [
+        "work",
+        "adopt"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "contract.evaluate",
+      "summary": "Evaluate the contract against any path; stores nothing.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "POST",
+      "http_path": "/contract/evaluate",
+      "mcp_tool": "contract_evaluate",
+      "cli_path": [
+        "contract",
+        "evaluate"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "contract.check",
+      "summary": "Evaluate the project contract; returns every failing rule.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/contract/check",
+      "mcp_tool": "contract_check",
+      "cli_path": [
+        "contract",
+        "check"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "contract.adopt",
+      "summary": "Opt a project into the contract; it is not applied by default.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/contract/adopt",
+      "mcp_tool": "contract_adopt",
+      "cli_path": [
+        "contract",
+        "adopt"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "contract.decline",
+      "summary": "Opt a project back out of the contract.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/contract/decline",
+      "mcp_tool": "contract_decline",
+      "cli_path": [
+        "contract",
+        "decline"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "contract.inapplicable",
+      "summary": "Declare that a criterion cannot apply to a project, and why.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/contract/inapplicable",
+      "mcp_tool": "contract_inapplicable",
+      "cli_path": [
+        "contract",
+        "inapplicable"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "contract.applicable",
+      "summary": "Withdraw an inapplicability declaration.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/contract/applicable",
+      "mcp_tool": "contract_applicable",
+      "cli_path": [
+        "contract",
+        "applicable"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "project.scaffold",
+      "summary": "Write the contract's skeleton into a registered project, never overwriting.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/projects/scaffold",
+      "mcp_tool": "project_scaffold",
+      "cli_path": [
+        "project",
+        "scaffold"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "compliance",
+      "summary": "A project's last recorded contract result, with its age.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/compliance",
+      "mcp_tool": "compliance",
+      "cli_path": [
+        "compliance"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "drift.detect",
+      "summary": "Compare declared state against observation; raise proposals.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/drift/detect",
+      "mcp_tool": "drift_detect",
+      "cli_path": [
+        "drift",
+        "detect"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "drift.list",
+      "summary": "Open drift proposals and their evidence.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/drift",
+      "mcp_tool": "drift_list",
+      "cli_path": [
+        "drift",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "drift.resolve",
+      "summary": "Accept, reject, or contest a drift proposal.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/drift/resolve",
+      "mcp_tool": "drift_resolve",
+      "cli_path": [
+        "drift",
+        "resolve"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "serve",
+      "summary": "Serve the API, MCP and health endpoints on one port.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "POST",
+      "http_path": "/instance/serve",
+      "mcp_tool": "serve",
+      "cli_path": [
+        "serve"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli"
+      ],
+      "exclusion": "local_only",
+      "exclusion_reason": "Takes over this process to listen on a port. A running server being asked over its own API to start another one is not a meaningful request; restarting a service is the supervisor's job."
+    },
+    {
+      "name": "session.start",
+      "summary": "Open a coding session (a terminal) for a work item or a project. With `template` (e.g. claude) it runs that agent, and a `task` is delivered as the agent's first prompt, so it starts working instead of opening idle. Returns both ids (ses_… and engine_session_id); then poll session_screen until `ready`.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions",
+      "mcp_tool": "session_start",
+      "cli_path": [
+        "session",
+        "start"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.list",
+      "summary": "List coding sessions with their live activity state (running / idle / waiting-for-input / exited / errored) and `alive`, including sessions opened from the GUI (unlinked, engine UUID only). Each row has both ids: `id` (ses_…) and `engine_session_id`.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions",
+      "mcp_tool": "session_list",
+      "cli_path": [
+        "session",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.stop",
+      "summary": "Stop a coding session and revoke the token it ran with. Takes either id: Vogt's ses_… id or the engine's session UUID (an unlinked GUI session is killed, with no token to revoke). The process is killed; its screen and log stay readable.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/stop",
+      "mcp_tool": "session_stop",
+      "cli_path": [
+        "session",
+        "stop"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.input",
+      "summary": "Type into a session: text, then named keys (enter, esc, tab, arrows, ctrl-c, ctrl-d, backspace), then Enter if submit. Takes either id: ses_… or the engine UUID. Read session_screen first and never send a blind Enter: at a menu it accepts whatever is highlighted (dismiss with esc). While a permission prompt shows, only a person's input is typed: an agent's is refused (403 person_required). Audited (byte count and keys, never the text).",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/input",
+      "mcp_tool": "session_input",
+      "cli_path": [
+        "session",
+        "input"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.sweep",
+      "summary": "Oversee every session at once: one row per live or hibernated session with its activity, turn timing, last reply excerpt, blocked report, permission dialog and the last lines of its screen, ordered by who needs attention (approval, blocked, waiting, stalled, running, idle, hibernated) with the reason. Use this instead of session_screen per session.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/sweep",
+      "mcp_tool": "session_sweep",
+      "cli_path": [
+        "session",
+        "sweep"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.hibernate",
+      "summary": "Hibernate a session: stop its processes to free their memory, keep it listed (activity `hibernated`, with its last screen), and revoke its token. session_wake (or session_input, which wakes it) resumes the same agent conversation under the same id. Only for a session whose conversation id the engine knows (Claude Code started by Vogt, or any resume); a shell needs allow_shell and wakes fresh. Takes either id.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/hibernate",
+      "mcp_tool": "session_hibernate",
+      "cli_path": [
+        "session",
+        "hibernate"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.wake",
+      "summary": "Wake a hibernated session: start it again under the same id, resuming its agent conversation in the directory it ran in, with a new token for the same actor. A live session is returned as it is. session_input wakes one by itself; wait for ready (session_wait) before typing after this. Takes either id.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/wake",
+      "mcp_tool": "session_wake",
+      "cli_path": [
+        "session",
+        "wake"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.keep_awake",
+      "summary": "Pin a session awake so the engine's idle policy never hibernates it (keep_awake=true), or unpin it. Takes either id.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/keep-awake",
+      "mcp_tool": "session_keep_awake",
+      "cli_path": [
+        "session",
+        "keep-awake"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.rename",
+      "summary": "Rename a session, live or hibernated: the display name the GUI shows and session_list returns as `name`. Takes either id.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/rename",
+      "mcp_tool": "session_rename",
+      "cli_path": [
+        "session",
+        "rename"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.remove",
+      "summary": "Remove a session: kill it if it still runs and have the engine forget it — its record, kept screen and brief — as the GUI's Remove does. session_stop keeps it listed with its output readable; this drops it. A linked session's record is closed and its token revoked as a stop would. Takes either id.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/remove",
+      "mcp_tool": "session_remove",
+      "cli_path": [
+        "session",
+        "remove"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.set_role",
+      "summary": "Nominate a session as oversight (role=oversight): one that supervises other sessions. It is pinned awake, so it comes back by itself after a redeploy, and the GUI lists it first. role=worker makes it an ordinary session again and lifts the pin oversight set. Person-only. Takes either id.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/role",
+      "mcp_tool": "session_set_role",
+      "cli_path": [
+        "session",
+        "set-role"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.bind_work",
+      "summary": "Declare which work item a session serves (work_item=WI-n), or that it serves none (work_item=null) — one current item per session, re-declarable, audited. Any principal with work.write may bind: a person, the session itself (omit id inside a session Vogt started), or its overseer. Never moves the terminal or the item's state; the item then shows the session as being worked by it. Takes either id.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/work-item",
+      "mcp_tool": "session_bind_work",
+      "cli_path": [
+        "session",
+        "bind"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.grant_request",
+      "summary": "Ask a person to approve one scoped item for one live session (WI-973): a named credential (secret_name + project_id) the target then fetches with `vogt-agent-auth fetch VAR`. It appears in the Inbox; nothing is granted until a person approves. Ask for your own session, or — as an oversight session — for a session you drive. uses=once (default) or ttl; ttl_seconds 60..86400.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/grants",
+      "mcp_tool": "session_grant_request",
+      "cli_path": [
+        "session",
+        "grant-request"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.grant_decide",
+      "summary": "Approve or deny a pending grant. A person's decision only: every agent is refused. Approval is applied to the live session by the engine before it is recorded.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/grants/decide",
+      "mcp_tool": "session_grant_decide",
+      "cli_path": [
+        "session",
+        "grant-decide"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.grant_revoke",
+      "summary": "Withdraw a pending grant or revoke an approved one at once. A person, or the session that asked, may.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/grants/revoke",
+      "mcp_tool": "session_grant_revoke",
+      "cli_path": [
+        "session",
+        "grant-revoke"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.grant_list",
+      "summary": "Grants to sessions, newest first, by state (pending, approved, denied, revoked, expired) or target. Names only, never a value.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/grants",
+      "mcp_tool": "session_grant_list",
+      "cli_path": [
+        "session",
+        "grants"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.answer",
+      "summary": "Answer the dialog a session shows (activity awaiting-approval) by choice: `option` (its number) or `label` (unique text of it); the engine moves the highlight itself. Startup gates (folder trust, external CLAUDE.md imports) take anyone's answer; a permission prompt (approval.kind permission or read-outside-cwd) only a person's — an agent is refused (403 person_required) and should leave it for the Inbox. Pass expect_question = approval.question so a stale answer is refused. Audited. Takes either id.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/answer",
+      "mcp_tool": "session_answer",
+      "cli_path": [
+        "session",
+        "answer"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.token",
+      "summary": "The session engine's call: mint the agent credential of a session it started itself (GUI, protected template), bound to agent:engine:<uuid>, or revoke it (`revoke`). Refused to every other caller (403 engine_only). Gives such sessions an agent identity, so the core tells their agents from people. Audited.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/token",
+      "mcp_tool": "session_token",
+      "cli_path": [
+        "engine-session-token"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "http"
+      ],
+      "exclusion": "http_only",
+      "exclusion_reason": "The session engine's own call, made over HTTP with its credential, to mint or revoke the agent credential of a session it started (WI-926). No person or agent has a reason to call it, and an MCP tool or CLI command for it would only put a refusal on every agent's tool list."
+    },
+    {
+      "name": "session.screen",
+      "summary": "Read what a session's terminal shows right now: visible lines, cursor, title, activity and readiness. `ready` true means the program is waiting for input — wait for it before typing. Takes either id: ses_… or the engine UUID. Needs an engine with the screen route.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/screen",
+      "mcp_tool": "session_screen",
+      "cli_path": [
+        "session",
+        "screen"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.last_reply",
+      "summary": "Read the last N replies of a session's agent (Claude Code or Codex) from its own transcript — whole, current and redacted, unlike the screen. Says how the conversation was found (`basis`). Takes either id.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/last-reply",
+      "mcp_tool": "session_last_reply",
+      "cli_path": [
+        "session",
+        "last-reply"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.wait",
+      "summary": "Wait for a session instead of polling it: blocks (up to timeout_s, max 600) until it is ready for input — or needs a person (awaiting-approval, blocked) or exits — or, with until=exited / any_change, until it exits or changes at all. Returns why (`outcome`, `matched`) and the screen then. Takes either id.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/wait",
+      "mcp_tool": "session_wait",
+      "cli_path": [
+        "session",
+        "wait"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.report_blocked",
+      "summary": "Report that this session's agent is blocked on a person: what it needs (`blocker`) and the concrete `items` to do. Shown on session_list/session_screen, raised in the Inbox and pushed; drivers stop re-prompting. Omit `id` from inside a session Vogt started. Clear with session_report_unblocked.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/blocked",
+      "mcp_tool": "session_report_blocked",
+      "cli_path": [
+        "session",
+        "blocked"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.report_unblocked",
+      "summary": "Clear a session's blocked report once the person has acted (or the agent found a way on). Omit `id` from inside a session Vogt started.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/sessions/unblocked",
+      "mcp_tool": "session_report_unblocked",
+      "cli_path": [
+        "session",
+        "unblocked"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "agent_cli.list",
+      "summary": "Report the pod's agent CLIs: active, baked and upstream versions.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/agent-clis",
+      "mcp_tool": "agent_cli_list",
+      "cli_path": [
+        "agent-cli",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "agent_cli.update",
+      "summary": "Make a version of an agent CLI the one new sessions run.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/agent-clis/update",
+      "mcp_tool": "agent_cli_update",
+      "cli_path": [
+        "agent-cli",
+        "update"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "agent_activity.search",
+      "summary": "Search the tool calls agents made (from their transcripts, redacted): by text, service, tool, errors, time, project or session.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/agent-activity",
+      "mcp_tool": "agent_activity_search",
+      "cli_path": [
+        "agent-activity",
+        "search"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "agent_activity.summary",
+      "summary": "Per agent conversation: tool counts, error rate and time spent waiting on tools, for a session or a project.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/agent-activity/summary",
+      "mcp_tool": "agent_activity_summary",
+      "cli_path": [
+        "agent-activity",
+        "summary"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.history_list",
+      "summary": "List archived sessions (history), newest first.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/history",
+      "mcp_tool": "session_history_list",
+      "cli_path": [
+        "session",
+        "history"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.search_output",
+      "summary": "Search session output (live sessions included).",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/history/search",
+      "mcp_tool": "session_search_output",
+      "cli_path": [
+        "session",
+        "search"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "session.log_tail",
+      "summary": "Read the tail of a session's output log, readable — the history of what it printed, not its current screen (use session_screen for that). Takes either id: Vogt's ses_… id or the engine's session UUID.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/sessions/log",
+      "mcp_tool": "session_log_tail",
+      "cli_path": [
+        "session",
+        "log"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "token.issue",
+      "summary": "Issue a scoped token bound to an actor. Shown once.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/tokens",
+      "mcp_tool": "token_issue",
+      "cli_path": [
+        "token",
+        "issue"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "token.list",
+      "summary": "List tokens. Never returns a secret.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/tokens",
+      "mcp_tool": "token_list",
+      "cli_path": [
+        "token",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "token.revoke",
+      "summary": "Revoke a token.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/tokens/revoke",
+      "mcp_tool": "token_revoke",
+      "cli_path": [
+        "token",
+        "revoke"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "auth.decisions",
+      "summary": "The allow and deny log. The denials are the interesting half.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/auth/decisions",
+      "mcp_tool": "auth_decisions",
+      "cli_path": [
+        "auth",
+        "decisions"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "auth.whoami",
+      "summary": "Who the caller is, as authentication decided, and their scopes.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/auth/whoami",
+      "mcp_tool": "auth_whoami",
+      "cli_path": [
+        "auth",
+        "whoami"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "auth.logout",
+      "summary": "Revoke the session or token this call arrived with.",
+      "scope": "read",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/auth/logout",
+      "mcp_tool": "auth_logout",
+      "cli_path": [
+        "auth",
+        "logout"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "user.create",
+      "summary": "Give a human a username and password to sign in with.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/users",
+      "mcp_tool": "user_create",
+      "cli_path": [
+        "user",
+        "create"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "user.list",
+      "summary": "List logins. Never returns a hash.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/users",
+      "mcp_tool": "user_list",
+      "cli_path": [
+        "user",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "user.set_password",
+      "summary": "Replace a user's password, ending their sessions.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/users/password",
+      "mcp_tool": "user_set_password",
+      "cli_path": [
+        "user",
+        "passwd"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "user.remove",
+      "summary": "Take a login away. The actor and its history stay.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/users/remove",
+      "mcp_tool": "user_remove",
+      "cli_path": [
+        "user",
+        "remove"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "backup",
+      "summary": "Snapshot both stores with a schema-version manifest.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/instance/backup",
+      "mcp_tool": "backup",
+      "cli_path": [
+        "backup"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli"
+      ],
+      "exclusion": "local_only",
+      "exclusion_reason": "Writes to a path on the machine holding the data directory. Over HTTP the path would name a filesystem the caller cannot see."
+    },
+    {
+      "name": "restore",
+      "summary": "Verify a backup's manifest, then replace the live stores.",
+      "scope": "admin",
+      "mutating": false,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/instance/restore",
+      "mcp_tool": "restore",
+      "cli_path": [
+        "restore"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli"
+      ],
+      "exclusion": "local_only",
+      "exclusion_reason": "Replaces the live stores from a path on the server's filesystem, and every client's view of the instance changes underneath them. That is an operator action taken at the machine, not a request."
+    },
+    {
+      "name": "clone",
+      "summary": "Restore another instance's backup here as a copy: keep this instance's id and credentials, revoke the source's tokens, disarm forge write-back, never copy push subscriptions.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/instance/clone",
+      "mcp_tool": "clone",
+      "cli_path": [
+        "clone"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli"
+      ],
+      "exclusion": "local_only",
+      "exclusion_reason": "Replaces the live stores from a path on the server's filesystem, exactly as restore does, so it is an operator action at the machine for the same reason."
+    },
+    {
+      "name": "export",
+      "summary": "Write the declared entities as JSON (format 2: with comments, relations and the clone stamp; --project for one).",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/instance/export",
+      "mcp_tool": "export",
+      "cli_path": [
+        "export"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "import",
+      "summary": "Merge an export into this instance under the documented conflict policy. A dry-run diff unless --apply --confirm; --strict refuses any both-sides change.",
+      "scope": "admin",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/instance/import",
+      "mcp_tool": "import",
+      "cli_path": [
+        "import"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli"
+      ],
+      "exclusion": "local_only",
+      "exclusion_reason": "Reads a file from the machine holding the data directory, for the same reason as backup."
+    },
+    {
+      "name": "forge.onboard",
+      "summary": "Read a repository's existing issues, PRs, labels and releases into observations. Changes nothing upstream.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/forge/onboard",
+      "mcp_tool": "forge_onboard",
+      "cli_path": [
+        "forge",
+        "onboard"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.writeback",
+      "summary": "Set a project's write-back policy: none, comment_only, full.",
+      "scope": "writeback",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/forge/writeback",
+      "mcp_tool": "forge_writeback",
+      "cli_path": [
+        "forge",
+        "writeback"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.link",
+      "summary": "Make a registered project upstream-truth: its work items become its forge issues, work writes go through, and any open native items migrate upstream.",
+      "scope": "writeback",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/forge/link",
+      "mcp_tool": "forge_link",
+      "cli_path": [
+        "forge",
+        "link"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.publish",
+      "summary": "Create a repository under your forge credential, push the local default branch, and make the project upstream-truth. Refuses existing remotes; never force-pushes.",
+      "scope": "writeback",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/forge/publish",
+      "mcp_tool": "forge_publish",
+      "cli_path": [
+        "forge",
+        "publish"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.account_link",
+      "summary": "Link your own forge account by pasting a PAT, stored encrypted; upstream writes are then attributed to you.",
+      "scope": "writeback",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/forge/accounts",
+      "mcp_tool": "forge_account_link",
+      "cli_path": [
+        "forge",
+        "account",
+        "link"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.account_status",
+      "summary": "Whether you have linked a forge account, and as whom. Never returns the token.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/forge/accounts",
+      "mcp_tool": "forge_account_status",
+      "cli_path": [
+        "forge",
+        "account",
+        "status"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.account_unlink",
+      "summary": "Remove your linked forge account; writes fall back to the instance file token.",
+      "scope": "writeback",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/forge/accounts/unlink",
+      "mcp_tool": "forge_account_unlink",
+      "cli_path": [
+        "forge",
+        "account",
+        "unlink"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.repos",
+      "summary": "List the repositories your linked credential can see, so you can pick which to import (clone + full sync).",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/forge/repos",
+      "mcp_tool": "forge_repos",
+      "cli_path": [
+        "forge",
+        "repos"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.import",
+      "summary": "Import a repository the picker listed as a project: clone it under your forge credential, register it, and consolidate its forge state so it comes back linked and ready for write-back.",
+      "scope": "project.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/forge/import",
+      "mcp_tool": "forge_import",
+      "cli_path": [
+        "forge",
+        "import"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "forge.actions",
+      "summary": "The ledger of what Vogt has said upstream, and what landed.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/forge/actions",
+      "mcp_tool": "forge_actions",
+      "cli_path": [
+        "forge",
+        "actions"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "events.list",
+      "summary": "Read the cursor-based event feed.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/events",
+      "mcp_tool": "events_list",
+      "cli_path": [
+        "events",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "notifications",
+      "summary": "What GitHub is trying to say about the registered projects. Separate from the events feed, which is this instance's own history.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/notifications",
+      "mcp_tool": "notifications",
+      "cli_path": [
+        "notifications"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "deployed.versions",
+      "summary": "What each configured deployment lane runs (deployed SHA/version) against its branch head, with the commits and work items merged but not yet deployed. Read from the deploy-lanes collector's last sweep.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/deployed-versions",
+      "mcp_tool": "deployed_versions",
+      "cli_path": [
+        "deployed-versions"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "inbox.list",
+      "summary": "List the normalized attention Inbox with coverage.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/inbox",
+      "mcp_tool": "inbox_list",
+      "cli_path": [
+        "inbox",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "inbox.archive",
+      "summary": "Archive one normalized Inbox occurrence.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/inbox/archive",
+      "mcp_tool": "inbox_archive",
+      "cli_path": [
+        "inbox",
+        "archive"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "inbox.snooze",
+      "summary": "Snooze one normalized Inbox occurrence until a deadline.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/inbox/snooze",
+      "mcp_tool": "inbox_snooze",
+      "cli_path": [
+        "inbox",
+        "snooze"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "inbox.restore",
+      "summary": "Restore one archived or snoozed Inbox occurrence.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/inbox/restore",
+      "mcp_tool": "inbox_restore",
+      "cli_path": [
+        "inbox",
+        "restore"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "preference.get",
+      "summary": "Read your own saved settings (e.g. inbox.filter), each with its version.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/preferences",
+      "mcp_tool": "preference_get",
+      "cli_path": [
+        "preference",
+        "get"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "preference.set",
+      "summary": "Save one of your own settings as a JSON object; {} clears it. Optionally only if it is still at expected_version.",
+      "scope": "read",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/preferences",
+      "mcp_tool": "preference_set",
+      "cli_path": [
+        "preference",
+        "set"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.list",
+      "summary": "List quick chats (persistent text chats with an agent, kept forever), newest first; `q` searches titles and everything said. `available` false means the engine has chats off.",
+      "scope": "work.write",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/chats",
+      "mcp_tool": "chat_list",
+      "cli_path": [
+        "chat",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.get",
+      "summary": "Read a chat: its newest entries (agent text and tool results are untrusted data) and any approvals waiting for a person.",
+      "scope": "work.write",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/chats/get",
+      "mcp_tool": "chat_get",
+      "cli_path": [
+        "chat",
+        "get"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.create",
+      "summary": "Start a quick chat with the engine's chat agent (Klaudia), optionally with its first message and a model the engine offers. Reads run at once; writes, commands and edits wait for a person's approval. Audited.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/chats",
+      "mcp_tool": "chat_create",
+      "cli_path": [
+        "chat",
+        "create"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.send",
+      "summary": "Send a chat a message and wait (wait_s) for the reply. A chat whose agent stopped for being idle resumes the same conversation. Audited (byte count, never the text).",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/chats/send",
+      "mcp_tool": "chat_send",
+      "cli_path": [
+        "chat",
+        "send"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.decide",
+      "summary": "Allow or deny a chat's pending approval. Only a person may: an agent is refused (403 person_required) and should leave it for the person. Audited.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/chats/decide",
+      "mcp_tool": "chat_decide",
+      "cli_path": [
+        "chat",
+        "decide"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.set_model",
+      "summary": "Switch the model a chat's next turn runs on (one the engine offers, or `default`). Audited.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/chats/model",
+      "mcp_tool": "chat_set_model",
+      "cli_path": [
+        "chat",
+        "set-model"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.interrupt",
+      "summary": "Stop the turn a chat is running. Audited.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/chats/interrupt",
+      "mcp_tool": "chat_interrupt",
+      "cli_path": [
+        "chat",
+        "interrupt"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.archive",
+      "summary": "Archive a chat (hide it from the default list) or unarchive it. Nothing is deleted. Audited.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/chats/archive",
+      "mcp_tool": "chat_archive",
+      "cli_path": [
+        "chat",
+        "archive"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "chat.promote",
+      "summary": "Continue a chat's conversation in a terminal session (the agent resumes it there); the chat then takes no more messages. Audited.",
+      "scope": "work.write",
+      "mutating": true,
+      "reason_required": true,
+      "http_method": "POST",
+      "http_path": "/chats/promote",
+      "mcp_tool": "chat_promote",
+      "cli_path": [
+        "chat",
+        "promote"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    },
+    {
+      "name": "audit.list",
+      "summary": "Query the audit log.",
+      "scope": "read",
+      "mutating": false,
+      "reason_required": false,
+      "http_method": "GET",
+      "http_path": "/audit",
+      "mcp_tool": "audit_list",
+      "cli_path": [
+        "audit",
+        "list"
+      ],
+      "params_schema": {
+        "not_ported": true
+      },
+      "result_schema": {
+        "not_ported": true
+      },
+      "transports": [
+        "cli",
+        "http",
+        "mcp"
+      ],
+      "exclusion": null,
+      "exclusion_reason": null
+    }
+  ]
+}
