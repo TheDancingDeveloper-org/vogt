@@ -28,8 +28,15 @@ const TOKEN_FILE_ENV: &str = "VOGT_TOKEN_FILE";
 /// auth broker for everything else. See [`resolve_token`] for which wins.
 const HTTP_TOKEN_ENV: &str = "VOGT_HTTP_TOKEN";
 
-/// One HTTP exchange. Injected in tests; the live transport is not this layer's
-/// to own, because the HTTP client is WI-1064's.
+/// The budget for the optional banner read. Discovery is a courtesy, and a
+/// client gives the whole handshake about 30 s, so a pre-flight that may take
+/// 30 s of it turns a slow core into "server failed to connect".
+pub const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Everything else. A call that has not answered in 30 s is not going to.
+pub const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// One HTTP exchange. Injected in tests; [`UreqTransport`] is the live one.
 pub trait BridgeTransport {
     fn exchange(
         &self,
@@ -316,6 +323,59 @@ pub fn resolve_token(env: &HashMap<String, String>) -> Option<String> {
 /// What `main` needs and cannot have: the URL. `None` is the exit-2 case.
 pub fn configured_url(env: &HashMap<String, String>) -> Option<String> {
     env.get(URL_ENV).filter(|url| !url.is_empty()).cloned()
+}
+
+/// The live transport. An empty body is a GET, because discovery sends one and
+/// a call never does; everything else is a POST. Discovery gets the short
+/// budget, a call the long one.
+pub struct UreqTransport;
+
+impl BridgeTransport for UreqTransport {
+    fn exchange(
+        &self,
+        url: &str,
+        headers: &[(&str, String)],
+        body: &[u8],
+    ) -> Result<(u16, Vec<u8>), String> {
+        let timeout = if body.is_empty() {
+            DISCOVERY_TIMEOUT
+        } else {
+            DEFAULT_TIMEOUT
+        };
+        let agent = ureq::AgentBuilder::new().timeout(timeout).build();
+        let mut request = if body.is_empty() {
+            agent.get(url)
+        } else {
+            agent.post(url)
+        };
+        for (name, value) in headers {
+            request = request.set(name, value);
+        }
+        let response = if body.is_empty() {
+            request.call()
+        } else {
+            request.send_bytes(body)
+        };
+        match response {
+            Ok(response) => read_response(response),
+            Err(ureq::Error::Status(status, response)) => {
+                read_response(response).map(|(_, bytes)| (status, bytes))
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    }
+}
+
+fn read_response(response: ureq::Response) -> Result<(u16, Vec<u8>), String> {
+    let status = response.status();
+    let mut bytes = Vec::new();
+    use std::io::Read;
+    response
+        .into_reader()
+        .take(8 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    Ok((status, bytes))
 }
 
 #[cfg(test)]

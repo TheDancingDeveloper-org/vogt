@@ -87,13 +87,41 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // `vogt-mcp-remote`: stdio in, streamable HTTP out. A missing URL is exit 2,
+    // because an agent that spawns the bridge with nothing configured should
+    // see a setup error rather than a hang.
+    if std::env::args()
+        .next()
+        .is_some_and(|arg| arg.ends_with("vogt-mcp-remote"))
+    {
+        let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        let Some(url) = adapters::mcp::bridge::configured_url(&env) else {
+            eprintln!("vogt-mcp-remote: set VOGT_URL to the remote Vogt");
+            return ExitCode::from(2);
+        };
+        let token = adapters::mcp::bridge::resolve_token(&env);
+        let transport = adapters::mcp::bridge::UreqTransport;
+        let mut bridge = adapters::mcp::bridge::Bridge::new(&url, token, &transport, VERSION);
+        let mut input = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+        let mut output = String::new();
+        bridge.serve(&input, &mut output);
+        print!("{output}");
+        for warning in &bridge.report.warned {
+            eprintln!("{warning}");
+        }
+        return ExitCode::SUCCESS;
+    }
     let argv: Vec<String> = std::env::args().skip(1).collect();
     // The generated CLI (P2.4) owns every registry command. `serve` and `init`
     // stay here because they take over the process or create the data
     // directory; the registry still lists them, and the CLI answers their
     // `--help`, but running them goes through this binary's own path so the
     // listener and the first-run store are the ones already tested.
-    if !matches!(argv.first().map(String::as_str), Some("serve" | "init") | None) {
+    if !matches!(
+        argv.first().map(String::as_str),
+        Some("serve" | "init") | None
+    ) {
         let code = adapters::cli::main_cli(
             &argv,
             &registry::default_registry(),

@@ -180,7 +180,9 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
         CommandMatch::Group { path } => {
             // `--help` on a group, or a bare group name, prints the group.
             let show = positional.len() == path.len()
-                || flags.first().is_some_and(|token| token == "--help" || token == "-h");
+                || flags
+                    .first()
+                    .is_some_and(|token| token == "--help" || token == "-h");
             if show {
                 return ParseOutcome::Result(ok_out(format_group(registry, &path)));
             }
@@ -238,7 +240,12 @@ fn cli_operations(registry: &OperationRegistry) -> Vec<CliOp> {
         .for_transport(registry::Transport::Cli)
         .into_iter()
         .map(|operation| CliOp {
-            path: operation.cli.path.iter().map(|part| (*part).to_string()).collect(),
+            path: operation
+                .cli
+                .path
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect(),
             name: operation.name,
             summary: operation.summary,
         })
@@ -262,13 +269,20 @@ fn resolve_command(argv: &[String], operations: &[CliOp]) -> CommandMatch {
     let mut group: Option<Vec<String>> = None;
     for op in operations {
         if argv.len() < op.path.len() {
-            if argv.iter().zip(op.path.iter()).all(|(got, want)| got == want) && group.is_none()
+            if argv
+                .iter()
+                .zip(op.path.iter())
+                .all(|(got, want)| got == want)
+                && group.is_none()
             {
                 group = Some(argv.to_vec());
             }
             continue;
         }
-        if argv.iter().zip(op.path.iter()).all(|(got, want)| got == want)
+        if argv
+            .iter()
+            .zip(op.path.iter())
+            .all(|(got, want)| got == want)
             && op.path.len() > best_depth
         {
             best = Some(op);
@@ -288,7 +302,10 @@ fn resolve_command(argv: &[String], operations: &[CliOp]) -> CommandMatch {
     }
     // The first token matches no command at all.
     let head = &argv[0];
-    if operations.iter().any(|op| op.path.first().is_some_and(|part| part == head)) {
+    if operations
+        .iter()
+        .any(|op| op.path.first().is_some_and(|part| part == head))
+    {
         return CommandMatch::Group {
             path: vec![head.clone()],
         };
@@ -364,7 +381,9 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         // `--no-<flag>` is the off switch for a boolean that is not already
         // phrased as a negative, matching argparse's BooleanOptionalAction.
         let (property_name, forced_bool) = if let Some(base) = field.strip_prefix("no_") {
-            if !properties.contains_key(&field) && properties.contains_key(base) && is_bool(&properties[base])
+            if !properties.contains_key(&field)
+                && properties.contains_key(base)
+                && is_bool(&properties[base])
             {
                 (base.to_string(), Some(false))
             } else {
@@ -392,7 +411,9 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         let raw = take_value(argv, &mut index, inline)?;
         let parsed = coerce(&raw, property)?;
         if is_list(property) {
-            let entry = values.entry(field).or_insert_with(|| Value::Array(Vec::new()));
+            let entry = values
+                .entry(field)
+                .or_insert_with(|| Value::Array(Vec::new()));
             entry.as_array_mut().expect("list value").push(parsed);
         } else {
             values.insert(field, parsed);
@@ -417,13 +438,20 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
     Ok(Value::Object(values))
 }
 
-fn take_value(argv: &[String], index: &mut usize, inline: Option<String>) -> Result<String, String> {
+fn take_value(
+    argv: &[String],
+    index: &mut usize,
+    inline: Option<String>,
+) -> Result<String, String> {
     if let Some(value) = inline {
         *index += 1;
         return Ok(value);
     }
     let next = argv.get(*index + 1).ok_or_else(|| {
-        format!("--{} requires a value", argv[*index].trim_start_matches("--"))
+        format!(
+            "--{} requires a value",
+            argv[*index].trim_start_matches("--")
+        )
     })?;
     if next.starts_with('-') && next != "-" {
         return Err(format!(
@@ -451,8 +479,8 @@ fn is_secret(name: &str) -> bool {
 }
 
 fn read_secret_file(path: &str) -> Result<String, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|_| format!("cannot read secret file {path}"))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|_| format!("cannot read secret file {path}"))?;
     Ok(text.trim_end_matches(['\r', '\n']).to_string())
 }
 
@@ -731,7 +759,11 @@ pub fn data_dir_of(invocation_argv: &[String]) -> Option<String> {
             continue;
         }
         if flag.starts_with('-') {
-            rest = if value.starts_with('-') { &rest[1..] } else { tail };
+            rest = if value.starts_with('-') {
+                &rest[1..]
+            } else {
+                tail
+            };
             continue;
         }
         break;
@@ -818,7 +850,15 @@ mod tests {
             Ok(serde_json::json!({"ok": true}))
         };
         let result = run(
-            &argv(&["--json", "work", "get", "--ref", "WI-7", "--comment-limit", "3"]),
+            &argv(&[
+                "--json",
+                "work",
+                "get",
+                "--ref",
+                "WI-7",
+                "--comment-limit",
+                "3",
+            ]),
             &registry,
             "test",
             &mut dispatch,
@@ -841,7 +881,11 @@ mod tests {
             &mut no_dispatch,
         );
         assert_eq!(result.exit_code, EXIT_ERROR);
-        assert!(result.stderr.contains("invalid_request"), "{}", result.stderr);
+        assert!(
+            result.stderr.contains("invalid_request"),
+            "{}",
+            result.stderr
+        );
         assert!(result.stderr.contains("not been ported"));
     }
 
@@ -938,14 +982,7 @@ mod tests {
         let registry = default_registry();
         let result = run(
             &argv(&[
-                "work",
-                "create",
-                "--kind",
-                "nope",
-                "--title",
-                "x",
-                "--reason",
-                "because",
+                "work", "create", "--kind", "nope", "--title", "x", "--reason", "because",
             ]),
             &registry,
             "test",
