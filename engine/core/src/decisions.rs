@@ -2326,3 +2326,494 @@ mod runtime_tests {
         assert_eq!(asked.effort, None);
     }
 }
+
+// What an agent did, reduced to something safe to keep. Ports
+// `core/agent_activity.py`. Redaction runs before anything is kept, raw output
+// is never stored, and the service tags and error flag are heuristics that say
+// so. The patterns and their order are the Python's, because a difference is a
+// credential kept or a useful row destroyed.
+
+use std::sync::LazyLock;
+
+pub const SUMMARY_LIMIT: usize = 300;
+pub const EXCERPT_HEAD: usize = 200;
+pub const EXCERPT_TAIL: usize = 200;
+pub const SCAN_WINDOW: usize = 8_192;
+pub const REDACTED: &str = "[REDACTED]";
+pub const WITHHELD: &str = "[withheld: configuration or environment output]";
+
+static PEM_BLOCK: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    fancy_regex::Regex::new(r"(?s)-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|\z)")
+        .expect("pattern")
+});
+static JWT_SHAPE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
+        .expect("pattern")
+});
+static TOKEN_SHAPES: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(concat!(
+        r"(?:",
+        r"\bgh[pousr]_[A-Za-z0-9]{20,}",
+        r"|\bgithub_pat_[A-Za-z0-9_]{20,}",
+        r"|\bglpat-[A-Za-z0-9_-]{16,}",
+        r"|\bsk-[A-Za-z0-9_-]{16,}",
+        r"|\bxox[abposr]-[A-Za-z0-9-]{10,}",
+        r"|\b(?:AKIA|ASIA)[0-9A-Z]{16}\b",
+        r"|\bAIza[0-9A-Za-z_-]{30,}",
+        r"|\bya29\.[0-9A-Za-z_-]{20,}",
+        r"|\bnpm_[A-Za-z0-9]{30,}",
+        r"|\bhf_[A-Za-z0-9]{30,}",
+        r"|\bst\.[A-Za-z0-9-]{8,}\.[A-Fa-f0-9]{16,}\.[A-Fa-f0-9]{16,}",
+        r"|\b(?:pk|rk|sk)_(?:live|test)_[A-Za-z0-9]{16,}",
+        r"|\bAGE-SECRET-KEY-1[0-9A-Z]{20,}",
+        r")",
+    ))
+    .expect("pattern")
+});
+static AUTH_HEADER: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(
+        "(?i)\\b((?:authorization|x-api-key|api-key|x-auth-token|private-token)\\s*[:=]\\s*(?:bearer\\s+|basic\\s+|token\\s+)?)[^\\s\"',;]+",
+    )
+    .expect("pattern")
+});
+static BEARER_TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}").expect("pattern")
+});
+static URL_USERINFO: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(://)[^/\s:@]+:[^/\s@]+@").expect("pattern"));
+
+const SECRET_NAME: &str = concat!(
+    r"[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|passwd|pwd|api[_-]?key|apikey",
+    r"|private[_-]?key|access[_-]?key|client[_-]?secret|credential|auth[_-]?key",
+    r"|session[_-]?key|signing[_-]?key|webhook[_-]?url|dsn)[A-Za-z0-9_.-]*"
+);
+
+static JSON_PAIR: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(&format!(
+        r#"(?i)("{SECRET_NAME}"\s*:\s*)("(?:[^"\\\n]|\\.)*"|[^\s,}}\]]+)"#
+    ))
+    .expect("pattern")
+});
+static FLAG_VALUE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(&format!(
+        r#"(?i)(--?{SECRET_NAME}[ =])("[^"\n]*"|'[^'\n]*'|[^\s"']+)"#
+    ))
+    .expect("pattern")
+});
+static ASSIGNMENT: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(&format!(
+        r#"(?i)\b({SECRET_NAME})(\s*[=:]\s*)("[^"\n]*"|'[^'\n]*'|[^\s"',;\}}&]+)"#
+    ))
+    .expect("pattern")
+});
+static LONG_HEX: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"\b[A-Fa-f0-9]{48,}\b").expect("pattern"));
+static LONG_BLOB: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"[A-Za-z0-9+_=-]{32,}").expect("pattern"));
+
+/// Replace every credential-shaped substring. Whole blocks first, then named
+/// shapes, then pairs whose name marks the value, then the shape-only fallback.
+pub fn activity_redact(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    let mut out = PEM_BLOCK.replace_all(text, "[REDACTED:pem]").into_owned();
+    out = JWT_SHAPE.replace_all(&out, "[REDACTED:jwt]").into_owned();
+    out = TOKEN_SHAPES
+        .replace_all(&out, "[REDACTED:token]")
+        .into_owned();
+    out = AUTH_HEADER
+        .replace_all(&out, format!("$1{REDACTED}"))
+        .into_owned();
+    out = BEARER_TOKEN
+        .replace_all(&out, format!("$1{REDACTED}"))
+        .into_owned();
+    out = URL_USERINFO.replace_all(&out, "$1[REDACTED]@").into_owned();
+    out = JSON_PAIR
+        .replace_all(&out, format!("$1\"{REDACTED}\""))
+        .into_owned();
+    out = FLAG_VALUE
+        .replace_all(&out, format!("$1{REDACTED}"))
+        .into_owned();
+    out = ASSIGNMENT
+        .replace_all(&out, format!("$1$2{REDACTED}"))
+        .into_owned();
+    out = LONG_HEX.replace_all(&out, REDACTED).into_owned();
+    LONG_BLOB
+        .replace_all(&out, |caps: &regex::Captures<'_>| {
+            activity_blob(caps.get(0).expect("match").as_str())
+        })
+        .into_owned()
+}
+
+/// A long mixed-case alphanumeric with a digit is random by construction. A
+/// commit id, a path segment or a word is not, and is kept.
+fn activity_blob(text: &str) -> String {
+    let mixed = text.chars().any(|c| c.is_ascii_digit())
+        && text.chars().any(|c| c.is_ascii_uppercase())
+        && text.chars().any(|c| c.is_ascii_lowercase());
+    if mixed {
+        REDACTED.to_string()
+    } else {
+        text.to_string()
+    }
+}
+
+static DUMP_COMMAND: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(concat!(
+        r"(?i)\.config\.environment|\bconfig\.environment\b|\bprintenv\b",
+        r"|(?:^|[;&|(]\s*|\bsudo\s+)env\s*(?:$|[;&|)])|\bdeclare\s+-x\b|\bexport\s+-p\b",
+        r"|\bkubectl\s+config\s+view|kube/?config\b|\bk3s\.yaml\b",
+        r"|\bcat\s+[^\s|;]*\.env\b|/proc/[^\s]*/environ\b",
+        r"|\binfisical\s+(?:secrets|export|run)\b|\bsecrets?\s+(?:get|export|list|show)\b",
+        r"|\bGetStack\b|\bGetVariable\b|\bListVariables\b|\bvault\s+(?:kv\s+)?read\b",
+    ))
+    .expect("pattern")
+});
+static KUBECONFIG_SHAPE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    fancy_regex::Regex::new(concat!(
+        r"(?is)client-(?:key|certificate)-data\s*:|certificate-authority-data\s*:",
+        r"|\bkind\s*:\s*Config\b[\s\S]*\busers\s*:",
+    ))
+    .expect("pattern")
+});
+static ENV_LINE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?m)^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=\S").expect("pattern")
+});
+
+pub fn dumps_secrets(command: &str) -> bool {
+    DUMP_COMMAND.is_match(command)
+}
+
+pub fn looks_like_dump(output: &str) -> bool {
+    if KUBECONFIG_SHAPE.is_match(output).unwrap_or(false) {
+        return true;
+    }
+    ENV_LINE
+        .find_iter(output)
+        .filter(|found| found.start() < SCAN_WINDOW)
+        .count()
+        >= 3
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn cut(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_string()
+    } else {
+        format!("{}…", text.chars().take(limit - 1).collect::<String>())
+    }
+}
+
+pub fn excerpt(output: &str) -> String {
+    if output.len() <= 2 * SCAN_WINDOW {
+        let cleaned = one_line(&activity_redact(output));
+        if cleaned.chars().count() <= EXCERPT_HEAD + EXCERPT_TAIL {
+            return cleaned;
+        }
+        let head: String = cleaned.chars().take(EXCERPT_HEAD).collect();
+        let tail: String = cleaned
+            .chars()
+            .rev()
+            .take(EXCERPT_TAIL)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        return format!("{head} … {tail}");
+    }
+    let head: String = one_line(&activity_redact(&output[..SCAN_WINDOW]))
+        .chars()
+        .take(EXCERPT_HEAD)
+        .collect();
+    let tail_src = one_line(&activity_redact(&output[output.len() - SCAN_WINDOW..]));
+    let tail: String = tail_src
+        .chars()
+        .rev()
+        .take(EXCERPT_TAIL)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{head} … {tail}")
+}
+
+const SUMMARY_FIELDS: &[&str] = &[
+    "command",
+    "cmd",
+    "file_path",
+    "path",
+    "notebook_path",
+    "pattern",
+    "query",
+    "url",
+    "description",
+    "prompt",
+    "skill",
+];
+
+/// One redacted line saying what a call did.
+pub fn summarize_input(call_input: &serde_json::Value) -> String {
+    let text = match call_input {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Object(map) => {
+            let picked: Vec<&str> = SUMMARY_FIELDS
+                .iter()
+                .filter_map(|key| {
+                    map.get(*key)
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|text| !text.is_empty())
+                })
+                .collect();
+            if picked.is_empty() {
+                serde_json::to_string(call_input).unwrap_or_default()
+            } else {
+                picked.into_iter().take(2).collect::<Vec<_>>().join(" ")
+            }
+        }
+        serde_json::Value::Array(parts) => parts
+            .iter()
+            .map(|part| match part {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    let window: String = text.chars().take(4 * SCAN_WINDOW).collect();
+    cut(&one_line(&activity_redact(&window)), SUMMARY_LIMIT)
+}
+
+/// The default service heuristics. An operator's table extends and overrides it.
+pub const DEFAULT_SERVICES: &[(&str, &str)] = &[
+    (
+        "github",
+        r"\bgh\s+(?:pr|run|api|workflow|release|repo|issue|secret|variable|auth)\b|api\.github\.com|github\.com/|mcp__github",
+    ),
+    (
+        "git",
+        r"\bgit\s+(?:push|pull|fetch|clone|rebase|merge|commit|checkout|switch)\b",
+    ),
+    (
+        "docker",
+        r"\bdocker(?:\s+compose|-compose)?\s+\w+|\bghcr\.io\b|\bpodman\b",
+    ),
+    ("kubernetes", r"\bkubectl\b|\bhelm\s|\bk3s\b|\bkubeconfig\b"),
+    (
+        "komodo",
+        r"\bkomodo\b|\bDeployStack\b|\bGetStack\b|\bWriteStackFile\b",
+    ),
+    ("infisical", r"\binfisical\b"),
+    ("cloudflare", r"\bcloudflare|\bwrangler\b|\bcloudflared\b"),
+    ("caddy", r"\bcaddy\b|\bCaddyfile\b"),
+    ("tailscale", r"\btailscale\b|\btailnet\b"),
+    ("dns", r"\bnslookup\b|\bdig\s+\S|\bresolvectl\b"),
+    ("forgejo", r"\bforgejo\b|\bgitea\b"),
+    ("woodpecker", r"\bwoodpecker\b"),
+    ("firebase", r"\bfirebase\b|\bfcm\b"),
+    (
+        "play",
+        r"\bandroidpublisher\b|\bfastlane\b|\bgoogle play\b|\bplay console\b",
+    ),
+    ("ssh", r#"(?:^|[\s;&|("'])(?:ssh|scp|rsync)\s"#),
+    (
+        "http",
+        r#"(?:^|[\s;&|("'])(?:curl|wget|http)\s|\bWebFetch\b"#,
+    ),
+    ("vogt", r"\bmcp__vogt__|\bvogt\s+\w+"),
+    ("cadastre", r"\bmcp__cadastre__"),
+];
+
+pub struct ServiceMatcher {
+    patterns: Vec<(String, regex::Regex)>,
+}
+
+impl ServiceMatcher {
+    pub fn build(overrides: &[(&str, &str)]) -> Self {
+        let mut merged: Vec<(String, String)> = DEFAULT_SERVICES
+            .iter()
+            .map(|(name, pattern)| ((*name).to_string(), (*pattern).to_string()))
+            .collect();
+        for (name, pattern) in overrides {
+            if pattern.is_empty() {
+                merged.retain(|(existing, _)| existing != name);
+            } else if let Some(slot) = merged.iter_mut().find(|(existing, _)| existing == name) {
+                slot.1 = (*pattern).to_string();
+            } else {
+                merged.push(((*name).to_string(), (*pattern).to_string()));
+            }
+        }
+        merged.sort_by(|left, right| left.0.cmp(&right.0));
+        Self {
+            patterns: merged
+                .into_iter()
+                .map(|(name, pattern)| {
+                    (
+                        name,
+                        regex::RegexBuilder::new(&pattern)
+                            .case_insensitive(true)
+                            .build()
+                            .expect("service pattern"),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    pub fn tags(&self, tool: &str, call_input: &serde_json::Value) -> Vec<String> {
+        let text = match call_input {
+            serde_json::Value::String(text) => text.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        };
+        let window: String = text.chars().take(4 * SCAN_WINDOW).collect();
+        let haystack = format!("{tool} {window}");
+        self.patterns
+            .iter()
+            .filter(|(_, pattern)| pattern.is_match(&haystack))
+            .map(|(name, _)| name.clone())
+            .collect()
+    }
+}
+
+const SHELL_TOOLS: &[&str] = &[
+    "Bash",
+    "BashOutput",
+    "exec",
+    "exec_command",
+    "shell",
+    "write_stdin",
+];
+const FAILURE_WINDOW: usize = 1_000;
+
+static EXIT_STATUS: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(concat!(
+        r"(?im)^\s*(?:Script failed\b|Process exited with code [1-9]",
+        r"|Exit code:?\s*[1-9]|exit status [1-9]|Command failed with exit code [1-9])",
+    ))
+    .expect("pattern")
+});
+static FAILURE_LINE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(concat!(
+        r"(?im)^\s*(?:error\b|fatal:|ERROR\b|Error:|panic:",
+        r"|Traceback \(most recent call last\)",
+        r"|.*\bcommand not found\b|.*\bpermission denied\b|.*\bNo such file or directory\b",
+        r"|.*\b(?:401 Unauthorized|403 Forbidden|HTTP (?:401|403|404|500|502|503|504))\b",
+        r"|.*\bconnection refused\b|.*\b(?:timed out|deadline exceeded)\b|<tool_use_error>)",
+    ))
+    .expect("pattern")
+});
+
+pub fn is_error(output: &str, flagged: Option<bool>, tool: &str) -> bool {
+    if flagged == Some(true) {
+        return true;
+    }
+    let window: String = output.chars().take(FAILURE_WINDOW).collect();
+    if EXIT_STATUS.is_match(&window) {
+        return true;
+    }
+    if !SHELL_TOOLS.contains(&tool) {
+        return false;
+    }
+    FAILURE_LINE.is_match(&window)
+}
+
+pub fn result_excerpt(output: &str, error: bool, withheld: bool) -> Option<String> {
+    if !error {
+        return None;
+    }
+    if withheld || looks_like_dump(output) {
+        return Some(WITHHELD.to_string());
+    }
+    Some(excerpt(output))
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+
+    /// Secrets assembled from pieces, the way the Python test builds them, so
+    /// this file never holds a string a scanner would read as a credential.
+    fn github_classic() -> String {
+        format!("gh{}{}", "p_", "Zq3".repeat(12))
+    }
+
+    fn password() -> String {
+        format!("{}{}{}", "Tr0ub4dor", "&3-", "horse-battery")
+    }
+
+    fn hex_key() -> String {
+        "9f".repeat(32)
+    }
+
+    #[test]
+    fn a_named_secret_and_a_token_shape_are_removed_and_a_commit_id_survives() {
+        for (text, secret) in [
+            (
+                format!("export GH_TOKEN={}", github_classic()),
+                github_classic(),
+            ),
+            (
+                format!("DB_PASSWORD='{}' ./migrate", password()),
+                password(),
+            ),
+            (format!("echo {} > key.bin", hex_key()), hex_key()),
+        ] {
+            let redacted = activity_redact(&text);
+            assert!(!redacted.contains(&secret), "{redacted}");
+            assert!(redacted.contains("REDACTED"));
+        }
+        let sha = "4a4cf5a0".repeat(5);
+        let kept = format!("git show {sha} -- src/vogt/storage");
+        assert_eq!(activity_redact(&kept), kept);
+    }
+
+    #[test]
+    fn a_private_key_block_goes_whole_even_when_cut_off() {
+        let body = format!(
+            "-----BEGIN {}-----\n{}{}\n-----END {}-----",
+            "OPENSSH PRIVATE KEY",
+            "b3BlbnNzaC1rZXktdjEAAAAA",
+            "BG5vbmUAAAAEbm9uZQ",
+            "OPENSSH PRIVATE KEY"
+        );
+        let redacted = activity_redact(&format!("cat key\n{body}\ndone"));
+        assert!(!redacted.contains("PRIVATE KEY"));
+        assert!(!redacted.contains("b3BlbnNzaC1rZXkt"));
+        assert!(redacted.contains("[REDACTED:pem]"));
+        assert!(redacted.starts_with("cat key"));
+        assert!(redacted.ends_with("done"));
+
+        let cut = &body[..body.find("-----END").expect("end")];
+        assert!(activity_redact(&format!("prefix {cut}")).contains("[REDACTED:pem]"));
+    }
+
+    #[test]
+    fn a_dump_is_withheld_and_only_a_failure_keeps_an_excerpt() {
+        assert!(dumps_secrets("printenv | sort"));
+        assert!(dumps_secrets("kubectl config view --raw"));
+        assert!(dumps_secrets("cat deploy/.env"));
+        assert!(!dumps_secrets("git status --short"));
+        assert_eq!(
+            result_excerpt("anything", true, true).as_deref(),
+            Some(WITHHELD)
+        );
+        let env = "HOME=/root\nPATH=/usr/bin\nSHELL=/bin/sh\n";
+        assert!(looks_like_dump(env));
+        assert!(!looks_like_dump("error: build failed\nsee log"));
+        assert!(result_excerpt("all good", false, false).is_none());
+        assert!(is_error("fatal: not a git repository", Some(false), "Bash"));
+        assert!(!is_error(
+            "Script completed\nWall time 1.0 seconds",
+            None,
+            ""
+        ));
+        let tags = ServiceMatcher::build(&[])
+            .tags("Bash", &serde_json::json!({"command": "gh pr view 1"}));
+        assert!(tags.contains(&"github".to_string()), "{tags:?}");
+    }
+}
