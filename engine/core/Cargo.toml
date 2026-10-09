@@ -33,12 +33,17 @@ base64 = "0.23.1"
 # library; https (GitHub, an https peer) needs a TLS stack. native-certs trusts
 # the platform store, so a private CA that Python trusts is trusted here too.
 # No OpenSSL.
-ureq = { version = "2", features = ["tls", "native-certs"], default-features = false }
+ureq = { version = "2", features = ["tls"], default-features = false }
 # The same rustls ureq speaks, so the client can hand it a trust store built
-# from the platform certificates (which honour SSL_CERT_FILE) instead of only
-# the bundled Mozilla roots.
+# from the platform certificates plus SSL_CERT_FILE, instead of only the
+# bundled Mozilla roots. ureq's own native-certs feature is not used: it
+# replaces the store with the env file rather than merging the two.
 rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.7"
+rustls-pemfile = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 hmac = "0.12"
 aes = "0.8"
 cbc = "0.1"

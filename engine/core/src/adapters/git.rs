@@ -446,7 +446,7 @@ fn run_git(
     unsafe {
         use std::os::unix::process::CommandExt;
         command.pre_exec(|| {
-            libc_setsid();
+            let _ = libc::setsid();
             Ok(())
         });
     }
@@ -504,31 +504,14 @@ fn run_git(
     Ok(String::from_utf8_lossy(&out).trim().to_string())
 }
 
-#[cfg(unix)]
-unsafe fn libc_setsid() {
-    extern "C" {
-        fn setsid() -> i32;
-    }
-    let _ = setsid();
-}
-
 /// Kill the process group `id` leads, so git's helpers die with it.
 fn kill_group(id: u32) {
     #[cfg(unix)]
     unsafe {
-        libc_killpg(id);
+        let _ = libc::killpg(id as i32, libc::SIGKILL);
     }
     #[cfg(not(unix))]
     let _ = id;
-}
-
-#[cfg(unix)]
-unsafe fn libc_killpg(id: u32) {
-    extern "C" {
-        fn killpg(group: i32, signal: i32) -> i32;
-    }
-    // SIGKILL, so nothing traps it and lingers.
-    let _ = killpg(id as i32, 9);
 }
 
 /// Join a reader thread, but only for a short while. After the process group
@@ -541,6 +524,9 @@ fn join_bounded(handle: std::thread::JoinHandle<Vec<u8>>) {
         let _ = done_tx.send(());
     });
     let _ = done_rx.recv_timeout(Duration::from_secs(2));
+    // On a timeout the reader thread is left running. It exits when the pipe
+    // closes, which it does once the process group is dead; if a grandchild
+    // somehow survives, the thread leaks until that pipe closes.
 }
 
 /// Read a child's pipe, keeping the first 8 MiB so a runaway command cannot

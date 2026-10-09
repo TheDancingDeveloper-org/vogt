@@ -850,23 +850,27 @@ fn runs(repo: &RepoRef, response: &ForgeResponse) -> Vec<ForgeCheck> {
 pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
     let raw = repo_url?.trim();
     let candidate = raw.strip_prefix("git+").unwrap_or(raw);
-    // Python strips only https, http and ssh. Any other scheme, and an scp
-    // host whose case isn't exactly `github.com`, is not a GitHub repo.
+    // Python strips only https, http and ssh, and also accepts the bare
+    // `github.com/owner/repo` form. Any other scheme, and an scp host whose
+    // case isn't exactly `github.com`, is not a GitHub repo.
+    let has_scheme = candidate.contains("://");
     let allowed = ["https://", "http://", "ssh://"]
         .iter()
         .any(|scheme| candidate.starts_with(scheme))
-        || candidate.starts_with("git@github.com:");
+        || candidate.starts_with("git@github.com:")
+        || !has_scheme;
     if !allowed {
         return None;
     }
     let (host, path, has_query) = super::urls::split_repo_url(candidate)?;
-    // A `?` or `#` with nothing after it carries no query, so it doesn't
-    // disqualify the URL the way a real one does.
-    let query_is_empty = candidate
+    // A trailing `?` or `#` with nothing after it is an empty query and an
+    // empty fragment, so it doesn't disqualify the URL. Anything after either
+    // one does, which is what urlsplit reports.
+    let query_and_fragment_empty = candidate
         .split(['?', '#'])
-        .nth(1)
-        .is_some_and(|rest| rest.is_empty());
-    if (has_query && !query_is_empty) || !host.eq_ignore_ascii_case(HOST) {
+        .skip(1)
+        .all(|rest| rest.is_empty());
+    if (has_query && !query_and_fragment_empty) || !host.eq_ignore_ascii_case(HOST) {
         return None;
     }
     let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
