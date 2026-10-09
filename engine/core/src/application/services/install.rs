@@ -35,8 +35,7 @@ pub fn install_status_op(ctx: &Built, _params: Value) -> Result<Value, VogtError
             return Ok(json!({ "install_mode": false }));
         }
         let view = ctx.declared.read()?;
-        let open = view.list_tokens(true, 1)?.is_empty();
-        Ok(json!({ "install_mode": open }))
+        Ok(json!({ "install_mode": !view.install_closed()? }))
     })
 }
 
@@ -149,7 +148,7 @@ fn bootstrap_recorded<C: Clock + 'static, I: IdFactory + 'static>(
         INSTALL_BOOTSTRAP,
         &format!("first-run install bootstrap for {identity_ref}"),
         move |txn: &mut _, actor: &Actor| {
-            if !txn.list_tokens(true, 1)?.is_empty() {
+            if txn.install_closed()? {
                 return Err(VogtError::InstallClosed(
                     "install mode is closed: this instance already has a token. Sign in with it, \
                      or mint another over the loopback surface with `vogt token issue`."
@@ -306,5 +305,129 @@ mod tests {
         assert!(minted["username"].is_null());
         assert!(minted["warning"].as_str().unwrap().contains("only time"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A password with no token is enough to close the door, and so is a revoked
+    /// token bound to a person. An agent token on its own leaves it open, which
+    /// is how a fresh stack looks after adopting the bootstrap core token.
+    #[test]
+    fn the_door_follows_people_not_tokens() {
+        let (dir, built) = fresh("door");
+        seed(
+            &dir,
+            "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at) VALUES ('act_agent', 'agent', 'core', 'agent:core', 0, '2026-01-01T00:00:00Z')",
+        );
+        seed(
+            &dir,
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, created_at) VALUES ('tok_agent', 'act_agent', 'core', 'hash', 'admin', 'api', '2026-01-01T00:00:00Z')",
+        );
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            true
+        );
+
+        seed(
+            &dir,
+            "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at) VALUES ('act_ada', 'human', 'Ada', 'human:ada', 0, '2026-01-01T00:00:00Z')",
+        );
+        seed(
+            &dir,
+            "INSERT INTO password_credentials (actor_id, username, password_hash, scopes, created_at, updated_at) VALUES ('act_ada', 'ada', 'scrypt$0$0$0$$', 'admin', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        );
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            false
+        );
+        let refused =
+            install_bootstrap_op(&built, json!({"display_name": "Ada", "token_name": "x"}))
+                .unwrap_err();
+        assert!(matches!(refused, VogtError::InstallClosed(_)), "{refused}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The latch alone closes the door, and a revoked token bound to a person
+    /// closes it even with no live credential.
+    #[test]
+    fn a_latch_or_a_revoked_person_token_closes_the_door() {
+        let (dir, built) = fresh("latch");
+        seed(
+            &dir,
+            "INSERT INTO install_latch (id, closed_at, reason) VALUES (1, '2026-01-01T00:00:00Z', 'set')",
+        );
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            false
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let (dir, built) = fresh("revoked");
+        seed(
+            &dir,
+            "INSERT INTO actors (id, kind, display_name, identity_ref, disabled, created_at) VALUES ('act_ada', 'human', 'Ada', 'human:ada', 0, '2026-01-01T00:00:00Z')",
+        );
+        seed(
+            &dir,
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, created_at) VALUES ('tok_old', 'act_ada', 'old', 'hash', 'admin', 'api', '2026-01-01T00:00:00Z')",
+        );
+        seed(
+            &dir,
+            "UPDATE tokens SET revoked_at = '2026-01-02T00:00:00Z', revoked_reason = 'retired' WHERE id = 'tok_old'",
+        );
+        assert_eq!(
+            install_status_op(&built, json!({})).unwrap()["install_mode"],
+            false
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two bootstraps at once: the write checks the door inside the transaction,
+    /// so exactly one mints a token.
+    #[test]
+    fn two_bootstraps_at_once_mint_one_token() {
+        let (dir, _) = fresh("race");
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let dir = dir.clone();
+            handles.push(std::thread::spawn(move || {
+                let built = open(&dir);
+                install_bootstrap_op(
+                    &built,
+                    json!({"display_name": "Ada", "password": "correct horse battery", "token_name": "browser"}),
+                )
+            }));
+        }
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        let won = results.iter().filter(|result| result.is_ok()).count();
+        assert_eq!(won, 1, "{results:?}");
+        assert_eq!(
+            install_status_op(&open(&dir), json!({})).unwrap()["install_mode"],
+            false
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn open(dir: &std::path::Path) -> crate::application::context::Built {
+        crate::application::context::build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.to_path_buf(),
+                ..crate::config::VogtConfig::default()
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+    }
+
+    fn seed(dir: &std::path::Path, sql: &str) {
+        let conn = rusqlite::Connection::open(dir.join("declared.sqlite3")).unwrap();
+        conn.execute(sql, []).unwrap();
     }
 }
