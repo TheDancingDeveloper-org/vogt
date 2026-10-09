@@ -9,6 +9,7 @@ pub mod contracts;
 pub mod coverage;
 pub mod instance;
 pub mod observations;
+pub mod projects;
 pub mod resolve;
 pub mod services;
 pub mod suppressions;
