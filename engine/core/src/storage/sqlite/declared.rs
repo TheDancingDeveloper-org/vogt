@@ -1005,7 +1005,7 @@ impl ReadView for SqliteReadView {
         // SQLite caps bound parameters per statement, so a large page goes in
         // slices rather than one statement that fails only once it matters.
         let mut found = BTreeMap::new();
-        for slice in entry_keys.chunks(900) {
+        for slice in entry_keys.chunks(500) {
             let placeholders = vec!["?"; slice.len()].join(", ");
             let params: Vec<Box<dyn rusqlite::ToSql>> = slice
                 .iter()
@@ -3211,6 +3211,24 @@ mod more {
         );
         assert_eq!(view.actor_preferences(&actor.id).unwrap()[0].version, 2);
         assert_eq!(view.list_inbox_triage(100).unwrap().len(), 1);
+        drop(view);
+
+        // A value that is not an object reads back as an empty one.
+        let conn = rusqlite::Connection::open(dir.join("declared.sqlite3")).unwrap();
+        conn.execute(
+            "UPDATE actor_preferences SET value = '[1]' WHERE actor_id = ? AND key = 'theme'",
+            [&actor.id],
+        )
+        .unwrap();
+        drop(conn);
+        let value = store
+            .read()
+            .unwrap()
+            .actor_preference(&actor.id, "theme")
+            .unwrap()
+            .unwrap()
+            .value;
+        assert_eq!(value, serde_json::json!({}));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -3309,10 +3327,17 @@ fn row_inbox_triage(row: &Row<'_>) -> rusqlite::Result<InboxTriage> {
 }
 
 fn row_actor_preference(row: &Row<'_>) -> rusqlite::Result<ActorPreference> {
+    // A preference value is an object. Anything else stored there reads back
+    // as an empty one, which is what Python's row mapper does.
+    let value = json_cell(row, "value")?;
     Ok(ActorPreference {
         actor_id: row.get("actor_id")?,
         key: row.get("key")?,
-        value: json_cell(row, "value")?,
+        value: if value.is_object() {
+            value
+        } else {
+            serde_json::json!({})
+        },
         version: row.get("version")?,
         updated_at: moment(row, "updated_at")?,
     })
