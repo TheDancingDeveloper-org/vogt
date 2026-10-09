@@ -1,10 +1,10 @@
 //! Parameter fields that strip whitespace, recorded from the models.
 //!
 //! Produced by `scripts/gen_registry.py`. A field is here exactly when
-//! its annotation in `src/vogt/application/models.py` is `Name` or
-//! `Reason`, the two types that strip. A field of the same name typed
-//! `str` is absent, and must stay absent: stripping it would change
-//! stored text, and with it the audit digest.
+//! validating `"  xy  "` against its annotation returns `"xy"`:
+//! `Name` and `Reason` do, a plain `str` does not. A field of the same
+//! name typed `str` is absent, and must stay absent: stripping it would
+//! change stored text, and with it the audit digest.
 
 /// `(operation, field)`, in registry order.
 pub static STRIPS: &[(&str, &str)] = &[

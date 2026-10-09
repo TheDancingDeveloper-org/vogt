@@ -71,7 +71,6 @@ def _operations() -> list[dict[str, object]]:
                 "method": ast.literal_eval(kw["route"].args[0]),
                 "path": ast.literal_eval(kw["route"].args[1]),
                 "cli": list(ast.literal_eval(kw["cli"].args[0])),
-                "params_model": kw["params_model"].id,
             }
         )
     return found
@@ -149,39 +148,35 @@ def record_strips() -> str:
     """Which parameter fields strip whitespace, per operation.
 
     `Name` and `Reason` strip; a plain `str` does not, even when it shares the
-    field's name. Pydantic erases the alias at runtime, so the annotation is
-    read from the source rather than from the model. A field named here is one
-    whose annotation is exactly `Name` or `Reason`, including the optional
-    forms; anything else keeps its spaces. Recording it here is what stops the
-    Rust side stripping every `body` or `title` because one of them is a `Name`.
+    field's name. Pydantic erases the alias, so this is decided by behaviour
+    rather than by reading the source: a field strips exactly when validating
+    ``"  xy  "`` against its own annotation returns ``"xy"``. Inheritance,
+    ``Name | None`` and a constraint written out by hand all come out the same
+    way, and a regex over the file would miss each of them.
     """
-    models = (REPO_ROOT / "src" / "vogt" / "application" / "models.py").read_text()
-    classes: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in models.splitlines():
-        header = re.match(r"class (\w+)\(", line)
-        if header:
-            current = header.group(1)
-            classes[current] = []
-            continue
-        if current is None or not line.startswith("    ") or line.startswith("        "):
-            continue
-        field = re.match(r"    (\w+): (Name|Reason)\b", line)
-        if field:
-            classes[current].append(field.group(1))
+    import pydantic  # noqa: E402
+
+    from vogt.registry.operations import build_operations  # noqa: E402
+
     rows = []
-    for operation in _operations():
-        model = operation["params_model"]
-        for field_name in classes.get(model, []):
-            rows.append(f'    ("{operation["name"]}", "{field_name}"),\n')
+    for operation in build_operations():
+        for name, field in operation.params_model.model_fields.items():
+            try:
+                out = pydantic.TypeAdapter(field.rebuild_annotation()).validate_python(
+                    "  xy  "
+                )
+            except (pydantic.ValidationError, TypeError):
+                continue
+            if out == "xy":
+                rows.append(f'    ("{operation.name}", "{name}"),\n')
     return (
         "//! Parameter fields that strip whitespace, recorded from the models.\n"
         "//!\n"
         "//! Produced by `scripts/gen_registry.py`. A field is here exactly when\n"
-        "//! its annotation in `src/vogt/application/models.py` is `Name` or\n"
-        "//! `Reason`, the two types that strip. A field of the same name typed\n"
-        "//! `str` is absent, and must stay absent: stripping it would change\n"
-        "//! stored text, and with it the audit digest.\n"
+        "//! validating `\"  xy  \"` against its annotation returns `\"xy\"`:\n"
+        "//! `Name` and `Reason` do, a plain `str` does not. A field of the same\n"
+        "//! name typed `str` is absent, and must stay absent: stripping it would\n"
+        "//! change stored text, and with it the audit digest.\n"
         "\n"
         "/// `(operation, field)`, in registry order.\n"
         "pub static STRIPS: &[(&str, &str)] = &[\n"
