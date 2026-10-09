@@ -144,11 +144,6 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             continue;
         }
         if flag == "--data-dir" && positional.is_empty() {
-            json = true;
-            index += 1;
-            continue;
-        }
-        if flag == "--data-dir" && positional.is_empty() {
             let Some(value) = argv_rest.get(index + 1) else {
                 return ParseOutcome::Result(usage(
                     "error: --data-dir requires a value\n".to_string(),
@@ -757,7 +752,7 @@ fn format_operation(operation: &Operation) -> String {
         for (flag, help) in flag_help(schema) {
             if help.is_empty() {
                 out.push_str(&format!("  {flag}\n"));
-            } else if flag.len() >= 22 {
+            } else if flag.len() > 20 {
                 // argparse wraps a flag whose column is already full onto the
                 // next line rather than running the text into the description.
                 out.push_str(&format!("  {flag}\n                        {help}\n"));
@@ -822,7 +817,7 @@ fn flag_metavar(name: &str, property: &Value) -> String {
     if let Some(choices) = enum_choices(property) {
         return format!("{{{}}}", choices.join(","));
     }
-    name.replace('_', "-").to_uppercase()
+    name.to_uppercase()
 }
 /// Human rendering, porting `render.py`: a mapping is `key: value` lines, an
 /// empty list is `(none)`, a boolean is `yes`/`no`, and `null` is `-`.
@@ -1227,7 +1222,7 @@ mod tests {
             "test",
             &mut no_dispatch,
         );
-        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
         assert!(
             result.stdout.contains("invalid choice"),
             "{}",
@@ -1262,7 +1257,7 @@ mod tests {
             "test",
             &mut no_dispatch,
         );
-        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
     }
 
     #[test]
@@ -1351,7 +1346,7 @@ mod tests {
             "test",
             &mut no_dispatch,
         );
-        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
         assert!(
             result.stdout.contains("not allowed with"),
             "{}",
@@ -1378,6 +1373,25 @@ mod tests {
     }
 
     #[test]
+    fn data_dir_before_the_command_is_not_the_command() {
+        let registry = default_registry();
+        let mut seen = false;
+        let mut dispatch = |_operation: &Operation, _params: Value| {
+            seen = true;
+            Ok(Value::Null)
+        };
+        let result = run(
+            &argv(&["--data-dir", "/tmp/x9", "registry", "dump"]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stdout);
+        assert!(seen, "the command ran");
+        assert!(!result.stdout.contains("unknown command"));
+    }
+
+    #[test]
     fn a_global_flag_after_the_command_is_usage() {
         let registry = default_registry();
         let result = run(
@@ -1386,14 +1400,14 @@ mod tests {
             "test",
             &mut no_dispatch,
         );
-        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
     }
 
     #[test]
     fn a_bare_group_is_usage() {
         let registry = default_registry();
         let result = run(&argv(&["work"]), &registry, "test", &mut no_dispatch);
-        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
         assert!(result.stdout.contains("usage: vogt"), "{}", result.stdout);
     }
 
