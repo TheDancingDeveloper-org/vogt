@@ -75,6 +75,7 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    announce_hooks();
     match cli.command {
         Command::Serve {
             host,
@@ -82,6 +83,27 @@ fn main() -> ExitCode {
             no_auth,
         } => serve(&host, port, cli.data_dir, cli.json, no_auth),
         Command::Init { check } => init(cli.data_dir, check, cli.json),
+    }
+}
+
+/// Python's one startup warning: name the deterministic hooks that are set,
+/// once, on stderr. A golden run sets both, so the line is part of what the
+/// two binaries must agree on.
+fn announce_hooks() {
+    let mut active = Vec::new();
+    for name in [core::CLOCK_ENV, core::IDS_ENV] {
+        if std::env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            active.push(name);
+        }
+    }
+    if !active.is_empty() {
+        eprintln!(
+            "deterministic test hooks are active: {}",
+            active.join(", ")
+        );
     }
 }
 
