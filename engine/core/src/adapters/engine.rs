@@ -854,7 +854,9 @@ impl EngineClient {
                 // strips exactly "forbidden: ", so the reason keeps the
                 // "person required: " that follows it.
                 return Err(VogtError::PersonRequired(
-                    said.trim_start_matches("forbidden: ").to_string(),
+                    said.strip_prefix("forbidden: ")
+                        .unwrap_or(&said)
+                        .to_string(),
                 ));
             }
             if let Some(reason) = said.strip_prefix("forbidden: ") {
@@ -2168,7 +2170,9 @@ mod tests {
             403,
             r#"{"error":"forbidden: person required: session is showing a permission prompt"}"#,
         );
-        let error = client(transport).send_input("s", "y", false, false).unwrap_err();
+        let error = client(transport)
+            .send_input("s", "y", false, false)
+            .unwrap_err();
         assert_eq!(error.code(), "person_required");
         assert_eq!(
             error.message(),
