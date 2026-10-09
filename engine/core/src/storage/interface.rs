@@ -682,6 +682,9 @@ pub trait DeclaredStore {
     fn credentials(&self) -> Result<CarriedCredentials, crate::errors::VogtError>;
     fn record_auth_decision(&self, decision: &AuthDecision)
         -> Result<(), crate::errors::VogtError>;
+    /// The current time and a fresh id, drawn together so a recorded row carries
+    /// both from the store's own clock and factory.
+    fn stamp_and_id(&self, prefix: &str) -> (crate::core::Moment, String);
     fn touch_token(
         &self,
         token_id: &str,

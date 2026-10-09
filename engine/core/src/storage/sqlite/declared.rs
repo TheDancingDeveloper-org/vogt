@@ -72,7 +72,11 @@ where
     /// The current time and a fresh id, from the clock and factory this store
     /// was opened with. The HTTP gate uses these so a recorded decision carries
     /// the same clock and id sequence as everything else the store writes.
-    pub fn stamp_and_id(&self, prefix: &str) -> (Moment, String) {
+    fn stamp_and_id(&self, prefix: &str) -> (Moment, String) {
+        self.mint(prefix)
+    }
+
+    pub fn mint(&self, prefix: &str) -> (Moment, String) {
         let now = self
             .clock
             .lock()
@@ -164,6 +168,9 @@ where
     C: Clock,
     I: IdFactory,
 {
+    fn stamp_and_id(&self, prefix: &str) -> (Moment, String) {
+        self.mint(prefix)
+    }
     type Read<'a>
         = SqliteReadView
     where

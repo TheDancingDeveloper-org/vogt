@@ -72,7 +72,6 @@ pub struct Request<'a> {
     pub no_auth: bool,
     pub writes_enabled: bool,
     pub now: Moment,
-    pub decision_id: &'a str,
 }
 
 /// Resolve the credential and nothing more. A refusal is recorded, because a
@@ -100,7 +99,6 @@ fn resolve<S: DeclaredStore>(
         no_auth,
         writes_enabled,
         now,
-        decision_id,
     } = request;
     if no_auth {
         // Python's loopback caller is `local:<os-user>`, a human principal, not
@@ -121,8 +119,8 @@ fn resolve<S: DeclaredStore>(
         Err(rejection) => {
             record(
                 store,
-                decision(Recorded {
-                    id: decision_id,
+                &mut decision(Recorded {
+                    id: "",
                     at: now,
                     operation,
                     transport: Transport::Http,
@@ -149,8 +147,8 @@ fn resolve<S: DeclaredStore>(
     if !permitted {
         record(
             store,
-            decision(Recorded {
-                id: decision_id,
+            &mut decision(Recorded {
+                id: "",
                 at: now,
                 operation,
                 transport,
@@ -175,8 +173,8 @@ fn resolve<S: DeclaredStore>(
     if record_allow {
         record(
             store,
-            decision(Recorded {
-                id: decision_id,
+            &mut decision(Recorded {
+                id: "",
                 at: now,
                 operation,
                 transport,
@@ -295,9 +293,15 @@ fn transport_name(transport: Transport) -> &'static str {
     }
 }
 
-fn record<S: DeclaredStore>(store: &S, decision: AuthDecision) -> Result<(), Denial> {
+fn record<S: DeclaredStore>(store: &S, decision: &mut AuthDecision) -> Result<(), Denial> {
+    // The id is minted here and nowhere earlier. A request that writes no row
+    // — a missing bearer, a switched-off check — must not consume one, or the
+    // next real row skips a number and the hooks-on sequence drifts from Python.
+    let (at, id) = store.stamp_and_id("aut");
+    decision.at = at;
+    decision.id = id;
     store
-        .record_auth_decision(&decision)
+        .record_auth_decision(decision)
         .map_err(|error| Denial::Unrecorded {
             failure: error.to_string(),
         })

@@ -35,7 +35,7 @@ fn openapi() -> serde_json::Value {
         "openapi": "3.1.0",
         "info": {
             "title": "Vogt",
-            "version": option_env!("VOGT_VERSION").unwrap_or("dev"),
+            "version": crate::VERSION,
             "description": "Every capability is available here, on the CLI, and over MCP — all three generated from one operation registry.",
         },
         "paths": paths,

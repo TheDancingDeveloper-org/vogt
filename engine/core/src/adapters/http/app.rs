@@ -106,7 +106,11 @@ async fn dispatch<C: Clock, I: IdFactory>(
     // that will be refused never reaches a handler.
     let granted = {
         let store = state.store.lock().expect("the store lock is not poisoned");
-        let (now, decision_id) = store.stamp_and_id("aut");
+        let now = store
+            .clock()
+            .lock()
+            .expect("the clock lock is not poisoned")
+            .now();
         auth_gate::authorize(
             &*store,
             AuthRequest {
@@ -116,7 +120,6 @@ async fn dispatch<C: Clock, I: IdFactory>(
                 no_auth: state.no_auth,
                 writes_enabled: state.writes_enabled,
                 now,
-                decision_id: &decision_id,
             },
         )
     };

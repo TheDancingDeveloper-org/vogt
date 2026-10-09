@@ -137,7 +137,11 @@ fn authenticate<C: Clock, I: IdFactory>(
     state: &McpState<C, I>,
     presented: Option<&str>,
 ) -> Result<auth_gate::Grant, Denial> {
-    let (now, decision_id) = store.stamp_and_id("aut");
+    let now = store
+        .clock()
+        .lock()
+        .expect("the clock lock is not poisoned")
+        .now();
     auth_gate::authenticate(
         store,
         auth_gate::Request {
@@ -147,7 +151,6 @@ fn authenticate<C: Clock, I: IdFactory>(
             no_auth: state.no_auth,
             writes_enabled: state.writes_enabled,
             now,
-            decision_id: &decision_id,
         },
     )
 }
@@ -183,7 +186,7 @@ fn record_call<C: Clock, I: IdFactory>(
         operation.scope.as_str(),
         operation.mutating,
     );
-    let (at, id) = store.stamp_and_id("aut");
+    let (at, id) = store.mint("aut");
     let local = state.no_auth;
     let decision = crate::core::AuthDecision {
         id,
