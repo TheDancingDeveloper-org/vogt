@@ -19,7 +19,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::registry::{Operation, OperationRegistry, LOCAL_ONLY};
+use crate::registry::{Operation, OperationRegistry, Transport};
 
 /// Newest first. The head is what the server offers when it gets to choose.
 pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -62,39 +62,57 @@ pub struct ServeReport {
 /// HTTP transport narrows it to the caller's grant, so an ungranted tool is
 /// absent rather than present and refusing.
 pub trait ToolGrant {
-    fn allows(&self, operation: &Operation) -> bool;
+    fn allows(&self, registry: &OperationRegistry, operation: &Operation) -> bool;
 }
 
 /// Every MCP-exposed operation, which is what a local stdio session may do.
 pub struct FullGrant;
 
 impl ToolGrant for FullGrant {
-    fn allows(&self, operation: &Operation) -> bool {
-        exposed_over_mcp(operation)
+    fn allows(&self, _registry: &OperationRegistry, _operation: &Operation) -> bool {
+        true
     }
 }
 
 /// Whether the MCP transport carries this operation at all.
 ///
-/// `LOCAL_ONLY` operations exist where the data directory is. They are absent
-/// from the remote tool list and undispatchable through it — the same
-/// invisible-tool rule on both paths.
-pub(super) fn exposed_over_mcp(operation: &Operation) -> bool {
-    !LOCAL_ONLY.iter().any(|(name, _)| *name == operation.name)
+/// `LOCAL_ONLY` and `HTTP_ONLY` operations are absent from the tool list and
+/// undispatchable through it — the same invisible-tool rule on both paths.
+/// The registry decides which those are, so this asks it rather than repeating
+/// one of the two lists.
+pub(super) fn exposed_over_mcp(registry: &OperationRegistry, operation: &Operation) -> bool {
+    registry
+        .transports_for(operation.name)
+        .contains(&Transport::Mcp)
 }
 
-/// One JSON-RPC message in, one response out, or silence for a notification.
+/// Which transport is asking. The two disagree on a handful of error shapes,
+/// and the disagreement is what the differential test pins down, so it is
+/// named here rather than papered over with one behaviour.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum McpTransport {
+    /// `stdio.py`: a missing method is `-32600`, a notification is any id that
+    /// is not a string or an integer, and an unknown tool falls into the
+    /// internal-error result because the surface raises before it can say
+    /// "unknown".
+    Stdio,
+    /// `http.py`: a missing method and a non-object body are `-32602`, only an
+    /// absent id is a notification, and an unknown tool is `-32601`.
+    Http,
+}
 pub struct Dispatcher<'a, G: ToolGrant> {
     registry: &'a OperationRegistry,
     grant: &'a G,
+    transport: McpTransport,
     report: ServeReport,
 }
 
 impl<'a, G: ToolGrant> Dispatcher<'a, G> {
-    pub fn new(registry: &'a OperationRegistry, grant: &'a G) -> Self {
+    pub fn new(registry: &'a OperationRegistry, grant: &'a G, transport: McpTransport) -> Self {
         Self {
             registry,
             grant,
+            transport,
             report: ServeReport::default(),
         }
     }
@@ -123,39 +141,76 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
     }
 
     /// Handle one parsed message.
+    ///
+    /// Validation runs before the id is read, because a message that is not a
+    /// request still has to be answered: `{"params": []}` is an invalid
+    /// request with a null id, not silence. The id itself is a string or an
+    /// integer. A boolean counts — Python's `bool` is an `int` — and a float
+    /// does not, so `1.5` and `1.0` are notifications over stdio.
     pub fn handle(&mut self, message: &Map<String, Value>) -> Option<Value> {
-        let message_id = message
-            .get("id")
-            .filter(|id| id.is_string() || id.is_number())
-            .cloned()?;
-        let Some(method) = message.get("method").and_then(Value::as_str) else {
-            return Some(error(Some(message_id), INVALID_REQUEST, "missing method"));
-        };
-        let params = match message.get("params") {
-            None | Some(Value::Null) => Map::new(),
-            Some(Value::Object(params)) => params.clone(),
-            Some(_) => {
+        let method = message.get("method").and_then(Value::as_str);
+        let params = message.get("params").filter(|params| !json_falsy(params));
+        if method.is_none() {
+            let code = match self.transport {
+                McpTransport::Stdio => INVALID_REQUEST,
+                McpTransport::Http => INVALID_PARAMS,
+            };
+            return Some(error(self.message_id(message), code, "missing method"));
+        }
+        if let Some(params) = params {
+            if !params.is_object() {
                 return Some(error(
-                    Some(message_id),
+                    self.message_id(message),
                     INVALID_PARAMS,
                     "params must be an object",
                 ));
             }
-        };
-        let response = match method {
+        }
+        let params = params
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let message_id = self.message_id(message)?;
+
+        let response = match method.expect("checked above") {
             "initialize" => self.initialize(&params),
             "ping" => json!({}),
             "tools/list" => json!({"tools": self.tools()}),
-            "tools/call" => self.call(&params),
+            "tools/call" => return Some(self.call(message_id, &params)),
             other => {
                 return Some(error(
                     Some(message_id),
                     METHOD_NOT_FOUND,
-                    format!("unknown method {other:?}"),
+                    format!("unknown method {}", python_repr(other)),
                 ));
             }
         };
         Some(result(Some(message_id), response))
+    }
+
+    /// The id a response should echo, or `None` when the message is a
+    /// notification.
+    ///
+    /// Over stdio anything that is not a string or an integer — a float, a
+    /// boolean-shaped number aside, an object — is a notification. Over HTTP
+    /// only an absent id is: `http.py` returns the raw id whenever the key is
+    /// present, and answers it.
+    fn message_id(&self, message: &Map<String, Value>) -> Option<Value> {
+        let raw = message.get("id")?;
+        let acceptable = match raw {
+            Value::String(_) => true,
+            Value::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
+            // Python's `bool` is a subclass of `int`, so `id: true` is a
+            // request there. JSON has no integer/boolean overlap, so this is
+            // the one place the two languages read the same byte differently.
+            Value::Bool(_) => true,
+            _ => false,
+        };
+        if acceptable || self.transport == McpTransport::Http {
+            Some(raw.clone())
+        } else {
+            None
+        }
     }
 
     fn initialize(&mut self, params: &Map<String, Value>) -> Value {
@@ -166,45 +221,73 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
         json!({
             "protocolVersion": version,
             "capabilities": {"tools": {"listChanged": false}},
-            "serverInfo": {"name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION")},
+            "serverInfo": {"name": SERVER_NAME, "version": crate::VERSION},
         })
     }
 
-    /// The tools this grant allows, in registry order.
+    /// The tools this grant allows, in registry order, and only the ones the
+    /// MCP transport carries. `session.token` is HTTP-only and must not appear.
     fn tools(&self) -> Vec<Value> {
         self.registry
             .iter()
-            .filter(|operation| self.grant.allows(operation))
+            .filter(|operation| exposed_over_mcp(self.registry, operation))
+            .filter(|operation| self.grant.allows(self.registry, operation))
             .map(tool_wire)
             .collect()
     }
 
-    fn call(&self, params: &Map<String, Value>) -> Value {
+    /// A tool call. A missing name or a non-object `arguments` is a protocol
+    /// error (`-32602`), not a failed tool result: the call never reached a
+    /// tool. An unknown tool differs by transport — HTTP names it with
+    /// `-32601`, stdio's surface raises and the catch-all reports an internal
+    /// error.
+    fn call(&self, message_id: Value, params: &Map<String, Value>) -> Value {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
-            return tool_error("invalid_params", "tools/call needs a tool name");
+            return error(
+                Some(message_id),
+                INVALID_PARAMS,
+                "tools/call needs a tool name",
+            );
         };
-        let _arguments = match params.get("arguments") {
-            None | Some(Value::Null) => Map::new(),
-            Some(Value::Object(arguments)) => arguments.clone(),
-            Some(_) => return tool_error("invalid_params", "arguments must be an object"),
-        };
+        if let Some(arguments) = params.get("arguments").filter(|value| !json_falsy(value)) {
+            if !arguments.is_object() {
+                return error(
+                    Some(message_id),
+                    INVALID_PARAMS,
+                    "arguments must be an object",
+                );
+            }
+        }
         let operation = match self.registry.by_mcp_tool(name) {
-            Ok(operation) if self.grant.allows(operation) => operation,
+            Ok(operation) if exposed_over_mcp(self.registry, operation) => operation,
             Ok(_) | Err(_) => {
-                return tool_error("method_not_found", &format!("unknown tool {name:?}"));
+                return match self.transport {
+                    McpTransport::Http => error(
+                        Some(message_id),
+                        METHOD_NOT_FOUND,
+                        format!("unknown tool {}", python_repr(name)),
+                    ),
+                    McpTransport::Stdio => {
+                        result(Some(message_id), tool_error("error", "internal error"))
+                    }
+                };
             }
         };
+        if !self.grant.allows(self.registry, operation) {
+            return result(Some(message_id), tool_error("forbidden", "forbidden"));
+        }
         // The service behind nearly every operation is not ported yet, and
         // saying so is a failed tool result the model can read — never a
         // protocol error, and never an empty success.
-        match operation.run() {
+        let body = match operation.run() {
             Ok(()) => json!({
                 "content": [{"type": "text", "text": "{}"}],
                 "structuredContent": {},
                 "isError": false,
             }),
             Err(error) => tool_error(error.code(), error.message()),
-        }
+        };
+        result(Some(message_id), body)
     }
 }
 
@@ -233,6 +316,34 @@ fn tool_error(code: &str, message: &str) -> Value {
     })
 }
 
+/// Python's truthiness for a JSON value: `None`, `[]`, `0`, `""` and `false`
+/// are all falsy, and both handlers write `params or {}`.
+fn json_falsy(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::Bool(value) => !value,
+        Value::Number(number) => number.as_i64() == Some(0) || number.as_f64() == Some(0.0),
+        Value::String(text) => text.is_empty(),
+        Value::Array(items) => items.is_empty(),
+        Value::Object(_) => false,
+    }
+}
+
+/// Python's `repr` for a string: single quotes, with the usual escapes.
+fn python_repr(text: &str) -> String {
+    let mut out = String::from("'");
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Read newline-delimited JSON-RPC from `input`, writing each response to
 /// `output`. Diagnostics would go to stderr; this layer has none of its own.
 ///
@@ -244,7 +355,7 @@ pub fn serve_stdio<G: ToolGrant>(
     registry: &OperationRegistry,
     grant: &G,
 ) -> ServeReport {
-    let mut dispatcher = Dispatcher::new(registry, grant);
+    let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
     for line in input.lines() {
         if let Some(response) = dispatcher.handle_line(line) {
             output.push_str(&response.to_string());
@@ -327,6 +438,10 @@ mod tests {
             !names.contains(&"mcp_stdio"),
             "a local-only operation is absent, not present and refusing"
         );
+        assert!(
+            !names.contains(&"session_token"),
+            "an http-only operation is absent too"
+        );
         assert!(tools
             .iter()
             .all(|tool| tool["inputSchema"]["type"] == "object"));
@@ -357,7 +472,7 @@ mod tests {
         assert!(response["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("unknown tool"));
+            .starts_with("error: internal error"));
     }
 
     #[test]
@@ -367,7 +482,7 @@ mod tests {
         let missing = &responses("{\"id\": 1, \"params\": []}\n")[0];
         assert_eq!(missing["error"]["code"], INVALID_REQUEST);
         let params =
-            &responses("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":[]}\n")[0];
+            &responses("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"params\":[1]}\n")[0];
         assert_eq!(params["error"]["code"], INVALID_PARAMS);
     }
 
@@ -380,6 +495,6 @@ mod tests {
         assert!(response["error"]["message"]
             .as_str()
             .unwrap()
-            .contains("resources/list"));
+            .contains("'resources/list'"));
     }
 }

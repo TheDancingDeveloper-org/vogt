@@ -23,6 +23,11 @@ mod observability;
 mod registry;
 mod storage;
 
+/// The product version, matching `pyproject.toml`. The bridge compares it
+/// against the remote server's advertised version, so the crate version
+/// (`0.1.0`) would report a skew that does not exist.
+pub const VERSION: &str = "0.7.7";
+
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::process::ExitCode;

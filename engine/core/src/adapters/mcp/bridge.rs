@@ -203,8 +203,10 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
             Ok(response) => response,
             Err(error) => {
                 // A notification expects no answer, so an unreachable server
-                // stays silent for one. A request gets the error.
-                return message.get("id").map(|id| {
+                // stays silent for one. A null id is a notification too:
+                // Python's `message.get("id") is None` is true for both an
+                // absent key and a JSON null. A request gets the error.
+                return message.get("id").filter(|id| !id.is_null()).map(|id| {
                     json!({"jsonrpc": "2.0", "id": id,
                         "error": {"code": -32000, "message": format!("vogt unreachable: {error}")}})
                 });
@@ -224,7 +226,13 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
         if status == 202 || body.iter().all(u8::is_ascii_whitespace) {
             return None;
         }
-        serde_json::from_slice(&body).ok()
+        // A non-JSON body (a 500 HTML page) must not vanish: the client is
+        // waiting on this id, and silence looks like a hung server.
+        Some(serde_json::from_slice(&body).unwrap_or_else(|_| {
+            json!({"jsonrpc": "2.0", "id": message.get("id"),
+                "error": {"code": -32000,
+                    "message": "the remote Vogt returned a non-JSON body"}})
+        }))
     }
 
     fn write(&self, output: &mut String, message: &Value) {
@@ -276,12 +284,16 @@ pub fn read_token(path: Option<&str>) -> Option<String> {
 /// to *this* session, and falling back to the shared container token would file
 /// every session's work under one identity while looking like it worked.
 pub fn resolve_token(env: &HashMap<String, String>) -> Option<String> {
-    if env.contains_key("VOGT_SESSION_ID") {
-        if let Some(token) = env.get(HTTP_TOKEN_ENV).map(|token| token.trim()) {
-            if !token.is_empty() {
-                return Some(token.to_owned());
-            }
-        }
+    // An empty session id is not a session. Inside a real one the session
+    // token is the only acceptable source: a whitespace-only token resolves to
+    // nothing rather than falling back to the shared file, which would file
+    // this session's writes under another identity.
+    if env.get("VOGT_SESSION_ID").is_some_and(|id| !id.is_empty()) {
+        return env
+            .get(HTTP_TOKEN_ENV)
+            .map(|token| token.trim())
+            .filter(|token| !token.is_empty())
+            .map(str::to_owned);
     }
     if let Some(token) = read_token(env.get(TOKEN_FILE_ENV).map(String::as_str)) {
         return Some(token);

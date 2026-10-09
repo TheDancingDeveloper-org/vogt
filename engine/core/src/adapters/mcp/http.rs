@@ -14,7 +14,7 @@
 
 use serde_json::{json, Map, Value};
 
-use super::framing::{Dispatcher, ToolGrant};
+use super::framing::{Dispatcher, McpTransport, ToolGrant};
 
 /// Where the route is mounted, matching the Python default.
 pub const MCP_PATH: &str = "/mcp";
@@ -60,7 +60,7 @@ pub fn respond<G: ToolGrant>(
     registry: &crate::registry::OperationRegistry,
     grant: &G,
 ) -> McpHttpResponse {
-    match Dispatcher::new(registry, grant).handle(message) {
+    match Dispatcher::new(registry, grant, McpTransport::Http).handle(message) {
         Some(response) => json_response(response),
         None => McpHttpResponse {
             status: ACCEPTED,
@@ -90,8 +90,8 @@ fn error(id: Option<Value>, message: &str) -> Value {
 /// each write scope implies `read`. Nothing else implies anything —
 /// `work.write` does not grant `project.write`. A mutating operation
 /// additionally needs writes enabled, so a server started read-only shows no
-/// writes no matter what the token says. `LOCAL_ONLY` operations are excluded
-/// before either check: they are absent from the remote transport altogether.
+/// writes no matter what the token says. Operations the MCP transport does not
+/// carry are excluded before either check.
 pub struct ScopeGrant {
     scopes: Vec<crate::registry::Scope>,
     writes_enabled: bool,
@@ -133,8 +133,12 @@ impl ScopeGrant {
 }
 
 impl ToolGrant for ScopeGrant {
-    fn allows(&self, operation: &crate::registry::Operation) -> bool {
-        if !super::framing::exposed_over_mcp(operation) {
+    fn allows(
+        &self,
+        registry: &crate::registry::OperationRegistry,
+        operation: &crate::registry::Operation,
+    ) -> bool {
+        if !super::framing::exposed_over_mcp(registry, operation) {
             return false;
         }
         self.effective().contains(&operation.scope) && (!operation.mutating || self.writes_enabled)
@@ -201,6 +205,10 @@ mod tests {
             "a read-only grant does not see a write"
         );
         assert!(!names.contains(&"init"), "local-only stays invisible");
+        assert!(
+            !names.contains(&"session_token"),
+            "http-only stays invisible"
+        );
     }
 
     #[test]
@@ -242,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_outside_the_grant_is_an_unknown_tool() {
+    fn a_call_outside_the_grant_is_forbidden() {
         let response = respond(
             &message(json!({
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -257,6 +265,6 @@ mod tests {
         assert!(body["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("unknown tool"));
+            .starts_with("forbidden"));
     }
 }
