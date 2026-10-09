@@ -706,5 +706,199 @@
     },
     "exit": 0,
     "operation": "contract.evaluate"
+  },
+  {
+    "body": {
+      "initiative": {
+        "body": "",
+        "created_at": "2026-01-02T03:04:05Z",
+        "id": "ini_0001",
+        "slug": "platform",
+        "state": "open",
+        "title": "Platform",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "weight": 0
+      }
+    },
+    "exit": 0,
+    "operation": "initiative.create"
+  },
+  {
+    "body": {
+      "initiatives": [
+        {
+          "body": "",
+          "created_at": "2026-01-02T03:04:05Z",
+          "id": "ini_0001",
+          "slug": "platform",
+          "state": "open",
+          "title": "Platform",
+          "updated_at": "2026-01-02T03:04:05Z",
+          "weight": 0
+        }
+      ]
+    },
+    "exit": 0,
+    "operation": "initiative.list"
+  },
+  {
+    "body": {
+      "initiative": {
+        "body": "",
+        "created_at": "2026-01-02T03:04:05Z",
+        "id": "ini_0001",
+        "slug": "platform",
+        "state": "open",
+        "title": "Platform work",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "weight": 0
+      }
+    },
+    "exit": 0,
+    "operation": "initiative.update"
+  },
+  {
+    "body": {
+      "slug": "platform",
+      "state": "open",
+      "tracking_issues": []
+    },
+    "exit": 0,
+    "operation": "initiative.publish"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "initiative.publish"
+  },
+  {
+    "body": {
+      "preferences": []
+    },
+    "exit": 0,
+    "operation": "preference.get"
+  },
+  {
+    "body": {
+      "preference": {
+        "key": "inbox.filter",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "value": {
+          "actor": "any",
+          "sources": [
+            "ci"
+          ],
+          "triage_states": [
+            "active"
+          ]
+        },
+        "version": 1
+      }
+    },
+    "exit": 0,
+    "operation": "preference.set"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "preference.set"
+  },
+  {
+    "body": {
+      "by_reason": {},
+      "detail": "nothing collected \u2014 either there is nothing to say, or the configured token cannot read notifications; `coverage` distinguishes the two",
+      "freshness": {
+        "age_seconds": null,
+        "collectors": "<volatile>",
+        "detail": "no collector has completed a sweep yet",
+        "oldest_relevant_sweep": null,
+        "status": "never_swept"
+      },
+      "notifications": [],
+      "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
+      "total": 0,
+      "unread": 0
+    },
+    "exit": 0,
+    "operation": "notifications"
+  },
+  {
+    "body": {
+      "actor_unknown_hidden": 0,
+      "counts": {
+        "active": 0,
+        "archived": 0,
+        "snoozed": 0
+      },
+      "coverage": {
+        "agent": {
+          "count": 0,
+          "detail": null,
+          "observed_at": null,
+          "projects": 0,
+          "registered": 0,
+          "source": "agent",
+          "status": "current"
+        },
+        "ci": {
+          "count": 0,
+          "detail": "this collector has not completed a sweep",
+          "observed_at": null,
+          "projects": 0,
+          "registered": 0,
+          "source": "ci",
+          "status": "unswept"
+        },
+        "drift": {
+          "count": 0,
+          "detail": "open proposals in the declared store",
+          "observed_at": null,
+          "projects": 0,
+          "registered": 0,
+          "source": "drift",
+          "status": "current"
+        },
+        "github": {
+          "count": 0,
+          "detail": "this collector has not completed a sweep",
+          "observed_at": null,
+          "projects": 0,
+          "registered": 0,
+          "source": "github",
+          "status": "unswept"
+        }
+      },
+      "engine_available": false,
+      "engine_detail": "the engine is not answering: <urlopen error [Errno -2] Name or service not known>",
+      "engine_status": "unreachable",
+      "entries": [],
+      "github_scope": "registered projects only",
+      "high_water": {
+        "agent": null,
+        "ci": null,
+        "drift": null,
+        "github": null
+      },
+      "instance_scope": "registered projects only",
+      "next_cursor": null,
+      "snapshot_at": "2026-01-02T03:04:05Z"
+    },
+    "exit": 0,
+    "operation": "inbox.list"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "inbox.archive"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "inbox.snooze"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "inbox.restore"
   }
 ]
