@@ -139,7 +139,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "suppression.list" => Some(crate::application::suppressions::suppression_list_op),
         "suppression.revoke" => Some(crate::application::suppressions::suppression_revoke_op),
         "why" => Some(crate::application::views::why_op),
-        _ => None,
+        other => crate::application::services::service_for(other),
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

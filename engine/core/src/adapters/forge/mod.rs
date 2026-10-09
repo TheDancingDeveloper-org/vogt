@@ -30,7 +30,10 @@ mod writeback;
 
 pub use edges::{parse_edges, ParsedEdge, FROM_BODY, FROM_BRANCH, FROM_TITLE};
 pub use github::repo_of;
-pub use kinds::{current_collector, COLLECTOR_ALIASES};
+pub use kinds::{
+    current_collector, COLLECTOR_ALIASES, COLLECTOR_CHECKS, COLLECTOR_NOTIFICATIONS, KIND_CHECK,
+    KIND_DEPLOY_LANE, KIND_NOTIFICATION,
+};
 pub use models::{
     ForgeActor, ForgeCapabilities, ForgeCheck, ForgeComparison, ForgeIssue, ForgeJob, ForgeLabel,
     ForgeNotification, ForgePosture, ForgePull, ForgeRelease, ForgeRepo, RepoRef,
