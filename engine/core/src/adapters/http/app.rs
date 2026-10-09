@@ -770,7 +770,7 @@ fn invalid_arguments(error: &VogtError) -> Response {
             .iter()
             .map(|problem| {
                 serde_json::json!({
-                    "loc": problem.loc,
+                    "loc": problem.loc.iter().map(crate::errors::Loc::as_text).collect::<Vec<_>>(),
                     "msg": problem.msg,
                     "type": problem.error_type,
                 })
