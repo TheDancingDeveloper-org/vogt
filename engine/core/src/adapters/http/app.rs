@@ -507,6 +507,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
                 writes_enabled: state.writes_enabled,
                 now,
             },
+            state.config.session_ttl_days,
         )
     };
     let grant = match granted {
@@ -574,12 +575,14 @@ fn parse_params(
     }
 }
 
-/// Query parameters as one flat object. A repeated key becomes a list. Each
-/// value is coerced to the type the operation's schema declares, because a query
-/// string only ever carries text and the validator does not coerce: `limit=5`
-/// has to arrive as a number, not the string `"5"`. Percent-encoding is decoded
-/// on bytes, never by slicing the string, so a `%` followed by a non-boundary
-/// byte is a bad query rather than a panic.
+/// Query parameters as one flat object. A repeated key keeps its last value,
+/// which is what FastAPI does for a scalar field; building an array made
+/// `?limit=5&limit=10` a 422. Each value is coerced to the type the operation's
+/// schema declares, because a query string only ever carries text and the
+/// validator does not coerce: `limit=5` has to arrive as a number, not the
+/// string `"5"`. Percent-encoding is decoded on bytes, never by slicing the
+/// string, so a `%` followed by a non-boundary byte is a bad query rather than
+/// a panic.
 fn query_object(operation: &str, query: Option<&str>) -> serde_json::Value {
     let schema = crate::registry::params_schema_for(operation);
     let mut object = serde_json::Map::new();
@@ -591,17 +594,8 @@ fn query_object(operation: &str, query: Option<&str>) -> serde_json::Value {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key);
         let decoded = percent_decode(value);
-        let value = coerce_query(&schema, &key, &decoded);
-        match object.get_mut(&key) {
-            Some(serde_json::Value::Array(items)) => items.push(value),
-            Some(existing) => {
-                let first = existing.take();
-                *existing = serde_json::Value::Array(vec![first, value]);
-            }
-            None => {
-                object.insert(key, value);
-            }
-        }
+        let coerced = coerce_query(&schema, &key, &decoded);
+        object.insert(key, coerced);
     }
     serde_json::Value::Object(object)
 }
@@ -883,6 +877,13 @@ mod tests {
         let (head, response) = buf.split_once("\r\n\r\n").unwrap();
         let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
         (status, response.to_string())
+    }
+
+    #[test]
+    fn a_repeated_query_key_keeps_its_last_value() {
+        let running = serve(true);
+        let (status, body) = request(running.addr, "GET", "/api/labels?limit=0&limit=5", None);
+        assert_eq!(status, 200, "{body}");
     }
 
     #[test]

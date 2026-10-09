@@ -25,7 +25,11 @@ pub enum Denial {
     /// A token was presented but does not resolve to a live credential.
     Rejected { code: &'static str },
     /// The token is live but does not carry the operation's scope.
-    Forbidden { held: Vec<String>, needed: String },
+    Forbidden {
+        operation: String,
+        held: Vec<String>,
+        needed: String,
+    },
     /// The instance refuses writes and the operation mutates.
     WritesDisabled,
     /// The decision could not be recorded, so nothing may proceed.
@@ -39,9 +43,22 @@ impl Denial {
         match self {
             Denial::NoBearer => VogtError::Unauthenticated("no bearer token presented".to_string()),
             Denial::Rejected { .. } => VogtError::Unauthenticated(TOKEN_INVALID.to_string()),
-            Denial::Forbidden { .. } => VogtError::Forbidden(
-                "the token does not carry the scope this operation needs".to_string(),
-            ),
+            Denial::Forbidden {
+                operation,
+                held,
+                needed,
+            } => {
+                let mut names: Vec<&str> = held.iter().map(String::as_str).collect();
+                names.sort_unstable();
+                let listed = if names.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    names.join(", ")
+                };
+                VogtError::Forbidden(format!(
+                    "{operation} requires the '{needed}' scope; this token holds {listed}"
+                ))
+            }
             Denial::WritesDisabled => {
                 VogtError::Forbidden("writes are disabled on this instance".to_string())
             }
@@ -67,9 +84,6 @@ pub struct Grant {
     pub token: Option<Token>,
 }
 
-/// How long a session token's expiry moves forward on each use, in seconds.
-const SLIDING_SESSION_SECONDS: i64 = 12 * 60 * 60;
-
 /// The request-shaped inputs to a decision, kept together so the check itself
 /// stays readable.
 pub struct Request<'a> {
@@ -85,19 +99,28 @@ pub struct Request<'a> {
 /// rejected token is the fact worth keeping; a success is not, because the
 /// authorization that follows records the one row for the request. MCP uses
 /// this so a ping or an initialize writes nothing for a live token.
-pub fn authenticate<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Grant, Denial> {
-    resolve(store, request, false)
+pub fn authenticate<S: DeclaredStore>(
+    store: &S,
+    request: Request<'_>,
+    session_ttl_days: i64,
+) -> Result<Grant, Denial> {
+    resolve(store, request, false, session_ttl_days)
 }
 
 /// Authenticate, then authorize, recording the one decision for the request.
-pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Grant, Denial> {
-    resolve(store, request, true)
+pub fn authorize<S: DeclaredStore>(
+    store: &S,
+    request: Request<'_>,
+    session_ttl_days: i64,
+) -> Result<Grant, Denial> {
+    resolve(store, request, true, session_ttl_days)
 }
 
 fn resolve<S: DeclaredStore>(
     store: &S,
     request: Request<'_>,
     record_allow: bool,
+    session_ttl_days: i64,
 ) -> Result<Grant, Denial> {
     let Request {
         operation,
@@ -147,6 +170,10 @@ fn resolve<S: DeclaredStore>(
             });
         }
     };
+    // The token was presented and it is live, so this request used it whether or
+    // not the scope check that follows allows the operation. Python stamps here,
+    // before authorize, which is why a 403 still moves `last_used_at`.
+    slide(store, &token, now, session_ttl_days);
     let held: Vec<&str> = token.scopes.iter().map(String::as_str).collect();
     let (permitted, reason) = allows(
         &held,
@@ -174,6 +201,7 @@ fn resolve<S: DeclaredStore>(
             Denial::WritesDisabled
         } else {
             Denial::Forbidden {
+                operation: operation.name.to_string(),
                 held: token.scopes.clone(),
                 needed: operation.scope.as_str().to_string(),
             }
@@ -196,7 +224,6 @@ fn resolve<S: DeclaredStore>(
                 operation_name: operation.name,
             }),
         )?;
-        slide(store, &token, now);
     }
     Ok(Grant {
         actor_id: token.actor_id.clone(),
@@ -335,17 +362,43 @@ fn record<S: DeclaredStore>(store: &S, decision: &mut AuthDecision) -> Result<()
         })
 }
 
-/// A session token's expiry slides forward on use. A failure here is not a
-/// reason to refuse the request: the decision is already recorded.
-fn slide<S: DeclaredStore>(store: &S, token: &Token, now: Moment) {
-    let expires = match token.kind {
-        TokenKind::Session => Some(Moment::from_unix(
-            now.unix_seconds().saturating_add(SLIDING_SESSION_SECONDS),
-            now.nanos(),
-        )),
+/// How stale `last_used_at` may get before a request rewrites it. Long enough
+/// that a busy token is not writing on every request, short enough that "last
+/// used" stays useful. Python's `_TOUCH_DEBOUNCE`.
+const TOUCH_DEBOUNCE_SECONDS: i64 = 5 * 60;
+
+/// Record that the token was used, and slide a session that is past half its
+/// life. A failure here is not a reason to refuse the request.
+///
+/// The stamp is debounced: a token touched within the last five minutes is left
+/// alone, unless its session is due a renewal, which rides the same write.
+/// Renewal extends a session to a full `session_ttl_days` from now, and only
+/// once less than half that lifetime remains. An API or agent token never
+/// slides — doing so would quietly make an expiring token permanent.
+fn slide<S: DeclaredStore>(store: &S, token: &Token, now: Moment, session_ttl_days: i64) {
+    let ttl = session_ttl_days.saturating_mul(24 * 60 * 60);
+    let renewal = match token.kind {
+        TokenKind::Session => token.expires_at.and_then(|expires| {
+            let left = expires.unix_seconds() - now.unix_seconds();
+            if left > 0 && left <= ttl / 2 {
+                Some(Moment::from_unix(
+                    now.unix_seconds().saturating_add(ttl),
+                    now.nanos(),
+                ))
+            } else {
+                None
+            }
+        }),
         _ => None,
     };
-    if let Err(error) = store.touch_token(&token.id, now, expires) {
+    let stale = match token.last_used_at {
+        None => true,
+        Some(at) => now.unix_seconds() - at.unix_seconds() >= TOUCH_DEBOUNCE_SECONDS,
+    };
+    if !stale && renewal.is_none() {
+        return;
+    }
+    if let Err(error) = store.touch_token(&token.id, now, renewal) {
         tracing::warn!("the token's last use could not be recorded: {error}");
     }
 }

@@ -302,6 +302,7 @@ fn authenticate<C: Clock, I: IdFactory>(
             writes_enabled: state.writes_enabled,
             now,
         },
+        state.config.session_ttl_days,
     )
 }
 
@@ -370,6 +371,7 @@ fn record_call<C: Clock, I: IdFactory>(
         Err(Denial::WritesDisabled)
     } else {
         Err(Denial::Forbidden {
+            operation: operation.name.to_string(),
             held: grant.scopes.clone(),
             needed: operation.scope.as_str().to_string(),
         })
