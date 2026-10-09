@@ -171,6 +171,29 @@ fn a_preference_write_bumps_its_version_and_a_stale_one_is_refused() {
 }
 
 #[test]
+fn a_saved_filter_with_bad_fields_reads_like_pydantic() {
+    let built = opened();
+    let bad = preferences::preference_set_op(
+        &built,
+        json!({
+            "key": "inbox.filter",
+            "value": {"sources": ["bogus"], "actor": "nobody", "project": "x"},
+            "reason": "bad",
+        }),
+    )
+    .unwrap_err();
+    match bad {
+        VogtError::InvalidPreference(message) => assert_eq!(
+            message,
+            "invalid inbox.filter value — sources.0: Input should be 'github', \
+             'drift', 'ci' or 'agent'; actor: Input should be 'any', 'external', \
+             'org' or 'bot'; project: Extra inputs are not permitted"
+        ),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
 fn a_preference_key_outside_the_shape_is_refused() {
     let built = opened();
     let bad_key = preferences::preference_set_op(
