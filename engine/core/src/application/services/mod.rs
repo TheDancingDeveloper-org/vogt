@@ -12,6 +12,7 @@
 
 pub mod auth;
 pub mod freshness;
+pub mod install;
 
 mod inbox;
 mod initiatives;

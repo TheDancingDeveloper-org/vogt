@@ -137,6 +137,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "auth.logout" => Some(crate::application::services::auth::logout_op),
         "auth.whoami" => Some(crate::application::services::auth::whoami_op),
         "auth.decisions" => Some(crate::application::services::auth::decisions_op),
+        "install.status" => Some(crate::application::services::install::install_status_op),
+        "install.bootstrap" => Some(crate::application::services::install::install_bootstrap_op),
         "contract.check" => Some(crate::application::contracts::contract_check_op),
         "contract.adopt" => Some(crate::application::contracts::contract_adopt_op),
         "contract.decline" => Some(crate::application::contracts::contract_decline_op),

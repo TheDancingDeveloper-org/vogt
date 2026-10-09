@@ -106,6 +106,15 @@ impl Moment {
         seconds + nanos / 1_000_000_000.0
     }
 
+    /// `now + timedelta(days=n)`. A day is 86400 seconds, as Python's timedelta
+    /// counts it, with no calendar arithmetic.
+    pub fn plus_days(self, days: i64) -> Self {
+        Self {
+            unix_seconds: self.unix_seconds + days * 86_400,
+            nanos: self.nanos,
+        }
+    }
+
     /// Always `+00:00`. A moment is UTC, so there is no other offset to print.
     pub fn to_iso(self) -> String {
         self.render("+00:00")
