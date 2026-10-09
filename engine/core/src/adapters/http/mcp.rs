@@ -70,16 +70,69 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
 }
 
 /// The route, gated by the declared store.
-pub fn router<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
-    state: McpState<C, I>,
-) -> Router {
-    Router::new()
-        .route(MCP_PATH, post(handle))
-        .with_state(Arc::new(state))
+///
+/// One function per hook pair rather than one generic one. A tool call's
+/// context has to be a `Built`, and `Built` only exists for these four pairs,
+/// so each route names its pair and builds the context on the store's own
+/// clock and id factory. `serve` already matches on the same four.
+macro_rules! mcp_route {
+    ($name:ident, $clock:ty, $ids:ty, $variant:ident) => {
+        pub fn $name(state: McpState<$clock, $ids>) -> Router {
+            fn build(
+                config: crate::config::VogtConfig,
+                principal: Option<crate::core::Principal>,
+                clock: Arc<Mutex<$clock>>,
+                ids: Arc<Mutex<$ids>>,
+                token: Option<crate::core::Token>,
+            ) -> crate::application::context::Built {
+                crate::application::context::Built::$variant(
+                    crate::application::context::context_on(config, principal, clock, ids, token),
+                )
+            }
+            Router::new()
+                .route(MCP_PATH, post(handle::<$clock, $ids>))
+                .with_state((Arc::new(state), build as ContextBuild<$clock, $ids>))
+        }
+    };
 }
 
+type ContextBuild<C, I> = fn(
+    crate::config::VogtConfig,
+    Option<crate::core::Principal>,
+    Arc<Mutex<C>>,
+    Arc<Mutex<I>>,
+    Option<crate::core::Token>,
+) -> crate::application::context::Built;
+
+type Routed<C, I> = (Arc<McpState<C, I>>, ContextBuild<C, I>);
+
+mcp_route!(
+    router_system_random,
+    crate::application::context::SystemClock,
+    crate::application::context::RandomIds,
+    SystemRandom
+);
+mcp_route!(
+    router_system_sequential,
+    crate::application::context::SystemClock,
+    crate::core::SequentialIds,
+    SystemSequential
+);
+mcp_route!(
+    router_step_random,
+    crate::core::StepClock,
+    crate::application::context::RandomIds,
+    StepRandom
+);
+mcp_route!(
+    router_step_sequential,
+    crate::core::StepClock,
+    crate::core::SequentialIds,
+    StepSequential
+);
+
 async fn handle<C: Clock, I: IdFactory>(
-    State(state): State<Arc<McpState<C, I>>>,
+    State((state, build)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
     let presented = bearer(request.headers().get("authorization"));
@@ -122,9 +175,10 @@ async fn handle<C: Clock, I: IdFactory>(
         scopes: grant.scopes.clone(),
         writes_enabled: state.writes_enabled,
     };
-    // The context carries the authenticated principal, so a ported service
-    // runs as the caller rather than against no context at all.
-    let built = context_for(&state, &grant);
+    // The context carries the authenticated principal, on the same clock and id
+    // factory the decision row was written with, so the service's writes
+    // continue that sequence instead of starting another one.
+    let built = context_for(&state, &grant, build);
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
     if let Some(context) = built.as_ref() {
         dispatcher = dispatcher.with_context(context);
@@ -145,13 +199,13 @@ async fn handle<C: Clock, I: IdFactory>(
 /// row the gate already loaded, so an agent's token stays an agent instead of
 /// being recorded as a person, and the token rides with it for `auth.whoami`.
 ///
-/// The clock and the id factory are still the hook environment's, not the
-/// store's. `Operation::run` takes `&Built`, whose variants own their clock, so
-/// the route cannot hand it the `Arc` handles the store already holds. That
-/// needs `Built` to carry them, which is `application::context`.
+/// The clock and the id factory are the store's own handles, not a fresh pair.
+/// A fresh pair would tick and count on its own, and with the hooks on a second
+/// factory rewrites `test-ids.json` from what it alone has drawn.
 fn context_for<C: Clock, I: IdFactory>(
     state: &McpState<C, I>,
     grant: &auth_gate::Grant,
+    build: ContextBuild<C, I>,
 ) -> Option<crate::application::context::Built> {
     use crate::core::{local_principal, os_user, Principal};
     let config = crate::config::VogtConfig {
@@ -164,17 +218,14 @@ fn context_for<C: Clock, I: IdFactory>(
         }
         _ => Some(local_principal(&os_user())),
     };
-    crate::application::context::build_context(
+    let store = state.store.lock().expect("the store lock is not poisoned");
+    Some(build(
         config,
         principal,
-        None,
-        None,
+        Arc::clone(store.clock()),
+        Arc::clone(store.id_factory()),
         grant.token.clone(),
-        None,
-        None,
-        None,
-    )
-    .ok()
+    ))
 }
 
 /// Resolve the credential through the shared gate, which records a refusal and
@@ -419,7 +470,8 @@ fn json_response(status: StatusCode, body: Value) -> Response {
 mod tests {
     use super::*;
 
-    use crate::core::{SequentialIds, SystemClock};
+    use crate::application::context::SystemClock;
+    use crate::core::SequentialIds;
     use crate::storage::interface::{DeclaredStore, ReadView};
 
     struct Running {
@@ -451,7 +503,9 @@ mod tests {
         );
         runtime.spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, router(state)).await.unwrap();
+            axum::serve(listener, router_system_sequential(state))
+                .await
+                .unwrap();
         });
         std::thread::sleep(std::time::Duration::from_millis(100));
         Running {

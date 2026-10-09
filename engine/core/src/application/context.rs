@@ -363,13 +363,10 @@ where
 /// `build_context` wraps whatever it is given in a fresh `Arc`, so a second
 /// context over the same data directory draws its own ids and ticks its own
 /// clock. The HTTP and MCP routes already hold both inside the store they
-/// authenticate against; this builds the request context on those same handles,
-/// so a decision row and the write it guards count from one sequence.
-///
-/// The HTTP registry routes cannot call this yet: `Operation::run` takes
-/// `&Built`, whose variants own their clock, and sharing the store's handles
-/// needs `Built` to carry the `Arc`. MCP builds its own context and can.
-#[allow(dead_code)]
+/// authenticate against, and each builds its request context on those same
+/// handles, so a decision row and the write it guards count from one sequence.
+/// The routes are split per hook pair because `Built` only exists for those
+/// four, and each pair wraps this in its own variant.
 pub fn context_on<C, I>(
     config: VogtConfig,
     principal: Option<Principal>,

@@ -437,7 +437,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
     // clock and id sequence as the rest of the process, hooks included.
     let router = match &built {
         application::context::Built::SystemRandom(ctx) => health
-            .merge(adapters::http::app::router(
+            .merge(adapters::http::app::router_system_random(
                 adapters::http::app::AppState::joined(
                     &data_dir,
                     no_auth,
@@ -445,7 +445,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
                     &ctx.declared,
                 ),
             ))
-            .merge(adapters::http::mcp::router(
+            .merge(adapters::http::mcp::router_system_random(
                 adapters::http::mcp::McpState::joined(
                     &data_dir,
                     no_auth,
@@ -454,7 +454,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
                 ),
             )),
         application::context::Built::SystemSequential(ctx) => health
-            .merge(adapters::http::app::router(
+            .merge(adapters::http::app::router_system_sequential(
                 adapters::http::app::AppState::joined(
                     &data_dir,
                     no_auth,
@@ -462,7 +462,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
                     &ctx.declared,
                 ),
             ))
-            .merge(adapters::http::mcp::router(
+            .merge(adapters::http::mcp::router_system_sequential(
                 adapters::http::mcp::McpState::joined(
                     &data_dir,
                     no_auth,
@@ -471,7 +471,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
                 ),
             )),
         application::context::Built::StepRandom(ctx) => health
-            .merge(adapters::http::app::router(
+            .merge(adapters::http::app::router_step_random(
                 adapters::http::app::AppState::joined(
                     &data_dir,
                     no_auth,
@@ -479,7 +479,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
                     &ctx.declared,
                 ),
             ))
-            .merge(adapters::http::mcp::router(
+            .merge(adapters::http::mcp::router_step_random(
                 adapters::http::mcp::McpState::joined(
                     &data_dir,
                     no_auth,
@@ -488,7 +488,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
                 ),
             )),
         application::context::Built::StepSequential(ctx) => health
-            .merge(adapters::http::app::router(
+            .merge(adapters::http::app::router_step_sequential(
                 adapters::http::app::AppState::joined(
                     &data_dir,
                     no_auth,
@@ -496,7 +496,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
                     &ctx.declared,
                 ),
             ))
-            .merge(adapters::http::mcp::router(
+            .merge(adapters::http::mcp::router_step_sequential(
                 adapters::http::mcp::McpState::joined(
                     &data_dir,
                     no_auth,

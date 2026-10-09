@@ -79,21 +79,77 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
 /// The router for the registry surface. Health routes stay on their own router
 /// and are merged in by `serve`. Login is mounted by hand, ahead of the
 /// fallback: the caller holds no credential yet, so it never enters the gate.
-pub fn router<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
-    state: AppState<C, I>,
-) -> Router {
-    Router::new()
-        .route("/api/auth/login", axum::routing::post(login))
-        .fallback(dispatch)
-        .with_state(Arc::new(state))
+///
+/// One function per hook pair, the way the MCP route is split. A request's
+/// context has to be a `Built`, which only exists for these four pairs, so each
+/// router names its pair and builds the context on the store's own clock and id
+/// factory rather than a fresh one.
+macro_rules! api_route {
+    ($name:ident, $clock:ty, $ids:ty, $variant:ident) => {
+        pub fn $name(state: AppState<$clock, $ids>) -> Router {
+            fn build(
+                config: crate::config::VogtConfig,
+                principal: Option<Principal>,
+                clock: Arc<Mutex<$clock>>,
+                ids: Arc<Mutex<$ids>>,
+                token: Option<crate::core::Token>,
+            ) -> crate::application::context::Built {
+                crate::application::context::Built::$variant(
+                    crate::application::context::context_on(config, principal, clock, ids, token),
+                )
+            }
+            Router::new()
+                .route(
+                    "/api/auth/login",
+                    axum::routing::post(login::<$clock, $ids>),
+                )
+                .fallback(dispatch::<$clock, $ids>)
+                .with_state((Arc::new(state), build as ContextBuild<$clock, $ids>))
+        }
+    };
 }
+
+type ContextBuild<C, I> = fn(
+    crate::config::VogtConfig,
+    Option<Principal>,
+    Arc<Mutex<C>>,
+    Arc<Mutex<I>>,
+    Option<crate::core::Token>,
+) -> crate::application::context::Built;
+
+type Routed<C, I> = (Arc<AppState<C, I>>, ContextBuild<C, I>);
+
+api_route!(
+    router_system_random,
+    crate::application::context::SystemClock,
+    crate::application::context::RandomIds,
+    SystemRandom
+);
+api_route!(
+    router_system_sequential,
+    crate::application::context::SystemClock,
+    crate::core::SequentialIds,
+    SystemSequential
+);
+api_route!(
+    router_step_random,
+    crate::core::StepClock,
+    crate::application::context::RandomIds,
+    StepRandom
+);
+api_route!(
+    router_step_sequential,
+    crate::core::StepClock,
+    crate::core::SequentialIds,
+    StepSequential
+);
 
 /// `POST /api/auth/login`. Public, like Python's hand-mounted route. The body
 /// is validated before anything else, and every refusal after that is the
 /// service's own answer: one sentence at 401, or the throttled error at 429.
 /// The decision rows are written inside `login_op`, with transport `http`.
 async fn login<C: Clock, I: IdFactory>(
-    State(state): State<Arc<AppState<C, I>>>,
+    State((state, build)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
     // `text/plain` is a CORS simple request, so a missing or wrong content type
@@ -113,7 +169,7 @@ async fn login<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error),
     };
-    let built = context_for_login(&state);
+    let built = context_for_login(&state, build);
     let Some(built) = built else {
         return error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
@@ -205,7 +261,7 @@ fn json_content_type(header: Option<&axum::http::HeaderValue>) -> bool {
 }
 
 async fn dispatch<C: Clock, I: IdFactory>(
-    State(state): State<Arc<AppState<C, I>>>,
+    State((state, build)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
     let method = request.method().clone();
@@ -278,7 +334,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
             return error_response(&denial.error());
         }
     };
-    let built = context_for(&state, &grant);
+    let built = context_for(&state, &grant, build);
     match operation.run(built.as_ref(), params) {
         Ok(value) => json_response(StatusCode::OK, value),
         // Not ported is not the caller's fault, so it is not a 400. The shared
@@ -368,10 +424,13 @@ fn percent_decode(text: &str) -> String {
 }
 
 /// The context a ported service runs in. The grant names the caller; the data
-/// directory is the one the route's own store was opened on.
+/// directory is the one the route's own store was opened on. The clock and the
+/// id factory are that store's handles, so the service's writes continue the
+/// sequence the decision row started instead of opening a second one.
 fn context_for<C: Clock, I: IdFactory>(
     state: &AppState<C, I>,
     grant: &Grant,
+    build: ContextBuild<C, I>,
 ) -> Option<crate::application::context::Built> {
     let config = crate::config::VogtConfig {
         data_dir: state.data_dir.clone(),
@@ -383,17 +442,23 @@ fn context_for<C: Clock, I: IdFactory>(
         }
         _ => Some(local_principal(&os_user())),
     };
-    crate::application::context::build_context(
-        config, principal, None, None, None, None, None, None,
-    )
-    .ok()
+    let store = state.store.lock().expect("the store lock is not poisoned");
+    Some(build(
+        config,
+        principal,
+        Arc::clone(store.clock()),
+        Arc::clone(store.id_factory()),
+        grant.token.clone(),
+    ))
 }
 
 /// The context a login runs in. Nobody is authenticated yet, so there is no
 /// principal and no token; `login_op` names the actor itself once the password
-/// matches. The data directory is the route's own store.
+/// matches. The data directory is the route's own store, and so are the clock
+/// and the id factory.
 fn context_for_login<C: Clock, I: IdFactory>(
     state: &AppState<C, I>,
+    build: ContextBuild<C, I>,
 ) -> Option<crate::application::context::Built> {
     // The loaded config, not `VogtConfig::default()`. The default fixes
     // `session_ttl_days` at 30, so an operator who set `VOGT_SESSION_TTL_DAYS`
@@ -401,8 +466,14 @@ fn context_for_login<C: Clock, I: IdFactory>(
     // own, because the store was opened on it.
     let mut config = crate::config::load_config(&serde_json::Map::new()).ok()?;
     config.data_dir = state.data_dir.clone();
-    crate::application::context::build_context(config, None, None, None, None, None, None, None)
-        .ok()
+    let store = state.store.lock().expect("the store lock is not poisoned");
+    Some(build(
+        config,
+        None,
+        Arc::clone(store.clock()),
+        Arc::clone(store.id_factory()),
+        None,
+    ))
 }
 
 /// Python's 422 envelope. The validator reports one error as a single
@@ -494,12 +565,14 @@ mod tests {
             &dir,
             no_auth,
             true,
-            crate::core::SystemClock,
+            crate::application::context::SystemClock,
             crate::core::SequentialIds::new(None).unwrap(),
         );
         runtime.spawn(async move {
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
-            axum::serve(listener, router(state)).await.unwrap();
+            axum::serve(listener, router_system_sequential(state))
+                .await
+                .unwrap();
         });
         std::thread::sleep(std::time::Duration::from_millis(150));
         Running {
