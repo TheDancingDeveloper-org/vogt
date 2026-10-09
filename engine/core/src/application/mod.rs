@@ -8,6 +8,7 @@ pub mod context;
 pub mod contracts;
 pub mod instance;
 pub mod resolve;
+pub mod views;
 pub mod writes;
 #[cfg(test)]
 mod writes_test;
