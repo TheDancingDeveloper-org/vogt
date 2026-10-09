@@ -1676,35 +1676,73 @@ pub mod http1 {
     /// the environment path and then stops while an override is set.
     fn merged_root_certs() -> Vec<rustls::pki_types::CertificateDer<'static>> {
         let mut certs = Vec::new();
+        // Which sources loaded, so a failure can say what is still trusted.
+        let mut file_loaded = false;
+        let mut dir_loaded = false;
+        // (what failed, the path, why), reported after the store is built.
+        let mut failures: Vec<(String, String, String)> = Vec::new();
         for (variable, kind) in [("SSL_CERT_FILE", "file"), ("SSL_CERT_DIR", "dir")] {
             let Some(path) = std::env::var_os(variable) else {
                 continue;
             };
+            let shown = std::path::Path::new(&path).display().to_string();
             match load_pem_path(std::path::Path::new(&path), kind == "dir") {
-                Ok(mut loaded) => certs.append(&mut loaded),
-                Err(error) => {
-                    // SSL_CERT_DIR replaces the platform roots, so a directory
-                    // that cannot be read leaves the store empty. Saying the
-                    // platform roots are trusted would be the opposite of true.
-                    let fallback = if kind == "dir" {
-                        "trusting nothing"
+                Ok(mut loaded) => {
+                    if kind == "dir" {
+                        dir_loaded = true;
                     } else {
-                        "trusting the platform roots only"
-                    };
-                    eprintln!(
-                        "vogt: {variable}={} could not be read ({error}); {fallback}",
-                        std::path::Path::new(&path).display()
-                    );
+                        file_loaded = true;
+                    }
+                    certs.append(&mut loaded);
                 }
+                Err(error) => failures.push((variable.to_string(), shown, error)),
             }
         }
         // Python's urllib uses SSL_CERT_DIR instead of the platform capath, so
         // an operator who narrows trust that way does not also trust the public
         // roots. SSL_CERT_FILE is additive and the platform roots stay.
-        if std::env::var_os("SSL_CERT_DIR").is_none() {
+        let platform = std::env::var_os("SSL_CERT_DIR").is_none();
+        let mut platform_loaded = false;
+        if platform {
             match platform_root_certs() {
-                Ok(mut loaded) => certs.append(&mut loaded),
-                Err(error) => eprintln!("vogt: platform certificate store unavailable: {error}"),
+                Ok(mut loaded) => {
+                    platform_loaded = true;
+                    certs.append(&mut loaded);
+                }
+                Err(error) => failures.push((
+                    "platform certificate store".to_string(),
+                    String::new(),
+                    error,
+                )),
+            }
+        }
+        // Said once, after the store exists, naming exactly the sources that
+        // loaded. A failed directory with a loaded file trusts the file; a
+        // failed file with a directory set trusts the directory.
+        if !failures.is_empty() {
+            let mut trusted = Vec::new();
+            if file_loaded {
+                trusted.push("SSL_CERT_FILE");
+            }
+            if dir_loaded {
+                trusted.push("SSL_CERT_DIR");
+            }
+            if platform_loaded {
+                trusted.push("the platform roots");
+            }
+            let trusting = match trusted.as_slice() {
+                [] => "trusting nothing".to_string(),
+                [one] => format!("trusting {one} only"),
+                [first, second] => format!("trusting {first} and {second}"),
+                _ => format!("trusting {}", trusted.join(", ")),
+            };
+            for (variable, path, error) in &failures {
+                let where_ = if path.is_empty() {
+                    String::new()
+                } else {
+                    format!("={path}")
+                };
+                eprintln!("vogt: {variable}{where_} could not be read ({error}); {trusting}");
             }
         }
         certs
