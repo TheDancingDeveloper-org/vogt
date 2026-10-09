@@ -1717,3 +1717,396 @@ mod projection_tests {
         assert_eq!(splice_managed_region(None, &region), region);
     }
 }
+
+// Which CI runs deserve attention on their own. Ports `core/ci_alerts.py`.
+// Pure: observations in, verdicts out. Nothing here reads a store or a clock.
+
+const PULL_REQUEST_EVENTS: &[&str] = &["pull_request", "pull_request_target", "merge_group"];
+const GITHUB_MANAGED_EVENTS: &[&str] = &["dynamic"];
+const GITHUB_MANAGED_PATH_PREFIX: &str = "dynamic/";
+const FAILING: &[&str] = &[
+    "failure",
+    "timed_out",
+    "startup_failure",
+    "action_required",
+    "error",
+];
+const PASSING: &[&str] = &["success", "neutral", "skipped"];
+
+fn payload_str<'a>(payload: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|text| !text.is_empty())
+}
+
+/// Whether a check observation is a run of a GitHub-managed workflow: its event
+/// is `dynamic`, its workflow path sits under `dynamic/`, or — for an
+/// observation stored before either was recorded — its name ends in a
+/// Dependabot update number.
+pub fn github_managed(payload: &serde_json::Value) -> bool {
+    if payload_str(payload, "event").is_some_and(|event| GITHUB_MANAGED_EVENTS.contains(&event)) {
+        return true;
+    }
+    if payload_str(payload, "workflow_path")
+        .is_some_and(|path| path.starts_with(GITHUB_MANAGED_PATH_PREFIX))
+    {
+        return true;
+    }
+    if payload_str(payload, "event").is_some() {
+        return false;
+    }
+    payload_str(payload, "check").is_some_and(dependabot_update_name)
+}
+
+/// ` - Update #<digits>` at the end of a run name.
+fn dependabot_update_name(name: &str) -> bool {
+    let Some(marker) = name.rfind(" - Update #") else {
+        return false;
+    };
+    let tail = &name[marker + " - Update #".len()..];
+    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneKind {
+    Branch,
+    Tag,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedRef {
+    pub kind: LaneKind,
+    pub lane: String,
+    pub reference: String,
+}
+
+/// The lane a run belongs to, or `None` when it is not watched. A run with no
+/// ref, one a pull request started, or one from a managed workflow is never
+/// watched. A ref matching a branch pattern is a branch even if a tag pattern
+/// would also match it.
+pub fn watched_ref(
+    branch: Option<&str>,
+    event: Option<&str>,
+    branches: &[&str],
+    tags: &[&str],
+) -> Option<WatchedRef> {
+    let branch = branch.filter(|text| !text.is_empty())?;
+    if event.is_some_and(|event| {
+        PULL_REQUEST_EVENTS.contains(&event) || GITHUB_MANAGED_EVENTS.contains(&event)
+    }) {
+        return None;
+    }
+    for pattern in branches {
+        if shell_match(branch, pattern) {
+            return Some(WatchedRef {
+                kind: LaneKind::Branch,
+                lane: branch.to_string(),
+                reference: branch.to_string(),
+            });
+        }
+    }
+    for pattern in tags {
+        if shell_match(branch, pattern) {
+            return Some(WatchedRef {
+                kind: LaneKind::Tag,
+                lane: (*pattern).to_string(),
+                reference: branch.to_string(),
+            });
+        }
+    }
+    None
+}
+
+/// `fnmatch.fnmatchcase` for the patterns a watch list holds: a literal, or a
+/// trailing `*` that matches the rest. Case sensitive, `*` and `?` elsewhere
+/// are literal, which is what the shipped patterns need.
+fn shell_match(text: &str, pattern: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) if !prefix.contains(['*', '?']) => text.starts_with(prefix),
+        _ => text == pattern,
+    }
+}
+
+fn ci_workflow_of(check: &crate::core::Observation) -> String {
+    payload_str(&check.payload, "check")
+        .unwrap_or("workflow")
+        .to_string()
+}
+
+fn ci_revision_of(check: &crate::core::Observation) -> String {
+    payload_str(&check.payload, "revision")
+        .unwrap_or("")
+        .to_string()
+}
+
+fn ci_conclusion_of(check: &crate::core::Observation) -> Option<String> {
+    payload_str(&check.payload, "conclusion").map(str::to_string)
+}
+
+/// When a run ran, for ordering: its own `updated_at`, then its run number,
+/// then when Vogt observed it.
+fn ci_ran_at(check: &crate::core::Observation) -> (String, i64, crate::core::Moment) {
+    (
+        payload_str(&check.payload, "updated_at")
+            .unwrap_or("")
+            .to_string(),
+        check
+            .payload
+            .get("run_number")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0),
+        check.observed_at,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefFailure {
+    pub workflow: String,
+    pub lane: WatchedRef,
+    pub conclusion: String,
+}
+
+/// Every watched lane whose newest decisive run failed. A run still going, a
+/// cancelled run and a stale one say nothing, so they neither raise nor clear.
+pub fn watched_failures(
+    checks: &[crate::core::Observation],
+    branches: &[&str],
+    tags: &[&str],
+) -> Vec<RefFailure> {
+    let mut newest: std::collections::BTreeMap<(String, String, u8, String), (usize, String)> =
+        std::collections::BTreeMap::new();
+    let mut places: std::collections::BTreeMap<(String, String, u8, String), WatchedRef> =
+        std::collections::BTreeMap::new();
+    for (index, check) in checks.iter().enumerate() {
+        let Some(conclusion) = ci_conclusion_of(check) else {
+            continue;
+        };
+        if !FAILING.contains(&conclusion.as_str()) && !PASSING.contains(&conclusion.as_str()) {
+            continue;
+        }
+        let Some(lane) = watched_ref(
+            payload_str(&check.payload, "branch"),
+            payload_str(&check.payload, "event"),
+            branches,
+            tags,
+        ) else {
+            continue;
+        };
+        if github_managed(&check.payload) {
+            continue;
+        }
+        let key = (
+            check.project_id.clone().unwrap_or_default(),
+            ci_workflow_of(check),
+            lane.kind as u8,
+            lane.lane.clone(),
+        );
+        let replace = newest
+            .get(&key)
+            .is_none_or(|held| ci_ran_at(check) > ci_ran_at(&checks[held.0]));
+        if replace {
+            newest.insert(key.clone(), (index, conclusion));
+            places.insert(key, lane);
+        }
+    }
+    newest
+        .into_iter()
+        .filter(|(_, (_, conclusion))| FAILING.contains(&conclusion.as_str()))
+        .map(|(key, (_, conclusion))| RefFailure {
+            workflow: key.1.clone(),
+            lane: places.remove(&key).expect("a lane was stored with the run"),
+            conclusion,
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchState {
+    Running,
+    Passed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchRun {
+    pub workflow: String,
+    pub conclusion: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BranchCi {
+    pub branch: String,
+    pub revision: String,
+    pub state: BranchState,
+    pub runs: Vec<BranchRun>,
+    pub failing: Vec<String>,
+    pub concluded_at: Option<String>,
+}
+
+/// What CI says about `branch`'s newest observed revision, or `None` when no
+/// run on the branch has been observed.
+pub fn branch_ci(checks: &[crate::core::Observation], branch: &str) -> Option<BranchCi> {
+    let on_branch: Vec<&crate::core::Observation> = checks
+        .iter()
+        .filter(|check| {
+            payload_str(&check.payload, "branch") == Some(branch)
+                && !ci_revision_of(check).is_empty()
+        })
+        .collect();
+    if on_branch.is_empty() {
+        return None;
+    }
+    let revision = ci_revision_of(
+        on_branch
+            .iter()
+            .max_by_key(|check| ci_ran_at(check))
+            .expect("non-empty"),
+    );
+    let mut latest: std::collections::BTreeMap<String, &crate::core::Observation> =
+        std::collections::BTreeMap::new();
+    for check in &on_branch {
+        if ci_revision_of(check) != revision {
+            continue;
+        }
+        let workflow = ci_workflow_of(check);
+        let replace = latest
+            .get(&workflow)
+            .is_none_or(|held| ci_ran_at(check) > ci_ran_at(held));
+        if replace {
+            latest.insert(workflow, check);
+        }
+    }
+    let runs: Vec<BranchRun> = latest
+        .into_iter()
+        .map(|(workflow, check)| BranchRun {
+            workflow,
+            conclusion: ci_conclusion_of(check),
+        })
+        .collect();
+    let failing: Vec<String> = runs
+        .iter()
+        .filter(|run| {
+            run.conclusion
+                .as_deref()
+                .is_some_and(|c| FAILING.contains(&c))
+        })
+        .map(|run| run.workflow.clone())
+        .collect();
+    let state = if runs.iter().any(|run| run.conclusion.is_none()) {
+        BranchState::Running
+    } else if !failing.is_empty() {
+        BranchState::Failed
+    } else if runs
+        .iter()
+        .all(|run| matches!(run.conclusion.as_deref(), Some("cancelled" | "stale")))
+    {
+        BranchState::Cancelled
+    } else {
+        BranchState::Passed
+    };
+    let concluded_at = if state == BranchState::Running {
+        None
+    } else {
+        checks
+            .iter()
+            .filter(|check| {
+                payload_str(&check.payload, "branch") == Some(branch)
+                    && ci_revision_of(check) == revision
+            })
+            .filter_map(|check| payload_str(&check.payload, "updated_at"))
+            .max()
+            .map(str::to_string)
+    };
+    Some(BranchCi {
+        branch: branch.to_string(),
+        revision,
+        state,
+        runs,
+        failing,
+        concluded_at,
+    })
+}
+
+#[cfg(test)]
+mod ci_alert_tests {
+    use super::*;
+
+    fn check(
+        branch: &str,
+        event: &str,
+        name: &str,
+        conclusion: &str,
+        updated: &str,
+    ) -> crate::core::Observation {
+        crate::core::Observation {
+            id: String::new(),
+            sweep_id: String::new(),
+            collector: "ci".to_string(),
+            kind: "check".to_string(),
+            project_id: Some("p".to_string()),
+            subject_key: String::new(),
+            payload: serde_json::json!({"branch": branch, "event": event, "check": name, "conclusion": conclusion, "updated_at": updated, "revision": "abc"}),
+            content_digest: String::new(),
+            promoted: false,
+            observed_at: crate::core::from_iso("2026-10-09T00:00:00Z").unwrap(),
+        }
+    }
+
+    #[test]
+    fn a_pull_request_and_a_dependabot_run_are_not_watched() {
+        let branches = ["main", "master", "prod"];
+        let tags = ["v*"];
+        assert!(watched_ref(Some("main"), Some("pull_request"), &branches, &tags).is_none());
+        assert!(watched_ref(Some("main"), Some("dynamic"), &branches, &tags).is_none());
+        assert!(watched_ref(Some("wi-7"), Some("push"), &branches, &tags).is_none());
+        assert!(watched_ref(None, Some("push"), &branches, &tags).is_none());
+        let tag = watched_ref(Some("v0.7.2"), Some("push"), &branches, &tags).unwrap();
+        assert_eq!(tag.kind, LaneKind::Tag);
+        assert_eq!(tag.lane, "v*");
+        assert!(github_managed(
+            &serde_json::json!({"check": "npm in /web - Update #1606151494"})
+        ));
+        assert!(!github_managed(
+            &serde_json::json!({"event": "push", "check": "build"})
+        ));
+    }
+
+    #[test]
+    fn a_later_success_clears_the_alert_and_a_cancelled_run_does_not() {
+        let branches = ["main"];
+        let tags = ["v*"];
+        let failed = check("main", "push", "build", "failure", "2026-10-09T01:00:00Z");
+        let cancelled = check("main", "push", "build", "cancelled", "2026-10-09T02:00:00Z");
+        assert_eq!(
+            watched_failures(&[failed.clone(), cancelled], &branches, &tags).len(),
+            1
+        );
+        let fixed = check("main", "push", "build", "success", "2026-10-09T03:00:00Z");
+        assert!(watched_failures(&[failed, fixed], &branches, &tags).is_empty());
+    }
+
+    #[test]
+    fn a_bound_branch_reports_its_newest_revision() {
+        let mut older = check(
+            "feature",
+            "push",
+            "build",
+            "failure",
+            "2026-10-09T01:00:00Z",
+        );
+        older.payload["revision"] = "old".into();
+        let head = check(
+            "feature",
+            "push",
+            "build",
+            "success",
+            "2026-10-09T02:00:00Z",
+        );
+        let found = branch_ci(&[older, head], "feature").unwrap();
+        assert_eq!(found.revision, "abc");
+        assert_eq!(found.state, BranchState::Passed);
+        assert!(branch_ci(&[], "feature").is_none());
+    }
+}
