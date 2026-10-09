@@ -7,7 +7,7 @@
 
 use serde_json::{Map, Value};
 
-use crate::errors::VogtError;
+use crate::errors::{record_validation, FieldError, ValidationReport, VogtError};
 
 /// Apply an operation's parameter schema: fill defaults, reject anything the
 /// schema does not allow, and check types and bounds. A `Null` is an empty
@@ -24,26 +24,24 @@ pub fn prepare(operation: &str, params: Value) -> Result<Value, VogtError> {
     let Value::Object(given) = params else {
         return Err(invalid(
             operation,
-            &[format!("{operation} takes an object")],
+            &[FieldError::bare(&format!("{operation} takes an object"))],
         ));
     };
     let given_value = Value::Object(given.clone());
     apply_object(operation, "", schema, given, schema)
         .map(Value::Object)
         .map_err(|problems| {
-            invalid(
-                operation,
-                &problems
-                    .iter()
-                    .map(|problem| {
-                        if problem.contains("[type=") {
-                            problem.clone()
-                        } else {
-                            finish(problem, &input_for(problem, &given_value))
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-            )
+            let problems: Vec<FieldError> = problems
+                .into_iter()
+                .map(|problem| {
+                    if problem.text.contains("[type=") {
+                        problem
+                    } else {
+                        finish(&problem.text, &input_for(&problem.text, &given_value))
+                    }
+                })
+                .collect();
+            invalid(operation, &problems)
         })
 }
 
@@ -53,7 +51,7 @@ fn apply_object(
     schema: &Value,
     mut given: Map<String, Value>,
     root: &Value,
-) -> Result<Map<String, Value>, Vec<String>> {
+) -> Result<Map<String, Value>, Vec<FieldError>> {
     let properties = schema
         .get("properties")
         .and_then(Value::as_object)
@@ -71,10 +69,10 @@ fn apply_object(
             .cloned()
             .collect();
         for name in unexpected {
-            if let Some(value) = given.get(&name) {
+            if let Some(value) = given.remove(&name) {
                 extras.push(finish(
                     &pydantic(&at(location, &name), "Extra inputs are not permitted"),
-                    value,
+                    &value,
                 ));
             }
         }
@@ -97,7 +95,10 @@ fn apply_object(
                         resolved.insert(name.clone(), default.clone());
                     }
                 } else if required_of(schema).iter().any(|item| item == name) {
-                    problems.push(pydantic(&at(location, name), "Field required"));
+                    problems.push(FieldError::bare(&pydantic(
+                        &at(location, name),
+                        "Field required",
+                    )));
                 }
             }
         }
@@ -139,7 +140,7 @@ fn check_value(
     property: &Value,
     value: Value,
     root: &Value,
-) -> Result<Value, Vec<String>> {
+) -> Result<Value, Vec<FieldError>> {
     let (schema, nullable) = match nullable_branch(property) {
         Some(schema) => (schema, true),
         None => (property, false),
@@ -159,11 +160,17 @@ fn check_value(
         }
         return if schema.get("format").and_then(Value::as_str) == Some("date-time") {
             Err(stamp(
-                &[pydantic(name, "Input should be a valid datetime")],
+                &[FieldError::bare(&pydantic(
+                    name,
+                    "Input should be a valid datetime",
+                ))],
                 &value,
             ))
         } else {
-            Err(stamp(&[pydantic(name, &expected_input(schema))], &value))
+            Err(stamp(
+                &[FieldError::bare(&pydantic(name, &expected_input(schema)))],
+                &value,
+            ))
         };
     }
     if let Some(nested) = schema.get("properties") {
@@ -174,10 +181,10 @@ fn check_value(
                     .and_then(Value::as_str)
                     .unwrap_or("object");
                 return Err(stamp(
-                    &[pydantic(
+                    &[FieldError::bare(&pydantic(
                         name,
                         &format!("Input should be a valid dictionary or instance of {model}"),
-                    )],
+                    ))],
                     &value,
                 ));
             };
@@ -188,7 +195,9 @@ fn check_value(
     // The definition lives on the operation's own schema.
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let Some(target) = root.pointer(reference.trim_start_matches('#')) else {
-            return Err(vec![format!("{name}\n  {name} refers to an unknown type")]);
+            return Err(vec![FieldError::bare(&format!(
+                "{name}\n  {name} refers to an unknown type"
+            ))]);
         };
         return check_value(operation, name, target, value, root);
     }
@@ -203,7 +212,10 @@ fn check_value(
                 // is a different complaint, made inside `check_string`.
                 if !value.is_string() {
                     return Err(stamp(
-                        &[pydantic(name, "Input should be a valid datetime")],
+                        &[FieldError::bare(&pydantic(
+                            name,
+                            "Input should be a valid datetime",
+                        ))],
                         &value,
                     ));
                 }
@@ -228,10 +240,10 @@ fn check_value(
 }
 
 /// Add the rejected value's tail to each complaint.
-fn stamp(problems: &[String], input: &Value) -> Vec<String> {
+fn stamp(problems: &[FieldError], input: &Value) -> Vec<FieldError> {
     problems
         .iter()
-        .map(|problem| finish(problem, input))
+        .map(|problem| finish(&problem.text, input))
         .collect()
 }
 
@@ -254,7 +266,7 @@ fn check_string(
     name: &str,
     schema: &Value,
     value: Value,
-) -> Result<Value, Vec<String>> {
+) -> Result<Value, Vec<FieldError>> {
     // `Name` and `Reason` strip whitespace before anything else, so a value of
     // " " fails the length check and " padded " is stored trimmed. Which fields
     // those are is recorded from the models (`strips.rs`), because pydantic's
@@ -275,47 +287,53 @@ fn check_string(
                 [one] => (*one).to_string(),
                 [rest @ .., last] => format!("{}' or '{last}", rest.join("', '")),
             };
-            return Err(vec![pydantic(name, &format!("Input should be '{listed}'"))]);
+            return Err(vec![FieldError::bare(&pydantic(
+                name,
+                &format!("Input should be '{listed}'"),
+            ))]);
         }
     }
     let Value::String(text) = &stripped else {
-        return Err(vec![pydantic(name, "Input should be a valid string")]);
+        return Err(vec![FieldError::bare(&pydantic(
+            name,
+            "Input should be a valid string",
+        ))]);
     };
     if let Some(min) = bound(schema, "minLength") {
         if (text.chars().count() as i64) < min {
             let noun = if min == 1 { "character" } else { "characters" };
-            return Err(vec![pydantic(
+            return Err(vec![FieldError::bare(&pydantic(
                 name,
                 &format!("String should have at least {min} {noun}"),
-            )]);
+            ))]);
         }
     }
     if let Some(max) = bound(schema, "maxLength") {
         if (text.chars().count() as i64) > max {
             let noun = if max == 1 { "character" } else { "characters" };
-            return Err(vec![pydantic(
+            return Err(vec![FieldError::bare(&pydantic(
                 name,
                 &format!("String should have at most {max} {noun}"),
-            )]);
+            ))]);
         }
     }
     if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
         if let Ok(expression) = regex::Regex::new(pattern) {
             if !expression.is_match(text) {
-                return Err(vec![pydantic(
+                return Err(vec![FieldError::bare(&pydantic(
                     name,
                     &format!("String should match pattern '{pattern}'"),
-                )]);
+                ))]);
             }
         }
     }
     if schema.get("format").and_then(Value::as_str) == Some("date-time") && !is_datetime(text) {
         // A bool or null never got past the string check above. A string that is
         // not a datetime is the parse failure, and the corpus's are all too short.
-        return Err(vec![pydantic(
+        return Err(vec![FieldError::bare(&pydantic(
             name,
             "Input should be a valid datetime or date, input is too short",
-        )]);
+        ))]);
     }
     Ok(stripped)
 }
@@ -345,17 +363,20 @@ fn check_preference_value(
     _operation: &str,
     name: &str,
     value: Value,
-) -> Result<Value, Vec<String>> {
+) -> Result<Value, Vec<FieldError>> {
     let Value::String(text) = &value else {
         return Ok(value);
     };
     match serde_json::from_str::<Value>(text) {
         Ok(parsed @ Value::Object(_)) => Ok(parsed),
-        Ok(_) => Err(vec![pydantic(name, "Input should be a valid dictionary")]),
-        Err(_) => Err(vec![pydantic(
+        Ok(_) => Err(vec![FieldError::bare(&pydantic(
+            name,
+            "Input should be a valid dictionary",
+        ))]),
+        Err(_) => Err(vec![FieldError::bare(&pydantic(
             name,
             "Value error, value is not valid JSON: Expecting value",
-        )]),
+        ))]),
     }
 }
 
@@ -368,7 +389,7 @@ fn check_integer(
     name: &str,
     schema: &Value,
     value: Value,
-) -> Result<Value, Vec<String>> {
+) -> Result<Value, Vec<FieldError>> {
     // Pydantic's lax mode: a whole float, a boolean and a string of digits are
     // an integer. The string is trimmed first. A number too big for i64 is kept
     // as JSON sent it, which is how Python keeps an arbitrary-precision int.
@@ -389,17 +410,17 @@ fn check_integer(
                     return Ok(value);
                 } else {
                     let bound = bound(schema, "maximum").unwrap_or(i64::MAX);
-                    return Err(vec![pydantic(
+                    return Err(vec![FieldError::bare(&pydantic(
                         name,
                         &format!("Input should be less than or equal to {bound}"),
-                    )]);
+                    ))]);
                 }
             }
             None => {
-                return Err(vec![pydantic(
+                return Err(vec![FieldError::bare(&pydantic(
                     name,
                     "Input should be a valid integer, got a number with a fractional part",
-                )]);
+                ))]);
             }
         },
         Value::Bool(flag) => Some(i64::from(*flag)),
@@ -414,16 +435,16 @@ fn check_integer(
                 return Ok(value);
             }
         }
-        return Err(vec![pydantic(
+        return Err(vec![FieldError::bare(&pydantic(
             name,
             "Input should be a valid integer, unable to parse string as an integer",
-        )]);
+        ))]);
     };
     check_bounds(operation, name, schema, number)?;
     Ok(Value::from(number))
 }
 
-fn check_boolean(_operation: &str, name: &str, value: Value) -> Result<Value, Vec<String>> {
+fn check_boolean(_operation: &str, name: &str, value: Value) -> Result<Value, Vec<FieldError>> {
     let flag = match &value {
         Value::Bool(flag) => Some(*flag),
         Value::Number(number) => match number.as_i64().or_else(|| {
@@ -445,10 +466,10 @@ fn check_boolean(_operation: &str, name: &str, value: Value) -> Result<Value, Ve
     };
     match flag {
         Some(flag) => Ok(Value::from(flag)),
-        None => Err(vec![pydantic(
+        None => Err(vec![FieldError::bare(&pydantic(
             name,
             "Input should be a valid boolean, unable to interpret input",
-        )]),
+        ))]),
     }
 }
 
@@ -457,28 +478,31 @@ fn check_number(
     name: &str,
     schema: &Value,
     value: Value,
-) -> Result<Value, Vec<String>> {
+) -> Result<Value, Vec<FieldError>> {
     let number = match &value {
         Value::Number(number) => number.as_f64(),
         _ => None,
     };
     let Some(number) = number else {
-        return Err(vec![pydantic(name, "Input should be a valid number")]);
+        return Err(vec![FieldError::bare(&pydantic(
+            name,
+            "Input should be a valid number",
+        ))]);
     };
     if let Some(min) = schema.get("minimum").and_then(Value::as_f64) {
         if number < min {
-            return Err(vec![pydantic(
+            return Err(vec![FieldError::bare(&pydantic(
                 name,
                 &format!("Input should be greater than or equal to {min}"),
-            )]);
+            ))]);
         }
     }
     if let Some(max) = schema.get("maximum").and_then(Value::as_f64) {
         if number > max {
-            return Err(vec![pydantic(
+            return Err(vec![FieldError::bare(&pydantic(
                 name,
                 &format!("Input should be less than or equal to {max}"),
-            )]);
+            ))]);
         }
     }
     Ok(value)
@@ -489,21 +513,21 @@ fn check_bounds(
     name: &str,
     schema: &Value,
     number: i64,
-) -> Result<(), Vec<String>> {
+) -> Result<(), Vec<FieldError>> {
     if let Some(min) = bound(schema, "minimum") {
         if number < min {
-            return Err(vec![pydantic(
+            return Err(vec![FieldError::bare(&pydantic(
                 name,
                 &format!("Input should be greater than or equal to {min}"),
-            )]);
+            ))]);
         }
     }
     if let Some(max) = bound(schema, "maximum") {
         if number > max {
-            return Err(vec![pydantic(
+            return Err(vec![FieldError::bare(&pydantic(
                 name,
                 &format!("Input should be less than or equal to {max}"),
-            )]);
+            ))]);
         }
     }
     Ok(())
@@ -515,7 +539,7 @@ fn check_array(
     schema: &Value,
     value: Value,
     root: &Value,
-) -> Result<Value, Vec<String>> {
+) -> Result<Value, Vec<FieldError>> {
     let Value::Array(items) = value else {
         // A comma-joined string is the list the CLI sends for a repeated flag.
         if let Value::String(text) = &value {
@@ -529,20 +553,23 @@ fn check_array(
             }
         }
         return Err(stamp(
-            &[pydantic(name, "Input should be a valid list")],
+            &[FieldError::bare(&pydantic(
+                name,
+                "Input should be a valid list",
+            ))],
             &value,
         ));
     };
     if let Some(min) = bound(schema, "minItems") {
         if (items.len() as i64) < min {
             return Err(stamp(
-                &[pydantic(
+                &[FieldError::bare(&pydantic(
                     name,
                     &format!(
                         "List should have at least {min} item after validation, not {}",
                         items.len()
                     ),
-                )],
+                ))],
                 &Value::Array(items),
             ));
         }
@@ -550,10 +577,10 @@ fn check_array(
     if let Some(max) = bound(schema, "maxItems") {
         if (items.len() as i64) > max {
             return Err(stamp(
-                &[pydantic(
+                &[FieldError::bare(&pydantic(
                     name,
                     &format!("List should have at most {max} items"),
-                )],
+                ))],
                 &Value::Array(items),
             ));
         }
@@ -698,19 +725,26 @@ fn render_full(value: &Value) -> String {
     }
 }
 
-/// Attach the rejected value to a complaint: the error code, the value as
-/// pydantic prints it, its type, and the link to the documentation.
-fn finish(problem: &str, input: &Value) -> String {
+/// Attach the rejected value to a complaint, and keep the structured half: the
+/// location, the error code, the message and the value itself.
+fn finish(problem: &str, input: &Value) -> FieldError {
     let Some((field, complaint)) = problem.split_once("\n  ") else {
-        return problem.to_string();
+        return FieldError::bare(problem);
     };
     let code = error_code(complaint, input);
-    format!(
+    let text = format!(
         "{field}\n  {complaint} [type={code}, input_value={}, input_type={}]\n    \
          For further information visit https://errors.pydantic.dev/2.13/v/{code}",
         render_input(input),
         json_type(input)
-    )
+    );
+    FieldError {
+        loc: field.split('.').map(str::to_string).collect(),
+        error_type: code.to_string(),
+        msg: complaint.to_string(),
+        input: input.clone(),
+        text,
+    }
 }
 
 /// A string keeps its first 24 and last 23 characters; anything else keeps 25 and
@@ -754,17 +788,26 @@ fn input_for(problem: &str, given: &Value) -> Value {
     cursor.clone()
 }
 
-fn invalid(operation: &str, problems: &[String]) -> VogtError {
+fn invalid(operation: &str, problems: &[FieldError]) -> VogtError {
     let model = super::params_schema_for(operation)
         .and_then(|schema| schema.get("title"))
         .and_then(Value::as_str)
         .unwrap_or(operation);
     let count = problems.len();
     let noun = if count == 1 { "error" } else { "errors" };
-    VogtError::InvalidRequest(format!(
+    let text = format!(
         "invalid arguments for {operation}:\n{count} validation {noun} for {model}\n{}",
-        problems.join("\n")
-    ))
+        problems
+            .iter()
+            .map(|problem| problem.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    record_validation(ValidationReport {
+        text: text.clone(),
+        errors: problems.to_vec(),
+    });
+    VogtError::InvalidRequest(text)
 }
 
 #[cfg(test)]

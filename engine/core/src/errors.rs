@@ -254,6 +254,68 @@ impl fmt::Display for VogtError {
 
 impl std::error::Error for VogtError {}
 
+/// One rejected field, in the shape pydantic's `error` dict carries and
+/// FastAPI's 422 `detail` repeats: where, the error code, the message, and the
+/// value that was refused.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldError {
+    pub loc: Vec<String>,
+    pub error_type: String,
+    /// The complaint without the tail, which is what `detail.msg` carries.
+    pub msg: String,
+    pub input: serde_json::Value,
+    /// The complaint as the CLI prints it, tail included.
+    pub text: String,
+}
+
+impl FieldError {
+    /// A complaint that carries no structured half yet. `finish` fills it in.
+    pub fn bare(text: &str) -> Self {
+        Self {
+            loc: Vec::new(),
+            error_type: String::new(),
+            msg: String::new(),
+            input: serde_json::Value::Null,
+            text: text.to_string(),
+        }
+    }
+}
+
+/// A validation failure as data. `text` is the CLI message, unchanged. `errors`
+/// is what the HTTP and MCP renderers read, so neither has to parse that text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ValidationReport {
+    pub text: String,
+    pub errors: Vec<FieldError>,
+}
+
+thread_local! {
+    static VALIDATION: std::cell::RefCell<Option<ValidationReport>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Remember the report for the validation error that is about to be returned.
+///
+/// `VogtError::InvalidRequest` carries only a string, and twenty-six sites build
+/// one, so the structured half travels beside it rather than inside it. The
+/// validator sets it and the transport reads it in the same call.
+pub fn record_validation(report: ValidationReport) {
+    VALIDATION.with(|slot| *slot.borrow_mut() = Some(report));
+}
+
+/// The report recorded for this error, if it is the validation failure just
+/// produced. A mismatch means the slot holds an older failure, and reading it
+/// would describe the wrong request, so it is dropped instead.
+pub fn take_validation(error: &VogtError) -> Option<ValidationReport> {
+    let VogtError::InvalidRequest(message) = error else {
+        return None;
+    };
+    VALIDATION.with(|slot| match slot.borrow_mut().take() {
+        Some(report) if report.text == *message => Some(report),
+        _ => None,
+    })
+}
+
 /// Every `(code, http_status)` pair, in the order `errors.py` declares them.
 /// The base `VogtError` (`error`, 500) is never raised on its own.
 pub fn error_table() -> &'static [(&'static str, u16)] {

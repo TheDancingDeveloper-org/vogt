@@ -366,24 +366,31 @@ fn tool_error(code: &str, message: &str) -> Value {
 }
 
 /// A validation failure as an instruction, the way `describe_invalid` writes it:
-/// what is wrong, then what the tool accepts. The validator reports one problem
-/// at a time and names it in its own words, so the mapping is by that wording.
-/// Any other error keeps its own message.
+/// what is wrong, then what the tool accepts. The validator's report names each
+/// field and why; anything else keeps its own message.
 fn describe(operation: &Operation, error: &crate::errors::VogtError) -> String {
-    let crate::errors::VogtError::InvalidRequest(message) = error else {
+    let Some(report) = crate::errors::take_validation(error) else {
         return error.message().to_string();
     };
-    let detail = message
-        .rsplit_once('\n')
-        .map(|(_, last)| last)
-        .unwrap_or(message);
-    let problem = if let Some(name) = detail.strip_suffix(" is required") {
-        format!("missing required parameter '{name}'")
-    } else if let Some(name) = detail.strip_prefix("unexpected parameter ") {
-        format!("unknown parameter '{name}'")
-    } else {
-        detail.to_string()
-    };
+    let problems = report
+        .errors
+        .iter()
+        .map(|error| {
+            let location = error.loc.join(".");
+            if error.error_type == "missing" && location == "reason" {
+                format!("missing required parameter 'reason': {REASON_HINT}")
+            } else if error.error_type == "missing" {
+                format!("missing required parameter '{location}'")
+            } else if error.error_type == "extra_forbidden" {
+                format!("unknown parameter '{location}'")
+            } else if !location.is_empty() {
+                format!("{location}: {}", error.msg)
+            } else {
+                error.msg.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
     let schema = crate::registry::params_schema_for(operation.name);
     let (required, optional) = schema
         .map(accepted)
@@ -399,8 +406,12 @@ fn describe(operation: &Operation, error: &crate::errors::VogtError) -> String {
     if !optional.is_empty() {
         accepted.push_str(&format!("; optional: {}", optional.join(", ")));
     }
-    format!("{problem}. {} takes {accepted}", operation.mcp_tool_name())
+    format!("{problems}. {} takes {accepted}", operation.mcp_tool_name())
 }
+
+/// What a missing `reason` is told. `describe_invalid` in `registry/operation.py`.
+const REASON_HINT: &str = "every write is audited and must say why it is being made — pass \
+    `reason` as a short sentence, e.g. reason=\"tests pass, ready for review\"";
 
 /// The parameter names a schema requires and the ones it leaves optional.
 fn accepted(schema: &Value) -> (Vec<String>, Vec<String>) {
