@@ -1,11 +1,15 @@
-//! Parameter and result schemas, generated from pydantic.
+//! Parameter and result schemas, recorded from pydantic, not derived.
 //!
-//! Produced by `scripts/gen_registry.py`. The models these schemas
-//! describe are not ported to Rust yet, so the schemas are recorded
-//! from pydantic's own output rather than derived from Rust types.
-//! `registry::dump` emits them, and the golden test checks the dump
-//! against Python with no normaliser. Replace this table with
-//! schemas derived from the ported models when those land (WI-1060).
+//! Produced by `scripts/gen_registry.py`. This is a recording, and
+//! that is a gap rather than the finished port: the parameter and
+//! result models are not hand-written Rust yet, so nothing here
+//! derives a schema from a Rust type. The parity check compares this
+//! table with pydantic's own output, which means a Rust model that
+//! validated differently would still pass. Deriving the schemas from
+//! the ported models, so the check is against Rust's own validation,
+//! and deleting this table is the remaining work of WI-1060. It has to
+//! land before the Python models are removed at the swap (WI-1082),
+//! because after that nothing can regenerate the table.
 
 /// `(operation name, params schema, result schema)`, in registry order.
 pub static SCHEMAS: &[(&str, &str, &str)] = &[

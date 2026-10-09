@@ -1,5 +1,8 @@
 # What two independent runs of the same script may differ on, and why.
-# Applied to answers, audit trails, OpenAPI and MCP tools/list.
+# Applied to answers, audit trails and OpenAPI. MCP tools/list is not covered
+# here: the parity script records no tools/list step, so a rule for it would
+# normalise nothing. The tool list's inputSchema comes from the registry dump,
+# which is compared against Python with no normaliser at all.
 
 [volatile]
 # A fresh instance mints nothing the hooks do not fix. Ids, timestamps and

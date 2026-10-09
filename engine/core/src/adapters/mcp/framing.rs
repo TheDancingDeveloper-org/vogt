@@ -326,7 +326,8 @@ fn tool_wire(operation: &Operation) -> Value {
     json!({
         "name": operation.mcp_tool_name(),
         "description": operation.summary,
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": crate::registry::params_schema_for(operation.name)
+            .expect("validate_schemas guarantees a schema for every operation"),
     })
 }
 

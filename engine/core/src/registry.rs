@@ -497,6 +497,34 @@ fn exclusion_of(name: &str) -> Option<(&'static str, &'static str)> {
         .map(|(_, reason)| ("http_only", *reason))
 }
 
+/// Parameter and result schemas, parsed once. `validate_schemas` refuses a
+/// registry whose table does not match the operation set, so a lookup that
+/// misses here is a bug in that check, not a state to paper over.
+fn parsed_schemas() -> &'static HashMap<&'static str, (serde_json::Value, serde_json::Value)> {
+    use std::sync::LazyLock;
+    static PARSED: LazyLock<HashMap<&str, (serde_json::Value, serde_json::Value)>> =
+        LazyLock::new(|| {
+            schemas::SCHEMAS
+                .iter()
+                .map(|(name, params, result)| {
+                    (
+                        *name,
+                        (
+                            serde_json::from_str(params).expect("generated params schema is JSON"),
+                            serde_json::from_str(result).expect("generated result schema is JSON"),
+                        ),
+                    )
+                })
+                .collect()
+        });
+    &PARSED
+}
+
+/// The parameter schema an operation's MCP tool advertises as `inputSchema`.
+pub fn params_schema_for(name: &str) -> Option<&'static serde_json::Value> {
+    parsed_schemas().get(name).map(|(params, _)| params)
+}
+
 /// The `registry.dump` result: every operation, in registration order.
 pub fn dump() -> serde_json::Value {
     let registry = default_registry();
@@ -507,21 +535,10 @@ pub fn dump() -> serde_json::Value {
                 Some((kind, reason)) => (Some(kind), Some(reason)),
                 None => (None, None),
             };
-            let (params_schema, result_schema) = schemas::SCHEMAS
-                .iter()
-                .find(|(name, _, _)| *name == operation.name)
-                .map(|(_, params, result)| {
-                    (
-                        serde_json::from_str(params).expect("generated params schema is JSON"),
-                        serde_json::from_str(result).expect("generated result schema is JSON"),
-                    )
-                })
-                .unwrap_or_else(|| {
-                    (
-                        serde_json::json!({"not_ported": true}),
-                        serde_json::json!({"not_ported": true}),
-                    )
-                });
+            let (params_schema, result_schema) = parsed_schemas()
+                .get(operation.name)
+                .map(|(params, result)| (params.clone(), result.clone()))
+                .expect("validate_schemas guarantees a schema for every operation");
             OperationManifest {
                 name: operation.name,
                 summary: operation.summary,
