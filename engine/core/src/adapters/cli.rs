@@ -157,30 +157,49 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
     let mut command_complete = false;
     while index < argv_rest.len() {
         let flag = &argv_rest[index];
-        if !command_complete && (flag == "--help" || flag == "-h") && positional.is_empty() {
+        // argparse abbreviates the globals too: `--js` is `--json`, `--vers`
+        // is `--version`, `--data` is `--data-dir`, and `--he`/`--h` are
+        // `--help`. An exact match still wins, so `--json` is never `--json`
+        // plus something else. Only before the command word: after `work`,
+        // `--json` is that command's flag and a usage error.
+        let global = if positional.is_empty() && flag.starts_with("--") {
+            match_global(flag)
+        } else {
+            None
+        };
+        if !command_complete && global == Some("--help") && positional.is_empty() {
             return ParseOutcome::Result(ok_out(format_top(registry)));
         }
-        if !command_complete && flag == "--version" && positional.is_empty() {
+        if !command_complete && global == Some("--version") && positional.is_empty() {
             return ParseOutcome::Result(ok_out(format!("vogt {version}\n")));
         }
-        // A global flag only before the first command word. After `work`,
-        // `--json` is that command's flag and a usage error, matching argparse.
-        if flag == "--json" && positional.is_empty() {
+        if global == Some("--json") && positional.is_empty() {
+            if let Some((_, value)) = flag.split_once('=') {
+                return ParseOutcome::Result(global_arg_error(&format!(
+                    "argument --json: ignored explicit argument '{value}'"
+                )));
+            }
             json = true;
             index += 1;
             continue;
         }
-        if flag == "--data-dir" && positional.is_empty() {
-            let Some(value) = argv_rest.get(index + 1) else {
-                return ParseOutcome::Result(usage(
-                    "error: --data-dir requires a value\n".to_string(),
+        if global == Some("--data-dir") && positional.is_empty() {
+            let inline = flag.split_once('=').map(|(_, value)| value.to_string());
+            let Some(value) = inline.clone().or_else(|| argv_rest.get(index + 1).cloned()) else {
+                return ParseOutcome::Result(global_arg_error(
+                    "argument --data-dir: expected one argument",
                 ));
             };
-            data_dir = Some(value.clone());
-            index += 2;
+            if inline.is_none() && value.starts_with('-') && value != "-" {
+                return ParseOutcome::Result(global_arg_error(
+                    "argument --data-dir: expected one argument",
+                ));
+            }
+            data_dir = Some(value);
+            index += if inline.is_some() { 1 } else { 2 };
             continue;
         }
-        if flag == "--help" || flag == "-h" {
+        if flag == "--help" || flag == "-h" || global == Some("--help") {
             flags.push(flag.clone());
             index += 1;
             continue;
@@ -230,9 +249,7 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
         CommandMatch::Group { path } => {
             // `--help` on a group, or a bare group name, prints the group.
             let show = positional.len() == path.len()
-                || flags
-                    .first()
-                    .is_some_and(|token| token == "--help" || token == "-h");
+                || flags.first().is_some_and(|token| is_help_flag(token));
             if show && flags.is_empty() {
                 // A bare group is a usage error (exit 2) and prints the root
                 // help, which is what argparse does for an incomplete command.
@@ -263,7 +280,7 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
         )));
     }
     let flags = flags.as_slice();
-    if flags.iter().any(|flag| flag == "--help" || flag == "-h") {
+    if flags.iter().any(|flag| is_help_flag(flag)) {
         return ParseOutcome::Result(ok_out(format_operation(operation)));
     }
 
@@ -600,6 +617,56 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
 /// They are when every required flag is already present, or when a known flag
 /// later in the tail supplies one that is still missing: argparse only reports
 /// the words once the command would otherwise be complete.
+/// A usage error on a global option, before any command. argparse writes the
+/// root synopsis and `vogt: error:` to stderr and exits 2.
+fn global_arg_error(detail: &str) -> CliResult {
+    CliResult {
+        exit_code: EXIT_USAGE,
+        stdout: String::new(),
+        stderr: format!("{}\nvogt: error: {detail}\n", usage_synopsis().trim_end()),
+    }
+}
+
+/// The global long options, in the order argparse lists them on the root parser.
+const GLOBAL_OPTIONS: [&str; 4] = ["help", "version", "data-dir", "json"];
+
+/// Resolve a `--flag` or `--flag=value` against the globals. `None` when it is
+/// not a unique prefix of any of them, so the caller treats it as unrecognized.
+fn match_global(flag: &str) -> Option<&'static str> {
+    let name = flag.split_once('=').map(|(head, _)| head).unwrap_or(flag);
+    let name = name.trim_start_matches("--");
+    if GLOBAL_OPTIONS.contains(&name) {
+        return Some(global_spelling(name));
+    }
+    let matches: Vec<&&str> = GLOBAL_OPTIONS
+        .iter()
+        .filter(|option| option.starts_with(name))
+        .collect();
+    match matches.as_slice() {
+        [one] => Some(global_spelling(one)),
+        _ => None,
+    }
+}
+
+fn global_spelling(name: &str) -> &'static str {
+    match name {
+        "help" => "--help",
+        "version" => "--version",
+        "data-dir" => "--data-dir",
+        "json" => "--json",
+        _ => "--help",
+    }
+}
+
+/// `--help`, `-h`, or a unique prefix of `--help`. argparse accepts all three
+/// on a subcommand.
+fn is_help_flag(flag: &str) -> bool {
+    flag == "-h" || flag == "--help" || {
+        let name = flag.trim_start_matches("--");
+        !name.is_empty() && "help".starts_with(name) && flag.starts_with("--")
+    }
+}
+
 /// Resolve an option abbreviation the way argparse does. An exact match wins
 /// before any prefix is considered. Otherwise every long option the text is a
 /// prefix of is a candidate: one candidate resolves, several are ambiguous.
@@ -1475,21 +1542,26 @@ pub fn main_cli(
 }
 
 /// `--data-dir` from a parsed invocation, for the binary to thread into config.
+/// A unique prefix counts (`--data DIR`, `--data=DIR`), because argparse
+/// resolves it before the command word and `main` routes `init` from the same
+/// argv. A missing value is left for the parser, which reports it.
 pub fn data_dir_of(invocation_argv: &[String]) -> Option<String> {
     let mut rest = invocation_argv;
-    while let [flag, value, tail @ ..] = rest {
-        if flag == "--data-dir" {
-            return Some(value.clone());
-        }
+    while let [flag, tail @ ..] = rest {
         if flag == "--json" || flag == "--help" || flag == "-h" || flag == "--version" {
-            rest = &rest[1..];
+            rest = tail;
             continue;
         }
+        if let Some("--data-dir") = match_global(flag) {
+            if let Some((_, value)) = flag.split_once('=') {
+                return Some(value.to_string());
+            }
+            return tail.first().cloned();
+        }
         if flag.starts_with('-') {
-            rest = if value.starts_with('-') {
-                &rest[1..]
-            } else {
-                tail
+            rest = match tail {
+                [value, after @ ..] if !value.starts_with('-') => after,
+                _ => tail,
             };
             continue;
         }
@@ -1892,6 +1964,73 @@ mod tests {
             "{}",
             result.stderr
         );
+    }
+
+    #[test]
+    fn a_global_prefix_before_the_command_is_the_option() {
+        let registry = default_registry();
+        let json = run(
+            &argv(&["--js", "work", "list"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_ne!(json.exit_code, EXIT_USAGE, "{}", json.stderr);
+        assert!(!json.stderr.contains("unrecognized"), "{}", json.stderr);
+
+        let version = run(&argv(&["--vers"]), &registry, "9.9.9", &mut no_dispatch);
+        assert_eq!(version.exit_code, EXIT_OK, "{}", version.stderr);
+        assert_eq!(version.stdout, "vogt 9.9.9\n");
+
+        let missing = run(&argv(&["--d"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(missing.exit_code, EXIT_USAGE, "{}", missing.stderr);
+        assert!(missing.stdout.is_empty(), "{}", missing.stdout);
+        assert!(
+            missing
+                .stderr
+                .contains("argument --data-dir: expected one argument"),
+            "{}",
+            missing.stderr
+        );
+        assert_eq!(
+            data_dir_of(&argv(&["--data", "DIR", "status"])).as_deref(),
+            Some("DIR")
+        );
+        assert_eq!(
+            data_dir_of(&argv(&["--data=DIR", "status"])).as_deref(),
+            Some("DIR")
+        );
+        assert_eq!(data_dir_of(&argv(&["--d"])), None);
+    }
+
+    #[test]
+    fn a_help_prefix_prints_the_help() {
+        let registry = default_registry();
+        let sub = run(
+            &argv(&["work", "list", "--he"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(sub.exit_code, EXIT_OK, "{}", sub.stderr);
+        assert!(
+            sub.stdout.contains("usage: vogt work list"),
+            "{}",
+            sub.stdout
+        );
+
+        let short = run(
+            &argv(&["work", "list", "--h"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(short.exit_code, EXIT_OK, "{}", short.stderr);
+        assert_eq!(short.stdout, sub.stdout);
+
+        let root = run(&argv(&["--he"]), &registry, "test", &mut no_dispatch);
+        assert_eq!(root.exit_code, EXIT_OK, "{}", root.stderr);
+        assert!(root.stdout.contains("usage: vogt"), "{}", root.stdout);
     }
 
     fn an_unknown_flag_stops_the_report_before_a_later_known_flag() {

@@ -176,8 +176,9 @@ fn main() -> ExitCode {
     // goes through the generated adapter.
     // `--help` on serve and init is the generated page, so it lists the schema
     // flags. clap accepts the same three: --read-only, --no-schedule and
-    // --tls-cert. A deployment that passes them must boot.
-    let help = argv.iter().any(|arg| arg == "--help" || arg == "-h");
+    // --tls-cert. A deployment that passes them must boot. A unique prefix of
+    // `--help` counts, because argparse treats `--he` and `--h` as `--help`.
+    let help = argv.iter().any(|arg| is_help_flag(arg));
     let command = command_word(&argv);
     if !matches!(command, Some("serve" | "init")) || help {
         if let Err(error) = validate_hooks(None) {
@@ -251,19 +252,56 @@ fn main() -> ExitCode {
 
 /// The command word, skipping global flags that may precede it.
 ///
-/// `--data-dir DIR init` is `init`. A flag this binary does not know is left
-/// for whichever parser owns the command, so this only steps over the two
-/// globals both parsers share.
+/// `--data-dir DIR init` is `init`, and so is `--data DIR init`: argparse
+/// resolves a unique prefix before it looks for the command, and this routing
+/// has to agree or `vogt --data X init` falls through to the generated CLI and
+/// never creates `X`. A flag this binary does not know is left for whichever
+/// parser owns the command, so this only steps over the globals both parsers share.
 fn command_word(argv: &[String]) -> Option<&str> {
     let mut index = 0usize;
     while index < argv.len() {
-        match argv[index].as_str() {
-            "--json" => index += 1,
-            "--data-dir" => index += 2,
-            _ => return Some(argv[index].as_str()),
+        let arg = argv[index].as_str();
+        if arg == "--json" || is_global_prefix(arg, "json") {
+            index += 1;
+            continue;
         }
+        if arg == "--data-dir" || is_global_prefix(arg, "data-dir") {
+            // `--data=DIR` carries its value; `--data DIR` takes the next token.
+            index += if arg.contains('=') { 1 } else { 2 };
+            continue;
+        }
+        if arg == "--version" || is_global_prefix(arg, "version") || is_help_flag(arg) {
+            index += 1;
+            continue;
+        }
+        return Some(arg);
     }
     None
+}
+
+/// Whether `arg` is a unique prefix of one root option and not of another.
+/// `--data` is `data-dir`; `--d` is too, because nothing else starts with `d`.
+fn is_global_prefix(arg: &str, option: &str) -> bool {
+    let name = arg.split_once('=').map(|(head, _)| head).unwrap_or(arg);
+    let Some(name) = name.strip_prefix("--") else {
+        return false;
+    };
+    if name.is_empty() || !option.starts_with(name) {
+        return false;
+    }
+    const GLOBALS: [&str; 4] = ["help", "version", "data-dir", "json"];
+    GLOBALS
+        .iter()
+        .filter(|candidate| candidate.starts_with(name))
+        .count()
+        == 1
+}
+
+/// `--help` and `-h`, or a prefix of `--help` that is not also a prefix of
+/// another global. `--he` is help; `--h` is not, because it is also `--host`
+/// on `serve`, and stealing that flag would stop a deployment booting.
+fn is_help_flag(arg: &str) -> bool {
+    arg == "--help" || arg == "-h" || is_global_prefix(arg, "help")
 }
 
 /// Validate the hooks and name the ones that are set, once. A value that is not
