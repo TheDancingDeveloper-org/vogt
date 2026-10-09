@@ -354,6 +354,10 @@ where
 {
     let params = parse_update(params)?;
     let view = ctx.declared.read()?;
+    // Declared ref first, then an upstream subject key, then not_found. A
+    // typo'd `WI-n` never reaches the write-through: only a ref that resolves
+    // to an observed item on a linked project does.
+    upstream::resolve_work_ref(ctx, &view, &params.reference)?;
     let native = view.work_item_by_ref(&params.reference)?.is_some();
     if !native {
         return Err(VogtError::UpstreamWriteFailed(format!(
@@ -953,6 +957,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retitled["item"]["title"], "still editable");
+    }
+
+    #[test]
+    fn an_unknown_ref_is_not_found_rather_than_an_upstream_item() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        for reference in ["WI-99", "wi-2"] {
+            let refused = update_work(
+                ctx,
+                json!({"ref": reference, "title": "nope", "reason": "test"}),
+            )
+            .unwrap_err();
+            let VogtError::NotFound(message) = &refused else {
+                panic!("{reference}: expected not_found, got {refused}");
+            };
+            assert!(message.contains("no work item"), "{reference}: {message}");
+        }
     }
 
     #[test]
