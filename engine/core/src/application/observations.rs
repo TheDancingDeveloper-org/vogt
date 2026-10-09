@@ -39,20 +39,17 @@ fn list<C: Clock, I: IdFactory>(
         None => None,
     };
     let kind = params.get("kind").and_then(Value::as_str);
-    let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(100);
-    let latest_only = params
-        .get("latest_only")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| VogtError::InvalidRequest("observations.list needs a limit".to_string()))?;
+    let latest_only = params.get("latest_only").and_then(Value::as_bool) == Some(true);
     let found = if latest_only {
         let kinds = kind.map(|one| vec![one.to_string()]).unwrap_or_default();
         ctx.observed.latest(
             &kinds,
             project_id.as_deref(),
-            params
-                .get("promoted_only")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+            params.get("promoted_only").and_then(Value::as_bool) == Some(true),
             false,
             limit,
         )?
@@ -62,7 +59,12 @@ fn list<C: Clock, I: IdFactory>(
             project_id.as_deref(),
             params.get("subject_key").and_then(Value::as_str),
             limit,
-            params.get("offset").and_then(Value::as_i64).unwrap_or(0),
+            params
+                .get("offset")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| {
+                    VogtError::InvalidRequest("observations.list needs an offset".to_string())
+                })?,
         )?
     };
     Ok(json!({ "observations": found, "total": found.len(), "detail": Value::Null }))

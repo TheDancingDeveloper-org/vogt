@@ -51,10 +51,9 @@ const POSTURE_FACTS: &[(&str, &str)] = &[
 ];
 
 pub fn drift_detect_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    let auto_accept = params
-        .get("auto_accept")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
+    // `auto_accept` defaults to true in the schema, which fills it before the
+    // service runs. A null is left as null, and that is not an acceptance.
+    let auto_accept = params.get("auto_accept").and_then(Value::as_bool) == Some(true);
     let reason = field(&params, "drift.detect", "reason")?;
     crate::with_ctx!(ctx, |ctx| detect(ctx, auto_accept, &reason))
 }
@@ -63,16 +62,10 @@ pub fn drift_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     // Absent means "open", the CLI default. An explicit null means no status
     // filter at all: MCP and HTTP can send one, and Python lists every status.
     let status = match params.get("status") {
-        None => Some("open".to_string()),
-        Some(Value::Null) => None,
-        Some(value) => Some(
-            value
-                .as_str()
-                .ok_or_else(|| {
-                    VogtError::InvalidRequest("drift.list status must be a string".to_string())
-                })?
-                .to_string(),
-        ),
+        Some(Value::String(status)) => Some(status.clone()),
+        // Explicit null: no status filter. The schema default of "open" only
+        // fills a field the caller left out, so a sent null must stay unfiltered.
+        _ => None,
     };
     let kind = params
         .get("kind")
@@ -82,7 +75,10 @@ pub fn drift_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
         .get("project")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(100);
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| VogtError::InvalidRequest("drift.list needs a limit".to_string()))?;
     crate::with_ctx!(ctx, |ctx| list(
         ctx,
         status.as_deref(),
@@ -1051,7 +1047,7 @@ mod tests {
     #[test]
     fn human_gated_keeps_the_declared_order() {
         let ctx = context();
-        let listed = drift_list_op(&ctx, json!({})).unwrap();
+        let listed = drift_list_op(&ctx, json!({"limit": 100})).unwrap();
         let keys: Vec<&str> = listed["human_gated"]
             .as_object()
             .unwrap()

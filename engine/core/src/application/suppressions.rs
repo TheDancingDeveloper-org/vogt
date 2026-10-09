@@ -24,10 +24,7 @@ const SUPPRESSION_REVOKED_EVENT: &str = "subject.unsuppressed";
 pub fn suppress_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     let subject = field(&params, "suppress", "subject")?;
     let reason = field(&params, "suppress", "reason")?;
-    let pattern = params
-        .get("pattern")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let pattern = params.get("pattern").and_then(Value::as_bool) == Some(true);
     let project = params
         .get("project")
         .and_then(Value::as_str)
@@ -115,11 +112,11 @@ fn suppress<C: Clock + 'static, I: IdFactory + 'static>(
 /// The suppressions on record. Revoked ones are history, so they stay out
 /// unless the caller asks for them.
 pub fn suppression_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    let include_revoked = params
-        .get("include_revoked")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(100);
+    let include_revoked = params.get("include_revoked").and_then(Value::as_bool) == Some(true);
+    let limit = params
+        .get("limit")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| VogtError::InvalidRequest("suppression.list needs a limit".to_string()))?;
     crate::with_ctx!(ctx, |ctx| {
         let view = ctx.declared.read()?;
         let suppressions = view.list_suppressions(include_revoked, limit)?;
@@ -231,17 +228,27 @@ mod tests {
     #[test]
     fn a_duplicate_subject_burns_no_suppression_id() {
         let ctx = context();
-        suppress_op(&ctx, json!({"subject": "gh:acme/app#1", "reason": "noise"})).unwrap();
-        let error =
-            suppress_op(&ctx, json!({"subject": "gh:acme/app#1", "reason": "noise"})).unwrap_err();
+        suppress_op(
+            &ctx,
+            json!({"subject": "gh:acme/app#1", "pattern": false, "reason": "noise"}),
+        )
+        .unwrap();
+        let error = suppress_op(
+            &ctx,
+            json!({"subject": "gh:acme/app#1", "pattern": false, "reason": "noise"}),
+        )
+        .unwrap_err();
         assert!(
             matches!(error, VogtError::Conflict(ref message) if message.contains("already suppressed")),
             "{error}"
         );
         // The duplicate check runs before the id is drawn, so the next
         // suppression keeps the id the duplicate would have taken.
-        let next =
-            suppress_op(&ctx, json!({"subject": "gh:acme/app#2", "reason": "noise"})).unwrap();
+        let next = suppress_op(
+            &ctx,
+            json!({"subject": "gh:acme/app#2", "pattern": false, "reason": "noise"}),
+        )
+        .unwrap();
         assert_eq!(next["suppression"]["id"], "sup_0002");
     }
 
@@ -250,22 +257,33 @@ mod tests {
         let ctx = context();
         let error = suppress_op(
             &ctx,
-            json!({"subject": "gh:acme/app#1", "project": "missing", "reason": "noise"}),
+            json!({"subject": "gh:acme/app#1", "pattern": false, "project": "missing", "reason": "noise"}),
         )
         .unwrap_err();
         assert!(matches!(error, VogtError::NotFound(_)), "{error}");
         // Resolved inside the write, and only after the project resolves, so
         // the failed attempt draws nothing.
-        let next =
-            suppress_op(&ctx, json!({"subject": "gh:acme/app#1", "reason": "noise"})).unwrap();
+        let next = suppress_op(
+            &ctx,
+            json!({"subject": "gh:acme/app#1", "pattern": false, "reason": "noise"}),
+        )
+        .unwrap();
         assert_eq!(next["suppression"]["id"], "sup_0001");
     }
 
     #[test]
     fn the_conflict_message_uses_python_repr() {
         let ctx = context();
-        suppress_op(&ctx, json!({"subject": "it's", "reason": "noise"})).unwrap();
-        let error = suppress_op(&ctx, json!({"subject": "it's", "reason": "noise"})).unwrap_err();
+        suppress_op(
+            &ctx,
+            json!({"subject": "it's", "pattern": false, "reason": "noise"}),
+        )
+        .unwrap();
+        let error = suppress_op(
+            &ctx,
+            json!({"subject": "it's", "pattern": false, "reason": "noise"}),
+        )
+        .unwrap_err();
         let VogtError::Conflict(message) = error else {
             panic!("{error}")
         };
@@ -278,7 +296,11 @@ mod tests {
     #[test]
     fn an_empty_subject_is_an_invalid_request() {
         let ctx = context();
-        let error = suppress_op(&ctx, json!({"subject": "", "reason": "noise"})).unwrap_err();
+        let error = suppress_op(
+            &ctx,
+            json!({"subject": "", "pattern": false, "reason": "noise"}),
+        )
+        .unwrap_err();
         assert!(
             matches!(error, VogtError::InvalidRequest(ref message) if message.contains("non-empty")),
             "{error}"
