@@ -32,6 +32,9 @@ const CONTRACT_COLLECTOR: &str = "contract-checker";
 /// The event a recorded check appends.
 const CONTRACT_CHECKED_EVENT: &str = "contract.checked";
 
+/// The event an adoption change appends, whether it opts in or back out.
+const CONTRACT_ADOPTION_EVENT: &str = "contract.adoption_changed";
+
 /// What a project that never adopted the contract is told, and why that is not
 /// a criticism.
 pub const NOT_ADOPTED_DETAIL: &str =
@@ -300,6 +303,145 @@ where
             recorded,
         },
     )
+}
+
+/// Opt a project into the contract, or back out of it.
+///
+/// Adoption is a declaration, never inferred from a passing check or a
+/// scaffolded directory. Repeating the posture a project already has changes
+/// nothing and says so. Declining clears the last verdict too: a project that
+/// is no longer measured has nothing to have been found non-compliant about.
+pub fn contract_adopt_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    set_adoption(ctx, &params, true)
+}
+
+pub fn contract_decline_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    set_adoption(ctx, &params, false)
+}
+
+fn set_adoption(ctx: &Built, params: &Value, adopted: bool) -> Result<Value, VogtError> {
+    let operation = if adopted {
+        "contract.adopt"
+    } else {
+        "contract.decline"
+    };
+    let slug = params
+        .get("project")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VogtError::InvalidRequest(format!("{operation} needs a project")))?;
+    let reason = params
+        .get("reason")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VogtError::InvalidRequest(format!("{operation} needs a reason")))?;
+    crate::with_ctx!(ctx, |ctx| apply_adoption(
+        ctx, operation, slug, reason, adopted
+    ))
+}
+
+fn apply_adoption<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    operation: &str,
+    slug: &str,
+    reason: &str,
+    adopted: bool,
+) -> Result<Value, VogtError> {
+    let project = resolve::project(&ctx.declared.read()?, slug)?;
+    let now = clock_now(&ctx.clock);
+    let already = project.contract_adopted_at.is_some() == adopted;
+    let adopted_at = if adopted {
+        Some(if already {
+            project.contract_adopted_at.unwrap_or(now)
+        } else {
+            now
+        })
+    } else {
+        None
+    };
+    let detail = if already {
+        format!("{} already had that posture; nothing changed", project.slug)
+    } else if adopted {
+        "the contract applies to this project from now on; `contract check` evaluates it"
+            .to_string()
+    } else {
+        NOT_ADOPTED_DETAIL.to_string()
+    };
+    let result = json!({
+        "project": project.slug,
+        "adopted": adopted,
+        "adopted_at": adopted_at.map(|moment| moment.to_json()),
+        "status": if adopted { "not_checked" } else { "not_applicable" },
+        "detail": detail,
+    });
+    let mut write = write_of(ctx);
+    record_adoption(
+        &mut write,
+        operation,
+        reason,
+        &AdoptionRecord {
+            now,
+            project_id: project.id,
+            project_slug: project.slug,
+            adopted,
+            already,
+            result,
+        },
+    )
+}
+
+struct AdoptionRecord {
+    now: crate::core::Moment,
+    project_id: String,
+    project_slug: String,
+    adopted: bool,
+    already: bool,
+    result: Value,
+}
+
+fn record_adoption<C: Clock + 'static, I: IdFactory + 'static>(
+    write: &mut crate::application::writes::WriteContext<
+        '_,
+        C,
+        I,
+        crate::storage::sqlite::declared::SqliteDeclaredStore<C, I>,
+    >,
+    operation: &str,
+    reason: &str,
+    adoption: &AdoptionRecord,
+) -> Result<Value, VogtError> {
+    let project_id = adoption.project_id.clone();
+    let project_slug = adoption.project_slug.clone();
+    let adopted = adoption.adopted;
+    let already = adoption.already;
+    let now = adoption.now;
+    let result = adoption.result.clone();
+    audited_write(write, operation, reason, |txn, _actor, _, _| {
+        if !already {
+            txn.update_project(
+                &project_id,
+                &crate::storage::interface::ProjectUpdate {
+                    contract_adopted_at: if adopted { Some(now) } else { None },
+                    clear_contract_adopted_at: !adopted,
+                    // Declining resets the verdict; adopting leaves it for the
+                    // next check rather than inventing one.
+                    compliance_status: if adopted {
+                        None
+                    } else {
+                        Some("not_checked".to_string())
+                    },
+                    ..crate::storage::interface::ProjectUpdate::default()
+                },
+                now,
+            )?;
+        }
+        Ok(WriteOutcome {
+            result,
+            entity_kind: "project".to_string(),
+            entity_id: project_id.clone(),
+            payload: json!({ "contract_adopted": adopted }),
+            event_kind: CONTRACT_ADOPTION_EVENT.to_string(),
+            summary: json!({ "slug": project_slug, "adopted": adopted }),
+        })
+    })
 }
 
 /// What a recorded check writes back onto the project, gathered so the audit
