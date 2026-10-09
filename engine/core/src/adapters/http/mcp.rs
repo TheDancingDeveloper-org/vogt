@@ -192,11 +192,16 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
         store.synchronous(),
     );
     // The operation context gets its own clock, restarted the same way the
-    // request store's was. Python builds a fresh context per call
-    // (`context.py`), so the service's rows start again at the hook's start
-    // instead of continuing the clock the gate and the decision row already
-    // ticked. A wall clock has nothing to restart, and keeps the shared one.
+    // request store's was, and then read once before the service sees it.
+    // Python's per-call context reads its fresh step clock once while it is
+    // being built (`context.py`), so the service's first stamp is one tick
+    // past the hook's start rather than on it. A wall clock has nothing to
+    // restart, and keeps the shared one.
     let operation_clock = clock_for(store.clock());
+    operation_clock
+        .lock()
+        .expect("the clock lock is not poisoned")
+        .now();
     // One read of the request's clock. The gate's expiry check and the decision
     // row below both use it; reading again for the row would land it a tick
     // later than Python's.
@@ -218,9 +223,12 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
         }
     }
     drop(store);
+    // The console caller (`--no-auth`) writes even when the server is
+    // read-only, the same exception `record_call` records the row under. A
+    // presented token stays bound by the switch.
     let permitted = Permitted {
         scopes: grant.scopes.clone(),
-        writes_enabled: state.writes_enabled,
+        writes_enabled: state.writes_enabled || state.no_auth,
     };
     let built = context_for(&request_store, &state, &grant, build, operation_clock);
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);

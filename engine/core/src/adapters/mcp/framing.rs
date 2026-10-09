@@ -333,7 +333,7 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
                 "structuredContent": value,
                 "isError": false,
             }),
-            Err(error) => tool_error(error.code(), &describe(operation, &error)),
+            Err(error) => tool_error(tool_code(&error), &describe(operation, &error)),
         };
         result(Some(message_id), body)
     }
@@ -363,6 +363,19 @@ fn tool_error(code: &str, message: &str) -> Value {
         "content": [{"type": "text", "text": format!("{code}: {message}")}],
         "isError": true,
     })
+}
+
+/// The code a tool error carries. A validation failure is `invalid_params`, the
+/// way `run_raw` raises `InvalidParams`; every other error keeps its own code.
+fn tool_code(error: &crate::errors::VogtError) -> &str {
+    match error {
+        crate::errors::VogtError::InvalidRequest(message)
+            if message.starts_with("invalid arguments for ") =>
+        {
+            "invalid_params"
+        }
+        other => other.code(),
+    }
 }
 
 /// A validation failure as an instruction, the way `describe_invalid` writes it:
