@@ -171,6 +171,93 @@ readonly_wanted() {
     return 0
 }
 
+# Write one read-only server table into Codex's config.toml (GitHub #914).
+#
+# Several sessions start at once, and each used to check then append (`>>`)
+# with nothing held between the two, so the file grew a second copy of every
+# `[mcp_servers.*]` table. Duplicate tables do not parse, and a file that does
+# not parse then failed the "already registered" check, so every later start
+# appended again.
+#
+# The whole read-modify-write is one flock on a lock next to the config. The
+# new file is written beside the old one and renamed over it, so a reader never
+# sees a partial write. A config that does not parse is left exactly as it is:
+# appending to it cannot repair it and would only add another copy. A table
+# this script already wrote (one whose command is the wrapper) is replaced, so
+# a second start changes nothing; a table an operator wrote under the same
+# name, running something else, is left where it is.
+readonly_codex_write() {
+    local config="$1" name="$2" arg="$3" vars="$4" lockdir
+    lockdir="$(dirname "$config")"
+    mkdir -p "$lockdir"
+    (
+        flock 9
+        CODEX_CONFIG="$config" CODEX_SERVER="$name" CODEX_ARG="$arg" \
+            CODEX_VARS="$vars" CODEX_WRAPPER="$READONLY_WRAPPER" \
+            python3 - <<'PY'
+import os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+name = os.environ["CODEX_SERVER"]
+header = f"[mcp_servers.{name}]"
+block = (
+    f"{header}\n"
+    f'command = "{os.environ["CODEX_WRAPPER"]}"\n'
+    f'args = ["{os.environ["CODEX_ARG"]}"]\n'
+    f'env_vars = [{os.environ["CODEX_VARS"]}]\n'
+)
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+lines = text.splitlines(keepends=True)
+kept: list[str] = []
+index = 0
+while index < len(lines):
+    stripped = lines[index].strip()
+    if stripped == header or stripped.startswith(header + "."):
+        index += 1
+        while index < len(lines) and not lines[index].lstrip().startswith("["):
+            index += 1
+        continue
+    kept.append(lines[index])
+    index += 1
+
+body = "".join(kept).rstrip("\n")
+new = f"{body}\n\n{block}" if body else block
+if new == text:
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
 readonly_codex() {
     local name="$1" arg="$2" required="$3" optional="$4" config vars var
     command -v codex >/dev/null 2>&1 || return 0
@@ -186,17 +273,7 @@ readonly_codex() {
     for var in $required $optional; do
         vars+="${vars:+, }\"$var\""
     done
-    if codex mcp get "$name" --json 2>/dev/null | tr -d ' \n' \
-        | grep -qF "\"env_vars\":[${vars// /}]"; then
-        codex mcp get "$name" 2>/dev/null | grep -qF "$READONLY_WRAPPER" && return 0
-    fi
-    codex mcp remove "$name" >/dev/null 2>&1 || true
-    # `codex mcp add` cannot set `env_vars`, so the table is written whole. A
-    # new table appended at the end of the file is valid TOML wherever the
-    # file's other tables are.
-    mkdir -p "$(dirname "$config")"
-    printf '\n[mcp_servers.%s]\ncommand = "%s"\nargs = ["%s"]\nenv_vars = [%s]\n' \
-        "$name" "$READONLY_WRAPPER" "$arg" "$vars" >>"$config"
+    readonly_codex_write "$config" "$name" "$arg" "$vars"
 }
 
 readonly_claude() {
