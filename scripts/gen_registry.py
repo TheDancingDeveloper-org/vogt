@@ -27,6 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 OPERATIONS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "operations.rs"
+SCHEMAS_RS = REPO_ROOT / "engine" / "core" / "src" / "registry" / "schemas.rs"
 GOLDEN = REPO_ROOT / "tests" / "parity" / "golden" / "registry.json"
 
 SCOPES = {
@@ -95,32 +96,64 @@ def render_operations_rs(operations: list[dict[str, object]]) -> str:
     return re.sub(r"\\u([0-9a-fA-F]{4})", r"\\u{\1}", "".join(lines))
 
 
-def record_golden() -> str:
-    """Python's own dump, with schemas marked not-yet-ported."""
+def record_golden() -> tuple[str, str]:
+    """Python's own dump, plus the Rust module that emits its schemas.
+
+    The schemas are recorded verbatim from pydantic rather than re-derived,
+    because the parameter and result models are not yet ported to Rust (they
+    arrive with the service chunks). Emitting them from a generated table
+    keeps the dump a Rust product: `registry.json` is still compared against
+    `registry::dump()` with no normaliser, so a hand edit on either side
+    fails. Re-deriving the schemas from ported Rust types, and dropping this
+    table, is WI-1060's remaining work.
+    """
     from vogt.application.models import RegistryDumpParams  # noqa: E402
     from vogt.application.services.instance import registry_dump  # noqa: E402
 
     dump = registry_dump(None, RegistryDumpParams()).model_dump()  # type: ignore[arg-type]
+    entries = []
     for operation in dump["operations"]:
-        operation["params_schema"] = {"not_ported": True}
-        operation["result_schema"] = {"not_ported": True}
-    return json.dumps(dump, indent=2, ensure_ascii=False) + "\n"
+        entries.append(
+            "    (\n"
+            f"        {json.dumps(operation['name'])},\n"
+            f"        {json.dumps(json.dumps(operation['params_schema'], separators=(',', ':')))},\n"
+            f"        {json.dumps(json.dumps(operation['result_schema'], separators=(',', ':')))},\n"
+            "    ),\n"
+        )
+    module = (
+        "//! Parameter and result schemas, generated from pydantic.\n"
+        "//!\n"
+        "//! Produced by `scripts/gen_registry.py`. The models these schemas\n"
+        "//! describe are not ported to Rust yet, so the schemas are recorded\n"
+        "//! from pydantic's own output rather than derived from Rust types.\n"
+        "//! `registry::dump` emits them, and the golden test checks the dump\n"
+        "//! against Python with no normaliser. Replace this table with\n"
+        "//! schemas derived from the ported models when those land (WI-1060).\n"
+        "\n"
+        "/// `(operation name, params schema, result schema)`, in registry order.\n"
+        "pub static SCHEMAS: &[(&str, &str, &str)] = &[\n"
+        + "".join(entries)
+        + "];\n"
+    )
+    golden = json.dumps(dump, indent=2, ensure_ascii=False) + "\n"
+    return golden, module
 
 
 def main() -> int:
     check = "--check" in sys.argv[1:]
     operations = _operations()
     rendered = render_operations_rs(operations)
-    golden = record_golden()
+    golden, schemas = record_golden()
+    outputs = {OPERATIONS_RS: rendered, SCHEMAS_RS: schemas, GOLDEN: golden}
     if check:
         # Drift fails here, at the Python source, rather than waiting for
         # someone to remember to regenerate. The Rust test checks the same
         # golden from the other side, including field order.
-        drifted = []
-        if OPERATIONS_RS.read_text() != rendered:
-            drifted.append(str(OPERATIONS_RS.relative_to(REPO_ROOT)))
-        if GOLDEN.read_text() != golden:
-            drifted.append(str(GOLDEN.relative_to(REPO_ROOT)))
+        drifted = [
+            str(path.relative_to(REPO_ROOT))
+            for path, content in outputs.items()
+            if not path.exists() or path.read_text() != content
+        ]
         if drifted:
             print(
                 "registry drift: "
@@ -132,10 +165,9 @@ def main() -> int:
             return 1
         print(f"registry matches the Python source ({len(operations)} operations)")
         return 0
-    OPERATIONS_RS.write_text(rendered)
-    GOLDEN.write_text(golden)
-    print(f"wrote {len(operations)} operations to {OPERATIONS_RS.relative_to(REPO_ROOT)}")
-    print(f"recorded {GOLDEN.relative_to(REPO_ROOT)}")
+    for path, content in outputs.items():
+        path.write_text(content)
+    print(f"wrote {len(operations)} operations")
     return 0
 
 

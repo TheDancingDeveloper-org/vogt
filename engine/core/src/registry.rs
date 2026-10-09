@@ -7,6 +7,7 @@
 //! operation this module implements itself.
 
 pub mod operations;
+mod schemas;
 
 use std::collections::{HashMap, HashSet};
 
@@ -282,6 +283,7 @@ impl OperationRegistry {
         }
         let registry = Self { operations };
         registry.validate()?;
+        registry.validate_schemas()?;
         Ok(registry)
     }
 
@@ -413,6 +415,30 @@ impl OperationRegistry {
         Ok(())
     }
 
+    /// Every operation has a recorded schema, and no schema names an operation
+    /// that does not exist. The two tables are generated together.
+    fn validate_schemas(&self) -> Result<(), RegistryError> {
+        for operation in &self.operations {
+            if !schemas::SCHEMAS
+                .iter()
+                .any(|(name, _, _)| *name == operation.name)
+            {
+                return Err(RegistryError(format!(
+                    "{} has no recorded schema; regenerate with scripts/gen_registry.py",
+                    operation.name
+                )));
+            }
+        }
+        for (name, _, _) in schemas::SCHEMAS {
+            if !self.contains(name) {
+                return Err(RegistryError(format!(
+                    "schema recorded for '{name}', which is not a registered operation"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn validate_exclusions(&self) -> Result<(), RegistryError> {
         for (name, _) in LOCAL_ONLY.iter().chain(HTTP_ONLY) {
             if !self.contains(name) {
@@ -450,8 +476,8 @@ pub struct OperationManifest {
     pub http_path: &'static str,
     pub mcp_tool: String,
     pub cli_path: Vec<&'static str>,
-    /// JSON schemas land with P2.2. Until then the manifest names the gap
-    /// instead of emitting a schema that would not match pydantic's.
+    /// Recorded from pydantic until the models are ported to Rust. See
+    /// `schemas.rs` for why this is a generated table and not a derivation.
     pub params_schema: serde_json::Value,
     pub result_schema: serde_json::Value,
     pub transports: Vec<&'static str>,
@@ -481,6 +507,21 @@ pub fn dump() -> serde_json::Value {
                 Some((kind, reason)) => (Some(kind), Some(reason)),
                 None => (None, None),
             };
+            let (params_schema, result_schema) = schemas::SCHEMAS
+                .iter()
+                .find(|(name, _, _)| *name == operation.name)
+                .map(|(_, params, result)| {
+                    (
+                        serde_json::from_str(params).expect("generated params schema is JSON"),
+                        serde_json::from_str(result).expect("generated result schema is JSON"),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    (
+                        serde_json::json!({"not_ported": true}),
+                        serde_json::json!({"not_ported": true}),
+                    )
+                });
             OperationManifest {
                 name: operation.name,
                 summary: operation.summary,
@@ -491,8 +532,8 @@ pub fn dump() -> serde_json::Value {
                 http_path: operation.route.path,
                 mcp_tool: operation.mcp_tool_name(),
                 cli_path: operation.cli.path.to_vec(),
-                params_schema: serde_json::json!({"not_ported": true}),
-                result_schema: serde_json::json!({"not_ported": true}),
+                params_schema,
+                result_schema,
                 transports: registry
                     .transports_for(operation.name)
                     .iter()
