@@ -375,10 +375,14 @@ impl EngineClient {
         timeout: Duration,
     ) -> Result<Option<EngineWait>, VogtError> {
         let seconds = timeout.as_secs();
+        // The product enum spells it `any_change`; the engine's route takes
+        // `any-change`, and rejects the underscore form. Python maps the one
+        // to the other at the call (`params.until.replace("_", "-")`).
+        let until = until.replace('_', "-");
         let payload = self.call(
             &session_path(
                 session_id,
-                &format!("/wait?until={}&timeout_s={seconds}", quote(until)),
+                &format!("/wait?until={}&timeout_s={seconds}", quote(&until)),
             ),
             "GET",
             None,
@@ -845,10 +849,12 @@ impl EngineClient {
             // The WI-983 person gate is a different refusal from a missing
             // grant: "forbidden: person required: …" means the session names no
             // person, not that the caller lacks a capability.
-            if let Some(reason) = said.strip_prefix("forbidden: person required") {
-                let detail = reason.trim().trim_start_matches(':').trim();
+            if said.starts_with("forbidden: person required: ") {
+                // A permission prompt only a person answers (WI-983). Python
+                // strips exactly "forbidden: ", so the reason keeps the
+                // "person required: " that follows it.
                 return Err(VogtError::PersonRequired(
-                    nonempty(detail).unwrap_or_else(|| "person required".to_string()),
+                    said.trim_start_matches("forbidden: ").to_string(),
                 ));
             }
             if let Some(reason) = said.strip_prefix("forbidden: ") {
@@ -2152,6 +2158,36 @@ mod tests {
     #[test]
     fn no_engine_configured_is_none_not_an_error() {
         assert!(EngineClient::from_config(Some("  "), None).is_none());
+    }
+
+    #[test]
+    fn a_person_required_refusal_keeps_the_person_required_words() {
+        // Python strips only "forbidden: ", so the message keeps the second
+        // prefix. Stripping the whole "forbidden: person required" would drop it.
+        let (_, transport) = scripted(
+            403,
+            r#"{"error":"forbidden: person required: session is showing a permission prompt"}"#,
+        );
+        let error = client(transport).send_input("s", "y", false, false).unwrap_err();
+        assert_eq!(error.code(), "person_required");
+        assert_eq!(
+            error.message(),
+            "person required: session is showing a permission prompt"
+        );
+    }
+
+    #[test]
+    fn a_wait_for_any_change_asks_the_engine_for_any_change_with_a_hyphen() {
+        let (seen, transport) = scripted(
+            200,
+            r#"{"outcome":"changed","matched":true,"waited_ms":1,"screen":{"id":"s","lines":[]}}"#,
+        );
+        client(transport)
+            .wait_session("s", "any_change", Duration::from_secs(5))
+            .unwrap();
+        let sent = &seen.lock().unwrap()[0];
+        assert!(sent.contains("/wait?until=any-change&timeout_s=5"));
+        assert!(!sent.contains("any_change"));
     }
 
     #[test]
