@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 
 use crate::application::context::{AppContext, Built};
 use crate::application::resolve;
-use crate::application::services::{context_parts, dispatch, next_id, now_of, write_context};
+use crate::application::services::{context_parts, next_id, now_of};
 use crate::application::writes::{audited_write, WriteContext, WriteOutcome};
 use crate::core::{
     py_repr, slugify, Clock, ComplianceStatus, IdFactory, LinkState, Project, ProjectLifecycle,
@@ -203,28 +203,28 @@ fn parse_lifecycle(value: &str) -> Result<ProjectLifecycle, VogtError> {
 // --- the operation arms -----------------------------------------------------
 
 pub fn register_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, register_project, params)
+    crate::with_ctx!(ctx, |ctx| register_project(ctx, params))
 }
 pub fn create_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, create_project, params)
+    crate::with_ctx!(ctx, |ctx| create_project(ctx, params))
 }
 pub fn scaffold_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, scaffold_project, params)
+    crate::with_ctx!(ctx, |ctx| scaffold_project(ctx, params))
 }
 pub fn update_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, update_project, params)
+    crate::with_ctx!(ctx, |ctx| update_project(ctx, params))
 }
 pub fn transition_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, transition_project, params)
+    crate::with_ctx!(ctx, |ctx| transition_project(ctx, params))
 }
 pub fn get_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, get_project, params)
+    crate::with_ctx!(ctx, |ctx| get_project(ctx, params))
 }
 pub fn list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, list_projects, params)
+    crate::with_ctx!(ctx, |ctx| list_projects(ctx, params))
 }
 pub fn brief_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, brief_project, params)
+    crate::with_ctx!(ctx, |ctx| brief_project(ctx, params))
 }
 
 // --- registration -----------------------------------------------------------
@@ -388,7 +388,7 @@ fn register_project<C: Clock + 'static, I: IdFactory + 'static>(
         )));
     }
     let project_id = next_id(&ids, "prj");
-    let mut writing = write_context(declared, principal, clock, ids);
+    let mut writing = crate::application::context::write_of(ctx);
     let project = record_registration(
         &mut writing,
         &params.reason,
@@ -512,13 +512,7 @@ fn scaffold_project<C: Clock + 'static, I: IdFactory + 'static>(
             skipped.len()
         ),
     });
-    let (declared, _, principal, clock, ids, _) = context_parts(ctx);
-    let mut writing = write_context(
-        declared,
-        principal,
-        std::sync::Arc::clone(&clock),
-        std::sync::Arc::clone(&ids),
-    );
+    let mut writing = crate::application::context::write_of(ctx);
     record_scaffold(
         &mut writing,
         &params.reason,
@@ -563,7 +557,7 @@ fn create_project<C: Clock + 'static, I: IdFactory + 'static>(
         )));
     }
     let project_id = next_id(&ids, "prj");
-    let mut writing = write_context(declared, principal, clock, ids);
+    let mut writing = crate::application::context::write_of(ctx);
     let project = record_registration(
         &mut writing,
         &params.reason,
@@ -926,13 +920,7 @@ fn place_change<C: Clock + 'static, I: IdFactory + 'static>(
     operation: &str,
     reason: &str,
 ) -> Result<Project, VogtError> {
-    let (declared, _, principal, clock, ids, _) = context_parts(ctx);
-    let mut writing = write_context(
-        declared,
-        principal,
-        std::sync::Arc::clone(&clock),
-        std::sync::Arc::clone(&ids),
-    );
+    let mut writing = crate::application::context::write_of(ctx);
     apply_change(&mut writing, operation, reason, change)
 }
 

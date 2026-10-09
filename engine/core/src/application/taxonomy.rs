@@ -5,12 +5,10 @@
 //! Initiatives live in `services::initiatives`; this module does not re-port
 //! them.
 
-use std::sync::Arc;
-
 use serde_json::{json, Value};
 
 use crate::application::context::{AppContext, Built};
-use crate::application::services::{context_parts, dispatch, next_id, now_of, write_context};
+use crate::application::services::{context_parts, next_id, now_of};
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::core::{py_repr, Actor, ActorKind, Clock, IdFactory, Label, Moment};
 use crate::errors::VogtError;
@@ -59,7 +57,7 @@ struct NewLabel {
 
 /// Define a tag, shared instance-wide and GitHub-label aligned.
 pub fn create_label_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, create_label, params)
+    crate::with_ctx!(ctx, |ctx| create_label(ctx, params))
 }
 
 fn create_label<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
@@ -68,7 +66,7 @@ where
     I: IdFactory + 'static,
 {
     let params = parse::<CreateLabelParams>(params)?;
-    let (declared, _, principal, clock, ids, _) = context_parts(ctx);
+    let (declared, _, _, clock, ids, _) = context_parts(ctx);
     // Checked before the id is drawn. The write repeats the check, but a
     // duplicate refused here costs no id, so the next one stays where Python
     // puts it.
@@ -84,7 +82,7 @@ where
         color: params.color,
         now: now_of(&clock),
     };
-    let mut writing = write_context(declared, principal, Arc::clone(&clock), Arc::clone(&ids));
+    let mut writing = crate::application::context::write_of(ctx);
     let label = insert_label(&mut writing, &params.reason, input)?;
     Ok(json!({"label": label}))
 }
@@ -121,7 +119,7 @@ fn insert_label<C: Clock + 'static, I: IdFactory + 'static>(
 }
 
 pub fn list_labels_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, list_labels, params)
+    crate::with_ctx!(ctx, |ctx| list_labels(ctx, params))
 }
 
 fn list_labels<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
@@ -167,7 +165,7 @@ struct NewActor {
 /// work can be attributed to; the tokens that let them act are issued
 /// separately, and the acting principal is never taken from a parameter.
 pub fn create_actor_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, create_actor, params)
+    crate::with_ctx!(ctx, |ctx| create_actor(ctx, params))
 }
 
 fn create_actor<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
@@ -182,7 +180,7 @@ where
             py_repr(&params.kind)
         )));
     }
-    let (declared, _, principal, clock, ids, _) = context_parts(ctx);
+    let (declared, _, _, clock, ids, _) = context_parts(ctx);
     if declared
         .read()?
         .actor_by_identity(&params.identity_ref)?
@@ -200,7 +198,7 @@ where
         identity_ref: params.identity_ref,
         now: now_of(&clock),
     };
-    let mut writing = write_context(declared, principal, Arc::clone(&clock), Arc::clone(&ids));
+    let mut writing = crate::application::context::write_of(ctx);
     let actor = insert_actor(&mut writing, &params.reason, input)?;
     Ok(json!({"actor": actor}))
 }
@@ -243,7 +241,7 @@ fn insert_actor<C: Clock + 'static, I: IdFactory + 'static>(
 }
 
 pub fn list_actors_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, list_actors, params)
+    crate::with_ctx!(ctx, |ctx| list_actors(ctx, params))
 }
 
 fn list_actors<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
@@ -264,7 +262,7 @@ where
 /// An agent that can read the machine can pick a legal next state instead of
 /// guessing and handling a rejection.
 pub fn list_workflows_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    dispatch!(ctx, list_workflows, params)
+    crate::with_ctx!(ctx, |ctx| list_workflows(ctx, params))
 }
 
 fn list_workflows<C, I>(ctx: &AppContext<C, I>, _params: Value) -> Result<Value, VogtError>
