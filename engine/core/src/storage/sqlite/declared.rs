@@ -288,7 +288,11 @@ impl ReadView for SqliteReadView {
             .unwrap_or(0))
     }
     fn latest_event_seq(&self) -> Result<i64, VogtError> {
-        later("latest_event_seq")
+        self.conn
+            .query_row("SELECT COALESCE(MAX(seq), 0) FROM events", [], |row| {
+                row.get(0)
+            })
+            .map_err(sql_err)
     }
     fn counts(&self) -> Result<Counts, VogtError> {
         Ok(Counts {
@@ -348,11 +352,11 @@ impl ReadView for SqliteReadView {
             row_project,
         )
     }
-    fn work_item_by_id(&self, _: &str) -> Result<Option<WorkItem>, VogtError> {
-        later("work_item_by_id")
+    fn work_item_by_id(&self, id: &str) -> Result<Option<WorkItem>, VogtError> {
+        load_work_item(&self.conn, "w.id = ?", id)
     }
-    fn work_item_by_ref(&self, _: &str) -> Result<Option<WorkItem>, VogtError> {
-        later("work_item_by_ref")
+    fn work_item_by_ref(&self, reference: &str) -> Result<Option<WorkItem>, VogtError> {
+        load_work_item(&self.conn, "w.ref = ?", reference)
     }
     fn list_work_items(&self, _: &WorkFilter) -> Result<Vec<WorkItem>, VogtError> {
         later("list_work_items")
@@ -387,8 +391,8 @@ impl ReadView for SqliteReadView {
     fn unfinished_blockers(&self, _: &str, _: &[&str]) -> Result<Vec<Blocker>, VogtError> {
         later("unfinished_blockers")
     }
-    fn comments_for(&self, _: &str, _: i64) -> Result<Vec<Comment>, VogtError> {
-        later("comments_for")
+    fn comments_for(&self, id: &str, limit: i64) -> Result<Vec<Comment>, VogtError> {
+        many(&self.conn, "SELECT c.*, a.display_name AS actor_display_name FROM comments c JOIN actors a ON a.id = c.actor_id WHERE c.work_item_id = ? ORDER BY c.created_at, c.id LIMIT ?", params![id, limit], row_comment)
     }
     fn label_by_name(&self, name: &str) -> Result<Option<Label>, VogtError> {
         one(
@@ -596,14 +600,44 @@ impl ReadView for SqliteReadView {
     ) -> Result<Vec<CodingSession>, VogtError> {
         later("list_sessions")
     }
-    fn list_events(&self, _: i64, _: i64, _: Option<&str>) -> Result<Vec<Event>, VogtError> {
-        later("list_events")
+    fn list_events(
+        &self,
+        after: i64,
+        limit: i64,
+        entity_id: Option<&str>,
+    ) -> Result<Vec<Event>, VogtError> {
+        match entity_id {
+            Some(entity) => many(
+                &self.conn,
+                "SELECT * FROM events WHERE seq > ? AND entity_id = ? ORDER BY seq LIMIT ?",
+                params![after, entity, limit],
+                row_event,
+            ),
+            None => many(
+                &self.conn,
+                "SELECT * FROM events WHERE seq > ? ORDER BY seq LIMIT ?",
+                params![after, limit],
+                row_event,
+            ),
+        }
     }
-    fn list_audit(&self, _: &AuditQuery) -> Result<Vec<AuditRecord>, VogtError> {
-        later("list_audit")
+    fn list_audit(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, VogtError> {
+        let (where_sql, mut params_box) = audit_where(query);
+        params_box.push(Box::new(query.limit));
+        params_box.push(Box::new(query.offset));
+        let refs: Vec<&dyn rusqlite::ToSql> = params_box.iter().map(|v| v.as_ref()).collect();
+        many(&self.conn, &format!("SELECT a.*, ac.identity_ref AS actor_identity_ref FROM audit a JOIN actors ac ON ac.id = a.actor_id {where_sql} ORDER BY a.at, a.id LIMIT ? OFFSET ?"), refs.as_slice(), row_audit)
     }
-    fn count_audit(&self, _: &AuditQuery) -> Result<i64, VogtError> {
-        later("count_audit")
+    fn count_audit(&self, query: &AuditQuery) -> Result<i64, VogtError> {
+        let (where_sql, params_box) = audit_where(query);
+        let refs: Vec<&dyn rusqlite::ToSql> = params_box.iter().map(|v| v.as_ref()).collect();
+        self.conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM audit a {where_sql}"),
+                refs.as_slice(),
+                |row| row.get(0),
+            )
+            .map_err(sql_err)
     }
 }
 
@@ -933,28 +967,103 @@ impl WriteTxn for SqliteWrite {
         meta_set(&self.view.conn, META_WORK_REF_SEQ, &next.to_string())?;
         Ok(format!("{WORK_REF_PREFIX}{next}"))
     }
-    fn insert_work_item(&mut self, _: &WorkItem) -> Result<(), VogtError> {
-        later("insert_work_item")
+    fn insert_work_item(&mut self, item: &WorkItem) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO work_items (id, ref, kind, title, body, state, priority, effort, project_id, initiative_id, origin, trust_state, assignee_actor_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![item.id, item.reference, item.kind, item.title, item.body, item.state, item.priority, item.effort, item.project_id, item.initiative_id, item.origin, item.trust_state, item.assignee_actor_id, to_iso(item.created_at), to_iso(item.updated_at)],
+        ).map_err(sql_err)?;
+        for name in &item.labels {
+            attach_label(&self.view.conn, &item.id, name)?;
+        }
+        Ok(())
     }
     fn update_work_item(
         &mut self,
-        _: &str,
-        _: &WorkItemUpdate,
-        _: Moment,
+        work_item_id: &str,
+        update: &WorkItemUpdate,
+        at: Moment,
     ) -> Result<(), VogtError> {
-        later("update_work_item")
+        let mut set: Vec<String> = Vec::new();
+        let mut values: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        let mut push = |column: &str, value: &Option<String>| {
+            if let Some(value) = value {
+                set.push(format!("{column} = ?"));
+                values.push(Box::new(value.clone()));
+            }
+        };
+        push("title", &update.title);
+        push("body", &update.body);
+        push("state", &update.state);
+        push("priority", &update.priority);
+        push("effort", &update.effort);
+        push("assignee_actor_id", &update.assignee_actor_id);
+        push("initiative_id", &update.initiative_id);
+        push("project_id", &update.project_id);
+        push("superseded_by", &update.superseded_by);
+        for (column, clear) in [
+            ("effort", update.clear_effort),
+            ("assignee_actor_id", update.clear_assignee),
+            ("initiative_id", update.clear_initiative),
+        ] {
+            if clear {
+                set.push(format!("{column} = NULL"));
+            }
+        }
+        if !set.is_empty() {
+            set.push("updated_at = ?".into());
+            values.push(Box::new(to_iso(at)));
+            values.push(Box::new(work_item_id.to_string()));
+            let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
+            self.view
+                .conn
+                .execute(
+                    &format!("UPDATE work_items SET {} WHERE id = ?", set.join(", ")),
+                    refs.as_slice(),
+                )
+                .map_err(sql_err)?;
+        }
+        for name in &update.add_labels {
+            attach_label(&self.view.conn, work_item_id, name)?;
+        }
+        for name in &update.remove_labels {
+            self.view.conn.execute("DELETE FROM work_item_labels WHERE work_item_id = ? AND label_id IN (SELECT id FROM labels WHERE name = ?)", params![work_item_id, name]).map_err(sql_err)?;
+        }
+        if !update.add_labels.is_empty() || !update.remove_labels.is_empty() {
+            self.view
+                .conn
+                .execute(
+                    "UPDATE work_items SET updated_at = ? WHERE id = ?",
+                    params![to_iso(at), work_item_id],
+                )
+                .map_err(sql_err)?;
+        }
+        Ok(())
     }
     fn insert_relation(
         &mut self,
-        _: &str,
-        _: &str,
-        _: RelationKind,
-        _: Moment,
+        work_item_id: &str,
+        related_id: &str,
+        kind: RelationKind,
+        at: Moment,
     ) -> Result<(), VogtError> {
-        later("insert_relation")
+        self.view.conn.execute("INSERT INTO work_relations (work_item_id, related_id, kind, created_at) VALUES (?, ?, ?, ?)", params![work_item_id, related_id, vocab_of(&kind), to_iso(at)]).map_err(sql_err)?;
+        Ok(())
     }
-    fn delete_relation(&mut self, _: &str, _: &str, _: RelationKind) -> Result<bool, VogtError> {
-        later("delete_relation")
+    fn delete_relation(
+        &mut self,
+        work_item_id: &str,
+        related_id: &str,
+        kind: RelationKind,
+    ) -> Result<bool, VogtError> {
+        Ok(self
+            .view
+            .conn
+            .execute(
+                "DELETE FROM work_relations WHERE work_item_id = ? AND related_id = ? AND kind = ?",
+                params![work_item_id, related_id, vocab_of(&kind)],
+            )
+            .map_err(sql_err)?
+            > 0)
     }
     fn insert_label(&mut self, label: &Label) -> Result<(), VogtError> {
         self.view
@@ -974,20 +1083,22 @@ impl WriteTxn for SqliteWrite {
         self.view.conn.execute("UPDATE initiatives SET title = ?, body = ?, state = ?, weight = ?, updated_at = ? WHERE id = ?", params![initiative.title, initiative.body, vocab(&initiative.state), initiative.weight, to_iso(initiative.updated_at), initiative.id]).map_err(sql_err)?;
         Ok(())
     }
-    fn insert_comment(&mut self, _: &Comment) -> Result<(), VogtError> {
-        later("insert_comment")
+    fn insert_comment(&mut self, comment: &Comment) -> Result<(), VogtError> {
+        self.view.conn.execute("INSERT INTO comments (id, work_item_id, actor_id, body, created_at) VALUES (?, ?, ?, ?, ?)", params![comment.id, comment.work_item_id, comment.actor_id, comment.body, to_iso(comment.created_at)]).map_err(sql_err)?;
+        Ok(())
     }
-    fn insert_suppression(&mut self, _: &Suppression) -> Result<(), VogtError> {
-        later("insert_suppression")
+    fn insert_suppression(&mut self, suppression: &Suppression) -> Result<(), VogtError> {
+        self.view.conn.execute("INSERT INTO suppressions (id, match_kind, subject_key_or_pattern, scope_project_id, actor_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![suppression.id, vocab_of(&suppression.match_kind), suppression.subject_key_or_pattern, suppression.scope_project_id, suppression.actor_id, suppression.reason, to_iso(suppression.created_at)]).map_err(sql_err)?;
+        Ok(())
     }
     fn revoke_suppression(
         &mut self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: Moment,
+        suppression_id: &str,
+        actor_id: &str,
+        reason: &str,
+        at: Moment,
     ) -> Result<bool, VogtError> {
-        later("revoke_suppression")
+        Ok(self.view.conn.execute("UPDATE suppressions SET revoked_at = ?, revoked_by_actor_id = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL", params![to_iso(at), actor_id, reason, suppression_id]).map_err(sql_err)? > 0)
     }
     fn insert_contract_exemption(
         &mut self,
@@ -1132,11 +1243,21 @@ impl WriteTxn for SqliteWrite {
         self.view.workflow_cache.borrow_mut().remove(&workflow.kind);
         Ok(())
     }
-    fn append_audit(&mut self, _: &AuditRecord) -> Result<AuditRecord, VogtError> {
-        later("append_audit")
+    fn append_audit(&mut self, record: &AuditRecord) -> Result<AuditRecord, VogtError> {
+        let stored = AuditRecord {
+            txn_id: self.txn_id.clone(),
+            revision: self.revision,
+            ..record.clone()
+        };
+        insert_audit(&self.view.conn, &stored)?;
+        Ok(stored)
     }
-    fn append_event(&mut self, _: &Event) -> Result<Event, VogtError> {
-        later("append_event")
+    fn append_event(&mut self, event: &Event) -> Result<Event, VogtError> {
+        self.view.conn.execute("INSERT INTO events (kind, entity_kind, entity_id, actor_id, audit_id, summary, at) VALUES (?, ?, ?, ?, ?, ?, ?)", params![event.kind, event.entity_kind, event.entity_id, event.actor_id, event.audit_id, event.summary.to_string(), to_iso(event.at)]).map_err(sql_err)?;
+        Ok(Event {
+            seq: self.view.conn.last_insert_rowid(),
+            ..event.clone()
+        })
     }
 }
 
@@ -1273,11 +1394,11 @@ mod tests {
     use crate::core::{InitiativeState, Moment, SequentialIds, StepClock};
     use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
-    fn moment() -> Moment {
+    pub(super) fn moment() -> Moment {
         Moment::from_unix(1_700_000_000, 0)
     }
 
-    fn store(dir: &Path) -> SqliteDeclaredStore<StepClock, SequentialIds> {
+    pub(super) fn store(dir: &Path) -> SqliteDeclaredStore<StepClock, SequentialIds> {
         let store = SqliteDeclaredStore::new(
             dir.join("declared.sqlite3"),
             StepClock::new(moment()),
@@ -1289,7 +1410,10 @@ mod tests {
         store
     }
 
-    fn project(store: &SqliteDeclaredStore<StepClock, SequentialIds>, slug: &str) -> Project {
+    pub(super) fn project(
+        store: &SqliteDeclaredStore<StepClock, SequentialIds>,
+        slug: &str,
+    ) -> Project {
         let now = moment();
         Project::new(
             &store.ids.borrow_mut().next("prj"),
@@ -1488,4 +1612,341 @@ mod tests {
             .is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+fn attach_label(conn: &Connection, work_item_id: &str, name: &str) -> Result<(), VogtError> {
+    let id: String = conn
+        .query_row("SELECT id FROM labels WHERE name = ?", [name], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(sql_err)?
+        .ok_or_else(|| VogtError::NotFound(format!("no label named {name:?}")))?;
+    conn.execute("INSERT INTO work_item_labels (work_item_id, label_id) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM work_item_labels WHERE work_item_id = ? AND label_id = ?)", params![work_item_id, id, work_item_id, id]).map_err(sql_err)?;
+    Ok(())
+}
+fn vocab_of<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[cfg(test)]
+mod more {
+    use super::tests::{moment, project, store};
+    use super::*;
+    #[test]
+    fn a_work_item_round_trips_with_its_label_relation_and_comment() {
+        let dir = std::env::temp_dir().join(format!("vogt-work-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let now = moment();
+        let label = Label {
+            id: "lbl_1".into(),
+            name: "backend".into(),
+            color: None,
+            created_at: now,
+        };
+        let project = project(&store, "governed");
+        let mut first = store.write().unwrap();
+        let reference = first.next_work_ref().unwrap();
+        first.insert_project(&project).unwrap();
+        first.insert_label(&label).unwrap();
+        first.commit().unwrap();
+        let item = WorkItem {
+            id: "wrk_1".into(),
+            reference,
+            kind: "bug".into(),
+            title: "leaks".into(),
+            body: String::new(),
+            state: "open".into(),
+            priority: "p1".into(),
+            effort: None,
+            project_id: Some(project.id.clone()),
+            project_slug: None,
+            initiative_id: None,
+            origin: "created".into(),
+            trust_state: "unverified".into(),
+            assignee_actor_id: None,
+            assignee_identity_ref: None,
+            labels: vec!["backend".into()],
+            relations: Vec::new(),
+            superseded_by: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let other = WorkItem {
+            id: "wrk_2".into(),
+            reference: String::new(),
+            title: "other".into(),
+            labels: Vec::new(),
+            ..item.clone()
+        };
+        let mut txn = store.write().unwrap();
+        let other_ref = txn.next_work_ref().unwrap();
+        let other = WorkItem {
+            reference: other_ref,
+            ..other
+        };
+        txn.insert_work_item(&item).unwrap();
+        txn.insert_work_item(&other).unwrap();
+        txn.insert_relation(
+            &item.id,
+            &other.id,
+            crate::core::RelationKind::DependsOn,
+            now,
+        )
+        .unwrap();
+        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        txn.insert_comment(&Comment {
+            id: "cmt_1".into(),
+            work_item_id: item.id.clone(),
+            actor_id: actor.id.clone(),
+            actor_display_name: String::new(),
+            body: "noted".into(),
+            created_at: now,
+        })
+        .unwrap();
+        let audit = txn
+            .append_audit(&AuditRecord {
+                id: "aud_x".into(),
+                txn_id: String::new(),
+                revision: 0,
+                actor_id: actor.id.clone(),
+                actor_identity_ref: actor.identity_ref.clone(),
+                operation: "work.create".into(),
+                entity_kind: "work_item".into(),
+                entity_id: item.id.clone(),
+                reason: "filed".into(),
+                payload_digest: format!("sha256:{}", "ab".repeat(32)),
+                at: now,
+            })
+            .unwrap();
+        let event = txn
+            .append_event(&Event {
+                seq: 0,
+                kind: "created".into(),
+                entity_kind: "work_item".into(),
+                entity_id: item.id.clone(),
+                actor_id: Some(actor.id.clone()),
+                audit_id: Some(audit.id.clone()),
+                summary: serde_json::json!({"verb": "created"}),
+                at: now,
+            })
+            .unwrap();
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        let loaded = view.work_item_by_id(&item.id).unwrap().unwrap();
+        assert_eq!(loaded.reference, "WI-1");
+        assert_eq!(loaded.project_slug.as_deref(), Some("governed"));
+        assert_eq!(loaded.labels, ["backend".to_string()]);
+        assert_eq!(loaded.relations.len(), 1);
+        assert_eq!(loaded.relations[0].related_ref, "WI-2");
+        assert_eq!(
+            view.comments_for(&item.id, 10).unwrap()[0].actor_display_name,
+            actor.display_name
+        );
+        // The store, not the caller, owns the transaction id and revision.
+        assert_eq!(
+            audit.txn_id,
+            view.list_audit(&AuditQuery {
+                limit: 10,
+                offset: 0,
+                actor_id: None,
+                operation: Some("work.create".into()),
+                entity_id: None,
+                project_id: None,
+                since: None,
+                until: None
+            })
+            .unwrap()[0]
+                .txn_id
+        );
+        assert_eq!(
+            view.count_audit(&AuditQuery {
+                limit: 0,
+                offset: 0,
+                actor_id: None,
+                operation: None,
+                entity_id: Some(item.id.clone()),
+                project_id: None,
+                since: None,
+                until: None
+            })
+            .unwrap(),
+            1
+        );
+        assert_eq!(event.seq, 1);
+        assert_eq!(view.latest_event_seq().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dropped_work_item_write_does_not_burn_a_reference() {
+        let dir = std::env::temp_dir().join(format!("vogt-ref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let txn = store.write().unwrap();
+        assert_eq!(txn.revision(), 1);
+        drop(txn);
+        let mut txn = store.write().unwrap();
+        assert_eq!(txn.next_work_ref().unwrap(), "WI-1");
+        drop(txn);
+        let mut txn = store.write().unwrap();
+        assert_eq!(txn.next_work_ref().unwrap(), "WI-1");
+        txn.commit().unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+const WORK_SELECT: &str = "SELECT w.*, p.slug AS project_slug, ac.identity_ref AS assignee_identity_ref FROM work_items w LEFT JOIN projects p ON p.id = w.project_id LEFT JOIN actors ac ON ac.id = w.assignee_actor_id";
+
+fn load_work_item(
+    conn: &Connection,
+    predicate: &str,
+    key: &str,
+) -> Result<Option<WorkItem>, VogtError> {
+    let row = conn
+        .query_row(
+            &format!("{WORK_SELECT} WHERE {predicate}"),
+            [key],
+            row_work_base,
+        )
+        .optional()
+        .map_err(sql_err)?;
+    row.map(|base| finish_work_item(conn, base)).transpose()
+}
+
+struct WorkBase {
+    item: WorkItem,
+}
+
+fn row_work_base(row: &Row<'_>) -> rusqlite::Result<WorkBase> {
+    Ok(WorkBase {
+        item: WorkItem {
+            id: row.get("id")?,
+            reference: row.get("ref")?,
+            kind: row.get("kind")?,
+            title: row.get("title")?,
+            body: row.get("body")?,
+            state: row.get("state")?,
+            priority: row.get("priority")?,
+            effort: row.get("effort")?,
+            project_id: row.get("project_id")?,
+            project_slug: row.get("project_slug")?,
+            initiative_id: row.get("initiative_id")?,
+            origin: row.get("origin")?,
+            trust_state: row.get("trust_state")?,
+            assignee_actor_id: row.get("assignee_actor_id")?,
+            assignee_identity_ref: row.get("assignee_identity_ref")?,
+            labels: Vec::new(),
+            relations: Vec::new(),
+            superseded_by: row.get("superseded_by")?,
+            created_at: moment(row, "created_at")?,
+            updated_at: moment(row, "updated_at")?,
+        },
+    })
+}
+
+fn finish_work_item(conn: &Connection, base: WorkBase) -> Result<WorkItem, VogtError> {
+    let mut item = base.item;
+    item.labels = many(conn, "SELECT l.name FROM labels l JOIN work_item_labels wl ON wl.label_id = l.id WHERE wl.work_item_id = ? ORDER BY l.name", params![item.id], |row| row.get(0))?;
+    item.relations = many(conn, "SELECT r.kind, o.id AS related_id, o.ref AS related_ref, o.title AS related_title, o.state AS related_state FROM work_relations r JOIN work_items o ON o.id = r.related_id WHERE r.work_item_id = ? ORDER BY r.kind, o.ref", params![item.id], row_relation)?;
+    Ok(item)
+}
+
+fn row_relation(row: &Row<'_>) -> rusqlite::Result<crate::core::Relation> {
+    let kind: String = row.get("kind")?;
+    Ok(crate::core::Relation {
+        kind: serde_json::from_value(serde_json::Value::String(kind))
+            .map_err(|e| rusqlite::Error::InvalidColumnName(e.to_string()))?,
+        related_id: row.get("related_id")?,
+        related_ref: row.get("related_ref")?,
+        related_title: row.get("related_title")?,
+        related_state: row.get("related_state")?,
+    })
+}
+
+fn row_comment(row: &Row<'_>) -> rusqlite::Result<Comment> {
+    Ok(Comment {
+        id: row.get("id")?,
+        work_item_id: row.get("work_item_id")?,
+        actor_id: row.get("actor_id")?,
+        actor_display_name: row.get("actor_display_name")?,
+        body: row.get("body")?,
+        created_at: moment(row, "created_at")?,
+    })
+}
+
+fn row_event(row: &Row<'_>) -> rusqlite::Result<Event> {
+    let summary: String = row.get("summary")?;
+    Ok(Event {
+        seq: row.get("seq")?,
+        kind: row.get("kind")?,
+        entity_kind: row.get("entity_kind")?,
+        entity_id: row.get("entity_id")?,
+        actor_id: row.get("actor_id")?,
+        audit_id: row.get("audit_id")?,
+        summary: serde_json::from_str(&summary).unwrap_or(serde_json::Value::Null),
+        at: moment(row, "at")?,
+    })
+}
+
+fn row_audit(row: &Row<'_>) -> rusqlite::Result<AuditRecord> {
+    Ok(AuditRecord {
+        id: row.get("id")?,
+        txn_id: row.get("txn_id")?,
+        revision: row.get("revision")?,
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        operation: row.get("operation")?,
+        entity_kind: row.get("entity_kind")?,
+        entity_id: row.get("entity_id")?,
+        reason: row.get("reason")?,
+        payload_digest: row.get("payload_digest")?,
+        at: moment(row, "at")?,
+    })
+}
+
+fn audit_where(query: &AuditQuery) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params_box: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut add = |clause: &str, value: String| {
+        clauses.push(clause.into());
+        params_box.push(Box::new(value));
+    };
+    if let Some(actor) = &query.actor_id {
+        add("a.actor_id = ?", actor.clone());
+    }
+    if let Some(operation) = &query.operation {
+        add("a.operation = ?", operation.clone());
+    }
+    if let Some(entity) = &query.entity_id {
+        add("a.entity_id = ?", entity.clone());
+    }
+    if let Some(project) = &query.project_id {
+        add(
+            "a.entity_id IN (SELECT id FROM work_items WHERE project_id = ?)",
+            project.clone(),
+        );
+    }
+    if let Some(since) = query.since {
+        add("a.at >= ?", to_iso(since));
+    }
+    if let Some(until) = query.until {
+        add("a.at < ?", to_iso(until));
+    }
+    (
+        if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", clauses.join(" AND "))
+        },
+        params_box,
+    )
 }
