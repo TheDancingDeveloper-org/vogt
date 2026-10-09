@@ -849,7 +849,13 @@ fn runs(repo: &RepoRef, response: &ForgeResponse) -> Vec<ForgeCheck> {
 /// that refuses to guess which repository a parameterised URL names.
 pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
     let raw = repo_url?.trim();
-    let candidate = raw.strip_prefix("git+").unwrap_or(raw);
+    // urlparse drops tabs, carriage returns and newlines before it reads a
+    // URL, so a repository pasted across a line break still resolves.
+    let raw: String = raw
+        .chars()
+        .filter(|ch| !matches!(ch, '\t' | '\r' | '\n'))
+        .collect();
+    let candidate = raw.strip_prefix("git+").unwrap_or(&raw);
     // Python strips only https, http and ssh, and also accepts the bare
     // `github.com/owner/repo` form. Any other scheme, and an scp host whose
     // case isn't exactly `github.com`, is not a GitHub repo.
