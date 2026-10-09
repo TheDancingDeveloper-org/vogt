@@ -76,7 +76,10 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    announce_hooks();
+    if let Err(error) = validate_hooks(None) {
+        eprintln!("{error}");
+        return ExitCode::from(1);
+    }
     match cli.command {
         Command::Serve {
             host,
@@ -90,19 +93,23 @@ fn main() -> ExitCode {
 /// Python's one startup warning: name the deterministic hooks that are set,
 /// once, on stderr. A golden run sets both, so the line is part of what the
 /// two binaries must agree on.
-fn announce_hooks() {
-    let mut active = Vec::new();
-    for name in [core::CLOCK_ENV, core::IDS_ENV] {
-        if std::env::var(name)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            active.push(name);
-        }
+/// Validate the hooks and name the ones that are set. A value that is not a
+/// timestamp, or an id mode other than `sequential`, exits 1 the way Python's
+/// `InvalidRequest` does. `host` is checked when serving, so a deterministic
+/// clock cannot run on a non-loopback bind.
+fn validate_hooks(host: Option<&str>) -> Result<(), crate::errors::VogtError> {
+    let clock = std::env::var(core::CLOCK_ENV).ok();
+    let ids = std::env::var(core::IDS_ENV).ok();
+    core::clock_from_env(clock.as_deref())?;
+    core::ids_from_env(ids.as_deref(), None)?;
+    if let Some(host) = host {
+        core::refuse_hooks_off_loopback(host, clock.as_deref(), ids.as_deref())?;
     }
+    let active = core::hooks_active(clock.as_deref(), ids.as_deref());
     if !active.is_empty() {
         eprintln!("deterministic test hooks are active: {}", active.join(", "));
     }
+    Ok(())
 }
 
 fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
@@ -208,6 +215,10 @@ fn render_text(body: &serde_json::Value) -> String {
 }
 
 fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: bool) -> ExitCode {
+    if let Err(error) = validate_hooks(Some(host)) {
+        eprintln!("vogt-core serve: {error}");
+        return ExitCode::from(1);
+    }
     let Some(data_dir) = resolve_data_dir(data_dir) else {
         return ExitCode::from(1);
     };
