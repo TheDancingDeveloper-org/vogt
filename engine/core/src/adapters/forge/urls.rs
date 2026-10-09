@@ -42,6 +42,9 @@ pub fn split_repo_url(candidate: &str) -> Option<(String, &str, bool)> {
         None => after,
     };
     let path = path.strip_prefix('/').unwrap_or(path);
+    // urlparse stops a path segment at `;`, which marks parameters. The
+    // parameters are never part of the repository name.
+    let path = path.split(';').next().unwrap_or(path);
     let host = raw_host.rsplit('@').next().unwrap_or(raw_host);
     let host = host.split_once(':').map_or(host, |(name, _)| name);
     if host.is_empty() {

@@ -849,9 +849,11 @@ fn runs(repo: &RepoRef, response: &ForgeResponse) -> Vec<ForgeCheck> {
 /// that refuses to guess which repository a parameterised URL names.
 pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
     let raw = repo_url?.trim();
-    // urlparse drops tabs, carriage returns and newlines before it reads a
-    // URL, so a repository pasted across a line break still resolves.
+    // urlparse strips every character Python's str.strip() does, tabs and line
+    // breaks included, before it reads a URL. Rust's trim() only removes
+    // Unicode whitespace, so a leading unit separator would survive it.
     let raw: String = raw
+        .trim_matches(|ch: char| ch.is_whitespace() || ch.is_control())
         .chars()
         .filter(|ch| !matches!(ch, '\t' | '\r' | '\n'))
         .collect();
