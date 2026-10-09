@@ -35,4 +35,5 @@ pub use models::{
 };
 pub use payloads::{comparison, decoded_content, quote_path};
 pub use provider::ForgeProvider;
+pub use transport::{api_path, ForgeResponse, ForgeTransport};
 pub use writeback::{permits, WriteBackAction, WriteBackOutcome, WriteBackPolicy, WriteBackResult};

@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::adapters::forge::{self, ForgeResponse, ForgeTransport};
 use crate::errors::VogtError;
 
 pub const API_ROOT: &str = "https://api.github.com";
@@ -26,16 +27,6 @@ pub const DEFAULT_PER_PAGE: u32 = 100;
 
 /// The one host this adapter can read.
 pub const SUPPORTED_HOST: &str = "github.com";
-
-/// One answer from the forge. `Missing` is a 404, `Empty` is a 204, and both
-/// mean "nothing to read" rather than a failure — GitHub answers the
-/// repository toggles with 204 when they are on and 404 when they are off.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ForgeResponse {
-    Json(Value),
-    Empty,
-    Missing,
-}
 
 /// Who a token belongs to, and what it may do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,18 +244,37 @@ impl GitHubClient {
     }
 }
 
-/// `{api_root}/repos/...` to `/repos/...`, or `None` for anything outside this
-/// API's repository tree. The URL comes from a forge payload, so the token
-/// must not follow one the payload chose.
-pub fn api_path(api_url: &str, api_root: &str) -> Option<String> {
-    let root = api_root.trim_end_matches('/');
-    let rest = api_url.strip_prefix(&format!("{root}/repos/"))?;
-    let path = format!("/repos/{}", rest.split(['?', '#']).next().unwrap_or(""));
-    if path.split('/').any(|part| part == "..") {
-        return None;
+/// The real `ForgeTransport`. `identity` narrows the client's richer result to
+/// the `(login, scopes)` the providers read.
+impl ForgeTransport for GitHubClient {
+    fn api_root(&self) -> &str {
+        self.api_root()
     }
-    Some(path)
+
+    fn token(&self) -> Option<&str> {
+        self.token()
+    }
+
+    fn get(&self, path: &str, query: &[(&str, String)]) -> Result<ForgeResponse, VogtError> {
+        self.get(path, query)
+    }
+
+    fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
+        Ok(GitHubClient::identity(self)?.map(|who| (who.login, who.scopes)))
+    }
+
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&Value>,
+    ) -> Result<Value, VogtError> {
+        self.send(method, path, body)
+    }
 }
+
+#[allow(unused_imports)]
+pub use forge::api_path;
 
 /// Extract `(owner, repo)` from a project's repository URL. A project with no
 /// GitHub URL is not an error — it is a project that does not live on GitHub.
