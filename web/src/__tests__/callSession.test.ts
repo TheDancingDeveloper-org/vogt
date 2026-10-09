@@ -111,7 +111,7 @@ async function connected() {
   const h = harness();
   await h.session.start();
   h.socket().open();
-  h.socket().server({ type: "session.created", call_id: "c1", sample_rate: 16000, end_of_turn_ms: 700, barge_in_ms: 500 });
+  h.socket().server({ type: "session.created", protocol: 1, call_id: "c1", sample_rate: 16000, end_of_turn_ms: 700, barge_in_ms: 500 });
   return h;
 }
 
@@ -124,7 +124,7 @@ describe("a live call on the client", () => {
     expect(h.socket().json()[0]).toEqual({ type: "auth", token: "tok" });
     h.frame(new ArrayBuffer(640)); // before session.created: dropped
     expect(h.socket().binaries()).toHaveLength(0);
-    h.socket().server({ type: "session.created", call_id: "c", sample_rate: 16000, end_of_turn_ms: 700, barge_in_ms: 500 });
+    h.socket().server({ type: "session.created", protocol: 1, call_id: "c", sample_rate: 16000, end_of_turn_ms: 700, barge_in_ms: 500 });
     h.frame(new ArrayBuffer(640));
     expect(h.socket().binaries()).toHaveLength(1);
     expect(h.view().phase).toBe("listening");

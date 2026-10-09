@@ -567,9 +567,9 @@ async fn a_spoken_yes_never_approves_and_the_button_does() {
     read_until(&mut ws, &mut seen, is("session.created")).await;
 
     speak(&mut ws, &utterance()).await;
-    let card = read_until(&mut ws, &mut seen, is("assistant.pending_action")).await;
-    let action_id = card["action"]["id"].as_str().unwrap().to_string();
-    assert_eq!(card["action"]["kind"], "send_input");
+    let card = read_until(&mut ws, &mut seen, is("approval.pending")).await;
+    let action_id = card["card"]["id"].as_str().unwrap().to_string();
+    assert_eq!(card["card"]["kind"], "send_input");
     let done = read_until(&mut ws, &mut seen, is("response.done")).await;
     assert_eq!(done["status"], "pending_approval");
     let calls_before = stubs.lock().unwrap().chat_calls;
@@ -610,7 +610,7 @@ async fn a_spoken_yes_never_approves_and_the_button_does() {
         json!({"type": "action.resolve", "id": action_id, "approve": true}),
     )
     .await;
-    let resolved = read_until(&mut ws, &mut seen, is("assistant.action_resolved")).await;
+    let resolved = read_until(&mut ws, &mut seen, is("approval.resolved")).await;
     assert_eq!(resolved["approved"], json!(true));
     let done = read_until(&mut ws, &mut seen, is("response.done")).await;
     assert_eq!(done["text"], "Done, I typed it.");

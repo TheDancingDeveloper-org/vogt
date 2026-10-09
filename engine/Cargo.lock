@@ -4034,14 +4034,16 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vogt-engine-contract",
- "voxcall",
+ "voicepipe",
  "vt100",
  "web-push",
 ]
 
 [[package]]
-name = "voxcall"
+name = "voicepipe"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91e6ba5487e80f49d620f7eeb5421baca455b83b21033556e567f6756009e766"
 dependencies = [
  "bytes",
  "earshot",

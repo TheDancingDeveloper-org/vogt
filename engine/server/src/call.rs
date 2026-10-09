@@ -20,11 +20,11 @@
 //! ## Shape
 //!
 //! The pipeline itself — endpointing, transcription, the turn spoken as it
-//! streams, barge-in, the approval invariant — is the generic `voxcall`
-//! crate (`engine/voxcall`, see its `DESIGN.md`). This module is Vogt's side
-//! of it: the route, authentication, the one-call slot, and the providers —
-//! the assistant runtime as the `Llm`, the speech proxy as `Stt`/`Tts`, the
-//! runtime's pending card as `Approvals`.
+//! streams, barge-in, the approval invariant — is the generic `voicepipe`
+//! crate (github.com/TheDancingDeveloper-org/voicepipe). This module is
+//! Vogt's side of it: the route, authentication, the one-call slot, and the
+//! providers — the assistant runtime as the `Llm`, the speech proxy as
+//! `Stt`/`Tts`, the runtime's pending card as `Approvals`.
 //!
 //! The socket's handler owns the call's state and is the only thing that
 //! reads the socket. A writer task owns the sending half. Each response —
@@ -71,7 +71,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
-use voxcall::{
+use voicepipe::{
     Approvals, BoxFuture, CallClientEvent, CallConfig, CallServerEvent, Clip, Endpointer, Inbound,
     Llm, LlmEvent, LlmSink, Outbound, ProviderError, Providers, ResponseReport, Stt, SttMode, Tts,
     TurnOutcome, TurnRequest,
@@ -285,14 +285,14 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>) {
     });
 
     let config = policy.call_config();
-    let detector: Box<dyn voxcall::TurnDetector> = match policy.vad {
+    let detector: Box<dyn voicepipe::TurnDetector> = match policy.vad {
         CallVad::Earshot => Box::new(Endpointer::new(
             config.endpoint_config(),
-            voxcall::EarshotVad::default(),
+            voicepipe::EarshotVad::default(),
         )),
         CallVad::Energy => Box::new(Endpointer::new(
             config.endpoint_config(),
-            voxcall::EnergyVad::new(voxcall::EnergyVadConfig::default()),
+            voicepipe::EnergyVad::new(voicepipe::EnergyVadConfig::default()),
         )),
     };
     let providers = Providers {
@@ -306,7 +306,7 @@ async fn run(mut socket: WebSocket, state: Arc<AppState>) {
         approvals: Arc::new(AssistantCards { runtime, caller }),
         observer: Some(Arc::new(log_response)),
     };
-    voxcall::run(call_id.clone(), config, providers, detector, in_rx, out_tx).await;
+    voicepipe::run(call_id.clone(), config, providers, detector, in_rx, out_tx).await;
     reader.abort();
     // Let the last events (the final `response.done`) drain before closing.
     let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
@@ -339,7 +339,7 @@ impl Stt for SpeechProvider {
             self.0
                 .transcribe(wav, "turn.wav", "audio/wav", None, None)
                 .await
-                .map_err(|e| ProviderError(e.to_string()))
+                .map_err(|e| ProviderError::new(e.to_string()))
         })
     }
 
@@ -356,7 +356,7 @@ impl Stt for SpeechProvider {
             self.0
                 .transcribe(wav, "chunk.wav", "audio/wav", prompt, None)
                 .await
-                .map_err(|e| ProviderError(e.to_string()))
+                .map_err(|e| ProviderError::new(e.to_string()))
         })
     }
 }
@@ -371,7 +371,7 @@ impl Tts for SpeechProvider {
                     content_type: clip.content_type,
                     bytes: clip.bytes,
                 })
-                .map_err(|e| ProviderError(e.to_string()))
+                .map_err(|e| ProviderError::new(e.to_string()))
         })
     }
 }
@@ -418,13 +418,15 @@ impl Llm for AssistantTurn {
                 }
                 TurnRequest::Resolve { card_id, approve } => {
                     let id = Uuid::parse_str(&card_id)
-                        .map_err(|_| ProviderError("not a card id".into()))?;
+                        .map_err(|_| ProviderError::new("not a card id"))?;
                     self.runtime
                         .resolve_action_streamed(self.caller.clone(), id, approve, &stream)
                         .await
                 }
             };
-            reply.map(outcome).map_err(|e| ProviderError(e.to_string()))
+            reply
+                .map(outcome)
+                .map_err(|e| ProviderError::new(e.to_string()))
         })
     }
 

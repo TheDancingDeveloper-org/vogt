@@ -206,8 +206,6 @@ WORKDIR /app/engine
 COPY engine/Cargo.toml engine/Cargo.lock ./
 COPY engine/contract/Cargo.toml ./contract/Cargo.toml
 COPY engine/contract/src ./contract/src
-COPY engine/voxcall/Cargo.toml ./voxcall/Cargo.toml
-COPY engine/voxcall/src ./voxcall/src
 COPY engine/server/Cargo.toml ./server/Cargo.toml
 COPY engine/server/build.rs ./server/build.rs
 COPY engine/server/src ./server/src
