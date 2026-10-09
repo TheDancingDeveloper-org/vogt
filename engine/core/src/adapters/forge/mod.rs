@@ -11,10 +11,13 @@
 //! construction — there is no delete, force, or replace.
 
 mod edges;
+mod forgejo;
+mod github;
 mod kinds;
 mod models;
 mod payloads;
 mod provider;
+mod transport;
 mod writeback;
 
 pub use edges::{parse_edges, ParsedEdge, FROM_BODY, FROM_BRANCH, FROM_TITLE};
