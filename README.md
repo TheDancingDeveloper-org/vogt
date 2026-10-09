@@ -21,6 +21,8 @@ Nothing there persists and no sign-in is needed:
 - [**vogt-mobile-demo.thedancingdeveloper.com**](https://vogt-mobile-demo.thedancingdeveloper.com/)
   — the same app in a phone frame, as the Android shell wraps it.
 
+![The Vogt Board in the live demo: work items in Open, In progress, Review and Done columns, with sessions and the Inbox in the sidebar](docs/images/demo-board.png)
+
 ## Run it
 
 One published image pair, no build. Copy the settings file, mint two
@@ -119,7 +121,8 @@ terminates TLS in front of it, and read [SECURITY.md](SECURITY.md) first.
 
 ## Licence
 
-[AGPL-3.0-only](LICENSE), Copyright (c) 2026 TheDancingDeveloper. You can run,
+[AGPL-3.0-only](LICENSE), Copyright (c) 2026 TheDancingDeveloper (see
+[NOTICE](NOTICE)). You can run,
 change and redistribute Vogt freely; if you offer a modified Vogt to others as
 a network service, the AGPL requires you to offer them its source too.
 
