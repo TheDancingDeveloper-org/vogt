@@ -286,13 +286,42 @@ fn git_signals<C: Clock, I: IdFactory>(
     Ok(signals)
 }
 
-/// The forge number a `gh-<n>` reference carries, if it carries one.
+/// The forge number a reference carries: the digits after the last `#`, which is
+/// how an upstream subject such as `gh:acme/widget#12` names its issue. Python's
+/// `_forge_number` is `#(\d+)$`, and `\d` is any Unicode decimal digit, so the
+/// captured run goes through the same normalisation the branch binding uses —
+/// `int()` strips leading zeros. A `gh-<n>` prefix is not one.
 fn forge_number(reference: &str) -> Option<i64> {
-    let rest = reference.strip_prefix("gh-")?;
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    if digits.is_empty() {
-        None
-    } else {
-        digits.parse().ok()
+    static PATTERN: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"#(\d+)$").unwrap());
+    let tail = PATTERN.captures(reference)?.get(1)?.as_str();
+    crate::branches::normalise_digits(tail).parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::forge_number;
+
+    #[test]
+    fn a_number_is_the_digits_after_the_last_hash() {
+        // Python's `#(\d+)$`: the issue number sits at the end of the subject,
+        // so a `gh-<n>` prefix is not a number and a hash earlier in the key is
+        // not the one that counts.
+        assert_eq!(forge_number("gh:acme/widget#12"), Some(12));
+        assert_eq!(forge_number("gh:acme/widget#7"), Some(7));
+        assert_eq!(forge_number("#12"), Some(12));
+        assert_eq!(forge_number("gh-12"), None);
+        assert_eq!(forge_number("gh-12-widget"), None);
+        assert_eq!(forge_number("WI-12"), None);
+        assert_eq!(forge_number("gh:acme/widget#12-extra"), None);
+        assert_eq!(forge_number("gh:acme/widget#"), None);
+    }
+
+    #[test]
+    fn a_unicode_digit_counts_and_leading_zeros_fold() {
+        // `\d` is any decimal digit and `int()` strips leading zeros, both of
+        // which the branch binding's normalisation already does.
+        assert_eq!(forge_number("gh:acme/widget#١٢"), Some(12));
+        assert_eq!(forge_number("gh:acme/widget#007"), Some(7));
     }
 }
