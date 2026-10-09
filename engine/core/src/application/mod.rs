@@ -8,6 +8,7 @@ pub mod context;
 pub mod contracts;
 pub mod coverage;
 pub mod deployed;
+pub mod drift;
 pub mod instance;
 pub mod observations;
 pub mod place;
