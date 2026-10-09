@@ -708,10 +708,16 @@ fn py_literal(value: &Value) -> String {
 }
 
 fn py_quote(text: &str) -> String {
+    let escaped = text
+        .replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t");
     if text.contains('\'') && !text.contains('"') {
-        format!("\"{text}\"")
+        format!("\"{escaped}\"")
     } else {
-        format!("'{}'", text.replace('\'', "\\'"))
+        format!("'{escaped}'")
     }
 }
 
