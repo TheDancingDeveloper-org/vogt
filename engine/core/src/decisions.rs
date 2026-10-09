@@ -3766,7 +3766,10 @@ static DUMP_COMMAND: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
         r"|\bGetStack\b|\bGetVariable\b|\bListVariables\b|\bvault\s+(?:kv\s+)?read\b",
     );
     let translated = python_pattern(source);
-    fancy_regex::Regex::new(&translated).expect("pattern")
+    fancy_regex::RegexBuilder::new(&translated)
+        .backtrack_limit(10_000_000)
+        .build()
+        .expect("pattern")
 });
 static KUBECONFIG_SHAPE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
     let source = concat!(
@@ -3776,11 +3779,16 @@ static KUBECONFIG_SHAPE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
     let translated = python_pattern(source);
     fancy_regex::Regex::new(&translated).expect("pattern")
 });
-static ENV_LINE: LazyLock<fancy_regex::Regex> =
-    LazyLock::new(|| python_regex(r"(?m)^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=\S"));
+// No lookaround, so the linear engine: the fancy VM backtracks over the blank
+// lines between assignments and gives up on a long dump.
+static ENV_LINE: LazyLock<regex::Regex> = LazyLock::new(|| {
+    regex::Regex::new(r"(?m)^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=\S").expect("pattern")
+});
 
 pub fn dumps_secrets(command: &str) -> bool {
-    DUMP_COMMAND.is_match(command).unwrap_or(false)
+    // An engine that gives up is not evidence of safety. Python has no backtrack
+    // limit, so an error here withholds, the way a match does.
+    DUMP_COMMAND.is_match(command).unwrap_or(true)
 }
 
 pub fn looks_like_dump(output: &str) -> bool {
@@ -3788,15 +3796,7 @@ pub fn looks_like_dump(output: &str) -> bool {
         return true;
     }
     let window: String = output.chars().take(SCAN_WINDOW).collect();
-    let mut found = 0;
-    for line in ENV_LINE.find_iter(&window) {
-        match line {
-            Ok(_) => found += 1,
-            // Uncountable is not evidence of a dump. Python returns False here.
-            Err(_) => return false,
-        }
-    }
-    found >= 3
+    ENV_LINE.find_iter(&window).count() >= 3
 }
 
 fn one_line(text: &str) -> String {
@@ -4237,6 +4237,24 @@ mod activity_tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("summarize_input hung on a backtrack limit");
         assert!(!summary.contains("ghp_"), "{summary}");
+    }
+
+    #[test]
+    fn a_long_dump_is_still_withheld() {
+        // Blank lines between assignments used to exhaust the backtrack limit,
+        // and the error was read as "not a dump", so the secrets were printed.
+        let dump = "SMTP_HOST=mail.internal\nSMTP_USER=ops\nSMTP_PASS=correct-horse-battery\nADMIN_PIN=482913\n".to_string()
+            + &"\n".repeat(1000);
+        assert!(looks_like_dump(&dump), "the env dump was not recognised");
+        let excerpt = result_excerpt(&dump, true, false).unwrap();
+        assert!(!excerpt.contains("SMTP_PASS"), "{excerpt}");
+        assert!(!excerpt.contains("482913"), "{excerpt}");
+
+        let command = "\\\"=:/ ́".repeat(4000) + " && infisical secrets get SMTP_PASS --plain";
+        assert!(
+            dumps_secrets(&command),
+            "the dump command was not recognised"
+        );
     }
 }
 
