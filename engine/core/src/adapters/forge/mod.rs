@@ -10,6 +10,7 @@
 //! decides whether a write goes upstream, and the verb set is append-only by
 //! construction — there is no delete, force, or replace.
 
+mod accounts;
 mod collectors;
 mod edges;
 mod forgejo;
@@ -19,8 +20,10 @@ mod lanes;
 mod models;
 mod payloads;
 mod provider;
+mod registry;
 mod sync;
 mod transport;
+mod urls;
 mod writeback;
 
 pub use edges::{parse_edges, ParsedEdge, FROM_BODY, FROM_BRANCH, FROM_TITLE};

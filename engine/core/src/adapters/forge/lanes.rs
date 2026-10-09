@@ -284,10 +284,7 @@ pub fn receipt_status(value: Option<&str>) -> Option<String> {
 /// image digests and deployment ids nobody asked to retain.
 fn receipt_fields(parsed: &Map<String, Value>) -> Map<String, Value> {
     let smoke = parsed.get("live_smoke").and_then(Value::as_object);
-    let status = parsed
-        .get("status")
-        .or_else(|| parsed.get("outcome"))
-        .filter(|value| !value.is_null())
+    let status = first_present(parsed, &["status", "outcome"])
         .or_else(|| smoke.and_then(|smoke| smoke.get("status")));
     let mut out = Map::new();
     out.insert(
@@ -335,8 +332,26 @@ fn first_text(payload: &Map<String, Value>, names: &[&str]) -> Option<String> {
     })
 }
 
+/// The first field that carries a real word. A JSON null, an empty string and
+/// a whitespace-only string all count as absent, so `{"status": "", "outcome":
+/// "failed"}` reads `failed` — the fallback the Inbox deploy alert depends on.
+fn first_present<'a>(payload: &'a Map<String, Value>, names: &[&str]) -> Option<&'a Value> {
+    names.iter().find_map(|name| match payload.get(*name) {
+        Some(Value::String(text)) if !text.trim().is_empty() => Some(payload.get(*name).unwrap()),
+        Some(value) if !value.is_null() && !value.is_string() => Some(value),
+        _ => None,
+    })
+}
+
+/// Lowercase hex, seven to forty characters. Uppercase is rejected: a SHA the
+/// forge reports is lowercase, and accepting both would let two spellings of
+/// one commit read as two. A trailing newline is also rejected — the Python
+/// pattern happens to allow one, and that quirk is deliberately not kept.
 fn is_sha(value: &str) -> bool {
-    (7..=40).contains(&value.len()) && value.chars().all(|char| char.is_ascii_hexdigit())
+    (7..=40).contains(&value.len())
+        && value
+            .chars()
+            .all(|char| char.is_ascii_hexdigit() && !char.is_ascii_uppercase())
 }
 
 fn opt(value: Option<String>) -> Value {
@@ -381,6 +396,11 @@ mod tests {
     fn a_sha_is_seven_to_forty_hex_characters() {
         assert!(is_sha("abc1234"));
         assert!(is_sha("0123456789abcdef"));
+        assert!(!is_sha("ABCDEF0"), "a sha is lowercase hex");
+        assert!(
+            !is_sha("abc1234\n"),
+            "a trailing newline is not part of a sha"
+        );
         assert!(!is_sha("abc123"));
         assert!(!is_sha("zzzzzzz"));
         assert!(!is_sha(&"a".repeat(41)));

@@ -764,7 +764,7 @@ pub fn parse_repo_url(repo_url: Option<&str>, hosts: &[&str]) -> Option<RepoRef>
     let canonical = hosts
         .iter()
         .find(|configured| configured.eq_ignore_ascii_case(&host))?;
-    let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(&path).trim_matches('/');
     let mut parts = path.split('/');
     let owner = parts.next().filter(|part| valid_name(part))?;
     let repo = parts.next().filter(|part| valid_name(part))?;
@@ -777,21 +777,11 @@ pub fn parse_repo_url(repo_url: Option<&str>, hosts: &[&str]) -> Option<RepoRef>
 
 /// Host and path, with the scheme, userinfo and port removed. `ssh://git@host`,
 /// `ssh://git@host:2222` and `https://host:3000` all parse; a query is kept out
-/// of the path but does not disqualify the URL.
-fn split_host(candidate: &str) -> Option<(String, &str)> {
-    let (raw_host, path) = if let Some(rest) = candidate.strip_prefix("git@") {
-        rest.split_once([':', '/'])?
-    } else if let Some(scheme_end) = candidate.find("://") {
-        candidate[scheme_end + 3..].split_once('/')?
-    } else {
-        candidate.split_once('/')?
-    };
-    let host = raw_host.rsplit('@').next().unwrap_or(raw_host);
-    let host = host.split_once(':').map_or(host, |(name, _)| name);
-    Some((
-        host.to_ascii_lowercase(),
-        path.split(['?', '#']).next().unwrap_or(path),
-    ))
+/// of the path but does not disqualify the URL — Forgejo tolerates one where
+/// GitHub does not.
+fn split_host(candidate: &str) -> Option<(String, String)> {
+    let (host, path, _) = super::urls::split_repo_url(candidate)?;
+    Some((host, path.to_owned()))
 }
 
 fn valid_name(name: &str) -> bool {

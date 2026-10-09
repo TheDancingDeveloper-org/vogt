@@ -544,12 +544,14 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         // Under the acting actor's token the repository lands in their account.
         // A name that already exists is a 422, and that is a typed refusal, never
         // an adoption of the existing repository.
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "name": name,
             "private": private,
-            "description": description.unwrap_or(""),
             "auto_init": false,
         });
+        if let Some(description) = description.filter(|text| !text.is_empty()) {
+            payload["description"] = serde_json::Value::String(description.to_owned());
+        }
         let response = match self.transport.send("POST", "/user/repos", Some(&payload)) {
             Err(error) if error.message().contains("422") => {
                 return Err(VogtError::RemoteRepoExists(format!(
@@ -843,14 +845,15 @@ fn runs(repo: &RepoRef, response: &ForgeResponse) -> Vec<ForgeCheck> {
 ///
 /// The host is `urlsplit().hostname`: lowercased, with userinfo and port
 /// stripped, so `https://GitHub.com/…`, `:443` and `user@github.com` all
-/// resolve. A query or fragment is tolerated; only the path decides the repo.
-fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
+/// resolve. A query or a fragment disqualifies the URL, matching the client
+/// that refuses to guess which repository a parameterised URL names.
+pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
     let candidate = repo_url?
         .trim()
         .strip_prefix("git+")
         .unwrap_or(repo_url?.trim());
-    let (host, path) = split_host(candidate)?;
-    if !host.eq_ignore_ascii_case(HOST) {
+    let (host, path, has_query) = super::urls::split_repo_url(candidate)?;
+    if has_query || !host.eq_ignore_ascii_case(HOST) {
         return None;
     }
     let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
@@ -858,24 +861,6 @@ fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
     let owner = parts.next().filter(|part| valid_name(part))?;
     let repo = parts.next().filter(|part| valid_name(part))?;
     Some((owner.to_owned(), repo.to_owned()))
-}
-
-/// Host and path, with the scheme, userinfo and port removed.
-fn split_host(candidate: &str) -> Option<(String, &str)> {
-    let scp = candidate.strip_prefix("git@");
-    let (raw_host, path) = if let Some(rest) = scp {
-        rest.split_once([':', '/'])?
-    } else if let Some(scheme_end) = candidate.find("://") {
-        candidate[scheme_end + 3..].split_once('/')?
-    } else {
-        candidate.split_once('/')?
-    };
-    let host = raw_host.rsplit('@').next().unwrap_or(raw_host);
-    let host = host.split_once(':').map_or(host, |(name, _)| name);
-    Some((
-        host.to_ascii_lowercase(),
-        path.split(['?', '#']).next().unwrap_or(path),
-    ))
 }
 
 fn valid_name(name: &str) -> bool {
@@ -991,7 +976,6 @@ mod tests {
             "https://GitHub.com/acme/widget",
             "https://github.com:443/acme/widget",
             "https://ada@github.com/acme/widget",
-            "https://github.com/acme/widget?inject=1",
             "git@github.com:acme/widget.git",
             "https://github.com/acme/widget.git",
             "git+https://github.com/acme/widget",
@@ -1006,6 +990,10 @@ mod tests {
             "https://github.com.evil.example/acme/widget",
             "https://github.com@evil.example/acme/widget",
             "https://gitlab.com/acme/widget",
+            "https://github.com/acme/widget?inject=1",
+            "https://github.com/acme/widget#f",
+            "https://evil.example?@github.com/acme/widget",
+            "https://evil.example#@github.com/acme/widget",
             "https://github.com/acme",
         ] {
             assert!(provider.parse(Some(url)).is_none(), "{url}");

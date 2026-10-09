@@ -201,8 +201,15 @@ impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
             }
         };
         let count = subject_keys.len();
-        let advanced =
-            newest.or_else(|| watermark.as_deref().and_then(|stamp| from_iso(stamp).ok()));
+        // The stored watermark seeds the comparison, so an overlap replay of an
+        // older item can never move it backwards. A watermark that does not
+        // parse is treated as absent: there is no honest moment to compare
+        // against, and the next sweep re-reads the window.
+        let stored = watermark.as_deref().and_then(|stamp| from_iso(stamp).ok());
+        let advanced = match (newest, stored) {
+            (Some(seen), Some(kept)) => Some(later(seen, kept)),
+            (seen, kept) => seen.or(kept),
+        };
         self.pending.insert(
             project.id.clone(),
             Pending {
@@ -349,6 +356,16 @@ pub fn forge_sync_collectors<'a, S: SyncBook>(
     ]
 }
 
+/// The later of two moments, by whole seconds then the remainder.
+fn later(left: Moment, right: Moment) -> Moment {
+    if left.unix_seconds() > right.unix_seconds()
+        || (left.unix_seconds() == right.unix_seconds() && left.nanos() > right.nanos())
+    {
+        left
+    } else {
+        right
+    }
+}
 /// The `since` to ask the forge for: the watermark, less the overlap, in the
 /// `Z`-suffixed form the forge `since` parameters expect.
 fn since_of(watermark: Option<&str>) -> Option<String> {
@@ -827,6 +844,37 @@ mod tests {
         assert_eq!(
             store.touched.borrow()[0],
             vec!["gh:acme/widgets#1".to_string(), "gh:acme/widgets#2".into()]
+        );
+    }
+
+    #[test]
+    fn an_older_replay_inside_the_overlap_does_not_rewind_the_watermark() {
+        let store = RecordingStore {
+            watermark: RefCell::new(Some("2026-03-01T00:01:00+00:00".into())),
+            written: RefCell::new(Vec::new()),
+            touched: RefCell::new(Vec::new()),
+        };
+        let mut replayed = ForgeIssue::new(1, "seen", "open", "acme/widgets");
+        replayed.updated_at = Some("2026-03-01T00:00:30Z".into());
+        let directory = Directory {
+            provider: Some(StubProvider {
+                issues: vec![replayed],
+                pulls: Vec::new(),
+            }),
+            reason: String::new(),
+        };
+        let mut collector = ForgeSyncCollector::issues(&store, &directory);
+        let findings = collector.collect(&project()).unwrap();
+        let receipt = findings.last().unwrap();
+        assert_eq!(
+            receipt.payload["watermark"],
+            Value::String("2026-03-01T00:01:00+00:00".into()),
+            "the stored watermark is the floor"
+        );
+        collector.after_append(Moment::from_unix(1, 0)).unwrap();
+        assert_eq!(
+            store.written.borrow().as_slice(),
+            &[Some("2026-03-01T00:01:00+00:00".into())]
         );
     }
 
