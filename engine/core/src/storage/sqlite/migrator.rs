@@ -221,23 +221,29 @@ pub fn migrate(
 ) -> Result<crate::storage::interface::MigrationReport, MigrateError> {
     ensure_framework(conn)?;
     let available = load_migrations(store, directory)?;
-    acquire_lock(conn, store, holder, now)?;
+    // The lock row stores `acquired_at`, and it is rewritten on every call even
+    // when nothing is pending. A step clock must only be spent when a migration
+    // is actually applied; a no-op check is timed from the wall clock, the way
+    // Python's `serve` never reads the hook clock at all.
+    let pending = pending_ids(conn, &available)?;
+    let stamp = if pending.is_empty() {
+        crate::core::to_iso(crate::core::utc_now())
+    } else {
+        now.to_string()
+    };
+    acquire_lock(conn, store, holder, &stamp)?;
     let result: Result<crate::storage::interface::MigrationReport, MigrateError> = (|| {
         verify_forward_only(conn, store, &available)?;
-        let applied = applied_ids(conn)?;
-        let pending: Vec<&Migration> = available
-            .iter()
-            .filter(|migration| !applied.contains(&migration.id))
-            .collect();
-        for migration in &pending {
-            apply_one(conn, store, migration, now)?;
+        for id in &pending {
+            let migration = available
+                .iter()
+                .find(|migration| &migration.id == id)
+                .expect("pending ids come from the available list");
+            apply_one(conn, store, migration, &stamp)?;
         }
         Ok(crate::storage::interface::MigrationReport {
             store: store.to_string(),
-            applied: pending
-                .iter()
-                .map(|migration| migration.id.clone())
-                .collect(),
+            applied: pending,
             version: applied_version(conn)?,
         })
     })();
@@ -255,6 +261,15 @@ fn ensure_framework(conn: &Connection) -> Result<(), MigrateError> {
     }
     conn.execute_batch("COMMIT")?;
     Ok(())
+}
+
+fn pending_ids(conn: &Connection, available: &[Migration]) -> Result<Vec<String>, MigrateError> {
+    let applied = applied_ids(conn)?;
+    Ok(available
+        .iter()
+        .filter(|migration| !applied.contains(&migration.id))
+        .map(|migration| migration.id.clone())
+        .collect())
 }
 
 fn applied_ids(conn: &Connection) -> Result<Vec<String>, MigrateError> {

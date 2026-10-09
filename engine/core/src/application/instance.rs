@@ -33,15 +33,15 @@ pub fn init(
     std::fs::create_dir_all(data_dir)?;
     let root = migrator::migrations_root();
     let declared_existed = declared_path(data_dir).exists();
-    // A database that already exists was migrated by `init`, and re-checking it
-    // applies nothing. Stamping the hook clock for that check anyway moves every
-    // later row one tick past Python, whose `serve` never touches the clock.
-    // The wall clock is read instead, so a step clock stays where `init` left it.
-    let now = if declared_existed {
-        crate::core::to_iso(crate::core::utc_now())
-    } else {
-        stamp(clock)
-    };
+    // The hook clock is spent only when a migration is actually applied. A
+    // database that is already current gets the wall clock, so `serve`
+    // re-checking it does not move every later row one tick past Python.
+    let declared_due = pending_in(
+        "declared",
+        &declared_path(data_dir),
+        root.as_deref().map(|path| path.join("declared")).as_deref(),
+    )?;
+    let now = stamp_if(clock, declared_due > 0);
     let declared = migrator::open_and_migrate(
         &declared_path(data_dir),
         "declared",
@@ -50,11 +50,12 @@ pub fn init(
         &now,
     )?;
     seed_workflows(data_dir, &now)?;
-    let observed_now = if declared_existed {
-        crate::core::to_iso(crate::core::utc_now())
-    } else {
-        stamp(clock)
-    };
+    let observed_due = pending_in(
+        "observed",
+        &observed_path(data_dir),
+        root.as_deref().map(|path| path.join("observed")).as_deref(),
+    )?;
+    let observed_now = stamp_if(clock, observed_due > 0);
     let observed = migrator::open_and_migrate(
         &observed_path(data_dir),
         "observed",
@@ -372,6 +373,16 @@ fn status<C: Clock, I: IdFactory>(
 /// The next instant. A step clock walks one second per read, the way Python's
 /// does; without one the wall clock is read once.
 fn stamp(clock: &mut Option<crate::core::StepClock>) -> String {
+    stamp_if(clock, true)
+}
+
+/// `stamp` when work is actually being written, the wall clock otherwise. A
+/// step clock ticks on every read, so checking a database that needs nothing
+/// must not spend one.
+fn stamp_if(clock: &mut Option<crate::core::StepClock>, due: bool) -> String {
+    if !due {
+        return crate::core::to_iso(crate::core::utc_now());
+    }
     match clock {
         Some(clock) => crate::core::to_iso(Clock::now(clock)),
         None => crate::core::to_iso(crate::core::utc_now()),
