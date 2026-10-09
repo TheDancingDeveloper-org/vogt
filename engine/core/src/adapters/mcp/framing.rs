@@ -121,6 +121,9 @@ pub struct Dispatcher<'a, G: ToolGrant> {
     grant: &'a G,
     transport: McpTransport,
     report: ServeReport,
+    /// The caller's context, when the transport has one. Stdio has none, and a
+    /// ported service then says so rather than running against a guessed one.
+    context: Option<&'a crate::application::context::Built>,
 }
 
 impl<'a, G: ToolGrant> Dispatcher<'a, G> {
@@ -130,7 +133,15 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             grant,
             transport,
             report: ServeReport::default(),
+            context: None,
         }
+    }
+
+    /// The context a tool call runs against. The HTTP route sets it; stdio,
+    /// which has no authenticated caller, leaves it unset.
+    pub fn with_context(mut self, context: &'a crate::application::context::Built) -> Self {
+        self.context = Some(context);
+        self
     }
 
     pub fn report(&self) -> &ServeReport {
@@ -306,13 +317,20 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
                 tool_error("forbidden", &self.grant.denial(operation)),
             );
         }
-        // The service behind nearly every operation is not ported yet, and
-        // saying so is a failed tool result the model can read — never a
-        // protocol error, and never an empty success.
-        let body = match operation.run(None, serde_json::Value::Null) {
-            Ok(_value) => json!({
-                "content": [{"type": "text", "text": "{}"}],
-                "structuredContent": {},
+        // The arguments the caller sent, or nothing. `run` validates them
+        // against the recorded schema and fills the defaults, so a bad
+        // argument comes back as a tool error the model can correct rather
+        // than a protocol error. A service that is not ported says so the
+        // same way, and never as an empty success.
+        let arguments = params
+            .get("arguments")
+            .filter(|value| !json_falsy(value))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let body = match operation.run(self.context, arguments) {
+            Ok(value) => json!({
+                "content": [{"type": "text", "text": value.to_string()}],
+                "structuredContent": value,
                 "isError": false,
             }),
             Err(error) => tool_error(error.code(), error.message()),

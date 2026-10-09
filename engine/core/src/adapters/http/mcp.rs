@@ -28,6 +28,7 @@ use crate::storage::sqlite::declared::SqliteDeclaredStore;
 /// factory are not shareable across tasks.
 pub struct McpState<C, I> {
     store: Mutex<SqliteDeclaredStore<C, I>>,
+    data_dir: std::path::PathBuf,
     pub no_auth: bool,
     pub writes_enabled: bool,
 }
@@ -46,6 +47,7 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
                 clock,
                 ids,
             )),
+            data_dir: data_dir.to_path_buf(),
             no_auth,
             writes_enabled,
         }
@@ -60,6 +62,7 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
     ) -> Self {
         Self {
             store: Mutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
+            data_dir: data_dir.to_path_buf(),
             no_auth,
             writes_enabled,
         }
@@ -116,10 +119,16 @@ async fn handle<C: Clock, I: IdFactory>(
     // is a 202, a bad argument is `-32602`, an unknown tool is `-32601`. The
     // grant narrows `tools/list` to what this caller may invoke.
     let permitted = Permitted {
-        scopes: grant.scopes,
+        scopes: grant.scopes.clone(),
         writes_enabled: state.writes_enabled,
     };
+    // The context carries the authenticated principal, so a ported service
+    // runs as the caller rather than against no context at all.
+    let built = context_for(&state, &grant);
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
+    if let Some(context) = built.as_ref() {
+        dispatcher = dispatcher.with_context(context);
+    }
     match dispatcher.handle(&message) {
         None => Response::builder()
             .status(StatusCode::ACCEPTED)
@@ -128,6 +137,32 @@ async fn handle<C: Clock, I: IdFactory>(
             .expect("a fixed response builds"),
         Some(value) => json_response(StatusCode::OK, value),
     }
+}
+
+/// The context a tool call runs against, with the authenticated principal on it.
+///
+/// Built the way `/api` builds its own: the data directory from the state, the
+/// identity from the grant, and the clock and ids from the hook environment so
+/// the service draws the same sequence the route's rows did.
+fn context_for<C: Clock, I: IdFactory>(
+    state: &McpState<C, I>,
+    grant: &auth_gate::Grant,
+) -> Option<crate::application::context::Built> {
+    use crate::core::{local_principal, os_user, ActorKind, Principal};
+    let config = crate::config::VogtConfig {
+        data_dir: state.data_dir.clone(),
+        ..crate::config::VogtConfig::default()
+    };
+    let principal = match &grant.identity_ref {
+        Some(identity_ref) if !identity_ref.is_empty() => {
+            Principal::new(identity_ref, ActorKind::Human, identity_ref).ok()
+        }
+        _ => Some(local_principal(&os_user())),
+    };
+    crate::application::context::build_context(
+        config, principal, None, None, None, None, None, None,
+    )
+    .ok()
 }
 
 /// Resolve the credential through the shared gate, which records a refusal and
