@@ -289,13 +289,16 @@ fn gather<C: Clock, I: IdFactory>(
         project.as_ref().map(|project| project.id.as_str()),
         now_of(&ctx.clock),
     )?;
-    // The one clock read the scoring uses, taken after the candidate reads, as
-    // Python's `_score_all(..., now=ctx.clock())` does.
-    let now = now_of(&ctx.clock);
+    // Branch age is measured from the read above. Scoring takes its own read,
+    // below, once the candidates exist — Python's `_score_all(..., now=ctx.clock())`
+    // is a separate call from `build_git_signals(..., now=ctx.clock())`.
     let mut ranked = Vec::new();
     for item in &items {
         let (open_pr, branch_activity) = signals.for_ref(&item.reference);
-        let mut inputs = RankingInputs::at(now);
+        // One read per candidate, in the order Python builds them: declared
+        // rows do not read the clock while they are assembled, so they all
+        // share the scoring read.
+        let mut inputs = RankingInputs::at(now_of(&ctx.clock));
         inputs.blocking_fan_out = fan_out.get(&item.id).copied().unwrap_or(0);
         inputs.initiative_weight = item
             .initiative_id
@@ -404,16 +407,17 @@ fn gather<C: Clock, I: IdFactory>(
             {
                 continue;
             }
+            // Trust reads the clock once per observed row while the candidate is
+            // built, before scoring. Python's `trust_for` does that, and the
+            // step clock advances a second per read, so scoring has to come
+            // after it or every score is one second too fresh.
             let trust = trust_for(
                 ctx,
                 observation.observed_at,
                 confirmed.get(&observation.subject_key).copied(),
             );
-            // Trust narrows only the declared half. Python passes `trust_states`
-            // into the work filter and never checks it against an observed
-            // subject, so a stale observed row survives `--trust-states verified`.
             let (open_pr, branch_activity) = signals.for_ref(&observation.subject_key);
-            let mut inputs = RankingInputs::at(now);
+            let mut inputs = RankingInputs::at(now_of(&ctx.clock));
             inputs.open_pr = open_pr;
             inputs.branch_activity_seconds = branch_activity;
             let rankable = Rankable {
