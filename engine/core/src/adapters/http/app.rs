@@ -498,7 +498,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
             .lock()
             .expect("the clock lock is not poisoned")
             .now();
-(
+        (
             auth_gate::authorize(
                 &request_store,
                 AuthRequest {
