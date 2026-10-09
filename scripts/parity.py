@@ -355,16 +355,18 @@ def _rules() -> dict[str, Any]:
 
 
 def _product_versions() -> set[str]:
-    """The version strings a build may honestly report.
+    """The version a build reports: the release in ``pyproject.toml``.
 
-    Python reports the release in ``pyproject.toml``. A dev build of the Rust
-    core reports ``local/dev`` when no version was injected. Anything else is
-    not a build stamp, and the version rule must leave it visible.
+    Both sides report it. Python reads ``vogt.__version__`` and the Rust core
+    falls back to the pinned release (``check_product_version.py`` enforces the
+    two agree), so neither ever says ``local/dev``. Accepting that stamp here
+    would hide a Rust build that had fallen back to it, which is the divergence
+    this rule exists to keep visible.
     """
     import tomllib
 
     project = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]
-    return {str(project["version"]), "local/dev"}
+    return {str(project["version"])}
 
 
 def _walk(
