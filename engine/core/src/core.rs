@@ -889,7 +889,10 @@ impl serde::Serialize for WriteBack {
 
 impl<'de> serde::Deserialize<'de> for WriteBack {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        match <&str>::deserialize(deserializer)? {
+        // A borrowed `&str` only works for a deserializer that lends its input.
+        // `serde_json::from_value` yields owned strings, and that is how an
+        // export's project is read, so the borrow fails on "none".
+        match String::deserialize(deserializer)?.as_str() {
             "none" => Ok(Self::Disabled),
             "comment_only" => Ok(Self::CommentOnly),
             "full" => Ok(Self::Full),

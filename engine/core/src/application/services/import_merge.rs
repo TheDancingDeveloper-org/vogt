@@ -175,7 +175,7 @@ impl Plan {
 struct Export {
     format_version: i64,
     instance_id: String,
-    exported_at: Moment,
+    exported_at: Option<Moment>,
     projects: Vec<Project>,
     items: Vec<WorkItem>,
     initiatives: Vec<Initiative>,
@@ -240,10 +240,10 @@ fn parse_export(raw: &Value, source: &Path) -> Result<Export, VogtError> {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string(),
-        exported_at: crate::core::from_iso(
-            raw.get("exported_at").and_then(Value::as_str).unwrap_or(""),
-        )
-        .unwrap_or_else(|_| Moment::from_unix(0, 0)),
+        exported_at: match raw.get("exported_at").and_then(Value::as_str) {
+            Some(text) => Some(crate::core::from_iso(text).map_err(VogtError::InvalidRequest)?),
+            None => None,
+        },
         projects,
         items,
         initiatives,
@@ -875,63 +875,47 @@ impl<'a, V: ReadView> Planner<'a, V> {
         Ok(())
     }
 
-    fn incoming_view(&self, item: &WorkItem) -> BTreeMap<&'static str, String> {
-        let mut view: BTreeMap<&'static str, String> = BTreeMap::new();
-        view.insert("kind", item.kind.to_string());
-        view.insert("title", item.title.clone());
-        view.insert("body", item.body.clone());
-        view.insert("state", item.state.clone());
-        view.insert("priority", item.priority.to_string());
-        view.insert(
-            "effort",
-            item.effort.map(|v| v.to_string()).unwrap_or_default(),
-        );
-        view.insert("project", item.project_slug.clone().unwrap_or_default());
+    fn incoming_view(&self, item: &WorkItem) -> BTreeMap<&'static str, Value> {
+        let mut view: BTreeMap<&'static str, Value> = BTreeMap::new();
+        view.insert("kind", json!(item.kind.to_string()));
+        view.insert("title", json!(item.title));
+        view.insert("body", json!(item.body));
+        view.insert("state", json!(item.state));
+        view.insert("priority", json!(item.priority.to_string()));
+        view.insert("effort", json!(item.effort.map(|v| v.to_string())));
+        view.insert("project", json!(item.project_slug));
         view.insert(
             "initiative",
-            item.initiative_id
+            json!(item
+                .initiative_id
                 .as_ref()
-                .and_then(|id| self.incoming_initiative_slug.get(id).cloned())
-                .map(|v| v.to_string())
-                .unwrap_or_default(),
+                .and_then(|id| self.incoming_initiative_slug.get(id).cloned())),
         );
-        view.insert(
-            "assignee",
-            item.assignee_identity_ref.clone().unwrap_or_default(),
-        );
+        view.insert("assignee", json!(item.assignee_identity_ref));
         let mut labels = item.labels.clone();
         labels.sort();
-        view.insert("labels", labels.join("\u{1f}"));
+        view.insert("labels", json!(labels));
         view
     }
 
-    fn target_view(&self, item: &WorkItem) -> Result<BTreeMap<&'static str, String>, VogtError> {
+    fn target_view(&self, item: &WorkItem) -> Result<BTreeMap<&'static str, Value>, VogtError> {
         let initiative = match &item.initiative_id {
             Some(id) => self.view.initiative_by_id(id)?.map(|found| found.slug),
             None => None,
         };
         let mut view = BTreeMap::new();
-        view.insert("kind", item.kind.to_string());
-        view.insert("title", item.title.clone());
-        view.insert("body", item.body.clone());
-        view.insert("state", item.state.clone());
-        view.insert("priority", item.priority.to_string());
-        view.insert(
-            "effort",
-            item.effort.map(|v| v.to_string()).unwrap_or_default(),
-        );
-        view.insert("project", item.project_slug.clone().unwrap_or_default());
-        view.insert(
-            "initiative",
-            initiative.map(|v| v.to_string()).unwrap_or_default(),
-        );
-        view.insert(
-            "assignee",
-            item.assignee_identity_ref.clone().unwrap_or_default(),
-        );
+        view.insert("kind", json!(item.kind.to_string()));
+        view.insert("title", json!(item.title));
+        view.insert("body", json!(item.body));
+        view.insert("state", json!(item.state));
+        view.insert("priority", json!(item.priority.to_string()));
+        view.insert("effort", json!(item.effort.map(|v| v.to_string())));
+        view.insert("project", json!(item.project_slug));
+        view.insert("initiative", json!(initiative));
+        view.insert("assignee", json!(item.assignee_identity_ref));
         let mut labels = item.labels.clone();
         labels.sort();
-        view.insert("labels", labels.join("\u{1f}"));
+        view.insert("labels", json!(labels));
         Ok(view)
     }
 
@@ -1170,16 +1154,21 @@ fn conflict_note(
     target: &WorkItem,
     incoming: &WorkItem,
     fields: &[String],
-    theirs: &BTreeMap<&str, String>,
+    theirs: &BTreeMap<&str, Value>,
     instance_id: &str,
 ) -> ConflictNote {
     use sha2::{Digest, Sha256};
-    let payload = json!([
-        incoming.id,
-        crate::core::to_iso(incoming.updated_at),
-        theirs
-    ]);
-    let digest = Sha256::digest(payload.to_string().as_bytes());
+    // json.dumps([id, to_iso(updated_at), theirs], sort_keys=True): the map's
+    // keys come out sorted, and the separators are ", " and ": ".
+    let dumped = crate::decisions::python_json_dumps(
+        &json!([
+            incoming.id,
+            crate::core::to_iso(incoming.updated_at),
+            theirs
+        ]),
+        true,
+    );
+    let digest = Sha256::digest(dumped.as_bytes());
     let digest = hex_of(&digest)[..26].to_string();
     let mut lines = vec![
         format!(
@@ -1193,7 +1182,11 @@ fn conflict_note(
         String::new(),
     ];
     for name in fields {
-        lines.push(format!("- {name}: {}", json!(theirs.get(name.as_str()))));
+        let rendered = theirs
+            .get(name.as_str())
+            .map(|value| crate::decisions::python_json_dumps(value, false))
+            .unwrap_or_else(|| "null".to_string());
+        lines.push(format!("- {name}: {rendered}"));
     }
     ConflictNote {
         work_item_id: target.id.clone(),
@@ -1213,19 +1206,22 @@ fn hex_of(bytes: &[u8]) -> String {
 }
 
 fn tallies(plan: &Plan) -> Value {
-    let mut counts: BTreeMap<&str, BTreeMap<String, i64>> = BTreeMap::new();
+    // ImportTally fills every counter it was not given, so a bucket that holds
+    // one action still reports the other four as zero.
+    let mut counts: BTreeMap<&str, BTreeMap<&str, i64>> = BTreeMap::new();
     for change in &plan.changes {
-        *counts
-            .entry(change.entity.as_str())
-            .or_default()
-            .entry(change.action.clone())
-            .or_insert(0) += 1;
+        let bucket = counts.entry(change.entity.as_str()).or_default();
+        for action in ["created", "updated", "conflict", "skipped", "unchanged"] {
+            bucket.entry(action).or_insert(0);
+        }
+        *bucket.entry(change.action.as_str()).or_insert(0) += 1;
     }
     for (name, count) in &plan.unchanged {
-        counts
-            .entry(name.as_str())
-            .or_default()
-            .insert("unchanged".to_string(), *count);
+        let bucket = counts.entry(name.as_str()).or_default();
+        for action in ["created", "updated", "conflict", "skipped", "unchanged"] {
+            bucket.entry(action).or_insert(0);
+        }
+        bucket.insert("unchanged", *count);
     }
     let mut result = serde_json::Map::new();
     for name in ENTITIES {
@@ -1243,27 +1239,55 @@ fn total(plan: &Plan, action: &str) -> i64 {
         .count() as i64
 }
 
-/// The baseline the policy compares against: the moment this instance was
-/// cloned from the export's source, or the export's own stamp when it was
-/// cloned from here. Anything else has no baseline.
+/// When the two instances last agreed, and how that is known.
 fn baseline<V: ReadView>(export: &Export, instance_id: &str, view: &V) -> (Option<Moment>, String) {
-    if let Some(stamp) = view.clone_stamp().ok().flatten() {
-        if stamp.source_instance_id == export.instance_id {
-            return (Some(stamp.backup_taken_at), "clone stamp".to_string());
-        }
+    if export.instance_id == instance_id {
+        return match export.exported_at {
+            Some(exported_at) => (
+                Some(exported_at),
+                "an export of this same instance: its exported_at".to_string(),
+            ),
+            None => (
+                None,
+                "an export of this instance with no exported_at".to_string(),
+            ),
+        };
     }
     if let Some(stamp) = &export.clone_stamp {
         if stamp.get("source_instance_id").and_then(Value::as_str) == Some(instance_id) {
-            if let Some(taken) = stamp.get("backup_taken_at").and_then(Value::as_str) {
-                if let Ok(moment) = crate::core::from_iso(taken) {
-                    return (Some(moment), "the export's clone stamp".to_string());
-                }
+            if let Some(moment) = stamp
+                .get("backup_taken_at")
+                .and_then(Value::as_str)
+                .and_then(|taken| crate::core::from_iso(taken).ok())
+            {
+                return (
+                    Some(moment),
+                    format!(
+                        "instance {} is a clone of this one; the cloned backup's as-of time",
+                        export.instance_id
+                    ),
+                );
             }
+        }
+    }
+    if let Some(stamp) = view.clone_stamp().ok().flatten() {
+        if stamp.source_instance_id == export.instance_id {
+            return (
+                Some(stamp.backup_taken_at),
+                format!(
+                    "this instance is a clone of {}; the cloned backup's as-of time",
+                    export.instance_id
+                ),
+            );
         }
     }
     (
         None,
-        "none: the two instances share no recorded history".to_string(),
+        format!(
+            "no clone relationship between this instance and {}: no baseline, so every difference \
+             is a conflict",
+            export.instance_id
+        ),
     )
 }
 
@@ -1425,10 +1449,25 @@ pub fn merge_export<C: crate::core::Clock, I: IdFactory>(
             source = source.display()
         )));
     }
-    let version = raw
-        .get("export_format_version")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
+    let version = match raw.get("export_format_version") {
+        // An export written before the field existed is format 1.
+        None => 1,
+        Some(Value::Number(number)) => number.as_i64().ok_or_else(|| {
+            VogtError::InvalidRequest(format!("export_format_version {number} is not a number"))
+        })?,
+        Some(other) => {
+            let shown = match other {
+                Value::String(text) => crate::core::py_repr(text),
+                Value::Bool(true) => "True".to_string(),
+                Value::Bool(false) => "False".to_string(),
+                Value::Null => "None".to_string(),
+                value => value.to_string(),
+            };
+            return Err(VogtError::InvalidRequest(format!(
+                "export_format_version {shown} is not a number"
+            )));
+        }
+    };
     if version > APPLICABLE_FORMAT {
         return Err(VogtError::InvalidRequest(format!(
             "export format {version} is newer than {APPLICABLE_FORMAT}; run a newer build rather \
@@ -1454,6 +1493,17 @@ pub fn merge_export<C: crate::core::Clock, I: IdFactory>(
                 "A format-{version} export is report-only: it predates applying import and carries \
                  no comments or clone stamp. Export again with this build to merge it."
             ),
+            // ImportResult fills these even when the export was never planned.
+            "project": Value::Null,
+            "base": Value::Null,
+            "base_source": "",
+            "created": 0,
+            "updated": 0,
+            "conflicted": 0,
+            "skipped": 0,
+            "unchanged": 0,
+            "by_entity": {},
+            "changes": [],
         }));
     }
     let export = parse_export(&raw, &source)?;
@@ -1628,7 +1678,7 @@ mod tests {
     use super::*;
     use crate::application::context::build_context;
     use crate::application::services::lifecycle::export_instance;
-    use crate::core::{ActorKind, Principal, SequentialIds, StepClock};
+    use crate::core::{ActorKind, Clock, Principal, SequentialIds, StepClock};
     use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 
     fn opened() -> Built {
@@ -1744,5 +1794,119 @@ mod tests {
         assert!(
             matches!(error, VogtError::InvalidRequest(message) if message.contains("--confirm"))
         );
+    }
+
+    /// A project in an export is what used to be unreadable: `WriteBack` was
+    /// deserialized from a borrowed string, which `serde_json::from_value`
+    /// cannot lend. This round-trips a real export that holds one.
+    #[test]
+    fn an_export_holding_a_project_imports_into_a_fresh_instance() {
+        let source = opened();
+        let now = ctx(&source).clock.lock().unwrap().now();
+        let (declared, _observed, principal, clock, ids, _config) =
+            crate::application::services::context_parts(ctx(&source));
+        let mut write =
+            crate::application::services::write_context(declared, principal, clock, ids);
+        crate::application::writes::audited_write(
+            &mut write,
+            "project.create",
+            "seed a project",
+            |txn, _actor| {
+                let project = Project::new("prj_seed", "alpha", "Alpha", "/work/alpha", now);
+                txn.insert_project(&project)?;
+                Ok(crate::application::writes::WriteOutcome::new(
+                    (),
+                    "project",
+                    &project.id,
+                    json!({"slug": "alpha"}),
+                    "project.created",
+                    json!({"slug": "alpha"}),
+                ))
+            },
+        )
+        .unwrap();
+
+        let destination = ctx(&source).config.resolved_data_dir().join("export.json");
+        export_instance(
+            ctx(&source),
+            &json!({"destination": destination.display().to_string(), "reason": "why"}),
+        )
+        .unwrap();
+
+        let target = opened();
+        let result = merge_export(
+            ctx(&target),
+            &json!({
+                "source": destination.display().to_string(),
+                "apply": true,
+                "confirm": true,
+                "reason": "why"
+            }),
+        )
+        .unwrap();
+        assert_eq!(result["applied"], json!(true));
+        assert!(result["projects"].as_i64().unwrap() >= 1);
+
+        let view = ctx(&target).declared.read().unwrap();
+        let imported = view
+            .project_by_slug("alpha")
+            .unwrap()
+            .expect("the project arrived");
+        assert_eq!(imported.name, "Alpha");
+        assert_eq!(imported.write_back, crate::core::WriteBack::Disabled);
+
+        let events = view.list_events(0, 50, None).unwrap();
+        let imported_event = events
+            .iter()
+            .find(|event| event.kind == "instance.imported")
+            .expect("the import was evented");
+        let project_counts = &imported_event.summary["counts"]["project"];
+        for counter in ["created", "updated", "conflict", "skipped", "unchanged"] {
+            assert!(
+                project_counts.get(counter).is_some(),
+                "{counter} is present"
+            );
+        }
+    }
+
+    #[test]
+    fn reimporting_the_same_instances_export_uses_its_exported_at() {
+        let source = opened();
+        let destination = ctx(&source).config.resolved_data_dir().join("export.json");
+        export_instance(
+            ctx(&source),
+            &json!({"destination": destination.display().to_string(), "reason": "why"}),
+        )
+        .unwrap();
+        let result = merge_export(
+            ctx(&source),
+            &json!({"source": destination.display().to_string(), "reason": "why"}),
+        )
+        .unwrap();
+        assert!(
+            result["base"].as_str().is_some(),
+            "the export's exported_at"
+        );
+        assert_eq!(
+            result["base_source"],
+            json!("an export of this same instance: its exported_at")
+        );
+    }
+
+    #[test]
+    fn an_export_with_no_format_version_is_format_1() {
+        let built = opened();
+        let destination = ctx(&built).config.resolved_data_dir().join("old.json");
+        std::fs::write(&destination, "{\"instance_id\": \"ins_old\"}").unwrap();
+        let result = merge_export(
+            ctx(&built),
+            &json!({"source": destination.display().to_string(), "reason": "why"}),
+        )
+        .unwrap();
+        assert_eq!(result["export_format_version"], json!(1));
+        assert_eq!(result["applied"], json!(false));
+        assert!(result["base"].is_null());
+        assert_eq!(result["by_entity"], json!({}));
+        assert_eq!(result["changes"], json!([]));
     }
 }
