@@ -1857,6 +1857,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn write_back_reads_from_an_owned_json_value() {
+        // serde_json::from_value yields owned strings. Deserializing from a
+        // borrowed &str fails there, and that is how an export's project is read.
+        for (text, expected) in [
+            ("none", WriteBack::Disabled),
+            ("comment_only", WriteBack::CommentOnly),
+            ("full", WriteBack::Full),
+        ] {
+            let owned = serde_json::Value::String(text.to_string());
+            let parsed: WriteBack = serde_json::from_value(owned).unwrap();
+            assert_eq!(parsed, expected);
+            assert_eq!(
+                serde_json::to_value(parsed).unwrap(),
+                serde_json::json!(text)
+            );
+        }
+    }
+
+    #[test]
     fn a_missing_trust_state_reads_as_unverified() {
         // Python's default is unverified. The first variant is verified, so a
         // blanket Default would mark an imported item as checked.

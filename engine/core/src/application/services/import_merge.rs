@@ -1207,26 +1207,32 @@ fn hex_of(bytes: &[u8]) -> String {
 
 fn tallies(plan: &Plan) -> Value {
     // ImportTally fills every counter it was not given, so a bucket that holds
-    // one action still reports the other four as zero.
-    let mut counts: BTreeMap<&str, BTreeMap<&str, i64>> = BTreeMap::new();
-    for change in &plan.changes {
-        let bucket = counts.entry(change.entity.as_str()).or_default();
-        for action in ["created", "updated", "conflict", "skipped", "unchanged"] {
-            bucket.entry(action).or_insert(0);
+    // one action still reports the other four as zero. The keys stay in the
+    // model's field order; a sorted map would put "conflict" first.
+    const ACTIONS: [&str; 5] = ["created", "updated", "conflict", "skipped", "unchanged"];
+    let mut counts: BTreeMap<&str, [i64; 5]> = BTreeMap::new();
+    let add = |bucket: &mut [i64; 5], action: &str| {
+        if let Some(index) = ACTIONS.iter().position(|name| *name == action) {
+            bucket[index] += 1;
         }
-        *bucket.entry(change.action.as_str()).or_insert(0) += 1;
+    };
+    for change in &plan.changes {
+        add(
+            counts.entry(change.entity.as_str()).or_default(),
+            &change.action,
+        );
     }
     for (name, count) in &plan.unchanged {
-        let bucket = counts.entry(name.as_str()).or_default();
-        for action in ["created", "updated", "conflict", "skipped", "unchanged"] {
-            bucket.entry(action).or_insert(0);
-        }
-        bucket.insert("unchanged", *count);
+        counts.entry(name.as_str()).or_default()[4] = *count;
     }
     let mut result = serde_json::Map::new();
     for name in ENTITIES {
         if let Some(bucket) = counts.get(name) {
-            result.insert(name.to_string(), json!(bucket));
+            let mut ordered = serde_json::Map::new();
+            for (index, action) in ACTIONS.iter().enumerate() {
+                ordered.insert((*action).to_string(), json!(bucket[index]));
+            }
+            result.insert(name.to_string(), Value::Object(ordered));
         }
     }
     Value::Object(result)
@@ -1312,7 +1318,9 @@ fn result_of(report: &Report<'_>, plan: &Plan) -> Value {
         "applied": report.applied,
         "detail": report.detail,
         "project": report.scope,
-        "base": report.base.map(crate::core::to_iso),
+        // The answer renders a moment the way pydantic's mode="json" does, with
+        // a Z. The stored event summary keeps to_iso, which is +00:00.
+        "base": report.base.map(|moment| moment.to_json()),
         "base_source": report.base_source,
         "created": total(plan, "created"),
         "updated": total(plan, "updated"),
@@ -1867,6 +1875,16 @@ mod tests {
                 "{counter} is present"
             );
         }
+        let order: Vec<&str> = project_counts
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            order,
+            ["created", "updated", "conflict", "skipped", "unchanged"]
+        );
     }
 
     #[test]
@@ -1883,10 +1901,7 @@ mod tests {
             &json!({"source": destination.display().to_string(), "reason": "why"}),
         )
         .unwrap();
-        assert!(
-            result["base"].as_str().is_some(),
-            "the export's exported_at"
-        );
+        assert!(result["base"].as_str().unwrap().ends_with('Z'));
         assert_eq!(
             result["base_source"],
             json!("an export of this same instance: its exported_at")
