@@ -12,6 +12,7 @@
 
 pub mod auth;
 pub mod freshness;
+mod history;
 pub mod install;
 pub mod work;
 
@@ -55,6 +56,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "restore" => lifecycle::restore_op,
         "export" => lifecycle::export_op,
         "import" => import_merge::import_op,
+        "events.list" => history::events_list_op,
+        "audit.list" => history::audit_list_op,
         _ => return None,
     })
 }
