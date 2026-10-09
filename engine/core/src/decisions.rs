@@ -792,6 +792,299 @@ pub fn contract_from_settings(
     }
 }
 
+pub const COMPLIANT: &str = "compliant";
+pub const NON_COMPLIANT: &str = "non_compliant";
+pub const NOT_CHECKED: &str = "not_checked";
+/// The one answer never stored on a project row: this project never adopted the
+/// contract, so there is nothing to comply with, and no view may present it as a fault.
+pub const NOT_APPLICABLE: &str = "not_applicable";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CriterionResult {
+    pub rule: String,
+    pub target: String,
+    pub satisfied: bool,
+    pub detail: String,
+    pub applicable: bool,
+    pub tracked: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContractResult {
+    pub contract_version: String,
+    pub path: String,
+    pub status: String,
+    pub criteria: Vec<CriterionResult>,
+}
+
+impl ContractResult {
+    /// The criteria that failed and were not declared inapplicable.
+    pub fn failing(&self) -> Vec<&CriterionResult> {
+        self.criteria
+            .iter()
+            .filter(|criterion| !criterion.satisfied && criterion.applicable)
+            .collect()
+    }
+
+    pub fn inapplicable(&self) -> Vec<&CriterionResult> {
+        self.criteria
+            .iter()
+            .filter(|criterion| !criterion.applicable)
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScaffoldFile {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Scaffold {
+    pub directories: Vec<String>,
+    pub files: Vec<ScaffoldFile>,
+}
+
+/// The minimum a new project needs to pass the stock contract. No licence text
+/// is invented: picking one is the owner's decision.
+pub fn default_scaffold(name: &str, owner: &str, lifecycle_state: &str) -> Scaffold {
+    Scaffold {
+        directories: Contract::stock().required_dirs,
+        files: vec![
+            ScaffoldFile {
+                path: "README.md".into(),
+                content: format!(
+                    "# {name}\n\nOne line on what this is and who it is for.\n\n## Status\n\n`{lifecycle_state}`.\n"
+                ),
+            },
+            ScaffoldFile {
+                path: "AGENTS.md".into(),
+                content: format!(
+                    "# {name} — Agent Guidance\n\n## Where things live\n\n- `docs/` — first-class documentation.\n- `design/` — diagrams, mockups, exploratory notes (may be messy).\n- `src/` — implementation.\n\n## Ground rules\n\n- Record decisions where the next reader will look for them.\n"
+                ),
+            },
+            ScaffoldFile {
+                path: "LICENSE".into(),
+                content: format!(
+                    "Copyright (c) {owner}\n\nTODO: choose a licence and replace this file with its full text.\n"
+                ),
+            },
+        ],
+    }
+}
+
+/// What the evaluator may know about a path. The caller resolves `~` and
+/// symlinks; this stays a pure read of the answers.
+pub trait ContractTree {
+    fn is_dir(&self, path: &str) -> bool;
+    fn is_file(&self, path: &str) -> bool;
+}
+
+/// Check a folder against a contract. Advisory: the result is a value to read
+/// and it blocks nothing. `tracked` is the set of top-level names the
+/// repository carries, from a caller that was allowed to ask git, and `None`
+/// where nobody could ask. A criterion met on disk but absent from that set
+/// fails, because a clone would not have it. `inapplicable` maps
+/// `(rule, target)` to the reason it cannot apply here.
+pub fn evaluate(
+    path: &str,
+    contract: &Contract,
+    tree: &dyn ContractTree,
+    tracked: Option<&std::collections::BTreeSet<String>>,
+    inapplicable: &[(&str, &str, &str)],
+) -> ContractResult {
+    if !tree.is_dir(path) {
+        return ContractResult {
+            contract_version: contract.version.clone(),
+            path: path.to_string(),
+            status: NOT_CHECKED.to_string(),
+            criteria: vec![CriterionResult {
+                rule: "path.exists".into(),
+                target: path.to_string(),
+                satisfied: false,
+                detail: "the path does not exist or is not a directory, so no criterion below was evaluated — this is 'not checked', not 'does not comply'".into(),
+                applicable: true,
+                tracked: None,
+            }],
+        };
+    }
+    let mut criteria = vec![CriterionResult {
+        rule: "path.exists".into(),
+        target: path.to_string(),
+        satisfied: true,
+        detail: "directory exists".into(),
+        applicable: true,
+        tracked: None,
+    }];
+    for name in &contract.required_files {
+        criteria.push(exempted(
+            criterion(
+                "required_file",
+                name,
+                tree.is_file(&child(path, name)),
+                tracked,
+            ),
+            inapplicable,
+        ));
+    }
+    for name in &contract.required_dirs {
+        criteria.push(exempted(
+            criterion(
+                "required_dir",
+                name,
+                tree.is_dir(&child(path, name)),
+                tracked,
+            ),
+            inapplicable,
+        ));
+    }
+    let failing = criteria
+        .iter()
+        .any(|item| !item.satisfied && item.applicable);
+    ContractResult {
+        contract_version: contract.version.clone(),
+        path: path.to_string(),
+        status: if failing { NON_COMPLIANT } else { COMPLIANT }.to_string(),
+        criteria,
+    }
+}
+
+fn child(root: &str, name: &str) -> String {
+    if root.ends_with('/') {
+        format!("{root}{name}")
+    } else {
+        format!("{root}/{name}")
+    }
+}
+
+fn criterion(
+    rule: &str,
+    name: &str,
+    on_disk: bool,
+    tracked: Option<&std::collections::BTreeSet<String>>,
+) -> CriterionResult {
+    let suffix = if rule == "required_dir" { "/" } else { "" };
+    let (satisfied, detail, carried) = if !on_disk {
+        (
+            false,
+            format!("{name}{suffix} is missing"),
+            tracked.map(|_| false),
+        )
+    } else if tracked.is_none() {
+        (true, "present".to_string(), None)
+    } else if tracked.is_some_and(|names| names.contains(name)) {
+        (true, "present".to_string(), Some(true))
+    } else {
+        (
+            false,
+            format!(
+                "{name}{suffix} is present in the working tree but not tracked, so no clone of this repository has it"
+            ),
+            Some(false),
+        )
+    };
+    CriterionResult {
+        rule: rule.to_string(),
+        target: name.to_string(),
+        satisfied,
+        detail,
+        applicable: true,
+        tracked: carried,
+    }
+}
+
+/// A declaration does not make the criterion satisfied — the file is still
+/// absent. It makes it not-counted, and only when it would otherwise fail.
+fn exempted(mut result: CriterionResult, inapplicable: &[(&str, &str, &str)]) -> CriterionResult {
+    let reason = inapplicable.iter().find_map(|(rule, target, reason)| {
+        (*rule == result.rule && *target == result.target).then_some(*reason)
+    });
+    if let Some(reason) = reason.filter(|_| !result.satisfied) {
+        result.applicable = false;
+        result.detail = format!("declared inapplicable to this project: {reason}");
+    }
+    result
+}
+
+pub const JUDGEMENT_TARGETS: &[(&str, &str)] = &[
+    ("LICENSE", "choose a licence for this project and write its full text to LICENSE. Vogt deliberately does not pick one: a scaffold that silently writes MIT makes that decision for the owner."),
+    ("design", "decide what this project's design record is — diagrams, mockups, exploratory notes — and put it in design/. An empty directory satisfies the letter of the criterion and none of its point, and git cannot carry one anyway."),
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recommendation {
+    pub rule: String,
+    pub target: String,
+    pub remedy: String,
+    pub instruction: String,
+}
+
+/// What would close each failing criterion. Advisory: nothing here applies
+/// anything, and a criterion declared inapplicable has nothing to recommend.
+pub fn recommendations(
+    result: &ContractResult,
+    scaffold: Option<&Scaffold>,
+) -> Vec<Recommendation> {
+    let written: std::collections::BTreeSet<&str> = scaffold
+        .map(|scaffold| {
+            scaffold
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    let directories: std::collections::BTreeSet<&str> = scaffold
+        .map(|scaffold| scaffold.directories.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    result
+        .failing()
+        .into_iter()
+        .map(|criterion| {
+            let (remedy, instruction) = if let Some((_, text)) = JUDGEMENT_TARGETS
+                .iter()
+                .find(|(target, _)| *target == criterion.target)
+            {
+                ("judgement", (*text).to_string())
+            } else if written.contains(criterion.target.as_str())
+                || directories.contains(criterion.target.as_str())
+            {
+                let slash = if criterion.rule == "required_dir" { "/" } else { "" };
+                (
+                    "scaffold",
+                    format!(
+                        "`project scaffold` writes {}{slash} into this project without overwriting anything that is already there.",
+                        criterion.target
+                    ),
+                )
+            } else if criterion.tracked == Some(false) {
+                (
+                    "judgement",
+                    format!(
+                        "{} is in the working tree but no clone carries it. Commit it, or decide it does not belong in this repository.",
+                        criterion.target
+                    ),
+                )
+            } else {
+                (
+                    "judgement",
+                    format!(
+                        "decide what {} should contain for this project and add it. Nothing here can write it for you.",
+                        criterion.target
+                    ),
+                )
+            };
+            Recommendation {
+                rule: criterion.rule.clone(),
+                target: criterion.target.clone(),
+                remedy: remedy.to_string(),
+                instruction,
+            }
+        })
+        .collect()
+}
+
 pub const VERSION_MISMATCH: &str = "version_mismatch";
 pub const AUTO_ACCEPTABLE_KINDS: &[&str] = &[VERSION_MISMATCH, "forge_state_mismatch"];
 
@@ -3183,5 +3476,128 @@ mod activity_tests {
             summarize_input(&serde_json::json!({"pattern": true})),
             "True"
         );
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    struct Tree {
+        dirs: Vec<String>,
+        files: Vec<String>,
+    }
+
+    impl ContractTree for Tree {
+        fn is_dir(&self, path: &str) -> bool {
+            self.dirs.iter().any(|dir| dir == path)
+        }
+        fn is_file(&self, path: &str) -> bool {
+            self.files.iter().any(|file| file == path)
+        }
+    }
+
+    #[test]
+    fn a_missing_root_is_not_checked_rather_than_non_compliant() {
+        let tree = Tree {
+            dirs: vec![],
+            files: vec![],
+        };
+        let result = evaluate("/work/app", &Contract::stock(), &tree, None, &[]);
+        assert_eq!(result.status, NOT_CHECKED);
+        assert_eq!(result.criteria.len(), 1);
+        assert_eq!(result.criteria[0].rule, "path.exists");
+    }
+
+    #[test]
+    fn a_file_on_disk_but_untracked_fails_and_an_exemption_is_not_counted() {
+        let tree = Tree {
+            dirs: vec![
+                "/work/app".into(),
+                "/work/app/docs".into(),
+                "/work/app/src".into(),
+            ],
+            files: vec![
+                "/work/app/AGENTS.md".into(),
+                "/work/app/README.md".into(),
+                "/work/app/LICENSE".into(),
+            ],
+        };
+        let tracked = ["AGENTS.md", "README.md", "LICENSE", "docs", "src"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let result = evaluate("/work/app", &Contract::stock(), &tree, Some(&tracked), &[]);
+        assert_eq!(result.status, NON_COMPLIANT);
+        let design = result
+            .criteria
+            .iter()
+            .find(|item| item.target == "design")
+            .expect("design");
+        assert_eq!(design.detail, "design/ is missing");
+
+        let exempted = evaluate(
+            "/work/app",
+            &Contract::stock(),
+            &tree,
+            Some(&tracked),
+            &[(
+                "required_dir",
+                "design",
+                "a cargo workspace has no design record",
+            )],
+        );
+        assert_eq!(exempted.status, COMPLIANT);
+        assert_eq!(exempted.inapplicable().len(), 1);
+        assert!(exempted.inapplicable()[0]
+            .detail
+            .contains("cargo workspace"));
+
+        let untracked = ["AGENTS.md", "README.md", "docs", "design", "src"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let loose = evaluate(
+            "/work/app",
+            &Contract::stock(),
+            &tree,
+            Some(&untracked),
+            &[],
+        );
+        let licence = loose
+            .criteria
+            .iter()
+            .find(|item| item.target == "LICENSE")
+            .expect("licence");
+        assert!(!licence.satisfied);
+        assert_eq!(licence.tracked, Some(false));
+    }
+
+    #[test]
+    fn a_scaffold_remedy_is_named_and_a_licence_is_a_judgement() {
+        let scaffold = default_scaffold("vogt", "Ada", "active");
+        assert!(scaffold
+            .files
+            .iter()
+            .any(|file| file.path == "LICENSE" && file.content.contains("Copyright (c) Ada")));
+        let tree = Tree {
+            dirs: vec!["/work/app".into()],
+            files: vec![],
+        };
+        let result = evaluate("/work/app", &Contract::stock(), &tree, None, &[]);
+        let advice = recommendations(&result, Some(&scaffold));
+        let licence = advice
+            .iter()
+            .find(|item| item.target == "LICENSE")
+            .expect("licence");
+        assert_eq!(licence.remedy, "judgement");
+        let readme = advice
+            .iter()
+            .find(|item| item.target == "README.md")
+            .expect("readme");
+        assert_eq!(readme.remedy, "scaffold");
+        assert!(readme
+            .instruction
+            .contains("`project scaffold` writes README.md "));
     }
 }
