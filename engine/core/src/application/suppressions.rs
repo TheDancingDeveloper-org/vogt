@@ -48,27 +48,41 @@ fn suppress<C: Clock + 'static, I: IdFactory + 'static>(
     project: Option<&str>,
     reason: &str,
 ) -> Result<Value, VogtError> {
-    let scope = match project {
-        Some(slug) => Some(resolve::project(&ctx.declared.read()?, slug)?.id),
-        None => None,
-    };
-    let now = clock_now(&ctx.clock);
+    if subject.is_empty() {
+        return Err(VogtError::InvalidRequest(
+            "suppress needs a non-empty subject".to_string(),
+        ));
+    }
+    let subject = subject.to_string();
+    let project = project.map(str::to_string);
+    let reason = reason.to_string();
     let mut write = write_of(ctx);
-    let id = write
-        .ids()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .next("sup");
+    let ids = std::sync::Arc::clone(write.ids());
+    let clock = std::sync::Arc::clone(write.clock());
     let match_kind = if pattern { "pattern" } else { "exact" };
-    audited_write(&mut write, "suppress", reason, |txn, actor| {
+    audited_write(&mut write, "suppress", &reason, |txn, actor| {
+        // Resolution and the duplicate check happen before the id and the
+        // timestamp are drawn, matching `observed_first.py`: a duplicate must
+        // not burn a `sup` id, and an unknown project must still consume the
+        // transaction id the write already opened.
+        let scope = match project.as_deref() {
+            Some(slug) => Some(resolve::project(&*txn, slug)?.id),
+            None => None,
+        };
         for existing in txn.list_suppressions(false, 1000)? {
             if existing.subject_key_or_pattern == subject && existing.scope_project_id == scope {
                 return Err(VogtError::Conflict(format!(
-                    "'{subject}' is already suppressed ({})",
+                    "{} is already suppressed ({})",
+                    crate::core::py_repr(&subject),
                     existing.id
                 )));
             }
         }
+        let id = ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .next("sup");
+        let now = clock_now(&clock);
         let suppression = crate::core::Suppression {
             id: id.clone(),
             match_kind: if pattern {
@@ -81,7 +95,7 @@ fn suppress<C: Clock + 'static, I: IdFactory + 'static>(
             scope_project_slug: None,
             actor_id: actor.id.clone(),
             actor_identity_ref: Some(actor.identity_ref.clone()),
-            reason: reason.to_string(),
+            reason: reason.clone(),
             created_at: now,
             revoked_at: None,
             revoked_reason: None,
@@ -130,12 +144,16 @@ fn revoke<C: Clock + 'static, I: IdFactory + 'static>(
     audited_write(&mut write, "suppression.revoke", reason, |txn, actor| {
         let existing = txn.suppression_by_id(id)?;
         if existing.is_none() {
-            return Err(VogtError::NotFound(format!("no suppression '{id}'")));
+            return Err(VogtError::NotFound(format!(
+                "no suppression {}",
+                crate::core::py_repr(id)
+            )));
         }
         let revoked = txn.revoke_suppression(id, &actor.id, reason, now)?;
         if !revoked {
             return Err(VogtError::Conflict(format!(
-                "suppression '{id}' is already revoked"
+                "suppression {} is already revoked",
+                crate::core::py_repr(id)
             )));
         }
         let updated = txn
