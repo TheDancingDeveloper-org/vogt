@@ -5,4 +5,5 @@
 //! stdin, and the HTTP route with its session and grant filtering — sit on top
 //! of it.
 
+mod bridge;
 mod framing;
