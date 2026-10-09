@@ -524,7 +524,11 @@ fn take_value(
             argv[*index].trim_start_matches("--")
         )
     })?;
-    if next.starts_with('-') && next != "-" {
+    // A negative number is a value, not a flag. argparse's
+    // `_negative_number_matcher` does the same when no option looks like a
+    // negative number, which none of ours do. `-5` and `-5.5` are values;
+    // `--foo` and `-h` are not.
+    if next.starts_with('-') && next != "-" && !is_negative_number(next) {
         return Err(format!(
             "--{} requires a value",
             argv[*index].trim_start_matches("--")
@@ -532,6 +536,20 @@ fn take_value(
     }
     *index += 2;
     Ok(next.clone())
+}
+
+fn is_negative_number(token: &str) -> bool {
+    let rest = token.strip_prefix('-').unwrap_or("");
+    let mut seen_dot = false;
+    let mut digits = 0usize;
+    for ch in rest.chars() {
+        match ch {
+            '0'..='9' => digits += 1,
+            '.' if !seen_dot => seen_dot = true,
+            _ => return false,
+        }
+    }
+    digits > 0
 }
 
 fn secret_name(field: &str) -> Option<&str> {
@@ -1393,6 +1411,35 @@ mod tests {
         assert!(result.stdout.contains("name: ada"), "{}", result.stdout);
         assert!(result.stdout.contains("active: yes"), "{}", result.stdout);
         assert!(result.stdout.contains("items: (none)"), "{}", result.stdout);
+    }
+
+    #[test]
+    fn a_negative_number_is_a_value_not_a_flag() {
+        let registry = default_registry();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = run(
+            &argv(&[
+                "token",
+                "issue",
+                "--actor",
+                "local:a",
+                "--name",
+                "t",
+                "--reason",
+                "because",
+                "--expires-in-days",
+                "-5",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stdout);
+        assert_eq!(seen.expect("dispatched")["expires_in_days"], -5);
     }
 
     #[test]
