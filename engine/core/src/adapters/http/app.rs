@@ -16,7 +16,7 @@ use axum::response::Response;
 use axum::Router;
 
 use crate::adapters::auth_gate::{self, Request as AuthRequest};
-use crate::core::{IdFactory, Moment, SystemClock};
+use crate::core::{Clock, IdFactory};
 use crate::errors::VogtError;
 use crate::registry::{default_registry, HttpMethod, OperationRegistry, Transport};
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
@@ -28,22 +28,43 @@ pub const API_PREFIX: &str = "/api";
 /// What a route needs to answer. The registry is shared because every request
 /// looks its operation up by method and path. The store is behind a mutex
 /// because its clock and id factory are not shareable across tasks.
-pub struct AppState<I> {
+pub struct AppState<C, I> {
     pub registry: Arc<OperationRegistry>,
-    store: Mutex<SqliteDeclaredStore<SystemClock, I>>,
+    store: Mutex<SqliteDeclaredStore<C, I>>,
     pub no_auth: bool,
     pub writes_enabled: bool,
 }
 
-impl<I: IdFactory> AppState<I> {
-    pub fn new(data_dir: &std::path::Path, no_auth: bool, writes_enabled: bool, ids: I) -> Self {
+impl<C: Clock, I: IdFactory> AppState<C, I> {
+    pub fn new(
+        data_dir: &std::path::Path,
+        no_auth: bool,
+        writes_enabled: bool,
+        clock: C,
+        ids: I,
+    ) -> Self {
         Self {
             registry: Arc::new(default_registry()),
             store: Mutex::new(SqliteDeclaredStore::new(
                 crate::storage::sqlite::declared_path(data_dir),
-                SystemClock,
+                clock,
                 ids,
             )),
+            no_auth,
+            writes_enabled,
+        }
+    }
+
+    /// A state whose store shares the clock and id factory of an existing one.
+    pub fn joined(
+        data_dir: &std::path::Path,
+        no_auth: bool,
+        writes_enabled: bool,
+        source: &SqliteDeclaredStore<C, I>,
+    ) -> Self {
+        Self {
+            registry: Arc::new(default_registry()),
+            store: Mutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
             no_auth,
             writes_enabled,
         }
@@ -52,12 +73,14 @@ impl<I: IdFactory> AppState<I> {
 
 /// The router for the registry surface. Health routes stay on their own router
 /// and are merged in by `serve`.
-pub fn router<I: IdFactory + Send + 'static>(state: AppState<I>) -> Router {
+pub fn router<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
+    state: AppState<C, I>,
+) -> Router {
     Router::new().fallback(dispatch).with_state(Arc::new(state))
 }
 
-async fn dispatch<I: IdFactory>(
-    State(state): State<Arc<AppState<I>>>,
+async fn dispatch<C: Clock, I: IdFactory>(
+    State(state): State<Arc<AppState<C, I>>>,
     request: Request<Body>,
 ) -> Response {
     let method = request.method().clone();
@@ -83,14 +106,7 @@ async fn dispatch<I: IdFactory>(
     // that will be refused never reaches a handler.
     let granted = {
         let store = state.store.lock().expect("the store lock is not poisoned");
-        let now = Moment::from_unix(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-            0,
-        );
-        let decision_id = crate::core::fresh_id("aud");
+        let (now, decision_id) = store.stamp_and_id("aut");
         auth_gate::authorize(
             &*store,
             AuthRequest {
@@ -197,6 +213,7 @@ mod tests {
             &dir,
             no_auth,
             true,
+            crate::core::SystemClock,
             crate::core::SequentialIds::new(None).unwrap(),
         );
         runtime.spawn(async move {

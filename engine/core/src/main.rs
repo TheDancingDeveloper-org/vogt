@@ -381,22 +381,96 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
             return ExitCode::from(1);
         }
     };
+    let built = application::context::build_context(
+        config.clone(),
+        None,
+        clock,
+        ids,
+        None,
+        None,
+        None,
+        None,
+    )
+    .expect("the hooks were validated at startup");
+    let writes_enabled = std::env::var("VOGT_READ_ONLY").ok().is_none();
     let health = adapters::http::health::router(adapters::http::health::HealthState {
         data_dir: data_dir.clone(),
         version: VERSION.to_string(),
         auth_enabled: !no_auth,
-        writes_enabled: true,
+        writes_enabled,
     });
-    // `/mcp` answers on the same port, behind the same gate as `/api`. The gate
-    // authenticates every request and records the decision before a tool runs,
-    // so an anonymous caller is refused and the refusal is a row.
-    let router = health
-        .merge(adapters::http::app::router(
-            adapters::http::app::AppState::new(&data_dir, no_auth, true, core::FreshIds),
-        ))
-        .merge(adapters::http::mcp::router(
-            adapters::http::mcp::McpState::new(&data_dir, no_auth, true, core::FreshIds),
-        ));
+    // Both routes join the context's store, so their recorded rows use the same
+    // clock and id sequence as the rest of the process, hooks included.
+    let router = match &built {
+        application::context::Built::SystemRandom(ctx) => health
+            .merge(adapters::http::app::router(
+                adapters::http::app::AppState::joined(
+                    &data_dir,
+                    no_auth,
+                    writes_enabled,
+                    &ctx.declared,
+                ),
+            ))
+            .merge(adapters::http::mcp::router(
+                adapters::http::mcp::McpState::joined(
+                    &data_dir,
+                    no_auth,
+                    writes_enabled,
+                    &ctx.declared,
+                ),
+            )),
+        application::context::Built::SystemSequential(ctx) => health
+            .merge(adapters::http::app::router(
+                adapters::http::app::AppState::joined(
+                    &data_dir,
+                    no_auth,
+                    writes_enabled,
+                    &ctx.declared,
+                ),
+            ))
+            .merge(adapters::http::mcp::router(
+                adapters::http::mcp::McpState::joined(
+                    &data_dir,
+                    no_auth,
+                    writes_enabled,
+                    &ctx.declared,
+                ),
+            )),
+        application::context::Built::StepRandom(ctx) => health
+            .merge(adapters::http::app::router(
+                adapters::http::app::AppState::joined(
+                    &data_dir,
+                    no_auth,
+                    writes_enabled,
+                    &ctx.declared,
+                ),
+            ))
+            .merge(adapters::http::mcp::router(
+                adapters::http::mcp::McpState::joined(
+                    &data_dir,
+                    no_auth,
+                    writes_enabled,
+                    &ctx.declared,
+                ),
+            )),
+        application::context::Built::StepSequential(ctx) => health
+            .merge(adapters::http::app::router(
+                adapters::http::app::AppState::joined(
+                    &data_dir,
+                    no_auth,
+                    writes_enabled,
+                    &ctx.declared,
+                ),
+            ))
+            .merge(adapters::http::mcp::router(
+                adapters::http::mcp::McpState::joined(
+                    &data_dir,
+                    no_auth,
+                    writes_enabled,
+                    &ctx.declared,
+                ),
+            )),
+    };
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(err) => {

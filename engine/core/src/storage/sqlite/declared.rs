@@ -69,12 +69,39 @@ where
     C: Clock,
     I: IdFactory,
 {
+    /// The current time and a fresh id, from the clock and factory this store
+    /// was opened with. The HTTP gate uses these so a recorded decision carries
+    /// the same clock and id sequence as everything else the store writes.
+    pub fn stamp_and_id(&self, prefix: &str) -> (Moment, String) {
+        let now = self
+            .clock
+            .lock()
+            .expect("the clock lock is not poisoned")
+            .now();
+        let id = self
+            .ids
+            .lock()
+            .expect("the id lock is not poisoned")
+            .next(prefix);
+        (now, id)
+    }
+
     pub fn new(path: PathBuf, clock: C, ids: I) -> Self {
         Self::shared(
             path,
             Arc::new(std::sync::Mutex::new(clock)),
             Arc::new(std::sync::Mutex::new(ids)),
             crate::storage::sqlite::connection::DEFAULT_SYNCHRONOUS,
+        )
+    }
+
+    /// A store over the same clock and id factory as this one.
+    pub fn joined(&self, path: PathBuf) -> Self {
+        Self::shared(
+            path,
+            Arc::clone(&self.clock),
+            Arc::clone(&self.ids),
+            &self.synchronous,
         )
     }
 

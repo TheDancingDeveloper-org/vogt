@@ -23,7 +23,7 @@ pub enum Denial {
     /// No `Authorization: Bearer` header, or one that does not parse.
     NoBearer,
     /// A token was presented but does not resolve to a live credential.
-    Rejected { code: &'static str, detail: String },
+    Rejected { code: &'static str },
     /// The token is live but does not carry the operation's scope.
     Forbidden { held: Vec<String>, needed: String },
     /// The instance refuses writes and the operation mutates.
@@ -38,7 +38,7 @@ impl Denial {
     pub fn error(&self) -> VogtError {
         match self {
             Denial::NoBearer => VogtError::Unauthenticated("no bearer token presented".to_string()),
-            Denial::Rejected { detail, .. } => VogtError::Unauthenticated(detail.clone()),
+            Denial::Rejected { .. } => VogtError::Unauthenticated(TOKEN_INVALID.to_string()),
             Denial::Forbidden { .. } => VogtError::Forbidden(
                 "the token does not carry the scope this operation needs".to_string(),
             ),
@@ -99,6 +99,7 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
                 token: None,
                 scope: None,
                 detail: None,
+                operation_name: operation.name,
             }),
         )?;
         return Ok(Grant {
@@ -109,20 +110,6 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
         });
     }
     let Some(secret) = presented else {
-        record(
-            store,
-            decision(Recorded {
-                id: decision_id,
-                at: now,
-                operation,
-                transport,
-                outcome: AuthOutcome::Deny,
-                reason: "no_bearer_token",
-                token: None,
-                scope: None,
-                detail: None,
-            }),
-        )?;
         return Err(Denial::NoBearer);
     };
     let token = match lookup(store, secret, now) {
@@ -137,14 +124,14 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
                     transport,
                     outcome: AuthOutcome::Deny,
                     reason: rejection.code,
-                    token: None,
+                    token: rejection.token.as_ref(),
                     scope: None,
-                    detail: Some(rejection.detail.clone()),
+                    detail: None,
+                    operation_name: "authenticate",
                 }),
             )?;
             return Err(Denial::Rejected {
                 code: rejection.code,
-                detail: rejection.detail,
             });
         }
     };
@@ -168,6 +155,7 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
                 token: Some(&token),
                 scope: Some(operation.scope),
                 detail: None,
+                operation_name: operation.name,
             }),
         )?;
         return Err(if reason == WRITES_DISABLED {
@@ -192,6 +180,7 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
             token: Some(&token),
             scope: Some(operation.scope),
             detail: None,
+            operation_name: operation.name,
         }),
     )?;
     slide(store, &token, now);
@@ -205,56 +194,53 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
 
 struct Rejection {
     code: &'static str,
-    detail: String,
+    /// The token the refusal belongs to, when one was found. An unknown token
+    /// has none; a revoked, expired or disabled one keeps its actor and token
+    /// id, because the operator needs to see whose credential was refused.
+    token: Option<Token>,
 }
 
-fn lookup_failed(error: VogtError) -> Rejection {
-    Rejection {
+fn lookup_failed(_: VogtError) -> Box<Rejection> {
+    Box::new(Rejection {
         code: "lookup_failed",
-        detail: format!("the token could not be looked up: {error}"),
-    }
+        token: None,
+    })
 }
 
-fn lookup<S: DeclaredStore>(store: &S, secret: &str, now: Moment) -> Result<Token, Rejection> {
+/// The one message every bad token gets. The reason code in the recorded row
+/// says which check failed; the caller is told none of them.
+const TOKEN_INVALID: &str = "the presented token is not valid";
+
+fn lookup<S: DeclaredStore>(store: &S, secret: &str, now: Moment) -> Result<Token, Box<Rejection>> {
     let hashed = hash_token(secret);
-    let found = store
-        .read()
-        .map_err(lookup_failed)?
-        .token_by_hash(&hashed)
-        .map_err(lookup_failed)?;
+    let view = store.read().map_err(lookup_failed)?;
+    let found = view.token_by_hash(&hashed).map_err(lookup_failed)?;
     let Some(token) = found else {
-        return Err(Rejection {
+        return Err(Box::new(Rejection {
             code: "unknown_token",
-            detail: "the token is not recognized".to_string(),
-        });
+            token: None,
+        }));
     };
     if token.revoked_at.is_some() {
-        return Err(Rejection {
-            code: "revoked",
-            detail: "the token has been revoked".to_string(),
-        });
+        return Err(Box::new(Rejection {
+            code: "token_revoked",
+            token: Some(token),
+        }));
     }
     if let Some(expires) = token.expires_at {
         if expires <= now {
-            return Err(Rejection {
-                code: "expired",
-                detail: "the token has expired".to_string(),
-            });
+            return Err(Box::new(Rejection {
+                code: "token_expired",
+                token: Some(token),
+            }));
         }
     }
-    // A disabled actor's token is not a live credential. Checked after the token
-    // checks, matching `services/auth.py`: the row names the token, and the
-    // caller only hears that it is not valid.
-    let actor = store
-        .read()
-        .map_err(lookup_failed)?
-        .actor_by_id(&token.actor_id)
-        .map_err(lookup_failed)?;
+    let actor = view.actor_by_id(&token.actor_id).map_err(lookup_failed)?;
     if actor.as_ref().is_none_or(|actor| actor.disabled) {
-        return Err(Rejection {
-            code: "disabled_actor",
-            detail: "the presented token is not valid".to_string(),
-        });
+        return Err(Box::new(Rejection {
+            code: "actor_disabled",
+            token: Some(token),
+        }));
     }
     Ok(token)
 }
@@ -269,6 +255,9 @@ struct Recorded<'a> {
     token: Option<&'a Token>,
     scope: Option<Scope>,
     detail: Option<String>,
+    /// Set when the row is about the token itself rather than the operation,
+    /// which is how an authentication refusal is recorded.
+    operation_name: &'a str,
 }
 
 fn decision(recorded: Recorded<'_>) -> AuthDecision {
@@ -277,7 +266,7 @@ fn decision(recorded: Recorded<'_>) -> AuthDecision {
         at: recorded.at,
         decision: recorded.outcome,
         reason_code: recorded.reason.to_string(),
-        operation: recorded.operation.name.to_string(),
+        operation: recorded.operation_name.to_string(),
         scope: recorded.scope.map(|scope| scope.as_str().to_string()),
         actor_id: recorded.token.map(|token| token.actor_id.clone()),
         token_id: recorded.token.map(|token| token.id.clone()),
