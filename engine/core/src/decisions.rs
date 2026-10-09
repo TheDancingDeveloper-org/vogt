@@ -711,21 +711,24 @@ fn py_quote(text: &str) -> String {
     crate::core::py_repr(text)
 }
 
-/// `str` of a number. serde prints `0.00000001` where Python prints `1e-07`.
+/// `str` of a number. serde prints `0.00000001` where Python prints `1e-07`,
+/// and pads a positive exponent with `+`.
 fn py_number(number: &serde_json::Number) -> String {
-    let Some(value) = number.as_f64() else {
+    // An integer stays digits however large it is. Only a float takes an exponent.
+    let Some(value) = number.as_f64().filter(|_| number.is_f64()) else {
         return number.to_string();
     };
     if value.is_finite() && value.abs() != 0.0 {
         let magnitude = value.abs().log10();
         if !(-4.0..16.0).contains(&magnitude) {
-            let mut rendered = format!("{value:.15e}");
+            // The shortest form, which round-trips the way Python's repr does,
+            // then the exponent padded to two digits with an explicit sign.
+            let rendered = format!("{value:e}");
             if let Some((mantissa, exponent)) = rendered.split_once('e') {
-                let trimmed = mantissa.trim_end_matches('0').trim_end_matches('.');
-                let (sign, digits) = exponent.split_at(1);
-                rendered = format!("{trimmed}e{sign}{digits:0>2}");
+                let sign = if exponent.starts_with('-') { "-" } else { "+" };
+                let digits = exponent.trim_start_matches(['+', '-']);
+                return format!("{mantissa}e{sign}{digits:0>2}");
             }
-            return rendered;
         }
     }
     number.to_string()
@@ -4279,6 +4282,16 @@ mod activity_tests {
         assert_eq!(summarize_input(&serde_json::json!(true)), "True");
         assert_eq!(py_display(&serde_json::json!(1e-7)), "1e-07");
         assert_eq!(py_display(&serde_json::json!(1e-5)), "1e-05");
+        assert_eq!(py_display(&serde_json::json!(1e16)), "1e+16");
+        assert_eq!(py_display(&serde_json::json!(2.5e20)), "2.5e+20");
+        assert_eq!(
+            py_display(&serde_json::json!(1.2345678901234567e-5)),
+            "1.2345678901234568e-05"
+        );
+        assert_eq!(
+            py_display(&serde_json::json!(10_000_000_000_000_000u64)),
+            "10000000000000000"
+        );
     }
 
     #[test]
