@@ -190,6 +190,17 @@ impl SequentialIds {
     }
 }
 
+/// The id factory production uses. Each id is a ULID from the clock and
+/// `/dev/urandom`, so it never repeats across a restart. `SequentialIds` is the
+/// test factory and must not be used here.
+pub struct FreshIds;
+
+impl IdFactory for FreshIds {
+    fn next(&mut self, prefix: &str) -> String {
+        fresh_id(prefix)
+    }
+}
+
 impl IdFactory for SequentialIds {
     fn next(&mut self, prefix: &str) -> String {
         let count = self.counts.entry(prefix.to_string()).or_insert(0);

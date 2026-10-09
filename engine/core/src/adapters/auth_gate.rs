@@ -89,17 +89,17 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
     if no_auth {
         record(
             store,
-            decision(
-                decision_id,
-                now,
+            decision(Recorded {
+                id: decision_id,
+                at: now,
                 operation,
                 transport,
-                AuthOutcome::Allow,
-                "no_auth",
-                None,
-                None,
-                None,
-            ),
+                outcome: AuthOutcome::Allow,
+                reason: "no_auth",
+                token: None,
+                scope: None,
+                detail: None,
+            }),
         )?;
         return Ok(Grant {
             actor_id: "local".to_string(),
@@ -111,17 +111,17 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
     let Some(secret) = presented else {
         record(
             store,
-            decision(
-                decision_id,
-                now,
+            decision(Recorded {
+                id: decision_id,
+                at: now,
                 operation,
                 transport,
-                AuthOutcome::Deny,
-                "no_bearer_token",
-                None,
-                None,
-                None,
-            ),
+                outcome: AuthOutcome::Deny,
+                reason: "no_bearer_token",
+                token: None,
+                scope: None,
+                detail: None,
+            }),
         )?;
         return Err(Denial::NoBearer);
     };
@@ -130,17 +130,17 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
         Err(rejection) => {
             record(
                 store,
-                decision(
-                    decision_id,
-                    now,
+                decision(Recorded {
+                    id: decision_id,
+                    at: now,
                     operation,
                     transport,
-                    AuthOutcome::Deny,
-                    rejection.code,
-                    None,
-                    None,
-                    Some(rejection.detail.clone()),
-                ),
+                    outcome: AuthOutcome::Deny,
+                    reason: rejection.code,
+                    token: None,
+                    scope: None,
+                    detail: Some(rejection.detail.clone()),
+                }),
             )?;
             return Err(Denial::Rejected {
                 code: rejection.code,
@@ -158,17 +158,17 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
     if !permitted {
         record(
             store,
-            decision(
-                decision_id,
-                now,
+            decision(Recorded {
+                id: decision_id,
+                at: now,
                 operation,
                 transport,
-                AuthOutcome::Deny,
+                outcome: AuthOutcome::Deny,
                 reason,
-                Some(&token),
-                None,
-                None,
-            ),
+                token: Some(&token),
+                scope: None,
+                detail: None,
+            }),
         )?;
         return Err(if reason == WRITES_DISABLED {
             Denial::WritesDisabled
@@ -182,17 +182,17 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
     debug_assert!(reason == TOKEN_OK || reason == MISSING_SCOPE);
     record(
         store,
-        decision(
-            decision_id,
-            now,
+        decision(Recorded {
+            id: decision_id,
+            at: now,
             operation,
             transport,
-            AuthOutcome::Allow,
+            outcome: AuthOutcome::Allow,
             reason,
-            Some(&token),
-            Some(operation.scope),
-            None,
-        ),
+            token: Some(&token),
+            scope: Some(operation.scope),
+            detail: None,
+        }),
     )?;
     slide(store, &token, now);
     Ok(Grant {
@@ -245,29 +245,33 @@ fn lookup<S: DeclaredStore>(store: &S, secret: &str, now: Moment) -> Result<Toke
     Ok(token)
 }
 
-fn decision(
-    id: &str,
+struct Recorded<'a> {
+    id: &'a str,
     at: Moment,
-    operation: &Operation,
+    operation: &'a Operation,
     transport: Transport,
     outcome: AuthOutcome,
-    reason: &str,
-    token: Option<&Token>,
+    reason: &'a str,
+    token: Option<&'a Token>,
     scope: Option<Scope>,
     detail: Option<String>,
-) -> AuthDecision {
+}
+
+fn decision(recorded: Recorded<'_>) -> AuthDecision {
     AuthDecision {
-        id: id.to_string(),
-        at,
-        decision: outcome,
-        reason_code: reason.to_string(),
-        operation: operation.name.to_string(),
-        scope: scope.map(|scope| scope.as_str().to_string()),
-        actor_id: token.map(|token| token.actor_id.clone()),
-        token_id: token.map(|token| token.id.clone()),
-        identity_ref: token.and_then(|token| token.actor_identity_ref.clone()),
-        transport: transport_name(transport).to_string(),
-        detail,
+        id: recorded.id.to_string(),
+        at: recorded.at,
+        decision: recorded.outcome,
+        reason_code: recorded.reason.to_string(),
+        operation: recorded.operation.name.to_string(),
+        scope: recorded.scope.map(|scope| scope.as_str().to_string()),
+        actor_id: recorded.token.map(|token| token.actor_id.clone()),
+        token_id: recorded.token.map(|token| token.id.clone()),
+        identity_ref: recorded
+            .token
+            .and_then(|token| token.actor_identity_ref.clone()),
+        transport: transport_name(recorded.transport).to_string(),
+        detail: recorded.detail,
     }
 }
 

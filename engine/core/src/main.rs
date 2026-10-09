@@ -384,12 +384,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
     // gets merged in when the MCP adapter runs every call through the shared
     // `adapters::auth_gate` with a store-backed recorder (R55-1, R60-1).
     let router = health.merge(adapters::http::app::router(
-        adapters::http::app::AppState::new(
-            &data_dir,
-            no_auth,
-            true,
-            core::SequentialIds::new(None).expect("the default id factory opens"),
-        ),
+        adapters::http::app::AppState::new(&data_dir, no_auth, true, core::FreshIds),
     ));
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,

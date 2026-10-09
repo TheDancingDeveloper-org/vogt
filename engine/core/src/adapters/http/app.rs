@@ -16,7 +16,7 @@ use axum::response::Response;
 use axum::Router;
 
 use crate::adapters::auth_gate::{self, Request as AuthRequest};
-use crate::core::{Moment, SequentialIds, SystemClock};
+use crate::core::{IdFactory, Moment, SystemClock};
 use crate::errors::VogtError;
 use crate::registry::{default_registry, HttpMethod, OperationRegistry, Transport};
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
@@ -28,20 +28,15 @@ pub const API_PREFIX: &str = "/api";
 /// What a route needs to answer. The registry is shared because every request
 /// looks its operation up by method and path. The store is behind a mutex
 /// because its clock and id factory are not shareable across tasks.
-pub struct AppState {
+pub struct AppState<I> {
     pub registry: Arc<OperationRegistry>,
-    store: Mutex<SqliteDeclaredStore<SystemClock, SequentialIds>>,
+    store: Mutex<SqliteDeclaredStore<SystemClock, I>>,
     pub no_auth: bool,
     pub writes_enabled: bool,
 }
 
-impl AppState {
-    pub fn new(
-        data_dir: &std::path::Path,
-        no_auth: bool,
-        writes_enabled: bool,
-        ids: SequentialIds,
-    ) -> Self {
+impl<I: IdFactory> AppState<I> {
+    pub fn new(data_dir: &std::path::Path, no_auth: bool, writes_enabled: bool, ids: I) -> Self {
         Self {
             registry: Arc::new(default_registry()),
             store: Mutex::new(SqliteDeclaredStore::new(
@@ -57,11 +52,14 @@ impl AppState {
 
 /// The router for the registry surface. Health routes stay on their own router
 /// and are merged in by `serve`.
-pub fn router(state: AppState) -> Router {
+pub fn router<I: IdFactory + Send + 'static>(state: AppState<I>) -> Router {
     Router::new().fallback(dispatch).with_state(Arc::new(state))
 }
 
-async fn dispatch(State(state): State<Arc<AppState>>, request: Request<Body>) -> Response {
+async fn dispatch<I: IdFactory>(
+    State(state): State<Arc<AppState<I>>>,
+    request: Request<Body>,
+) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let presented = bearer(request.headers().get("authorization"));
@@ -92,7 +90,7 @@ async fn dispatch(State(state): State<Arc<AppState>>, request: Request<Body>) ->
                 .unwrap_or(0),
             0,
         );
-        let decision_id = format!("aud-{}", uuid_ish(&now));
+        let decision_id = crate::core::fresh_id("aud");
         auth_gate::authorize(
             &*store,
             AuthRequest {
@@ -138,10 +136,6 @@ fn bearer(header: Option<&axum::http::HeaderValue>) -> Option<String> {
     } else {
         Some(secret.to_string())
     }
-}
-
-fn uuid_ish(now: &Moment) -> String {
-    format!("{:x}{:x}", now.unix_seconds(), std::process::id())
 }
 
 fn error_response(error: &VogtError) -> Response {
