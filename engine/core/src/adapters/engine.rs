@@ -1976,6 +1976,24 @@ impl ExpandUser for Path {
     }
 }
 
+/// ureq phrases a transport failure in its own words. Python's urllib phrases
+/// the same three the other way, and the parity golden records Python's. Only
+/// these three are translated; anything else stays ureq's text so a new failure
+/// is visible rather than hidden.
+fn urllib_form(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    if error.contains("failed to lookup address information") {
+        return "<urlopen error [Errno -2] Name or service not known>".to_string();
+    }
+    if error.contains("Connection refused") {
+        return "<urlopen error [Errno 111] Connection refused>".to_string();
+    }
+    if lower.contains("timed out") || lower.contains("timeout") {
+        return "<urlopen error timed out>".to_string();
+    }
+    error.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2097,22 +2115,4 @@ mod tests {
     fn no_engine_configured_is_none_not_an_error() {
         assert!(EngineClient::from_config(Some("  "), None).is_none());
     }
-}
-
-/// ureq phrases a transport failure in its own words. Python's urllib phrases
-/// the same three the other way, and the parity golden records Python's. Only
-/// these three are translated; anything else stays ureq's text so a new failure
-/// is visible rather than hidden.
-fn urllib_form(error: &str) -> String {
-    let lower = error.to_ascii_lowercase();
-    if error.contains("failed to lookup address information") {
-        return "<urlopen error [Errno -2] Name or service not known>".to_string();
-    }
-    if error.contains("Connection refused") {
-        return "<urlopen error [Errno 111] Connection refused>".to_string();
-    }
-    if lower.contains("timed out") || lower.contains("timeout") {
-        return "<urlopen error timed out>".to_string();
-    }
-    error.to_string()
 }
