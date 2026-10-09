@@ -2560,7 +2560,14 @@ pub fn parse_checkbox_states(body: &str) -> Vec<(String, bool)> {
     let pattern = fancy_regex::Regex::new(&python_pattern(r"(?m)^\s*- \[([ xX])\]\s+#(\d+)\b"))
         .expect("pattern");
     let mut order: Vec<(String, bool)> = Vec::new();
-    for found in pattern.captures_iter(span).flatten() {
+    for found in pattern.captures_iter(span) {
+        let found = match found {
+            Ok(found) => found,
+            // The same non-advancing error as `sub`. A checkbox state is not a
+            // secret, so the failure drops the rest of the region rather than
+            // redacting it.
+            Err(_) => break,
+        };
         let number = found.get(2).expect("number").as_str().to_string();
         let checked = found
             .get(1)
@@ -3590,7 +3597,18 @@ fn starts_any_class(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> boo
 fn sub(pattern: &fancy_regex::Regex, replacement: &str, text: &str) -> String {
     let mut out = String::new();
     let mut cursor = 0;
-    for found in pattern.captures_iter(text).flatten() {
+    let mut matches = pattern.captures_iter(text);
+    loop {
+        // A backtrack limit yields `Err` and does not advance the iterator, so
+        // looping on it hangs. The rest of the text is redacted whole: failing
+        // closed beats returning raw text that may hold a secret.
+        let found = match matches.next() {
+            Some(Ok(found)) => found,
+            Some(Err(_)) => {
+                return format!("{out}[REDACTED]");
+            }
+            None => break,
+        };
         let whole = found.get(0).expect("match");
         out.push_str(&text[cursor..whole.start()]);
         let mut chars = replacement.chars().peekable();
@@ -3762,7 +3780,7 @@ static ENV_LINE: LazyLock<fancy_regex::Regex> =
     LazyLock::new(|| python_regex(r"(?m)^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=\S"));
 
 pub fn dumps_secrets(command: &str) -> bool {
-    DUMP_COMMAND.is_match(command).unwrap_or(true)
+    DUMP_COMMAND.is_match(command).unwrap_or(false)
 }
 
 pub fn looks_like_dump(output: &str) -> bool {
@@ -3770,7 +3788,15 @@ pub fn looks_like_dump(output: &str) -> bool {
         return true;
     }
     let window: String = output.chars().take(SCAN_WINDOW).collect();
-    ENV_LINE.find_iter(&window).flatten().count() >= 3
+    let mut found = 0;
+    for line in ENV_LINE.find_iter(&window) {
+        match line {
+            Ok(_) => found += 1,
+            // Uncountable is not evidence of a dump. Python returns False here.
+            Err(_) => return false,
+        }
+    }
+    found >= 3
 }
 
 fn one_line(text: &str) -> String {
@@ -4194,6 +4220,23 @@ mod activity_tests {
         assert_eq!(quoted, r#"["it's"]"#);
         let control = py_display(&serde_json::json!(["a\u{000b}b"]));
         assert_eq!(control, r#"['a\x0bb']"#);
+    }
+
+    #[test]
+    fn a_backtrack_limit_redacts_instead_of_hanging() {
+        // fancy-regex yields `Err` without advancing when it gives up, so
+        // iterating it naively never returns. The window is inside Python's
+        // 32,768-character summary, and the tail carries a real token.
+        let noise = "\\éb\u{a7cb}\u{2028}\u{1c89}\"\u{2029}\u{0}".repeat(4_000);
+        let input = format!("{noise} ghp_{}", "a".repeat(30));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(summarize_input(&serde_json::json!(input)));
+        });
+        let summary = receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("summarize_input hung on a backtrack limit");
+        assert!(!summary.contains("ghp_"), "{summary}");
     }
 }
 

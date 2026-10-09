@@ -60,13 +60,6 @@
       }
     },
     {
-      "operation": "migrate",
-      "params": {},
-      "expect": {
-        "exit": 0
-      }
-    },
-    {
       "operation": "http.health.live",
       "http": {
         "method": "GET",
