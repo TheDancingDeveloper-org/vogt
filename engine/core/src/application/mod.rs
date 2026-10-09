@@ -13,6 +13,7 @@ pub mod projects;
 pub mod resolve;
 pub mod services;
 pub mod suppressions;
+pub mod taxonomy;
 pub mod views;
 pub mod writes;
 #[cfg(test)]
