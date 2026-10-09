@@ -32,7 +32,9 @@ const RECENT_LINE_LIMIT: usize = 2000;
 
 tokio::task_local! {
     static REQUEST_ID: String;
-    static ACTOR: String;
+    // A cell, not the scope value itself: auth resolves the actor after the
+    // request scope has opened, and Python's `set_request_actor` writes it then.
+    static ACTOR: std::cell::RefCell<Option<String>>;
 }
 
 struct Recent {
@@ -69,22 +71,37 @@ pub async fn with_request_id<F, T>(request_id: String, body: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    REQUEST_ID.scope(request_id, body).await
+    REQUEST_ID
+        .scope(request_id, ACTOR.scope(std::cell::RefCell::new(None), body))
+        .await
 }
 
 pub fn current_request_id() -> Option<String> {
     REQUEST_ID.try_with(Clone::clone).ok()
 }
 
+/// Open the request scope with no actor. `set_request_actor` fills it once auth
+/// has resolved who is calling.
 pub async fn with_actor<F, T>(identity_ref: String, body: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
-    ACTOR.scope(identity_ref, body).await
+    ACTOR
+        .scope(std::cell::RefCell::new(Some(identity_ref)), body)
+        .await
+}
+
+/// `set_request_actor`: record who is calling, inside an already-open scope.
+/// Outside one it does nothing, because there is no request to attribute.
+pub fn set_request_actor(identity_ref: Option<String>) {
+    let _ = ACTOR.try_with(|actor| *actor.borrow_mut() = identity_ref);
 }
 
 pub fn current_actor() -> Option<String> {
-    ACTOR.try_with(Clone::clone).ok()
+    ACTOR
+        .try_with(|actor| actor.borrow().clone())
+        .ok()
+        .flatten()
 }
 
 /// Best-effort removal of credential-shaped substrings. Mirrors the five
@@ -420,6 +437,20 @@ mod tests {
         assert_eq!(first.await.unwrap().as_deref(), Some("req-1"));
         assert_eq!(second.await.unwrap().as_deref(), Some("req-2"));
         assert_eq!(current_request_id(), None);
+    }
+
+    #[tokio::test]
+    async fn the_actor_is_set_after_the_scope_opens() {
+        // Auth resolves the caller once the handler is already running, so the
+        // actor has to be writable inside the scope rather than fixed at entry.
+        let seen = with_request_id("req".to_string(), async {
+            assert_eq!(current_actor(), None);
+            set_request_actor(Some("alice".to_string()));
+            current_actor()
+        })
+        .await;
+        assert_eq!(seen.as_deref(), Some("alice"));
+        assert_eq!(current_actor(), None);
     }
 
     #[test]
