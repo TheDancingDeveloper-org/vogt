@@ -30,9 +30,9 @@ pub const LOGGER_NAMESPACE: &str = "vogt";
 pub const RECENT_PROBLEMS_CAPACITY: usize = 200;
 const RECENT_LINE_LIMIT: usize = 2000;
 
-std::thread_local! {
-    static REQUEST_ID: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
-    static ACTOR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+tokio::task_local! {
+    static REQUEST_ID: String;
+    static ACTOR: String;
 }
 
 struct Recent {
@@ -60,24 +60,30 @@ pub fn accepted_request_id(raw: Option<&str>) -> Option<String> {
     ok.then(|| candidate.to_string())
 }
 
-pub fn bind_request_id(request_id: &str) {
-    REQUEST_ID.with(|slot| *slot.borrow_mut() = Some(request_id.to_string()));
-}
-
-pub fn reset_request_id() {
-    REQUEST_ID.with(|slot| *slot.borrow_mut() = None);
+/// Run `body` with the correlation id bound to the current task. The scope is
+/// the binding, the way Python's `ContextVar` token is: it cannot leak onto
+/// the next request a worker picks up, and a task spawned inside the scope
+/// inherits it.
+pub async fn with_request_id<F, T>(request_id: String, body: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    REQUEST_ID.scope(request_id, body).await
 }
 
 pub fn current_request_id() -> Option<String> {
-    REQUEST_ID.with(|slot| slot.borrow().clone())
+    REQUEST_ID.try_with(Clone::clone).ok()
 }
 
-pub fn set_request_actor(identity_ref: Option<&str>) {
-    ACTOR.with(|slot| *slot.borrow_mut() = identity_ref.map(str::to_string));
+pub async fn with_actor<F, T>(identity_ref: String, body: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    ACTOR.scope(identity_ref, body).await
 }
 
 pub fn current_actor() -> Option<String> {
-    ACTOR.with(|slot| slot.borrow().clone())
+    ACTOR.try_with(Clone::clone).ok()
 }
 
 /// Best-effort removal of credential-shaped substrings. Mirrors the five
@@ -310,6 +316,20 @@ mod tests {
         assert_eq!(accepted_request_id(Some("has\nline")), None);
         assert_eq!(accepted_request_id(Some(&"a".repeat(65))), None);
         assert_eq!(accepted_request_id(None), None);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_id_stays_with_its_task() {
+        let first = tokio::spawn(with_request_id("req-1".to_string(), async {
+            tokio::task::yield_now().await;
+            current_request_id()
+        }));
+        let second = tokio::spawn(with_request_id("req-2".to_string(), async {
+            current_request_id()
+        }));
+        assert_eq!(first.await.unwrap().as_deref(), Some("req-1"));
+        assert_eq!(second.await.unwrap().as_deref(), Some("req-2"));
+        assert_eq!(current_request_id(), None);
     }
 
     #[test]
