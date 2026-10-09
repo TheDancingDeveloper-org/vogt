@@ -23,10 +23,14 @@ mod observability;
 mod registry;
 mod storage;
 
-/// The product version, matching `pyproject.toml`. The bridge compares it
-/// against the remote server's advertised version, so the crate version
-/// (`0.1.0`) would report a skew that does not exist.
-pub const VERSION: &str = "0.7.8";
+/// The product version. A release build injects `VOGT_VERSION`; a
+/// local one falls back to the pinned version, which `scripts/check_product_version.py`
+/// keeps equal to `pyproject.toml`. Health and MCP both report this, so a
+/// local build cannot say `local/dev` on one and a number on the other.
+pub const VERSION: &str = match option_env!("VOGT_VERSION") {
+    Some(value) if !value.is_empty() => value,
+    _ => "0.7.8",
+};
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -254,7 +258,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
     };
     let router = adapters::http::health::router(adapters::http::health::HealthState {
         data_dir: data_dir.clone(),
-        version: PRODUCT_VERSION.to_string(),
+        version: VERSION.to_string(),
         auth_enabled: !no_auth,
         writes_enabled: true,
     });
@@ -285,11 +289,6 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
         }
     }
 }
-
-const PRODUCT_VERSION: &str = match option_env!("VOGT_PRODUCT_VERSION") {
-    Some(value) if !value.is_empty() => value,
-    _ => "local/dev",
-};
 
 /// Where the instance lives. An explicit `--data-dir` wins, then `VOGT_DATA_DIR`,
 /// then the TOML file named by `VOGT_CONFIG_FILE`, then the XDG default. That is

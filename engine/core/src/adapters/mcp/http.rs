@@ -95,7 +95,8 @@ pub fn respond_recording<G: ToolGrant, R: AuthRecorder>(
             // plain 500 Starlette would have sent, not a SQLite message and not
             // an id that failed to normalise.
             // Server-side only. The caller gets the plain text, never the
-            // store's own words.
+            // store's own words. `tracing` reaches a subscriber only once the
+            // front door installs one; until then the line is a no-op.
             tracing::error!("mcp authorization could not be recorded: {failure}");
             return McpHttpResponse {
                 status: 500,
