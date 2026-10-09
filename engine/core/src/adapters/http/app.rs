@@ -77,11 +77,56 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
 }
 
 /// The router for the registry surface. Health routes stay on their own router
-/// and are merged in by `serve`.
+/// and are merged in by `serve`. Login is mounted by hand, ahead of the
+/// fallback: the caller holds no credential yet, so it never enters the gate.
 pub fn router<C: Clock + Send + 'static, I: IdFactory + Send + 'static>(
     state: AppState<C, I>,
 ) -> Router {
-    Router::new().fallback(dispatch).with_state(Arc::new(state))
+    Router::new()
+        .route("/api/auth/login", axum::routing::post(login))
+        .fallback(dispatch)
+        .with_state(Arc::new(state))
+}
+
+/// `POST /api/auth/login`. Public, like Python's hand-mounted route. The body
+/// is validated before anything else, and every refusal after that is the
+/// service's own answer: one sentence at 401, or the throttled error at 429.
+/// The decision rows are written inside `login_op`, with transport `http`.
+async fn login<C: Clock, I: IdFactory>(
+    State(state): State<Arc<AppState<C, I>>>,
+    request: Request<Body>,
+) -> Response {
+    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    let params = match serde_json::from_slice::<serde_json::Value>(&body) {
+        Ok(serde_json::Value::Object(object)) => serde_json::Value::Object(object),
+        _ => {
+            return invalid_arguments(&VogtError::InvalidRequest(
+                "invalid arguments for auth.login:\n1 validation error for request body\nbody\n  \
+                 Input should be a valid JSON object"
+                    .to_string(),
+            ))
+        }
+    };
+    for field in ["username", "password"] {
+        if params.get(field).and_then(serde_json::Value::as_str).is_none() {
+            return invalid_arguments(&VogtError::InvalidRequest(format!(
+                "invalid arguments for auth.login:\n1 validation error for LoginParams\n{field}\n  \
+                 Field required"
+            )));
+        }
+    }
+    let built = context_for_login(&state);
+    let Some(built) = built else {
+        return error_response(&VogtError::InvalidRequest(
+            "the request context could not be built".to_string(),
+        ));
+    };
+    match crate::application::services::auth::login_op(&built, params) {
+        Ok(value) => json_response(StatusCode::OK, value),
+        Err(error) => error_response(&error),
+    }
 }
 
 async fn dispatch<C: Clock, I: IdFactory>(
@@ -267,6 +312,20 @@ fn context_for<C: Clock, I: IdFactory>(
         config, principal, None, None, None, None, None, None,
     )
     .ok()
+}
+
+/// The context a login runs in. Nobody is authenticated yet, so there is no
+/// principal and no token; `login_op` names the actor itself once the password
+/// matches. The data directory is the route's own store.
+fn context_for_login<C: Clock, I: IdFactory>(
+    state: &AppState<C, I>,
+) -> Option<crate::application::context::Built> {
+    let config = crate::config::VogtConfig {
+        data_dir: state.data_dir.clone(),
+        ..crate::config::VogtConfig::default()
+    };
+    crate::application::context::build_context(config, None, None, None, None, None, None, None)
+        .ok()
 }
 
 /// Python's 422 envelope. The validator reports one error as a single
@@ -476,5 +535,31 @@ mod tests {
         let running = serve(false);
         let (status, _) = request(running.addr, "GET", "/api/instance/init", None);
         assert_eq!(status, 404, "init is local-only");
+    }
+
+    #[test]
+    fn login_is_public_and_validates_before_anything_else() {
+        let running = serve(false);
+        let (status, body) = post_body(running.addr, "/api/auth/login", "{}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(json["error"]["code"], "invalid_arguments");
+    }
+
+    #[test]
+    fn login_refuses_an_unknown_user_with_the_one_sentence() {
+        let running = serve(true);
+        let (status, body) = post_body(
+            running.addr,
+            "/api/auth/login",
+            r#"{"username":"nobody","password":"whatever"}"#,
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 401, "{body}");
+        assert_eq!(json["error"]["code"], "unauthenticated");
+        assert_eq!(
+            json["error"]["message"],
+            "the username or password is not right"
+        );
     }
 }
