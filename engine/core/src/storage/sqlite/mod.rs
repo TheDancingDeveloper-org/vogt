@@ -20,3 +20,4 @@ pub fn observed_path(data_dir: &Path) -> PathBuf {
 }
 
 pub mod declared;
+pub mod observed;

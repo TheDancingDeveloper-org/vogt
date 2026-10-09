@@ -1319,6 +1319,7 @@ pub struct Observation {
     pub subject_key: String,
     pub payload: serde_json::Value,
     pub content_digest: String,
+    pub source_url: Option<String>,
     pub promoted: bool,
     pub observed_at: Moment,
 }

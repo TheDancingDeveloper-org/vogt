@@ -888,6 +888,7 @@ mod tests {
             subject_key: format!("ci:{revision}:{name}"),
             payload,
             content_digest: "sha256:x".into(),
+            source_url: None,
             promoted: false,
             observed_at: moment(1_700_000_000),
         }
@@ -1144,6 +1145,7 @@ mod tests {
             subject_key: "gh:acme/app#1".into(),
             payload: serde_json::json!({"labels": ["Bug"], "state": "OPEN", "title": "Crash", "number": 7}),
             content_digest: "sha256:x".into(),
+            source_url: None,
             promoted: false,
             observed_at: moment(0),
         };
@@ -2049,6 +2051,7 @@ mod ci_alert_tests {
             subject_key: String::new(),
             payload: serde_json::json!({"branch": branch, "event": event, "check": name, "conclusion": conclusion, "updated_at": updated, "revision": "abc"}),
             content_digest: String::new(),
+            source_url: None,
             promoted: false,
             observed_at: crate::core::from_iso("2026-10-09T00:00:00Z").unwrap(),
         }
