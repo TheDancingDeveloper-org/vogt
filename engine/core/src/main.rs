@@ -113,15 +113,12 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    // The generated CLI (P2.4) owns every registry command. `serve` and `init`
-    // stay here because they take over the process or create the data
-    // directory; the registry still lists them, and the CLI answers their
-    // `--help`, but running them goes through this binary's own path so the
-    // listener and the first-run store are the ones already tested.
-    if !matches!(
-        argv.first().map(String::as_str),
-        Some("serve" | "init") | None
-    ) {
+    // `init` and `serve` already have a Rust implementation in this binary.
+    // The generated CLI must not steal them: a global flag before the command
+    // (`--data-dir DIR init`) is still that command, and replacing it with the
+    // not-ported stub breaks instance bootstrap. Every other registry command
+    // goes through the generated adapter.
+    if !matches!(command_word(&argv), Some("serve" | "init")) {
         let code = adapters::cli::main_cli(
             &argv,
             &registry::default_registry(),
@@ -151,6 +148,23 @@ fn main() -> ExitCode {
         } => serve(&host, port, cli.data_dir, cli.json, no_auth),
         Command::Init { check } => init(cli.data_dir, check, cli.json),
     }
+}
+
+/// The command word, skipping global flags that may precede it.
+///
+/// `--data-dir DIR init` is `init`. A flag this binary does not know is left
+/// for whichever parser owns the command, so this only steps over the two
+/// globals both parsers share.
+fn command_word(argv: &[String]) -> Option<&str> {
+    let mut index = 0usize;
+    while index < argv.len() {
+        match argv[index].as_str() {
+            "--json" => index += 1,
+            "--data-dir" => index += 2,
+            _ => return Some(argv[index].as_str()),
+        }
+    }
+    None
 }
 
 /// Validate the hooks and name the ones that are set, once. A value that is not
