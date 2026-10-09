@@ -495,7 +495,7 @@ mod tests {
     fn a_tool_call_against_an_unported_service_is_a_failed_result() {
         let response = &responses(&line(json!({
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
-            "params": {"name": "work_list", "arguments": {}}
+            "params": {"name": "backlog", "arguments": {}}
         })))[0];
         assert!(
             response.get("error").is_none(),
