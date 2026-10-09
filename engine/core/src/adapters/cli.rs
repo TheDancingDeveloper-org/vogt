@@ -1050,19 +1050,36 @@ fn format_top(registry: &OperationRegistry) -> String {
     let mut out = String::new();
     out.push_str(&usage_synopsis());
     out.push('\n');
-    for line in wrap_text(DESCRIPTION, wrap_width()) {
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out.push_str("\npositional arguments:\n");
-    for (name, summary) in top_commands(registry) {
-        out.push_str(&format!("  {name:<22}{summary}\n"));
+    out.push_str(DESCRIPTION);
+    out.push_str("\n\npositional arguments:\n  <command>\n");
+    let rows = top_commands(registry);
+    let width = wrap_width() + 2;
+    let cap = 24.min(width.saturating_sub(20).max(4));
+    let option_longest = ["-h, --help", "--version", "--data-dir DATA_DIR", "--json"]
+        .iter()
+        .map(|flag| flag.chars().count())
+        .max()
+        .unwrap_or(0);
+    let option_column = cap.min(option_longest + 2 + 2);
+    let sub_column = option_column;
+    for (name, summary) in &rows {
+        out.push_str(&option_row(name, summary, sub_column, 4));
     }
     out.push_str("\noptions:\n");
-    out.push_str("  -h, --help           show this help message and exit\n");
-    out.push_str("  --version            show program's version number and exit\n");
-    out.push_str("  --data-dir DATA_DIR  Instance data directory (overrides VOGT_DATA_DIR).\n");
-    out.push_str("  --json               Emit the raw result as JSON instead of formatted text.\n");
+    for (flag, help) in [
+        ("-h, --help", "show this help message and exit"),
+        ("--version", "show program's version number and exit"),
+        (
+            "--data-dir DATA_DIR",
+            "Instance data directory (overrides VOGT_DATA_DIR).",
+        ),
+        (
+            "--json",
+            "Emit the raw result as JSON instead of formatted text.",
+        ),
+    ] {
+        out.push_str(&option_row(flag, help, option_column, 2));
+    }
     out
 }
 
@@ -1099,24 +1116,33 @@ fn format_group(registry: &OperationRegistry, path: &[String]) -> String {
         &["[-h]".to_string()],
         &["<subcommand>".to_string(), "...".to_string()],
     ));
-    out.push_str("\n\npositional arguments:\n  <subcommand>\n");
+    out.push_str("\npositional arguments:\n  <subcommand>\n");
     let rows = group_rows(registry, path);
+    // The help position argparse prints at: the longest choice plus two spaces,
+    // but never past min(24, width - 20) and never short of where `-h, --help`
+    // sits. `option_row` subtracts the indent itself, so this is the column the
+    // help text starts at, not the invocation width. `bind-branch` (11) starts
+    // the help at 15; `label`'s choices are shorter, and so is its help.
+    let width = wrap_width() + 2;
+    let cap = 24.min(width.saturating_sub(20).max(4));
     let longest = rows
         .iter()
         .map(|(name, _)| name.chars().count())
         .max()
         .unwrap_or(0);
-    // argparse's subcommand column: the longest name plus its indent of 4, then
-    // two spaces, capped at 24. `work` lands on 15, `label` on 14.
-    let column = (longest + 4 + 2).min(24);
+    // Wide enough for the longest subcommand row and for the options row. A
+    // column narrower than the indent plus the flag wraps the flag onto its own
+    // line, which argparse only does past the cap.
+    let option_column = cap.min("-h, --help".chars().count() + 2 + 2);
+    let sub_column = (longest + 4 + 2).max(option_column + 2);
     for (name, summary) in &rows {
-        out.push_str(&option_row(name, summary, column, 4));
+        out.push_str(&option_row(name, summary, sub_column, 4));
     }
     out.push_str("\noptions:\n");
     out.push_str(&option_row(
         "-h, --help",
         "show this help message and exit",
-        15,
+        sub_column.max(option_column),
         2,
     ));
     out
@@ -1247,11 +1273,17 @@ fn option_row(flag: &str, help: &str, column: usize, indent: usize) -> String {
     let lines = wrap_text(help, help_width);
     let mut out = String::new();
     let flag_width = flag.chars().count();
+    let gap = " ".repeat(indent);
     if help.is_empty() {
-        out.push_str(&format!("{:indent$}{flag}\n", ""));
+        out.push_str(&format!("{gap}{flag}\n"));
     } else if flag_width <= action_width {
         let pad = " ".repeat(action_width - flag_width);
-        out.push_str(&format!("{:indent$}{flag}{pad}  {}\n", "", lines[0]));
+        out.push_str(&gap);
+        out.push_str(flag);
+        out.push_str(&pad);
+        out.push_str("  ");
+        out.push_str(&lines[0]);
+        out.push('\n');
         for line in lines.iter().skip(1) {
             out.push_str(&format!("{:>column$}{line}\n", ""));
         }
@@ -2086,8 +2118,9 @@ mod tests {
         assert_eq!(root.exit_code, EXIT_OK, "{}", root.stderr);
         assert!(root.stdout.contains("usage: vogt"), "{}", root.stdout);
         assert!(
-            root.stdout.contains("provenance and\n"),
-            "the description is not wrapped: {}",
+            root.stdout
+                .contains("provenance and freshness on every answer.\n"),
+            "{}",
             root.stdout
         );
     }
@@ -2124,7 +2157,12 @@ mod tests {
             "{}",
             work.stdout
         );
-        assert!(work.stdout.contains("-h, --help"), "{}", work.stdout);
+        assert!(
+            work.stdout
+                .contains("  -h, --help     show this help message and exit\n"),
+            "{}",
+            work.stdout
+        );
 
         let label = run(
             &argv(&["label", "--he"]),
@@ -2137,6 +2175,13 @@ mod tests {
             label
                 .stdout
                 .starts_with("usage: vogt label [-h] <subcommand> ...\n"),
+            "{}",
+            label.stdout
+        );
+        assert!(
+            label
+                .stdout
+                .contains("  -h, --help    show this help message and exit\n"),
             "{}",
             label.stdout
         );

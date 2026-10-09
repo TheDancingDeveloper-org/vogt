@@ -180,6 +180,14 @@ fn main() -> ExitCode {
     // `--help` counts, because argparse treats `--he` and `--h` as `--help`.
     let help = argv.iter().any(|arg| is_help_flag(arg));
     let command = command_word(&argv);
+    if matches!(command, Some("init" | "serve")) && global_after_command(&argv) {
+        // `--json` is global on the root parser only. clap would accept it
+        // after the subcommand; argparse reports it and does nothing.
+        eprintln!(
+            "usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json] <command> ...\nvogt: error: unrecognized arguments: --json"
+        );
+        return ExitCode::from(2);
+    }
     if !matches!(command, Some("serve" | "init")) || help {
         if let Err(error) = validate_hooks(None) {
             eprintln!("{error}");
@@ -308,6 +316,24 @@ fn is_global_prefix(arg: &str, option: &str) -> bool {
 /// on `serve`, and stealing that flag would stop a deployment booting.
 fn is_help_flag(arg: &str) -> bool {
     arg == "--help" || arg == "-h" || is_global_prefix(arg, "help")
+}
+
+/// Whether a root-only global sits after the command word. `--json` is the one
+/// clap would otherwise swallow, because it is declared `global = true`.
+fn global_after_command(argv: &[String]) -> bool {
+    let mut seen_command = false;
+    for arg in argv {
+        if !seen_command {
+            if !arg.starts_with('-') {
+                seen_command = true;
+            }
+            continue;
+        }
+        if arg == "--json" || arg.starts_with("--json=") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Rewrite a unique prefix of a global option to the spelling clap knows.
