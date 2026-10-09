@@ -584,10 +584,11 @@ fn parse_params(
     }
     match serde_json::from_slice::<serde_json::Value>(body) {
         Ok(serde_json::Value::Object(object)) => Ok(serde_json::Value::Object(object)),
-        _ => Err(VogtError::InvalidRequest(format!(
-            "invalid arguments for {}:\n1 validation error for request body\nbody\n  Input should be a valid JSON object",
-            operation.name
-        ))),
+        Ok(_) => Err(VogtError::InvalidRequest(
+            "model_attributes_type\nbody\n  Input should be a valid dictionary or object to extract fields from"
+                .to_string(),
+        )),
+        Err(error) => Err(VogtError::InvalidRequest(format!("json_invalid\n{error}"))),
     }
 }
 
@@ -817,11 +818,11 @@ fn invalid_arguments(error: &VogtError, source: &str) -> Response {
                 })
             })
             .collect::<Vec<_>>(),
-        None => vec![serde_json::json!({
-            "loc": ["body"],
-            "msg": error.message(),
-            "type": "value_error",
-        })],
+        None => {
+            let message = error.message();
+            let (error_type, msg, loc) = body_parse_error(message);
+            vec![serde_json::json!({"loc": loc, "msg": msg, "type": error_type})]
+        }
     };
     json_response(
         StatusCode::UNPROCESSABLE_ENTITY,
@@ -833,6 +834,24 @@ fn invalid_arguments(error: &VogtError, source: &str) -> Response {
             }
         }),
     )
+}
+
+/// A body that never reached the validator. Python reports a body that is not
+/// JSON as `json_invalid` at `["body", "0"]`, and JSON that is not an object as
+/// `model_attributes_type` at `["body"]`. Anything else keeps the whole-body
+/// `value_error`.
+fn body_parse_error(message: &str) -> (&'static str, String, Vec<&'static str>) {
+    if let Some(rest) = message.strip_prefix("json_invalid\n") {
+        return (
+            "json_invalid",
+            format!("JSON decode error: {rest}"),
+            vec!["body", "0"],
+        );
+    }
+    if let Some(rest) = message.strip_prefix("model_attributes_type\n") {
+        return ("model_attributes_type", rest.to_string(), vec!["body"]);
+    }
+    ("value_error", message.to_string(), vec!["body"])
 }
 
 fn bearer(header: Option<&axum::http::HeaderValue>) -> Option<String> {
@@ -1095,6 +1114,31 @@ mod tests {
             "a rejected body must not close install mode"
         );
         let _ = status;
+    }
+
+    #[test]
+    fn a_body_that_is_not_json_names_the_decode_error() {
+        // Python reports a body that will not parse as `json_invalid` at
+        // `["body", "0"]`, and JSON that is not an object as
+        // `model_attributes_type` at `["body"]`.
+        let running = serve(true);
+        let (status, body) = post_typed(
+            running.addr,
+            "/api/labels",
+            "not json",
+            Some("application/json"),
+        );
+        assert_eq!(status, 422, "{body}");
+        assert!(body.contains("\"type\":\"json_invalid\""), "{body}");
+        assert!(body.contains("\"loc\":[\"body\",\"0\"]"), "{body}");
+        let (status, body) =
+            post_typed(running.addr, "/api/labels", "[1]", Some("application/json"));
+        assert_eq!(status, 422, "{body}");
+        assert!(
+            body.contains("\"type\":\"model_attributes_type\""),
+            "{body}"
+        );
+        assert!(body.contains("\"loc\":[\"body\"]"), "{body}");
     }
 
     #[test]
