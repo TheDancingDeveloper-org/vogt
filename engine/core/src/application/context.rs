@@ -303,10 +303,18 @@ fn identity_of(config: &VogtConfig) -> PublicIdentity {
     }
 }
 
+/// The OS user this process runs as. Python's `local_principal` asks
+/// `getpass.getuser()`, which reads `LOGNAME` before `USER` before `USERNAME`,
+/// and falls back to `unknown` rather than raising.
 fn whoami() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "unknown".to_string())
+    for name in ["LOGNAME", "USER", "USERNAME"] {
+        if let Ok(value) = std::env::var(name) {
+            if !value.is_empty() {
+                return value;
+            }
+        }
+    }
+    "unknown".to_string()
 }
 
 /// The same context over the two store files in another directory.
