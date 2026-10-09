@@ -96,19 +96,29 @@ fn main() -> ExitCode {
     {
         let env: std::collections::HashMap<String, String> = std::env::vars().collect();
         let Some(url) = adapters::mcp::bridge::configured_url(&env) else {
-            eprintln!("vogt-mcp-remote: set VOGT_URL to the remote Vogt");
+            eprintln!(
+                "vogt-mcp-remote: set VOGT_URL to the server's base URL (and VOGT_HTTP_TOKEN_FILE to a file holding a token)"
+            );
             return ExitCode::from(2);
         };
         let token = adapters::mcp::bridge::resolve_token(&env);
         let transport = adapters::mcp::bridge::UreqTransport;
         let mut bridge = adapters::mcp::bridge::Bridge::new(&url, token, &transport, VERSION);
-        let mut input = String::new();
-        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
-        let mut output = String::new();
-        bridge.serve(&input, &mut output);
-        print!("{output}");
-        for warning in &bridge.report.warned {
-            eprintln!("{warning}");
+        // A line at a time. A client sends `initialize` and waits for the
+        // answer, so reading all of stdin first hangs the handshake.
+        let stdin = std::io::stdin();
+        let mut warned = 0;
+        for line in stdin.lines() {
+            let mut output = String::new();
+            bridge.serve_line(line.as_deref().unwrap_or(""), &mut output);
+            if !output.is_empty() {
+                print!("{output}");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            }
+            for warning in bridge.report.warned.iter().skip(warned) {
+                eprintln!("vogt-mcp-remote: {warning}");
+            }
+            warned = bridge.report.warned.len();
         }
         return ExitCode::SUCCESS;
     }

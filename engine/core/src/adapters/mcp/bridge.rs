@@ -178,30 +178,37 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
     /// the core is slow.
     pub fn serve(&mut self, input: &str, output: &mut String) {
         for line in input.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            self.report.messages_forwarded += 1;
-            let message = match serde_json::from_str::<Value>(line) {
-                Ok(message) => message,
-                Err(error) => {
-                    self.write(
+            self.serve_line(line, output);
+        }
+    }
+
+    /// One line of the client's stdin. Empty lines are skipped; a line that is
+    /// not JSON is answered with `-32700` rather than dropped, because the
+    /// client is waiting on it.
+    pub fn serve_line(&mut self, line: &str, output: &mut String) {
+        let line = super::super::text::python_strip(line);
+        if line.is_empty() {
+            return;
+        }
+        self.report.messages_forwarded += 1;
+        let message = match serde_json::from_str::<Value>(line) {
+            Ok(message) => message,
+            Err(error) => {
+                self.write(
                         output,
                         &json!({"jsonrpc": "2.0", "id": null,
                             "error": {"code": -32700, "message": format!("invalid JSON: {error}")}}),
                     );
-                    continue;
-                }
-            };
-            if let Some(response) = self.forward(&message) {
-                self.note_tools(&message, &response);
-                self.write(output, &response);
+                return;
             }
-            if !self.discovered {
-                self.discovered = true;
-                self.discover();
-            }
+        };
+        if let Some(response) = self.forward(&message) {
+            self.note_tools(&message, &response);
+            self.write(output, &response);
+        }
+        if !self.discovered {
+            self.discovered = true;
+            self.discover();
         }
     }
 
