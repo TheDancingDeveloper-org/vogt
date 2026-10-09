@@ -108,9 +108,32 @@ def record_golden() -> str:
 
 
 def main() -> int:
+    check = "--check" in sys.argv[1:]
     operations = _operations()
-    OPERATIONS_RS.write_text(render_operations_rs(operations))
-    GOLDEN.write_text(record_golden())
+    rendered = render_operations_rs(operations)
+    golden = record_golden()
+    if check:
+        # Drift fails here, at the Python source, rather than waiting for
+        # someone to remember to regenerate. The Rust test checks the same
+        # golden from the other side, including field order.
+        drifted = []
+        if OPERATIONS_RS.read_text() != rendered:
+            drifted.append(str(OPERATIONS_RS.relative_to(REPO_ROOT)))
+        if GOLDEN.read_text() != golden:
+            drifted.append(str(GOLDEN.relative_to(REPO_ROOT)))
+        if drifted:
+            print(
+                "registry drift: "
+                + ", ".join(drifted)
+                + " differ from src/vogt/registry/operations.py. "
+                "Run `python scripts/gen_registry.py` and commit the result.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"registry matches the Python source ({len(operations)} operations)")
+        return 0
+    OPERATIONS_RS.write_text(rendered)
+    GOLDEN.write_text(golden)
     print(f"wrote {len(operations)} operations to {OPERATIONS_RS.relative_to(REPO_ROOT)}")
     print(f"recorded {GOLDEN.relative_to(REPO_ROOT)}")
     return 0

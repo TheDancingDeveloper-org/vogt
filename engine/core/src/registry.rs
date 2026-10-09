@@ -643,14 +643,22 @@ mod tests {
     fn the_dump_matches_the_python_golden() {
         // Recorded by `scripts/gen_registry.py` from Python's own registry
         // dump. Compared with no normaliser, so a drift in any field fails.
+        // The golden is unkeyed (tests/parity/golden/registry.json, not under
+        // golden/<sha>/) on purpose: it describes the registry, which changes
+        // with the operation set rather than with the parity script, and
+        // `gen_registry.py --check` re-records it from the live Python.
         let golden_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/parity/golden/registry.json");
         let golden: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&golden_path).unwrap()).unwrap();
+        let dump = dump();
+        assert_eq!(dump, golden, "registry dump drifted from the Python golden");
+        // Value equality ignores key order, and the manifest's field order is
+        // part of the contract, so compare the text too.
         assert_eq!(
-            dump(),
-            golden,
-            "registry dump drifted from the Python golden"
+            serde_json::to_string_pretty(&dump).unwrap(),
+            serde_json::to_string_pretty(&golden).unwrap(),
+            "registry field order drifted"
         );
     }
 

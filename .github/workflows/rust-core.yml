@@ -139,5 +139,11 @@ jobs:
           uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
           uv run python scripts/parity.py selftest --golden "$golden"
 
+      - name: registry matches the Python source
+        # The Rust registry and its golden are generated. This fails the
+        # moment operations.py changes without a regeneration, instead of
+        # waiting for the next review to notice the drift.
+        run: uv run python scripts/gen_registry.py --check
+
       - name: drift ledger (report only)
         run: uv run python scripts/drift_ledger.py
