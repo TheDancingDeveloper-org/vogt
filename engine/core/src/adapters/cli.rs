@@ -891,12 +891,14 @@ fn format_operation(operation: &Operation) -> String {
     let indent = 2usize;
     let width = wrap_width();
     // argparse caps the help column at 24, and on a narrow terminal at
-    // `max(width - 20, 4)`.
+    // `max(width - 20, 4)`. A flag longer than `width - 11` is excluded from
+    // the measurement, so it cannot push the column out.
     let max_help_position = 24.min((width.saturating_sub(20)).max(indent * 2));
     let action_max = rows
         .iter()
         .map(|(flag, _)| flag.chars().count() + indent)
         .chain(["-h, --help".chars().count() + indent])
+        .filter(|length| *length <= width.saturating_sub(11))
         .max()
         .unwrap_or(0);
     let help_column = (action_max + 2).min(max_help_position);
@@ -990,27 +992,33 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
     }
     let mut lines: Vec<String> = Vec::new();
     let mut current: Vec<char> = Vec::new();
+    let width = width.max(1);
     for chunk in hyphen_chunks(&text) {
         let mut chars: Vec<char> = chunk.chars().collect();
-        while chars.len() > width.max(1) {
-            if current.is_empty() {
-                lines.push(chars.drain(..width.max(1)).collect());
-            } else {
-                break;
+        // A chunk longer than the line breaks mid-word. What fits stays on
+        // the current line; the rest starts the next, matching textwrap.
+        if chars.len() > width && !chars.iter().all(|ch| ch.is_whitespace()) {
+            let room = width - current.len();
+            if room > 0 && !current.is_empty() {
+                current.extend(chars.drain(..room));
+            }
+            while chars.len() > width {
+                lines.push(current.iter().collect());
+                current = chars.drain(..width).collect();
             }
         }
         if chars.is_empty() {
             continue;
         }
         let whitespace = chars.iter().all(|ch| ch.is_whitespace());
+        // A space that would end the line is dropped, matching textwrap, so
+        // the next word still gets the full width.
+        if whitespace && (current.is_empty() || current.len() + chars.len() > width) {
+            continue;
+        }
         if current.is_empty() {
-            current = chars
-                .into_iter()
-                .skip_while(|ch| ch.is_whitespace())
-                .collect();
-        } else if current.len() + chars.len() <= width
-            && !(whitespace && current.len() + chars.len() == width)
-        {
+            current = chars;
+        } else if current.len() + chars.len() <= width {
             current.extend(chars);
         } else {
             lines.push(current.iter().collect());
