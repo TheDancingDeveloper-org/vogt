@@ -354,6 +354,19 @@ def _rules() -> dict[str, Any]:
     return tomllib.loads(RULES_PATH.read_text())
 
 
+def _product_versions() -> set[str]:
+    """The version strings a build may honestly report.
+
+    Python reports the release in ``pyproject.toml``. A dev build of the Rust
+    core reports ``local/dev`` when no version was injected. Anything else is
+    not a build stamp, and the version rule must leave it visible.
+    """
+    import tomllib
+
+    project = tomllib.loads((REPO / "pyproject.toml").read_text())["project"]
+    return {str(project["version"]), "local/dev"}
+
+
 def _walk(
     value: Any,
     rules: dict[str, Any],
@@ -368,10 +381,12 @@ def _walk(
         drop = set(schema["drop_keys"]) if in_schema else set()
         version = rules.get("version", {})
         blank_version = top and operation in set(version.get("operations", []))
+        version_key = version.get("key")
+        accepted = _product_versions() if blank_version else set()
         walked = {
             key: (
                 "<version>"
-                if blank_version and key == version.get("key")
+                if blank_version and key == version_key and item in accepted
                 else "<volatile>"
                 if key in volatile
                 else _walk(item, rules, paths, operation, False)

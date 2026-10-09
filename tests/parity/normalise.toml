@@ -31,12 +31,14 @@ tokens = [{ needle_kind = "root", token = "<root>" }, { needle_kind = "data", to
 
 [version]
 # The product version is stamped at build time, and only the answers that
-# report the build itself carry it. A dev build of vogt-core says "local/dev"
-# where Python says the release. Blanking every key named `version` would also
-# hide a wrong contract version, a deployed version, or a version_mismatch
-# payload, so the rule names the operations it applies to and only their
-# top-level `version`.
-why = "the build stamp names the build, not the behaviour, and only these answers carry it"
+# report the build itself carry it. The rule substitutes <version> only when
+# the value is the version under test: the release in pyproject.toml, which is
+# what Python reports, or "local/dev", which a dev build of vogt-core reports
+# when no version was injected. Any other value is left as it is, so a wrong
+# version, a contract version or a version_mismatch payload stays visible and
+# fails the comparison. The rule names the operations it applies to and only
+# their top-level `version`, so a key named `version` elsewhere is untouched.
+why = "the build stamp names the build, not the behaviour, and only the version under test is substituted"
 operations = ["http.health.live", "http.version", "http.connection_info"]
 key = "version"
 

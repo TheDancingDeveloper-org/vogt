@@ -416,20 +416,20 @@ impl OperationRegistry {
     }
 
     /// Every operation has a recorded schema, and no schema names an operation
-    /// that does not exist. The two tables are generated together.
+    /// that does not exist. Checked against the parsed map, which is also what
+    /// the dump and the MCP tool list read, so a mismatch fails here rather
+    /// than at the first call.
     fn validate_schemas(&self) -> Result<(), RegistryError> {
+        let schemas = parsed_schemas();
         for operation in &self.operations {
-            if !schemas::SCHEMAS
-                .iter()
-                .any(|(name, _, _)| *name == operation.name)
-            {
+            if !schemas.contains_key(operation.name) {
                 return Err(RegistryError(format!(
                     "{} has no recorded schema; regenerate with scripts/gen_registry.py",
                     operation.name
                 )));
             }
         }
-        for (name, _, _) in schemas::SCHEMAS {
+        for name in schemas.keys() {
             if !self.contains(name) {
                 return Err(RegistryError(format!(
                     "schema recorded for '{name}', which is not a registered operation"
