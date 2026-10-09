@@ -191,15 +191,23 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
         Arc::clone(store.id_factory()),
         store.synchronous(),
     );
+    // One read of the request's clock. The gate's expiry check and the decision
+    // row below both use it; reading again for the row would land it a tick
+    // later than Python's.
+    let now = request_store
+        .clock()
+        .lock()
+        .expect("the clock lock is not poisoned")
+        .now();
     // Authenticate through the shared gate. It records a refusal and nothing
     // for a live credential, so a ping or a tools/list writes no row. The one
     // row a tool call writes is recorded below.
-    let grant = match authenticate(&request_store, &state, presented.as_deref()) {
+    let grant = match authenticate(&request_store, &state, presented.as_deref(), now) {
         Ok(grant) => grant,
         Err(denial) => return unauthenticated(denial),
     };
     if let Some(operation) = called_operation(&message, &registry) {
-        if let Err(denial) = record_call(&request_store, &state, &grant, operation) {
+        if let Err(denial) = record_call(&request_store, &state, &grant, operation, now) {
             return refusal(&message, operation, &grant, denial);
         }
     }
@@ -285,12 +293,8 @@ fn authenticate<C: Clock, I: IdFactory>(
     store: &SqliteDeclaredStore<C, I>,
     state: &McpState<C, I>,
     presented: Option<&str>,
+    now: crate::core::Moment,
 ) -> Result<auth_gate::Grant, Denial> {
-    let now = store
-        .clock()
-        .lock()
-        .expect("the clock lock is not poisoned")
-        .now();
     auth_gate::authenticate(
         store,
         auth_gate::Request {
@@ -327,6 +331,7 @@ fn record_call<C: Clock, I: IdFactory>(
     state: &McpState<C, I>,
     grant: &auth_gate::Grant,
     operation: &Operation,
+    now: crate::core::Moment,
 ) -> Result<(), Denial> {
     use crate::storage::interface::DeclaredStore;
     let held: Vec<&str> = grant.scopes.iter().map(String::as_str).collect();
@@ -336,12 +341,11 @@ fn record_call<C: Clock, I: IdFactory>(
         operation.scope.as_str(),
         operation.mutating,
     );
-    let at = store.now();
     let id = store.next_id("aut");
     let local = state.no_auth;
     let decision = crate::core::AuthDecision {
         id,
-        at,
+        at: now,
         decision: if permitted {
             crate::core::AuthOutcome::Allow
         } else {
