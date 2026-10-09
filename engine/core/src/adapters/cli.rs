@@ -487,7 +487,8 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
             continue;
         }
         let raw = take_value(argv, &mut index, inline)?;
-        let parsed = coerce(&raw, property)?;
+        let parsed =
+            coerce(&raw, property).map_err(|message| format!("argument --{name}: {message}"))?;
         if is_list(property) {
             let entry = values
                 .entry(field)
@@ -651,7 +652,7 @@ fn coerce(raw: &str, property: &Value) -> Result<Value, String> {
     if types.iter().any(|kind| kind == "integer") {
         let number: i64 = raw
             .parse()
-            .map_err(|_| format!("expected an integer, got {raw}"))?;
+            .map_err(|_| format!("invalid int value: '{raw}'"))?;
         return Ok(Value::from(number));
     }
     if types.iter().any(|kind| kind == "number") {
@@ -787,7 +788,7 @@ fn format_operation(operation: &Operation) -> String {
     let mut out = String::new();
     out.push_str(&format!("usage: vogt {path}"));
     if let Some(schema) = schema {
-        for flag in flag_names(schema) {
+        for flag in usage_flags(schema) {
             out.push_str(&format!(" {flag}"));
         }
     }
@@ -814,11 +815,38 @@ fn format_operation(operation: &Operation) -> String {
     out
 }
 
-fn flag_names(schema: &Value) -> Vec<String> {
+fn usage_flags(schema: &Value) -> Vec<String> {
+    let required = required_fields(schema);
     flag_help(schema)
         .into_iter()
-        .map(|(flag, _)| flag)
+        .map(|(flag, _)| {
+            let name = flag.split_whitespace().next().unwrap_or("");
+            let field = name.trim_start_matches("--").replace('-', "_");
+            let base = field
+                .strip_suffix("_file")
+                .or_else(|| field.strip_suffix("_stdin"))
+                .unwrap_or(&field);
+            if required.iter().any(|item| item == base) {
+                flag
+            } else {
+                format!("[{flag}]")
+            }
+        })
         .collect()
+}
+
+fn required_fields(schema: &Value) -> Vec<String> {
+    schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn flag_help(schema: &Value) -> Vec<(String, String)> {
@@ -1425,6 +1453,47 @@ mod tests {
         assert!(result.stdout.contains("name: ada"), "{}", result.stdout);
         assert!(result.stdout.contains("active: yes"), "{}", result.stdout);
         assert!(result.stdout.contains("items: (none)"), "{}", result.stdout);
+    }
+
+    #[test]
+    fn optional_flags_are_bracketed_and_a_bad_int_names_the_flag() {
+        let registry = default_registry();
+        let help = run(
+            &argv(&["token", "issue", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert!(help.stdout.contains("[--scopes"), "{}", help.stdout);
+        assert!(
+            help.stdout.contains("[--expires-in-days"),
+            "{}",
+            help.stdout
+        );
+        assert!(help.stdout.contains("--actor"), "{}", help.stdout);
+        let bad = run(
+            &argv(&[
+                "token",
+                "issue",
+                "--actor",
+                "a",
+                "--name",
+                "t",
+                "--reason",
+                "r",
+                "--expires-in-days",
+                "-1.5",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(bad.exit_code, EXIT_USAGE, "{}", bad.stdout);
+        assert!(
+            bad.stdout.contains("invalid int value: '-1.5'"),
+            "{}",
+            bad.stdout
+        );
     }
 
     #[test]
