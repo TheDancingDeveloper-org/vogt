@@ -48,6 +48,21 @@ pub fn adopt(secret: &str) -> Result<String, String> {
     Ok(hash_token(secret))
 }
 
+/// 32 bytes of randomness, the same length `secrets.token_urlsafe` draws.
+pub const TOKEN_ENTROPY_BYTES: usize = 32;
+
+/// Mint a new token. The secret is returned once, beside the hash that is all
+/// this database keeps. The randomness comes from the caller, so a test hands
+/// in fixed bytes and a deployment hands in the output of the system RNG.
+pub fn issue(entropy: &[u8; TOKEN_ENTROPY_BYTES]) -> (String, String) {
+    use base64::Engine;
+    let secret = format!(
+        "{TOKEN_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(entropy)
+    );
+    (secret.clone(), hash_token(&secret))
+}
+
 /// A comma-separated scope list. Unknown and empty are both errors.
 pub fn parse_scopes(raw: &str) -> Result<Vec<&str>, String> {
     let mut parsed = Vec::new();
@@ -296,6 +311,10 @@ mod tests {
             "vogt_other",
             &hash_token("vogt_test-secret-0123456789abcdef")
         ));
+        let (secret, hash) = issue(&[0; TOKEN_ENTROPY_BYTES]);
+        assert!(secret.starts_with(TOKEN_PREFIX));
+        assert_eq!(hash, hash_token(&secret));
+        assert!(matches(&secret, &hash));
     }
 
     #[test]
