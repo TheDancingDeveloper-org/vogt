@@ -109,6 +109,22 @@ pub enum Built {
     StepSequential(AppContext<StepClock, SequentialIds>),
 }
 
+/// Run one function against whichever concrete context the hooks built.
+///
+/// A service writes `with_ctx!(ctx, |ctx| status(ctx))` instead of matching the
+/// four clock and id-factory combinations itself.
+#[macro_export]
+macro_rules! with_ctx {
+    ($built:expr, |$ctx:ident| $body:expr) => {
+        match $built {
+            $crate::application::context::Built::SystemRandom($ctx) => $body,
+            $crate::application::context::Built::SystemSequential($ctx) => $body,
+            $crate::application::context::Built::StepRandom($ctx) => $body,
+            $crate::application::context::Built::StepSequential($ctx) => $body,
+        }
+    };
+}
+
 /// Announced once per process. `build_context` runs per request, and a warning
 /// per request would bury the one fact that matters: this process is not using
 /// wall-clock time.

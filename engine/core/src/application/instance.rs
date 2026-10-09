@@ -281,16 +281,9 @@ fn bind_instance(
     }
 }
 
-/// The next instant. A step clock walks one second per read, the way Python's
-/// does; without one the wall clock is read once.
 /// `migrate`, as the registry calls it. Ports `migrate_instance`.
 pub fn migrate_op(ctx: &Built, _params: serde_json::Value) -> Result<serde_json::Value, VogtError> {
-    match ctx {
-        Built::SystemRandom(ctx) => migrate(ctx),
-        Built::SystemSequential(ctx) => migrate(ctx),
-        Built::StepRandom(ctx) => migrate(ctx),
-        Built::StepSequential(ctx) => migrate(ctx),
-    }
+    crate::with_ctx!(ctx, |ctx| migrate(ctx))
 }
 
 /// Bring both stores forward. It refuses an empty data directory rather than
@@ -328,15 +321,9 @@ fn migrate<C: Clock, I: IdFactory>(
     }))
 }
 
-/// `status`, as the registry calls it. Ports `status` in
-/// `services/instance.py`.
+/// `status`, as the registry calls it. Ports `status` in `services/instance.py`.
 pub fn status_op(ctx: &Built, _params: serde_json::Value) -> Result<serde_json::Value, VogtError> {
-    match ctx {
-        Built::SystemRandom(ctx) => status(ctx),
-        Built::SystemSequential(ctx) => status(ctx),
-        Built::StepRandom(ctx) => status(ctx),
-        Built::StepSequential(ctx) => status(ctx),
-    }
+    crate::with_ctx!(ctx, |ctx| status(ctx))
 }
 
 /// What this instance is and how much is in it.
@@ -370,6 +357,8 @@ fn status<C: Clock, I: IdFactory>(
     }))
 }
 
+/// The next instant. A step clock walks one second per read, the way Python's
+/// does; without one the wall clock is read once.
 fn stamp(clock: &mut Option<crate::core::StepClock>) -> String {
     match clock {
         Some(clock) => crate::core::to_iso(Clock::now(clock)),

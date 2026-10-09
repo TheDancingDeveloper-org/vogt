@@ -176,13 +176,22 @@ fn main() -> ExitCode {
                     operation.run(None, params)
                 }
                 registry::Handler::NotPorted => {
-                    // The data directory is where the instance lives. A service
-                    // that needs one gets the context built over it; a service
-                    // that has not landed gets the honest-unavailable error.
-                    let mut config = config::VogtConfig::default();
-                    if let Some(dir) = &data_dir {
-                        config.data_dir = std::path::PathBuf::from(dir);
-                    }
+                    // The same resolution `init` uses: the config file, then
+                    // VOGT_DATA_DIR, then `--data-dir` on top. A pod sets only
+                    // VOGT_DATA_DIR, so a default here would read the wrong
+                    // instance.
+                    let Some(dir) = resolve_data_dir(data_dir.as_deref().map(PathBuf::from)) else {
+                        return Err(crate::errors::VogtError::InvalidRequest(
+                            "could not resolve the data directory".into(),
+                        ));
+                    };
+                    let mut overrides = serde_json::Map::new();
+                    overrides.insert(
+                        "data_dir".to_string(),
+                        serde_json::Value::String(dir.display().to_string()),
+                    );
+                    let config = config::load_config(&overrides)
+                        .map_err(crate::errors::VogtError::InvalidRequest)?;
                     let built = application::context::build_context(
                         config, None, None, None, None, None, None, None,
                     )?;
@@ -538,4 +547,31 @@ fn resolve_data_dir(given: Option<PathBuf>) -> Option<PathBuf> {
 
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::resolve_data_dir;
+
+    /// `VOGT_DATA_DIR` alone names the instance. A pod sets nothing else, so a
+    /// status that fell back to the XDG default would read the wrong one.
+    #[test]
+    fn the_env_var_names_the_data_dir_when_no_flag_is_given() {
+        let dir = std::env::temp_dir().join(format!("vogt-datadir-{}", std::process::id()));
+        // SAFETY: this test owns the variable and restores it before returning.
+        unsafe { std::env::set_var("VOGT_DATA_DIR", &dir) };
+        let resolved = resolve_data_dir(None);
+        unsafe { std::env::remove_var("VOGT_DATA_DIR") };
+        assert_eq!(resolved.as_deref(), Some(dir.as_path()));
+    }
+
+    #[test]
+    fn the_flag_overrides_the_env_var() {
+        let from_env = std::env::temp_dir().join("vogt-from-env");
+        let from_flag = std::env::temp_dir().join("vogt-from-flag");
+        unsafe { std::env::set_var("VOGT_DATA_DIR", &from_env) };
+        let resolved = resolve_data_dir(Some(from_flag.clone()));
+        unsafe { std::env::remove_var("VOGT_DATA_DIR") };
+        assert_eq!(resolved.as_deref(), Some(from_flag.as_path()));
+    }
 }
