@@ -238,7 +238,7 @@ fn publishing_an_initiative_refuses_honestly() {
     .unwrap_err();
     match refused {
         VogtError::InvalidRequest(message) => {
-            assert!(message.contains("forge adapter not ported"), "{message}");
+            assert!(message.contains("has not been ported"), "{message}");
         }
         other => panic!("unexpected {other:?}"),
     }

@@ -274,13 +274,13 @@ where
     let _reason = require_string(&params, "reason")?;
     let (declared, _, _, _, _, _) = context_parts(ctx);
     let view = declared.read()?;
-    let initiative = view
+    let _initiative = view
         .initiative_by_slug(&slug)?
         .ok_or_else(|| VogtError::NotFound(format!("no initiative {slug:?}")))?;
-    Err(VogtError::InvalidRequest(format!(
-        "forge adapter not ported: initiative.publish for {slug:?} ({id}) needs a forge client to write the tracking issue, and Built carries none",
-        id = initiative.id,
-    )))
+    Err(VogtError::InvalidRequest(
+        "initiative.publish is not available in this build: its service has not been ported yet"
+            .to_string(),
+    ))
 }
 
 /// The adopt-only refresh of an initiative's tracking issue. With no forge
