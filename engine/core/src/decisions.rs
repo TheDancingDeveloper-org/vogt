@@ -3782,7 +3782,12 @@ static KUBECONFIG_SHAPE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
 // No lookaround, so the linear engine: the fancy VM backtracks over the blank
 // lines between assignments and gives up on a long dump.
 static ENV_LINE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?m)^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=\S").expect("pattern")
+    // The regex crate's `\s` stops at U+001F; Python's includes U+001C–U+001F,
+    // so a dump whose lines are prefixed with one would not be counted.
+    regex::Regex::new(
+        r"(?m)^[\s\x1c-\x1f]*(?:export[\s\x1c-\x1f]+)?[A-Z][A-Z0-9_]{2,}=[^\s\x1c-\x1f]",
+    )
+    .expect("pattern")
 });
 
 pub fn dumps_secrets(command: &str) -> bool {
@@ -4254,6 +4259,13 @@ mod activity_tests {
         assert!(
             dumps_secrets(&command),
             "the dump command was not recognised"
+        );
+
+        // Python's `\s` includes U+001C–U+001F, which the regex crate's does not.
+        let prefixed = "\u{1c}FOO=1\n\u{1c}BAR=2\n\u{1c}BAZ=3\n";
+        assert!(
+            looks_like_dump(prefixed),
+            "the prefixed dump was not counted"
         );
     }
 }
