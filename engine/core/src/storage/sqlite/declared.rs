@@ -920,18 +920,59 @@ impl ReadView for SqliteReadView {
     }
     fn list_drift(
         &self,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: i64,
+        status: Option<&str>,
+        kind: Option<&str>,
+        project_id: Option<&str>,
+        limit: i64,
     ) -> Result<Vec<DriftProposal>, VogtError> {
-        later("list_drift")
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        for (column, value) in [
+            ("d.status", status),
+            ("d.kind", kind),
+            ("d.project_id", project_id),
+        ] {
+            if let Some(value) = value {
+                clauses.push(format!("{column} = ?"));
+                params.push(Box::new(value.to_string()));
+            }
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", clauses.join(" AND "))
+        };
+        params.push(Box::new(limit));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        many(
+            &self.conn,
+            &format!("{DRIFT_SELECT} {where_sql} ORDER BY d.opened_at DESC, d.id DESC LIMIT ?"),
+            refs.as_slice(),
+            row_drift,
+        )
     }
-    fn drift_by_id(&self, _: &str) -> Result<Option<DriftProposal>, VogtError> {
-        later("drift_by_id")
+    fn drift_by_id(&self, proposal_id: &str) -> Result<Option<DriftProposal>, VogtError> {
+        one(
+            &self.conn,
+            &format!("{DRIFT_SELECT} WHERE d.id = ?"),
+            [proposal_id],
+            row_drift,
+        )
     }
     fn open_drift_subjects(&self) -> Result<BTreeSet<(String, String, String)>, VogtError> {
-        later("open_drift_subjects")
+        let rows = many(
+            &self.conn,
+            "SELECT kind, subject_kind, subject_id FROM drift_proposals WHERE status = 'open'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )?;
+        Ok(rows.into_iter().collect())
     }
     fn list_writeback_actions(
         &self,
@@ -941,25 +982,74 @@ impl ReadView for SqliteReadView {
         later("list_writeback_actions")
     }
     fn drift_evidence_ids(&self) -> Result<BTreeSet<String>, VogtError> {
-        later("drift_evidence_ids")
+        let rows = many(
+            &self.conn,
+            "SELECT DISTINCT evidence_observation_id FROM drift_proposals WHERE evidence_observation_id IS NOT NULL",
+            [],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows.into_iter().collect())
     }
-    fn inbox_triage_by_key(&self, _: &str) -> Result<Option<InboxTriage>, VogtError> {
-        later("inbox_triage_by_key")
+    fn inbox_triage_by_key(&self, entry_key: &str) -> Result<Option<InboxTriage>, VogtError> {
+        one(
+            &self.conn,
+            &format!("{INBOX_SELECT} WHERE t.entry_key = ?"),
+            [entry_key],
+            row_inbox_triage,
+        )
     }
     fn inbox_triage_by_keys(
         &self,
-        _: &[String],
+        entry_keys: &[String],
     ) -> Result<BTreeMap<String, InboxTriage>, VogtError> {
-        later("inbox_triage_by_keys")
+        // SQLite caps bound parameters per statement, so a large page goes in
+        // slices rather than one statement that fails only once it matters.
+        let mut found = BTreeMap::new();
+        for slice in entry_keys.chunks(900) {
+            let placeholders = vec!["?"; slice.len()].join(", ");
+            let params: Vec<Box<dyn rusqlite::ToSql>> = slice
+                .iter()
+                .map(|key| Box::new(key.clone()) as Box<dyn rusqlite::ToSql>)
+                .collect();
+            let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+            for triage in many(
+                &self.conn,
+                &format!("{INBOX_SELECT} WHERE t.entry_key IN ({placeholders})"),
+                refs.as_slice(),
+                row_inbox_triage,
+            )? {
+                found.insert(triage.entry_key.clone(), triage);
+            }
+        }
+        Ok(found)
     }
-    fn list_inbox_triage(&self, _: i64) -> Result<Vec<InboxTriage>, VogtError> {
-        later("list_inbox_triage")
+    fn list_inbox_triage(&self, limit: i64) -> Result<Vec<InboxTriage>, VogtError> {
+        many(
+            &self.conn,
+            &format!("{INBOX_SELECT} ORDER BY t.decided_at DESC, t.entry_key DESC LIMIT ?"),
+            params![limit],
+            row_inbox_triage,
+        )
     }
-    fn actor_preference(&self, _: &str, _: &str) -> Result<Option<ActorPreference>, VogtError> {
-        later("actor_preference")
+    fn actor_preference(
+        &self,
+        actor_id: &str,
+        key: &str,
+    ) -> Result<Option<ActorPreference>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT actor_id, key, value, version, updated_at FROM actor_preferences WHERE actor_id = ? AND key = ?",
+            params![actor_id, key],
+            row_actor_preference,
+        )
     }
-    fn actor_preferences(&self, _: &str) -> Result<Vec<ActorPreference>, VogtError> {
-        later("actor_preferences")
+    fn actor_preferences(&self, actor_id: &str) -> Result<Vec<ActorPreference>, VogtError> {
+        many(
+            &self.conn,
+            "SELECT actor_id, key, value, version, updated_at FROM actor_preferences WHERE actor_id = ? ORDER BY key",
+            [actor_id],
+            row_actor_preference,
+        )
     }
     fn session_by_id(&self, _: &str) -> Result<Option<CodingSession>, VogtError> {
         later("session_by_id")
@@ -1818,32 +1908,72 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
     fn mark_session_stopped(&mut self, _: &str, _: Moment) -> Result<(), VogtError> {
         later("mark_session_stopped")
     }
-    fn insert_drift(&mut self, _: &DriftProposal) -> Result<(), VogtError> {
-        later("insert_drift")
+    fn insert_drift(&mut self, proposal: &DriftProposal) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO drift_proposals (id, kind, subject_kind, subject_id, project_id, summary, evidence_observation_id, evidence_snapshot, proposed_change, status, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                proposal.id, proposal.kind, proposal.subject_kind, proposal.subject_id,
+                proposal.project_id, proposal.summary, proposal.evidence_observation_id,
+                crate::decisions::python_json_dumps(&proposal.evidence_snapshot, false),
+                crate::decisions::python_json_dumps(&proposal.proposed_change, false),
+                vocab_text(proposal.status), to_iso(proposal.opened_at),
+            ],
+        ).map(|_| ()).map_err(sql_err)
     }
-    fn upsert_inbox_triage(&mut self, _: &InboxTriage) -> Result<(), VogtError> {
-        later("upsert_inbox_triage")
+    fn upsert_inbox_triage(&mut self, triage: &InboxTriage) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO inbox_triage (entry_key, state, snooze_until, actor_id, decided_at, occurrence_snapshot) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(entry_key) DO UPDATE SET state = excluded.state, snooze_until = excluded.snooze_until, actor_id = excluded.actor_id, decided_at = excluded.decided_at, occurrence_snapshot = excluded.occurrence_snapshot",
+            params![
+                triage.entry_key, vocab_text(triage.state), triage.snooze_until.map(to_iso),
+                triage.actor_id, to_iso(triage.decided_at),
+                crate::decisions::python_json_dumps(&triage.occurrence_snapshot, true),
+            ],
+        ).map(|_| ()).map_err(sql_err)
     }
-    fn upsert_actor_preference(&mut self, _: &ActorPreference) -> Result<(), VogtError> {
-        later("upsert_actor_preference")
+    fn upsert_actor_preference(&mut self, preference: &ActorPreference) -> Result<(), VogtError> {
+        let values = params![
+            crate::decisions::python_json_dumps(&preference.value, true),
+            preference.version,
+            to_iso(preference.updated_at),
+            preference.actor_id,
+            preference.key,
+        ];
+        let updated = self.view.conn.execute(
+            "UPDATE actor_preferences SET value = ?, version = ?, updated_at = ? WHERE actor_id = ? AND key = ?",
+            values,
+        ).map_err(sql_err)?;
+        if updated == 0 {
+            self.view.conn.execute(
+                "INSERT INTO actor_preferences (value, version, updated_at, actor_id, key) VALUES (?, ?, ?, ?, ?)",
+                values,
+            ).map_err(sql_err)?;
+        }
+        Ok(())
     }
     fn mark_drift_superseded(
         &mut self,
-        _: &str,
-        _: Option<&str>,
-        _: Option<Moment>,
+        proposal_id: &str,
+        detail: Option<&str>,
+        at: Option<Moment>,
     ) -> Result<bool, VogtError> {
-        later("mark_drift_superseded")
+        // Only open proposals: a resolved one is history.
+        Ok(self.view.conn.execute(
+            "UPDATE drift_proposals SET superseded_at = ?, superseded_detail = ? WHERE id = ? AND status = 'open'",
+            params![at.map(to_iso), detail, proposal_id],
+        ).map_err(sql_err)? > 0)
     }
     fn resolve_drift(
         &mut self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: Moment,
+        proposal_id: &str,
+        status: &str,
+        actor_id: &str,
+        reason: &str,
+        at: Moment,
     ) -> Result<bool, VogtError> {
-        later("resolve_drift")
+        Ok(self.view.conn.execute(
+            "UPDATE drift_proposals SET status = ?, resolved_by_actor_id = ?, resolution_reason = ?, resolved_at = ? WHERE id = ? AND status = 'open'",
+            params![status, actor_id, reason, to_iso(at), proposal_id],
+        ).map_err(sql_err)? > 0)
     }
     fn upsert_workflow(&mut self, workflow: &Workflow, at: Moment) -> Result<(), VogtError> {
         let definition = workflow.to_definition_json();
@@ -2973,6 +3103,116 @@ mod more {
         assert!(store.read().unwrap().install_closed().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn drift_inbox_and_preferences_round_trip() {
+        let dir = std::env::temp_dir().join(format!("vogt-decl-drift-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = store(&dir);
+        let now = Moment::from_unix(1_700_000_000, 0);
+        let later_at = Moment::from_unix(1_700_086_400, 0);
+        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let mut txn = store.write().unwrap();
+        txn.insert_drift(&DriftProposal {
+            id: "dft_1".into(),
+            kind: "stale".into(),
+            subject_kind: "work_item".into(),
+            subject_id: "wrk_1".into(),
+            project_id: None,
+            project_slug: None,
+            summary: "behind".into(),
+            evidence_observation_id: Some("obs_1".into()),
+            evidence_snapshot: serde_json::json!({"n": 1}),
+            proposed_change: serde_json::json!({"state": "done"}),
+            status: crate::core::DriftStatus::Open,
+            opened_at: now,
+            superseded_at: None,
+            superseded_detail: None,
+            resolved_by_actor_id: None,
+            resolved_by_identity_ref: None,
+            resolved_at: None,
+            resolution_reason: None,
+        })
+        .unwrap();
+        txn.upsert_actor_preference(&ActorPreference {
+            actor_id: actor.id.clone(),
+            key: "theme".into(),
+            value: serde_json::json!({"mode": "dark"}),
+            version: 1,
+            updated_at: now,
+        })
+        .unwrap();
+        txn.upsert_inbox_triage(&InboxTriage {
+            entry_key: "entry-1".into(),
+            state: crate::core::TriageState::Snoozed,
+            snooze_until: Some(later_at),
+            actor_id: actor.id.clone(),
+            actor_identity_ref: None,
+            decided_at: now,
+            occurrence_snapshot: serde_json::json!({"count": 2}),
+        })
+        .unwrap();
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        let open = view.list_drift(Some("open"), None, None, 100).unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].evidence_snapshot["n"], 1);
+        assert!(view.open_drift_subjects().unwrap().contains(&(
+            "stale".into(),
+            "work_item".into(),
+            "wrk_1".into()
+        )));
+        assert!(view.drift_evidence_ids().unwrap().contains("obs_1"));
+        assert_eq!(
+            view.actor_preference(&actor.id, "theme")
+                .unwrap()
+                .unwrap()
+                .version,
+            1
+        );
+        assert_eq!(
+            view.inbox_triage_by_key("entry-1")
+                .unwrap()
+                .unwrap()
+                .snooze_until,
+            Some(later_at)
+        );
+        drop(view);
+
+        let mut txn = store.write().unwrap();
+        assert!(txn
+            .mark_drift_superseded("dft_1", Some("newer sweep"), Some(later_at))
+            .unwrap());
+        assert!(txn
+            .resolve_drift("dft_1", "accepted", &actor.id, "agreed", later_at)
+            .unwrap());
+        // A resolved proposal is history: flagging it again changes nothing.
+        assert!(!txn.mark_drift_superseded("dft_1", None, None).unwrap());
+        txn.upsert_actor_preference(&ActorPreference {
+            actor_id: actor.id.clone(),
+            key: "theme".into(),
+            value: serde_json::json!({"mode": "light"}),
+            version: 2,
+            updated_at: later_at,
+        })
+        .unwrap();
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        assert!(view
+            .list_drift(Some("open"), None, None, 100)
+            .unwrap()
+            .is_empty());
+        let resolved = view.drift_by_id("dft_1").unwrap().unwrap();
+        assert_eq!(
+            resolved.resolved_by_actor_id.as_deref(),
+            Some(actor.id.as_str())
+        );
+        assert_eq!(view.actor_preferences(&actor.id).unwrap()[0].version, 2);
+        assert_eq!(view.list_inbox_triage(100).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Close first-run install mode once a person holds a credential. The latch
@@ -3020,6 +3260,69 @@ fn row_auth_decision(row: &Row<'_>) -> rusqlite::Result<AuthDecision> {
         identity_ref: row.get("identity_ref")?,
         transport: row.get("transport")?,
         detail: row.get("detail")?,
+    })
+}
+
+const DRIFT_SELECT: &str = "SELECT d.*, p.slug AS project_slug, a.identity_ref AS resolved_by FROM drift_proposals d LEFT JOIN projects p ON p.id = d.project_id LEFT JOIN actors a ON a.id = d.resolved_by_actor_id";
+
+fn row_drift(row: &Row<'_>) -> rusqlite::Result<DriftProposal> {
+    let status: String = row.get("status")?;
+    Ok(DriftProposal {
+        id: row.get("id")?,
+        kind: row.get("kind")?,
+        subject_kind: row.get("subject_kind")?,
+        subject_id: row.get("subject_id")?,
+        project_id: row.get("project_id")?,
+        project_slug: row.get("project_slug")?,
+        summary: row.get("summary")?,
+        evidence_observation_id: row.get("evidence_observation_id")?,
+        evidence_snapshot: json_cell(row, "evidence_snapshot")?,
+        proposed_change: json_cell(row, "proposed_change")?,
+        status: serde_json::from_value(serde_json::Value::String(status)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        opened_at: moment(row, "opened_at")?,
+        superseded_at: opt_moment(row, "superseded_at")?,
+        superseded_detail: row.get("superseded_detail")?,
+        resolved_by_actor_id: row.get("resolved_by_actor_id")?,
+        resolved_by_identity_ref: row.get("resolved_by")?,
+        resolved_at: opt_moment(row, "resolved_at")?,
+        resolution_reason: row.get("resolution_reason")?,
+    })
+}
+
+const INBOX_SELECT: &str = "SELECT t.*, a.identity_ref AS actor_identity_ref FROM inbox_triage t JOIN actors a ON a.id = t.actor_id";
+
+fn row_inbox_triage(row: &Row<'_>) -> rusqlite::Result<InboxTriage> {
+    let state: String = row.get("state")?;
+    Ok(InboxTriage {
+        entry_key: row.get("entry_key")?,
+        state: serde_json::from_value(serde_json::Value::String(state)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        snooze_until: opt_moment(row, "snooze_until")?,
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        decided_at: moment(row, "decided_at")?,
+        occurrence_snapshot: json_cell(row, "occurrence_snapshot")?,
+    })
+}
+
+fn row_actor_preference(row: &Row<'_>) -> rusqlite::Result<ActorPreference> {
+    Ok(ActorPreference {
+        actor_id: row.get("actor_id")?,
+        key: row.get("key")?,
+        value: json_cell(row, "value")?,
+        version: row.get("version")?,
+        updated_at: moment(row, "updated_at")?,
+    })
+}
+
+/// One JSON column, parsed. A corrupt value is a conversion failure, not null.
+fn json_cell(row: &Row<'_>, column: &str) -> rusqlite::Result<serde_json::Value> {
+    let text: String = row.get(column)?;
+    serde_json::from_str(&text).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
     })
 }
 
