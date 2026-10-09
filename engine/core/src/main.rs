@@ -378,13 +378,18 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
         auth_enabled: !no_auth,
         writes_enabled: true,
     });
-    // `/mcp` is deliberately not mounted. The route exists
-    // (`adapters::http::mcp`) but it can only answer with the full grant and a
-    // recorder that writes nothing, and serving that would hand every tool to
-    // whoever reaches the port with no audit row. It gets merged in when the
-    // shared bearer resolution and store-backed recorder land (W7, R55-1).
+    // `/mcp` is deliberately not mounted yet. The route exists
+    // (`adapters::http::mcp`) but its recorder writes nothing, so serving it
+    // would hand every tool to whoever reaches the port with no audit row. It
+    // gets merged in when the MCP adapter runs every call through the shared
+    // `adapters::auth_gate` with a store-backed recorder (R55-1, R60-1).
     let router = health.merge(adapters::http::app::router(
-        adapters::http::app::AppState::from_default(),
+        adapters::http::app::AppState::new(
+            &data_dir,
+            no_auth,
+            true,
+            core::SequentialIds::new(None).expect("the default id factory opens"),
+        ),
     ));
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,

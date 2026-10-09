@@ -2,6 +2,9 @@
 //!
 //! Only `http` has behaviour in this chunk: the health routes.
 
+//! `auth_gate` is the one authorization both the HTTP and MCP adapters use.
+
+pub mod auth_gate;
 pub mod cli;
 pub mod engine;
 pub mod forge;
