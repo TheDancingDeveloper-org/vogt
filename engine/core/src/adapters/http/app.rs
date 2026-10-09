@@ -87,8 +87,9 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
 /// state is built. A config that cannot be read is fatal: falling back to the
 /// defaults would silently turn `install_bootstrap_enabled` back on for an
 /// operator who had switched it off. `serve` has already exited on the same
-/// error, so a failure here means the state was built some other way.
-fn loaded_config(data_dir: &std::path::Path) -> crate::config::VogtConfig {
+/// error, so a failure here means the state was built some other way. The MCP
+/// route reads through this same function, so both surfaces share one config.
+pub(crate) fn loaded_config(data_dir: &std::path::Path) -> crate::config::VogtConfig {
     let mut config = crate::config::load_config(&serde_json::Map::new())
         .expect("the configuration could not be read; refusing to serve on the defaults");
     config.data_dir = data_dir.to_path_buf();
@@ -103,7 +104,13 @@ fn loaded_config(data_dir: &std::path::Path) -> crate::config::VogtConfig {
 /// router names its pair and builds the context on the store's own clock and id
 /// factory rather than a fresh one.
 macro_rules! api_route {
-    ($name:ident, $clock:ty, $ids:ty, $variant:ident) => {
+    ($name:ident, $clock:ty, $ids:ty, $variant:ident, shared) => {
+        api_route!(@build $name, $clock, $ids, $variant, crate::adapters::http::mcp::clock_for::<$clock, false>);
+    };
+    ($name:ident, $clock:ty, $ids:ty, $variant:ident, restart) => {
+        api_route!(@build $name, $clock, $ids, $variant, crate::adapters::http::mcp::step_clock_for);
+    };
+    (@build $name:ident, $clock:ty, $ids:ty, $variant:ident, $clock_for:path) => {
         pub fn $name(state: AppState<$clock, $ids>) -> Router {
             fn build(
                 config: crate::config::VogtConfig,
@@ -130,7 +137,11 @@ macro_rules! api_route {
                     axum::routing::post(install_bootstrap::<$clock, $ids>),
                 )
                 .fallback(dispatch::<$clock, $ids>)
-                .with_state((Arc::new(state), build as ContextBuild<$clock, $ids>))
+                .with_state((
+                    Arc::new(state),
+                    build as ContextBuild<$clock, $ids>,
+                    $clock_for as ClockFor<$clock>,
+                ))
         }
     };
 }
@@ -143,31 +154,37 @@ type ContextBuild<C, I> = fn(
     Option<crate::core::Token>,
 ) -> crate::application::context::Built;
 
-type Routed<C, I> = (Arc<AppState<C, I>>, ContextBuild<C, I>);
+type Routed<C, I> = (Arc<AppState<C, I>>, ContextBuild<C, I>, ClockFor<C>);
+
+type ClockFor<C> = fn(&Arc<Mutex<C>>) -> Arc<Mutex<C>>;
 
 api_route!(
     router_system_random,
     crate::application::context::SystemClock,
     crate::application::context::RandomIds,
-    SystemRandom
+    SystemRandom,
+    shared
 );
 api_route!(
     router_system_sequential,
     crate::application::context::SystemClock,
     crate::core::SequentialIds,
-    SystemSequential
+    SystemSequential,
+    shared
 );
 api_route!(
     router_step_random,
     crate::core::StepClock,
     crate::application::context::RandomIds,
-    StepRandom
+    StepRandom,
+    restart
 );
 api_route!(
     router_step_sequential,
     crate::core::StepClock,
     crate::core::SequentialIds,
-    StepSequential
+    StepSequential,
+    restart
 );
 
 /// `POST /api/auth/login`. Public, like Python's hand-mounted route. The body
@@ -175,7 +192,7 @@ api_route!(
 /// service's own answer: one sentence at 401, or the throttled error at 429.
 /// The decision rows are written inside `login_op`, with transport `http`.
 async fn login<C: Clock, I: IdFactory>(
-    State((state, build)): State<Routed<C, I>>,
+    State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
     // `text/plain` is a CORS simple request, so a missing or wrong content type
@@ -195,7 +212,7 @@ async fn login<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error),
     };
-    let built = context_for_login(&state, build);
+    let built = context_for_login(&state, build, clock_for);
     let Some(built) = built else {
         return error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
@@ -290,9 +307,9 @@ fn json_content_type(header: Option<&axum::http::HeaderValue>) -> bool {
 /// answers a browser that holds no credential, and states one boolean that
 /// caller could infer by trying to bootstrap anyway.
 async fn install_status<C: Clock, I: IdFactory>(
-    State((state, build)): State<Routed<C, I>>,
+    State((state, build, clock_for)): State<Routed<C, I>>,
 ) -> Response {
-    let Some(built) = context_for_login(&state, build) else {
+    let Some(built) = context_for_login(&state, build, clock_for) else {
         return error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
         ));
@@ -309,7 +326,7 @@ async fn install_status<C: Clock, I: IdFactory>(
 /// and the store is never opened, so a bad request cannot race the one-shot
 /// bootstrap or write a row.
 async fn install_bootstrap<C: Clock, I: IdFactory>(
-    State((state, build)): State<Routed<C, I>>,
+    State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
     if !json_content_type(request.headers().get("content-type")) {
@@ -329,7 +346,7 @@ async fn install_bootstrap<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error),
     };
-    let Some(built) = context_for_login(&state, build) else {
+    let Some(built) = context_for_login(&state, build, clock_for) else {
         return error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
         ));
@@ -426,7 +443,7 @@ fn bootstrap_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
 }
 
 async fn dispatch<C: Clock, I: IdFactory>(
-    State((state, build)): State<Routed<C, I>>,
+    State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
     let method = request.method().clone();
@@ -507,7 +524,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
             return error_response(&denial.error());
         }
     };
-    let built = context_for(&state, &grant, build);
+    let built = context_for(&state, &grant, build, clock_for);
     match operation.run(built.as_ref(), params) {
         Ok(value) => json_response(StatusCode::OK, value),
         // Not ported is not the caller's fault, so it is not a 400. The shared
@@ -657,13 +674,15 @@ fn percent_decode(text: &str) -> String {
 }
 
 /// The context a ported service runs in. The grant names the caller; the data
-/// directory is the one the route's own store was opened on. The clock and the
-/// id factory are that store's handles, so the service's writes continue the
-/// sequence the decision row started instead of opening a second one.
+/// directory is the one the route's own store was opened on. The id factory is
+/// that store's handle, so the service's writes continue the sequence the
+/// decision row started. The clock is the route's choice: a step clock restarts
+/// at the hook's start each request, a wall clock is the store's.
 fn context_for<C: Clock, I: IdFactory>(
     state: &AppState<C, I>,
     grant: &Grant,
     build: ContextBuild<C, I>,
+    clock_for: ClockFor<C>,
 ) -> Option<crate::application::context::Built> {
     let principal = match &grant.identity_ref {
         Some(identity_ref) if !identity_ref.is_empty() => {
@@ -675,7 +694,7 @@ fn context_for<C: Clock, I: IdFactory>(
     Some(build(
         state.config.clone(),
         principal,
-        Arc::clone(store.clock()),
+        clock_for(store.clock()),
         Arc::clone(store.id_factory()),
         grant.token.clone(),
     ))
@@ -683,17 +702,18 @@ fn context_for<C: Clock, I: IdFactory>(
 
 /// The context a login runs in. Nobody is authenticated yet, so there is no
 /// principal and no token; `login_op` names the actor itself once the password
-/// matches. The data directory is the route's own store, and so are the clock
-/// and the id factory.
+/// matches. The data directory and the id factory are the route's own store;
+/// the clock restarts per request the way the other route's does.
 fn context_for_login<C: Clock, I: IdFactory>(
     state: &AppState<C, I>,
     build: ContextBuild<C, I>,
+    clock_for: ClockFor<C>,
 ) -> Option<crate::application::context::Built> {
     let store = state.store.lock().expect("the store lock is not poisoned");
     Some(build(
         state.config.clone(),
         None,
-        Arc::clone(store.clock()),
+        clock_for(store.clock()),
         Arc::clone(store.id_factory()),
         None,
     ))

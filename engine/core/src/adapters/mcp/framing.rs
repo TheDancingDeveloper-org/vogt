@@ -329,7 +329,7 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             .unwrap_or(serde_json::Value::Null);
         let body = match operation.run(self.context, arguments) {
             Ok(value) => json!({
-                "content": [{"type": "text", "text": value.to_string()}],
+                "content": [{"type": "text", "text": pretty(&value)}],
                 "structuredContent": value,
                 "isError": false,
             }),
@@ -365,7 +365,12 @@ fn tool_error(code: &str, message: &str) -> Value {
     })
 }
 
-/// Python's truthiness for a JSON value: `None`, `[]`, `0`, `""` and `false`
+/// Python's `json.dumps(body, indent=2)`, which is what the tool result's text
+/// carries. `Value`'s own rendering is compact, so a model would read a
+/// different document than Python's server hands it.
+fn pretty(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
 /// are all falsy, and both handlers write `params or {}`.
 pub(super) fn json_falsy(value: &Value) -> bool {
     match value {

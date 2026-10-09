@@ -29,6 +29,10 @@ use crate::storage::sqlite::declared::SqliteDeclaredStore;
 pub struct McpState<C, I> {
     store: Mutex<SqliteDeclaredStore<C, I>>,
     data_dir: std::path::PathBuf,
+    /// Loaded once, at startup, the same way `/api` loads it. A request must not
+    /// call `load_config` itself, and `VogtConfig::default()` is where
+    /// `VOGT_CONTRACT_VERSION` and `VOGT_SESSION_TTL_DAYS` got lost.
+    config: crate::config::VogtConfig,
     pub no_auth: bool,
     pub writes_enabled: bool,
 }
@@ -48,6 +52,7 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
                 ids,
             )),
             data_dir: data_dir.to_path_buf(),
+            config: super::app::loaded_config(data_dir),
             no_auth,
             writes_enabled,
         }
@@ -63,6 +68,7 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
         Self {
             store: Mutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
             data_dir: data_dir.to_path_buf(),
+            config: super::app::loaded_config(data_dir),
             no_auth,
             writes_enabled,
         }
@@ -73,10 +79,21 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
 ///
 /// One function per hook pair rather than one generic one. A tool call's
 /// context has to be a `Built`, and `Built` only exists for these four pairs,
-/// so each route names its pair and builds the context on the store's own
-/// clock and id factory. `serve` already matches on the same four.
+/// so each route names its pair. `serve` already matches on the same four.
+///
+/// The id factory is the store's own handle, so every route and the CLI count
+/// from one sequence. The clock is not. Python builds a fresh step clock per
+/// request, starting again at `VOGT_TEST_CLOCK_START`, and sharing the store's
+/// would advance it four ticks a request and stamp later rows later. The step
+/// routes therefore restart theirs; a wall clock has no start to restart from.
 macro_rules! mcp_route {
-    ($name:ident, $clock:ty, $ids:ty, $variant:ident) => {
+    ($name:ident, $clock:ty, $ids:ty, $variant:ident, shared) => {
+        mcp_route!(@build $name, $clock, $ids, $variant, clock_for::<$clock, false>);
+    };
+    ($name:ident, $clock:ty, $ids:ty, $variant:ident, restart) => {
+        mcp_route!(@build $name, $clock, $ids, $variant, step_clock_for);
+    };
+    (@build $name:ident, $clock:ty, $ids:ty, $variant:ident, $clock_for:path) => {
         pub fn $name(state: McpState<$clock, $ids>) -> Router {
             fn build(
                 config: crate::config::VogtConfig,
@@ -91,7 +108,11 @@ macro_rules! mcp_route {
             }
             Router::new()
                 .route(MCP_PATH, post(handle::<$clock, $ids>))
-                .with_state((Arc::new(state), build as ContextBuild<$clock, $ids>))
+                .with_state((
+                    Arc::new(state),
+                    build as ContextBuild<$clock, $ids>,
+                    $clock_for as ClockFor<$clock>,
+                ))
         }
     };
 }
@@ -104,35 +125,41 @@ type ContextBuild<C, I> = fn(
     Option<crate::core::Token>,
 ) -> crate::application::context::Built;
 
-type Routed<C, I> = (Arc<McpState<C, I>>, ContextBuild<C, I>);
+type Routed<C, I> = (Arc<McpState<C, I>>, ContextBuild<C, I>, ClockFor<C>);
+
+type ClockFor<C> = fn(&Arc<Mutex<C>>) -> Arc<Mutex<C>>;
 
 mcp_route!(
     router_system_random,
     crate::application::context::SystemClock,
     crate::application::context::RandomIds,
-    SystemRandom
+    SystemRandom,
+    shared
 );
 mcp_route!(
     router_system_sequential,
     crate::application::context::SystemClock,
     crate::core::SequentialIds,
-    SystemSequential
+    SystemSequential,
+    shared
 );
 mcp_route!(
     router_step_random,
     crate::core::StepClock,
     crate::application::context::RandomIds,
-    StepRandom
+    StepRandom,
+    restart
 );
 mcp_route!(
     router_step_sequential,
     crate::core::StepClock,
     crate::core::SequentialIds,
-    StepSequential
+    StepSequential,
+    restart
 );
 
-async fn handle<C: Clock, I: IdFactory>(
-    State((state, build)): State<Routed<C, I>>,
+async fn handle<C: Clock + Clone, I: IdFactory>(
+    State((state, build, clock_for)): State<Routed<C, I>>,
     request: Request<Body>,
 ) -> Response {
     let presented = bearer(request.headers().get("authorization"));
@@ -178,7 +205,7 @@ async fn handle<C: Clock, I: IdFactory>(
     // The context carries the authenticated principal, on the same clock and id
     // factory the decision row was written with, so the service's writes
     // continue that sequence instead of starting another one.
-    let built = context_for(&state, &grant, build);
+    let built = context_for(&state, &grant, build, clock_for);
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
     if let Some(context) = built.as_ref() {
         dispatcher = dispatcher.with_context(context);
@@ -199,19 +226,17 @@ async fn handle<C: Clock, I: IdFactory>(
 /// row the gate already loaded, so an agent's token stays an agent instead of
 /// being recorded as a person, and the token rides with it for `auth.whoami`.
 ///
-/// The clock and the id factory are the store's own handles, not a fresh pair.
-/// A fresh pair would tick and count on its own, and with the hooks on a second
-/// factory rewrites `test-ids.json` from what it alone has drawn.
+/// The id factory is the store's own handle, so the service's writes continue
+/// the sequence the decision row started. The clock is the route's choice: a
+/// step clock restarts at the hook's start, a wall clock is the store's.
 fn context_for<C: Clock, I: IdFactory>(
     state: &McpState<C, I>,
     grant: &auth_gate::Grant,
     build: ContextBuild<C, I>,
+    clock_for: ClockFor<C>,
 ) -> Option<crate::application::context::Built> {
     use crate::core::{local_principal, os_user, Principal};
-    let config = crate::config::VogtConfig {
-        data_dir: state.data_dir.clone(),
-        ..crate::config::VogtConfig::default()
-    };
+    let config = state.config.clone();
     let principal = match &grant.identity_ref {
         Some(identity_ref) if !identity_ref.is_empty() => {
             Principal::new(identity_ref, grant.kind, &grant.display_name).ok()
@@ -222,10 +247,37 @@ fn context_for<C: Clock, I: IdFactory>(
     Some(build(
         config,
         principal,
-        Arc::clone(store.clock()),
+        clock_for(store.clock()),
         Arc::clone(store.id_factory()),
         grant.token.clone(),
     ))
+}
+
+/// Which clock a request's context ticks.
+///
+/// `RESTART` is the step-clock routes. Python builds a fresh step clock per
+/// request, starting again at `VOGT_TEST_CLOCK_START`, so the decision row, the
+/// entity row and the audit row land at the same three instants every time. A
+/// wall clock has no start to restart from, and the request ticks the one the
+/// store holds. The two are separate functions because only `StepClock` has a
+/// start to restart from, and a generic one could not name it.
+pub(crate) fn clock_for<C: Clock + Clone, const RESTART: bool>(
+    shared: &Arc<Mutex<C>>,
+) -> Arc<Mutex<C>> {
+    let _ = RESTART;
+    Arc::clone(shared)
+}
+
+pub(crate) fn step_clock_for(
+    shared: &Arc<Mutex<crate::core::StepClock>>,
+) -> Arc<Mutex<crate::core::StepClock>> {
+    let _ = shared;
+    use crate::core::{clock_from_env, CLOCK_ENV};
+    let clock = clock_from_env(std::env::var(CLOCK_ENV).ok().as_deref())
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| crate::core::StepClock::new(crate::core::Moment::from_unix(0, 0)));
+    Arc::new(Mutex::new(clock))
 }
 
 /// Resolve the credential through the shared gate, which records a refusal and

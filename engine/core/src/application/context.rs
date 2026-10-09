@@ -362,11 +362,12 @@ where
 ///
 /// `build_context` wraps whatever it is given in a fresh `Arc`, so a second
 /// context over the same data directory draws its own ids and ticks its own
-/// clock. The HTTP and MCP routes already hold both inside the store they
-/// authenticate against, and each builds its request context on those same
-/// handles, so a decision row and the write it guards count from one sequence.
-/// The routes are split per hook pair because `Built` only exists for those
-/// four, and each pair wraps this in its own variant.
+/// clock. The HTTP and MCP routes already hold the id factory inside the store
+/// they authenticate against, and each builds its request context on that same
+/// handle, so a decision row and the write it guards count from one sequence.
+/// The clock is the route's own, restarted per request for the step clock. The
+/// routes are split per hook pair because `Built` only exists for those four,
+/// and each pair wraps this in its own variant.
 pub fn context_on<C, I>(
     config: VogtConfig,
     principal: Option<Principal>,
