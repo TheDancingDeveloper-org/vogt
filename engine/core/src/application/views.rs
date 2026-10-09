@@ -249,15 +249,16 @@ fn gather<C: Clock, I: IdFactory>(
         .project
         .map(|slug| crate::application::resolve::project(&view, slug))
         .transpose()?;
-    // Kinds and priorities are not part of this filter. Python loads the whole
-    // candidate set, scores it, and only then drops rows by kind and priority
-    // (`views.py:556-559`). The declared half reads no clock of its own, but the
-    // observed half reads once per row, so the set it reads has to be the
-    // unfiltered one. The drop happens after those reads, below.
+    // Kinds and priorities filter the declared half in the store, as Python's
+    // `WorkFilter` does (`views.py:393-414`): the declared rows and the
+    // `excluded_unlinked` count are both taken from that filtered query. The
+    // observed half is different. Python scores every observed candidate and
+    // only then drops rows (`views.py:556-559`), and each one reads the clock
+    // inside `trust_for` on the way, so that filter happens after scoring.
     let filter = crate::storage::interface::WorkFilter {
         project_id: project.as_ref().map(|project| project.id.clone()),
-        kinds: Vec::new(),
-        priorities: Vec::new(),
+        kinds: query.kinds.clone(),
+        priorities: query.priorities.clone(),
         assignee_actor_id: query
             .assignee
             .map(|identity| {
@@ -452,19 +453,9 @@ fn gather<C: Clock, I: IdFactory>(
     } else {
         // No observed rows, so no `trust_for` reads: the scoring read is the
         // second one, straight after the git-signals read.
-        // Python scores every declared candidate and filters afterwards
-        // (`views.py:556-559`). None of these rows read the clock, so the drop
-        // can happen before scoring without moving a timestamp.
-        let declared_rows: Vec<DeclaredScore<'_>> = declared_rows
-            .into_iter()
-            .filter(|row| {
-                let kind = row.item.kind.to_string();
-                let priority = row.item.priority.to_string();
-                (query.kinds.is_empty() || query.kinds.iter().any(|wanted| wanted == &kind))
-                    && (query.priorities.is_empty()
-                        || query.priorities.iter().any(|wanted| wanted == &priority))
-            })
-            .collect();
+        // No observed rows, so no `trust_for` reads: the scoring read is the
+        // second one, straight after the git-signals read. The declared rows
+        // were already filtered by kind and priority in the store query.
         let scored = score_rows(&declared_rows, &[], now_of(&ctx.clock));
         (scored, 0, 0, 0)
     };
