@@ -21,6 +21,7 @@ use crate::storage::sqlite::connection::{connect_with, DEFAULT_SYNCHRONOUS};
 use crate::storage::sqlite::migrator::{self, migrations_root, table_exists};
 
 const META_INSTANCE_ID: &str = "instance_id";
+const META_CREATED_AT: &str = "created_at";
 const WITHHELD: &str = "[withheld: configuration or environment output]";
 const OPEN_STATE_SQL: &str =
     "lower(coalesce(json_extract(payload, '$.state'), '')) NOT IN ('closed', 'merged')";
@@ -35,12 +36,12 @@ pub struct SqliteObservedStore<C, I> {
     has_evidence_cached: Cell<bool>,
 }
 
-#[allow(dead_code)]
 impl<C, I> SqliteObservedStore<C, I>
 where
     C: Clock,
     I: IdFactory,
 {
+    #[allow(dead_code)]
     pub fn new(path: PathBuf, clock: C, ids: I) -> Self {
         Self {
             path,
@@ -68,11 +69,7 @@ where
     fn migrate(&self) -> Result<MigrationReport, VogtError> {
         let now = self.clock.borrow_mut().now();
         let mut conn = self.open(true)?;
-        let holder = format!(
-            "{}/{}",
-            std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".into()),
-            std::process::id()
-        );
+        let holder = format!("{}/{}", hostname(), std::process::id());
         migrator::migrate(
             &mut conn,
             "observed",
@@ -112,29 +109,22 @@ where
     }
 
     fn bind_instance(&self, instance_id: &str) -> Result<(), VogtError> {
+        // A plain insert, not an upsert: binding twice is a constraint
+        // failure, the same one Python's second INSERT raises. The created_at
+        // row is what a restore checks alongside the instance id.
         let conn = self.open(true)?;
         conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
         let outcome = (|| -> Result<(), rusqlite::Error> {
             conn.execute(
-                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-                [],
-            )?;
-            let existing: Option<String> = conn
-                .query_row(
-                    "SELECT value FROM meta WHERE key = ?",
-                    [META_INSTANCE_ID],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(bound) = existing.filter(|value| !value.is_empty()) {
-                if bound != instance_id {
-                    return Err(bound_elsewhere());
-                }
-                return Ok(());
-            }
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
                 params![META_INSTANCE_ID, instance_id],
+            )?;
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?)",
+                params![
+                    META_CREATED_AT,
+                    crate::core::to_iso(self.clock.borrow_mut().now())
+                ],
             )?;
             Ok(())
         })();
@@ -142,16 +132,19 @@ where
     }
 
     fn rebind_instance(&self, instance_id: &str) -> Result<(), VogtError> {
-        let conn = self.open(true)?;
+        // A clone re-stamps an existing file, so this never creates one.
+        let conn = self.open(false)?;
         write_tx(&conn, || {
-            conn.execute(
-                "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
-                [],
+            let updated = conn.execute(
+                "UPDATE meta SET value = ? WHERE key = ?",
+                params![instance_id, META_INSTANCE_ID],
             )?;
-            conn.execute(
-                "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-                params![META_INSTANCE_ID, instance_id],
-            )?;
+            if updated == 0 {
+                conn.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?)",
+                    params![META_INSTANCE_ID, instance_id],
+                )?;
+            }
             Ok(())
         })
     }
@@ -253,22 +246,24 @@ where
             let collector = collector_of(&conn, sweep_id)?;
             let mut stats = AppendStats::default();
             for finding in findings {
-                let latest: Option<(String, String)> = conn
+                // Dedup against the newest history row, not the projection:
+                // the projection is rebuilt separately and is droppable, so
+                // reading it here would re-insert a whole history after a
+                // drop and would disagree with Python on an out-of-order
+                // append.
+                let current: Option<String> = conn
                     .query_row(
-                        "SELECT observation_id, content_digest FROM latest_observations WHERE subject_key = ?",
+                        "SELECT content_digest FROM observations WHERE subject_key = ? ORDER BY observed_at DESC, id DESC LIMIT 1",
                         [&finding.subject_key],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| row.get(0),
                     )
                     .optional()?;
-                if latest
-                    .as_ref()
-                    .is_some_and(|(_, digest)| digest == &finding.content_digest)
-                {
+                if current.as_deref() == Some(finding.content_digest.as_str()) {
                     stats.unchanged += 1;
                     continue;
                 }
                 let observation_id = self.next_id("obs");
-                let payload = crate::decisions::python_json_dumps(&finding.payload, false);
+                let payload = crate::decisions::python_json_dumps(&finding.payload, true);
                 conn.execute(
                     "INSERT INTO observations (id, sweep_id, collector, kind, project_id, subject_key, payload, content_digest, source_url, promoted, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
@@ -285,25 +280,6 @@ where
                         crate::core::to_iso(at),
                     ],
                 )?;
-                conn.execute(
-                    "DELETE FROM latest_observations WHERE subject_key = ?",
-                    [&finding.subject_key],
-                )?;
-                conn.execute(
-                    "INSERT INTO latest_observations (subject_key, observation_id, collector, kind, project_id, payload, content_digest, source_url, promoted, observed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    params![
-                        finding.subject_key,
-                        observation_id,
-                        collector,
-                        finding.kind,
-                        finding.project_id,
-                        payload,
-                        finding.content_digest,
-                        finding.source_url,
-                        finding.promoted as i64,
-                        crate::core::to_iso(at),
-                    ],
-                )?;
                 stats.new += 1;
             }
             Ok(stats)
@@ -312,8 +288,9 @@ where
     }
 
     fn list_sweeps(&self, collector: Option<&str>, limit: i64) -> Result<Vec<Sweep>, VogtError> {
+        // Python's `if collector` treats "" as absent.
         let conn = self.open(false)?;
-        match collector {
+        match collector.filter(|name| !name.is_empty()) {
             Some(name) => many(
                 &conn,
                 "SELECT * FROM sweeps WHERE collector = ? ORDER BY started_at DESC, id DESC LIMIT ?",
@@ -330,42 +307,44 @@ where
     }
 
     fn coverage(&self) -> Result<BTreeMap<String, Sweep>, VogtError> {
+        // The newest *completed* sweep per collector. A running sweep says
+        // nothing about coverage yet, and freshness computed from one would
+        // claim an answer newer than the evidence behind it.
         let conn = self.open(false)?;
         let rows = many(
             &conn,
-            "SELECT * FROM sweeps WHERE id IN (SELECT id FROM sweeps s WHERE s.started_at = (SELECT MAX(started_at) FROM sweeps x WHERE x.collector = s.collector) ORDER BY id DESC)",
+            "SELECT * FROM sweeps WHERE finished_at IS NOT NULL ORDER BY collector, finished_at DESC, id DESC",
             [],
             row_sweep,
         )?;
-        let mut latest: BTreeMap<String, Sweep> = BTreeMap::new();
+        let mut newest: BTreeMap<String, Sweep> = BTreeMap::new();
         for sweep in rows {
-            latest.entry(sweep.collector.clone()).or_insert(sweep);
+            newest.entry(sweep.collector.clone()).or_insert(sweep);
         }
-        Ok(latest)
+        Ok(newest)
     }
 
     fn coverage_by_project(&self) -> Result<BTreeMap<String, BTreeMap<String, Moment>>, VogtError> {
+        // Per collector, when each project was last swept by it, taken from
+        // the scopes of finished sweeps. Ascending, so a later sweep
+        // overwrites an earlier one; a collector with zero findings still
+        // appears, because the question is what looked at what.
         let conn = self.open(false)?;
-        let mut coverage: BTreeMap<String, BTreeMap<String, Moment>> = BTreeMap::new();
-        let mut statement = conn
-            .prepare(
-                "SELECT project_id, collector, MAX(observed_at) AS observed_at FROM observations WHERE project_id IS NOT NULL GROUP BY project_id, collector",
-            )
-            .map_err(sql_err)?;
-        let rows = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    moment(row, 2)?,
-                ))
-            })
-            .map_err(sql_err)?;
-        for row in rows {
-            let (project, collector, at) = row.map_err(sql_err)?;
-            coverage.entry(project).or_default().insert(collector, at);
+        let rows = many(
+            &conn,
+            "SELECT * FROM sweeps WHERE finished_at IS NOT NULL ORDER BY collector, finished_at ASC, id ASC",
+            [],
+            row_sweep,
+        )?;
+        let mut seen: BTreeMap<String, BTreeMap<String, Moment>> = BTreeMap::new();
+        for sweep in rows {
+            let finished = sweep.finished_at.unwrap_or(sweep.started_at);
+            let per_project = seen.entry(sweep.collector).or_default();
+            for project_id in sweep.scope {
+                per_project.insert(project_id, finished);
+            }
         }
-        Ok(coverage)
+        Ok(seen)
     }
 
     fn fail_sweeps(&self, sweep_ids: &[String], detail: &str) -> Result<(), VogtError> {
@@ -670,7 +649,8 @@ where
             let doomed: Vec<&String> = candidates
                 .iter()
                 .filter(|candidate| {
-                    !newest.contains(*candidate) && !protected_observation_ids.contains(*candidate)
+                    let id: &String = candidate;
+                    !newest.contains(id) && !protected_observation_ids.contains(id)
                 })
                 .collect();
             for observation_id in &doomed {
@@ -716,7 +696,13 @@ where
         let outcome = write_tx(&conn, || {
             let mut calls = 0;
             for call in &batch.calls {
-                let services = format!(",{},", call.services.join(","));
+                let services = format!(
+                    ",{}",
+                    call.services
+                        .iter()
+                        .map(|tag| format!("{tag},"))
+                        .collect::<String>()
+                );
                 let changed = conn.execute(
                     "INSERT OR IGNORE INTO agent_activity (id, sweep_id, source_path, call_id, agent, agent_session_id, cwd, tool, summary, services, withheld, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
@@ -890,23 +876,15 @@ where
     }
 }
 
-fn bound_elsewhere() -> rusqlite::Error {
-    rusqlite::Error::SqliteFailure(
-        rusqlite::ffi::Error {
-            code: rusqlite::ffi::ErrorCode::ConstraintViolation,
-            extended_code: 0,
-        },
-        Some("observed store is bound to a different instance".into()),
-    )
+fn sql_err(err: rusqlite::Error) -> VogtError {
+    VogtError::MigrationError(err.to_string())
 }
 
-fn sql_err(err: rusqlite::Error) -> VogtError {
-    if let rusqlite::Error::SqliteFailure(_, Some(message)) = &err {
-        if message.contains("bound to a different instance") {
-            return VogtError::Conflict(message.clone());
-        }
-    }
-    VogtError::MigrationError(err.to_string())
+/// `socket.gethostname()`, which reads the kernel name rather than `$HOSTNAME`.
+fn hostname() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|text| text.trim().to_string())
+        .unwrap_or_else(|_| "localhost".to_string())
 }
 
 fn finish<T>(conn: Connection, outcome: Result<T, rusqlite::Error>) -> Result<T, VogtError> {
@@ -1127,7 +1105,7 @@ fn like_escape(text: &str) -> String {
 fn activity_where(query: &ActivityQuery) -> (String, Vec<String>) {
     let mut clauses = Vec::new();
     let mut params = Vec::new();
-    if let Some(q) = &query.q {
+    if let Some(q) = query.q.as_deref().filter(|text| !text.is_empty()) {
         let needle = format!("%{}%", like_escape(q));
         clauses.push(
             "(summary LIKE ? ESCAPE '!' OR tool LIKE ? ESCAPE '!' OR excerpt LIKE ? ESCAPE '!')"
@@ -1135,13 +1113,13 @@ fn activity_where(query: &ActivityQuery) -> (String, Vec<String>) {
         );
         params.extend([needle.clone(), needle.clone(), needle]);
     }
-    if let Some(service) = &query.service {
+    if let Some(service) = query.service.as_deref().filter(|text| !text.is_empty()) {
         clauses.push("services LIKE ? ESCAPE '!'".to_string());
         params.push(format!("%,{},%", like_escape(service)));
     }
-    if let Some(tool) = &query.tool {
+    if let Some(tool) = query.tool.as_deref().filter(|text| !text.is_empty()) {
         clauses.push("tool = ?".to_string());
-        params.push(tool.clone());
+        params.push(tool.to_string());
     }
     if query.errors_only {
         clauses.push("error = 1".to_string());
@@ -1272,6 +1250,10 @@ mod tests {
             )
             .unwrap();
 
+        // The projection is rebuilt separately, never by append.
+        let rebuilt = store.rebuild_latest().unwrap();
+        assert_eq!(rebuilt, 1);
+
         let latest = store.latest_by_subject("proj_1:abc").unwrap().unwrap();
         assert_eq!(latest.content_digest, "sha256:2");
         assert_eq!(latest.source_url.as_deref(), Some("https://example/abc"));
@@ -1282,17 +1264,62 @@ mod tests {
             .unwrap()
             .is_empty());
 
-        let rebuilt = store.rebuild_latest().unwrap();
-        assert_eq!(rebuilt, 1);
+        // Dedup reads history, not the projection: appending an older
+        // payload and then the current one again counts the second as
+        // unchanged and writes no duplicate row.
+        let older = PendingObservation {
+            content_digest: "sha256:1".into(),
+            payload: serde_json::json!({"sha": "abc", "state": "open"}),
+            ..finding
+        };
+        let back = Moment::from_unix(1_700_000_450, 0);
+        let out_of_order = store
+            .append(&sweep.id, std::slice::from_ref(&older), back)
+            .unwrap();
+        assert_eq!(
+            out_of_order,
+            AppendStats {
+                new: 1,
+                unchanged: 0
+            }
+        );
+        let repeated = store
+            .append(
+                &sweep.id,
+                &[PendingObservation {
+                    content_digest: "sha256:2".into(),
+                    payload: serde_json::json!({"sha": "def", "state": "closed"}),
+                    ..older
+                }],
+                later,
+            )
+            .unwrap();
+        assert_eq!(
+            repeated,
+            AppendStats {
+                new: 0,
+                unchanged: 1
+            }
+        );
+        assert_eq!(store.counts().unwrap().get("observations"), Some(&3));
 
+        // `before` is exclusive of the newest row, so both older rows are
+        // candidates and neither is the newest, so both go.
         let report = store.prune(later, &BTreeSet::new()).unwrap();
-        assert_eq!(report.removed, 1);
+        assert_eq!(report.removed, 2);
         assert_eq!(report.kept_latest, 0);
         assert_eq!(store.counts().unwrap().get("observations"), Some(&1));
 
         let coverage = store.coverage().unwrap();
         assert_eq!(coverage["git"].outcome, SweepOutcome::Ok);
         assert_eq!(coverage["git"].stats.get("new"), Some(&2));
+        // A running sweep is not coverage: freshness must not claim an
+        // answer newer than the evidence behind it.
+        store.begin_sweep("git", &["proj_2".into()], later).unwrap();
+        assert_eq!(store.coverage().unwrap()["git"].id, sweep.id);
+        let by_project = store.coverage_by_project().unwrap();
+        assert_eq!(by_project["git"]["proj_1"], later);
+        assert!(!by_project["git"].contains_key("proj_2"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1367,8 +1394,10 @@ mod tests {
 
         let error = store.rebind_instance("inst_2");
         assert!(error.is_ok());
+        // Binding again is a constraint failure, the same one Python's
+        // second INSERT raises; a clone uses rebind_instance instead.
         let conflict = store.bind_instance("inst_3");
-        assert!(matches!(conflict, Err(VogtError::Conflict(_))));
+        assert!(matches!(conflict, Err(VogtError::MigrationError(_))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
