@@ -1,25 +1,271 @@
-//! `work.list`. Ports `list_work` in `services/work.py`.
+//! `work.list` and the native half of `work.create`. Ports `list_work` and
+//! `_create_native` in `services/work.py`.
 //!
 //! On a linked project the list is the forge mirror joined to the overlay; a
 //! global list carries every linked project's upstream items alongside the
 //! declared rows. An unlinked project scope answers with the CTA marker —
 //! empty items and `link_state: "unlinked"` — rather than its native rows,
 //! which stay reachable by ref.
+//!
+//! `work.create` with no project, or with `local_only`, writes a native
+//! declared item. A linked project without `local_only` is the forge
+//! write-through, which this port does not do: it fails typed rather than
+//! storing a local item the forge never heard of. An unlinked project without
+//! `local_only` is the decision-10 refusal.
 
 use serde_json::{json, Value};
 
 use crate::application::context::{AppContext, Built};
 use crate::application::resolve;
 use crate::application::upstream;
-use crate::core::{Clock, IdFactory, Project, WorkItem, TERMINAL_STATES};
+use crate::application::writes::{audited_write, WriteOutcome};
+use crate::core::{
+    Clock, Effort, IdFactory, Origin, Priority, Project, TrustState, WorkItem, WorkKind,
+    TERMINAL_STATES,
+};
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ReadView, WorkFilter};
+use crate::storage::interface::{DeclaredStore, ReadView, WorkFilter, WriteTxn};
+
+const WORK_CREATE: &str = "work.create";
+const WORK_CREATED_EVENT: &str = "work.created";
 
 const UNLINKED_STILL_WORKS: &str = "Native items (WI-n) on this project still take comments, \
      transitions (including to done) and field edits by ref";
 
+pub fn create_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| create_work(ctx, params))
+}
+
 pub fn list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| list_work(ctx, params))
+}
+
+/// Create a work item. No project, or `local_only`, writes a native declared
+/// item. A linked project without `local_only` is the forge write-through,
+/// which is not ported and fails typed. An unlinked project without
+/// `local_only` is the decision-10 refusal.
+fn create_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let params = parse_create(params)?;
+    let project = match params.project.as_deref() {
+        None => None,
+        Some(slug) => Some(resolve::project(&ctx.declared.read()?, slug)?),
+    };
+    if params.project.is_none() || params.local_only {
+        return create_native(ctx, &params, project.as_ref());
+    }
+    let project = project.expect("a project was resolved above");
+    if !upstream::is_linked(&project) {
+        return Err(refuse_unlinked(&project));
+    }
+    // Decision 9: the forge write-through runs before anything local exists.
+    // It is not ported, and storing a native row here would be the local
+    // success the forge never heard of.
+    Err(VogtError::UpstreamWriteFailed(
+        "work.create on a linked project writes through to the forge, and that path is not ported — nothing was stored locally. Pass local_only to keep a native item instead.".to_string(),
+    ))
+}
+
+struct CreateParams {
+    kind: String,
+    title: String,
+    body: String,
+    priority: String,
+    effort: Option<String>,
+    project: Option<String>,
+    initiative: Option<String>,
+    assignee: Option<String>,
+    labels: Vec<String>,
+    local_only: bool,
+    reason: String,
+}
+
+fn parse_create(params: Value) -> Result<CreateParams, VogtError> {
+    let Value::Object(map) = params else {
+        return Err(VogtError::InvalidRequest(
+            "work.create takes an object".to_string(),
+        ));
+    };
+    let text = |key: &str| match map.get(key) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => Some(String::new()),
+    };
+    let kind = text("kind").ok_or_else(|| VogtError::InvalidRequest("kind is required".into()))?;
+    let title =
+        text("title").ok_or_else(|| VogtError::InvalidRequest("title is required".into()))?;
+    let priority = text("priority").unwrap_or_else(|| "p2".to_string());
+    let labels = map
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(CreateParams {
+        kind,
+        title,
+        body: text("body").unwrap_or_default(),
+        priority,
+        effort: text("effort"),
+        project: text("project"),
+        initiative: text("initiative"),
+        assignee: text("assignee"),
+        labels,
+        local_only: map
+            .get("local_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        reason: text("reason").unwrap_or_default(),
+    })
+}
+
+fn refuse_unlinked(project: &Project) -> VogtError {
+    VogtError::NotLinked(format!(
+        "work.create needs a forge-linked project, and {} is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or pass `local_only: true` to keep a native item in this project. {UNLINKED_STILL_WORKS}.",
+        crate::core::py_repr(&project.slug)
+    ))
+}
+
+/// A native declared item, optionally scoped to a project. `project` set is the
+/// `local_only` path: the row belongs to the project but has a `WI-n` ref and
+/// `origin="created"`.
+fn create_native<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &CreateParams,
+    project: Option<&Project>,
+) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let kind: WorkKind = params.kind.parse().map_err(|_| {
+        VogtError::InvalidRequest(format!(
+            "unknown work kind {}",
+            crate::core::py_repr(&params.kind)
+        ))
+    })?;
+    let priority: Priority = params.priority.parse().map_err(|_| {
+        VogtError::InvalidRequest(format!(
+            "unknown priority {}",
+            crate::core::py_repr(&params.priority)
+        ))
+    })?;
+    let effort = params
+        .effort
+        .as_deref()
+        .map(|value| {
+            value.parse::<Effort>().map_err(|_| {
+                VogtError::InvalidRequest(format!("unknown effort {}", crate::core::py_repr(value)))
+            })
+        })
+        .transpose()?;
+    let project_id = project.map(|project| project.id.clone());
+    let drawn = Drawn {
+        kind,
+        title: params.title.clone(),
+        body: params.body.clone(),
+        priority,
+        effort,
+        project_id,
+        initiative: params.initiative.clone(),
+        assignee: params.assignee.clone(),
+        labels: params.labels.clone(),
+    };
+
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let ids = std::sync::Arc::clone(writing.ids());
+    let stored = audited_write(
+        &mut writing,
+        WORK_CREATE,
+        &params.reason,
+        move |txn, _actor| {
+            let workflow = txn.workflow_for(&drawn.kind.to_string())?;
+            let initiative_id = drawn
+                .initiative
+                .as_deref()
+                .map(|slug| resolve::initiative(txn, slug).map(|found| found.id))
+                .transpose()?;
+            let assignee_id = drawn
+                .assignee
+                .as_deref()
+                .map(|identity| resolve::actor(txn, identity).map(|found| found.id))
+                .transpose()?;
+            for name in &drawn.labels {
+                resolve::label_exists(txn, name)?;
+            }
+            // Drawn inside the transaction, after the resolutions, which is where
+            // Python reads it. The audit row reads the clock again afterwards.
+            let now = super::now_of(&clock);
+            let id = super::next_id(&ids, "wrk");
+            let reference = txn.next_work_ref()?;
+            let item = WorkItem {
+                id: id.clone(),
+                reference: reference.clone(),
+                kind: drawn.kind,
+                title: drawn.title.clone(),
+                body: drawn.body.clone(),
+                state: workflow.initial_state,
+                priority: drawn.priority,
+                effort: drawn.effort,
+                project_id: drawn.project_id.clone(),
+                project_slug: None,
+                initiative_id,
+                origin: Origin::Created,
+                trust_state: TrustState::Unverified,
+                assignee_actor_id: assignee_id,
+                assignee_identity_ref: None,
+                labels: drawn.labels.clone(),
+                relations: Vec::new(),
+                superseded_by: None,
+                created_at: now,
+                updated_at: now,
+            };
+            txn.insert_work_item(&item)?;
+            let stored = txn.work_item_by_id(&id)?.ok_or_else(|| {
+                VogtError::NotFound(format!("work item {id} vanished inside its own write"))
+            })?;
+            let payload = serde_json::to_value(&stored).unwrap_or(Value::Null);
+            let summary = json!({"ref": reference, "kind": drawn.kind, "title": drawn.title});
+            Ok(WriteOutcome::new(
+                stored,
+                "work_item",
+                &id,
+                payload,
+                WORK_CREATED_EVENT,
+                summary,
+            ))
+        },
+    )?;
+    Ok(json!({
+        "item": stored,
+        "comments": [],
+        "sessions": [],
+        "branches": [],
+        "git": null,
+        "walked": [],
+        "live_sessions": [],
+    }))
+}
+
+struct Drawn {
+    kind: WorkKind,
+    title: String,
+    body: String,
+    priority: Priority,
+    effort: Option<Effort>,
+    project_id: Option<String>,
+    initiative: Option<String>,
+    assignee: Option<String>,
+    labels: Vec<String>,
 }
 
 fn list_work<C: Clock, I: IdFactory>(

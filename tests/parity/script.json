@@ -301,6 +301,17 @@
    }
   },
   {
+   "operation": "work.create",
+   "params": {
+    "kind": "chore",
+    "title": "parity item",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
    "operation": "work.list",
    "params": {},
    "expect": {

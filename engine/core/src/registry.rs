@@ -160,6 +160,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "backlog" => Some(crate::application::views::backlog_op),
         "bugs" => Some(crate::application::views::bugs_op),
         "work.list" => Some(crate::application::services::work::list_op),
+        "work.create" => Some(crate::application::services::work::create_op),
         "project.register" => Some(crate::application::projects::register_op),
         "project.create" => Some(crate::application::projects::create_op),
         "project.scaffold" => Some(crate::application::projects::scaffold_op),
@@ -751,7 +752,7 @@ mod tests {
     #[test]
     fn not_ported_is_a_failure() {
         let registry = registry();
-        let operation = registry.get("work.create").unwrap();
+        let operation = registry.get("work.get").unwrap();
         let error = operation.run(None, serde_json::json!({})).unwrap_err();
         assert!(
             error.message().contains("not been ported"),
