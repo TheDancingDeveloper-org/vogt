@@ -371,20 +371,14 @@ fn bootstrap_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
         }
     }
     let mut out = serde_json::Map::new();
+    // `token_name` is a plain string with a default, so an explicit null is a
+    // type error rather than "use the default". The other three are `Name | None`,
+    // where null and absence mean the same thing and the service fills in.
     for field in ["display_name", "identity_ref", "token_name", "username"] {
+        let nullable = ["identity_ref", "username"].contains(&field);
         match object.get(field) {
-            // Absent and explicit null are the same thing: the field is optional
-            // and the service applies its default. `token_name` defaults to the
-            // name the web wizard never sends, so an omitted one must not land as
-            // an empty string.
-            None | Some(serde_json::Value::Null) => {
-                if field == "token_name" {
-                    out.insert(
-                        field.to_string(),
-                        serde_json::Value::String("first-run browser token".to_string()),
-                    );
-                }
-            }
+            None => {}
+            Some(serde_json::Value::Null) if nullable => {}
             Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
                 out.insert(
                     field.to_string(),
@@ -398,6 +392,12 @@ fn bootstrap_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
                 )))
             }
         }
+    }
+    if !out.contains_key("token_name") {
+        out.insert(
+            "token_name".to_string(),
+            serde_json::Value::String("first-run browser token".to_string()),
+        );
     }
     if !out.contains_key("display_name") {
         return Err(VogtError::InvalidRequest(
@@ -912,6 +912,14 @@ mod tests {
             "a body without a content type never reaches the service"
         );
         let (status, _) = post_json(running.addr, "/api/install/bootstrap", "{}");
+        assert_eq!(status, 422);
+        // `token_name` is a plain string with a default, so an explicit null is a
+        // type error. Only the fields typed as optional treat null as "not given".
+        let (status, _) = post_json(
+            running.addr,
+            "/api/install/bootstrap",
+            r#"{"display_name":"Ada","token_name":null}"#,
+        );
         assert_eq!(status, 422);
         // An explicit null is "not given", not a type error. The service then
         // decides it cannot derive an identity, which is its own answer.
