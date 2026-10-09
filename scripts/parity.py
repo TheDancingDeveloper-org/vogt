@@ -129,23 +129,35 @@ def _run(binary: str, steps: list[dict[str, Any]], transport: str) -> list[dict[
     return _run_cli(binary, steps)
 
 
+def _child_env() -> dict[str, str]:
+    """The environment a recorded binary runs in, the same on every machine.
+
+    Every inherited `VOGT_*` variable is dropped. A session or a pod exports
+    several (`VOGT_CORE_URL`, `VOGT_ENGINE_URL`, `VOGT_DATA_DIR`, ...), and
+    each one changes what the binary answers: an engine URL that resolves on
+    one host and not on another turned `engine_detail` into a statement about
+    the runner's DNS. With none of them set, both cores read the defaults the
+    contract is about, and the hooks below are the only `VOGT_*` they see.
+    """
+    env = {key: value for key, value in os.environ.items() if not key.startswith("VOGT_")}
+    env.update(
+        {
+            "VOGT_TEST_CLOCK_START": CLOCK_START,
+            "VOGT_TEST_IDS": "sequential",
+            # The local principal is `local:$USER`. Pinning it keeps a golden
+            # recorded by one account comparable to a run under another,
+            # including CI's `runner` user.
+            "USER": "parity",
+            "LOGNAME": "parity",
+        }
+    )
+    return env
+
+
 def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     root = Path(tempfile.mkdtemp(prefix="vogt-parity-"))
     data = root / "instance"
-    env = {
-        **os.environ,
-        "VOGT_TEST_CLOCK_START": CLOCK_START,
-        "VOGT_TEST_IDS": "sequential",
-        # The local principal is `local:$USER`. Pinning it keeps a golden
-        # recorded by one account comparable to a run under another, including
-        # CI's `runner` user.
-        "USER": "parity",
-        "LOGNAME": "parity",
-    }
-    # A session may export VOGT_CORE_URL for the engine front door. The CLI
-    # this harness spawns uses its own local store, and the hint that variable
-    # produces is not part of the contract under test.
-    env.pop("VOGT_CORE_URL", None)
+    env = _child_env()
     answers: list[dict[str, Any]] = []
     seen: dict[str, Any] = {}
     try:
@@ -271,14 +283,7 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     recorded: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="vogt-parity-http-") as scratch:
         data = Path(scratch) / "instance"
-        env = {
-            **os.environ,
-            "VOGT_TEST_CLOCK_START": CLOCK_START,
-            "VOGT_TEST_IDS": "sequential",
-            "USER": "parity",
-            "LOGNAME": "parity",
-        }
-        env.pop("VOGT_CORE_URL", None)
+        env = _child_env()
         init = subprocess.run(
             [binary, "--json", "--data-dir", str(data), "init"],
             env=env, capture_output=True, text=True, check=False,

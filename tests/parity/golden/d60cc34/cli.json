@@ -1064,12 +1064,12 @@
       "coverage": {
         "agent": {
           "count": 0,
-          "detail": null,
+          "detail": "no session engine is configured",
           "observed_at": null,
           "projects": 0,
           "registered": 2,
           "source": "agent",
-          "status": "current"
+          "status": "unconfigured"
         },
         "ci": {
           "count": 0,
@@ -1100,8 +1100,8 @@
         }
       },
       "engine_available": false,
-      "engine_detail": "the engine is not answering: <urlopen error [Errno -2] Name or service not known>",
-      "engine_status": "unreachable",
+      "engine_detail": "no session engine is configured",
+      "engine_status": "not_configured",
       "entries": [],
       "github_scope": "registered projects only",
       "high_water": {
