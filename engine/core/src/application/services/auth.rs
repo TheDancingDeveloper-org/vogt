@@ -383,6 +383,250 @@ pub fn list_users_op(ctx: &Built, _params: Value) -> Result<Value, VogtError> {
     })
 }
 
+/// `user.set_password`. Replaces the hash, and by default every live session
+/// the user holds, so a stolen session dies with the password it was issued
+/// under. The hash is computed before the write, so a weak password fails
+/// before any row is touched.
+pub fn set_password_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| set_password(ctx, &params))
+}
+
+fn set_password<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let reason = params["reason"].as_str().unwrap_or("");
+    let username = username_of(params["username"].as_str().unwrap_or(""))?;
+    let password_hash = password_hash_of(params["password"].as_str().unwrap_or(""))?;
+    let scopes = match params.get("scopes").and_then(Value::as_str) {
+        Some(scopes) => Some(scopes_of(scopes)?),
+        None => None,
+    };
+    let revoke_sessions = params["revoke_sessions"].as_bool().unwrap_or(true);
+    let mut writing = write_of(ctx);
+    let user = set_password_recorded(
+        &mut writing,
+        reason,
+        &SetPasswordRequest {
+            username,
+            password_hash,
+            scopes,
+            revoke_sessions,
+        },
+    )?;
+    Ok(serde_json::json!({ "user": user }))
+}
+
+struct SetPasswordRequest {
+    username: String,
+    password_hash: String,
+    scopes: Option<Vec<String>>,
+    revoke_sessions: bool,
+}
+
+fn set_password_recorded<C: Clock + 'static, I: IdFactory + 'static>(
+    write: &mut SqliteWrite<'_, C, I>,
+    reason: &str,
+    request: &SetPasswordRequest,
+) -> Result<Value, VogtError> {
+    let username = request.username.clone();
+    let password_hash = request.password_hash.clone();
+    let scopes = request.scopes.clone();
+    let revoke_sessions = request.revoke_sessions;
+    let clock = std::sync::Arc::clone(write.clock());
+    audited_write(
+        write,
+        USER_SET_PASSWORD,
+        reason,
+        move |txn: &mut _, _actor: &Actor| {
+            let current = txn
+                .password_credential_by_username(&username)?
+                .ok_or_else(|| VogtError::NotFound(format!("no user named '{username}'")))?;
+            let now = clock.lock().expect("the clock lock").now();
+            let scopes = scopes.unwrap_or_else(|| current.scopes.clone());
+            txn.upsert_password_credential(
+                &current.actor_id,
+                &username,
+                &password_hash,
+                &scopes,
+                now,
+            )?;
+            let revoked = if revoke_sessions {
+                revoke_sessions_of(txn, &current.actor_id, reason, now)?
+            } else {
+                0
+            };
+            let user = txn
+                .password_credential_for_actor(&current.actor_id)?
+                .expect("the credential was just written in this transaction");
+            Ok(WriteOutcome::new(
+                serde_json::to_value(&user).expect("a credential serialises"),
+                "user",
+                &current.actor_id,
+                serde_json::json!({
+                    "username": username,
+                    "scopes": user.scopes,
+                    "sessions_revoked": revoked,
+                }),
+                USER_PASSWORD_SET_EVENT,
+                serde_json::json!({ "username": username }),
+            ))
+        },
+    )
+}
+
+/// `user.remove`. The login goes; the actor and its audit history stay, so the
+/// writes the person made remain attributable.
+pub fn remove_user_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| remove_user(ctx, &params))
+}
+
+fn remove_user<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let reason = params["reason"].as_str().unwrap_or("");
+    let username = username_of(params["username"].as_str().unwrap_or(""))?;
+    let mut writing = write_of(ctx);
+    remove_user_recorded(&mut writing, reason, &username)
+}
+
+fn remove_user_recorded<C: Clock + 'static, I: IdFactory + 'static>(
+    write: &mut SqliteWrite<'_, C, I>,
+    reason: &str,
+    username: &str,
+) -> Result<Value, VogtError> {
+    let username = username.to_string();
+    let clock = std::sync::Arc::clone(write.clock());
+    audited_write(
+        write,
+        USER_REMOVE,
+        reason,
+        move |txn: &mut _, _actor: &Actor| {
+            let current = txn
+                .password_credential_by_username(&username)?
+                .ok_or_else(|| VogtError::NotFound(format!("no user named '{username}'")))?;
+            let now = clock.lock().expect("the clock lock").now();
+            txn.delete_password_credential(&current.actor_id)?;
+            let revoked = revoke_sessions_of(txn, &current.actor_id, reason, now)?;
+            Ok(WriteOutcome::new(
+                serde_json::json!({ "username": username, "sessions_revoked": revoked }),
+                "user",
+                &current.actor_id,
+                serde_json::json!({ "username": username, "sessions_revoked": revoked }),
+                USER_REMOVED_EVENT,
+                serde_json::json!({ "username": username }),
+            ))
+        },
+    )
+}
+
+/// Revoke every live session token an actor holds. API tokens are untouched:
+/// changing a password is not how those are retired.
+fn revoke_sessions_of(
+    txn: &mut impl WriteTxn,
+    actor_id: &str,
+    reason: &str,
+    now: Moment,
+) -> Result<i64, VogtError> {
+    let mut count = 0;
+    for existing in txn.tokens_for_actor(actor_id, false)? {
+        if existing.kind == crate::core::TokenKind::Session
+            && txn.revoke_token(&existing.id, reason, now)?
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+/// `auth.logout`. Revokes the token the call arrived with. A surface with no
+/// token behind it — the local CLI — has nothing to revoke, and says so rather
+/// than failing, so a client can call it unconditionally.
+pub fn logout_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| logout(ctx, &params))
+}
+
+fn logout<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let Some(current) = ctx.token.clone() else {
+        return Ok(serde_json::json!({ "revoked": false, "token": Value::Null }));
+    };
+    let reason = params["reason"].as_str().unwrap_or("");
+    let mut writing = write_of(ctx);
+    logout_recorded(&mut writing, reason, &current)
+}
+
+fn logout_recorded<C: Clock + 'static, I: IdFactory + 'static>(
+    write: &mut SqliteWrite<'_, C, I>,
+    reason: &str,
+    current: &Token,
+) -> Result<Value, VogtError> {
+    let id = current.id.clone();
+    let kind = match current.kind {
+        crate::core::TokenKind::Session => "session",
+        crate::core::TokenKind::Api => "api",
+        crate::core::TokenKind::Agent => "agent",
+    };
+    let actor_ref = current.actor_identity_ref.clone();
+    let clock = std::sync::Arc::clone(write.clock());
+    audited_write(
+        write,
+        AUTH_LOGOUT,
+        reason,
+        move |txn: &mut _, _actor: &Actor| {
+            let now = clock.lock().expect("the clock lock").now();
+            let revoked = txn.revoke_token(&id, reason, now)?;
+            let updated = txn.token_by_id(&id)?;
+            Ok(WriteOutcome::new(
+                serde_json::json!({ "revoked": revoked, "token": updated }),
+                "token",
+                &id,
+                serde_json::json!({ "revoked": revoked, "kind": kind }),
+                SESSION_CLOSED_EVENT,
+                serde_json::json!({ "actor": actor_ref }),
+            ))
+        },
+    )
+}
+
+/// `auth.whoami`. The effective scope set, implications applied, so a consumer
+/// never re-derives them. With no token behind the call the answer is the
+/// local grant: admin, writes enabled.
+pub fn whoami_op(ctx: &Built, _params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| {
+        let held: Vec<&str> = match &ctx.token {
+            Some(token) => token.scopes.iter().map(String::as_str).collect(),
+            // The local grant is admin with writes enabled.
+            None => vec!["admin"],
+        };
+        let mut scopes = auth::effective(&held);
+        scopes.sort_unstable();
+        Ok(serde_json::json!({
+            "identity_ref": ctx.principal.identity_ref,
+            "kind": ctx.principal.kind,
+            "display_name": ctx.principal.display_name,
+            "scopes": scopes,
+            "token": ctx.token,
+        }))
+    })
+}
+
+/// `auth.decisions`. The allow and deny log; the denials are the interesting
+/// half.
+pub fn decisions_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| {
+        let decision = params.get("decision").and_then(Value::as_str);
+        let limit = params["limit"].as_i64().unwrap_or(100);
+        let view = ctx.declared.read()?;
+        Ok(serde_json::json!({
+            "decisions": view.list_auth_decisions(decision, limit)?
+        }))
+    })
+}
+
 /// `auth.login`. Not a registry operation: Python mounts it by hand at
 /// `/api/auth/login`, because the caller holds no credential yet and every
 /// registry route sits behind authorization. The service is what that route
@@ -418,7 +662,8 @@ fn login<C: Clock + 'static, I: IdFactory + 'static>(
     // every other refusal, so the reply never confirms a guess.
     if let Some(retry) = throttle_check(&username, now) {
         return Err(VogtError::LoginThrottled(format!(
-            "too many failed logins for '{username}'; try again in {retry} seconds"
+            "too many failed logins for {}; try again in {retry} seconds",
+            crate::core::py_repr(&username)
         )));
     }
 
@@ -559,16 +804,19 @@ const LOGIN_OK: &str = "login_ok";
 const SESSION_OPENED_EVENT: &str = "auth.session_opened";
 
 /// Verified against when the username names nobody, so a miss costs the same
-/// scrypt as a hit. Computed once; the value never matters.
+/// scrypt as a hit. Computed once, at startup, so the first miss in a process
+/// costs exactly one scrypt rather than the dummy's plus its own. If the
+/// operating system refuses the salt, the dummy is a stored form no password
+/// parses to: a miss then fails the check instead of panicking, which is the
+/// same answer it would have given.
 fn dummy_hash() -> &'static str {
-    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
-        auth::hash_password(
-            "not-a-real-password",
-            &random_array::<PASSWORD_SALT_BYTES>().unwrap(),
-        )
-        .unwrap()
-    })
+    static HASH: std::sync::LazyLock<String> =
+        std::sync::LazyLock::new(|| match random_array::<PASSWORD_SALT_BYTES>() {
+            Ok(salt) => auth::hash_password("not-a-real-password", &salt)
+                .unwrap_or_else(|_| "scrypt$0$0$0$$".to_string()),
+            Err(_) => "scrypt$0$0$0$$".to_string(),
+        });
+    &HASH
 }
 
 /// The process-local failure window. The store keeps the durable record in
@@ -583,12 +831,14 @@ fn throttle() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec
 
 /// `Some(seconds)` when the username is locked out.
 fn throttle_check(username: &str, now: Moment) -> Option<i64> {
-    let mut guard = throttle().lock().expect("the throttle lock");
-    let window = guard.entry(username.to_string()).or_default();
-    window.retain(|at| now.unix_seconds() - at.unix_seconds() <= LOGIN_FAILURE_WINDOW_SECONDS);
+    let mut guard = throttle()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let window = guard.get_mut(username)?;
+    window.retain(|at| now.seconds_since(*at) <= LOGIN_FAILURE_WINDOW_SECONDS as f64);
     if window.len() >= LOGIN_FAILURE_LIMIT {
-        let retry = LOGIN_FAILURE_WINDOW_SECONDS - (now.unix_seconds() - window[0].unix_seconds());
-        return Some(retry.max(1));
+        let retry = LOGIN_FAILURE_WINDOW_SECONDS as f64 - now.seconds_since(window[0]);
+        return Some(retry.floor().max(1.0) as i64);
     }
     None
 }
@@ -596,7 +846,7 @@ fn throttle_check(username: &str, now: Moment) -> Option<i64> {
 fn throttle_failed(username: &str, now: Moment) {
     throttle()
         .lock()
-        .expect("the throttle lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .entry(username.to_string())
         .or_default()
         .push(now);
@@ -605,14 +855,17 @@ fn throttle_failed(username: &str, now: Moment) {
 fn throttle_succeeded(username: &str) {
     throttle()
         .lock()
-        .expect("the throttle lock")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(username);
 }
 
 /// Tests share one process, so one test's failures would lock the next test's
 /// username. Production never calls this.
 fn throttle_reset() {
-    throttle().lock().expect("the throttle lock").clear();
+    throttle()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
 }
 
 fn record_decision<C: Clock, I: IdFactory>(
@@ -728,7 +981,7 @@ mod tests {
         create_user_op(
             &built,
             serde_json::json!({
-                "username": "ada",
+                "username": "lock",
                 "password": "correct horse battery",
                 "reason": "first user",
             }),
@@ -737,20 +990,20 @@ mod tests {
         for _ in 0..5 {
             let wrong = login_op(
                 &built,
-                serde_json::json!({"username": "ada", "password": "nope"}),
+                serde_json::json!({"username": "lock", "password": "nope"}),
             )
             .unwrap_err();
             assert_eq!(wrong.message(), "the username or password is not right");
         }
         let locked = login_op(
             &built,
-            serde_json::json!({"username": "ada", "password": "correct horse battery"}),
+            serde_json::json!({"username": "lock", "password": "correct horse battery"}),
         )
         .unwrap_err();
         assert!(
             locked
                 .message()
-                .contains("too many failed logins for 'ada'"),
+                .contains("too many failed logins for 'lock'"),
             "{locked}"
         );
         assert!(matches!(locked, VogtError::LoginThrottled(_)));
@@ -770,7 +1023,7 @@ mod tests {
         create_user_op(
             &built,
             serde_json::json!({
-                "username": "ada",
+                "username": "disa",
                 "password": "correct horse battery",
                 "reason": "first user",
             }),
@@ -778,7 +1031,7 @@ mod tests {
         .unwrap();
         let wrong = login_op(
             &built,
-            serde_json::json!({"username": "ada", "password": "nope"}),
+            serde_json::json!({"username": "disa", "password": "nope"}),
         )
         .unwrap_err();
         let unknown = login_op(
@@ -793,14 +1046,14 @@ mod tests {
         let db = dir.join("declared.sqlite3");
         let conn = rusqlite::Connection::open(&db).unwrap();
         conn.execute(
-            "UPDATE actors SET disabled = 1 WHERE identity_ref = 'human:ada'",
+            "UPDATE actors SET disabled = 1 WHERE identity_ref = 'human:disa'",
             [],
         )
         .unwrap();
         drop(conn);
         let disabled = login_op(
             &built,
-            serde_json::json!({"username": "ada", "password": "correct horse battery"}),
+            serde_json::json!({"username": "disa", "password": "correct horse battery"}),
         )
         .unwrap_err();
         assert_eq!(disabled.message(), wrong.message());
@@ -826,5 +1079,93 @@ mod tests {
         )
         .unwrap();
         (dir, built)
+    }
+
+    /// Changing the password ends the sessions issued under the old one, and the
+    /// old password stops working.
+    #[test]
+    fn setting_a_password_revokes_the_sessions() {
+        throttle_reset();
+        let (dir, built) = fresh("passwd");
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "setp", "password": "correct horse battery", "reason": "first"}),
+        )
+        .unwrap();
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": "setp", "password": "correct horse battery"}),
+        )
+        .unwrap();
+        assert_eq!(session["token"]["kind"], "session");
+        let changed = set_password_op(
+            &built,
+            serde_json::json!({"username": "setp", "password": "a new passphrase", "reason": "rotated"}),
+        )
+        .unwrap();
+        assert_eq!(changed["user"]["username"], "setp");
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        let tokens = view
+            .tokens_for_actor(session["token"]["actor_id"].as_str().unwrap(), true)
+            .unwrap();
+        assert!(tokens.iter().all(|token| token.revoked_at.is_some()));
+        drop(view);
+        let old = login_op(
+            &built,
+            serde_json::json!({"username": "setp", "password": "correct horse battery"}),
+        )
+        .unwrap_err();
+        assert_eq!(old.message(), "the username or password is not right");
+        let fresh_session = login_op(
+            &built,
+            serde_json::json!({"username": "setp", "password": "a new passphrase"}),
+        )
+        .unwrap();
+        assert!(fresh_session["secret"]
+            .as_str()
+            .unwrap()
+            .starts_with("vogt_"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Removing a login keeps the actor and refuses the password afterwards.
+    #[test]
+    fn removing_a_user_keeps_the_actor() {
+        throttle_reset();
+        let (dir, built) = fresh("remove");
+        create_user_op(
+            &built,
+            serde_json::json!({"username": "gone", "password": "correct horse battery", "reason": "first"}),
+        )
+        .unwrap();
+        let removed = remove_user_op(
+            &built,
+            serde_json::json!({"username": "gone", "reason": "left"}),
+        )
+        .unwrap();
+        assert_eq!(removed["username"], "gone");
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        assert!(view.actor_by_identity("human:gone").unwrap().is_some());
+        assert!(view
+            .password_credential_by_username("gone")
+            .unwrap()
+            .is_none());
+        drop(view);
+        let refused = login_op(
+            &built,
+            serde_json::json!({"username": "gone", "password": "correct horse battery"}),
+        )
+        .unwrap_err();
+        assert_eq!(refused.message(), "the username or password is not right");
+        let missing = remove_user_op(
+            &built,
+            serde_json::json!({"username": "gone", "reason": "again"}),
+        )
+        .unwrap_err();
+        assert!(
+            missing.message().contains("no user named 'gone'"),
+            "{missing}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

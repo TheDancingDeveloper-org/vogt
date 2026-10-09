@@ -118,7 +118,7 @@ pub fn allows(
     }
 }
 
-fn effective<'a>(scopes: &[&'a str]) -> Vec<&'a str> {
+pub fn effective<'a>(scopes: &[&'a str]) -> Vec<&'a str> {
     let mut granted = Vec::new();
     for scope in scopes {
         let implied: &[&str] = IMPLIED
