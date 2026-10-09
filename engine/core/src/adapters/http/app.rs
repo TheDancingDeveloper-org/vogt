@@ -1082,6 +1082,55 @@ fn scan_number(body: &[u8], start: usize) -> Scan {
     Scan::End(at)
 }
 
+/// The length of a number whose exponent is above `1e308`, the largest f64 can
+/// hold, or `None` when the text is not such a number. The mantissa and the
+/// exponent sign are skipped the way `scan_number` reads them, and only the
+/// exponent's magnitude decides.
+fn overflowing_number(bytes: &[u8]) -> Option<usize> {
+    let mut at = 0;
+    if bytes.first() == Some(&b'-') {
+        at += 1;
+    }
+    let digits = if bytes.get(at) == Some(&b'0') {
+        1
+    } else {
+        count_digits(&bytes[at..])
+    };
+    if digits == 0 {
+        return None;
+    }
+    at += digits;
+    if bytes.get(at) == Some(&b'.') {
+        let fraction = count_digits(&bytes[at + 1..]);
+        if fraction == 0 {
+            return None;
+        }
+        at += 1 + fraction;
+    }
+    if !bytes
+        .get(at)
+        .is_some_and(|byte| *byte == b'e' || *byte == b'E')
+    {
+        return None;
+    }
+    at += 1;
+    if bytes
+        .get(at)
+        .is_some_and(|byte| *byte == b'+' || *byte == b'-')
+    {
+        at += 1;
+    }
+    let exponent = count_digits(&bytes[at..]);
+    if exponent == 0 {
+        return None;
+    }
+    let magnitude: i32 = std::str::from_utf8(&bytes[at..at + exponent])
+        .ok()?
+        .parse()
+        .ok()?;
+    (magnitude > 308).then_some(at + exponent)
+}
+
 fn count_digits(bytes: &[u8]) -> usize {
     bytes
         .iter()
@@ -1092,8 +1141,7 @@ fn count_digits(bytes: &[u8]) -> usize {
 /// `NaN`, `Infinity` and `-Infinity` are numbers to CPython's `json.loads` and a
 /// decode error to serde. Each bare token is rewritten as `null`, outside of
 /// strings, so the parse succeeds and the validator rejects the field for its
-/// type. A number too large for f64, such as `1e999`, is kept by
-/// `arbitrary_precision` and rejected the same way.
+/// type, as is a number whose exponent overflows f64, such as `1e999`.
 fn neutralise_nonfinite(body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len());
     let mut at = 0;
@@ -1123,6 +1171,15 @@ fn neutralise_nonfinite(body: &[u8]) -> Vec<u8> {
         if let Some(token) = token {
             out.extend(b"null");
             at += token.len();
+            continue;
+        }
+        // An exponent past what f64 can hold, such as `1e999`, overflows
+        // serde, which then reports a decode error. It is a number to
+        // CPython, so it is rewritten as `null` and the validator rejects the
+        // field for its type.
+        if let Some(end) = overflowing_number(&body[at..]) {
+            out.extend(b"null");
+            at += end;
             continue;
         }
         out.push(byte);

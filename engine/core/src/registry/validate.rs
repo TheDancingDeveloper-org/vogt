@@ -28,7 +28,7 @@ pub fn prepare(operation: &str, params: Value) -> Result<Value, VogtError> {
         ));
     };
     let given_value = Value::Object(given.clone());
-    apply_object(operation, "", schema, given, schema)
+    apply_object(operation, &[], schema, given, schema)
         .map(Value::Object)
         .map_err(|problems| {
             let problems: Vec<FieldError> = problems
@@ -47,7 +47,7 @@ pub fn prepare(operation: &str, params: Value) -> Result<Value, VogtError> {
 
 fn apply_object(
     operation: &str,
-    location: &str,
+    location: &[Loc],
     schema: &Value,
     mut given: Map<String, Value>,
     root: &Value,
@@ -71,7 +71,10 @@ fn apply_object(
         for name in unexpected {
             if let Some(value) = given.remove(&name) {
                 extras.push(finish(
-                    &pydantic(&at(location, &name), "Extra inputs are not permitted"),
+                    &pydantic(
+                        &descend(location, Loc::Field(name.clone())),
+                        "Extra inputs are not permitted",
+                    ),
                     &value,
                 ));
             }
@@ -79,8 +82,13 @@ fn apply_object(
     }
     for (name, property) in &properties {
         match given.remove(name) {
-            Some(value) => match check_value(operation, &at(location, name), property, value, root)
-            {
+            Some(value) => match check_value(
+                operation,
+                &descend(location, Loc::Field(name.clone())),
+                property,
+                value,
+                root,
+            ) {
                 Ok(checked) => {
                     resolved.insert(name.clone(), checked);
                 }
@@ -96,7 +104,7 @@ fn apply_object(
                     }
                 } else if required_of(schema).iter().any(|item| item == name) {
                     problems.push(FieldError::bare(&pydantic(
-                        &at(location, name),
+                        &descend(location, Loc::Field(name.clone())),
                         "Field required",
                     )));
                 }
@@ -111,13 +119,14 @@ fn apply_object(
     }
 }
 
-/// A nested field is `cells.cursor`; a top-level one is just its name.
-fn at(location: &str, name: &str) -> String {
-    if location.is_empty() {
-        name.to_string()
-    } else {
-        format!("{location}.{name}")
-    }
+/// The location one step deeper. A key is always one field step, even when the
+/// key itself contains a dot: `a.b` is a single field, never two.
+fn descend(location: &[Loc], step: Loc) -> Vec<Loc> {
+    location
+        .iter()
+        .cloned()
+        .chain(std::iter::once(step))
+        .collect()
 }
 
 fn required_of(schema: &Value) -> Vec<String> {
@@ -136,7 +145,7 @@ fn required_of(schema: &Value) -> Vec<String> {
 
 fn check_value(
     operation: &str,
-    name: &str,
+    location: &[Loc],
     property: &Value,
     value: Value,
     root: &Value,
@@ -155,20 +164,23 @@ fn check_value(
         // A null where the value must be one of an enum fails the enum, which
         // names the allowed values, rather than the underlying string check.
         if schema.get("enum").is_some() {
-            return check_string(operation, name, schema, value.clone())
+            return check_string(operation, location, schema, value.clone())
                 .map_err(|p| stamp(&p, &value));
         }
         return if schema.get("format").and_then(Value::as_str) == Some("date-time") {
             Err(stamp(
                 &[FieldError::bare(&pydantic(
-                    name,
+                    location,
                     "Input should be a valid datetime",
                 ))],
                 &value,
             ))
         } else {
             Err(stamp(
-                &[FieldError::bare(&pydantic(name, &expected_input(schema)))],
+                &[FieldError::bare(&pydantic(
+                    location,
+                    &expected_input(schema),
+                ))],
                 &value,
             ))
         };
@@ -182,13 +194,13 @@ fn check_value(
                     .unwrap_or("object");
                 return Err(stamp(
                     &[FieldError::bare(&pydantic(
-                        name,
+                        location,
                         &format!("Input should be a valid dictionary or instance of {model}"),
                     ))],
                     &value,
                 ));
             };
-            return apply_object(operation, name, schema, object, root).map(Value::Object);
+            return apply_object(operation, location, schema, object, root).map(Value::Object);
         }
     }
     // A field typed as another model arrives as `{"$ref": "#/$defs/Name"}`.
@@ -196,16 +208,18 @@ fn check_value(
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let Some(target) = root.pointer(reference.trim_start_matches('#')) else {
             return Err(vec![FieldError::bare(&format!(
-                "{name}\n  {name} refers to an unknown type"
+                "{}\n  {} refers to an unknown type",
+                dotted(location),
+                dotted(location)
             ))]);
         };
-        return check_value(operation, name, target, value, root);
+        return check_value(operation, location, target, value, root);
     }
     match schema.get("type").and_then(Value::as_str) {
         Some("string") => {
             if schema.get("format").and_then(Value::as_str) == Some("date-time") {
                 if let Some(coerced) = coerce_datetime(&value) {
-                    return check_string(operation, name, schema, coerced)
+                    return check_string(operation, location, schema, coerced)
                         .map_err(|problems| stamp(&problems, &value));
                 }
                 // A bool or null is the wrong type. A string that fails to parse
@@ -213,27 +227,28 @@ fn check_value(
                 if !value.is_string() {
                     return Err(stamp(
                         &[FieldError::bare(&pydantic(
-                            name,
+                            location,
                             "Input should be a valid datetime",
                         ))],
                         &value,
                     ));
                 }
             }
-            check_string(operation, name, schema, value.clone()).map_err(|p| stamp(&p, &value))
+            check_string(operation, location, schema, value.clone()).map_err(|p| stamp(&p, &value))
         }
         Some("integer") => {
-            check_integer(operation, name, schema, value.clone()).map_err(|p| stamp(&p, &value))
+            check_integer(operation, location, schema, value.clone()).map_err(|p| stamp(&p, &value))
         }
         Some("number") => {
-            check_number(operation, name, schema, value.clone()).map_err(|p| stamp(&p, &value))
+            check_number(operation, location, schema, value.clone()).map_err(|p| stamp(&p, &value))
         }
         Some("boolean") => {
-            check_boolean(operation, name, value.clone()).map_err(|p| stamp(&p, &value))
+            check_boolean(operation, location, value.clone()).map_err(|p| stamp(&p, &value))
         }
-        Some("array") => check_array(operation, name, schema, value, root),
-        Some("object") if operation == "preference.set" && name == "value" => {
-            check_preference_value(operation, name, value.clone()).map_err(|p| stamp(&p, &value))
+        Some("array") => check_array(operation, location, schema, value, root),
+        Some("object") if operation == "preference.set" && dotted(location) == "value" => {
+            check_preference_value(operation, location, value.clone())
+                .map_err(|p| stamp(&p, &value))
         }
         _ => Ok(value),
     }
@@ -263,17 +278,17 @@ fn nullable_branch(property: &Value) -> Option<&Value> {
 
 fn check_string(
     operation: &str,
-    name: &str,
+    location: &[Loc],
     schema: &Value,
     value: Value,
 ) -> Result<Value, Vec<FieldError>> {
     // `Name` and `Reason` strip whitespace before anything else, so a value of
     // " " fails the length check and " padded " is stored trimmed. Which fields
     // those are is recorded from the models (`strips.rs`), because pydantic's
-    // schema drops the constraint and the same field name is a plain `str` on
+    // schema drops the constraint and the same field location is a plain `str` on
     // other operations.
     let stripped = match &value {
-        Value::String(text) if strips_whitespace(operation, name) => {
+        Value::String(text) if strips_whitespace(operation, &dotted(location)) => {
             Value::String(text.trim().to_string())
         }
         _ => value,
@@ -288,14 +303,14 @@ fn check_string(
                 [rest @ .., last] => format!("{}' or '{last}", rest.join("', '")),
             };
             return Err(vec![FieldError::bare(&pydantic(
-                name,
+                location,
                 &format!("Input should be '{listed}'"),
             ))]);
         }
     }
     let Value::String(text) = &stripped else {
         return Err(vec![FieldError::bare(&pydantic(
-            name,
+            location,
             "Input should be a valid string",
         ))]);
     };
@@ -303,7 +318,7 @@ fn check_string(
         if (text.chars().count() as i64) < min {
             let noun = if min == 1 { "character" } else { "characters" };
             return Err(vec![FieldError::bare(&pydantic(
-                name,
+                location,
                 &format!("String should have at least {min} {noun}"),
             ))]);
         }
@@ -312,7 +327,7 @@ fn check_string(
         if (text.chars().count() as i64) > max {
             let noun = if max == 1 { "character" } else { "characters" };
             return Err(vec![FieldError::bare(&pydantic(
-                name,
+                location,
                 &format!("String should have at most {max} {noun}"),
             ))]);
         }
@@ -321,7 +336,7 @@ fn check_string(
         if let Ok(expression) = regex::Regex::new(pattern) {
             if !expression.is_match(text) {
                 return Err(vec![FieldError::bare(&pydantic(
-                    name,
+                    location,
                     &format!("String should match pattern '{pattern}'"),
                 ))]);
             }
@@ -331,7 +346,7 @@ fn check_string(
         // A bool or null never got past the string check above. A string that is
         // not a datetime is the parse failure, and the corpus's are all too short.
         return Err(vec![FieldError::bare(&pydantic(
-            name,
+            location,
             "Input should be a valid datetime or date, input is too short",
         ))]);
     }
@@ -361,7 +376,7 @@ fn coerce_datetime(value: &Value) -> Option<Value> {
 /// first; an unparseable string is the refusal.
 fn check_preference_value(
     _operation: &str,
-    name: &str,
+    location: &[Loc],
     value: Value,
 ) -> Result<Value, Vec<FieldError>> {
     let Value::String(text) = &value else {
@@ -370,23 +385,23 @@ fn check_preference_value(
     match serde_json::from_str::<Value>(text) {
         Ok(parsed @ Value::Object(_)) => Ok(parsed),
         Ok(_) => Err(vec![FieldError::bare(&pydantic(
-            name,
+            location,
             "Input should be a valid dictionary",
         ))]),
         Err(_) => Err(vec![FieldError::bare(&pydantic(
-            name,
+            location,
             "Value error, value is not valid JSON: Expecting value",
         ))]),
     }
 }
 
-fn strips_whitespace(operation: &str, name: &str) -> bool {
-    super::strips::STRIPS.contains(&(operation, name))
+fn strips_whitespace(operation: &str, field: &str) -> bool {
+    super::strips::STRIPS.contains(&(operation, field))
 }
 
 fn check_integer(
     operation: &str,
-    name: &str,
+    location: &[Loc],
     schema: &Value,
     value: Value,
 ) -> Result<Value, Vec<FieldError>> {
@@ -411,14 +426,14 @@ fn check_integer(
                 } else {
                     let bound = bound(schema, "maximum").unwrap_or(i64::MAX);
                     return Err(vec![FieldError::bare(&pydantic(
-                        name,
+                        location,
                         &format!("Input should be less than or equal to {bound}"),
                     ))]);
                 }
             }
             None => {
                 return Err(vec![FieldError::bare(&pydantic(
-                    name,
+                    location,
                     "Input should be a valid integer, got a number with a fractional part",
                 ))]);
             }
@@ -436,15 +451,19 @@ fn check_integer(
             }
         }
         return Err(vec![FieldError::bare(&pydantic(
-            name,
+            location,
             "Input should be a valid integer, unable to parse string as an integer",
         ))]);
     };
-    check_bounds(operation, name, schema, number)?;
+    check_bounds(operation, location, schema, number)?;
     Ok(Value::from(number))
 }
 
-fn check_boolean(_operation: &str, name: &str, value: Value) -> Result<Value, Vec<FieldError>> {
+fn check_boolean(
+    _operation: &str,
+    location: &[Loc],
+    value: Value,
+) -> Result<Value, Vec<FieldError>> {
     let flag = match &value {
         Value::Bool(flag) => Some(*flag),
         Value::Number(number) => match number.as_i64().or_else(|| {
@@ -467,7 +486,7 @@ fn check_boolean(_operation: &str, name: &str, value: Value) -> Result<Value, Ve
     match flag {
         Some(flag) => Ok(Value::from(flag)),
         None => Err(vec![FieldError::bare(&pydantic(
-            name,
+            location,
             "Input should be a valid boolean, unable to interpret input",
         ))]),
     }
@@ -475,7 +494,7 @@ fn check_boolean(_operation: &str, name: &str, value: Value) -> Result<Value, Ve
 
 fn check_number(
     _operation: &str,
-    name: &str,
+    location: &[Loc],
     schema: &Value,
     value: Value,
 ) -> Result<Value, Vec<FieldError>> {
@@ -485,14 +504,14 @@ fn check_number(
     };
     let Some(number) = number else {
         return Err(vec![FieldError::bare(&pydantic(
-            name,
+            location,
             "Input should be a valid number",
         ))]);
     };
     if let Some(min) = schema.get("minimum").and_then(Value::as_f64) {
         if number < min {
             return Err(vec![FieldError::bare(&pydantic(
-                name,
+                location,
                 &format!("Input should be greater than or equal to {min}"),
             ))]);
         }
@@ -500,7 +519,7 @@ fn check_number(
     if let Some(max) = schema.get("maximum").and_then(Value::as_f64) {
         if number > max {
             return Err(vec![FieldError::bare(&pydantic(
-                name,
+                location,
                 &format!("Input should be less than or equal to {max}"),
             ))]);
         }
@@ -510,14 +529,14 @@ fn check_number(
 
 fn check_bounds(
     _operation: &str,
-    name: &str,
+    location: &[Loc],
     schema: &Value,
     number: i64,
 ) -> Result<(), Vec<FieldError>> {
     if let Some(min) = bound(schema, "minimum") {
         if number < min {
             return Err(vec![FieldError::bare(&pydantic(
-                name,
+                location,
                 &format!("Input should be greater than or equal to {min}"),
             ))]);
         }
@@ -525,7 +544,7 @@ fn check_bounds(
     if let Some(max) = bound(schema, "maximum") {
         if number > max {
             return Err(vec![FieldError::bare(&pydantic(
-                name,
+                location,
                 &format!("Input should be less than or equal to {max}"),
             ))]);
         }
@@ -535,7 +554,7 @@ fn check_bounds(
 
 fn check_array(
     operation: &str,
-    name: &str,
+    location: &[Loc],
     schema: &Value,
     value: Value,
     root: &Value,
@@ -544,17 +563,17 @@ fn check_array(
         // A comma-joined string is the list the CLI sends for a repeated flag.
         if let Value::String(text) = &value {
             // `work.list`'s states is the one list the CLI sends comma-joined.
-            if operation == "work.list" && name == "states" {
+            if operation == "work.list" && dotted(location) == "states" {
                 let split = text
                     .split(',')
                     .map(|part| Value::String(part.trim().to_string()))
                     .collect();
-                return check_array(operation, name, schema, Value::Array(split), root);
+                return check_array(operation, location, schema, Value::Array(split), root);
             }
         }
         return Err(stamp(
             &[FieldError::bare(&pydantic(
-                name,
+                location,
                 "Input should be a valid list",
             ))],
             &value,
@@ -564,7 +583,7 @@ fn check_array(
         if (items.len() as i64) < min {
             return Err(stamp(
                 &[FieldError::bare(&pydantic(
-                    name,
+                    location,
                     &format!(
                         "List should have at least {min} item after validation, not {}",
                         items.len()
@@ -578,7 +597,7 @@ fn check_array(
         if (items.len() as i64) > max {
             return Err(stamp(
                 &[FieldError::bare(&pydantic(
-                    name,
+                    location,
                     &format!("List should have at most {max} items"),
                 ))],
                 &Value::Array(items),
@@ -593,7 +612,7 @@ fn check_array(
     for (index, item) in items.into_iter().enumerate() {
         match check_value(
             operation,
-            &format!("{name}.{index}"),
+            &descend(location, Loc::Index(index)),
             item_schema,
             item,
             root,
@@ -627,8 +646,8 @@ fn expected_input(schema: &Value) -> String {
 
 /// The field and the complaint, in the shape pydantic prints. The tail that names
 /// the rejected value is added by `finish` once that value is known.
-fn pydantic(field: &str, complaint: &str) -> String {
-    format!("{field}\n  {complaint}")
+fn pydantic(location: &[Loc], complaint: &str) -> String {
+    format!("{}\n  {complaint}", dotted(location))
 }
 
 /// Pydantic's error code. The complaint decides it, except that a null is
@@ -731,6 +750,7 @@ fn finish(problem: &str, input: &Value) -> FieldError {
     let Some((field, complaint)) = problem.split_once("\n  ") else {
         return FieldError::bare(problem);
     };
+    let loc = parse_loc(field);
     let code = error_code(complaint, input);
     let text = format!(
         "{field}\n  {complaint} [type={code}, input_value={}, input_type={}]\n    \
@@ -739,7 +759,7 @@ fn finish(problem: &str, input: &Value) -> FieldError {
         json_type(input)
     );
     FieldError {
-        loc: parse_loc(field),
+        loc,
         error_type: code.to_string(),
         msg: complaint.to_string(),
         input: input.clone(),
@@ -747,33 +767,54 @@ fn finish(problem: &str, input: &Value) -> FieldError {
     }
 }
 
-/// A dotted location back into pydantic's steps. `cells.2.lane_key` is a field,
-/// then an index, then a field. The validator only ever joins with a dot before
-/// an array index (`cells.2`) or after one (`cells.2.lane_key`), so a step that
-/// is not all digits keeps every dot inside it: a key literally named `nam.e`
-/// is one field, the way pydantic reports it.
+/// The steps back out of the dotted spelling `dotted` writes. An index is
+/// digits and a field step ends at the next `.` that introduces an index, so a
+/// key that itself contains a dot stays one field.
 fn parse_loc(field: &str) -> Vec<Loc> {
     let mut steps = Vec::new();
     let mut rest = field;
     while !rest.is_empty() {
-        let (index, after) = match rest.find('.') {
-            Some(dot) => (&rest[..dot], &rest[dot + 1..]),
+        let split = rest.match_indices('.').map(|(at, _)| at).find(|at| {
+            let step = &rest[..*at];
+            let digits = step.rsplit('.').next().unwrap_or("");
+            !digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())
+        });
+        let (head, after) = match split {
+            Some(at) => (&rest[..at], &rest[at + 1..]),
             None => (rest, ""),
         };
-        if let Ok(parsed) = index.parse::<usize>() {
-            if parsed.to_string() == index {
-                steps.push(Loc::Index(parsed));
-                rest = after;
-                continue;
+        // `cells.0` splits into the field and then the index.
+        let (step, index) = match head.rfind('.') {
+            Some(dot)
+                if head[dot + 1..].chars().all(|ch| ch.is_ascii_digit())
+                    && !head[dot + 1..].is_empty() =>
+            {
+                (&head[..dot], Some(&head[dot + 1..]))
             }
+            _ => (head, None),
+        };
+        if !step.is_empty() {
+            steps.push(match step.parse::<usize>() {
+                Ok(index) if index.to_string() == step => Loc::Index(index),
+                _ => Loc::Field(step.to_string()),
+            });
         }
-        let end = after
-            .find('.')
-            .map_or(rest.len(), |dot| index.len() + 1 + dot);
-        steps.push(Loc::Field(rest[..end].to_string()));
-        rest = rest[end..].trim_start_matches('.');
+        if let Some(index) = index {
+            steps.push(Loc::Index(index.parse::<usize>().unwrap()));
+        }
+        rest = after;
     }
     steps
+}
+
+/// The dotted spelling one complaint line uses. The structured `loc` is what a
+/// caller compares; this text is only the message.
+fn dotted(location: &[Loc]) -> String {
+    location
+        .iter()
+        .map(Loc::as_text)
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// A string keeps its first 24 and last 23 characters; anything else keeps 25 and
@@ -799,16 +840,16 @@ fn input_for(problem: &str, given: &Value) -> Value {
     let Some(field) = problem.split('\n').next() else {
         return given.clone();
     };
-    let mut path: Vec<&str> = field.split('.').collect();
+    let mut path = parse_loc(field);
     path.pop();
     let mut cursor = given;
-    for part in path {
-        cursor = match part.parse::<usize>() {
-            Ok(index) => match cursor.as_array().and_then(|items| items.get(index)) {
+    for part in &path {
+        cursor = match part {
+            Loc::Index(index) => match cursor.as_array().and_then(|items| items.get(*index)) {
                 Some(item) => item,
                 None => return given.clone(),
             },
-            Err(_) => match cursor.as_object().and_then(|fields| fields.get(part)) {
+            Loc::Field(name) => match cursor.as_object().and_then(|fields| fields.get(name)) {
                 Some(item) => item,
                 None => return given.clone(),
             },
