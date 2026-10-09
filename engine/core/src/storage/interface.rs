@@ -340,6 +340,9 @@ pub trait ReadView {
         actor_id: &str,
         include_revoked: bool,
     ) -> Result<Vec<Token>, crate::errors::VogtError>;
+    /// Whether first-run install mode has closed: a latch row, a non-agent
+    /// token, or a password login. Any one of them is enough.
+    fn install_closed(&self) -> Result<bool, crate::errors::VogtError>;
     fn list_auth_decisions(
         &self,
         decision: Option<&str>,

@@ -817,12 +817,23 @@ impl ReadView for SqliteReadView {
             row_token,
         )
     }
+    fn install_closed(&self) -> Result<bool, VogtError> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM install_latch) OR EXISTS (SELECT 1 FROM tokens t JOIN actors a ON a.id = t.actor_id WHERE a.kind <> 'agent') OR EXISTS (SELECT 1 FROM password_credentials)",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|found| found != 0)
+            .map_err(sql_err)
+    }
     fn list_auth_decisions(
         &self,
         decision: Option<&str>,
         limit: i64,
     ) -> Result<Vec<AuthDecision>, VogtError> {
-        match decision {
+        // An empty string is no filter, matching Python's `if decision`.
+        match decision.filter(|value| !value.is_empty()) {
             Some(decision) => many(
                 &self.conn,
                 "SELECT * FROM auth_decisions WHERE decision = ? ORDER BY at DESC, id DESC LIMIT ?",
@@ -1153,6 +1164,9 @@ impl<I: IdFactory> ReadView for SqliteWrite<'_, I> {
     }
     fn tokens_for_actor(&self, a: &str, b: bool) -> Result<Vec<Token>, VogtError> {
         self.view.tokens_for_actor(a, b)
+    }
+    fn install_closed(&self) -> Result<bool, VogtError> {
+        self.view.install_closed()
     }
     fn list_auth_decisions(&self, a: Option<&str>, b: i64) -> Result<Vec<AuthDecision>, VogtError> {
         self.view.list_auth_decisions(a, b)
@@ -2948,6 +2962,7 @@ mod more {
         .unwrap();
         txn.commit().unwrap();
         assert!(!latched(), "an agent token leaves install mode open");
+        assert!(!store.read().unwrap().install_closed().unwrap());
 
         let person = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
         let mut txn = store.write().unwrap();
@@ -2955,6 +2970,7 @@ mod more {
             .unwrap();
         txn.commit().unwrap();
         assert!(latched(), "a person's login closes it");
+        assert!(store.read().unwrap().install_closed().unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
