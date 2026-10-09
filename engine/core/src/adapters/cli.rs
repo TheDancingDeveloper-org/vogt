@@ -744,31 +744,82 @@ fn wrap_width() -> usize {
 }
 
 fn usage_synopsis() -> String {
-    // argparse breaks only when the next token would pass the wrap width, and
-    // the continuation lines up under the first argument.
+    // argparse's HelpFormatter._format_usage: optionals and positionals wrap as
+    // separate groups, so once the line breaks a positional always starts its
+    // own line. The wrap width is $COLUMNS (80 when unset) minus 2, and a part
+    // only moves to the next line when it would not fit.
     let width = wrap_width();
-    let indent = "usage: vogt ".len();
-    let parts = [
-        "[-h]",
-        "[--version]",
-        "[--data-dir DATA_DIR]",
-        "[--json]",
-        "<command> ...",
-    ];
-    let mut lines: Vec<String> = vec!["usage: vogt".to_string()];
-    for part in parts {
-        let line = lines.last().expect("a line exists");
-        if line.len() + 1 + part.len() <= width {
-            let line = lines.last_mut().expect("a line exists");
-            line.push(' ');
-            line.push_str(part);
+    let prog = "vogt";
+    let opt_parts = ["[-h]", "[--version]", "[--data-dir DATA_DIR]", "[--json]"];
+    let pos_parts = ["<command>", "..."];
+    let one_line = ["usage:", prog]
+        .into_iter()
+        .chain(opt_parts)
+        .chain(pos_parts)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = if one_line.len() <= width {
+        one_line
+    } else {
+        let prefix = "usage: ";
+        // A short program follows the prefix on the first line. A long one takes
+        // the line to itself and the arguments indent under the prefix.
+        let short = prefix.len() + prog.len() <= width * 3 / 4;
+        let indent = " ".repeat(if short {
+            prefix.len() + prog.len() + 1
         } else {
-            lines.push(format!("{:indent$}{part}", "", indent = indent));
+            prefix.len()
+        });
+        let opt_head: &[&str] = if short { &[prog] } else { &[] };
+        let mut lines = if short {
+            wrap_parts(Some(prefix), opt_head, &opt_parts, &indent, width)
+        } else {
+            let mut lines = vec![format!("{prefix}{prog}")];
+            lines.extend(wrap_parts(None, &[], &opt_parts, &indent, width));
+            lines
+        };
+        lines.extend(wrap_parts(None, &[], &pos_parts, &indent, width));
+        lines.join("\n")
+    };
+    format!("{body}\n")
+}
+
+/// One wrapped group, measured the way argparse's `get_lines` measures it. The
+/// running length starts one short of the lead, a part breaks the line only
+/// when adding it would pass the width, and `prefix` replaces the indent on the
+/// first line. `None` means there is no prefix, so the first line keeps the
+/// indent — which is how the positional group stays aligned.
+fn wrap_parts(
+    prefix: Option<&str>,
+    head: &[&str],
+    parts: &[&str],
+    indent: &str,
+    width: usize,
+) -> Vec<String> {
+    let lead = prefix.unwrap_or(indent);
+    let mut lines: Vec<Vec<&str>> = Vec::new();
+    let mut line: Vec<&str> = Vec::new();
+    let mut length = lead.len().saturating_sub(1);
+    for part in head.iter().copied().chain(parts.iter().copied()) {
+        if !line.is_empty() && length + 1 + part.len() > width {
+            lines.push(line);
+            line = Vec::new();
+            length = indent.len().saturating_sub(1);
         }
+        line.push(part);
+        length += part.len() + 1;
     }
-    let mut out = lines.join("\n");
-    out.push('\n');
-    out
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+        .into_iter()
+        .enumerate()
+        .map(|(index, parts)| {
+            let lead = if index == 0 { lead } else { indent };
+            format!("{lead}{}", parts.join(" "))
+        })
+        .collect()
 }
 
 fn format_top(registry: &OperationRegistry) -> String {
