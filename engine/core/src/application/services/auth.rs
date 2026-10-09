@@ -784,7 +784,7 @@ fn login_recorded<C: Clock + 'static, I: IdFactory + 'static>(
                     "scopes": scopes,
                     "name": token.name,
                     "kind": "session",
-                    "expires_at": expires_at.to_json(),
+                    "expires_at": expires_at.to_iso(),
                 }),
                 SESSION_OPENED_EVENT,
                 serde_json::json!({ "actor": holder.identity_ref }),
@@ -1013,6 +1013,36 @@ mod tests {
         // Each row reads the clock again, so the stepped clock puts them a
         // second apart rather than sharing the attempt's moment.
         assert!(allow.at.unix_seconds() > deny.at.unix_seconds());
+        // The audit payload writes the expiry the way Python's isoformat does,
+        // with `+00:00` rather than the `Z` the token's wire form uses.
+        let audit = view
+            .list_audit(&crate::storage::interface::AuditQuery {
+                limit: 10,
+                offset: 0,
+                actor_id: None,
+                operation: Some("auth.login".to_string()),
+                entity_id: None,
+                project_id: None,
+                since: None,
+                until: None,
+            })
+            .unwrap();
+        let login = audit
+            .iter()
+            .find(|row| row.operation == "auth.login")
+            .unwrap();
+        let expiry = session["token"]["expires_at"]
+            .as_str()
+            .unwrap()
+            .replace('Z', "+00:00");
+        let expected = crate::decisions::digest_of(&serde_json::json!({
+            "actor": "human:ada",
+            "scopes": ["read"],
+            "name": session["token"]["name"],
+            "kind": "session",
+            "expires_at": expiry,
+        }));
+        assert_eq!(login.payload_digest, expected);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
