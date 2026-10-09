@@ -399,6 +399,33 @@ mod tests {
     }
 
     #[test]
+    fn a_null_id_is_a_notification_and_a_bad_id_is_echoed_as_null() {
+        let silent = respond(
+            &message(json!({"jsonrpc": "2.0", "id": null, "method": "ping"})),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], false),
+        );
+        assert_eq!(silent.status, ACCEPTED);
+        assert!(silent.body.is_none());
+
+        let answered = respond(
+            &message(json!({"jsonrpc": "2.0", "id": 1.5, "method": "ping"})),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], false),
+        );
+        assert_eq!(answered.body.unwrap()["id"], Value::Null);
+
+        let object_id = respond(
+            &message(json!({"jsonrpc": "2.0", "id": {"x": 1}, "method": "nope"})),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], false),
+        );
+        let body = object_id.body.unwrap();
+        assert_eq!(body["id"], Value::Null);
+        assert_eq!(body["error"]["code"], -32601);
+    }
+
+    #[test]
     fn an_unknown_tool_is_a_protocol_error_and_records_nothing() {
         let response = respond(
             &message(json!({

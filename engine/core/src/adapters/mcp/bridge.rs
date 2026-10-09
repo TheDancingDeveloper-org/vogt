@@ -236,7 +236,9 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
     }
 
     fn write(&self, output: &mut String, message: &Value) {
-        output.push_str(&message.to_string());
+        // Python's `json.dumps` defaults: spaced separators and escaped
+        // non-ASCII, so a raw U+2028 cannot split a line the client reads.
+        output.push_str(&crate::decisions::python_json_dumps(message, false));
         output.push('\n');
     }
 
@@ -256,8 +258,11 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
     }
 
     fn post(&self, url: &str, message: &Value) -> Result<(u16, Vec<u8>), String> {
-        self.transport
-            .exchange(url, &self.headers(), message.to_string().as_bytes())
+        self.transport.exchange(
+            url,
+            &self.headers(),
+            crate::decisions::python_json_dumps(message, false).as_bytes(),
+        )
     }
 }
 
@@ -288,12 +293,16 @@ pub fn resolve_token(env: &HashMap<String, String>) -> Option<String> {
     // token is the only acceptable source: a whitespace-only token resolves to
     // nothing rather than falling back to the shared file, which would file
     // this session's writes under another identity.
+    // The session branch is taken only when the session actually supplied a
+    // token. An absent or empty one falls through to the token file: the
+    // session has not overridden anything, so the shared credential stands.
+    // A whitespace-only token is an override that strips to nothing, and that
+    // resolves to None rather than to the file.
     if env.get("VOGT_SESSION_ID").is_some_and(|id| !id.is_empty()) {
-        return env
-            .get(HTTP_TOKEN_ENV)
-            .map(|token| token.trim())
-            .filter(|token| !token.is_empty())
-            .map(str::to_owned);
+        if let Some(token) = env.get(HTTP_TOKEN_ENV).filter(|token| !token.is_empty()) {
+            let token = token.trim();
+            return (!token.is_empty()).then(|| token.to_owned());
+        }
     }
     if let Some(token) = read_token(env.get(TOKEN_FILE_ENV).map(String::as_str)) {
         return Some(token);
@@ -480,6 +489,24 @@ mod tests {
             .warned
             .iter()
             .any(|warning| warning.contains("2 tools")));
+    }
+
+    #[test]
+    fn an_empty_session_token_falls_through_to_the_file() {
+        let dir = std::env::temp_dir().join(format!("vogt-token-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("token");
+        std::fs::write(&file, "from-file\n").unwrap();
+        let path = file.display().to_string();
+        let mut env = HashMap::new();
+        env.insert("VOGT_SESSION_ID".to_owned(), "s".to_owned());
+        env.insert(TOKEN_FILE_ENV.to_owned(), path.clone());
+        assert_eq!(resolve_token(&env).as_deref(), Some("from-file"));
+        env.insert(HTTP_TOKEN_ENV.to_owned(), String::new());
+        assert_eq!(resolve_token(&env).as_deref(), Some("from-file"));
+        env.insert(HTTP_TOKEN_ENV.to_owned(), "   ".to_owned());
+        assert_eq!(resolve_token(&env), None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

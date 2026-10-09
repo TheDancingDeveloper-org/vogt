@@ -207,6 +207,12 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
     /// present, and answers it.
     fn message_id(&self, message: &Map<String, Value>) -> Option<Value> {
         let raw = message.get("id")?;
+        // A JSON null is an absent id on both transports: Python's
+        // `message.get("id") is None` is true for it, so the message is a
+        // notification and gets no answer.
+        if raw.is_null() {
+            return None;
+        }
         let acceptable = match raw {
             Value::String(_) => true,
             Value::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
@@ -216,8 +222,13 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             Value::Bool(_) => true,
             _ => false,
         };
-        if acceptable || self.transport == McpTransport::Http {
+        if acceptable {
             Some(raw.clone())
+        } else if self.transport == McpTransport::Http {
+            // http.py echoes the raw id only when it is a str or an int, and
+            // answers with a null id otherwise. A float, an object or an array
+            // is still a request — only an absent id is a notification.
+            Some(Value::Null)
         } else {
             None
         }
@@ -371,7 +382,7 @@ pub fn serve_stdio<G: ToolGrant>(
     let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Stdio);
     for line in input.lines() {
         if let Some(response) = dispatcher.handle_line(line) {
-            output.push_str(&response.to_string());
+            output.push_str(&crate::decisions::python_json_dumps(&response, false));
             output.push('\n');
         }
     }
