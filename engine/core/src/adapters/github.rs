@@ -279,18 +279,6 @@ pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
     crate::adapters::forge::repo_of(repo_url)
 }
 
-/// What a forge permits in an owner or repository name. Owner and repo are
-/// interpolated into URL builds, so a value carrying `..`, `?`, `#` or `%`
-/// would steer the stored credential's request.
-fn valid_name(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphanumeric() => {}
-        _ => return false,
-    }
-    chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
-}
-
 fn quote(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for byte in text.bytes() {

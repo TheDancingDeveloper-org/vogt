@@ -367,8 +367,10 @@ impl AskPass {
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>()
         ));
-        // 0700 at creation, so there is no umask window and no chmod to skip.
+        // Recursive, because callers pass data_dir/"tmp", which may not exist
+        // yet, and 0700 at creation so there is no umask window.
         let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
@@ -389,7 +391,12 @@ impl AskPass {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).ok();
+            if let Err(error) = fs::set_permissions(&script, fs::Permissions::from_mode(0o700)) {
+                let _ = fs::remove_dir_all(&dir);
+                return Err(VogtError::GitUnavailable(format!(
+                    "could not make the helper executable: {error}"
+                )));
+            }
         }
         env.insert(
             "GIT_ASKPASS".to_string(),
@@ -416,15 +423,6 @@ impl Drop for AskPass {
     }
 }
 
-#[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).ok();
-}
-
-#[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) {}
-
 fn run_git(
     args: &[&str],
     cwd: &Path,
@@ -440,6 +438,17 @@ fn run_git(
         .stderr(Stdio::piped());
     if let Some(env) = env {
         command.env_clear().envs(env);
+    }
+    // Its own session, so a timeout can kill git and the helpers it spawned.
+    // Killing git alone leaves git-remote-http holding the pipes, and the
+    // reader threads then block well past the timeout.
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc_setsid();
+            Ok(())
+        });
     }
     let mut child = command.spawn().map_err(|error| {
         VogtError::GitUnavailable(format!(
@@ -459,10 +468,13 @@ fn run_git(
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() > timeout => {
+                kill_group(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = out_thread.join();
-                let _ = err_thread.join();
+                // The readers exit once the pipes close. Bound the wait anyway,
+                // so a grandchild that somehow survives cannot stall the caller.
+                join_bounded(out_thread);
+                join_bounded(err_thread);
                 return Err(VogtError::GitUnavailable(format!(
                     "git {} timed out after {}s",
                     args.first().copied().unwrap_or(""),
@@ -490,6 +502,45 @@ fn run_git(
         )));
     }
     Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+#[cfg(unix)]
+unsafe fn libc_setsid() {
+    extern "C" {
+        fn setsid() -> i32;
+    }
+    let _ = setsid();
+}
+
+/// Kill the process group `id` leads, so git's helpers die with it.
+fn kill_group(id: u32) {
+    #[cfg(unix)]
+    unsafe {
+        libc_killpg(id);
+    }
+    #[cfg(not(unix))]
+    let _ = id;
+}
+
+#[cfg(unix)]
+unsafe fn libc_killpg(id: u32) {
+    extern "C" {
+        fn killpg(group: i32, signal: i32) -> i32;
+    }
+    // SIGKILL, so nothing traps it and lingers.
+    let _ = killpg(id as i32, 9);
+}
+
+/// Join a reader thread, but only for a short while. After the process group
+/// is dead the pipes close and it finishes immediately; this only guards the
+/// case where something still holds one.
+fn join_bounded(handle: std::thread::JoinHandle<Vec<u8>>) {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = done_tx.send(());
+    });
+    let _ = done_rx.recv_timeout(Duration::from_secs(2));
 }
 
 /// Read a child's pipe, keeping the first 8 MiB so a runaway command cannot
