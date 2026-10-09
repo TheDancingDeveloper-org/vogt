@@ -18,6 +18,7 @@ mod errors;
 mod git_story;
 mod merge;
 mod observability;
+#[allow(dead_code)] // Consumed by the HTTP, CLI and MCP adapters (P2.3–P2.5).
 mod registry;
 mod storage;
 
