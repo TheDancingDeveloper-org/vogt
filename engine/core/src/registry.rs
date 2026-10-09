@@ -157,6 +157,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "observations.prune" => Some(crate::application::observations::observations_prune_op),
         "why" => Some(crate::application::views::why_op),
         "backlog" => Some(crate::application::views::backlog_op),
+        "bugs" => Some(crate::application::views::bugs_op),
         "work.list" => Some(crate::application::services::work::list_op),
         "project.register" => Some(crate::application::projects::register_op),
         "project.create" => Some(crate::application::projects::create_op),

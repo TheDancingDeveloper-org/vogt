@@ -1176,5 +1176,33 @@
     "body": null,
     "exit": 1,
     "operation": "backlog"
+  },
+  {
+    "body": {
+      "closed_upstream": 0,
+      "declared": 0,
+      "excluded_unlinked": 0,
+      "freshness": {
+        "age_seconds": null,
+        "collectors": "<volatile>",
+        "detail": "no collector has completed a sweep yet",
+        "oldest_relevant_sweep": null,
+        "status": "never_swept"
+      },
+      "items": [],
+      "link_state": null,
+      "next_offset": null,
+      "observed": 0,
+      "scope": "global",
+      "suppressed": 0,
+      "total_considered": 0
+    },
+    "exit": 0,
+    "operation": "bugs"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "bugs"
   }
 ]

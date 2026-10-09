@@ -249,10 +249,15 @@ fn gather<C: Clock, I: IdFactory>(
         .project
         .map(|slug| crate::application::resolve::project(&view, slug))
         .transpose()?;
+    // Kinds and priorities are not part of this filter. Python loads the whole
+    // candidate set, scores it, and only then drops rows by kind and priority
+    // (`views.py:556-559`). The declared half reads no clock of its own, but the
+    // observed half reads once per row, so the set it reads has to be the
+    // unfiltered one. The drop happens after those reads, below.
     let filter = crate::storage::interface::WorkFilter {
         project_id: project.as_ref().map(|project| project.id.clone()),
-        kinds: query.kinds.clone(),
-        priorities: query.priorities.clone(),
+        kinds: Vec::new(),
+        priorities: Vec::new(),
         assignee_actor_id: query
             .assignee
             .map(|identity| {
@@ -391,14 +396,11 @@ fn gather<C: Clock, I: IdFactory>(
             // Counted before the kind and priority filters, as Python's
             // `observed.append` is: a filtered-out subject still counts.
             observed_count += 1;
-            if !query.kinds.is_empty() && !query.kinds.iter().any(|wanted| wanted == kind) {
-                continue;
-            }
-            if !query.priorities.is_empty()
-                && !query.priorities.iter().any(|wanted| wanted == &priority)
-            {
-                continue;
-            }
+            // The kind and priority filters come after scoring, not here.
+            // Python scores the whole candidate set (`views.py:554`) and only
+            // then drops rows (`views.py:556-559`), and every candidate reads
+            // the clock inside `trust_for` on the way. Filtering first spends
+            // fewer reads, so the scores land a few seconds fresher.
             let trust = trust_for(
                 ctx,
                 observation.observed_at,
@@ -426,6 +428,21 @@ fn gather<C: Clock, I: IdFactory>(
         // observed row inside `trust_for` (`views.py:189`) while assembling
         // them, then once at `views.py:554` for `_score_all`. Both halves
         // score from that last read, so it comes after the observed loop.
+        // Python scores the whole candidate set and only then filters by kind
+        // and priority (`views.py:554-559`). The clock reads above already
+        // happened for every row, which is what the scores are counted from, so
+        // dropping the unwanted rows here changes nothing about them.
+        let observed_rows: Vec<ObservedScore<'_>> = observed_rows
+            .into_iter()
+            .filter(|row| {
+                (query.kinds.is_empty() || query.kinds.iter().any(|wanted| wanted == row.kind))
+                    && (query.priorities.is_empty()
+                        || query
+                            .priorities
+                            .iter()
+                            .any(|wanted| wanted == &row.priority))
+            })
+            .collect();
         let closed = ctx
             .observed
             .count_closed(&kinds, project.as_ref().map(|project| project.id.as_str()))?
@@ -435,6 +452,19 @@ fn gather<C: Clock, I: IdFactory>(
     } else {
         // No observed rows, so no `trust_for` reads: the scoring read is the
         // second one, straight after the git-signals read.
+        // Python scores every declared candidate and filters afterwards
+        // (`views.py:556-559`). None of these rows read the clock, so the drop
+        // can happen before scoring without moving a timestamp.
+        let declared_rows: Vec<DeclaredScore<'_>> = declared_rows
+            .into_iter()
+            .filter(|row| {
+                let kind = row.item.kind.to_string();
+                let priority = row.item.priority.to_string();
+                (query.kinds.is_empty() || query.kinds.iter().any(|wanted| wanted == &kind))
+                    && (query.priorities.is_empty()
+                        || query.priorities.iter().any(|wanted| wanted == &priority))
+            })
+            .collect();
         let scored = score_rows(&declared_rows, &[], now_of(&ctx.clock));
         (scored, 0, 0, 0)
     };
@@ -671,6 +701,71 @@ fn backlog<C: Clock, I: IdFactory>(
         "items": page,
         "total_considered": total,
         "next_offset": (!page.is_empty() && following < total).then_some(following),
+        "declared": gathered.declared,
+        "observed": gathered.observed,
+        "suppressed": gathered.suppressed,
+        "closed_upstream": gathered.closed,
+        "link_state": project.map(|_| "linked"),
+        "excluded_unlinked": gathered.excluded_unlinked,
+        "scope": project.unwrap_or("global"),
+        "freshness": freshness,
+    }))
+}
+
+/// `bugs`, as the registry calls it.
+pub fn bugs_op(ctx: &Built, params: serde_json::Value) -> Result<serde_json::Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| bugs(ctx, params))
+}
+
+/// Open bugs across every project. Ports `bugs`.
+///
+/// The backlog's gather narrowed to kind `bug`, with no initiative or trust
+/// filter. The rows come back whole, and `next_offset` stays null: Python
+/// slices the ranked list and never sets the page cursor.
+fn bugs<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, VogtError> {
+    let project = params.get("project").and_then(serde_json::Value::as_str);
+    let limit = params
+        .get("limit")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(50);
+    let offset = params
+        .get("offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    if let Some(project) = project {
+        if let Some(marker) = unlinked_scope(ctx, project)? {
+            return Ok(marker);
+        }
+    }
+    let query = GatherQuery {
+        project,
+        kinds: vec!["bug".to_string()],
+        priorities: string_list(params.get("priorities")),
+        assignee: params.get("assignee").and_then(serde_json::Value::as_str),
+        initiative: None,
+        label: params.get("label").and_then(serde_json::Value::as_str),
+        trust_states: Vec::new(),
+        include_prs: true,
+    };
+    let gathered = gather(ctx, &query)?;
+    let freshness =
+        crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
+    let total = gathered.ranked.len() as i64;
+    let start = offset.max(0) as usize;
+    let page: Vec<serde_json::Value> = gathered
+        .ranked
+        .iter()
+        .skip(start)
+        .take(limit.max(0) as usize)
+        .map(|row| row.value.clone())
+        .collect();
+    Ok(serde_json::json!({
+        "items": page,
+        "total_considered": total,
+        "next_offset": serde_json::Value::Null,
         "declared": gathered.declared,
         "observed": gathered.observed,
         "suppressed": gathered.suppressed,

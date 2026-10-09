@@ -333,6 +333,22 @@
    }
   },
   {
+   "operation": "bugs",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "bugs",
+   "params": {
+    "project": "missing"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
    "operation": "install.bootstrap",
    "http": {
     "method": "POST",
