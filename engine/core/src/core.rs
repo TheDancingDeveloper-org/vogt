@@ -664,6 +664,21 @@ vocab!(WriteBackOutcome {
     Skipped
 });
 
+/// Pydantic defaults for fields a caller may omit. `Default` on the enum
+/// itself would default every vocabulary's first variant, including the ones
+/// Python requires.
+fn initiative_state_default() -> InitiativeState {
+    InitiativeState::Open
+}
+
+fn link_relation_default() -> LinkRelation {
+    LinkRelation::Completion
+}
+
+fn token_kind_default() -> TokenKind {
+    TokenKind::Api
+}
+
 pub type LifecycleState = &'static str;
 
 pub const OPEN: &str = "open";
@@ -1166,8 +1181,11 @@ pub struct Initiative {
     pub id: String,
     pub slug: String,
     pub title: String,
+    #[serde(default)]
     pub body: String,
+    #[serde(default = "initiative_state_default")]
     pub state: InitiativeState,
+    #[serde(default)]
     pub weight: i64,
     pub created_at: Moment,
     pub updated_at: Moment,
@@ -1232,6 +1250,7 @@ pub struct WorkLink {
     pub subject_key: String,
     pub origin_kind: String,
     pub source_url: Option<String>,
+    #[serde(default = "link_relation_default")]
     pub relation: LinkRelation,
     pub created_at: Moment,
 }
@@ -1261,6 +1280,7 @@ pub struct Token {
     pub actor_identity_ref: Option<String>,
     pub name: String,
     pub scopes: Vec<String>,
+    #[serde(default = "token_kind_default")]
     pub kind: TokenKind,
     pub created_at: Moment,
     pub expires_at: Option<Moment>,
@@ -1755,6 +1775,30 @@ mod tests {
             serde_json::to_string(&WriteBackOutcome::Skipped).unwrap(),
             "\"skipped\""
         );
+    }
+
+    /// A field pydantic defaults must decode when the payload omits it.
+    #[test]
+    fn omitted_fields_take_the_pydantic_default() {
+        let initiative: Initiative = serde_json::from_str(
+            r#"{"id":"i","slug":"s","title":"t","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(initiative.body, "");
+        assert_eq!(initiative.state, InitiativeState::Open);
+        assert_eq!(initiative.weight, 0);
+
+        let link: WorkLink = serde_json::from_str(
+            r#"{"work_item_id":"w","subject_key":"k","origin_kind":"git","created_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(link.relation, LinkRelation::Completion);
+
+        let token: Token = serde_json::from_str(
+            r#"{"id":"t","actor_id":"a","name":"n","scopes":[],"created_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(token.kind, TokenKind::Api);
     }
 
     #[test]

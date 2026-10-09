@@ -1827,6 +1827,7 @@ mod tests {
 
     #[test]
     fn deploy_lane_requires_a_source_and_http() {
+        let _guard = clean();
         let bad = serde_json::json!([{"name": "dev", "project": "app"}]);
         let mut overrides = Map::new();
         overrides.insert("deploy_lanes".to_string(), bad);
@@ -1849,6 +1850,7 @@ mod tests {
 
     #[test]
     fn activity_roots_and_services_are_checked() {
+        let _guard = clean();
         let mut overrides = Map::new();
         overrides.insert(
             "agent_activity_roots".to_string(),
@@ -1873,6 +1875,7 @@ mod tests {
 
     #[test]
     fn numeric_bounds_and_sqlite_values() {
+        let _guard = clean();
         let mut overrides = Map::new();
         overrides.insert("session_ttl_days".to_string(), Value::from(0));
         assert!(load_config(&overrides).is_err());
