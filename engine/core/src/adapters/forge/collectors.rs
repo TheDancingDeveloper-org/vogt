@@ -52,10 +52,11 @@ const JOB_LOOKUP_BUDGET: i64 = 5;
 
 /// How many notification authors one sweep may resolve. The rest wait.
 ///
-/// `actors.py`'s `RESOLVE_BUDGET`: a first sweep over a busy repository must
+/// [`super::actors::RESOLVE_BUDGET`]: a first sweep over a busy repository must
 /// not spend the hourly rate limit, so the remainder stay unknown this sweep
-/// and are resolved on the next.
-const RESOLVE_BUDGET: i64 = 30;
+/// and are resolved on the next. The constant lives with the resolver; this is
+/// the collector's starting budget.
+const RESOLVE_BUDGET: i64 = super::actors::RESOLVE_BUDGET;
 
 /// The previous observation of a subject, for the caches the collectors carry
 /// forward (failed jobs, notification authors). Read-only: nothing here writes.
@@ -65,8 +66,8 @@ pub trait PriorObservations {
 
 /// Who caused a notification, resolved at collect time (never on a read path).
 ///
-/// `actors.py` implements this; it lands in the next chunk, so the collector
-/// depends on the seam. `None` means "not resolved this sweep".
+/// [`super::actors::ActorResolver`] implements this. `None` means "not resolved
+/// this sweep".
 pub trait ActorBlock {
     fn actor_block(
         &self,

@@ -16,8 +16,9 @@
 //!   a failed read is remembered briefly as "unknown" rather than retried per
 //!   thread.
 
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -51,10 +52,12 @@ struct OrgEntry {
 
 /// Process-wide caches for author and org-membership reads.
 ///
-/// `now` stands in for the monotonic clock, held in a cell so a test can move
-/// it forward and watch a cached org list expire.
+/// `started` is the monotonic origin, the way Python's `time.monotonic` is, so
+/// a member list lasts an hour and a failed read five minutes. `override_now`
+/// replaces it for a test that wants an entry to expire without waiting.
 pub struct ActorResolver {
-    now: Cell<f64>,
+    started: Instant,
+    override_now: RefCell<Option<f64>>,
     authors: RefCell<VecDeque<((String, String), ForgeActor)>>,
     orgs: RefCell<Vec<(String, String, OrgEntry)>>,
 }
@@ -62,15 +65,24 @@ pub struct ActorResolver {
 impl ActorResolver {
     pub fn new() -> Self {
         Self {
-            now: Cell::new(0.0),
+            started: Instant::now(),
+            override_now: RefCell::new(None),
             authors: RefCell::new(VecDeque::new()),
             orgs: RefCell::new(Vec::new()),
         }
     }
 
-    /// Move the clock, for a test that wants a cache entry to expire.
+    /// Seconds since construction, unless a test has pinned the clock.
+    fn now(&self) -> f64 {
+        self.override_now
+            .borrow()
+            .unwrap_or_else(|| self.started.elapsed().as_secs_f64())
+    }
+
+    /// Pin the clock, for a test that wants a cache entry to expire. Production
+    /// never calls this; the monotonic clock above is what a sweep sees.
     pub fn set_now(&self, now: f64) {
-        self.now.set(now);
+        *self.override_now.borrow_mut() = Some(now);
     }
 
     pub fn clear(&self) {
@@ -84,7 +96,7 @@ impl ActorResolver {
     /// does not become one retry per thread.
     pub fn org_members(&self, provider: &dyn ForgeProvider, repo: &RepoRef) -> Option<Vec<String>> {
         let key = (repo.host.clone(), repo.owner.to_ascii_lowercase());
-        let now = self.now.get();
+        let now = self.now();
         let mut orgs = self.orgs.borrow_mut();
         if let Some((_, _, entry)) = orgs
             .iter()
@@ -186,11 +198,12 @@ impl ActorResolver {
         }?;
         let org_member = match &actor.login {
             Some(login)
-                if !actor
-                    .user_type
-                    .as_deref()
-                    .unwrap_or("")
-                    .eq_ignore_ascii_case("bot") =>
+                if !login.is_empty()
+                    && !actor
+                        .user_type
+                        .as_deref()
+                        .unwrap_or("")
+                        .eq_ignore_ascii_case("bot") =>
             {
                 self.org_members(provider, repo).map(|members| {
                     members
@@ -465,6 +478,7 @@ mod tests {
         stub.actor.set(Some(Ok(Some(actor("ada")))));
         stub.members.set(Some(Ok(Some(vec!["ada".into()]))));
         let resolver = ActorResolver::new();
+        resolver.set_now(0.0);
         let mut budget = RESOLVE_BUDGET;
         let first = resolver
             .resolve(
@@ -502,6 +516,7 @@ mod tests {
         let stub = Stub::new();
         stub.actor.set(Some(Ok(Some(actor("ada")))));
         let resolver = ActorResolver::new();
+        resolver.set_now(0.0);
         let mut budget = 0;
         assert!(resolver
             .resolve(
@@ -520,6 +535,7 @@ mod tests {
         let stub = Stub::new();
         stub.actor.set(Some(Err("rate limited".into())));
         let resolver = ActorResolver::new();
+        resolver.set_now(0.0);
         let mut budget = 5;
         assert!(resolver
             .resolve(
@@ -534,11 +550,69 @@ mod tests {
     }
 
     #[test]
+    fn a_member_list_expires_and_is_read_again() {
+        let stub = Stub::new();
+        stub.actor.set(Some(Ok(Some(actor("ada")))));
+        stub.members.set(Some(Ok(Some(vec!["ada".into()]))));
+        let resolver = ActorResolver::new();
+        resolver.set_now(0.0);
+        let mut budget = 2;
+        resolver
+            .resolve(
+                &stub,
+                &repo(),
+                &note(Some("/c/1"), None, None),
+                None,
+                &mut budget,
+            )
+            .unwrap();
+        assert_eq!(stub.member_reads.get(), 1);
+        // An hour later the list is stale and read again.
+        resolver.set_now(ORG_TTL_SECONDS + 1.0);
+        stub.actor.set(Some(Ok(Some(actor("bea")))));
+        stub.members.set(Some(Ok(Some(vec!["bea".into()]))));
+        resolver
+            .resolve(
+                &stub,
+                &repo(),
+                &note(Some("/c/2"), None, None),
+                None,
+                &mut budget,
+            )
+            .unwrap();
+        assert_eq!(stub.member_reads.get(), 2);
+    }
+
+    #[test]
+    fn an_empty_login_is_not_a_member_lookup() {
+        let stub = Stub::new();
+        let mut empty = actor("ada");
+        empty.login = Some(String::new());
+        stub.actor.set(Some(Ok(Some(empty))));
+        stub.members.set(Some(Ok(Some(vec!["ada".into()]))));
+        let resolver = ActorResolver::new();
+        resolver.set_now(0.0);
+        let mut budget = 1;
+        let block = resolver
+            .resolve(
+                &stub,
+                &repo(),
+                &note(Some("/c/1"), None, None),
+                None,
+                &mut budget,
+            )
+            .unwrap();
+        assert_eq!(block["org_member"], Value::Null);
+        assert_eq!(stub.member_reads.get(), 0);
+    }
+
+    #[test]
     fn the_prior_observation_is_the_cache_that_survives_a_restart() {
         let stub = Stub::new();
         let prior = json!({"actor": {"login": "ada", "user_type": "User",
             "resolved_from": "/c/1", "resolved_for": "t1"}});
         let resolver = ActorResolver::new();
+        resolver.set_now(0.0);
         let mut budget = 1;
         let block = resolver
             .resolve(
@@ -558,6 +632,7 @@ mod tests {
     fn a_check_suite_with_no_url_is_the_actions_bot() {
         let stub = Stub::new();
         let resolver = ActorResolver::new();
+        resolver.set_now(0.0);
         let mut budget = 1;
         let block = resolver
             .resolve(
@@ -583,6 +658,7 @@ mod tests {
         stub.actor.set(Some(Ok(Some(actor("ada")))));
         stub.members.set(Some(Err("unavailable".into())));
         let resolver = ActorResolver::new();
+        resolver.set_now(0.0);
         let mut budget = 2;
         let block = resolver
             .resolve(
