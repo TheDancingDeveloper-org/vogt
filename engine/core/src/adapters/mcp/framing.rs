@@ -362,17 +362,7 @@ pub(super) fn json_falsy(value: &Value) -> bool {
 
 /// Python's `repr` for a string: single quotes, with the usual escapes.
 pub(super) fn python_repr(text: &str) -> String {
-    let mut out = String::from("'");
-    for ch in text.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '\'' => out.push_str("\\'"),
-            '\n' => out.push_str("\\n"),
-            other => out.push(other),
-        }
-    }
-    out.push('\'');
-    out
+    crate::core::py_repr(text)
 }
 
 /// Read newline-delimited JSON-RPC from `input`, writing each response to
