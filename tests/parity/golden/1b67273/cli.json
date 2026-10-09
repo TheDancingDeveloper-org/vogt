@@ -504,5 +504,207 @@
     },
     "exit": 0,
     "operation": "migrate"
+  },
+  {
+    "body": {
+      "checked_at": null,
+      "contract_version": "v1",
+      "criteria": [
+        {
+          "applicable": true,
+          "detail": "directory exists",
+          "rule": "path.exists",
+          "satisfied": true,
+          "target": "<root>",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "AGENTS.md is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "AGENTS.md",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "README.md is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "README.md",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "LICENSE is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "LICENSE",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "docs/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "docs",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "design/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "design",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "src/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "src",
+          "tracked": null
+        }
+      ],
+      "detail": null,
+      "failing": [
+        {
+          "applicable": true,
+          "detail": "AGENTS.md is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "AGENTS.md",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "README.md is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "README.md",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "LICENSE is missing",
+          "rule": "required_file",
+          "satisfied": false,
+          "target": "LICENSE",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "docs/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "docs",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "design/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "design",
+          "tracked": null
+        },
+        {
+          "applicable": true,
+          "detail": "src/ is missing",
+          "rule": "required_dir",
+          "satisfied": false,
+          "target": "src",
+          "tracked": null
+        }
+      ],
+      "inapplicable": [],
+      "path": "<root>",
+      "project": null,
+      "recommendations": [
+        {
+          "instruction": "`project scaffold` writes AGENTS.md into this project without overwriting anything that is already there.",
+          "remedy": "scaffold",
+          "rule": "required_file",
+          "target": "AGENTS.md"
+        },
+        {
+          "instruction": "`project scaffold` writes README.md into this project without overwriting anything that is already there.",
+          "remedy": "scaffold",
+          "rule": "required_file",
+          "target": "README.md"
+        },
+        {
+          "instruction": "choose a licence for this project and write its full text to LICENSE. Vogt deliberately does not pick one: a scaffold that silently writes MIT makes that decision for the owner.",
+          "remedy": "judgement",
+          "rule": "required_file",
+          "target": "LICENSE"
+        },
+        {
+          "instruction": "`project scaffold` writes docs/ into this project without overwriting anything that is already there.",
+          "remedy": "scaffold",
+          "rule": "required_dir",
+          "target": "docs"
+        },
+        {
+          "instruction": "decide what this project's design record is \u2014 diagrams, mockups, exploratory notes \u2014 and put it in design/. An empty directory satisfies the letter of the criterion and none of its point, and git cannot carry one anyway.",
+          "remedy": "judgement",
+          "rule": "required_dir",
+          "target": "design"
+        },
+        {
+          "instruction": "`project scaffold` writes src/ into this project without overwriting anything that is already there.",
+          "remedy": "scaffold",
+          "rule": "required_dir",
+          "target": "src"
+        }
+      ],
+      "recorded": false,
+      "status": "non_compliant"
+    },
+    "exit": 0,
+    "operation": "contract.evaluate"
+  },
+  {
+    "body": {
+      "checked_at": null,
+      "contract_version": "v1",
+      "criteria": [
+        {
+          "applicable": true,
+          "detail": "the path does not exist or is not a directory, so no criterion below was evaluated \u2014 this is 'not checked', not 'does not comply'",
+          "rule": "path.exists",
+          "satisfied": false,
+          "target": "<root>/does-not-exist",
+          "tracked": null
+        }
+      ],
+      "detail": null,
+      "failing": [
+        {
+          "applicable": true,
+          "detail": "the path does not exist or is not a directory, so no criterion below was evaluated \u2014 this is 'not checked', not 'does not comply'",
+          "rule": "path.exists",
+          "satisfied": false,
+          "target": "<root>/does-not-exist",
+          "tracked": null
+        }
+      ],
+      "inapplicable": [],
+      "path": "<root>/does-not-exist",
+      "project": null,
+      "recommendations": [
+        {
+          "instruction": "decide what <root>/does-not-exist should contain for this project and add it. Nothing here can write it for you.",
+          "remedy": "judgement",
+          "rule": "path.exists",
+          "target": "<root>/does-not-exist"
+        }
+      ],
+      "recorded": false,
+      "status": "not_checked"
+    },
+    "exit": 0,
+    "operation": "contract.evaluate"
   }
 ]

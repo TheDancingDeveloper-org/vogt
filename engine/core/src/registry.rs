@@ -125,6 +125,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
     match name {
         "migrate" => Some(crate::application::instance::migrate_op),
         "status" => Some(crate::application::instance::status_op),
+        "contract.evaluate" => Some(crate::application::contracts::contract_evaluate_op),
         "contract.check" => Some(crate::application::contracts::contract_check_op),
         "why" => Some(crate::application::views::why_op),
         _ => None,

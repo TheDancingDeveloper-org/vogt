@@ -93,6 +93,24 @@
         "method": "GET",
         "path": "/connection-info"
       }
+    },
+    {
+      "operation": "contract.evaluate",
+      "params": {
+        "path": "{root}"
+      },
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
+      "operation": "contract.evaluate",
+      "params": {
+        "path": "{root}/does-not-exist"
+      },
+      "expect": {
+        "exit": 0
+      }
     }
   ]
 }

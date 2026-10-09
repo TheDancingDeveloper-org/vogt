@@ -100,7 +100,21 @@ impl ContractTree for Filesystem {
 }
 
 /// Evaluate the contract against any path, storing nothing.
-pub fn contract_evaluate(config: &VogtConfig, path: &str) -> Value {
+pub fn contract_evaluate_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    let path = params
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VogtError::InvalidRequest("contract.evaluate needs a path".to_string()))?;
+    let config = match ctx {
+        Built::SystemRandom(ctx) => &ctx.config,
+        Built::SystemSequential(ctx) => &ctx.config,
+        Built::StepRandom(ctx) => &ctx.config,
+        Built::StepSequential(ctx) => &ctx.config,
+    };
+    Ok(contract_evaluate(config, path))
+}
+
+fn contract_evaluate(config: &VogtConfig, path: &str) -> Value {
     let root = Path::new(path);
     let result = evaluate(
         path,
