@@ -18,6 +18,7 @@ pub mod resolve;
 pub mod services;
 pub mod suppressions;
 pub mod taxonomy;
+pub mod upstream;
 pub mod views;
 pub mod writes;
 #[cfg(test)]

@@ -613,10 +613,7 @@ pub fn priority_of(observation: &Observation) -> &'static str {
 
 fn labels_of(observation: &Observation) -> Vec<String> {
     match observation.payload.get("labels") {
-        Some(Value::Array(labels)) => labels
-            .iter()
-            .map(|label| label.to_string().trim_matches('"').to_string())
-            .collect(),
+        Some(Value::Array(labels)) => labels.iter().map(|label| py_str(Some(label))).collect(),
         _ => Vec::new(),
     }
 }
@@ -749,10 +746,11 @@ pub fn implemented_targets(observation: &Observation) -> std::collections::BTree
         return targets;
     };
     for edge in edges {
-        if let Some(subject) = edge.get("subject").and_then(Value::as_str) {
-            if !subject.is_empty() {
-                targets.insert(subject.to_string());
-            }
+        // Python's `str(edge["subject"])` for any truthy value, so a numeric
+        // `12` names the subject `"12"` and a boolean renders as `True`.
+        let subject = py_str(edge.get("subject"));
+        if !subject.is_empty() && subject != "None" && subject != "False" {
+            targets.insert(subject);
         }
     }
     targets
@@ -4629,5 +4627,47 @@ mod drift_tests {
         );
         assert!(open.summary.contains("observed reopen"));
         assert_eq!(open.proposed_change["to"], "open");
+    }
+
+    fn observed(kind: &str, payload: serde_json::Value) -> Observation {
+        Observation {
+            id: "obs_1".into(),
+            sweep_id: "swp_1".into(),
+            collector: "test".into(),
+            kind: kind.into(),
+            project_id: None,
+            subject_key: "subj".into(),
+            payload,
+            content_digest: String::new(),
+            source_url: None,
+            promoted: false,
+            observed_at: Moment::from_unix(0, 0),
+        }
+    }
+
+    #[test]
+    fn a_pull_request_implements_a_subject_that_is_not_text() {
+        // Python's `str(edge["subject"])`: a numeric subject is the subject
+        // `"12"`, and a boolean renders capitalised the way `str(True)` does.
+        let pull = observed(
+            "forge.pull_request",
+            serde_json::json!({"implements": [
+                {"subject": 12}, {"subject": true}, {"subject": false}, {"subject": null}
+            ]}),
+        );
+        let targets = implemented_targets(&pull);
+        assert!(targets.contains("12"));
+        assert!(targets.contains("True"));
+        assert!(!targets.contains("False"));
+        assert!(!targets.contains("None"));
+    }
+
+    #[test]
+    fn a_marker_title_reads_a_non_text_path_and_line() {
+        let marker = observed(
+            "marker",
+            serde_json::json!({"tag": "TODO", "path": 7, "line": 3}),
+        );
+        assert_eq!(title_of(&marker), "TODO 7:3");
     }
 }

@@ -126,7 +126,7 @@ fn observed<C: Clock, I: IdFactory>(
 
 /// `verified` inside the horizon, `stale` once the confirmation ages out. A
 /// subject nothing has confirmed takes its first-seen time.
-fn trust_for<C: Clock, I: IdFactory>(
+pub fn trust_for<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     observed_at: Moment,
     confirmed_at: Option<Moment>,
