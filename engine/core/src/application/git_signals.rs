@@ -187,9 +187,8 @@ mod tests {
         // Python's `!r`: an apostrophe with no double quote takes double quotes,
         // and a tab is escaped rather than printed raw.
         use crate::core::py_repr;
-        let text = |reference: &str| {
-            format!("no work item or observed subject {}", py_repr(reference))
-        };
+        let text =
+            |reference: &str| format!("no work item or observed subject {}", py_repr(reference));
         assert_eq!(text("it's"), "no work item or observed subject \"it's\"");
         assert_eq!(text("é\t"), "no work item or observed subject 'é\\t'");
         assert_eq!(
