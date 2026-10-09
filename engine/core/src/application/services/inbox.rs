@@ -466,7 +466,10 @@ where
             source_url: None,
             trust_state: trust,
             freshness,
-            action: json!({"kind": "observation", "subject_key": observation.subject_key}),
+            action: action_of(
+                "observation",
+                json!({"subject_key": observation.subject_key}),
+            ),
             actor: &actors::system_actor(),
             extra: json!({}),
         }));
@@ -557,10 +560,15 @@ where
         ));
     }
 
-    // Bound branches (WI-855) and live engine state (blocked sessions, approval
-    // dialogs, grant requests) need `ci_watch` and `grants`, which are not
-    // ported, and `Built` carries the engine client but no live session list is
-    // joined here until those land. The store-backed sources above are complete.
+    // Bound branches (WI-855) and the live engine session list (blocked sessions,
+    // approval dialogs) are not ported. A pending grant is: it lives in the
+    // declared store, and a target that is not in the live list is exactly the
+    // entry Python builds for a session that is not running now.
+    for grant in view.list_session_grants(Some("pending"), None, MAX_SCAN)? {
+        if grant.effective_state(now_of(&ctx.clock)) == "pending" {
+            entries.push(grant_entry(view, &grant, &projects)?);
+        }
+    }
 
     if !config.deploy_lanes.is_empty() {
         let lanes = observed.latest(
@@ -698,7 +706,10 @@ fn observation_entry(
         source_url: observation.source_url.as_deref(),
         trust_state: "unverified",
         freshness: "unknown",
-        action: json!({"kind": "observation", "subject_key": observation.subject_key}),
+        action: action_of(
+            "observation",
+            json!({"subject_key": observation.subject_key}),
+        ),
         actor,
         extra: json!({}),
     })
@@ -787,7 +798,10 @@ fn ref_failure_entry(
         source_url: log_url,
         trust_state: trust,
         freshness,
-        action: json!({"kind": "observation", "subject_key": observation.subject_key}),
+        action: action_of(
+            "observation",
+            json!({"subject_key": observation.subject_key}),
+        ),
         actor: &actors::system_actor(),
         extra: json!({}),
     })
@@ -828,9 +842,133 @@ fn deploy_lane_entry(
         source_url: text(receipt.get("url")).or(observation.source_url.as_deref()),
         trust_state: trust,
         freshness,
-        action: json!({"kind": "observation", "subject_key": observation.subject_key}),
+        action: action_of("observation", json!({"subject_key": observation.subject_key})),
         actor: &actors::system_actor(),
         extra: json!({}),
+    }))
+}
+
+/// An action carries every target key, the unused ones null. Python's model
+/// renders its defaults, and a snapshot that dropped them would persist a
+/// different shape.
+fn action_of(kind: &str, fields: Value) -> Value {
+    let mut action = json!({
+        "kind": kind,
+        "drift_id": Value::Null,
+        "subject_key": Value::Null,
+        "session_id": Value::Null,
+        "grant_id": Value::Null,
+    });
+    if let (Some(object), Some(extra)) = (action.as_object_mut(), fields.as_object()) {
+        for (key, value) in extra {
+            object.insert(key.clone(), value.clone());
+        }
+    }
+    action
+}
+
+/// A grant a session asked for and a person has yet to decide. The target's
+/// live detail is absent here — `Built` carries no session list — which is the
+/// same entry Python builds when the session is not running now.
+fn grant_entry(
+    view: &impl ReadView,
+    grant: &crate::core::SessionGrant,
+    projects: &BTreeMap<String, Project>,
+) -> Result<Value, VogtError> {
+    let declared = view.session_by_engine_id(&grant.target_engine_session_id)?;
+    let project = declared
+        .as_ref()
+        .and_then(|session| projects.get(&session.project_id));
+    let label = &grant.target_engine_session_id;
+    let mut facts = vec!["not running now".to_string()];
+    if let Some(project) = project {
+        facts.push(format!("project {}", project.slug));
+    }
+    if let Some(session) = declared.as_ref() {
+        facts.push(session.id.clone());
+    }
+    let itself = grant.requested_by == format!("agent:engine:{label}")
+        || declared
+            .as_ref()
+            .is_some_and(|session| grant.requested_by == format!("agent:session:{}", session.id));
+    let who = if itself {
+        "itself".to_string()
+    } else {
+        format!("session {label} ({})", facts.join(", "))
+    };
+    let item = format!(
+        "{} (project {}) as {}",
+        grant.secret_name.as_deref().unwrap_or(""),
+        grant.project_id.as_deref().unwrap_or(""),
+        grant.var.as_deref().unwrap_or("")
+    );
+    let uses = if grant.uses.to_string() == "once" {
+        "one fetch"
+    } else {
+        "any number of fetches"
+    };
+    let summary = truncate(
+        &format!(
+            "{} asks for {item} for {who}: {uses}, for {} min once approved. Reason: {}",
+            grant.requested_by,
+            grant.ttl_seconds / 60,
+            grant.reason
+        ),
+        1000,
+    );
+    let requester = view.actor_by_identity(&grant.requested_by)?;
+    let actor = ActorClass {
+        login: Some(grant.requested_by.clone()),
+        kind: Some(match &requester {
+            Some(actor) if actor.kind == crate::core::ActorKind::Human => actors::ActorKind::Human,
+            _ => actors::ActorKind::Bot,
+        }),
+        relation: actors::ActorRelation::OrgMember,
+    };
+    Ok(entry(EntrySpec {
+        entry_key: format!("agent:grant:{}", grant.id),
+        source: "agent",
+        kind: "session.grant_request",
+        occurred_at: Some(grant.requested_at),
+        observed_at: None,
+        title: &format!(
+            "Grant request: {} for session {label}",
+            grant.secret_name.as_deref().unwrap_or("")
+        ),
+        summary: &summary,
+        project_slug: project.map(|project| project.slug.as_str()),
+        work_item_ref: None,
+        source_subject_key: &grant.id,
+        source_url: None,
+        trust_state: "unverified",
+        freshness: "live",
+        action: action_of(
+            "grant",
+            json!({"grant_id": grant.id, "session_id": grant.target_engine_session_id}),
+        ),
+        actor: &actor,
+        extra: json!({
+            "session_id": grant.target_engine_session_id,
+            "provisional": true,
+            "evidence_snapshot": {
+                "grant_id": grant.id,
+                "target": grant.target_engine_session_id,
+                "target_name": Value::Null,
+                "target_role": Value::Null,
+                "target_agent": Value::Null,
+                "target_permission_mode": Value::Null,
+                "target_alive": false,
+                "target_session": declared.as_ref().map(|session| session.id.clone()),
+                "project": project.map(|project| project.slug.clone()),
+                "requested_by": grant.requested_by,
+                "requester_is_target": itself,
+                "var": grant.var,
+                "project_id": grant.project_id,
+                "secret_name": grant.secret_name,
+                "uses": grant.uses.to_string(),
+                "ttl_seconds": grant.ttl_seconds,
+            },
+        }),
     }))
 }
 
@@ -864,7 +1002,7 @@ fn drift_entry(
         source_url: None,
         trust_state: "disputed",
         freshness: "current",
-        action: json!({"kind": "drift", "drift_id": proposal.id}),
+        action: action_of("drift", json!({"drift_id": proposal.id})),
         actor: &actors::system_actor(),
         extra: json!({
             "evidence_snapshot": proposal.evidence_snapshot,
