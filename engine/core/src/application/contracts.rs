@@ -402,7 +402,7 @@ where
         tracked.as_ref(),
         &[],
     );
-    record_findings(&ctx.observed, &project, &evidence, &ctx.clock)?;
+    record_findings(&ctx.observed, &project, &evidence, &ctx.clock, now)?;
 
     let exempt_refs: Vec<(&str, &str, &str)> = exempt
         .iter()
@@ -634,7 +634,14 @@ fn apply_exemption<C: Clock + 'static, I: IdFactory + 'static>(
     declare: bool,
 ) -> Result<Value, VogtError> {
     let project = resolve::project(&ctx.declared.read()?, slug)?;
-    let now = clock_now(&ctx.clock);
+    // Withdrawing reads neither the clock nor the id factory. Python's
+    // contract.applicable does neither, so a withdrawal that did would stamp
+    // the audit a second late and burn an id.
+    let now = if declare {
+        Some(clock_now(&ctx.clock))
+    } else {
+        None
+    };
     let mut write = write_of(ctx);
     record_exemption(
         &mut write,
@@ -653,7 +660,7 @@ fn apply_exemption<C: Clock + 'static, I: IdFactory + 'static>(
 }
 
 struct ExemptionChange {
-    now: crate::core::Moment,
+    now: Option<crate::core::Moment>,
     project_id: String,
     project_slug: String,
     rule: String,
@@ -679,18 +686,23 @@ fn record_exemption<C: Clock + 'static, I: IdFactory + 'static>(
     let target = change.target.clone();
     let declared_reason = change.reason.clone();
     let declare = change.declare;
-    let now = change.now;
-    // The id factory lives on the write context, so the id is minted here
-    // rather than before the write. It is consumed only when declaring.
-    let id = write
-        .ids()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .next("cex");
+    // Minted only when declaring. A withdrawal has nothing to identify.
+    let id = if declare {
+        Some(
+            write
+                .ids()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .next("cex"),
+        )
+    } else {
+        None
+    };
+    let declared_at = change.now;
     audited_write(write, operation, reason, |txn, actor| {
-        let removed = if declare {
+        let absent = if declare {
             txn.insert_contract_exemption(&crate::core::ContractExemption {
-                id,
+                id: id.expect("minted above when declaring"),
                 project_id: project_id.clone(),
                 project_slug: Some(project_slug.clone()),
                 rule: rule.clone(),
@@ -701,10 +713,11 @@ fn record_exemption<C: Clock + 'static, I: IdFactory + 'static>(
                 } else {
                     actor.identity_ref.clone()
                 },
-                declared_at: now,
+                declared_at: declared_at.expect("read above when declaring"),
             })?;
             false
         } else {
+            // True when there was nothing to withdraw.
             !txn.delete_contract_exemption(&project_id, &rule, &target)?
         };
         let exemptions: Vec<Value> = txn
@@ -722,7 +735,7 @@ fn record_exemption<C: Clock + 'static, I: IdFactory + 'static>(
             .collect();
         let detail = if declare {
             format!("{target} is recorded as unmeetable by {project_slug}; it is reported, and not counted as a failure")
-        } else if removed {
+        } else if absent {
             format!("{target} was not declared inapplicable here")
         } else {
             format!("{target} applies to {project_slug} again")
@@ -816,11 +829,12 @@ fn record_findings<O: ObservedStore, C: Clock>(
     project: &Project,
     result: &ContractResult,
     clock: &std::sync::Arc<std::sync::Mutex<C>>,
+    started: crate::core::Moment,
 ) -> Result<(), VogtError> {
     if !observed.has_evidence_tables()? {
         return Ok(());
     }
-    let now = clock_now(clock);
+    let now = started;
     let payload = json!({
         "contract_version": result.contract_version,
         "status": result.status,

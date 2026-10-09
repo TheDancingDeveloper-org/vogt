@@ -9,6 +9,7 @@ pub mod contracts;
 pub mod instance;
 pub mod resolve;
 pub mod services;
+pub mod suppressions;
 pub mod views;
 pub mod writes;
 #[cfg(test)]

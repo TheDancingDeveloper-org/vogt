@@ -135,6 +135,9 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "contract.inapplicable" => Some(crate::application::contracts::contract_inapplicable_op),
         "contract.applicable" => Some(crate::application::contracts::contract_applicable_op),
         "compliance" => Some(crate::application::contracts::compliance_op),
+        "suppress" => Some(crate::application::suppressions::suppress_op),
+        "suppression.list" => Some(crate::application::suppressions::suppression_list_op),
+        "suppression.revoke" => Some(crate::application::suppressions::suppression_revoke_op),
         "why" => Some(crate::application::views::why_op),
         _ => None,
     }
