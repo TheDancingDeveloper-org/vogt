@@ -91,6 +91,29 @@ fn main() -> ExitCode {
     // MCP route's audit failure is a `tracing::error!`, and without this it
     // goes nowhere.
     observability::configure_logging("info", "text");
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // The generated CLI (P2.4) owns every registry command. `serve` and `init`
+    // stay here because they take over the process or create the data
+    // directory; the registry still lists them, and the CLI answers their
+    // `--help`, but running them goes through this binary's own path so the
+    // listener and the first-run store are the ones already tested.
+    if !matches!(argv.first().map(String::as_str), Some("serve" | "init") | None) {
+        let code = adapters::cli::main_cli(
+            &argv,
+            &registry::default_registry(),
+            VERSION,
+            &mut |operation, _params| {
+                operation.run()?;
+                if operation.handler == registry::Handler::RegistryDump {
+                    return Ok(registry::dump());
+                }
+                Ok(serde_json::Value::Null)
+            },
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        );
+        std::process::exit(code);
+    }
     let cli = Cli::parse();
     if let Err(error) = validate_hooks(None) {
         eprintln!("{error}");
