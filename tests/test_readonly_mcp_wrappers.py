@@ -505,3 +505,110 @@ def test_bootstrap_registers_vogt_and_readonly_servers_for_klaudia_and_opencode(
     bootstrap({})
     servers = json.loads(klaudia_config.read_text(encoding="utf-8"))["mcpServers"]
     assert servers == {"vogt": {"command": "/usr/local/bin/vogt-mcp"}}
+
+
+def _codex_tables(text: str) -> dict[str, dict[str, Any]]:
+    import tomllib
+
+    parsed = tomllib.loads(text)
+    servers = parsed["mcp_servers"]
+    assert isinstance(servers, dict)
+    return servers
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
+    """GitHub #914: unlocked check-then-append raced when several sessions
+    started together, leaving duplicate `[mcp_servers.*]` tables. The file
+    then no longer parsed, so every later start appended again."""
+    import tomllib
+
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    # The rewrite no longer asks `codex mcp` while a server is wanted, but the
+    # bootstrap still requires the binary to be present before it touches the file.
+    codex = bindir / "codex"
+    codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    codex.chmod(0o755)
+    for name in ("github-mcp-server", "mcp-grafana", "gitea-mcp"):
+        (bindir / name).write_text("#!/bin/sh\n", encoding="utf-8")
+        (bindir / name).chmod(0o755)
+    wrapper = bindir / "vogt-readonly-mcp"
+    wrapper.write_text("#!/bin/sh\n", encoding="utf-8")
+    wrapper.chmod(0o755)
+    codex_home = tmp_path / "codex"
+    config = codex_home / "config.toml"
+    config.parent.mkdir()
+    # An operator's own table must survive the rewrite.
+    config.write_text('[other]\nkept = true\n', encoding="utf-8")
+    env = {
+        "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+        "HOME": str(tmp_path),
+        "CODEX_HOME": str(codex_home),
+        "VOGT_SRC": str(tmp_path / "absent"),
+        "VOGT_READONLY_MCP_WRAPPER": str(wrapper),
+        "GITHUB_MCP_TOKEN": "x",
+        "VOGT_GITHUB_MCP_TOOLSETS": "repos",
+        "GRAFANA_URL": "http://grafana.example",
+        "GRAFANA_SERVICE_ACCOUNT_TOKEN": "viewer",
+        "GITEA_HOST": "https://forge.example",
+        "GITEA_MCP_TOKEN": "y",
+    }
+    procs = [
+        subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+            ["bash", str(BOOTSTRAP)],
+            env=env,
+            cwd=tmp_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(8)
+    ]
+    for proc in procs:
+        stdout, stderr = proc.communicate(timeout=60)
+        assert proc.returncode == 0, stderr
+        assert stdout == "", "stdout is the MCP transport"
+        assert "not valid TOML" not in stderr
+
+    text = config.read_text(encoding="utf-8")
+    servers = _codex_tables(text)
+    assert set(servers) == {"github-ro", "grafana-ro", "forgejo-ro"}
+    assert text.count("[mcp_servers.github-ro]") == 1
+    assert text.count("[mcp_servers.grafana-ro]") == 1
+    assert text.count("[mcp_servers.forgejo-ro]") == 1
+    assert servers["github-ro"]["command"] == str(wrapper)
+    assert servers["github-ro"]["args"] == ["github"]
+    assert "GITHUB_MCP_TOKEN" in servers["github-ro"]["env_vars"]
+    assert tomllib.loads(text)["other"] == {"kept": True}
+
+    # A second wave replaces the tables in place instead of appending copies.
+    again = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert again.returncode == 0, again.stderr
+    assert config.read_text(encoding="utf-8").count("[mcp_servers.") == 3
+
+    # A config that does not parse is not appended to.
+    config.write_text("[mcp_servers.github-ro]\n[mcp_servers.github-ro]\n", encoding="utf-8")
+    broken = subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env=env,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert broken.returncode == 0, broken.stderr
+    assert "not valid TOML" in broken.stderr
+    assert config.read_text(encoding="utf-8") == (
+        "[mcp_servers.github-ro]\n[mcp_servers.github-ro]\n"
+    )

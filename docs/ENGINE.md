@@ -363,7 +363,13 @@ could edit. `vogt-readonly-mcp` (`deploy/readonly-mcp.sh`) renames the token
 to the variable the upstream server reads and sets the read-only switches on
 every start, overriding any `GITHUB_TOOLSETS`, `GITHUB_READ_ONLY` or
 `GITEA_READONLY` the session carries. The `-ro` names leave a server an
-operator registered by hand under its plain name untouched. Read-only rests
+operator registered by hand under its plain name untouched. Codex cannot set
+`env_vars` through `codex mcp add`, so that registration is written straight
+into `~/.codex/config.toml`: one flock on a lock beside the file, a rewrite
+through a temporary file renamed into place, and an existing table for the
+same server replaced rather than copied. A config that does not parse is left
+alone and the error logged — appending to it is what used to make a raced
+write permanent (GitHub #914). Read-only rests
 on the token as well as on the server's mode, so each token should be issued
 read-only even though the mode already hides write tools.
 
