@@ -91,13 +91,20 @@ def probes_for(schema: dict) -> list[tuple[str, dict]]:
     for name, prop in props.items():
         field = scalar(prop, defs)
         kind = field.get("type")
-        nullable = "anyOf" in prop and any(b.get("type") == "null" for b in prop["anyOf"])
 
         def add(tag: str, value: object, name: str = name) -> None:
             probes.append((f"{name}:{tag}", {**good, name: value}))
 
-        if not nullable:
-            add("null", None)
+        # Every field, nullable or not. A nullable one must accept null; one that
+        # is not must refuse it. Skipping the nullable ones is how a null on a
+        # nullable enum went untested.
+        add("null", None)
+        add("valid", base_value(prop, defs))
+        if "enum" in field:
+            # A member that is not allowed, and the right member in the wrong
+            # case. Both must be refused, whether or not the field is nullable.
+            add("enum-bad", "zzz-bad")
+            add("enum-case", str(field["enum"][0]).swapcase())
         if kind == "integer":
             for tag, value in [("str5", "5"), ("float5.0", 5.0), ("float5.5", 5.5),
                                ("bool", True), ("strjunk", "abc"), ("str-space", " 5 "),
@@ -125,9 +132,6 @@ def probes_for(schema: dict) -> list[tuple[str, dict]]:
         elif kind == "string" or "enum" in field:
             add("int", 5)
             add("bool", True)
-            if "enum" in field:
-                add("enum-bad", "zzz-bad")
-                add("enum-case", str(field["enum"][0]).upper())
             if "minLength" in field:
                 add("minlen-1", "é" * (field["minLength"] - 1))
                 add("ws", " " * max(field["minLength"], 1))
