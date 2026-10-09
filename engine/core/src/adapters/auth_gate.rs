@@ -166,7 +166,7 @@ pub fn authorize<S: DeclaredStore>(store: &S, request: Request<'_>) -> Result<Gr
                 outcome: AuthOutcome::Deny,
                 reason,
                 token: Some(&token),
-                scope: None,
+                scope: Some(operation.scope),
                 detail: None,
             }),
         )?;
@@ -242,6 +242,20 @@ fn lookup<S: DeclaredStore>(store: &S, secret: &str, now: Moment) -> Result<Toke
             });
         }
     }
+    // A disabled actor's token is not a live credential. Checked after the token
+    // checks, matching `services/auth.py`: the row names the token, and the
+    // caller only hears that it is not valid.
+    let actor = store
+        .read()
+        .map_err(lookup_failed)?
+        .actor_by_id(&token.actor_id)
+        .map_err(lookup_failed)?;
+    if actor.as_ref().is_none_or(|actor| actor.disabled) {
+        return Err(Rejection {
+            code: "disabled_actor",
+            detail: "the presented token is not valid".to_string(),
+        });
+    }
     Ok(token)
 }
 
@@ -279,7 +293,10 @@ fn transport_name(transport: Transport) -> &'static str {
     match transport {
         Transport::Cli => "cli",
         Transport::Http => "http",
-        Transport::Mcp => "mcp",
+        // Python's MCP route records `mcp-http`, not the registry's transport
+        // name. The registry says which surface this is; the row says which
+        // adapter wrote it.
+        Transport::Mcp => "mcp-http",
     }
 }
 

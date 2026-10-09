@@ -30,10 +30,10 @@ use axum::routing::post;
 use axum::Router;
 use serde_json::{Map, Value};
 
-use crate::adapters::auth_gate::{self, Denial, Request as AuthRequest};
+use crate::adapters::auth_gate::Denial;
 use crate::adapters::mcp::framing::{Dispatcher, McpTransport, ToolGrant};
 use crate::adapters::mcp::http::MCP_PATH;
-use crate::core::{IdFactory, Moment, SystemClock};
+use crate::core::{Clock, IdFactory, SystemClock};
 use crate::registry::{Operation, OperationRegistry, Transport};
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 
@@ -89,85 +89,236 @@ async fn handle<I: IdFactory>(
     };
 
     let store = state.store.lock().expect("the store lock is not poisoned");
-    // Authenticate before dispatch. Recorded against `status`, because this row
-    // says who asked rather than which tool they named.
-    if let Err(denial) = authorize(
-        &store,
-        &state,
-        presented.as_deref(),
-        status_operation(&registry),
-    ) {
-        return unauthenticated(&message, denial);
-    }
-    // A tool call that reaches an operation is authorized against it, and the
-    // gate records that decision before the call runs.
+    // Authenticate first, the way `resolve()` does, and record it only when the
+    // credential is refused. An authenticated initialize, ping or tools/list
+    // writes no row: Python records none for those.
+    let caller = match authenticate(&store, &state, presented.as_deref()) {
+        Ok(caller) => caller,
+        Err(denial) => return unauthenticated(&message, denial),
+    };
+    // A tool call that reaches an operation is authorized against it, and that
+    // decision is recorded before the call runs.
     if let Some(operation) = called_operation(&message, &registry) {
-        if let Err(denial) = authorize(&store, &state, presented.as_deref(), operation) {
-            return refusal(&message, denial);
+        if let Err(denial) = authorize(&store, &state, &caller, operation) {
+            return refusal(&message, operation, &caller, denial);
         }
     }
     drop(store);
 
-    // Both checks passed, so the caller may do what the message asks. The
-    // dispatcher still owns the protocol: a notification is a 202, a bad
-    // argument is `-32602`, an unknown tool is `-32601`.
+    // Both checks passed. The dispatcher still owns the protocol: a notification
+    // is a 202, a bad argument is `-32602`, an unknown tool is `-32601`. The
+    // grant narrows `tools/list` to what this caller may invoke.
     let grant = Permitted {
+        scopes: caller.scopes.clone(),
         writes_enabled: state.writes_enabled,
     };
     let mut dispatcher = Dispatcher::new(&registry, &grant, McpTransport::Http);
     match dispatcher.handle(&message) {
         None => Response::builder()
             .status(StatusCode::ACCEPTED)
-            .body(Body::empty())
+            .header("content-type", "application/json")
+            .body(Body::from("null"))
             .expect("a fixed response builds"),
         Some(value) => json_response(StatusCode::OK, value),
     }
 }
 
-/// Run one request through the shared gate and record the decision.
-fn authorize<I: IdFactory>(
+/// Who a request resolved to. Scopes are the token's own, so the grant can
+/// narrow `tools/list` the way `http.py` does.
+struct Caller {
+    scopes: Vec<String>,
+    /// The token the credential resolved to. Absent on the no-auth path, which
+    /// has no row to attribute.
+    token: Option<crate::core::Token>,
+}
+
+/// Resolve the credential, recording a refusal only.
+///
+/// A refusal is recorded against `authenticate` on the `http` transport, which
+/// is what `services/auth.py` writes: the row says the credential was refused,
+/// not which method was asked for. An accepted credential records nothing here;
+/// the per-operation row is `authorize`'s.
+fn authenticate<I: IdFactory>(
     store: &SqliteDeclaredStore<SystemClock, I>,
     state: &McpState<I>,
     presented: Option<&str>,
+) -> Result<Caller, Denial> {
+    use crate::storage::interface::{DeclaredStore, ReadView};
+    if state.no_auth {
+        return Ok(Caller {
+            scopes: vec!["admin".to_string()],
+            token: None,
+        });
+    }
+    let Some(secret) = presented else {
+        record_refusal(store, "no_bearer_token", None)?;
+        return Err(Denial::NoBearer);
+    };
+    let hashed = crate::auth::hash_token(secret);
+    let found = store
+        .read()
+        .map_err(lookup_failed)?
+        .token_by_hash(&hashed)
+        .map_err(lookup_failed)?;
+    let Some(token) = found else {
+        record_refusal(store, "unknown_token", None)?;
+        return Err(Denial::Rejected {
+            code: "unknown_token",
+            detail: "the presented token is not valid".to_string(),
+        });
+    };
+    let now = store
+        .clock()
+        .lock()
+        .expect("the clock lock is not poisoned")
+        .now();
+    let rejection = if token.revoked_at.is_some() {
+        Some("revoked")
+    } else if token.expires_at.is_some_and(|expires| expires <= now) {
+        Some("expired")
+    } else {
+        None
+    };
+    if let Some(code) = rejection {
+        record_refusal(store, code, Some(&token))?;
+        return Err(Denial::Rejected {
+            code: "rejected",
+            detail: "the presented token is not valid".to_string(),
+        });
+    }
+    // A disabled actor's token is not a live credential. The row names the
+    // token; the caller only hears that it is not valid.
+    let actor = store
+        .read()
+        .map_err(lookup_failed)?
+        .actor_by_id(&token.actor_id)
+        .map_err(lookup_failed)?;
+    if actor.as_ref().is_none_or(|actor| actor.disabled) {
+        record_refusal(store, "disabled_actor", Some(&token))?;
+        return Err(Denial::Rejected {
+            code: "disabled_actor",
+            detail: "the presented token is not valid".to_string(),
+        });
+    }
+    Ok(Caller {
+        scopes: token.scopes.clone(),
+        token: Some(token),
+    })
+}
+
+/// A refused credential, recorded the way `services/auth.py` records it:
+/// operation `authenticate`, transport `http`, and no scope.
+fn record_refusal<I: IdFactory>(
+    store: &SqliteDeclaredStore<SystemClock, I>,
+    code: &str,
+    token: Option<&crate::core::Token>,
+) -> Result<(), Denial> {
+    record(
+        store,
+        &decision(store, token, code, "authenticate", "http", None),
+    )
+    .map_err(|failure| Denial::Unrecorded { failure })
+}
+
+fn lookup_failed(error: crate::errors::VogtError) -> Denial {
+    Denial::Unrecorded {
+        failure: format!("the token could not be looked up: {error}"),
+    }
+}
+
+/// Authorize one tool call and record it, with the transport Python uses.
+fn authorize<I: IdFactory>(
+    store: &SqliteDeclaredStore<SystemClock, I>,
+    state: &McpState<I>,
+    caller: &Caller,
     operation: &Operation,
 ) -> Result<(), Denial> {
-    let now = Moment::from_unix(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs() as i64)
-            .unwrap_or(0),
-        0,
+    // The same question the shared gate asks, so the two cannot drift.
+    let held: Vec<&str> = caller.scopes.iter().map(String::as_str).collect();
+    let (permitted, reason) = crate::auth::allows(
+        &held,
+        state.writes_enabled,
+        operation.scope.as_str(),
+        operation.mutating,
     );
-    let decision_id = crate::core::fresh_id("aud");
-    auth_gate::authorize(
+    record(
         store,
-        AuthRequest {
-            operation,
-            transport: Transport::Mcp,
-            presented,
-            no_auth: state.no_auth,
-            writes_enabled: state.writes_enabled,
-            now,
-            decision_id: &decision_id,
-        },
+        &decision(
+            store,
+            caller.token.as_ref(),
+            reason,
+            operation.name,
+            "mcp-http",
+            Some(operation.scope.as_str()),
+        ),
     )
-    .map(|_| ())
+    .map_err(|failure| Denial::Unrecorded { failure })?;
+    if permitted {
+        // The decision above says Allow only when permitted. `decision` reads the
+        // reason, and `allows` returns `ok` exactly when it permits.
+        Ok(())
+    } else if reason == crate::auth::WRITES_DISABLED {
+        Err(Denial::WritesDisabled)
+    } else {
+        Err(Denial::Forbidden {
+            held: caller.scopes.clone(),
+            needed: operation.scope.as_str().to_string(),
+        })
+    }
 }
 
-/// The operation the authentication check is recorded against. It is a read, so
-/// the check says whether the credential is live and never whether writes are
-/// switched on.
-fn status_operation(registry: &OperationRegistry) -> &Operation {
-    registry
-        .get("status")
-        .expect("status is a registered operation")
+fn decision<I: IdFactory>(
+    store: &SqliteDeclaredStore<SystemClock, I>,
+    token: Option<&crate::core::Token>,
+    reason: &str,
+    operation: &str,
+    transport: &str,
+    scope: Option<&str>,
+) -> crate::core::AuthDecision {
+    // The store's own hooks, not a fresh clock and a fresh counter. The context
+    // holds the same ones, so a second source would collide with it.
+    let id = store
+        .id_factory()
+        .lock()
+        .expect("the id factory lock is not poisoned")
+        .next("aud");
+    let at = store
+        .clock()
+        .lock()
+        .expect("the clock lock is not poisoned")
+        .now();
+    crate::core::AuthDecision {
+        id,
+        at,
+        decision: if reason == crate::auth::TOKEN_OK {
+            crate::core::AuthOutcome::Allow
+        } else {
+            crate::core::AuthOutcome::Deny
+        },
+        reason_code: reason.to_string(),
+        operation: operation.to_string(),
+        scope: scope.map(str::to_string),
+        actor_id: token.map(|token| token.actor_id.clone()),
+        token_id: token.map(|token| token.id.clone()),
+        identity_ref: token.and_then(|token| token.actor_identity_ref.clone()),
+        transport: transport.to_string(),
+        detail: None,
+    }
 }
 
-/// The operation a `tools/call` names, when the call reaches one.
-///
-/// A call whose arguments are not an object, or whose name is not a tool the
-/// MCP transport carries, never reaches an operation: it is a protocol error
-/// and records no authorization. That is the order `http.py` uses.
+fn record<I: IdFactory>(
+    store: &SqliteDeclaredStore<SystemClock, I>,
+    decision: &crate::core::AuthDecision,
+) -> Result<(), String> {
+    use crate::storage::interface::DeclaredStore;
+    store
+        .record_auth_decision(decision)
+        .map_err(|error| error.to_string())
+}
+
+/// The operation a `tools/call` names, when the message is well-formed enough
+/// to be one and the name is an MCP-exposed operation. Anything else is the
+/// dispatcher's to answer, and it records nothing.
 fn called_operation<'a>(
     message: &Map<String, Value>,
     registry: &'a OperationRegistry,
@@ -175,12 +326,14 @@ fn called_operation<'a>(
     if message.get("method").and_then(Value::as_str) != Some("tools/call") {
         return None;
     }
-    // A notification, including a null id, is answered before the call.
-    message.get("id").filter(|id| !id.is_null())?;
-    let params = message.get("params").and_then(Value::as_object)?;
+    if message.get("id").is_none_or(Value::is_null) {
+        return None;
+    }
+    let params = message.get("params").filter(|value| !json_falsy(value))?;
+    let params = params.as_object()?;
     let name = params.get("name").and_then(Value::as_str)?;
-    if let Some(arguments) = params.get("arguments").filter(|value| !json_falsy(value)) {
-        if !arguments.is_object() {
+    if let Some(arguments) = params.get("arguments") {
+        if !json_falsy(arguments) && !arguments.is_object() {
             return None;
         }
     }
@@ -191,76 +344,95 @@ fn called_operation<'a>(
         .then_some(operation)
 }
 
-/// Truthiness for a JSON value, matching `params or {}`: null, false, zero, an
-/// empty string and an empty array are all absent.
 fn json_falsy(value: &Value) -> bool {
     match value {
-        Value::Null | Value::Bool(false) => true,
-        Value::Number(number) => number.as_i64() == Some(0) || number.as_f64() == Some(0.0),
+        Value::Null => true,
+        Value::Bool(flag) => !flag,
+        Value::Number(number) => number.as_f64().is_some_and(|value| value == 0.0),
         Value::String(text) => text.is_empty(),
         Value::Array(items) => items.is_empty(),
-        _ => false,
+        Value::Object(fields) => fields.is_empty(),
     }
 }
 
-/// A grant for a caller the gate has already allowed.
-///
-/// The gate decided the scope, so this allows every operation the MCP transport
-/// carries. It still refuses a write when the instance is read-only, because
-/// that switch is per request and the dispatcher is what turns it into the
-/// tool-result the caller reads.
+/// A refused credential. Python's envelope, not a JSON-RPC error: the request
+/// never reached the protocol.
+fn unauthenticated(message: &Map<String, Value>, denial: Denial) -> Response {
+    if matches!(denial, Denial::Unrecorded { .. }) {
+        // The decision could not be recorded, so the request does not run and
+        // the client hears a plain failure rather than the store's own text.
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .header("content-type", "text/plain; charset=utf-8")
+            .body(Body::from("Internal Server Error"))
+            .expect("a fixed response builds");
+    }
+    let _ = message;
+    json_response(
+        StatusCode::UNAUTHORIZED,
+        serde_json::json!({
+            "error": {"code": "unauthenticated", "message": denial.error().to_string()}
+        }),
+    )
+}
+
+/// A tool call the caller may not make. The text names the operation, the scope
+/// it needs and the scopes the token holds, matching `core/auth.py`.
+fn refusal(
+    message: &Map<String, Value>,
+    operation: &Operation,
+    caller: &Caller,
+    denial: Denial,
+) -> Response {
+    if matches!(denial, Denial::Unrecorded { .. }) {
+        return unauthenticated(message, denial);
+    }
+    let text = if matches!(denial, Denial::WritesDisabled) {
+        format!(
+            "{} is a write, and this server was started read-only",
+            operation.name
+        )
+    } else {
+        // Deduplicated and alphabetical, so the order the token was issued in
+        // never reaches the message.
+        let mut held: Vec<&str> = caller.scopes.iter().map(String::as_str).collect();
+        held.sort_unstable();
+        held.dedup();
+        let held = held.join(", ");
+        format!(
+            "{} requires the {} scope; this token holds {}",
+            operation.name,
+            serde_json::to_string(operation.scope.as_str()).unwrap_or_else(|_| "\"?\"".to_string()),
+            if held.is_empty() { "nothing" } else { &held }
+        )
+    };
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": message.get("id").cloned().unwrap_or(Value::Null),
+            "result": {"content": [{"type": "text", "text": text}], "isError": true}
+        }),
+    )
+}
+
+/// What this caller may invoke. The scope decision is the same one the shared
+/// gate makes; the dispatcher uses it to narrow `tools/list`.
 struct Permitted {
+    scopes: Vec<String>,
     writes_enabled: bool,
 }
 
 impl ToolGrant for Permitted {
     fn allows(&self, _registry: &OperationRegistry, operation: &Operation) -> bool {
-        !operation.mutating || self.writes_enabled
-    }
-
-    fn writes_enabled(&self) -> bool {
-        self.writes_enabled
-    }
-}
-
-/// A missing or rejected credential. The request never became a caller, so this
-/// is a `401` rather than a tool result.
-fn unauthenticated(message: &Map<String, Value>, denial: Denial) -> Response {
-    json_response(
-        StatusCode::UNAUTHORIZED,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": message.get("id").cloned().unwrap_or(Value::Null),
-            "error": {"code": -32001, "message": denial.error().message()},
-        }),
-    )
-}
-
-/// A call the gate refused after the caller had authenticated.
-fn refusal(message: &Map<String, Value>, denial: Denial) -> Response {
-    match denial {
-        Denial::Unrecorded { .. } => Response::builder()
-            .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .header("content-type", "text/plain; charset=utf-8")
-            .body(Body::from("Internal Server Error"))
-            .expect("a fixed response builds"),
-        Denial::Forbidden { .. } | Denial::WritesDisabled => json_response(
-            StatusCode::OK,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": message.get("id").cloned().unwrap_or(Value::Null),
-                "result": {
-                    "content": [{
-                        "type": "text",
-                        "text": format!("forbidden: {}", denial.error().message())
-                    }],
-                    "isError": true,
-                },
-            }),
-        ),
-        // The same credential just authenticated, so these do not arise on the
-        // second check. Refused anyway: assuming they cannot is how a hole opens.
-        Denial::NoBearer | Denial::Rejected { .. } => unauthenticated(message, denial),
+        let held: Vec<&str> = self.scopes.iter().map(String::as_str).collect();
+        crate::auth::allows(
+            &held,
+            self.writes_enabled,
+            operation.scope.as_str(),
+            operation.mutating,
+        )
+        .0
     }
 }
 
@@ -361,8 +533,11 @@ mod tests {
         let recorded = decisions(&running.dir);
         assert_eq!(recorded.len(), 1, "{recorded:?}");
         assert_eq!(recorded[0].decision, crate::core::AuthOutcome::Deny);
-        assert_eq!(recorded[0].operation, "status");
-        assert_eq!(recorded[0].transport, "mcp");
+        // A refused credential is recorded as the authentication, not as the
+        // method that was asked for.
+        assert_eq!(recorded[0].operation, "authenticate");
+        assert_eq!(recorded[0].reason_code, "no_bearer_token");
+        assert_eq!(recorded[0].transport, "http");
     }
 
     #[test]
@@ -382,14 +557,13 @@ mod tests {
     }
 
     #[test]
-    fn no_auth_answers_a_ping_and_records_the_allow() {
+    fn no_auth_answers_a_ping_and_records_nothing() {
         let running = serve(true);
         let (status, response) = post(running.addr, r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#);
         assert_eq!(status, 200, "{response}");
         let json: Value = serde_json::from_str(&response).unwrap();
         assert!(json.get("result").is_some(), "{response}");
-        let recorded = decisions(&running.dir);
-        assert_eq!(recorded.len(), 1, "{recorded:?}");
-        assert_eq!(recorded[0].decision, crate::core::AuthOutcome::Allow);
+        // An authenticated ping is not a tool call, so it writes no row.
+        assert!(decisions(&running.dir).is_empty());
     }
 }
