@@ -85,9 +85,9 @@ jobs:
 
   parity:
     name: parity
-    # Proves the harness against the Python core. The Rust side joins once
-    # vogt-core can serve the script; until then a missing Rust binary is not
-    # a failure of this job.
+    # Proves the harness against both cores. The Rust binary is built in this
+    # job, because the rust job runs on a different runner and its target
+    # directory is not here.
     runs-on: [self-hosted]
     timeout-minutes: 20
     steps:
@@ -98,6 +98,19 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: "0.11.23"
+
+      - uses: dtolnay/rust-toolchain@29eef336d3d87daa4843439c5b6e2e65f915549d
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: engine
+
+      - name: build vogt-core
+        working-directory: engine
+        run: cargo build -p vogt-core
 
       - name: record then check the Python core
         run: |
@@ -121,6 +134,8 @@ jobs:
           uv run python scripts/parity.py check --impl python --transport http --golden "$golden"
           VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
             uv run python scripts/parity.py check --impl rust --transport http --golden "$golden"
+          VOGT_PARITY_RUST_BIN="$GITHUB_WORKSPACE/engine/target/debug/vogt-core" \
+            uv run python scripts/parity.py check --impl rust --golden "$golden" --only dump
           uv run python scripts/parity.py check --impl python --golden "$golden" --only actor
           uv run python scripts/parity.py selftest --golden "$golden"
 
