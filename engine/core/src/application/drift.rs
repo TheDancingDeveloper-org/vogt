@@ -60,11 +60,20 @@ pub fn drift_detect_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
 }
 
 pub fn drift_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
-    let status = params
-        .get("status")
-        .and_then(Value::as_str)
-        .unwrap_or("open")
-        .to_string();
+    // Absent means "open", the CLI default. An explicit null means no status
+    // filter at all: MCP and HTTP can send one, and Python lists every status.
+    let status = match params.get("status") {
+        None => Some("open".to_string()),
+        Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_str()
+                .ok_or_else(|| {
+                    VogtError::InvalidRequest("drift.list status must be a string".to_string())
+                })?
+                .to_string(),
+        ),
+    };
     let kind = params
         .get("kind")
         .and_then(Value::as_str)
@@ -76,7 +85,7 @@ pub fn drift_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     let limit = params.get("limit").and_then(Value::as_i64).unwrap_or(100);
     crate::with_ctx!(ctx, |ctx| list(
         ctx,
-        &status,
+        status.as_deref(),
         kind.as_deref(),
         project.as_deref(),
         limit
@@ -155,7 +164,7 @@ fn detect<C: Clock + 'static, I: IdFactory + 'static>(
 
 fn list<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
-    status: &str,
+    status: Option<&str>,
     kind: Option<&str>,
     project: Option<&str>,
     limit: i64,
@@ -165,7 +174,7 @@ fn list<C: Clock, I: IdFactory>(
         Some(slug) => Some(resolve::project(&declared, slug)?.id),
         None => None,
     };
-    let proposals = declared.list_drift(Some(status), kind, project_id.as_deref(), limit)?;
+    let proposals = declared.list_drift(status, kind, project_id.as_deref(), limit)?;
     // Insertion order, not sorted. `BTreeMap` would alphabetise the keys, and
     // Python's answer keeps `HUMAN_GATED_REASON`'s order on every list.
     let mut human_gated = serde_json::Map::new();
