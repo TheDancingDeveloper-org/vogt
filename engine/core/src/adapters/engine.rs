@@ -284,17 +284,21 @@ impl EngineClient {
     }
 
     /// Write `text` to a session's PTY. `submit` appends a carriage return.
-    /// `Ok(false)` when the engine has no such session.
+    /// `person` says whether the principal behind the input is a person: the
+    /// engine refuses anyone else's input while a permission prompt is showing
+    /// (WI-983), raised here as `PersonRequired`. `Ok(false)` when the engine
+    /// has no such session.
     pub fn send_input(
         &self,
         session_id: &str,
         text: &str,
         submit: bool,
+        person: bool,
     ) -> Result<bool, VogtError> {
         let payload = self.call(
             &session_path(session_id, "/input"),
             "POST",
-            Some(&serde_json::json!({"text": text, "submit": submit})),
+            Some(&serde_json::json!({"text": text, "submit": submit, "person": person})),
             true,
             None,
         )?;
@@ -427,15 +431,18 @@ impl EngineClient {
     }
 
     /// Choose an option of the dialog on screen. A dialog that is gone, changed,
-    /// or lacks the option is a `Conflict` naming why.
+    /// or lacks the option is a `Conflict` naming why; a permission prompt
+    /// answered without `person` is `PersonRequired` (WI-983).
     pub fn answer_session(
         &self,
         session_id: &str,
         option: Option<i64>,
         label: Option<&str>,
         expect_question: Option<&str>,
+        person: bool,
     ) -> Result<Option<Value>, VogtError> {
         let mut body = Map::new();
+        body.insert("person".to_string(), Value::Bool(person));
         if let Some(option) = option {
             body.insert("option".to_string(), Value::from(option));
         }
@@ -2140,6 +2147,25 @@ mod tests {
     #[test]
     fn no_engine_configured_is_none_not_an_error() {
         assert!(EngineClient::from_config(Some("  "), None).is_none());
+    }
+
+    #[test]
+    fn input_and_answer_carry_the_person_flag() {
+        // The engine's person gate reads this flag (WI-983): a missing one is
+        // treated as false for the stack secret and true for a break-glass
+        // token, so both writes must send it explicitly.
+        let (seen, transport) = scripted(200, r#"{"ok":true}"#);
+        let client = client(transport);
+        assert!(client.send_input("s", "yes", true, false).unwrap());
+        client
+            .answer_session("s", Some(1), None, Some("allow?"), true)
+            .unwrap();
+        let sent = seen.lock().unwrap();
+        assert!(sent[0].contains(r#""text":"yes","submit":true,"person":false"#));
+        assert!(sent[1].contains(r#""person":true"#));
+        assert!(sent[1].contains(r#""option":1"#));
+        assert!(sent[1].contains(r#""expect_question":"allow?""#));
+        assert!(!sent[1].contains("label"));
     }
 
     #[test]
