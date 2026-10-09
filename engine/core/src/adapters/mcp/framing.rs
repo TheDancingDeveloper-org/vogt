@@ -70,7 +70,7 @@ pub struct FullGrant;
 
 impl ToolGrant for FullGrant {
     fn allows(&self, operation: &Operation) -> bool {
-        mcp_exposed(operation)
+        exposed_over_mcp(operation)
     }
 }
 
@@ -79,7 +79,7 @@ impl ToolGrant for FullGrant {
 /// `LOCAL_ONLY` operations exist where the data directory is. They are absent
 /// from the remote tool list and undispatchable through it — the same
 /// invisible-tool rule on both paths.
-fn mcp_exposed(operation: &Operation) -> bool {
+pub(super) fn exposed_over_mcp(operation: &Operation) -> bool {
     !LOCAL_ONLY.iter().any(|(name, _)| *name == operation.name)
 }
 
