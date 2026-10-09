@@ -505,14 +505,12 @@ fn env_settings() -> Result<Map<String, Value>, String> {
 }
 
 fn env_value(name: &str) -> Option<String> {
-    env::vars().find_map(|(key, value)| {
-        (key.eq_ignore_ascii_case(name) && !value.is_empty()).then_some(value)
-    })
+    env::vars().find_map(|(key, value)| key.eq_ignore_ascii_case(name).then_some(value))
 }
 
 fn parse_env_value(field: &FieldDoc, raw: &str) -> Result<Value, String> {
     match field.kind {
-        Kind::Bool => Ok(Value::Bool(parse_bool(raw.trim())?)),
+        Kind::Bool => Ok(Value::Bool(parse_bool(raw)?)),
         Kind::Int { .. } => Ok(Value::Number(
             int_from_str(raw)
                 .ok_or_else(|| format!("expected an integer, got {raw:?}"))?
@@ -550,12 +548,20 @@ fn parse_bool(raw: &str) -> Result<bool, String> {
 fn as_bool(value: &Value) -> Option<bool> {
     match value {
         Value::Bool(flag) => Some(*flag),
-        Value::Number(number) => number.as_i64().and_then(|n| match n {
-            1 => Some(true),
-            0 => Some(false),
-            _ => None,
-        }),
-        Value::String(text) => parse_bool(text.trim()).ok(),
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| {
+                number
+                    .as_f64()
+                    .and_then(|n| (n.fract() == 0.0).then_some(n as i64))
+            })
+            .and_then(|n| match n {
+                1 => Some(true),
+                0 => Some(false),
+                _ => None,
+            }),
+        // Pydantic does not trim a bool string: " yes " is an error.
+        Value::String(text) => parse_bool(text).ok(),
         _ => None,
     }
 }
@@ -575,14 +581,24 @@ fn as_int(value: &Value) -> Option<i64> {
 }
 
 fn int_from_str(raw: &str) -> Option<i64> {
-    let trimmed = raw.trim().replace('_', "");
-    if let Ok(number) = trimmed.parse::<i64>() {
-        return Some(number);
+    // Pydantic accepts surrounding whitespace and a single underscore between
+    // digits (`1_000`), and rejects scientific notation, a leading underscore
+    // and a doubled one (`1e3`, `_1000`, `1__000`).
+    let trimmed = raw.trim();
+    let mut cleaned = String::new();
+    let chars: Vec<char> = trimmed.chars().collect();
+    for (index, ch) in chars.iter().enumerate() {
+        if *ch == '_' {
+            let before = chars[..index].last().is_some_and(|c| c.is_ascii_digit());
+            let after = chars.get(index + 1).is_some_and(|c| c.is_ascii_digit());
+            if before && after {
+                continue;
+            }
+            return None;
+        }
+        cleaned.push(*ch);
     }
-    trimmed.parse::<f64>().ok().and_then(|number| {
-        (number.fract() == 0.0 && number >= i64::MIN as f64 && number <= i64::MAX as f64)
-            .then_some(number as i64)
-    })
+    cleaned.parse::<i64>().ok()
 }
 
 fn config_from_map(values: &Map<String, Value>) -> Result<VogtConfig, String> {
@@ -1560,7 +1576,7 @@ mod tests {
         let mut guard = clean();
         guard.set(CONFIG_FILE_ENV, file.to_str().unwrap());
         guard.set("VOGT_DATA_DIR", "/from/env");
-        let config = load_config(&Map::new()).unwrap();
+        let config = load_config(&Map::new()).unwrap_or_else(|err| panic!("{err}"));
         assert_eq!(config.data_dir, PathBuf::from("/from/env"));
     }
 
@@ -1572,6 +1588,33 @@ mod tests {
         let config = load_config(&Map::new()).unwrap();
         assert_eq!(config.log_level, LogLevel::Debug);
         assert_eq!(config.retention_days, 9);
+    }
+
+    #[test]
+    fn coercion_matches_pydantics_edges() {
+        let dir = std::env::temp_dir().join(format!("vogt-cfg-edge-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("vogt.toml");
+        std::fs::write(&file, "fronted = 1.0\n").unwrap();
+        let _guard = clean();
+        unsafe { std::env::set_var(CONFIG_FILE_ENV, file.to_str().unwrap()) };
+        unsafe { std::env::set_var("VOGT_RETENTION_DAYS", " 5 ") };
+        let config = load_config(&Map::new()).unwrap();
+        assert!(config.fronted);
+        assert_eq!(config.retention_days, 5);
+        for rejected in ["1e3", "_1000", "1__000"] {
+            unsafe { std::env::set_var("VOGT_RETENTION_DAYS", rejected) };
+            assert!(
+                load_config(&Map::new()).is_err(),
+                "{rejected} should be rejected"
+            );
+        }
+        unsafe { std::env::set_var("VOGT_RETENTION_DAYS", "7") };
+        unsafe { std::env::set_var("VOGT_FRONTED", " yes ") };
+        assert!(
+            load_config(&Map::new()).is_err(),
+            "a padded bool is rejected"
+        );
     }
 
     #[test]
