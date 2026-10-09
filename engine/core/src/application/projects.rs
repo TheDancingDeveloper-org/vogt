@@ -378,6 +378,15 @@ fn register_project<C: Clock + 'static, I: IdFactory + 'static>(
         &params.root_path,
     )?;
     let now = now_of(&clock);
+    // Refused before an id is drawn, so a duplicate registration does not
+    // shift the ids that follow it. The write repeats the check.
+    let slug = slug_for(&params.name)?;
+    if declared.read()?.project_by_slug(&slug)?.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "a project with slug {} is already registered",
+            py_repr(&slug)
+        )));
+    }
     let project_id = next_id(&ids, "prj");
     let mut writing = write_context(declared, principal, clock, ids);
     let project = record_registration(
@@ -546,6 +555,13 @@ fn create_project<C: Clock + 'static, I: IdFactory + 'static>(
     let scaffold = default_scaffold(&params.name, &owner, &params.lifecycle_state);
     let (created, skipped) = lay_scaffold(&root, &scaffold, true)?;
     let now = now_of(&clock);
+    let slug = slug_for(&params.name)?;
+    if declared.read()?.project_by_slug(&slug)?.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "a project with slug {} is already registered",
+            py_repr(&slug)
+        )));
+    }
     let project_id = next_id(&ids, "prj");
     let mut writing = write_context(declared, principal, clock, ids);
     let project = record_registration(

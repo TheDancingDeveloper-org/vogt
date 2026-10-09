@@ -69,6 +69,15 @@ where
 {
     let params = parse::<CreateLabelParams>(params)?;
     let (declared, _, principal, clock, ids, _) = context_parts(ctx);
+    // Checked before the id is drawn. The write repeats the check, but a
+    // duplicate refused here costs no id, so the next one stays where Python
+    // puts it.
+    if declared.read()?.label_by_name(&params.name)?.is_some() {
+        return Err(VogtError::Conflict(format!(
+            "a label named {} already exists",
+            py_repr(&params.name)
+        )));
+    }
     let input = NewLabel {
         id: next_id(&ids, "lbl"),
         name: params.name,
@@ -174,6 +183,16 @@ where
         )));
     }
     let (declared, _, principal, clock, ids, _) = context_parts(ctx);
+    if declared
+        .read()?
+        .actor_by_identity(&params.identity_ref)?
+        .is_some()
+    {
+        return Err(VogtError::Conflict(format!(
+            "an actor with identity {} already exists",
+            py_repr(&params.identity_ref)
+        )));
+    }
     let input = NewActor {
         id: next_id(&ids, "act"),
         kind: params.kind,
