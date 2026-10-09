@@ -1168,6 +1168,47 @@
   },
   {
     "body": {
+      "branches": [],
+      "comments": [],
+      "git": null,
+      "item": {
+        "assignee_actor_id": null,
+        "assignee_identity_ref": null,
+        "body": "",
+        "created_at": "2026-01-02T03:04:05Z",
+        "effort": null,
+        "id": "wrk_0002",
+        "initiative_id": null,
+        "kind": "chore",
+        "labels": [
+          "parity"
+        ],
+        "origin": "created",
+        "priority": "p2",
+        "project_id": null,
+        "project_slug": null,
+        "ref": "WI-2",
+        "relations": [],
+        "state": "open",
+        "superseded_by": null,
+        "title": "labelled item",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z"
+      },
+      "live_sessions": [],
+      "sessions": [],
+      "walked": []
+    },
+    "exit": 0,
+    "operation": "work.create"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "work.create"
+  },
+  {
+    "body": {
       "detail": null,
       "items": [
         {
@@ -1177,12 +1218,20 @@
           "ref": "WI-1",
           "state": "open",
           "title": "parity item"
+        },
+        {
+          "kind": "chore",
+          "priority": "p2",
+          "project_slug": null,
+          "ref": "WI-2",
+          "state": "open",
+          "title": "labelled item"
         }
       ],
       "link_state": null,
       "mode": "summary",
       "next_offset": null,
-      "total": 1
+      "total": 2
     },
     "exit": 0,
     "operation": "work.list"
@@ -1195,7 +1244,7 @@
   {
     "body": {
       "closed_upstream": 0,
-      "declared": 1,
+      "declared": 2,
       "excluded_unlinked": 0,
       "freshness": {
         "age_seconds": null,
@@ -1223,6 +1272,27 @@
           "title": "parity item",
           "trust_state": "unverified",
           "updated_at": "2026-01-02T03:04:05Z"
+        },
+        {
+          "adopted_as": null,
+          "classified": true,
+          "item": null,
+          "kind": "chore",
+          "labels": [
+            "parity"
+          ],
+          "observation_kind": null,
+          "observed_at": null,
+          "origin": "declared",
+          "priority": "p2",
+          "project_slug": null,
+          "ref": "WI-2",
+          "score": 22.0,
+          "source_url": null,
+          "state": "open",
+          "title": "labelled item",
+          "trust_state": "unverified",
+          "updated_at": "2026-01-02T03:04:05Z"
         }
       ],
       "link_state": null,
@@ -1230,7 +1300,7 @@
       "observed": 0,
       "scope": "global",
       "suppressed": 0,
-      "total_considered": 1
+      "total_considered": 2
     },
     "exit": 0,
     "operation": "backlog"

@@ -312,6 +312,30 @@
    }
   },
   {
+   "operation": "work.create",
+   "params": {
+    "kind": "chore",
+    "title": "labelled item",
+    "labels": "parity",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.create",
+   "params": {
+    "kind": "chore",
+    "title": "refused item",
+    "project": "parity",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
    "operation": "work.list",
    "params": {},
    "expect": {

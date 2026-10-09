@@ -57,13 +57,24 @@ where
     if params.project.is_none() || params.local_only {
         return create_native(ctx, &params, project.as_ref());
     }
-    let project = project.expect("a project was resolved above");
+    // A project was resolved above, so this is a project-scoped create.
+    let Some(project) = project else {
+        return Err(VogtError::InvalidRequest(
+            "work.create resolved no project".to_string(),
+        ));
+    };
     if !upstream::is_linked(&project) {
         return Err(refuse_unlinked(&project));
     }
     // Decision 9: the forge write-through runs before anything local exists.
-    // It is not ported, and storing a native row here would be the local
-    // success the forge never heard of.
+    // The precondition chain is local — policy, then a forge credential — and
+    // a gap refuses the whole operation. Only a chain that would actually
+    // reach the forge falls through to the not-ported failure, and that still
+    // stores nothing.
+    let gaps = write_through_gaps(ctx, &project, "create");
+    if !gaps.is_empty() {
+        return Err(refuse_gaps(&project, "create", &gaps, true));
+    }
     Err(VogtError::UpstreamWriteFailed(
         "work.create on a linked project writes through to the forge, and that path is not ported — nothing was stored locally. Pass local_only to keep a native item instead.".to_string(),
     ))
@@ -131,6 +142,64 @@ fn refuse_unlinked(project: &Project) -> VogtError {
     VogtError::NotLinked(format!(
         "work.create needs a forge-linked project, and {} is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or pass `local_only: true` to keep a native item in this project. {UNLINKED_STILL_WORKS}.",
         crate::core::py_repr(&project.slug)
+    ))
+}
+
+/// Every unmet precondition for a write-through, named, in the order Python
+/// reports them. Ports `_gaps_for`.
+///
+/// The chain is the policy, then a forge credential, then whether the
+/// project's `repo_url` parses for that provider. Credential resolution
+/// (`writeback._writer_provider`) is not ported: with no provider wired, the
+/// credential gate is unmet and the parse gate never runs, which is exactly
+/// what an instance with no token answers. A chain that passes every gate is
+/// empty, and that is the case the caller still has to fail as not-ported.
+fn write_through_gaps<C: Clock, I: IdFactory>(
+    _ctx: &AppContext<C, I>,
+    project: &Project,
+    action: &str,
+) -> Vec<String> {
+    let mut gaps = Vec::new();
+    let policy = project.write_back.to_string();
+    if !crate::adapters::forge::permits(&policy, action) {
+        gaps.push(format!(
+            "write-back policy is {}, which does not permit {} — set it with `forge writeback`",
+            crate::core::py_repr(&policy),
+            crate::core::py_repr(action),
+        ));
+    }
+    // No provider resolves: the port has neither an actor PAT nor a file-token
+    // provider, so the credential gate is the honest answer rather than a
+    // guessed pass.
+    gaps.push(
+        "no forge credential resolves for this project — link your forge account with `forge account link`, or configure the instance token file".to_string(),
+    );
+    gaps
+}
+
+/// `_require_permitted`'s message: every gap numbered, with the create escape
+/// hatch when `offer_local_only` is set.
+fn refuse_gaps(
+    project: &Project,
+    action: &str,
+    gaps: &[String],
+    offer_local_only: bool,
+) -> VogtError {
+    let enumerated = gaps
+        .iter()
+        .enumerate()
+        .map(|(index, gap)| format!("({}) {gap}", index + 1))
+        .collect::<Vec<_>>()
+        .join("; ");
+    let tail = if offer_local_only {
+        " Or pass `local_only` to create the item locally, without upstreaming it now."
+    } else {
+        ""
+    };
+    VogtError::UpstreamWriteRefused(format!(
+        "cannot {action} on linked project {}: on a linked project the write goes upstream or not at all, and {} precondition(s) are unmet: {enumerated}.{tail}",
+        crate::core::py_repr(&project.slug),
+        gaps.len(),
     ))
 }
 
@@ -374,6 +443,7 @@ fn work_page(
     link_state: Option<&str>,
 ) -> Value {
     let following = offset + page.len() as i64;
+    let page_empty = page.is_empty();
     let items: Vec<Value> = page
         .iter()
         .map(|item| {
@@ -394,14 +464,22 @@ fn work_page(
     // `WorkListResult`'s field order, every key present. A scoped list and a
     // global one carry the same shape; `link_state` and `detail` are null where
     // they do not apply, and `next_offset` is null on the last page.
-    json!({
-        "items": items,
-        "total": total,
-        "mode": mode,
-        "next_offset": (!page.is_empty() && following < total).then_some(following),
-        "link_state": link_state,
-        "detail": Value::Null,
-    })
+    let mut page = serde_json::Map::new();
+    page.insert("items".to_string(), Value::Array(items));
+    page.insert("total".to_string(), json!(total));
+    page.insert("mode".to_string(), Value::String(mode.to_string()));
+    page.insert(
+        "next_offset".to_string(),
+        (!page_empty && following < total)
+            .then_some(json!(following))
+            .unwrap_or(Value::Null),
+    );
+    page.insert(
+        "link_state".to_string(),
+        link_state.map_or(Value::Null, |state| Value::String(state.to_string())),
+    );
+    page.insert("detail".to_string(), Value::Null);
+    Value::Object(page)
 }
 
 /// What an unlinked project's empty list is hiding, and how to reach it. An
@@ -484,8 +562,72 @@ fn strings(value: Option<&Value>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::work_page;
-    use serde_json::Value;
+    use super::{create_work, work_page};
+    use crate::application::context::{build_context, Built};
+    use crate::core::{
+        ActorKind, LinkState, Moment, Principal, Project, SequentialIds, StepClock, WriteBack,
+    };
+    use crate::errors::VogtError;
+    use crate::storage::interface::{DeclaredStore, ObservedStore, WriteTxn};
+    use serde_json::{json, Value};
+
+    fn moment() -> Moment {
+        Moment::from_unix(1_700_000_000, 0)
+    }
+
+    fn unique() -> u64 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn opened() -> Built {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-work-{}-{}", std::process::id(), unique()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let built = build_context(
+            config,
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            panic!("expected a step clock");
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared
+            .bootstrap(&Principal::new("local:test-user", ActorKind::Human, "Test").unwrap())
+            .unwrap();
+        ctx.observed.migrate().unwrap();
+        built
+    }
+
+    fn insert_project(built: &Built, slug: &str, linked: bool, policy: WriteBack) {
+        let Built::StepSequential(ctx) = built else {
+            unreachable!("opened() builds a step clock");
+        };
+        let mut project = Project::new(&format!("prj_{slug}"), slug, slug, "/tmp", moment());
+        project.link_state = if linked {
+            LinkState::Linked
+        } else {
+            LinkState::Unlinked
+        };
+        project.write_back = policy;
+        project.repo_url = Some("https://github.com/acme/beta".to_string());
+        let mut txn = ctx.declared.write().unwrap();
+        txn.insert_project(&project).unwrap();
+        txn.commit().unwrap();
+    }
 
     #[test]
     fn the_envelope_carries_every_key_in_the_model_order() {
@@ -493,7 +635,10 @@ mod tests {
         // has no link state and an empty page has no next offset, and neither
         // is a reason to drop the key.
         let page = work_page("summary", 0, Vec::new(), 0, None);
-        let keys: Vec<&String> = page.as_object().unwrap().keys().collect();
+        let Value::Object(map) = &page else {
+            panic!("a page is an object");
+        };
+        let keys: Vec<&String> = map.keys().collect();
         assert_eq!(
             keys,
             [
@@ -510,8 +655,88 @@ mod tests {
         assert_eq!(page["detail"], Value::Null);
 
         let scoped = work_page("full", 0, Vec::new(), 0, Some("unlinked"));
-        let scoped_keys: Vec<&String> = scoped.as_object().unwrap().keys().collect();
-        assert_eq!(scoped_keys, keys);
+        let Value::Object(scoped_map) = &scoped else {
+            panic!("a page is an object");
+        };
+        assert_eq!(scoped_map.keys().collect::<Vec<_>>(), keys);
         assert_eq!(scoped["link_state"], "unlinked");
+    }
+
+    #[test]
+    fn a_native_create_keeps_the_body_and_numbers_refs_in_order() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        let first = create_work(
+            ctx,
+            json!({"kind": "chore", "title": "one", "body": "  kept  ", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(first["item"]["ref"], "WI-1");
+        assert_eq!(first["item"]["body"], "  kept  ");
+        assert_eq!(first["item"]["origin"], "created");
+        assert_eq!(first["item"]["trust_state"], "unverified");
+        let second = create_work(
+            ctx,
+            json!({"kind": "bug", "title": "two", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(second["item"]["ref"], "WI-2");
+        assert_eq!(second["item"]["state"], "open");
+    }
+
+    #[test]
+    fn an_unlinked_project_refuses_without_burning_a_ref() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        insert_project(&built, "beta", false, WriteBack::Disabled);
+        let refused = create_work(
+            ctx,
+            json!({"kind": "chore", "title": "nope", "project": "beta", "reason": "test"}),
+        )
+        .unwrap_err();
+        assert!(matches!(refused, VogtError::NotLinked(_)), "{refused}");
+        assert!(
+            refused.message().contains("local_only: true"),
+            "{}",
+            refused.message()
+        );
+        let after = create_work(
+            ctx,
+            json!({"kind": "chore", "title": "still first", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(after["item"]["ref"], "WI-1");
+    }
+
+    #[test]
+    fn a_linked_project_names_every_unmet_precondition() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        insert_project(&built, "beta", true, WriteBack::Disabled);
+        let refused = create_work(
+            ctx,
+            json!({"kind": "chore", "title": "nope", "project": "beta", "reason": "test"}),
+        )
+        .unwrap_err();
+        let VogtError::UpstreamWriteRefused(message) = &refused else {
+            panic!("expected upstream_write_refused, got {refused}");
+        };
+        assert!(
+            message.contains("write-back policy is 'none'")
+                && message.contains("(2) no forge credential"),
+            "{message}"
+        );
+        let after = create_work(
+            ctx,
+            json!({"kind": "chore", "title": "still first", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(after["item"]["ref"], "WI-1");
     }
 }
