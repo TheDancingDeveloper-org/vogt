@@ -126,13 +126,17 @@ fn check_value(
         return check_value(operation, name, target, value, root);
     }
     match schema.get("type").and_then(Value::as_str) {
-        Some("string") => check_string(operation, name, schema, value),
+        Some("string") => {
+            if schema.get("format").and_then(Value::as_str) == Some("date-time") {
+                if let Some(coerced) = coerce_datetime(&value) {
+                    return check_string(operation, name, schema, coerced);
+                }
+            }
+            check_string(operation, name, schema, value)
+        }
         Some("integer") => check_integer(operation, name, schema, value),
         Some("number") => check_number(operation, name, schema, value),
-        Some("boolean") => match value {
-            Value::Bool(_) => Ok(value),
-            _ => Err(invalid(operation, &format!("{name} takes a boolean"))),
-        },
+        Some("boolean") => check_boolean(operation, name, value),
         Some("array") => check_array(operation, name, schema, value, root),
         Some("object") if operation == "preference.set" && name == "value" => {
             check_preference_value(operation, name, value)
@@ -230,6 +234,17 @@ fn is_datetime(text: &str) -> bool {
     text.len() >= 8 && text.chars().any(|ch| ch.is_ascii_digit())
 }
 
+/// An integer on a datetime field is a unix timestamp. Pydantic renders it as
+/// UTC with a `Z` and no fractional seconds.
+fn coerce_datetime(value: &Value) -> Option<Value> {
+    let seconds = match value {
+        Value::Number(number) => number.as_i64(),
+        _ => None,
+    }?;
+    let moment = crate::core::Moment::from_unix(seconds, 0);
+    Some(Value::String(moment.to_json()))
+}
+
 /// `preference.set`'s value is an object, but the CLI hands every flag over as
 /// text, so a JSON object arrives as its source. The field validator parses it
 /// first; an unparseable string is the refusal.
@@ -285,15 +300,77 @@ fn check_integer(
     schema: &Value,
     value: Value,
 ) -> Result<Value, VogtError> {
+    // Pydantic's lax mode: a whole float, a boolean and a string of digits are
+    // an integer. The string is trimmed first. A number too big for i64 is kept
+    // as JSON sent it, which is how Python keeps an arbitrary-precision int.
     let number = match &value {
-        Value::Number(number) => number.as_i64(),
+        Value::Number(number) => match number.as_i64() {
+            Some(number) => Some(number),
+            // A whole float coerces. A number f64 cannot represent exactly is
+            // bigger than i64, and Python keeps the digits, so it passes through.
+            None if number.as_f64().is_some_and(|f| f.fract() == 0.0) => {
+                let exact = number.as_f64().unwrap() as i64;
+                if serde_json::Number::from(exact).as_f64() == number.as_f64() {
+                    Some(exact)
+                } else if schema.get("maximum").is_none()
+                    && schema.get("exclusiveMaximum").is_none()
+                {
+                    // No upper bound, and the number is a whole integer Python
+                    // keeps. The digits survive as JSON sent them.
+                    return Ok(value);
+                } else {
+                    return Err(invalid(
+                        operation,
+                        &format!("{name} is outside the range of an integer"),
+                    ));
+                }
+            }
+            None => {
+                return Err(invalid(operation, &format!("{name} takes an integer")));
+            }
+        },
+        Value::Bool(flag) => Some(i64::from(*flag)),
+        Value::String(text) => text.trim().parse::<i64>().ok(),
         _ => None,
     };
     let Some(number) = number else {
+        // Bigger than i64, so f64 has already rounded it. The digits JSON sent
+        // are exact, and Python keeps them, so the value passes through.
+        if let Value::Number(raw) = &value {
+            if raw.as_i64().is_none() && !raw.as_f64().is_some_and(|f| f.fract() != 0.0) {
+                return Ok(value);
+            }
+        }
         return Err(invalid(operation, &format!("{name} takes an integer")));
     };
     check_bounds(operation, name, schema, number)?;
-    Ok(value)
+    Ok(Value::from(number))
+}
+
+fn check_boolean(operation: &str, name: &str, value: Value) -> Result<Value, VogtError> {
+    let flag = match &value {
+        Value::Bool(flag) => Some(*flag),
+        Value::Number(number) => match number.as_i64().or_else(|| {
+            number
+                .as_f64()
+                .filter(|f| f.fract() == 0.0)
+                .map(|f| f as i64)
+        }) {
+            Some(0) => Some(false),
+            Some(1) => Some(true),
+            _ => None,
+        },
+        Value::String(text) => match text.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "1" => Some(true),
+            "false" | "no" | "0" => Some(false),
+            _ => None,
+        },
+        _ => None,
+    };
+    match flag {
+        Some(flag) => Ok(Value::from(flag)),
+        None => Err(invalid(operation, &format!("{name} takes a boolean"))),
+    }
 }
 
 fn check_number(
@@ -368,6 +445,17 @@ fn check_array(
     root: &Value,
 ) -> Result<Value, VogtError> {
     let Value::Array(items) = value else {
+        // A comma-joined string is the list the CLI sends for a repeated flag.
+        if let Value::String(text) = &value {
+            // `work.list`'s states is the one list the CLI sends comma-joined.
+            if operation == "work.list" && name == "states" {
+                let split = text
+                    .split(',')
+                    .map(|part| Value::String(part.trim().to_string()))
+                    .collect();
+                return check_array(operation, name, schema, Value::Array(split), root);
+            }
+        }
         return Err(invalid(operation, &format!("{name} takes a list")));
     };
     if let Some(min) = bound(schema, "minItems") {
@@ -531,7 +619,7 @@ mod tests {
         for case in corpus {
             let op = case["op"].as_str().unwrap();
             let outcome = match prepare(op, case["params"].clone()) {
-                Ok(_) => serde_json::json!({"ok": true}),
+                Ok(value) => serde_json::json!({"ok": true, "dump": value}),
                 Err(error) => serde_json::json!({"ok": false, "msg": error.message()}),
             };
             rows.push(serde_json::json!({"op": op, "tag": case["tag"], "rs": outcome}));
