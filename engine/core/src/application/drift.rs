@@ -166,7 +166,12 @@ fn list<C: Clock, I: IdFactory>(
         None => None,
     };
     let proposals = declared.list_drift(Some(status), kind, project_id.as_deref(), limit)?;
-    let human_gated: BTreeMap<&str, &str> = decisions::HUMAN_GATED_REASON.iter().copied().collect();
+    // Insertion order, not sorted. `BTreeMap` would alphabetise the keys, and
+    // Python's answer keeps `HUMAN_GATED_REASON`'s order on every list.
+    let mut human_gated = serde_json::Map::new();
+    for (kind, reason) in decisions::HUMAN_GATED_REASON {
+        human_gated.insert((*kind).to_string(), Value::String((*reason).to_string()));
+    }
     let freshness = freshness_of(&ctx.observed, clock_now(&ctx.clock))?;
     Ok(json!({
         "proposals": proposals,
@@ -1032,6 +1037,25 @@ mod tests {
             matches!(error, VogtError::InvalidRequest(ref message) if message.contains("run `sweep` first")),
             "{error}"
         );
+    }
+
+    #[test]
+    fn human_gated_keeps_the_declared_order() {
+        let ctx = context();
+        let listed = drift_list_op(&ctx, json!({})).unwrap();
+        let keys: Vec<&str> = listed["human_gated"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let expected: Vec<&str> = decisions::HUMAN_GATED_REASON
+            .iter()
+            .map(|(kind, _)| *kind)
+            .collect();
+        assert_eq!(keys, expected);
+        // The sorted order would put `broken_path_dependency` first.
+        assert_ne!(keys.first().copied(), Some("broken_path_dependency"));
     }
 
     #[test]
