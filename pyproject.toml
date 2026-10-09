@@ -5,7 +5,7 @@ description = "A product development environment for the AI era"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "AGPL-3.0-only"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [{ name = "TheDancingDeveloper" }]
 keywords = ["backlog", "mcp", "agents", "project-management"]
 classifiers = [
@@ -57,7 +57,7 @@ packages = ["src/vogt"]
 # The Python distribution is the independently supported core. Keep CI,
 # deployment, engine, PWA and mobile source out of the source archive so a
 # consumer cannot mistake a development checkout for the package boundary.
-only-include = ["src/vogt", "README.md", "LICENSE", "pyproject.toml"]
+only-include = ["src/vogt", "README.md", "LICENSE", "NOTICE", "pyproject.toml"]
 
 [tool.ruff]
 line-length = 88
