@@ -23,10 +23,12 @@ mod observability;
 mod registry;
 mod storage;
 
-/// The product version. A release build injects `VOGT_VERSION`; a
-/// local one falls back to the pinned version, which `scripts/check_product_version.py`
-/// keeps equal to `pyproject.toml`. Health and MCP both report this, so a
-/// local build cannot say `local/dev` on one and a number on the other.
+/// The product version. Nothing sets `VOGT_VERSION` today, so this resolves to
+/// the pinned fallback, which is what Python's `vogt.__version__` reports. It
+/// deliberately does not read `VOGT_PRODUCT_VERSION`: the image build defaults
+/// that to `local/dev` (see `engine/Dockerfile`), and the core must not announce
+/// a version Python never would. `scripts/check_product_version.py` keeps the
+/// fallback equal to `pyproject.toml`. Health and MCP both report this.
 pub const VERSION: &str = match option_env!("VOGT_VERSION") {
     Some(value) if !value.is_empty() => value,
     _ => "0.7.8",
@@ -85,6 +87,10 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // One subscriber for the process, installed before anything can log. The
+    // MCP route's audit failure is a `tracing::error!`, and without this it
+    // goes nowhere.
+    observability::configure_logging("info", "text");
     let cli = Cli::parse();
     if let Err(error) = validate_hooks(None) {
         eprintln!("{error}");
