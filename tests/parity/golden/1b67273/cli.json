@@ -709,6 +709,321 @@
   },
   {
     "body": {
+      "created_paths": [
+        "<root>/proj",
+        "<root>/proj/AGENTS.md",
+        "<root>/proj/LICENSE",
+        "<root>/proj/README.md",
+        "<root>/proj/design",
+        "<root>/proj/docs",
+        "<root>/proj/src"
+      ],
+      "project": {
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:05Z",
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:05Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "incubating",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "repo_url": null,
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "write_back": "none"
+      },
+      "skipped_paths": []
+    },
+    "exit": 0,
+    "operation": "project.create"
+  },
+  {
+    "body": {
+      "project": {
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:05Z",
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:05Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "incubating",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "repo_url": null,
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "write_back": "none"
+      }
+    },
+    "exit": 0,
+    "operation": "project.get"
+  },
+  {
+    "body": {
+      "projects": [
+        {
+          "compliance_checked_at": null,
+          "compliance_status": "not_checked",
+          "contract_adopted_at": "2026-01-02T03:04:05Z",
+          "contract_version": null,
+          "created_at": "2026-01-02T03:04:05Z",
+          "current_version": null,
+          "exclusions": [
+            ".venv/",
+            "node_modules/",
+            "target/",
+            "dist/",
+            "build/",
+            ".git/",
+            ".claude/"
+          ],
+          "id": "prj_0001",
+          "lifecycle_state": "incubating",
+          "link_state": "unlinked",
+          "name": "Parity",
+          "repo_url": null,
+          "root_path": "<root>/proj",
+          "slug": "parity",
+          "trust_state": "unverified",
+          "updated_at": "2026-01-02T03:04:05Z",
+          "writable": false,
+          "writable_reason": "not forge-linked: work.create refuses with project_not_linked. Pass local_only=true for a local record, or link (`forge link`) or publish (`forge publish`) the project.",
+          "write_back": "none"
+        }
+      ],
+      "total": 1
+    },
+    "exit": 0,
+    "operation": "project.list"
+  },
+  {
+    "body": {
+      "project": {
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:05Z",
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:05Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "incubating",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "repo_url": "https://example.invalid/parity.git",
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "write_back": "none"
+      }
+    },
+    "exit": 0,
+    "operation": "project.update"
+  },
+  {
+    "body": {
+      "project": {
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:05Z",
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:05Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "repo_url": "https://example.invalid/parity.git",
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "write_back": "none"
+      }
+    },
+    "exit": 0,
+    "operation": "project.transition"
+  },
+  {
+    "body": {
+      "created": [],
+      "detail": "0 written, 6 already there and left exactly as they were",
+      "project": "parity",
+      "root_path": "<root>/proj",
+      "skipped": [
+        "<root>/proj/AGENTS.md",
+        "<root>/proj/LICENSE",
+        "<root>/proj/README.md",
+        "<root>/proj/design",
+        "<root>/proj/docs",
+        "<root>/proj/src"
+      ]
+    },
+    "exit": 0,
+    "operation": "project.scaffold"
+  },
+  {
+    "body": {
+      "by_kind": {},
+      "by_state": {},
+      "ci_status": {
+        "checks": 0,
+        "detail": "swept, but no CI checks were observed \u2014 either this project has none, or the optional forge adapter is not configured",
+        "earlier_failures": 0,
+        "failing": [],
+        "revision": null,
+        "revisions_observed": 0,
+        "status": "no_checks"
+      },
+      "compliance_checked_at": null,
+      "compliance_status": "not_checked",
+      "current_version": null,
+      "declared_version": null,
+      "declared_work": 0,
+      "dependencies": {
+        "detail": "`dep-refs` has not walked this project; its references are not collected, which is not the same as none",
+        "referenced_by": 0,
+        "references_out": 0,
+        "status": "not_collected",
+        "unresolved": 0
+      },
+      "freshness": {
+        "age_seconds": null,
+        "collectors": "<volatile>",
+        "detail": "no collector has completed a sweep yet",
+        "oldest_relevant_sweep": null,
+        "status": "never_swept"
+      },
+      "observed_version": null,
+      "observed_work": 0,
+      "open_bugs": 0,
+      "open_work": 0,
+      "project": {
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": "2026-01-02T03:04:05Z",
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:05Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0001",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Parity",
+        "repo_url": "https://example.invalid/parity.git",
+        "root_path": "<root>/proj",
+        "slug": "parity",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "write_back": "none"
+      },
+      "top_backlog": [],
+      "version_matches": null
+    },
+    "exit": 0,
+    "operation": "project.brief"
+  },
+  {
+    "body": {
+      "project": {
+        "compliance_checked_at": null,
+        "compliance_status": "not_checked",
+        "contract_adopted_at": null,
+        "contract_version": null,
+        "created_at": "2026-01-02T03:04:05Z",
+        "current_version": null,
+        "exclusions": [
+          ".venv/",
+          "node_modules/",
+          "target/",
+          "dist/",
+          "build/",
+          ".git/",
+          ".claude/"
+        ],
+        "id": "prj_0002",
+        "lifecycle_state": "active",
+        "link_state": "unlinked",
+        "name": "Second",
+        "repo_url": null,
+        "root_path": "<root>/second",
+        "slug": "second",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z",
+        "write_back": "none"
+      }
+    },
+    "exit": 0,
+    "operation": "project.register"
+  },
+  {
+    "body": {
+      "backlog_total_considered": 0,
+      "drift_present": false,
+      "generated_at": "2026-01-02T03:04:08Z",
+      "inbox_active": 0,
+      "inbox_active_unfiltered": 0,
+      "inbox_filter": null,
+      "projects_total": 2,
+      "revision": 7,
+      "work_total": 0
+    },
+    "exit": 0,
+    "operation": "place.metrics"
+  },
+  {
+    "body": {
       "initiative": {
         "body": "",
         "created_at": "2026-01-02T03:04:05Z",
@@ -836,7 +1151,7 @@
           "detail": null,
           "observed_at": null,
           "projects": 0,
-          "registered": 0,
+          "registered": 2,
           "source": "agent",
           "status": "current"
         },
@@ -845,7 +1160,7 @@
           "detail": "this collector has not completed a sweep",
           "observed_at": null,
           "projects": 0,
-          "registered": 0,
+          "registered": 2,
           "source": "ci",
           "status": "unswept"
         },
@@ -854,7 +1169,7 @@
           "detail": "open proposals in the declared store",
           "observed_at": null,
           "projects": 0,
-          "registered": 0,
+          "registered": 2,
           "source": "drift",
           "status": "current"
         },
@@ -863,7 +1178,7 @@
           "detail": "this collector has not completed a sweep",
           "observed_at": null,
           "projects": 0,
-          "registered": 0,
+          "registered": 2,
           "source": "github",
           "status": "unswept"
         }
