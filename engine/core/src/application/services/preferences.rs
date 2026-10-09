@@ -93,16 +93,16 @@ fn set_preference<C: Clock + 'static, I: IdFactory + 'static>(
     updated_at: crate::core::Moment,
 ) -> Result<Value, VogtError> {
     let key = key.to_string();
-    let value = value.clone();
+    let value = canonical_value(&key, value)?;
     audited_write(writing, "preference.set", reason, |txn, actor| {
         let current = txn.actor_preference(&actor.id, &key)?;
         let current_version = current.as_ref().map(|row| row.version).unwrap_or(0);
         if let Some(expected) = expected {
             if expected != current_version {
                 let message = format!(
-                        "preference {key} for actor {identity} is at version {current_version}, not {expected}",
-                        identity = actor.identity_ref,
-                    );
+                    "preference {} is at version {current_version}, not {expected}; re-read it and apply the change on top of the current value",
+                    crate::core::py_repr(&key),
+                );
                 return Err(VogtError::PreferenceVersionConflict(message));
             }
         }
@@ -121,7 +121,7 @@ fn set_preference<C: Clock + 'static, I: IdFactory + 'static>(
             "cleared": stored.value == json!({}),
         });
         Ok(WriteOutcome::new(
-            preference_json(&stored),
+            json!({"preference": preference_json(&stored)}),
             "preference",
             &format!("{actor_id}:{key}", actor_id = actor.id),
             payload,
@@ -196,17 +196,38 @@ fn validate_key(key: &str) -> Result<(), VogtError> {
 }
 
 /// The Inbox filter a client can pin. Ports `InboxSavedFilter`, `extra="forbid"`.
+/// Omitted fields render as their defaults, which is how a stored filter reads
+/// back.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct InboxSavedFilter {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sources: Option<Vec<String>>,
-    #[serde(default)]
-    pub triage_states: Option<Vec<String>>,
-    #[serde(default)]
-    pub project: Option<String>,
-    #[serde(default)]
-    pub actor: Option<String>,
+    #[serde(default = "default_actor")]
+    pub actor: String,
+    #[serde(default = "default_triage_states")]
+    pub triage_states: Vec<String>,
+}
+
+fn default_actor() -> String {
+    "any".to_string()
+}
+
+fn default_triage_states() -> Vec<String> {
+    vec!["active".to_string()]
+}
+
+/// `inbox.filter` is stored as its model renders it, so omitted fields come back
+/// as their defaults. An empty object clears the setting and is stored as given.
+/// Any other key is stored verbatim.
+fn canonical_value(key: &str, value: &Value) -> Result<Value, VogtError> {
+    if key != INBOX_FILTER_KEY || value.as_object().is_some_and(|object| object.is_empty()) {
+        return Ok(value.clone());
+    }
+    let parsed: InboxSavedFilter = serde_json::from_value(value.clone()).map_err(|error| {
+        VogtError::InvalidPreference(format!("invalid {INBOX_FILTER_KEY} value — {error}"))
+    })?;
+    Ok(serde_json::to_value(parsed).expect("a parsed filter serialises"))
 }
 
 fn preference_json(row: &ActorPreference) -> Value {

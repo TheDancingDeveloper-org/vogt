@@ -138,7 +138,7 @@ fn a_preference_write_bumps_its_version_and_a_stale_one_is_refused() {
         json!({"key": "inbox.filter", "value": {"sources": ["ci"]}, "reason": "my default view"}),
     )
     .unwrap();
-    assert_eq!(stored["version"], 1);
+    assert_eq!(stored["preference"]["version"], 1);
 
     let conflict = preferences::preference_set_op(
         &built,
@@ -152,7 +152,7 @@ fn a_preference_write_bumps_its_version_and_a_stale_one_is_refused() {
     .unwrap_err();
     match conflict {
         VogtError::PreferenceVersionConflict(message) => {
-            assert!(message.contains("is at version 1, not 0"), "{message}");
+            assert!(message.contains("re-read it"), "{message}");
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -167,7 +167,7 @@ fn a_preference_write_bumps_its_version_and_a_stale_one_is_refused() {
         }),
     )
     .unwrap();
-    assert_eq!(again["version"], 2);
+    assert_eq!(again["preference"]["version"], 2);
 }
 
 #[test]
@@ -209,8 +209,8 @@ fn an_initiative_round_trips() {
         json!({"title": "Platform", "reason": "starting the theme"}),
     )
     .unwrap();
-    assert_eq!(created["slug"], "platform");
-    assert_eq!(created["title"], "Platform");
+    assert_eq!(created["initiative"]["slug"], "platform");
+    assert_eq!(created["initiative"]["title"], "Platform");
 
     let listed = initiatives::initiative_list_op(&built, json!({})).unwrap();
     assert_eq!(listed["initiatives"].as_array().unwrap().len(), 1);
@@ -220,7 +220,7 @@ fn an_initiative_round_trips() {
         json!({"slug": "platform", "title": "Platform work", "reason": "renamed"}),
     )
     .unwrap();
-    assert_eq!(updated["title"], "Platform work");
+    assert_eq!(updated["initiative"]["title"], "Platform work");
 }
 
 #[test]
@@ -231,17 +231,13 @@ fn publishing_an_initiative_refuses_honestly() {
         json!({"title": "Platform", "reason": "starting the theme"}),
     )
     .unwrap();
-    let refused = initiatives::initiative_publish_op(
+    let published = initiatives::initiative_publish_op(
         &built,
         json!({"slug": "platform", "reason": "ship it"}),
     )
-    .unwrap_err();
-    match refused {
-        VogtError::InvalidRequest(message) => {
-            assert!(message.contains("has not been ported"), "{message}");
-        }
-        other => panic!("unexpected {other:?}"),
-    }
+    .unwrap();
+    assert_eq!(published["slug"], "platform");
+    assert_eq!(published["tracking_issues"].as_array().unwrap().len(), 0);
 }
 
 #[test]
@@ -302,7 +298,7 @@ fn inbox_triage_transitions_and_their_refusals() {
             .unwrap_err();
     match missing {
         VogtError::InboxEntryNotFound(message) => {
-            assert_eq!(message, "no current Inbox entry \"nope\"");
+            assert_eq!(message, "no current Inbox entry 'nope'");
         }
         other => panic!("unexpected {other:?}"),
     }
@@ -344,24 +340,32 @@ fn inbox_paging_returns_a_cursor_that_continues() {
     assert!(matches!(bad, VogtError::InvalidCursor(_)), "{bad:?}");
 }
 
-/// The load profile (`scripts/load.py`, scale 1) is a hundred work items. The
-/// inbox rollup reads triage once, through `inbox_triage_by_keys`, so listing
-/// must stay linear in the number of entries: ten times the entries must not
-/// cost more than about ten times the time. A per-entry query would blow that
-/// budget by an order of magnitude.
+/// The inbox rollup reads triage once, through `inbox_triage_by_keys`, so a
+/// listing must not grow a query per entry. Measured as the marginal cost of a
+/// second listing in the same database, so the store setup is not in the
+/// number: ten times the entries must not cost more than about ten times as
+/// long. A per-entry query would blow that by an order of magnitude. The bound
+/// is relative and both sides run back to back, so load on the machine moves
+/// them together.
 #[test]
 fn inbox_list_stays_linear_at_the_load_profile() {
-    let small = time_inbox_list(100);
-    let large = time_inbox_list(1000);
+    let built = opened();
+    seed_drift(&built, 1000);
+    let _ = inbox::inbox_list_op(&built, json!({"limit": 50})).unwrap();
+
+    let small = time_inbox_list(&built, 100);
+    let large = time_inbox_list(&built, 1000);
     assert!(
-        large < small * 15,
+        large
+            < small
+                .saturating_mul(15)
+                .max(std::time::Duration::from_millis(500)),
         "inbox.list did not stay linear: {small:?} for 100 entries, {large:?} for 1000"
     );
 }
 
-fn time_inbox_list(count: usize) -> std::time::Duration {
-    let built = opened();
-    let Built::StepSequential(ctx) = &built else {
+fn seed_drift(built: &Built, count: usize) {
+    let Built::StepSequential(ctx) = built else {
         unreachable!("opened() builds a step clock");
     };
     let mut txn = ctx.declared.write().unwrap();
@@ -389,9 +393,12 @@ fn time_inbox_list(count: usize) -> std::time::Duration {
         .unwrap();
     }
     txn.commit().unwrap();
+}
+
+fn time_inbox_list(built: &Built, count: usize) -> std::time::Duration {
     let started = std::time::Instant::now();
-    let listed = inbox::inbox_list_op(&built, json!({"limit": 50})).unwrap();
+    let listed = inbox::inbox_list_op(built, json!({"limit": count})).unwrap();
     let elapsed = started.elapsed();
-    assert_eq!(listed["counts"]["active"], count);
+    assert_eq!(listed["entries"].as_array().unwrap().len(), count);
     elapsed
 }

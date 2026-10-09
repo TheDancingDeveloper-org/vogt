@@ -48,6 +48,7 @@ where
             "by_reason": {},
             "freshness": never_swept(),
             "detail": "no sweep has run; notifications are not collected",
+            "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
         }));
     }
     let project_id = match project.as_deref() {
@@ -120,6 +121,7 @@ where
         "by_reason": by_reason,
         "freshness": freshness_of(observed, now_of(&clock))?,
         "detail": detail,
+        "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
     }))
 }
 

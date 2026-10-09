@@ -72,7 +72,7 @@ where
             updated_at: now,
         },
     )?;
-    Ok(initiative_json(&made))
+    Ok(json!({"initiative": initiative_json(&made)}))
 }
 
 /// The audited half, against the concrete store. A closure built against the
@@ -91,8 +91,8 @@ fn insert_initiative<C: Clock + 'static, I: IdFactory + 'static>(
     audited_write(writing, "initiative.create", reason, |txn, _actor| {
         if txn.initiative_by_slug(&made.slug)?.is_some() {
             return Err(VogtError::Conflict(format!(
-                "an initiative with slug {slug:?} already exists",
-                slug = made.slug,
+                "an initiative with slug {} already exists",
+                crate::core::py_repr(&made.slug),
             )));
         }
         txn.insert_initiative(&made)?;
@@ -102,7 +102,7 @@ fn insert_initiative<C: Clock + 'static, I: IdFactory + 'static>(
             &made.id,
             initiative_json(&made),
             "initiative.created",
-            json!({"slug": made.slug, "title": made.title}),
+            json!({"slug": made.slug, "weight": made.weight}),
         ))
     })
 }
@@ -119,7 +119,6 @@ where
     let rows = view.list_initiatives(limit, offset)?;
     Ok(json!({
         "initiatives": rows.iter().map(initiative_json).collect::<Vec<_>>(),
-        "total": rows.len(),
     }))
 }
 
@@ -158,7 +157,7 @@ where
     let reason = require_string(&params, "reason")?;
     if title.is_none() && body.is_none() && weight.is_none() && state.is_none() {
         return Err(VogtError::InvalidRequest(
-            "initiative update changes nothing".to_string(),
+            "give a title, body, weight or state; there is nothing else to update".to_string(),
         ));
     }
     let changed_text = title.is_some() || body.is_some();
@@ -183,7 +182,7 @@ where
         // so the reprojection is a no-op rather than a second error.
         reproject_initiative();
     }
-    Ok(initiative_json(&updated))
+    Ok(json!({"initiative": initiative_json(&updated)}))
 }
 
 /// The fields an update may change, gathered so the audit closure takes one
@@ -214,9 +213,12 @@ fn apply_initiative_update<C: Clock + 'static, I: IdFactory + 'static>(
     let state = change.state;
     let now = change.now;
     audited_write(writing, "initiative.update", reason, |txn, _actor| {
-        let mut current = txn
-            .initiative_by_slug(&slug)?
-            .ok_or_else(|| VogtError::NotFound(format!("no initiative {slug:?}")))?;
+        let mut current = txn.initiative_by_slug(&slug)?.ok_or_else(|| {
+            VogtError::NotFound(format!(
+                "no initiative with slug {}",
+                crate::core::py_repr(&slug)
+            ))
+        })?;
         if let Some(title) = &title {
             current.title = title.clone();
         }
@@ -256,31 +258,56 @@ fn apply_initiative_update<C: Clock + 'static, I: IdFactory + 'static>(
     })
 }
 
-/// `initiative.publish`. Resolves the initiative, then stops.
-///
-/// The rest of the Python path writes a forge tracking issue
-/// (`provider.create_issue` / `update_issue_body`), splices the marker, and
-/// records the effect with `audited_action`. `Built` has no forge client — the
-/// provider trait lives under `adapters/forge/`, which this change is not
-/// allowed to edit, and the context has no field to hold one. Inventing a
-/// client, or returning a tracking issue that was never written, would be a
-/// silent stub. The refusal is the whole of the unported part.
+/// `initiative.publish`. With no forge-linked projects the initiative spans,
+/// there is nothing to project and no forge client is needed: the result is an
+/// empty tracking list and the action is still audited. A linked project would
+/// need the forge adapter, which this build does not carry, so that case
+/// refuses with the not-ported error rather than skipping the repo silently.
 fn initiative_publish<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
 where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
     let slug = require_string(&params, "slug")?;
-    let _reason = require_string(&params, "reason")?;
-    let (declared, _, _, _, _, _) = context_parts(ctx);
-    let view = declared.read()?;
-    let _initiative = view
-        .initiative_by_slug(&slug)?
-        .ok_or_else(|| VogtError::NotFound(format!("no initiative {slug:?}")))?;
-    Err(VogtError::InvalidRequest(
-        "initiative.publish is not available in this build: its service has not been ported yet"
-            .to_string(),
-    ))
+    let reason = require_string(&params, "reason")?;
+    let (declared, _, principal, clock, ids, _) = context_parts(ctx);
+    let (initiative, linked) = {
+        let view = declared.read()?;
+        let initiative = view.initiative_by_slug(&slug)?.ok_or_else(|| {
+            VogtError::NotFound(format!(
+                "no initiative with slug {}",
+                crate::core::py_repr(&slug)
+            ))
+        })?;
+        let linked = view
+            .list_projects(10_000, 0)?
+            .into_iter()
+            .any(|project| project.repo_url.is_some());
+        (initiative, linked)
+    };
+    if linked {
+        return Err(VogtError::InvalidRequest(
+            "initiative.publish is not available in this build: its service has not been ported yet"
+                .to_string(),
+        ));
+    }
+    let result = json!({
+        "slug": initiative.slug,
+        "state": initiative.state.to_string(),
+        "tracking_issues": [],
+    });
+    let mut writing = write_context(declared, principal, Arc::clone(&clock), Arc::clone(&ids));
+    crate::application::writes::audited_action(
+        &mut writing,
+        "initiative.publish",
+        &reason,
+        "initiative",
+        &initiative.id,
+        &result,
+        "initiative.projected",
+        None,
+    )?;
+    Ok(result)
 }
 
 /// The adopt-only refresh of an initiative's tracking issue. With no forge

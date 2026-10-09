@@ -161,7 +161,7 @@ where
         "entries": page,
         "next_cursor": next_cursor,
         "snapshot_at": snapshot_at.to_json(),
-        "high_water": source_water,
+        "high_water": ordered_water(&source_water),
         "coverage": coverage,
         "counts": counts,
         "github_scope": "registered projects only",
@@ -227,7 +227,8 @@ where
     };
     let Some(entry) = entry else {
         return Err(VogtError::InboxEntryNotFound(format!(
-            "no current Inbox entry {entry_key:?}"
+            "no current Inbox entry {}",
+            crate::core::py_repr(&entry_key)
         )));
     };
     if let Some(existing) = existing.as_ref() {
@@ -1105,6 +1106,17 @@ fn cursor_snapshot(cursor: &Value) -> Result<Moment, VogtError> {
         .map_err(|_| VogtError::InvalidCursor("cursor has an invalid snapshot time".to_string()))
 }
 
+fn ordered_water(water: &BTreeMap<String, Value>) -> serde_json::Map<String, Value> {
+    let mut ordered = serde_json::Map::new();
+    for source in SOURCES {
+        ordered.insert(
+            source.to_string(),
+            water.get(source).cloned().unwrap_or(Value::Null),
+        );
+    }
+    ordered
+}
+
 fn high_water(entries: &[Value]) -> BTreeMap<String, Value> {
     let mut result: BTreeMap<String, Value> = SOURCES
         .iter()
@@ -1164,6 +1176,7 @@ where
             "count": entries.iter().filter(|entry| text_of(entry, "source") == "drift").count(),
             "observed_at": Value::Null,
             "registered": registered,
+        "projects": registered,
             "detail": "open proposals in the declared store",
         }),
     );
@@ -1175,6 +1188,7 @@ where
             "count": entries.iter().filter(|entry| text_of(entry, "source") == "agent").count(),
             "observed_at": Value::Null,
             "registered": registered,
+        "projects": registered,
             "detail": if engine_configured { Value::Null } else { json!("no session engine is configured") },
         }),
     );
@@ -1188,6 +1202,7 @@ fn coverage_row(source: &str, sweep: Option<&Sweep>, entries: &[Value], register
         "count": entries.iter().filter(|entry| text_of(entry, "source") == source).count(),
         "observed_at": sweep.and_then(|sweep| sweep.finished_at).map(|moment| moment.to_json()),
         "registered": registered,
+        "projects": registered,
         "detail": match sweep {
             Some(_) => Value::Null,
             None => json!("this collector has not completed a sweep"),
