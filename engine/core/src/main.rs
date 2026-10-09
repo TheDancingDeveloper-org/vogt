@@ -180,11 +180,8 @@ fn main() -> ExitCode {
                     // VOGT_DATA_DIR, then `--data-dir` on top. A pod sets only
                     // VOGT_DATA_DIR, so a default here would read the wrong
                     // instance.
-                    let Some(dir) = resolve_data_dir(data_dir.as_deref().map(PathBuf::from)) else {
-                        return Err(crate::errors::VogtError::InvalidRequest(
-                            "could not resolve the data directory".into(),
-                        ));
-                    };
+                    let dir = resolve_data_dir(data_dir.as_deref().map(PathBuf::from))
+                        .map_err(crate::errors::VogtError::InvalidRequest)?;
                     let mut overrides = serde_json::Map::new();
                     overrides.insert(
                         "data_dir".to_string(),
@@ -256,8 +253,12 @@ fn validate_hooks(host: Option<&str>) -> Result<(), crate::errors::VogtError> {
 }
 
 fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
-    let Some(data_dir) = resolve_data_dir(data_dir) else {
-        return ExitCode::from(1);
+    let data_dir = match resolve_data_dir(data_dir) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("vogt-core: {err}");
+            return ExitCode::from(1);
+        }
     };
     if check {
         return match application::instance::pending(&data_dir) {
@@ -382,8 +383,12 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
         eprintln!("error: invalid_request: {error}");
         return ExitCode::from(1);
     }
-    let Some(data_dir) = resolve_data_dir(data_dir) else {
-        return ExitCode::from(1);
+    let data_dir = match resolve_data_dir(data_dir) {
+        Ok(dir) => dir,
+        Err(err) => {
+            eprintln!("vogt-core: {err}");
+            return ExitCode::from(1);
+        }
     };
     // validate_hooks already refused a bad value, so these are the hook or none.
     let mut clock = core::clock_from_env(std::env::var(core::CLOCK_ENV).ok().as_deref())
@@ -528,7 +533,7 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
 /// then the TOML file named by `VOGT_CONFIG_FILE`, then the XDG default. That is
 /// the order `load_config` applies, so a stack that sets `data_dir` in its config
 /// file lands in the same place as Python.
-fn resolve_data_dir(given: Option<PathBuf>) -> Option<PathBuf> {
+fn resolve_data_dir(given: Option<PathBuf>) -> Result<PathBuf, String> {
     let mut overrides = serde_json::Map::new();
     if let Some(dir) = &given {
         overrides.insert(
@@ -536,13 +541,7 @@ fn resolve_data_dir(given: Option<PathBuf>) -> Option<PathBuf> {
             serde_json::Value::String(dir.display().to_string()),
         );
     }
-    match config::load_config(&overrides) {
-        Ok(config) => Some(config.resolved_data_dir().to_path_buf()),
-        Err(err) => {
-            eprintln!("vogt-core: {err}");
-            None
-        }
-    }
+    config::load_config(&overrides).map(|config| config.resolved_data_dir().to_path_buf())
 }
 
 async fn shutdown() {
@@ -560,9 +559,9 @@ mod data_dir_tests {
         let dir = std::env::temp_dir().join(format!("vogt-datadir-{}", std::process::id()));
         // SAFETY: this test owns the variable and restores it before returning.
         unsafe { std::env::set_var("VOGT_DATA_DIR", &dir) };
-        let resolved = resolve_data_dir(None);
+        let resolved = resolve_data_dir(None).unwrap();
         unsafe { std::env::remove_var("VOGT_DATA_DIR") };
-        assert_eq!(resolved.as_deref(), Some(dir.as_path()));
+        assert_eq!(resolved.as_path(), dir.as_path());
     }
 
     #[test]
@@ -570,8 +569,8 @@ mod data_dir_tests {
         let from_env = std::env::temp_dir().join("vogt-from-env");
         let from_flag = std::env::temp_dir().join("vogt-from-flag");
         unsafe { std::env::set_var("VOGT_DATA_DIR", &from_env) };
-        let resolved = resolve_data_dir(Some(from_flag.clone()));
+        let resolved = resolve_data_dir(Some(from_flag.clone())).unwrap();
         unsafe { std::env::remove_var("VOGT_DATA_DIR") };
-        assert_eq!(resolved.as_deref(), Some(from_flag.as_path()));
+        assert_eq!(resolved.as_path(), from_flag.as_path());
     }
 }

@@ -85,7 +85,7 @@ fn a_reason_is_stored_stripped() {
         &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
         "test.op",
         "  padded reason  ",
-        |txn, _actor, _clock, _ids| {
+        |txn, _actor| {
             let made = project("prj_spaced", "spaced");
             txn.insert_project(&made)?;
             Ok(WriteOutcome::new(
@@ -124,7 +124,7 @@ fn a_failing_body_rolls_the_transaction_back() {
         &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
         "test.op",
         "a reason",
-        |txn, _actor, _clock, _ids| {
+        |txn, _actor| {
             txn.insert_project(&project("prj_doomed", "doomed"))?;
             Err::<WriteOutcome<()>, _>(VogtError::Conflict("body failed".to_string()))
         },
@@ -145,7 +145,7 @@ fn an_unseen_principal_is_auto_registered_and_explained() {
         &mut writing(&store, "agent:claude-code", ActorKind::Agent, "Claude Code"),
         "test.op",
         "the write that introduces the actor",
-        |txn, actor, _clock, _ids| {
+        |txn, actor| {
             let made = project("prj_agent", "agent-project");
             txn.insert_project(&made)?;
             Ok(WriteOutcome::new(
@@ -201,7 +201,7 @@ fn a_known_principal_is_not_registered_again() {
             &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
             "test.op",
             "again",
-            |txn, actor, _clock, _ids| {
+            |txn, actor| {
                 let _ = txn;
                 Ok(WriteOutcome::new(
                     actor.id.clone(),
@@ -326,7 +326,7 @@ fn a_name_that_exists_resolves() {
         &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
         "test.op",
         "seeding",
-        |txn, _actor, _clock, _ids| {
+        |txn, _actor| {
             txn.insert_project(&project("prj_alpha", "alpha"))?;
             txn.insert_work_item(&WorkItem {
                 id: "wrk_1".to_string(),

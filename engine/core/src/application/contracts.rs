@@ -414,7 +414,7 @@ fn record_adoption<C: Clock + 'static, I: IdFactory + 'static>(
     let already = adoption.already;
     let now = adoption.now;
     let result = adoption.result.clone();
-    audited_write(write, operation, reason, |txn, _actor, _, _| {
+    audited_write(write, operation, reason, |txn, _actor| {
         if !already {
             txn.update_project(
                 &project_id,
@@ -475,7 +475,7 @@ fn record_check<C: Clock + 'static, I: IdFactory + 'static>(
     let failing = check.failing.clone();
     let now = check.now;
     let recorded = check.recorded.clone();
-    audited_write(write, "contract.check", reason, |txn, _actor, _, _| {
+    audited_write(write, "contract.check", reason, |txn, _actor| {
         txn.update_project(
             &project_id,
             &crate::storage::interface::ProjectUpdate {

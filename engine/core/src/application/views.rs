@@ -135,7 +135,7 @@ mod tests {
             ),
             "create the item",
             "work.create",
-            |txn, _, _, _| {
+            |txn, _| {
                 txn.insert_project(&Project::new("prj_app", "app", "app", "/srv/app", moment()))?;
                 txn.insert_work_item(&WorkItem {
                     id: "wrk_1".to_string(),

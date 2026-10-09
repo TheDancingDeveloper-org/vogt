@@ -126,6 +126,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "migrate" => Some(crate::application::instance::migrate_op),
         "status" => Some(crate::application::instance::status_op),
         "contract.evaluate" => Some(crate::application::contracts::contract_evaluate_op),
+        "token.issue" => Some(crate::application::services::auth::issue_token_op),
         "contract.check" => Some(crate::application::contracts::contract_check_op),
         "contract.adopt" => Some(crate::application::contracts::contract_adopt_op),
         "contract.decline" => Some(crate::application::contracts::contract_decline_op),

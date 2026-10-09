@@ -102,6 +102,18 @@ impl<'a, C, I, D> WriteContext<'a, C, I, D> {
             ids,
         }
     }
+
+    /// The shared clock. A body draws its moment through this rather than being
+    /// handed it, because a closure that captured the generic clock bound would
+    /// not compile from a generic caller.
+    pub fn clock(&self) -> &Arc<std::sync::Mutex<C>> {
+        &self.clock
+    }
+
+    /// The shared id factory, for the same reason as [`Self::clock`].
+    pub fn ids(&self) -> &Arc<std::sync::Mutex<I>> {
+        &self.ids
+    }
 }
 
 /// Resolve the acting principal to an Actor row, creating it if new.
@@ -183,10 +195,12 @@ fn actor_payload(actor: &Actor) -> Value {
 
 /// Run one declared write atomically, audited and evented.
 ///
-/// `body` receives the transaction, the resolved actor, and the shared clock
-/// and id factory, so it draws after `ensure_actor` exactly as a Python body
-/// does. The audit and event rows are appended after it returns and committed
-/// with it; a `Err` from the body drops the transaction, which rolls it back.
+/// `body` receives the transaction and the resolved actor. It does not receive
+/// the clock and id factory: a closure that captured those generic bounds
+/// would not compile from a generic caller (the compiler demands `'static`),
+/// so a body draws its ids and moments before the call and moves them in. The
+/// audit and event rows are appended after it returns and committed with it;
+/// a `Err` from the body drops the transaction, which rolls it back.
 pub fn audited_write<C, I, D, T, F>(
     ctx: &mut WriteContext<'_, C, I, D>,
     operation: &str,
@@ -197,12 +211,7 @@ where
     C: Clock,
     I: IdFactory,
     D: DeclaredStore,
-    F: FnOnce(
-        &mut D::Write<'_>,
-        &Actor,
-        &Arc<std::sync::Mutex<C>>,
-        &Arc<std::sync::Mutex<I>>,
-    ) -> Result<WriteOutcome<T>, VogtError>,
+    F: FnOnce(&mut D::Write<'_>, &Actor) -> Result<WriteOutcome<T>, VogtError>,
 {
     let cleaned = validate_reason(reason)?;
     let mut txn = ctx.declared.write()?;
@@ -214,7 +223,7 @@ where
         &ctx.clock,
         &ctx.ids,
     )?;
-    let outcome = body(&mut txn, &actor, &ctx.clock, &ctx.ids)?;
+    let outcome = body(&mut txn, &actor)?;
     let now = ctx
         .clock
         .lock()
