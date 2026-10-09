@@ -42,7 +42,7 @@ sidecar, released as a pair and run by one Compose file,
   on by default (`COMPOSE_PROFILES=voice`).
 
 The engine is not optional: it is the only way in. The core image,
-`ghcr.io/thedancingdeveloper-org/vogt:0.7.7`, is also published at every
+`ghcr.io/thedancingdeveloper-org/vogt:0.7.8`, is also published at every
 release because the stack image is built from it by digest and the release
 manifest records both — it is a build input, not a deployment target.
 `deploy/vogt.compose.yml` and `deploy/engine.overlay.yml` run a core and an
@@ -98,8 +98,27 @@ ready when the core is absent — restarting the container would not revive a
 core and would kill every live terminal — so read its body, not just the
 status. Then open `http://localhost:8910/`: the first-run wizard asks for
 your name, a username and a password, creates your `admin` login and signs
-you in. Later people are added with `vogt user create` and agents get API
-tokens from `vogt token issue`, both run inside the container (§3).
+you in. The wizard stays open until the first *person* has a login: the
+stack secret is bound to an agent actor and does not count, so supplying it
+before `up` no longer closes the wizard (releases up to v0.7.7 did, #903).
+`GET /api/install/status` says which: `{"install_mode": true}` while the
+wizard is offered. Once closed it stays closed — the store latches it, and
+an upgrade from v0.7.7 or earlier latches any store that already held a
+token, so a running instance operated only through `ENGINE_TOKEN` is never
+reopened. If it answers `false` with nobody able to sign in — such an
+upgraded instance, or `VOGT_INSTALL_BOOTSTRAP_ENABLED=false` — create the
+first operator in the container instead; it prompts for the password:
+
+```console
+docker compose -f deploy/stack.compose.yml exec vogt \
+  vogt user create --username <name> --scopes admin --reason "Create first operator"
+```
+
+The wizard is an unauthenticated door until it closes, so on a stack
+published beyond loopback (§4) either finish it before opening the port up,
+or set `VOGT_INSTALL_BOOTSTRAP_ENABLED=false` in an overlay and use the
+command above. Later people are added with `vogt user create` and agents
+get API tokens from `vogt token issue`, both run inside the container (§3).
 [`USER_GUIDE.md`](USER_GUIDE.md) is the tour from there.
 
 Three named volumes — `vogt-data`, `engine-home` and `engine-agent-clis`
@@ -117,8 +136,8 @@ Everything an operator chooses lives in `deploy/.env`, read by
 | `ENGINE_BIND` | no | `127.0.0.1` | Host interface the port is published on. Loopback until you mean to expose it. |
 | `ENGINE_PORT` | no | `8910` | Host port the container's 8910 is published on. |
 | `ENGINE_PUBLIC_URL` | no | — | The URL clients reach the stack at. Set it once there is a stable one (§4). |
-| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.7` | The image to run. Pin a digest (§6). |
-| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.7` | The sidecar. Pin the same release as the stack. |
+| `VOGT_STACK_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.8` | The image to run. Pin a digest (§6). |
+| `VOGT_VOICE_IMAGE` | no | `ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.8` | The sidecar. Pin the same release as the stack. |
 | `COMPOSE_PROFILES` | no | `voice` | Clear it to run without the sidecar; the voice controls stay present but inert. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_ACTOR` | no | `agent:engine` | Who the adopted stack secret acts as — and therefore whom a break-glass token's Vogt calls are attributed to. |
 | `VOGT_BOOTSTRAP_CORE_TOKEN_SCOPES` | no | `read,work.write,project.write` | What it may do. Everything in the pod can read the file, so this is the blast radius. |
@@ -159,8 +178,9 @@ error, not a silent default provider.
 **Credentials for people and agents.** The core authenticates every request
 and is the only identity authority; the engine holds no token table and asks
 the core who a bearer is. **People sign in with a username and password.**
-The first operator chooses theirs in the browser wizard; every later person
-is created from the container that owns the data:
+The first operator chooses theirs in the browser wizard (or, where the
+wizard is off, with the `vogt user create --scopes admin` command in §2);
+every later person is created from the container that owns the data:
 
 ```console
 docker compose -f deploy/stack.compose.yml exec vogt \
@@ -566,9 +586,9 @@ a deployment are separate acts, and the digest line is what moves one.
 Resolve the digests of a release:
 
 ```console
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.7 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-stack:0.7.8 \
   | grep -m 1 Digest
-docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.7 \
+docker buildx imagetools inspect ghcr.io/thedancingdeveloper-org/vogt-voice:0.7.8 \
   | grep -m 1 Digest
 ```
 

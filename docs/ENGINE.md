@@ -624,6 +624,12 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
 
 #### Routes
 
+Each route below has a core operation that is its MCP counterpart, or a
+stated reason it has none, in `src/vogt/registry/engine_routes.py`
+(`tests/test_engine_parity.py` enforces it; `API.md` has the table). An agent
+should use those operations — they take either id and are audited — rather
+than these routes.
+
 - `GET /api/sessions` -> `SessionSummary[]` — any valid bearer. Exited
   sessions are included until deleted; filter on `alive`.
 - `POST /api/sessions` `SessionSpec` -> `SessionSummary` (requires the
@@ -647,30 +653,36 @@ session the core started also sees its Vogt id as `VOGT_SESSION_ID`.
   screen as `blocked`, publishes a `session-blocked` event and (when set)
   sends a push. Cleared when the session exits. Requires `sessions`.
 - `PATCH /api/sessions/:id` `{"name": "..."}` -> `OkResponse` (requires the
-  `sessions` capability)
+  `sessions` capability). MCP: `session_rename`.
 - `POST /api/sessions/:id/kill` `{"reason"?, "by"?}` -> `OkResponse`
   (SIGKILL to the child; the session stays in the registry so its
   scrollback is still readable, which is what makes this different from
   `DELETE`. The optional body is recorded before the kill, and the exit then
   reads `stopped` rather than `errored`. Requires the `sessions`
   capability)
-- `POST /api/sessions/:id/input` `{"text": "...", "submit": bool}` -> `OkResponse`
-  (writes verbatim to PTY stdin, 64 KiB cap, `submit` appends `\r`; requires
-  the `sessions` capability)
+- `POST /api/sessions/:id/input` `{"text": "...", "submit": bool, "person"?}`
+  -> `OkResponse` (writes verbatim to PTY stdin, 64 KiB cap, `submit`
+  appends `\r`; requires the `sessions` capability). `403 person required`,
+  with nothing typed, when a permission prompt is showing and the caller is
+  not a person ([Only a person answers a permission
+  prompt](#only-a-person-answers-a-permission-prompt)).
 - `DELETE /api/sessions/:id` -> `OkResponse` — kills the child if it is still
   running, then forgets the session and its prompt file (requires the
-  `sessions` capability)
+  `sessions` capability). MCP: `session_remove`.
 - `GET /api/sessions/:id/attach` — the WebSocket stream (see
   [Attach protocol](#attach-protocol)); a driver does not need it.
 - `POST /api/sessions/:id/answer` `{"option": N | "label": "...",
-  "expect_question"?}` -> `AnswerResult` — choose an option of the dialog on
+  "expect_question"?, "person"?}` -> `AnswerResult` — choose an option of the dialog on
   screen: a permission dialog, or a startup gate (`approval.kind`
   `folder-trust`, `external-imports`, `read-outside-cwd`). The engine
   re-reads the menu at that moment, moves the highlight from where it is
   with arrow keys (one write each), presses Enter, and looks again for up to
   2 s to report `dismissed`. `409` when no dialog is showing, when it no
   longer asks `expect_question`, when the option is not on the menu, or when
-  a label matches several options. Requires `sessions` (WI-917).
+  a label matches several options. Requires `sessions` (WI-917). A
+  permission prompt (`kind` `permission` or `read-outside-cwd`) is answered
+  only by a person: anyone else gets `403 person required` and nothing is
+  typed (WI-983, below).
 - `GET /api/sessions/sweep[?screen_lines=N&include_exited=true]` ->
   `SessionSweepEntry[]` — every live and hibernated session (exited ones
   only when asked) with the last N (default 8, at most 40) non-blank lines
@@ -1173,7 +1185,9 @@ ready → read → answer → stop.** Over MCP (the core's tools, preferred):
    `last_reply_excerpt` for each live agent session.
 4. **Answer.** `session_input` with `text` and `submit: true` to type a
    follow-up; `keys: ["esc"]` to dismiss a menu or dialog; `keys: ["down",
-   "enter"]` to pick an option. Then go back to step 2.
+   "enter"]` to pick an option; `session_answer` for a startup gate. A
+   permission prompt is not the driver's to answer unless the driver is a
+   person (below). Then go back to step 2.
 5. **Stop.** `session_stop` kills the process and, for a session the core
    started, revokes its token. The screen and log stay readable until the
    session is deleted.
@@ -1202,7 +1216,67 @@ sequences included, JSON-escaped) plus `\r` when `submit` is true; an empty
   status). Use the core's operation unless it cannot do what is needed.
 - **Any `sessions` holder can type into any session**, including one a
   person is using. There is no per-session grant (`API.md`, "Who may read
-  and type into sessions").
+  and type into sessions"). The one exception is a permission prompt.
+
+##### Only a person answers a permission prompt
+
+A Claude Code `permissions.ask` rule, and the same dialog in Codex and
+opencode, means "a person decides". Every route that reaches a terminal
+needs only `sessions`, which every `work.write` token holds, so without a
+check any agent could approve another session's prompt, or its own
+(WI-983). The engine therefore refuses, with `403 person required:` and
+nothing typed, input from anyone but a person that lands while a
+**permission** dialog is on the screen: `approval.kind` `permission` or
+`read-outside-cwd`. It covers every way in — `POST /answer`, a raw
+`POST /input`, a WebSocket keystroke (dropped, with an `input-refused`
+frame; see [Attach protocol](#attach-protocol)), and an approved assistant
+`send_input` card, which is typed as whoever approved it (refused at
+delivery, and the model is told `person required:`). A TUI dialog is modal, so
+at that moment any keystroke is an answer to it, `Esc` and `Ctrl-C`
+included. The screen is read fresh for the check, the same read `/answer`
+aims by.
+
+Not gated: input to a session with no dialog showing (ordinary driving),
+and the startup gates `folder-trust` and `external-imports`, which an
+overseer answers as before. Engine-internal writers (the autopilot nudge,
+the post-wake resume prompt) type only into a session that is `ready`, and
+`ready` is false while a dialog shows.
+
+Who is a person is decided by flags the authentication gate sets, never by
+the caller's name (an actor's `identity_ref` can be any string), the same
+discipline as the WI-973 grant routes:
+
+- a caller the core resolves to an actor of kind `human`;
+- vogt-core's own credential (the stack secret) only when the request says
+  `"person": true`. The core's `session.answer` and `session.input` send it,
+  and decide it from their own authenticated principal the way
+  `session.grant_decide` does: never for an agent principal (a session's
+  `agent:session:` token, an `agent:engine:` token, the pod token), and never
+  for the engine's own credential, whatever actor that is bound to;
+- the break-glass `ENGINE_TOKEN`, an operator credential no session holds,
+  unless the request says `"person": false` (as the core does when it relays
+  an agent with it).
+
+Everyone else — every agent-bound token, whatever its scopes — is refused,
+and `"person"` in its request is ignored. Refusals and a person's answers to
+permission prompts through `/answer` are logged under `vogt::audit` as
+`event=session.permission_answer` with the principal, session, kind,
+question and (for an answer) the option chosen. The core's `session.answer`
+audit row names the actor, and its `session.answered` event records `kind`,
+`question`, `option`, `label` and `person`; `session.input` records
+`person`.
+
+The refusal tells the overseer to escalate: leave the prompt for a person in
+the Inbox (it is already there as "asking for approval"), or report it with
+`session_report_blocked`; stopping the session is still allowed.
+
+This is a boundary only against a session that cannot act as the engine. A
+session running as the engine's uid can read the stack secret or the
+break-glass token and relay its own `"person": true`; separating the uids is
+WI-982. Detection is the same screen reading that raises `awaiting-approval`,
+so a dialog the engine does not recognise is not gated, and input that
+reaches the terminal in the instant before a dialog is drawn is not gated
+either.
 
 Over HTTP, the same loop with `curl`:
 
@@ -1571,6 +1645,7 @@ Server text control frames:
 {"type":"pong","id":1,"pos":123}
 {"type":"lag","note":"client too slow; reattach"}
 {"type":"hibernated"}
+{"type":"input-refused","reason":"person required: …"}
 ```
 
 One PTY has one size, however many clients attach. `snapshot-start` carries
@@ -1584,6 +1659,13 @@ narrower client wraps each line so the moves land on the wrong rows and leave
 ghost frames (WI-1089). The PWA asks for its own size only from the pane the
 person is using — on open, on input or focus, on a resize while focused, or
 from its "Fit to this screen" chip — and follows otherwise.
+
+`input-refused` says that input this socket sent was dropped rather than
+typed: a permission prompt was showing and the attached caller is not a
+person (WI-983, [Only a person answers a permission
+prompt](#only-a-person-answers-a-permission-prompt)). The socket stays open;
+input once the prompt is gone is typed as usual. A person's keystrokes are
+never checked.
 
 `hibernated` follows `snapshot-done` when the session is hibernated. The
 snapshot was its kept output (always `reset`, whatever `resume_from` said).
@@ -1673,7 +1755,8 @@ within five seconds, `4401` bad or missing auth frame, `4404` no such session.
   subscription count, live GUI process count, whether the GUI stream and FCM
   are configured, and nested `history`, `agent_tasks`, `auth_broker` and
   `storage` blocks. Storage numbers are counts and byte totals, never paths
-  into the workspace beyond the two roots themselves.
+  into the workspace beyond the two roots themselves. MCP: `engine_status`
+  (`engine.status`), through the core's engine credential.
 - `GET /api/agent-clis[?upstream=true]` -> `AgentCliReport` — the
   runtime-pinned agent CLIs and the Go toolchain ([`DEPLOYMENT.md`](DEPLOYMENT.md)
   §3): for each tool in the image's table its package (an npm package, or
@@ -1946,6 +2029,126 @@ piece → its audio), `speech_end_to_first_audio_ms` (the headline: last voice
 → first reply audio sent), `tool_rounds` and `filler`. The same line is logged
 under `vogt::call`. `scripts/call_latency.py` measures a deployment with a
 WAV file and no microphone.
+
+### Quick chat APIs
+
+A **quick chat** (WI-1097) is a persistent text conversation with an agent
+CLI, run without a terminal. The agent is Klaudia, driven over its stream-json
+protocol (msp-klaudia `docs/embedding.md`): each message is a `user` line on
+its stdin, and its replies, tool calls and the `result` that ends a turn come
+back on stdout. The engine picks the conversation id, which is the chat's own
+id: `--session-id` on the first launch and `--resume` on every later one. A
+chat's process is therefore disposable. It is stopped after
+`ENGINE_CHAT_IDLE_AFTER`, and on the next message it is relaunched with the
+whole conversation. Chats are kept for good in `state_dir/chats.db`. There is
+no retention sweep, and archiving only hides a chat from the default list.
+
+Every route needs the `sessions` capability, because a chat starts an agent
+and its transcript is a shared record. They all answer 404 when chats are off
+(`ENGINE_CHAT_ENABLED=0`, or no Klaudia launch configured), and `/api/config`
+advertises `chat: {drivers: [{name, label, models}]}` only when they are on.
+The core's `chat.*` operations are the MCP/CLI/REST counterparts.
+
+- `GET /api/chats?q=&archived=false|true|all&limit=` -> `ChatSummary[]`, newest
+  first. `q` is full-text search over titles and over what people and the
+  agent said. Tool inputs and results are not indexed.
+- `POST /api/chats` `{title?, model?, message?, work_item?}` -> `ChatSendResult`.
+- `GET /api/chats/:id?tail=` -> `ChatDetail`, i.e. the summary plus `entries`
+  (`user`, `assistant`, `tool-call`, `tool-result`, `notice`, `error`,
+  `approval`) and `approvals` still pending.
+- `POST /api/chats/:id/messages` `{text, wait_secs?}` -> `ChatSendResult`.
+  `wait_secs` (≤ 300) waits for the turn to end. A promoted chat answers 409.
+  An `error` entry with `retryable: true` (a provider refusal mid-turn,
+  WI-1007, or a stopped agent) is answered by sending the message again.
+- `POST /api/chats/:id/approvals/:approval_id` `{allow, message?, person?}` ->
+  `ChatApproval`. **Only a person may answer** (the WI-983 rule,
+  `person_gate::is_person`). Anyone else gets `403 person required`.
+- `POST /api/chats/:id/model` `{model}`: a configured id, or `default`. It takes
+  effect from the next turn (`set_model` to a running agent, `--model` on a
+  relaunch).
+- `POST /api/chats/:id/interrupt`: stops the running turn.
+- `POST /api/chats/:id/archive` `{archived}`.
+- `POST /api/chats/:id/promote` `{cwd?, name?, template?, work_item?}` ->
+  `{chat, session}`. This stops the chat's agent and starts a terminal session
+  from the chat's template with `resume: <chat id>`. The session continues the
+  same conversation with the session's own credentials. The chat takes no
+  further messages.
+- `GET /api/chats/:id/events`: an SSE stream of `ChatEvent` (`entry`,
+  `progress`, `approval`, `chat`, `lagged`). `/api/events` also carries a
+  thin `chat-changed {id}`.
+- `POST /api/chats/:id/gate` is **outside the bearer gate**. Only the chat's own
+  agent calls it (below), with the per-process token the engine gave that
+  agent.
+
+**What a chat's agent can do.** A chat reads pages and documents nobody
+vetted, so the engine assumes its agent can be talked into anything:
+
+- **Its environment holds no secrets.** The agent starts from a cleared
+  environment plus an allowlist (`PATH`, `HOME`, locale, `TZ`, proxy and CA
+  variables), its gate's URL and token, and the one provider key that
+  `ENGINE_CHAT_PROVIDER_KEY` names. The engine resolves that key through the
+  agent-auth manifest's `get` when the deployment brokers it, or else from its
+  own environment. The template's credential wrapper is dropped, so a chat has
+  no Vogt token, no brokered service tokens and no secrets-manager identity.
+  **Its MCP servers therefore start without credentials. The POC has no MCP
+  in chats (decision D1 on WI-1097).**
+- **Only its own directory is free.** Each chat runs in
+  `state_dir/chats/<id>/`, whose `.klaudia/config.toml` (loaded with
+  `--trusted-project-config`) declares a `PreToolUse` hook. The hook posts
+  every tool call to the gate. The free path is an allowlist, and it fails
+  closed. A call runs at once only in two cases: it is a tool that touches
+  nothing outside the agent (`ToolSearch`, `TodoWrite` and the like), or it is
+  a read tool the engine knows argument by argument (`Read`, `Glob`, `Grep`
+  and the LSP tools, from Klaudia's own schemas) whose every argument is one
+  it knows and whose every path resolves, lexically and through symlinks,
+  inside that directory. An unknown tool, an unknown argument, or a missing
+  or non-string path is a card. **Everything else waits on an approval card
+  that a person answers.** That includes any read elsewhere (`/proc/self/environ`, the
+  engine's state, `~`), every web, browser and MCP call (**decision D2:
+  every web call is carded**), every command and every edit. A prompt
+  injection therefore cannot read something and send it out in one unseen
+  step, because each half is a card naming what it would do. Klaudia's own
+  `can_use_tool` asks (host changes) become cards too. `ask_user` and
+  `exit_plan` are answered "not supported in a chat".
+- **The gate fails closed where it can.** On any failure to get an answer, the
+  hook exits 2, which is Klaudia's "block". The engine denies a card at
+  `ENGINE_CHAT_APPROVAL_TIMEOUT`, which is before curl gives up and before the
+  hook's own timeout, after which Klaudia would let the call through. When
+  Klaudia asks whether the chat's hooks may run, the engine allows that only
+  for its own file, byte for byte as it wrote it. If a gated call succeeds
+  without the gate having seen exactly that call, the chat's agent is stopped
+  with an error. The gate is a driver's gate, not a sandbox. A command a person
+  allows runs unconfined, which is what WI-982's uid separation is for.
+- **It is bounded.** Limits on chat processes:
+  - at most `ENGINE_CHAT_MAX_PROCESSES` (4) at once, and
+    `ENGINE_CHAT_MAX_PER_CREATOR` (2) per person; a launch first stops the least
+    recently active idle chat, and gets a 409 when every running chat is busy;
+  - a turn past `ENGINE_CHAT_TURN_TIMEOUT` (20m) is stopped, and killed if it
+    does not stop;
+  - a process tree over `ENGINE_CHAT_MAX_RSS` (2GiB) is killed;
+  - each process group is killed when its agent exits, and at boot the engine
+    ends any that a previous process left running (a pidfile with the start
+    time, so a reused pid is never hit).
+
+  `/api/status` reports `chats: {running, rss_bytes}`. Chats are not sessions:
+  they appear in no session list and never hibernate.
+- **What is kept** is text: what was said, tool calls (600 characters), tool
+  results (4 000), approvals, notices and errors, with what looks like a
+  credential redacted. Klaudia's own JSONL transcript under
+  `~/.klaudia/sessions` is what `--resume` continues from.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `ENGINE_CHAT_ENABLED` | `1` | `0` turns chats off |
+| `ENGINE_CHAT_TEMPLATE` | first Klaudia template | the session template whose driver a chat runs, and that promotion uses |
+| `ENGINE_CHAT_COMMAND` | — | the driver command instead (words, or a JSON array) |
+| `ENGINE_CHAT_MODELS_JSON` | `[]` | `[{"id","label"}]` for the model picker; the first is a new chat's default; empty offers only the driver's own default |
+| `ENGINE_CHAT_PROVIDER_KEY` | — | the name of the provider-key variable the driver reads (its `apiKeyEnv`) |
+| `ENGINE_CHAT_IDLE_AFTER` | `10m` | stop an idle chat's process |
+| `ENGINE_CHAT_APPROVAL_TIMEOUT` | `10m` | deny an unanswered card |
+| `ENGINE_CHAT_TURN_TIMEOUT` | `20m` | stop a turn running longer |
+| `ENGINE_CHAT_MAX_PROCESSES` / `_MAX_PER_CREATOR` | `4` / `2` | process caps |
+| `ENGINE_CHAT_MAX_RSS` | `2GiB` | kill a chat's process tree past this |
 
 ### File APIs
 
@@ -2900,6 +3103,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `migrate` | Operator-only | Unavailable: Local schema maintenance; no remote MCP tool. |
 | `status` | Voice-readable | Available: Report instance identity, schema versions, and row counts. |
 | `instance.diagnostics` | Operator-only | Unavailable: Deploy diagnostics (version, digest, readiness, migrations, redacted error log, optional peer probe) are for operators and agents over MCP, not the assistant. |
+| `engine.status` | Operator-only | Unavailable: The engine's operational report (build, counts, storage, event lag) is for operators and agents over MCP, not the assistant. |
 | `place.metrics` | Voice-readable | Available: Read all bounded shell navigation counts in one response. |
 | `connect` | Operator-only | Unavailable: Client and connection configuration belongs to operator setup. |
 | `mcp.stdio` | Operator-only | Unavailable: Local process transport; no remote MCP tool. |
@@ -2977,6 +3181,8 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
 | `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |
 | `session.set_role` | Operator-only | Unavailable: Nominates the overseeing session; for the GUI and for agents over MCP/CLI/REST. |
+| `session.rename` | Operator-only | Unavailable: Renames a session as the GUI does; for the GUI and for agents over MCP/CLI/REST. |
+| `session.remove` | Operator-only | Unavailable: Kills and forgets a session as the GUI's Remove does; for the GUI and for agents over MCP/CLI/REST. |
 | `session.bind_work` | Operator-only | Unavailable: Declares which work item a session serves; for the GUI and for agents over MCP/CLI/REST. |
 | `session.grant_request` | Operator-only | Unavailable: Asks a person to approve a credential for a session; for agents over MCP/CLI/REST. |
 | `session.grant_decide` | Operator-only | Unavailable: A person's approval of a grant, made deliberately in the Inbox, never by voice. |
@@ -3016,6 +3222,15 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `inbox.restore` | Confirmation-gated | Available after approval: Restore one archived or snoozed Inbox occurrence. |
 | `preference.get` | Operator-only | Unavailable: Per-person UI settings (saved filters); the assistant has no use for them. |
 | `preference.set` | Operator-only | Unavailable: Changes a person's saved UI settings; set them in the surface they belong to. |
+| `chat.list` | Operator-only | Unavailable: Quick chats are a separate agent (Klaudia) with its own transcript; the assistant is not a client of them. For the Chat panel and agents over MCP/CLI/REST. |
+| `chat.get` | Operator-only | Unavailable: Reads a quick chat's transcript; for the Chat panel and agents over MCP/CLI/REST. |
+| `chat.create` | Operator-only | Unavailable: Starts another agent; the assistant starts sessions instead. |
+| `chat.send` | Operator-only | Unavailable: Talks to another agent; for the Chat panel and agents over MCP/CLI/REST. |
+| `chat.decide` | Operator-only | Unavailable: Only a person answers a chat's approval, in the Chat panel; an agent's call is refused. |
+| `chat.set_model` | Operator-only | Unavailable: A chat's model is the person's choice in the Chat panel. |
+| `chat.interrupt` | Operator-only | Unavailable: Stops a chat's turn; for the Chat panel and agents over MCP/CLI/REST. |
+| `chat.archive` | Operator-only | Unavailable: Files a chat away; for the Chat panel and agents over MCP/CLI/REST. |
+| `chat.promote` | Operator-only | Unavailable: Turns a chat into a terminal session; for the Chat panel and agents over MCP/CLI/REST. |
 | `audit.list` | Voice-readable | Available: Query the audit log. |
 | `registry.dump` | Voice-readable | Available: The operation registry as a manifest — every operation's scope, bindings and schemas. |
 <!-- voice-capabilities:end -->

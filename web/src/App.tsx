@@ -73,6 +73,7 @@ import {
   closeTab,
   focusTab,
   openAssistantTab,
+  openChatTab,
   openEditorTab,
   openGitTab,
   openGuiTab,
@@ -168,6 +169,7 @@ const Editor = lazy(() => import("./Editor"));
 const EditorWorkspace = lazy(() => import("./EditorWorkspace"));
 const AgentTasks = lazy(() => import("./AgentTasks"));
 const Assistant = lazy(() => import("./Assistant"));
+const Chat = lazy(() => import("./Chat"));
 const AuditBrowser = lazy(() => import("./AuditBrowser"));
 const Backlog = lazy(() => import("./Backlog"));
 const Inbox = lazy(() => import("./Inbox"));
@@ -474,6 +476,7 @@ function pathFor(tab: Tab): string {
   if (tab.kind === "oversight") return "/oversight";
   if (tab.kind === "workitem") return `/w/${encodeURIComponent(tab.ref)}`;
   if (tab.kind === "assistant") return "/assistant";
+  if (tab.kind === "chat") return "/chat";
   return "/tasks";
 }
 
@@ -702,12 +705,18 @@ const App: Component = () => {
           : "loading",
       sessionExists: (id) => Boolean(sessionsStore.sessions[id]),
       assistantEnabled: Boolean(publicCfg()?.assistant_enabled),
+      chatEnabled: Boolean(publicCfg()?.chat),
       guiAvailable: guiEnabled(),
     },
     settingsReturnUrl,
   );
   const currentPlace = (place: PrimaryPlace) =>
     isCurrentPlace(routeOutcome(), place);
+  /** The chat `#/chat/<id>` names (WI-1097), or null for the list. */
+  const chatRouteId = () => {
+    const match = /^\/chat\/([0-9a-fA-F-]{36})$/.exec(location.pathname);
+    return match?.[1] ?? null;
+  };
   const currentTool = () => {
     const outcome = routeOutcome();
     return outcome?.kind === "tool" || outcome?.kind === "settings"
@@ -981,6 +990,9 @@ const App: Component = () => {
       // provisioned, and a tab that opens and then fails is a worse answer
       // than no tab.
       if (publicCfg()?.assistant_enabled) openAssistantTab();
+    } else if (path === "/chat" || path.startsWith("/chat/")) {
+      // Same rule as the Assistant: no tab onto routes that 404.
+      if (publicCfg()?.chat) openChatTab();
     } else if (path === "/settings") {
       settingsRouted = true;
       setSettingsOpen(true);
@@ -1011,6 +1023,7 @@ const App: Component = () => {
         "/tasks": "Tasks",
         "/gui": "GUI stream",
         "/assistant": "Assistant",
+        "/chat": "Chat",
       };
       // A terminal chip is named by its live session, not the opaque id in
       // its URL; everything else keeps the route label. Dedupe on the surface
@@ -1402,6 +1415,8 @@ const App: Component = () => {
       (location.pathname === "/tasks" && tabId === "tasks") ||
       ((location.pathname === "/assistant" || location.pathname.startsWith("/assistant/")) &&
         tabId === "assistant") ||
+      ((location.pathname === "/chat" || location.pathname.startsWith("/chat/")) &&
+        tabId === "chat") ||
       (location.pathname.startsWith("/w/") &&
         `workitem:${decodeURIComponent(params.ref ?? "")}` === tabId);
 
@@ -1653,7 +1668,7 @@ const App: Component = () => {
               <span class="places-group-label">Machine</span>
               <a
                 class={currentPlace("sessions") ? "active" : ""}
-                aria-current={currentPlace("sessions") && !["git", "history", "oversight", "tasks", "gui", "assistant"].includes(currentTool() ?? "") ? "page" : undefined}
+                aria-current={currentPlace("sessions") && !["git", "history", "oversight", "tasks", "gui", "assistant", "chat"].includes(currentTool() ?? "") ? "page" : undefined}
                 href="#/sessions"
               ><span>Sessions</span><PlaceCount metric={sessionMetric()} label="sessions" /></a>
               <a class={isCurrentTool(routeOutcome(), "git") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "git") ? "page" : undefined} href="#/g">Git</a>
@@ -1661,6 +1676,7 @@ const App: Component = () => {
               <a class={isCurrentTool(routeOutcome(), "history") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "history") ? "page" : undefined} href="#/history">History</a>
               <a class={isCurrentTool(routeOutcome(), "tasks") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "tasks") ? "page" : undefined} href="#/tasks">Tasks</a>
               <Show when={guiEnabled()}><a class={isCurrentTool(routeOutcome(), "gui") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "gui") ? "page" : undefined} href="#/gui">GUI stream</a></Show>
+              <Show when={publicCfg()?.chat}><a class={isCurrentTool(routeOutcome(), "chat") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "chat") ? "page" : undefined} href="#/chat">Chat</a></Show>
               <Show when={publicCfg()?.assistant_enabled}><a class={isCurrentTool(routeOutcome(), "assistant") ? "active" : ""} aria-current={isCurrentTool(routeOutcome(), "assistant") ? "page" : undefined} href="#/assistant">Assistant</a></Show>
             </div>
           </nav>
@@ -2161,6 +2177,7 @@ const App: Component = () => {
               currentTool={currentTool()}
               guiEnabled={guiEnabled()}
               assistantEnabled={Boolean(publicCfg()?.assistant_enabled)}
+              chatEnabled={Boolean(publicCfg()?.chat)}
               hasActiveWorkspace={sessionWorkspaceActive()}
               onCreateSession={(promptForName) =>
                 void onCreate(undefined, undefined, promptForName)
@@ -2311,6 +2328,20 @@ const App: Component = () => {
                       confirmAction={confirmUser}
                     />
                   </Show>
+                  <Show when={t.kind === "chat" && publicCfg()?.chat}>
+                    {(config) => (
+                      <Chat
+                        config={config()}
+                        chatId={chatRouteId()}
+                        onSelect={(id) => navigate(id ? `/chat/${id}` : "/chat")}
+                        onOpenSession={(sessionId, label) => {
+                          openTerminalTab(sessionId, label);
+                          navigate(`/t/${sessionId}`);
+                        }}
+                        onError={(msg) => showToast(msg, { kind: "error" })}
+                      />
+                    )}
+                  </Show>
                   <Show when={t.kind === "tasks"}>
                     <AgentTasks
                       onError={(msg) => showToast(msg, { kind: "error" })}
@@ -2384,6 +2415,7 @@ const App: Component = () => {
                 vogtConfigured: Boolean(publicCfg()?.vogt?.configured),
                 guiEnabled: guiEnabled(),
                 assistantEnabled: Boolean(publicCfg()?.assistant_enabled),
+                chatEnabled: Boolean(publicCfg()?.chat),
               })}
             >
               {(item) =>

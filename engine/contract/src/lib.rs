@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod chat;
+pub use chat::*;
+
 /// What a session's terminal is doing.
 ///
 /// `idle`, `running`, `waiting-for-input` and `awaiting-approval` are the live
@@ -568,6 +571,12 @@ pub struct AnswerRequest {
     /// answer meant for one dialog never lands on the next.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_question: Option<String>,
+    /// Whether the principal behind this answer is a person (WI-983). Read
+    /// only from the two credentials that relay for someone else — vogt-core
+    /// (absent means no) and the break-glass token (absent means yes); every
+    /// other caller is a person or not by its own actor's kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub person: Option<bool>,
 }
 
 /// What `POST /api/sessions/{id}/answer` did.
@@ -841,6 +850,12 @@ pub enum ServerEvent {
     /// The tag is spelled explicitly rather than left to the container's
     /// kebab-case rule so it reads `task.gate.opened`, the dotted name the PWA
     /// and phone filter on.
+    /// A quick chat (WI-1097) changed: a message, a state, an approval, its
+    /// title or archive flag. Thin like `VogtChanged`: a client showing that
+    /// chat reads it, or follows `/api/chats/{id}/events`.
+    ChatChanged {
+        id: Uuid,
+    },
     #[serde(rename = "task.gate.opened")]
     TaskGateOpened {
         task_id: Uuid,
@@ -1173,6 +1188,13 @@ pub enum ServerControl {
     /// was its last screen, nothing live follows, and the server closes.
     /// The client offers to wake it.
     Hibernated,
+    /// Input this socket sent was dropped, not typed: a permission prompt
+    /// was showing and only a person answers one (WI-983). The socket stays
+    /// open; input once the prompt is gone is typed as usual.
+    InputRefused {
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

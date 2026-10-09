@@ -227,13 +227,20 @@ carrying its reason, and the test fails if either names an operation that
 does not exist: `LOCAL_ONLY` (`init`, `migrate`, `serve`, `backup`,
 `restore`, `clone`, `import`, `mcp.stdio` — each acts on the local process or data
 directory, and none is mounted under `/api` or offered over MCP) and
-`HTTP_ONLY`, which is empty.
+`HTTP_ONLY` (`session.token`, the engine's own call to mint a session's
+credential). The engine's routes are held to the same rule by a third table,
+`src/vogt/registry/engine_routes.py`: each route names the core operation
+that is its MCP counterpart or says why it has none, and
+`tests/test_engine_parity.py` fails on a route in neither (`API.md`).
 
 Three routes sit beside the registry rather than in it: the unauthenticated
 health probes; the first-run install surface (`GET /api/install/status`,
-`POST /api/install/bootstrap`), which names the first operator only while the
-token store holds no rows at all and refuses with `install_closed` forever
-after — given a `password` it creates that person's `admin` login and returns
+`POST /api/install/bootstrap`), which names the first operator only while no
+person holds a credential — no token bound to a non-agent actor, revoked
+included, and no password login; agent-bound tokens such as the adopted
+stack secret do not count (#903) — and refuses with `install_closed` forever
+after (the store latches it: an upgraded store that already held a token,
+or one whose user was later removed, stays closed) — given a `password` it creates that person's `admin` login and returns
 an expiring session, which is what the browser wizard rides, and without one
 it returns an `admin` API token shown once, the headless shape; and
 `POST /api/auth/login`, the password login, which is unauthenticated by

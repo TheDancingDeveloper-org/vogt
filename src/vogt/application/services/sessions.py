@@ -59,6 +59,8 @@ from vogt.application.models import (
     ListSessionsParams,
     LogTailParams,
     LogTailResult,
+    RemoveSessionParams,
+    RenameSessionParams,
     ReportBlockedParams,
     ReportUnblockedParams,
     SearchOutputParams,
@@ -135,6 +137,10 @@ SESSION_KEEP_AWAKE = "session.keep_awake"
 SESSION_KEEP_AWAKE_EVENT = "session.keep_awake"
 SESSION_SET_ROLE = "session.set_role"
 SESSION_ROLE_EVENT = "session.role_set"
+SESSION_RENAME = "session.rename"
+SESSION_RENAMED_EVENT = "session.renamed"
+SESSION_REMOVE = "session.remove"
+SESSION_REMOVED_EVENT = "session.removed"
 SESSION_BIND_WORK = "session.bind_work"
 SESSION_WORK_BOUND_EVENT = "session.work_bound"
 SESSION_WORK_UNBOUND_EVENT = "session.work_unbound"
@@ -870,6 +876,10 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     the effect (the `audited_action` ordering) with the byte count and key
     names only: what was typed may be a password, and an audit row is the
     wrong place to keep one.
+
+    While the session shows a permission prompt, every keystroke answers it,
+    so the engine refuses input from anyone but a person (`PersonRequired`,
+    WI-983); this says which the caller is (`_answers_as_person`).
     """
     reason = writes.validate_reason(params.reason)
     text = params.text or ""
@@ -887,6 +897,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
+    person = _answers_as_person(ctx)
 
     writes_in_order: list[tuple[str, bool]] = []
     if text:
@@ -910,7 +921,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         before = None if seen is None else seen.activity
     woke = False
     try:
-        _send_all(engine, engine_id, params.id, writes_in_order)
+        _send_all(engine, engine_id, params.id, writes_in_order, person=person)
     except Conflict:
         # The engine refuses input to a hibernated session. Typing into one
         # is asking for it back: wake it — resuming its conversation, with a
@@ -935,7 +946,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             raise Conflict(msg) from None
         # Freshly woken and at its prompt: nothing was running.
         before = "waiting-for-input"
-        _send_all(engine, engine_id, params.id, writes_in_order)
+        _send_all(engine, engine_id, params.id, writes_in_order, person=person)
 
     verdict = (
         _confirm_delivery(engine, engine_id, before)
@@ -960,6 +971,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             "submitted": submitted,
             "delivery": verdict.delivery,
             "woke": woke,
+            "person": person,
         },
         event_kind=SESSION_INPUT_EVENT,
     )
@@ -1015,10 +1027,15 @@ def _confirm_delivery(
 
 
 def _send_all(
-    engine: EngineClient, engine_id: str, named: str, chunks: list[tuple[str, bool]]
+    engine: EngineClient,
+    engine_id: str,
+    named: str,
+    chunks: list[tuple[str, bool]],
+    *,
+    person: bool,
 ) -> None:
     for chunk, submit in chunks:
-        if not engine.send_input(engine_id, chunk, submit=submit):
+        if not engine.send_input(engine_id, chunk, submit=submit, person=person):
             msg = f"the engine has no live session {named!r}"
             raise NotFound(msg)
 
@@ -1349,6 +1366,118 @@ def keep_session_awake(
         )
 
 
+def rename_session(ctx: AppContext, params: RenameSessionParams) -> SessionResult:
+    """Rename a session, live or hibernated — the GUI's rename, audited.
+
+    The name is the engine's: the core keeps no copy, so a linked session and
+    one the GUI started are renamed the same way and read back the same way.
+    """
+    reason = writes.validate_reason(params.reason)
+    name = params.name.strip()
+    if not name:
+        msg = "name must not be empty: give the session a name to show"
+        raise InvalidRequest(msg)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    if not engine.rename_session(engine_id, name=name):
+        msg = f"the engine has no session {params.id!r}"
+        raise NotFound(msg)
+    audited_action(
+        ctx,
+        operation=SESSION_RENAME,
+        reason=reason,
+        entity_kind="session",
+        entity_id=target.session.id if target.session is not None else engine_id,
+        outcome={
+            "engine_session_id": engine_id,
+            "linked": target.session is not None,
+            "name": name,
+        },
+        event_kind=SESSION_RENAMED_EVENT,
+    )
+    renamed = engine.get_session(engine_id)
+    if target.session is None:
+        if renamed is None:
+            msg = f"the engine has no session {params.id!r}"
+            raise NotFound(msg)
+        return SessionResult(session=_summarize_engine_only(renamed))
+    with ctx.declared.read() as view:
+        return SessionResult(
+            session=_summarize(view, target.session, engine_session=renamed)
+        )
+
+
+def remove_session(ctx: AppContext, params: RemoveSessionParams) -> SessionResult:
+    """Kill a session if it still runs and have the engine forget it — the
+    GUI's Remove, audited.
+
+    Where `session.stop` keeps the session listed so its output stays
+    readable, this drops the engine's record, its kept screen and its brief.
+    A linked session's own record is closed and its token revoked exactly as
+    a stop closes them, unless a stop already did; Vogt's record and the
+    audit trail stay. An engine that had already forgotten a linked session
+    is not an error: the record is closed all the same.
+
+    A live session is killed through the stop path first, carrying the
+    reason and who asked, so its exit reads `stopped` with both rather than
+    `errored` (WI-913) — the engine's DELETE kills without them.
+    """
+    reason = writes.validate_reason(params.reason)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    before = engine.get_session(engine_id)
+    if before is not None and before.alive:
+        engine.kill_session(engine_id, reason=reason, by=ctx.principal.identity_ref)
+    if target.session is None:
+        if before is None or not engine.remove_session(engine_id):
+            msg = f"no session {engine_id!r}"
+            raise NotFound(msg)
+        audited_action(
+            ctx,
+            operation=SESSION_REMOVE,
+            reason=reason,
+            entity_kind="session",
+            entity_id=engine_id,
+            outcome={"engine_session_id": engine_id, "linked": False},
+            event_kind=SESSION_REMOVED_EVENT,
+            summary={"engine_removed": True, "linked": False},
+        )
+        summary = _summarize_engine_only(before).model_copy(
+            update={"alive": False, "stopped_at": ctx.clock()}
+        )
+        return SessionResult(session=summary)
+
+    session = target.session
+    removed = engine.remove_session(engine_id)
+
+    def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
+        del actor
+        current = txn.session_by_id(session.id)
+        if current is None:  # pragma: no cover - resolved just above
+            msg = f"no session {params.id!r}"
+            raise NotFound(msg)
+        now = ctx.clock()
+        closed = current.stopped_at is None
+        if closed:
+            txn.mark_session_stopped(current.id, at=now)
+            for token in txn.tokens_for_actor(current.actor_id):
+                txn.revoke_token(token.id, reason=reason, at=now)
+        after = txn.session_by_id(current.id)
+        assert after is not None  # read in this transaction
+        return WriteOutcome(
+            result=SessionResult(session=_summarize(txn, after, engine_session=None)),
+            entity_kind="session",
+            entity_id=after.id,
+            payload=_audited_payload(after),
+            event_kind=SESSION_REMOVED_EVENT,
+            summary={"engine_removed": removed, "record_closed": closed},
+        )
+
+    return audited_write(ctx, operation=SESSION_REMOVE, reason=reason, body=body)
+
+
 def set_session_role(ctx: AppContext, params: SetSessionRoleParams) -> SessionResult:
     """Nominate a session as oversight, or make it a worker again (WI-957).
 
@@ -1583,7 +1712,11 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
 
     The engine reads the menu as it is at that moment and moves the highlight
     itself, so nothing here counts rows. Audited after the effect with the
-    question, the kind and the option chosen.
+    question, the kind, the option chosen and whether a person chose it.
+
+    A permission prompt (not a startup gate) is a person's to answer: the
+    engine refuses it for anyone else with `PersonRequired` (WI-983), and
+    this decides which the caller is (`_answers_as_person`).
     """
     reason = writes.validate_reason(params.reason)
     if (params.option is None) == (params.label is None or not params.label.strip()):
@@ -1592,11 +1725,13 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
+    person = _answers_as_person(ctx)
     answered = engine.answer_session(
         engine_id,
         option=params.option,
         label=None if params.label is None else params.label.strip(),
         expect_question=params.expect_question,
+        person=person,
     )
     if answered is None:
         msg = (
@@ -1628,6 +1763,7 @@ def answer_session(ctx: AppContext, params: AnswerSessionParams) -> SessionAnswe
             "option": option.number,
             "label": option.label[:200],
             "dismissed": dismissed,
+            "person": person,
         },
         event_kind=SESSION_ANSWERED_EVENT,
     )
@@ -1646,6 +1782,19 @@ SESSION_TOKEN = "session.token"
 #: template, an agent task), as opposed to `agent:session:<ses_…>` for one
 #: vogt-core started.
 ENGINE_SESSION_ACTOR_PREFIX = "agent:engine:"
+
+
+def _answers_as_person(ctx: AppContext) -> bool:
+    """Whether this caller answers a permission prompt as a person (WI-983).
+
+    The rule `session.grant_decide` applies (WI-973): an agent principal —
+    a session's token, an `agent:engine:` token, the pod token — never
+    does. Nor does the engine's own credential, whatever actor it is bound
+    to: on a deployment whose stack secret was first issued to a person, its
+    principal is that person, but what presents it is the engine, and any
+    process that can read it.
+    """
+    return ctx.principal.kind == "human" and not _is_engine_credential(ctx)
 
 
 def _is_engine_credential(ctx: AppContext) -> bool:
@@ -2278,6 +2427,13 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
     if engine_session is None:
         return {}
     return {
+        "name": engine_session.name or None,
+        "command": engine_session.command,
+        "exit_code": engine_session.exit_code,
+        "activity_changed_at": _parse_engine_timestamp(
+            engine_session.activity_changed_at
+        ),
+        "conversation_agent": engine_session.conversation_agent,
         "turn_started_at": _parse_engine_timestamp(engine_session.turn_started_at),
         "last_output_at": _parse_engine_timestamp(engine_session.last_output_at),
         "approval": _approval(engine_session.approval),
@@ -2352,7 +2508,9 @@ def _summarize_engine_only(
         work_item_state=None if item is None else item.state,
         actor=None,
         cwd=engine_session.cwd,
-        template=None,
+        # The engine's own record of the template, not an audited claim: the
+        # name it was started from, as the GUI's rail shows it.
+        template=engine_session.template,
         model=None,
         effort=None,
         reason=None,
@@ -2389,6 +2547,8 @@ __all__ = [
     "last_reply",
     "list_sessions",
     "log_tail",
+    "remove_session",
+    "rename_session",
     "report_blocked",
     "report_unblocked",
     "search_output",

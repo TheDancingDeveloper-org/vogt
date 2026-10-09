@@ -64,10 +64,14 @@ WHY = "parity harness"
 #: alternative is not driving those operations at all.
 StepParams = dict[str, Any] | Callable[[dict[str, Any]], dict[str, Any]]
 
+#: The stand-in engine's one chat (WI-1097).
+PARITY_CHAT = "0c0c0c0c-0000-4000-8000-000000000001"
+
 SCRIPT: list[tuple[str, StepParams]] = [
     ("status", {}),
     ("registry.dump", {}),
     ("instance.diagnostics", {}),
+    ("engine.status", {}),
     ("place.metrics", {}),
     ("connect", {}),
     ("workflow.list", {}),
@@ -509,6 +513,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    (
+        "session.rename",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "name": "parity renamed",
+            "reason": WHY,
+        },
+    ),
     # Re-declare the item the session serves (WI-998): the core row, then
     # the stand-in engine's label.
     (
@@ -519,6 +531,19 @@ SCRIPT: list[tuple[str, StepParams]] = [
             "reason": WHY,
         },
     ),
+    # Quick chats (WI-1097), against the same stand-in engine's canned chat.
+    ("chat.list", {"q": "parity"}),
+    ("chat.create", {"message": "hi", "reason": WHY}),
+    ("chat.get", {"id": PARITY_CHAT}),
+    ("chat.send", {"id": PARITY_CHAT, "text": "hi", "wait_s": 5, "reason": WHY}),
+    (
+        "chat.decide",
+        {"id": PARITY_CHAT, "approval_id": "a1", "allow": True, "reason": WHY},
+    ),
+    ("chat.set_model", {"id": PARITY_CHAT, "model": "grok-4.7", "reason": WHY}),
+    ("chat.interrupt", {"id": PARITY_CHAT, "reason": WHY}),
+    ("chat.archive", {"id": PARITY_CHAT, "archived": True, "reason": WHY}),
+    ("chat.promote", {"id": PARITY_CHAT, "name": "chat", "reason": WHY}),
     (
         "session.wake",
         lambda seen: {"id": seen["session.start"]["session"]["id"], "reason": WHY},
@@ -555,6 +580,15 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
             "reason": "the harness is finished with it",
+        },
+    ),
+    # Forget it engine-side once stopped, as the GUI's Remove does: the
+    # record is already closed, so only the engine's copy goes.
+    (
+        "session.remove",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "reason": "the harness is done with its output too",
         },
     ),
     (
@@ -904,6 +938,53 @@ def _forge_key_file(root: Path) -> Path:
     return path
 
 
+def _stand_in_chat(method: str, path: str, spec: dict[str, Any]) -> object:
+    """Canned `/api/chats` answers: stateless, so all three transports see
+    the same chat whatever ran before them."""
+    chat = {
+        "id": PARITY_CHAT,
+        "title": "parity",
+        "driver": "klaudia",
+        "model": spec.get("model", "grok-4.7"),
+        "creator": "human:parity",
+        "created_at": "2026-10-08T00:00:00Z",
+        "updated_at": "2026-10-08T00:00:00Z",
+        "archived": bool(spec.get("archived", False)),
+        "state": "idle",
+        "live": False,
+        "message_count": 2,
+    }
+    entries = [
+        {"seq": 1, "at": "2026-10-08T00:00:00Z", "kind": "user", "text": "hi"},
+        {"seq": 2, "at": "2026-10-08T00:00:01Z", "kind": "assistant", "text": "hello"},
+    ]
+    if method == "GET" and path.endswith("/api/chats"):
+        return [chat]
+    if method == "POST" and path.endswith("/api/chats"):
+        return {"chat": chat, "entries": entries[:1], "finished": False}
+    if path.endswith("/messages"):
+        return {"chat": chat, "entries": entries, "finished": True}
+    if "/approvals/" in path:
+        return {
+            "id": path.rsplit("/", 1)[-1],
+            "tool_name": "Bash",
+            "summary": "make test",
+            "source": "gate",
+            "status": "allowed" if spec.get("allow") else "denied",
+            "requested_at": "2026-10-08T00:00:00Z",
+            "expires_at": "2026-10-08T00:10:00Z",
+            "decided_by": "human:parity",
+        }
+    if path.endswith("/promote"):
+        return {
+            "chat": {**chat, "promoted_session": "eng-chat"},
+            "session": {"id": "eng-chat", "name": spec.get("name", "chat")},
+        }
+    if method == "POST":
+        return chat
+    return {**chat, "entries": entries, "approvals": []}
+
+
 def _stand_in_engine() -> EngineClient:
     """An engine that answers predictably, so three transports can be compared.
 
@@ -915,11 +996,13 @@ def _stand_in_engine() -> EngineClient:
     counter = itertools.count(1)
     #: Sessions the stand-in has hibernated, so a wake takes its real path.
     asleep: set[str] = set()
+    #: Names given by a rename, so the summary after it reads the new one.
+    names: dict[str, str] = {}
 
     def summary(engine_id: str) -> dict[str, object]:
         return {
             "id": engine_id,
-            "name": "parity",
+            "name": names.get(engine_id, "parity"),
             "activity": "hibernated" if engine_id in asleep else "idle",
             "alive": engine_id not in asleep,
             "cwd": "/tmp",
@@ -955,6 +1038,11 @@ def _stand_in_engine() -> EngineClient:
                     "exit_code": None,
                 }
             ).encode()
+        if method == "PATCH" and "/api/sessions/eng-" in path:
+            names[path.rsplit("/", 1)[-1]] = spec["name"].strip()
+            return 200, b'{"ok":true}'
+        if method == "DELETE" and "/api/sessions/eng-" in path:
+            return 200, b'{"ok":true}'
         if method == "POST" and url.endswith("/kill"):
             return 200, b'{"ok":true}'
         if method == "POST" and path.endswith("/hibernate"):
@@ -1100,6 +1188,26 @@ def _stand_in_engine() -> EngineClient:
                     "truncated": False,
                 }
             ).encode()
+        if method == "GET" and path.endswith("/api/status"):
+            return 200, json.dumps(
+                {
+                    "version": "0.0.0",
+                    "product_version": "0.0.0",
+                    "source_ref": "main",
+                    "source_sha": "abc123",
+                    "release_url": None,
+                    "session_count": 0,
+                    "push_subscription_count": 0,
+                    "gui_process_count": 0,
+                    "gui_stream_configured": False,
+                    "fcm_enabled": False,
+                    "history": {"enabled": False},
+                    "agent_tasks": {"task_count": 0},
+                    "auth_broker": {"auto_agent_auth": True, "helper": "x"},
+                    "storage": {"state_dir": "/state", "workspace_root": "/ws"},
+                    "event_lag": {"assistant": {"episodes": 1, "events_skipped": 3}},
+                }
+            ).encode()
         # Runtime-pinned agent CLIs: one canned report, whichever
         # surface asks, and the same report back after a move.
         if path.endswith("/api/agent-clis") or "/api/agent-clis/" in path:
@@ -1122,6 +1230,8 @@ def _stand_in_engine() -> EngineClient:
                     ],
                 }
             ).encode()
+        if "/api/chats" in path:
+            return 200, json.dumps(_stand_in_chat(method, path, spec)).encode()
         return 404, b""
 
     return EngineClient(base_url="http://127.0.0.1:8910", transport=transport)

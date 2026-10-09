@@ -1183,10 +1183,12 @@ impl AssistantRuntime {
                 (PendingActionView::VogtWrite(view), Some(write)) => {
                     self.deliver_vogt_write(view, write, &turn.caller).await
                 }
-                (PendingActionView::SendInput(view), _) => match self.deliver_input(view) {
-                    Ok(()) => "input delivered".to_string(),
-                    Err(e) => untrusted("tool-error", &format!("delivery failed: {e}")),
-                },
+                (PendingActionView::SendInput(view), _) => {
+                    match self.deliver_input(view, &turn.caller) {
+                        Ok(()) => "input delivered".to_string(),
+                        Err(e) => untrusted("tool-error", &format!("delivery failed: {e}")),
+                    }
+                }
                 // A Vogt view with no payload cannot happen — they are built
                 // together — but the type allows it, so it refuses rather than
                 // guessing at what to send the core.
@@ -1272,8 +1274,18 @@ impl AssistantRuntime {
         }
     }
 
-    fn deliver_input(&self, action: &SendInputView) -> Result<()> {
+    fn deliver_input(&self, action: &SendInputView, caller: &Caller) -> Result<()> {
         let session = self.sessions.get(action.session_id)?;
+        // Approving the card is not answering a permission prompt: one may
+        // have appeared since, or the approver may be an agent driving the
+        // assistant with its own token. Typed as the approver, so it is
+        // gated as the approver (WI-983).
+        crate::person_gate::guard_as(
+            &session,
+            caller.person,
+            &caller.token_name,
+            crate::person_gate::Via::Assistant,
+        )?;
         let mut bytes = action.text.clone().into_bytes();
         if action.submit {
             bytes.push(b'\r');
@@ -2533,6 +2545,7 @@ mod tests {
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,
             metrics_bind: None,
+            chat: Default::default(),
         }
     }
 

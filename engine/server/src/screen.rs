@@ -126,6 +126,23 @@ impl Terminal {
         out.extend_from_slice(&screen.cursor_state_formatted());
         out
     }
+
+    /// A hash of what the screen shows: the text of every visible cell and
+    /// the window title. Attributes and the cursor are left out on purpose:
+    /// a blinking cursor is a TUI redrawing one cell in reverse video and
+    /// back, and that is not the program doing anything (WI-1090).
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.parser.screen().contents().hash(&mut hasher);
+        self.parser.callbacks().title.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// The window title the program last set, if any.
+    pub fn title(&self) -> Option<String> {
+        self.parser.callbacks().title.clone()
+    }
 }
 
 /// Captures the window title a program sets (OSC 0 / OSC 2).
@@ -246,6 +263,15 @@ pub fn shows_prompt(lines: &[String]) -> bool {
 
 fn shows_glyph_prompt(lines: &[String]) -> bool {
     const BORDER: &[char] = &['│', '┃', '║', '|', ' ', '\u{a0}'];
+    // Claude Code and Codex keep their input box drawn mid-turn, with an
+    // `esc to interrupt` working line beside it: a turn is at work, however
+    // quiet its output (WI-1090).
+    if bottom_lines(lines, 10)
+        .iter()
+        .any(|l| l.to_lowercase().contains("esc to interrupt"))
+    {
+        return false;
+    }
     lines
         .iter()
         .rev()
@@ -289,13 +315,150 @@ pub fn shows_opencode_prompt(lines: &[String]) -> bool {
     footer && bar && !working
 }
 
+/// The state a Klaudia TUI announces in its window title (WI-1090):
+/// `klaudia: ready`, `klaudia: working`, `klaudia: awaiting approval`,
+/// `klaudia: goal-loop`. Matched on the start of what follows the prefix, so
+/// a suffix (`klaudia: working · fixing tests`) is allowed. A build that sets
+/// no such title reads `None`, and its screen is consulted instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KlaudiaTitle {
+    Ready,
+    Working,
+    AwaitingApproval,
+    GoalLoop,
+}
+
+pub fn klaudia_title(title: Option<&str>) -> Option<KlaudiaTitle> {
+    let title = title?.trim().to_lowercase();
+    let state = title.strip_prefix("klaudia:")?.trim_start();
+    [
+        ("ready", KlaudiaTitle::Ready),
+        ("working", KlaudiaTitle::Working),
+        ("awaiting approval", KlaudiaTitle::AwaitingApproval),
+        ("approval", KlaudiaTitle::AwaitingApproval),
+        ("goal-loop", KlaudiaTitle::GoalLoop),
+        ("goal loop", KlaudiaTitle::GoalLoop),
+    ]
+    .into_iter()
+    .find(|(word, _)| {
+        state
+            .strip_prefix(word)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '-'))
+    })
+    .map(|(_, found)| found)
+}
+
+/// The last `n` non-blank lines of a screen, top to bottom: where a TUI
+/// draws its live region (input box, the captions under it, status bar).
+fn bottom_lines(lines: &[String], n: usize) -> Vec<&str> {
+    let mut tail: Vec<&str> = lines
+        .iter()
+        .rev()
+        .map(|l| l.trim_end())
+        .filter(|l| !l.trim().is_empty())
+        .take(n)
+        .collect();
+    tail.reverse();
+    tail
+}
+
+/// Whether the screen shows Klaudia's input box with no turn running, for
+/// builds that do not announce their state in the title.
+///
+/// Klaudia draws its prompt as a rounded box whose first line starts with
+/// the `› ` gutter (`│ › Ask Klaudia…   │`, closed by `╰──╯`) and keeps it on
+/// screen while a turn runs, with a `(esc to interrupt)` working line above
+/// it. A permission ask, a question or a confirmation replaces the box with a
+/// caption. The bare `› ` gutter is not enough: Klaudia marks the prompts it
+/// already sent the same way in the transcript above.
+pub fn shows_klaudia_prompt(lines: &[String]) -> bool {
+    let tail = bottom_lines(lines, 10);
+    let boxed_input = tail.windows(2).any(|pair| {
+        let line = pair[0].trim_start();
+        let gutter = line
+            .strip_prefix('│')
+            .map(str::trim_start)
+            .is_some_and(|body| body == "›" || body.starts_with("› "));
+        gutter && line.ends_with('│') && pair[1].trim_start().starts_with('╰')
+    });
+    boxed_input && !klaudia_busy(lines)
+}
+
+/// Whether the bottom of the screen shows something Klaudia draws only while
+/// it works or waits on an answer: its working line, a permission ask, a
+/// question or a confirmation.
+pub fn klaudia_busy(lines: &[String]) -> bool {
+    const BUSY: &[&str] = &[
+        "esc to interrupt",
+        "ctrl+c to force quit",
+        "esc cancels turn",
+        "(y)es / (n)o",
+        "choose 1-",
+    ];
+    bottom_lines(lines, 10).iter().any(|l| {
+        let l = l.to_lowercase();
+        BUSY.iter().any(|b| l.contains(b))
+    })
+}
+
+/// Whether Klaudia's own goal loop is driving the session (WI-950): its
+/// title says so, or its status bar (the last line on the screen) carries
+/// the loop's `goal 3/10` or `goal summary` segment, or `goal-setting` while
+/// it interviews the person for a spec. Two drivers of one loop would
+/// interleave prompts into its turns, so autopilot leaves it alone.
+pub fn klaudia_goal_loop(title: Option<&str>, lines: &[String]) -> bool {
+    if klaudia_title(title) == Some(KlaudiaTitle::GoalLoop) {
+        return true;
+    }
+    let Some(status) = bottom_lines(lines, 1).pop() else {
+        return false;
+    };
+    let count = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    status.split(" · ").map(str::trim).any(|segment| {
+        segment == "goal summary"
+            || segment == "goal-setting"
+            || segment
+                .strip_prefix("goal ")
+                .and_then(|n| n.split_once('/'))
+                .is_some_and(|(done, total)| count(done) && count(total))
+    })
+}
+
 /// Whether a driver can type now. See [`SessionScreen::ready`].
 ///
 /// A session `awaiting-approval` is not ready: it is at a permission dialog,
 /// where typed text and Enter answer the dialog rather than reach the agent.
-pub fn is_ready(activity: ActivityState, alive: bool, lines: &[String]) -> bool {
+///
+/// Klaudia has its own rules (WI-1090), because it keeps its input box on
+/// screen mid-turn and marks sent prompts with the same glyph: its title when
+/// it announces its state there, and otherwise its boxed input with nothing
+/// busy under it. `agent` is the agent CLI the session runs, `title` the
+/// window title.
+pub fn is_ready(
+    activity: ActivityState,
+    alive: bool,
+    lines: &[String],
+    agent: Option<&str>,
+    title: Option<&str>,
+) -> bool {
     if !alive {
         return false;
+    }
+    if agent == Some("klaudia") {
+        let at_rest = matches!(
+            activity,
+            ActivityState::Idle | ActivityState::WaitingForInput
+        );
+        return match klaudia_title(title) {
+            // The agent's own word. The activity reads `idle` already (the
+            // title overrides output recency in `pty::compute_activity`)
+            // unless a dialog the engine recognises is open. Anything in the
+            // session can set a title (a `cat` of a file holding the escape),
+            // so a screen that shows a turn at work outranks it.
+            Some(KlaudiaTitle::Ready) => at_rest && !klaudia_busy(lines),
+            Some(_) => false,
+            None => at_rest && shows_klaudia_prompt(lines),
+        };
     }
     match activity {
         ActivityState::WaitingForInput => true,
@@ -324,7 +487,14 @@ pub async fn session_screen(
         tokio::task::spawn_blocking(move || rendering.render_screen(scrollback_lines))
             .await
             .map_err(|e| ApiError::Internal(format!("render screen: {e}")))?;
-    let ready = is_ready(summary.activity, summary.alive, &rendered.lines);
+    let agent = session.agent();
+    let ready = is_ready(
+        summary.activity,
+        summary.alive,
+        &rendered.lines,
+        agent.as_deref(),
+        rendered.title.as_deref(),
+    );
     Ok(SessionScreen {
         id: session.id,
         cols: rendered.cols,
@@ -575,6 +745,21 @@ mod tests {
         assert!(shows_prompt(&[">>> ".to_string()]));
         assert!(shows_prompt(&["❯".to_string()]));
         assert!(!shows_prompt(&["compiling foo v0.1.0".to_string()]));
+        // The input box stays drawn mid-turn beside a working line (WI-1090).
+        let working = vec![
+            "✻ Running… (12s · esc to interrupt)".to_string(),
+            "╭──────────────╮".to_string(),
+            "│ >            │".to_string(),
+            "╰──────────────╯".to_string(),
+        ];
+        assert!(!shows_prompt(&working));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &working,
+            Some("claude"),
+            None
+        ));
         assert!(!shows_prompt(&["->x".to_string()]));
         assert!(!shows_prompt(&[]));
     }
@@ -625,8 +810,14 @@ mod tests {
         assert!(shows_prompt(&fresh));
         assert!(shows_prompt(&finished));
         assert!(!shows_prompt(&running), "a running turn is not ready");
-        assert!(is_ready(ActivityState::Idle, true, &finished));
-        assert!(!is_ready(ActivityState::Running, true, &finished));
+        assert!(is_ready(ActivityState::Idle, true, &finished, None, None));
+        assert!(!is_ready(
+            ActivityState::Running,
+            true,
+            &finished,
+            None,
+            None
+        ));
         // A bar with no footer is just a box-drawing character in output.
         assert!(!shows_opencode_prompt(&screen(&["┃ some table cell"])));
     }
@@ -706,12 +897,291 @@ mod tests {
     fn readiness_needs_a_live_quiet_prompt() {
         let prompt = vec!["│ > ".to_string()];
         let plain = vec!["building".to_string()];
-        assert!(is_ready(ActivityState::WaitingForInput, true, &plain));
-        assert!(is_ready(ActivityState::Idle, true, &prompt));
-        assert!(!is_ready(ActivityState::Idle, true, &plain));
+        assert!(is_ready(
+            ActivityState::WaitingForInput,
+            true,
+            &plain,
+            None,
+            None
+        ));
+        assert!(is_ready(ActivityState::Idle, true, &prompt, None, None));
+        assert!(!is_ready(ActivityState::Idle, true, &plain, None, None));
         // A TUI keeps its input box on screen while it works.
-        assert!(!is_ready(ActivityState::Running, true, &prompt));
-        assert!(!is_ready(ActivityState::WaitingForInput, false, &prompt));
-        assert!(!is_ready(ActivityState::Exited, false, &prompt));
+        assert!(!is_ready(ActivityState::Running, true, &prompt, None, None));
+        assert!(!is_ready(
+            ActivityState::WaitingForInput,
+            false,
+            &prompt,
+            None,
+            None
+        ));
+        assert!(!is_ready(ActivityState::Exited, false, &prompt, None, None));
+    }
+}
+
+/// Klaudia's screens as the engine sees them (WI-1090), shared by the
+/// readiness and autopilot tests. Trimmed to the bottom of a narrower
+/// terminal; the shapes are those of a live grok-4.7 session on 2026-10-08
+/// and of msp-klaudia's `bottomView`.
+#[cfg(test)]
+pub(crate) mod klaudia_frames {
+    fn screen(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|l| l.to_string()).collect()
+    }
+
+    const TOP: &str = "╭──────────────────────────────────────╮";
+    const BOTTOM: &str = "╰──────────────────────────────────────╯";
+    const EMPTY: &str = "│ › Ask Klaudia…                       │";
+
+    /// A finished turn: the end-of-turn footer, the empty input box and the
+    /// status bar. Old builds keep repainting this frame while idle.
+    pub fn idle() -> Vec<String> {
+        screen(&[
+            "› fix the failing parity test",
+            "  ✓ Edit · 10ms: Edited engine/core/src/core.rs",
+            "  ✓ done in 9m07s · ✗ tests failed · Not verified",
+            "",
+            TOP,
+            EMPTY,
+            BOTTOM,
+            "  grok-4.7 · 397 turns · 38.2M in+out",
+        ])
+    }
+
+    /// A turn at work: the spinner line, with the box still drawn under it.
+    pub fn mid_turn() -> Vec<String> {
+        screen(&[
+            "  ✓ Bash · 1.4s: error: duplicated attribute",
+            "  ⣟  thinking… 1m4.1s  (esc to interrupt)",
+            TOP,
+            EMPTY,
+            BOTTOM,
+            "  grok-4.7 · 397 turns · 38.2M in+out",
+        ])
+    }
+
+    /// A permission ask: the box is replaced by a caption, and the prompt
+    /// that started the turn is still on screen with the same `›` gutter.
+    pub fn approval() -> Vec<String> {
+        screen(&[
+            "› run the engine tests",
+            "  ⚙ Bash cargo test --workspace",
+            "  Allow Bash(cargo test --workspace)? (y)es / (n)o / (s)omething else  (esc cancels turn)",
+            "  grok-4.7 · 12 turns · 1.1M in+out",
+        ])
+    }
+
+    /// Klaudia's own goal loop, between two iterations: the box is idle,
+    /// and the status bar says which iteration is next.
+    pub fn goal_loop() -> Vec<String> {
+        screen(&[
+            "  ↻ iteration 3/10",
+            TOP,
+            EMPTY,
+            BOTTOM,
+            "  grok-4.7 · goal 3/10 · ctx 41% · 52 turns · 4.0M in+out",
+        ])
+    }
+}
+
+#[cfg(test)]
+mod klaudia_tests {
+    use super::{klaudia_frames as frames, *};
+
+    const K: Option<&str> = Some("klaudia");
+
+    #[test]
+    fn klaudia_reads_its_title_contract() {
+        use KlaudiaTitle::*;
+        assert_eq!(klaudia_title(Some("klaudia: ready")), Some(Ready));
+        assert_eq!(klaudia_title(Some("  Klaudia:Ready ")), Some(Ready));
+        assert_eq!(
+            klaudia_title(Some("klaudia: working · fixing tests")),
+            Some(Working)
+        );
+        assert_eq!(
+            klaudia_title(Some("klaudia: awaiting approval")),
+            Some(AwaitingApproval)
+        );
+        assert_eq!(klaudia_title(Some("klaudia: goal-loop")), Some(GoalLoop));
+        assert_eq!(
+            klaudia_title(Some("klaudia: goal loop 3/10")),
+            Some(GoalLoop)
+        );
+        // Not the contract: another program's title, a word that only starts
+        // like a state, or no title at all.
+        assert_eq!(klaudia_title(Some("claude: ready")), None);
+        assert_eq!(klaudia_title(Some("klaudia: readying")), None);
+        assert_eq!(klaudia_title(Some("klaudia")), None);
+        assert_eq!(klaudia_title(None), None);
+    }
+
+    /// Old builds set no title: the screen decides.
+    #[test]
+    fn klaudia_without_a_title_is_ready_only_at_its_idle_box() {
+        let idle = frames::idle();
+        assert!(shows_klaudia_prompt(&idle));
+        assert!(is_ready(ActivityState::Idle, true, &idle, K, None));
+        // A draft typed into the box is still the box.
+        let mut draft = idle.clone();
+        draft[5] = "│ › carry on with the                 │".to_string();
+        assert!(is_ready(ActivityState::Idle, true, &draft, K, None));
+        // The box is drawn mid-turn too; the working line rules it out even
+        // if the activity were to read idle.
+        assert!(!shows_klaudia_prompt(&frames::mid_turn()));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::mid_turn(),
+            K,
+            None
+        ));
+        assert!(!is_ready(ActivityState::Running, true, &idle, K, None));
+        // At a permission ask the only `›` is the prompt already sent, which
+        // the generic glyph test would have taken for an input line.
+        assert!(shows_prompt(&frames::approval()));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::approval(),
+            K,
+            None
+        ));
+        // The goal loop's idle box is a box; autopilot rules it out, not this.
+        assert!(is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::goal_loop(),
+            K,
+            None
+        ));
+        assert!(!is_ready(ActivityState::Idle, false, &idle, K, None));
+    }
+
+    /// New builds say their state in the title, and it outranks the screen.
+    #[test]
+    fn klaudia_with_a_title_is_ready_when_it_says_so() {
+        let ready = Some("klaudia: ready");
+        assert!(is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::idle(),
+            K,
+            ready
+        ));
+        // The title is enough even when the box is out of view.
+        assert!(is_ready(ActivityState::Idle, true, &[], K, ready));
+        for title in [
+            "klaudia: working",
+            "klaudia: awaiting approval",
+            "klaudia: goal-loop",
+        ] {
+            assert!(
+                !is_ready(ActivityState::Idle, true, &frames::idle(), K, Some(title)),
+                "{title}"
+            );
+        }
+        // A dialog the engine recognises still wins.
+        assert!(!is_ready(
+            ActivityState::AwaitingApproval,
+            true,
+            &[],
+            K,
+            ready
+        ));
+        // Anything in the session can set the title: a spoofed `ready` over
+        // a screen that shows a turn at work is not ready.
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::mid_turn(),
+            K,
+            ready
+        ));
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &frames::approval(),
+            K,
+            ready
+        ));
+        // The title is read for Klaudia only.
+        assert!(!is_ready(
+            ActivityState::Idle,
+            true,
+            &[],
+            Some("claude"),
+            ready
+        ));
+    }
+
+    #[test]
+    fn klaudia_goal_loop_shows_in_its_title_or_its_status_bar() {
+        assert!(klaudia_goal_loop(None, &frames::goal_loop()));
+        assert!(klaudia_goal_loop(
+            Some("klaudia: goal-loop"),
+            &frames::idle()
+        ));
+        assert!(!klaudia_goal_loop(None, &frames::idle()));
+        assert!(!klaudia_goal_loop(Some("klaudia: ready"), &frames::idle()));
+        let status = |s: &str| vec![s.to_string()];
+        assert!(klaudia_goal_loop(
+            None,
+            &status("  grok-4.7 · goal summary · 3 turns")
+        ));
+        assert!(klaudia_goal_loop(
+            None,
+            &status("  grok-4.7 · goal-setting · 1 turns")
+        ));
+        // "goal" in the transcript, or a model named oddly, is not the loop.
+        assert!(!klaudia_goal_loop(None, &status("  the goal 3/10 was met")));
+        assert!(!klaudia_goal_loop(
+            None,
+            &status("  grok-4.7 · goal x/y · 3 turns")
+        ));
+    }
+
+    /// A Klaudia input box drawn by its inline renderer, as `full`, then the
+    /// cursor-blink repaint it sends twice a second — the bytes recorded from
+    /// a live session, trimmed to a narrower box — alternating the cursor
+    /// cell between reverse video and the placeholder's grey.
+    fn blink(on: bool) -> Vec<u8> {
+        let cell = if on { "\x1b[7m" } else { "\x1b[38;5;240m" };
+        format!(
+            "\n\n\x1b[38;5;60m│\x1b[0m \x1b[40m\x1b[37m› \x1b[0m\x1b[0m\x1b[40m{cell}A\x1b[0m\x1b[0m\
+             \x1b[40m\x1b[38;5;240msk Klaudia…\x1b[0m\x1b[0m                       \
+             \x1b[38;5;60m│\x1b[0m\x1b[K\r\n\n\r\x1b[4A"
+        )
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_blinking_cursor_does_not_change_the_fingerprint() {
+        let mut term = Terminal::new(6, 41);
+        let mut full = b"\x1b[2J\x1b[H  \xe2\x9c\x93 done in 9m07s\r\n".to_vec();
+        for line in &frames::idle()[4..] {
+            full.extend_from_slice(line.as_bytes());
+            full.extend_from_slice(b"\r\n");
+        }
+        full.extend_from_slice(b"\x1b[5A");
+        term.process(&full);
+        let (before, _) = term.render(0);
+        assert_eq!(before.lines[2], frames::idle()[5], "{before:?}");
+        let at_rest = term.fingerprint();
+        for n in 0..20 {
+            term.process(&blink(n % 2 == 0));
+            assert_eq!(term.fingerprint(), at_rest, "blink {n}");
+        }
+        assert_eq!(term.render(0).0.lines, before.lines);
+        // A spinner frame, a keystroke or a new title is a change.
+        let mut spun = Terminal::new(6, 41);
+        spun.process(&full);
+        spun.process("  ⣟  thinking… 0.1s".as_bytes());
+        assert_ne!(spun.fingerprint(), at_rest);
+        let mut titled = Terminal::new(6, 41);
+        titled.process(&full);
+        titled.process(b"\x1b]0;klaudia: working\x07");
+        assert_ne!(titled.fingerprint(), at_rest);
+        assert_eq!(titled.title().as_deref(), Some("klaudia: working"));
     }
 }

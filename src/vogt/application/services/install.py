@@ -1,20 +1,36 @@
 """First-run install mode: the door that closes itself.
 
-A new instance has no tokens, so nothing can authenticate to it over the
+A new instance has no operator, so no person can authenticate to it over the
 network — which until now meant the first credential had to be minted from a
 shell inside the container. Install mode is the bootstrap that replaces that
-incantation: while the token store holds **no token rows at all**, an
-unauthenticated caller may name the first operator and receive the first
-browser token; the moment any token exists — this one, an operator-adopted
-one, one minted over loopback — the mode is closed and the bootstrap
-refuses with `install_closed`.
+incantation: while **no person holds a credential** — no token bound to a
+non-agent actor, revoked or not, and no password login — an unauthenticated
+caller may name the first operator and receive the first browser token; the
+moment a person holds one — this one, one minted over loopback for a person,
+`vogt user create` — the mode is closed and the bootstrap refuses with
+`install_closed`.
 
-Install mode is deliberately a *property of the token store*, not a flag:
-there is no row to forget to flip and no way to reopen it short of deleting
-the store. Revoked tokens count as "a token exists" on purpose — revoking
-your last credential is a lockout to be fixed over loopback (`vogt token
-issue`), not a reason to reopen an unauthenticated door on whatever network
-the port is published to.
+Tokens bound to *agent* actors do not count (#903). The stack secret adopted
+at `init` (`bootstrap_core_token_file`, bound to `agent:vogt-engine`), the
+brokered agent token and coding-session tokens are machinery: they
+authenticate exactly as before, but a Docker quick start that supplies the
+stack secret has still created no operator, and closing the wizard on it
+left a fresh install with no way to sign in short of `vogt user create`
+inside the container.
+
+Install mode is deliberately a *property of the credential store*, not a
+flag an operation flips: the declared store latches it closed by itself
+(`install_latch`, migration 0020; set in the same transaction by every write
+that gives a credential) the moment a person is given a login or a token, by any
+path, and nothing reopens it short of deleting the store. The same migration
+latched every store that already held a token when it was upgraded, so a
+running instance operated only through agent-bound tokens and the engine's
+break-glass `ENGINE_TOKEN` stays closed — it was closed under the old rule,
+and an upgrade must not hand its port an unauthenticated admin bootstrap.
+Revoked tokens count as "a credential exists" on purpose, and removing a
+user does not undo the latch: a lockout is fixed over loopback (`vogt token
+issue`, `vogt user create`), not by reopening an unauthenticated door on
+whatever network the port is published to.
 
 Why an unauthenticated write is acceptable here: `serve` publishes on
 loopback unless the operator binds elsewhere (`VOGT_BIND_IP` defaults to
@@ -57,8 +73,11 @@ BOOTSTRAP_SCOPES: tuple[Scope, ...] = ("admin",)
 
 
 def install_mode_active(view: ReadView) -> bool:
-    """Active exactly while the store holds no token rows, revoked included."""
-    return not view.list_tokens(include_revoked=True, limit=1)
+    """Active exactly while no person holds a credential — no token bound to
+    a non-agent actor (revoked included), no password login — and the store
+    was never latched closed. Agent-bound tokens, the adopted stack secret
+    among them, never close it (#903); see `ReadView.install_closed`."""
+    return not view.install_closed()
 
 
 def install_status(ctx: AppContext) -> InstallStatusResult:
@@ -66,9 +85,9 @@ def install_status(ctx: AppContext) -> InstallStatusResult:
     truthful either way: the closed answer tells a wizard to go log in.
 
     An operator who has refused the bootstrap by config is closed
-    regardless of how many tokens exist — the wizard is told to go log in,
-    because a deployment that turned the door off provisions its first
-    credential another way."""
+    regardless of who holds a credential — the wizard is told to go log in,
+    because a deployment that turned the door off creates its first
+    operator another way (`vogt user create`)."""
     if not ctx.config.install_bootstrap_enabled:
         return InstallStatusResult(install_mode=False)
     with ctx.declared.read() as view:
@@ -89,13 +108,14 @@ def install_bootstrap(
     auto-register row says where that actor came from.
     """
     if not ctx.config.install_bootstrap_enabled:
-        # An operator who provisions the first credential another way
-        # (bootstrap_core_token_file, adoption) closes the unauthenticated
-        # door outright — no window on the public front for a caller to race.
+        # An operator who creates the first operator another way (`vogt user
+        # create` in the container) closes the unauthenticated door outright —
+        # no window on the public front for a caller to race.
         msg = (
             "install mode is disabled on this instance "
-            "(install_bootstrap_enabled=false): the first credential is "
-            "provisioned by configuration, not over this endpoint."
+            "(install_bootstrap_enabled=false): create the first operator in "
+            "the container with `vogt user create --scopes admin`, not over "
+            "this endpoint."
         )
         raise InstallClosed(msg)
     identity_ref = (
@@ -138,9 +158,9 @@ def install_bootstrap(
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[InstallBootstrapResult]:
         if not install_mode_active(txn):
             msg = (
-                "install mode is closed: this instance already has a token. "
-                "Sign in with it, or mint another over the loopback surface "
-                "with `vogt token issue`."
+                "install mode is closed: this instance already has an "
+                "operator. Sign in, or create another login over the loopback "
+                "surface with `vogt user create`."
             )
             raise InstallClosed(msg)
         if username is not None and password_hash is not None:

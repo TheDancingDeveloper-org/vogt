@@ -459,6 +459,10 @@ pub struct Config {
     /// served, on a listener of its own (`crate::metrics`). Unset, nothing
     /// listens.
     pub metrics_bind: Option<SocketAddr>,
+    /// Quick chats (WI-1097): which agent CLI drives them, the models the
+    /// picker offers, and how long an idle chat process and an unanswered
+    /// approval live (`ENGINE_CHAT_*`). Off in a hand-built config.
+    pub chat: crate::chats::ChatPolicy,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -921,6 +925,7 @@ pub fn load(
         hibernation: hibernation_policy_from_env()?,
         assistant_call: call_policy_from_env()?,
         autopilot: autopilot_policy_from_env()?,
+        chat: chat_policy_from_env()?,
         agent_onboarding: crate::claude_config::Onboarding::from_env(),
         session_rss_warn_bytes: match engine_env("ENGINE_SESSION_RSS_WARN") {
             Ok(v) if !v.trim().is_empty() => {
@@ -1314,6 +1319,79 @@ fn autopilot_policy_from_env() -> Result<crate::autopilot::Policy> {
             ApiError::Config(format!("ENGINE_AUTOPILOT_MAX_NUDGES={max} is too large"))
         })?;
     }
+    Ok(policy)
+}
+
+fn chat_policy_from_env() -> Result<crate::chats::ChatPolicy> {
+    let mut policy = crate::chats::ChatPolicy {
+        enabled: true,
+        ..Default::default()
+    };
+    if let Ok(v) = engine_env("ENGINE_CHAT_ENABLED") {
+        if !v.trim().is_empty() {
+            policy.enabled = parse_bool_env("ENGINE_CHAT_ENABLED", &v)?;
+        }
+    }
+    if let Ok(v) = engine_env("ENGINE_CHAT_COMMAND") {
+        let v = v.trim();
+        if !v.is_empty() {
+            // A JSON array when an argument holds a space; otherwise words.
+            let argv: Vec<String> = if v.starts_with('[') {
+                serde_json::from_str(v).map_err(|e| {
+                    ApiError::Config(format!("ENGINE_CHAT_COMMAND is not a JSON array: {e}"))
+                })?
+            } else {
+                v.split_whitespace().map(str::to_string).collect()
+            };
+            policy.command = Some(argv).filter(|a| !a.is_empty());
+        }
+    }
+    policy.template = engine_env("ENGINE_CHAT_TEMPLATE")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if let Ok(v) = engine_env("ENGINE_CHAT_MODELS_JSON") {
+        if !v.trim().is_empty() {
+            policy.models = serde_json::from_str(v.trim()).map_err(|e| {
+                ApiError::Config(format!(
+                    "ENGINE_CHAT_MODELS_JSON must be a JSON array of {{\"id\",\"label\"}}: {e}"
+                ))
+            })?;
+        }
+    }
+    policy.provider_key = engine_env("ENGINE_CHAT_PROVIDER_KEY")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty());
+    if let Some(n) = parse_usize_env("ENGINE_CHAT_MAX_PROCESSES")? {
+        policy.max_processes = n;
+    }
+    if let Some(n) = parse_usize_env("ENGINE_CHAT_MAX_PER_CREATOR")? {
+        policy.max_per_creator = n;
+    }
+    if let Ok(v) = engine_env("ENGINE_CHAT_MAX_RSS") {
+        if !v.trim().is_empty() {
+            policy.max_rss_bytes = crate::hibernate_policy::parse_size(&v).ok_or_else(|| {
+                ApiError::Config(format!(
+                    "ENGINE_CHAT_MAX_RSS={v:?} is not a size like 2GiB or 512M"
+                ))
+            })?;
+        }
+    }
+    for (name, slot) in [
+        ("ENGINE_CHAT_IDLE_AFTER", &mut policy.idle_after),
+        ("ENGINE_CHAT_APPROVAL_TIMEOUT", &mut policy.approval_timeout),
+        ("ENGINE_CHAT_TURN_TIMEOUT", &mut policy.turn_timeout),
+    ] {
+        if let Ok(v) = engine_env(name) {
+            if !v.trim().is_empty() {
+                *slot = crate::hibernate_policy::parse_duration(&v).ok_or_else(|| {
+                    ApiError::Config(format!("{name}={v:?} is not a duration like 60s or 10m"))
+                })?;
+            }
+        }
+    }
+    policy.validate().map_err(ApiError::Config)?;
     Ok(policy)
 }
 

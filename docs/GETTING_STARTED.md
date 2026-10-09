@@ -82,8 +82,29 @@ the status.
 Open `http://localhost:8910/` in a browser. The engine serves the PWA — the
 board, backlog, terminals, agent tasks, and the voice assistant — at the
 root. A fresh instance greets you with the first-run wizard: give your name,
-a username (suggested from the name) and a password, and it signs you in.
-[`docs/USER_GUIDE.md`](USER_GUIDE.md) is the tour.
+a username (suggested from the name) and a password, and it creates your
+`admin` login and signs you in. The stack secret you wrote above does not
+count as an operator — it is the two halves' credential for each other,
+bound to an agent actor — so the wizard stays open until the first *person*
+has a login (see [First run](#run-the-http-server-locally) below for the
+exact rule). [`docs/USER_GUIDE.md`](USER_GUIDE.md) is the tour.
+
+**If you see only "Sign in".** The wizard is shown while `curl
+http://localhost:8910/api/install/status` answers `{"install_mode": true}`.
+It answers `false` once somebody already has a login, when the deployment
+set `VOGT_INSTALL_BOOTSTRAP_ENABLED=false`, and — on releases up to and
+including v0.7.7 — as soon as the stack secret was adopted, which is the
+case #903 fixed. An instance that ran v0.7.7 or earlier stays closed after
+upgrading (the upgrade latches any store that already held a token, so a
+running instance is never reopened to an unauthenticated bootstrap). Either way, create the first operator from inside the
+container instead; it prompts for the password (`--password-file PATH` and
+`--password-stdin` are the non-interactive forms), and you then sign in
+with that username and password:
+
+```console
+docker compose -f deploy/stack.compose.yml exec vogt \
+  vogt user create --username <name> --scopes admin --reason "Create first operator"
+```
 
 Stop or inspect the instance with:
 
@@ -156,8 +177,10 @@ VOGT_PUBLIC_URL=http://127.0.0.1:8000 \
 start with authentication enabled (the default), initialise the instance,
 and issue a scoped token from a trusted local process.
 
-**First run (install mode).** A freshly initialised instance holds no tokens
-at all, and while that is true the server is in *install mode*: `GET
+**First run (install mode).** A freshly initialised instance has no
+operator, and while no *person* holds a credential — no token bound to a
+non-agent actor, revoked or not, and no password login — the server is in
+*install mode*: `GET
 /api/install/status` answers `{"install_mode": true}` and an unauthenticated
 `POST /api/install/bootstrap` names the first operator. Given a `password`
 (at least 8 characters) it creates that person's login with the `admin`
@@ -178,15 +201,40 @@ curl -s http://127.0.0.1:8000/api/install/bootstrap \
   -d '{"display_name": "Ada Lovelace", "username": "ada", "password": "correct horse battery"}'
 ```
 
+On Windows PowerShell, `curl` is an alias for `Invoke-WebRequest` and the
+quoting above does not survive. Send a plain JSON string instead — and pass
+the password as a literal string, not the output of `Get-Content`, which
+carries file metadata that turns the body into something the core refuses
+with `422`:
+
+```powershell
+$body = @{ display_name = "Ada Lovelace"; username = "ada"; password = "correct horse battery" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/install/bootstrap `
+  -ContentType 'application/json' -Body $body
+# the sign-in call has the same shape:
+$login = @{ username = "ada"; password = "correct horse battery" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Uri http://127.0.0.1:8000/api/auth/login `
+  -ContentType 'application/json' -Body $login
+```
+
 Either answer carries the secret exactly once and a token bound to the actor
 it just created (`human:ada-lovelace`), and the write is audited to that
-actor. The moment any token exists — this one, or one issued any other
-way — install mode closes itself and the bootstrap refuses with
-`install_closed`. Revoking every token does not reopen it: a lockout is fixed
-from a trusted local process, below. The self-closing door is safe because
-the port publishes on loopback by default (`VOGT_BIND_IP` falls back to
-`127.0.0.1`); publish it to a real interface only after the first token
-exists.
+actor. The moment a person holds a credential — this one, a token issued to
+a person any other way, or a login made with `vogt user create` — install
+mode closes itself and the bootstrap refuses with `install_closed`. Tokens
+bound to *agent* actors never close it: the stack secret adopted at `init`
+(`bootstrap_core_token_file`), the brokered agent token and session tokens
+authenticate as they always did, but none of them is an operator. Once
+closed it stays closed: the store latches it, so neither revoking every
+token nor removing every user reopens it, and a lockout is fixed from a
+trusted local process, below. An instance upgraded from v0.7.7 or earlier
+that already held any token — the stack secret included — was latched
+closed by that upgrade, exactly as it was before; if nobody can sign in to
+it, create the operator with `vogt user create`. The self-closing door is safe because the port publishes on
+loopback by default (`VOGT_BIND_IP` falls back to `127.0.0.1`); publish it
+to a real interface only after the first operator exists, or set
+`install_bootstrap_enabled = false` and create the operator with `vogt user
+create` instead.
 
 **Local (`uv run`).** The token is bound to the OS user running the command:
 

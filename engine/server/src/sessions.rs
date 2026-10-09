@@ -32,7 +32,7 @@ pub(crate) const ENGINE_URL_ENV: &str = "VOGT_ENGINE_URL";
 /// runs beside the engine. Plain HTTP, because the engine serves no TLS.
 /// `None` for port 0, where the port is chosen at bind time and the configured
 /// address does not name it.
-fn engine_self_url(bind: std::net::SocketAddr) -> Option<String> {
+pub(crate) fn engine_self_url(bind: std::net::SocketAddr) -> Option<String> {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     if bind.port() == 0 {
         return None;
@@ -51,7 +51,7 @@ fn engine_self_url(bind: std::net::SocketAddr) -> Option<String> {
 /// one wins, then the alphabetically-first name, so the choice is deterministic
 /// rather than list-order-dependent. An unknown name is refused with the
 /// configured names, never quietly started as a shell.
-fn resolve_template_in<'a>(
+pub(crate) fn resolve_template_in<'a>(
     templates: &'a [crate::config::SessionTemplate],
     name: &str,
 ) -> Result<&'a crate::config::SessionTemplate> {

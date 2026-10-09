@@ -20,7 +20,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
-from vogt.errors import Conflict, GrantRefused, InvalidRequest, NotFound, VogtError
+from vogt.errors import (
+    Conflict,
+    GrantRefused,
+    InvalidRequest,
+    NotFound,
+    PersonRequired,
+    VogtError,
+)
 
 USER_AGENT = "vogt"
 DEFAULT_TIMEOUT_SECONDS = 20
@@ -792,6 +799,27 @@ class EngineClient:
         )
         return payload is not None
 
+    def rename_session(self, session_id: str, *, name: str) -> bool:
+        """Rename a session, live or hibernated. `False` when the engine no
+        longer had it; a name the engine refuses is its 400, said."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}",
+            method="PATCH",
+            payload={"name": name},
+            allow_missing=True,
+        )
+        return payload is not None
+
+    def remove_session(self, session_id: str) -> bool:
+        """Kill a session if it still runs and forget it: its record, its
+        kept screen and its brief. `False` when the engine no longer had it."""
+        payload = self._call(
+            f"/api/sessions/{urllib.parse.quote(session_id)}",
+            method="DELETE",
+            allow_missing=True,
+        )
+        return payload is not None
+
     def archived_session(self, session_id: str) -> EngineArchivedSession | None:
         """What the engine's history says about a terminal that has ended.
 
@@ -893,17 +921,22 @@ class EngineClient:
             return None
         return EngineSessionLog.from_payload(payload)
 
-    def send_input(self, session_id: str, text: str, *, submit: bool = False) -> bool:
+    def send_input(
+        self, session_id: str, text: str, *, submit: bool = False, person: bool = False
+    ) -> bool:
         """Write `text` to a session's PTY (`submit` appends a carriage return).
 
         `False` when the engine has no such session. The engine caps one
         write at 64 KiB; the caller checks that first so the refusal names
-        the limit rather than an HTTP status.
+        the limit rather than an HTTP status. `person` says whether the
+        principal behind the input is a person: the engine refuses anyone
+        else's input while a permission prompt is showing (WI-983), raised
+        here as `PersonRequired`.
         """
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/input",
             method="POST",
-            payload={"text": text, "submit": submit},
+            payload={"text": text, "submit": submit, "person": person},
             allow_missing=True,
         )
         return payload is not None
@@ -994,11 +1027,13 @@ class EngineClient:
         option: int | None,
         label: str | None,
         expect_question: str | None,
+        person: bool = False,
     ) -> dict[str, Any] | None:
         """Choose an option of the dialog on screen; the engine's
         `AnswerResult`, or `None` on a 404. A dialog that is gone, changed,
-        or lacks the option is a `Conflict` naming why."""
-        body: dict[str, Any] = {}
+        or lacks the option is a `Conflict` naming why; a permission prompt
+        answered without `person` is `PersonRequired` (WI-983)."""
+        body: dict[str, Any] = {"person": person}
         if option is not None:
             body["option"] = option
         if label is not None:
@@ -1134,9 +1169,115 @@ class EngineClient:
 
     # -- transport ---------------------------------------------------------
 
+    # -- quick chats (WI-1097) ---------------------------------------------
+
+    def chat_list(
+        self, *, q: str | None, archived: str, limit: int
+    ) -> list[dict[str, Any]] | None:
+        """The engine's chats, or `None` when it has chats off (404)."""
+        query = {"archived": archived, "limit": str(limit)}
+        if q:
+            query["q"] = q
+        payload = self._call(
+            f"/api/chats?{urllib.parse.urlencode(query)}", allow_missing=True
+        )
+        if payload is None:
+            return None
+        return (
+            [row for row in payload if isinstance(row, dict)]
+            if isinstance(payload, list)
+            else []
+        )
+
+    def chat_get(self, chat_id: str, *, tail: int) -> dict[str, Any] | None:
+        return self._chat_call(f"/{_quote(chat_id)}?tail={tail}")
+
+    def chat_create(
+        self, body: dict[str, Any], *, wait_s: int
+    ) -> dict[str, Any] | None:
+        return self._chat_call("", method="POST", payload=body, wait_s=wait_s)
+
+    def chat_send(self, chat_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
+        wait = int(body.get("wait_secs") or 0)
+        return self._chat_call(
+            f"/{_quote(chat_id)}/messages", method="POST", payload=body, wait_s=wait
+        )
+
+    def chat_decide(
+        self,
+        chat_id: str,
+        approval_id: str,
+        *,
+        allow: bool,
+        message: str | None,
+        person: bool,
+    ) -> dict[str, Any] | None:
+        """A person's answer to a chat's approval. `person` says whether the
+        principal behind it is one; the engine refuses anyone else
+        (`PersonRequired`), as for a session's permission prompt."""
+        body: dict[str, Any] = {"allow": allow, "person": person}
+        if message:
+            body["message"] = message
+        return self._chat_call(
+            f"/{_quote(chat_id)}/approvals/{_quote(approval_id)}",
+            method="POST",
+            payload=body,
+        )
+
+    def chat_set_model(self, chat_id: str, model: str) -> dict[str, Any] | None:
+        return self._chat_call(
+            f"/{_quote(chat_id)}/model", method="POST", payload={"model": model}
+        )
+
+    def chat_interrupt(self, chat_id: str) -> dict[str, Any] | None:
+        return self._chat_call(
+            f"/{_quote(chat_id)}/interrupt", method="POST", payload={}
+        )
+
+    def chat_archive(self, chat_id: str, *, archived: bool) -> dict[str, Any] | None:
+        return self._chat_call(
+            f"/{_quote(chat_id)}/archive",
+            method="POST",
+            payload={"archived": archived},
+        )
+
+    def chat_promote(self, chat_id: str, body: dict[str, Any]) -> dict[str, Any] | None:
+        return self._chat_call(
+            f"/{_quote(chat_id)}/promote", method="POST", payload=body
+        )
+
+    def _chat_call(
+        self,
+        suffix: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        wait_s: int = 0,
+    ) -> dict[str, Any] | None:
+        """One `/api/chats` call; `None` on a 404 (no such chat, or chats off)."""
+        answer = self._call(
+            f"/api/chats{suffix}",
+            method=method,
+            payload=payload,
+            allow_missing=True,
+            # A send that waits for its reply outlasts the ordinary timeout.
+            timeout=(wait_s + DEFAULT_TIMEOUT_SECONDS) if wait_s else None,
+        )
+        if answer is None:
+            return None
+        return answer if isinstance(answer, dict) else {}
+
     def healthz(self) -> None:
         """Raise `EngineUnavailable` unless the engine answers its liveness probe."""
         self._call("/healthz")
+
+    def operational_status(self) -> dict[str, Any]:
+        """The engine's own operational report (`GET /api/status`)."""
+        payload = self._call("/api/status")
+        if not isinstance(payload, dict):
+            msg = f"the {self.label} answered GET /api/status with no object"
+            raise EngineUnavailable(msg)
+        return payload
 
     # -- runtime-pinned agent CLIs ------------------------------------
 
@@ -1212,6 +1353,9 @@ class EngineClient:
             return None
         if status == 403:
             said = _engine_error_text(response.decode("utf-8", errors="replace"))
+            if said.startswith("forbidden: person required: "):
+                # A permission prompt only a person answers (WI-983).
+                raise PersonRequired(said.removeprefix("forbidden: "))
             if said.startswith("forbidden: "):
                 # The engine understood the credential and refused the act
                 # itself, saying why (a grant to a project not open to grants).
@@ -1265,6 +1409,10 @@ class EngineClient:
             # sessions are unavailable while everything else still works.
             msg = f"the {self.label} is not answering: {exc}"
             raise EngineUnavailable(msg) from exc
+
+
+def _quote(value: str) -> str:
+    return urllib.parse.quote(value, safe="")
 
 
 def _engine_error_text(text: str) -> str:

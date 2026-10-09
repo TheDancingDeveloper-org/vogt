@@ -196,6 +196,8 @@ export type ServerEvent =
    * surface that wants the change reads it from Vogt — this is what lets a
    * board stop polling and still be honest about being current.
    */
+  /** A quick chat changed; a client showing it re-reads or follows its own stream. */
+  | { type: "chat-changed"; id: string }
   | {
       type: "vogt-changed";
       kind: string;
@@ -1343,6 +1345,12 @@ export interface PublicConfig {
    * URL is an exposure value, so neither is advertised.
    */
   assistant_profiles?: { name: string; model: string; default: boolean }[];
+  /**
+   * Quick chats (WI-1097): the drivers this engine can run a chat with and
+   * the models each offers. Absent when chats are off, so the Chat button
+   * is hidden rather than opening onto a 404.
+   */
+  chat?: ChatConfigInfo;
 }
 
 export interface AssistantTranscriptEntry {
@@ -1653,4 +1661,176 @@ export function openAttach(id: string, resumeFrom?: number): RuntimeSocket {
     { once: true },
   );
   return ws;
+}
+
+
+// ── Quick chats (WI-1097) ───────────────────────────────────────────────────
+
+export interface ChatModel {
+  id: string;
+  label: string;
+}
+
+export interface ChatConfigInfo {
+  drivers: { name: string; label: string; models: ChatModel[] }[];
+}
+
+export type ChatState = "idle" | "running" | "awaiting-approval";
+
+export interface ChatSummary {
+  id: string;
+  title: string;
+  driver: string;
+  model: string | null;
+  creator: string;
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+  work_item?: string | null;
+  promoted_session?: string | null;
+  state: ChatState;
+  live: boolean;
+  message_count: number;
+  preview?: string | null;
+}
+
+export type ChatEntryKind =
+  | "user"
+  | "assistant"
+  | "tool-call"
+  | "tool-result"
+  | "notice"
+  | "error"
+  | "approval";
+
+export interface ChatEntry {
+  seq: number;
+  at: string;
+  kind: ChatEntryKind;
+  text: string;
+  tool_name?: string | null;
+  tool_use_id?: string | null;
+  is_error?: boolean;
+  retryable?: boolean;
+  by?: string | null;
+}
+
+export interface ChatApproval {
+  id: string;
+  tool_name: string;
+  summary: string;
+  source: "gate" | "driver" | string;
+  status: "pending" | "allowed" | "denied" | "expired" | string;
+  requested_at: string;
+  expires_at: string;
+  decided_by?: string | null;
+}
+
+export interface ChatDetail extends ChatSummary {
+  entries: ChatEntry[];
+  approvals: ChatApproval[];
+}
+
+export interface ChatSendResult {
+  chat: ChatSummary;
+  entries: ChatEntry[];
+  finished: boolean;
+}
+
+export type ChatEvent =
+  | { type: "entry"; entry: ChatEntry }
+  | { type: "progress"; tool_name?: string | null; text: string }
+  | { type: "approval"; approval: ChatApproval }
+  | { type: "chat"; chat: ChatSummary }
+  | { type: "lagged"; skipped: number };
+
+const chatPath = (id: string) => `/api/chats/${encodeURIComponent(id)}`;
+
+export const chatApi = {
+  list: (opts: { q?: string; archived?: "true" | "false" | "all" } = {}, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ archived: opts.archived ?? "false" });
+    if (opts.q?.trim()) query.set("q", opts.q.trim());
+    return req<ChatSummary[]>("GET", `/api/chats?${query}`, undefined, signal);
+  },
+  get: (id: string, signal?: AbortSignal) =>
+    req<ChatDetail>("GET", chatPath(id), undefined, signal, "detail"),
+  create: (body: { model?: string | null; message?: string; title?: string; work_item?: string }) =>
+    req<ChatSendResult>("POST", "/api/chats", body, undefined, "long"),
+  send: (id: string, text: string) =>
+    req<ChatSendResult>("POST", `${chatPath(id)}/messages`, { text }, undefined, "long"),
+  decide: (id: string, approvalId: string, allow: boolean, message?: string) =>
+    req<ChatApproval>(
+      "POST",
+      `${chatPath(id)}/approvals/${encodeURIComponent(approvalId)}`,
+      { allow, ...(message ? { message } : {}) },
+    ),
+  setModel: (id: string, model: string) =>
+    req<ChatSummary>("POST", `${chatPath(id)}/model`, { model }),
+  interrupt: (id: string) => req<ChatSummary>("POST", `${chatPath(id)}/interrupt`, {}),
+  archive: (id: string, archived: boolean) =>
+    req<ChatSummary>("POST", `${chatPath(id)}/archive`, { archived }),
+  promote: (id: string, body: { cwd?: string; name?: string } = {}) =>
+    req<{ chat: ChatSummary; session: SessionSummary }>(
+      "POST",
+      `${chatPath(id)}/promote`,
+      body,
+      undefined,
+      "long",
+    ),
+};
+
+/**
+ * Follow one chat's live events (`GET /api/chats/{id}/events`). The stream
+ * ending or failing is reported through `onDrop`, and the caller re-reads
+ * the chat and reconnects: a gap in a stream is never trusted as "nothing
+ * happened".
+ */
+export function subscribeChat(
+  id: string,
+  onEvent: (event: ChatEvent) => void,
+  onDrop: (error: unknown) => void,
+): () => void {
+  let cancelled = false;
+  const controller = new AbortController();
+  (async () => {
+    try {
+      const res = await runtimeTransport().request(`${getBase()}${chatPath(id)}/events`, {
+        headers: authHeaders({ Accept: "text/event-stream" }),
+        signal: controller.signal,
+      });
+      if (!res.ok || !res.body) {
+        if (!res.ok) reportAuthResponse(res.status, "the chat stream was refused");
+        throw new Error(`chat stream failed: ${res.status}`);
+      }
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (!cancelled) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error("the chat stream ended");
+        buf += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buf.indexOf("\n\n")) !== -1) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          let data = "";
+          for (const line of frame.split("\n")) {
+            if (line.startsWith("data:")) data += line.slice(5).trimStart();
+          }
+          if (!data) continue;
+          try {
+            onEvent(JSON.parse(data) as ChatEvent);
+          } catch {
+            /* ignore malformed frames */
+          }
+        }
+      }
+    } catch (e) {
+      if (!cancelled) onDrop(e);
+    }
+  })();
+  return () => {
+    cancelled = true;
+    controller.abort();
+  };
 }

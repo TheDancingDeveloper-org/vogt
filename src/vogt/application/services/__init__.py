@@ -25,6 +25,17 @@ from vogt.application.services.auth import (
     whoami,
 )
 from vogt.application.services.board import list_board
+from vogt.application.services.chats import (
+    chat_archive,
+    chat_create,
+    chat_decide,
+    chat_get,
+    chat_interrupt,
+    chat_list,
+    chat_promote,
+    chat_send,
+    chat_set_model,
+)
 from vogt.application.services.collect import coverage, deps, observations, sweep
 from vogt.application.services.connect import connect
 from vogt.application.services.contracts import (
@@ -42,6 +53,7 @@ from vogt.application.services.drift_service import (
     list_drift,
     resolve_drift,
 )
+from vogt.application.services.engine_status import engine_status
 from vogt.application.services.forge_accounts import (
     link_forge_account,
     status_forge_account,
@@ -116,6 +128,8 @@ from vogt.application.services.sessions import (
     last_reply,
     list_sessions,
     log_tail,
+    remove_session,
+    rename_session,
     report_blocked,
     report_unblocked,
     search_output,
@@ -168,6 +182,15 @@ __all__ = [
     "bind_session_work",
     "brief_project",
     "bugs",
+    "chat_archive",
+    "chat_create",
+    "chat_decide",
+    "chat_get",
+    "chat_interrupt",
+    "chat_list",
+    "chat_promote",
+    "chat_send",
+    "chat_set_model",
     "clone",
     "comment_work",
     "compliance",
@@ -190,6 +213,7 @@ __all__ = [
     "deps",
     "detect_drift",
     "engine_session_token",
+    "engine_status",
     "export_instance",
     "get_preferences",
     "get_project",
@@ -241,7 +265,9 @@ __all__ = [
     "register_project",
     "registry_dump",
     "relate_work",
+    "remove_session",
     "remove_user",
+    "rename_session",
     "report_blocked",
     "report_unblocked",
     "reproject_initiative",

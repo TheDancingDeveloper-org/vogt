@@ -12,7 +12,11 @@
 //! - a session that cannot be at all (no conversation to resume, an
 //!   agent-task run, exited) — `SessionRegistry::hibernate_refusal`;
 //! - one pinned with `keep_awake`;
-//! - one whose turn is running, or that shows a permission dialog;
+//! - one whose turn is running, or that shows a permission dialog (Klaudia's
+//!   own, which the engine reads from its title, included), or that drew
+//!   anything within the activity quiet window. Quiet time here is raw
+//!   output time, not the screen-change clock activity reads (WI-1090): an
+//!   agent animating only colours mid-turn must never look quiet to it;
 //! - one whose agent reported itself blocked on a person;
 //! - by the idle trigger only, one on autopilot (WI-949): it is meant to be
 //!   working through a backlog unattended, and the pause at the end of each
@@ -109,6 +113,26 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
         ActivityState::Running => return Some("a turn is running".into()),
         ActivityState::AwaitingApproval => return Some("a permission dialog is open".into()),
         _ => {}
+    }
+    // Activity reads the screen-change clock, which an agent animating
+    // only colours mid-turn can leave reading `idle` (WI-1090). Hibernation
+    // trusts the raw bytes instead: anything drawn within the quiet window
+    // may be a live turn.
+    if session.output_quiet_for() < session.idle_after() {
+        return Some("output is still arriving".into());
+    }
+    // Klaudia says in its title when a turn is running, and when it waits
+    // on a permission ask, question or plan approval, none of which are
+    // dialogs the engine recognises (WI-1090).
+    if session.agent().as_deref() == Some("klaudia") {
+        use crate::screen::{klaudia_title, KlaudiaTitle};
+        match klaudia_title(session.title().as_deref()) {
+            Some(KlaudiaTitle::Working) => return Some("a turn is running".into()),
+            Some(KlaudiaTitle::AwaitingApproval) => {
+                return Some("a permission dialog is open".into())
+            }
+            _ => {}
+        }
     }
     if session.blocked().is_some() {
         return Some("blocked on a person".into());
@@ -251,7 +275,7 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
         .live_sessions()
         .iter()
         .filter_map(|s| match exemption(registry, s) {
-            None => Some((s.id, s.quiet_for(), s.autopilot())),
+            None => Some((s.id, s.output_quiet_for(), s.autopilot())),
             Some(why) => {
                 tracing::debug!(session = %s.id, reason = %why, "not hibernating");
                 None

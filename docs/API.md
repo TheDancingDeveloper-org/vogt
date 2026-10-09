@@ -119,6 +119,8 @@ Reading a terminal and typing into one are deliberately different grants.
 | `session.screen` (`session_screen`) | `read` | what the terminal shows now: lines, cursor, title, activity, readiness |
 | `session.input` (`session_input`) | `work.write` | type text, press named keys (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`, `ctrl-d`, `backspace`), then Enter with `submit` |
 | `session.start` / `session.stop` | `work.write` | open or close a terminal |
+| `session.rename` (`session_rename`) | `work.write` | rename a session, as the GUI does; `session.list` returns the name as `name` |
+| `session.remove` (`session_remove`) | `work.write` | kill a session if it runs and have the engine forget it, as the GUI's Remove does |
 
 - **Either id works** on the core's operations ([Sessions](#sessions)).
 - **Any `work.write` holder can type into any session**, including one another
@@ -145,8 +147,10 @@ Terminal sessions live in the engine. Two ways to reach them:
 - **The core's operations (preferred):** `session_start`, `session_list`,
   `session_screen` (read the visible screen; `ready` says it awaits input),
   `session_input` (type text, press named keys, submit; audited),
-  `session_log_tail`, `session_stop` — on MCP, REST (`/api/sessions…` on the
-  core) and the CLI (`vogt session …`).
+  `session_log_tail`, `session_rename`, `session_stop`, `session_remove` — on
+  MCP, REST (`/api/sessions…` on the core) and the CLI (`vogt session …`).
+  `engine_status` (`GET /api/engine/status`, `vogt engine status`) is the
+  engine's own operational report, the one the GUI's Settings shows.
 - **The engine's own routes:** `/api/sessions…` on `:8910`, described
   machine-readably in [`engine-openapi.yaml`](engine-openapi.yaml) (OpenAPI
   3.1). Inside a session, `VOGT_ENGINE_URL` names the engine and
@@ -258,6 +262,21 @@ dialogs and the startup gates `folder-trust`, `external-imports` and
 engine moves the highlight itself and reports `dismissed`. `approval.options`
 on the list, screen and sweep rows lists the menu.
 
+**A permission prompt is a person's to answer** (WI-983). For
+`approval.kind` `permission` or `read-outside-cwd`, `session.answer` from an
+agent principal — a session's token, an `agent:engine:` token, the pod
+token — or from the engine's own credential is refused with
+`403 person_required`, and so is `session.input` while such a prompt is
+showing, since every keystroke on a modal dialog answers it. Nothing is
+typed. The startup gates `folder-trust` and `external-imports`, and input to
+a session with no dialog showing, are unaffected. The core decides who is a
+person the way `session.grant_decide` does and tells the engine, which reads
+the screen and refuses (`ENGINE.md`, "Only a person answers a permission
+prompt"). The audit row names the actor; the `session.answered` event
+records `kind`, `question`, `option`, `label` and `person`. An overseer that
+meets a permission prompt leaves it for a person in the Inbox or reports it
+with `session.report_blocked`.
+
 `session.sweep` (`read`) is the oversight table, built in one call. It has a
 row for every live and hibernated session, ordered by who needs attention:
 `approval`, `blocked`, `waiting` (at its prompt, wanting the next
@@ -286,6 +305,16 @@ the role is what lets a session ask for grants on another session's behalf
 (below), and a session that could nominate itself would make that rule
 self-service. An oversight session is pinned awake as it becomes one, rows
 carry `role`, and the GUI lists oversight sessions first (WI-957).
+
+`session.rename` (`POST /sessions/rename`, `work.write`, audited) renames a
+session, live or hibernated; the name is the engine's, so `session.list`
+reads it back as `name` for linked and unlinked sessions alike.
+`session.remove` (`POST /sessions/remove`, `work.write`, audited) is the GUI's
+Remove: it kills the session if it still runs and has the engine forget its
+record, kept screen and brief. Where `session.stop` keeps a session listed
+with its output readable, `session.remove` drops it; a linked session's
+record is closed and its token revoked as a stop would, unless a stop
+already did (`summary.record_closed`). Vogt's record and the audit trail stay.
 
 `session.bind_work` (`POST /sessions/work-item`, `work.write`, audited)
 declares which work item a session serves — `work_item: "WI-7"` — or that it
@@ -616,3 +645,36 @@ tailnet access nor the orchestrator:
 - `ENGINE.md` — the engine, the agent-auth broker, and identity passthrough.
 - `CONFIG.md` — generated config reference (`agent_session_scopes`,
   `session_ttl_days`, `bootstrap_*_token_*`, `ENGINE_AGENT_AUTH_*`).
+
+## Engine routes and their MCP counterparts
+
+The core's operations reach REST, MCP and the CLI from one registry, so they
+cannot drift. The engine's routes are separate Rust handlers that the PWA
+calls directly, so the rule that anything a person can do over the API an
+agent can do over MCP is kept by a table instead:
+`src/vogt/registry/engine_routes.py`. `ENGINE_COUNTERPARTS` maps each engine
+route an agent should reach to the core operation that is its MCP
+counterpart (`PATCH /api/sessions/{id}` → `session.rename`,
+`DELETE /api/sessions/{id}` → `session.remove`, `GET /api/status` →
+`engine.status`, …). `ENGINE_ONLY` names every other route with the reason
+it has none:
+
+| Engine routes | Why there is no MCP tool |
+|---|---|
+| `/healthz`, `/readyz`, the forwarded core probes | supervisor probes; `status` / `instance.diagnostics` are the agent's view |
+| `/api/config`, `/api/install/*`, `/api/auth/login` | browser bootstrap before any credential; an MCP caller already holds a token |
+| `/api/vogt/*`, `/mcp` | the front door to the core's own surfaces |
+| `/api/push/*` | device push endpoints an agent does not have; `notifications` / `inbox.list` carry the signal |
+| `/api/assistant/*` | the assistant's effectors wait for a person's on-screen approval; another agent must not resolve them |
+| `/api/client-log`, `/api/events`, `/api/sessions/{id}/attach` | the PWA's own transport (diagnostics, SSE, terminal WebSocket and resize); `events.list`, `session.wait`, `session.screen`, `session.input` serve agents |
+| `/api/files*`, `/api/dir`, `/api/tree`, `/api/search*`, `/api/git/*` | an agent in a session has the workspace directly; these are gated on capabilities the core's engine credential does not hold (WI-1020) |
+| `/api/gui/*` | `gui-control` is arbitrary code execution, not held by the core's credential |
+| `/api/agent-tasks*` | `agent-tasks-write` is arbitrary code execution, not held by the core's credential; an operator decision (WI-1095) |
+| `POST /api/history/cleanup`, `DELETE /api/history/{id}` | erasing the record of what sessions did is a person's call; `history-write` is not held by the core's credential |
+| `/api/agent-auth/*`, `POST /api/sessions/{id}/conversation` | a session's own calls with its broker token, made by its launcher and hooks |
+
+`tests/test_engine_parity.py` reads `engine/server/src/app.rs` and fails when
+a route is in neither table, when an entry names a route that no longer
+exists, or when a counterpart is not an operation on MCP. A new engine route
+therefore ships with a core operation that proxies it, or with a stated
+reason it has none.

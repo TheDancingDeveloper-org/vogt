@@ -495,7 +495,7 @@ fn validate_conversation_id(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate(field: &str, value: &str) -> Result<()> {
+pub(crate) fn validate(field: &str, value: &str) -> Result<()> {
     if value.len() > MAX_VALUE_LEN {
         return Err(ApiError::BadRequest(format!(
             "{field} is longer than {MAX_VALUE_LEN} characters"

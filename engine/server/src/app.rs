@@ -19,7 +19,9 @@ use crate::{
     assistant_api,
     assistant_log::AssistantLog,
     assistant_speech::{self, AssistantSpeech},
-    auth, client_diag,
+    auth, chat_api,
+    chats::ChatRuntime,
+    client_diag,
     config::Config,
     core_auth::CoreIdentityCache,
     events::EventBus,
@@ -94,6 +96,9 @@ pub struct AppState {
     /// installer that may move them. Always present; an image without the
     /// installer reports `installer_present: false` and refuses the POST.
     pub agent_clis: Arc<agent_clis::AgentCliRuntime>,
+    /// Quick chats (WI-1097), or `None` when they are off or no Klaudia
+    /// launch is configured; their routes then 404.
+    pub chats: Option<Arc<ChatRuntime>>,
 }
 
 pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
@@ -221,6 +226,12 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         }
     }
 
+    let chats =
+        ChatRuntime::from_config(Arc::clone(&cfg), bus.clone(), Arc::clone(&sessions)).await;
+    if chats.is_some() {
+        tracing::info!("quick chats enabled");
+    }
+
     let agent_clis_paths = cfg.agent_clis.clone();
     let state = Arc::new(AppState {
         config: cfg,
@@ -238,6 +249,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         vogt_core,
         core_identities: Arc::new(CoreIdentityCache::default()),
         agent_clis: Arc::new(agent_clis::AgentCliRuntime::new(agent_clis_paths)),
+        chats,
     });
 
     // Background task: fan out a push notification whenever a session enters
@@ -329,6 +341,19 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             "/api/sessions/{id}/conversation",
             post(api::report_session_conversation),
         )
+        // Quick chats (WI-1097). All need `sessions`; they 404 when off.
+        .route("/api/chats", get(chat_api::list).post(chat_api::create))
+        .route("/api/chats/{id}", get(chat_api::get))
+        .route("/api/chats/{id}/messages", post(chat_api::send))
+        .route(
+            "/api/chats/{id}/approvals/{approval_id}",
+            post(chat_api::decide),
+        )
+        .route("/api/chats/{id}/model", post(chat_api::set_model))
+        .route("/api/chats/{id}/interrupt", post(chat_api::interrupt))
+        .route("/api/chats/{id}/archive", post(chat_api::archive))
+        .route("/api/chats/{id}/promote", post(chat_api::promote))
+        .route("/api/chats/{id}/events", get(chat_api::events))
         .route("/api/assistant/message", post(assistant_api::message))
         .route(
             "/api/assistant/actions/{id}",
@@ -488,7 +513,10 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         )
         // A session's own approved grants (WI-973): the same caller and the
         // same per-session token.
-        .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants));
+        .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants))
+        // A quick chat's approval gate (WI-1097): its own agent's hook, with
+        // the per-process token the engine gave that agent.
+        .route(chat_api::GATE_ROUTE, post(chat_api::gate));
 
     // WS handles its own auth so query-param tokens work (browsers can't set
     // Authorization on a WebSocket handshake).
@@ -639,6 +667,13 @@ pub async fn serve_forever(cfg: Config) -> std::io::Result<()> {
     let (router, state) = router(cfg).await;
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(addr = %bind, "vogt-engine listening");
+    if bind.port() == 0 {
+        // The configuration did not name the port, so a chat's gate URL
+        // could not either until now.
+        if let (Some(chats), Ok(addr)) = (state.chats.as_ref(), listener.local_addr()) {
+            chats.set_gate_base(format!("http://127.0.0.1:{}", addr.port()));
+        }
+    }
     if let Some(addr) = metrics_bind {
         crate::metrics::spawn_listener(addr);
     }

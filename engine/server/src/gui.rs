@@ -230,6 +230,10 @@ pub struct PublicConfig {
     /// needs neither, and a base URL is an exposure value.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub assistant_profiles: Vec<AssistantProfileSummary>,
+    /// Quick chats (WI-1097): the drivers and the models each offers.
+    /// Absent when chats are off, so the PWA hides the Chat button.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chat: Option<vogt_engine_contract::ChatConfigInfo>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -282,6 +286,7 @@ pub async fn public_config(State(state): State<Arc<AppState>>) -> Json<PublicCon
                     .collect()
             })
             .unwrap_or_default(),
+        chat: state.chats.as_ref().map(|c| c.info()),
     })
 }
 

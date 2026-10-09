@@ -218,6 +218,14 @@ pub struct AuthorizedIdentity {
     /// core-resolved actor's `identity_ref` becomes, and an actor can be
     /// created with any `identity_ref` string.
     pub stack_secret: bool,
+    /// Whether the bearer was the static break-glass `ENGINE_TOKEN`, decided
+    /// the same way and for the same reason as `stack_secret`.
+    pub break_glass: bool,
+    /// Whether the core resolved the bearer to an actor of kind `human`: a
+    /// person, not an agent. False for both static credentials, which have
+    /// no actor of their own here. What decides who may answer a permission
+    /// prompt (WI-983, `person_gate`); like `stack_secret`, never `name`.
+    pub person: bool,
 }
 
 impl AuthorizedIdentity {
@@ -265,6 +273,8 @@ pub async fn authorize(
                 core_bearer: cfg.vogt_core_token.clone(),
                 mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
                 stack_secret: false,
+                break_glass: true,
+                person: false,
             });
         }
     }
@@ -277,6 +287,8 @@ pub async fn authorize(
                 core_bearer: Some(secret.to_string()),
                 mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
                 stack_secret: true,
+                break_glass: false,
+                person: false,
             });
         }
     }
@@ -304,12 +316,14 @@ fn from_core(
     cfg: &crate::config::Config,
 ) -> AuthorizedIdentity {
     AuthorizedIdentity {
+        person: identity.kind == "human",
         name: identity.identity_ref,
         capabilities: capabilities_for_scopes(&identity.scopes),
         scopes: identity.scopes,
         core_bearer: Some(bearer.to_string()),
         mutating_requests_per_minute: cfg.token_mutating_request_limit_per_minute,
         stack_secret: false,
+        break_glass: false,
     }
 }
 
@@ -524,11 +538,14 @@ pub async fn record_ws_auth_failure(reason: &'static str) {
     tokio::time::sleep(Duration::from_millis(delay_ms)).await;
 }
 
-pub async fn ws_token_allows_session_access(state: &AppState, candidate: &str) -> bool {
+/// Who a WebSocket attach bearer is, when it may attach at all (it holds
+/// `sessions`). The attach keeps the identity: its keystrokes are answered
+/// for by it (WI-983).
+pub async fn ws_session_identity(state: &AppState, candidate: &str) -> Option<AuthorizedIdentity> {
     authorize(state, candidate)
         .await
-        .map(|access| access.allows(TokenCapability::Sessions))
-        .unwrap_or(false)
+        .ok()
+        .filter(|access| access.allows(TokenCapability::Sessions))
 }
 
 fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
@@ -545,6 +562,13 @@ fn required_capability(method: &Method, path: &str) -> Option<TokenCapability> {
     // read of live output) is registered outside this gate and authenticates
     // itself.
     if path.starts_with("/api/sessions/") {
+        return Some(TokenCapability::Sessions);
+    }
+    // A quick chat starts an agent, and its transcript is a shared record,
+    // so every chat route — reads included — needs what a session does
+    // (WI-1097). The gate is not under this rule: it is outside the bearer
+    // gate and checks its own per-process token.
+    if path == "/api/chats" || path.starts_with("/api/chats/") {
         return Some(TokenCapability::Sessions);
     }
     // Reading the durable interaction log is scope-gated even though it is a
@@ -702,6 +726,8 @@ mod tests {
             core_bearer: None,
             mutating_requests_per_minute: 60,
             stack_secret: false,
+            break_glass: false,
+            person: false,
         }
     }
 
