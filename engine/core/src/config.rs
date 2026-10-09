@@ -402,21 +402,45 @@ impl VogtConfig {
 }
 
 /// Build the configuration, applying the documented precedence.
+const MAP_FIELDS: &[&str] = &[
+    "forge_token_files",
+    "agent_activity_roots",
+    "session_transcript_roots",
+    "agent_activity_services",
+];
+
+/// Pydantic-settings deep-merges the map settings across the file, the
+/// environment and explicit overrides. A higher source adds or replaces keys;
+/// it does not drop the ones a lower source set.
+fn merge_value(into: &mut Map<String, Value>, key: String, value: Value) {
+    if MAP_FIELDS.contains(&key.as_str()) {
+        if let (Some(Value::Object(existing)), Value::Object(incoming)) =
+            (into.get_mut(&key), &value)
+        {
+            for (inner, entry) in incoming {
+                existing.insert(inner.clone(), entry.clone());
+            }
+            return;
+        }
+    }
+    into.insert(key, value);
+}
+
 pub fn load_config(overrides: &Map<String, Value>) -> Result<VogtConfig, String> {
     let mut merged = Map::new();
     if let Some(file) = read_config_file()? {
         for (key, value) in file {
-            merged.insert(key, value);
+            merge_value(&mut merged, key, value);
         }
     }
     for (key, value) in env_settings()? {
-        merged.insert(key, value);
+        merge_value(&mut merged, key, value);
     }
     for (key, value) in overrides {
         if !FIELD_NAMES.contains(&key.as_str()) {
             return Err(format!("unknown setting {key:?}"));
         }
-        merged.insert(key.clone(), value.clone());
+        merge_value(&mut merged, key.clone(), value.clone());
     }
     config_from_map(&merged)
 }
@@ -467,7 +491,10 @@ fn env_settings() -> Result<Map<String, Value>, String> {
     let mut values = Map::new();
     for field in FIELD_CATALOGUE {
         let key = format!("{ENV_PREFIX}{}", field.name.to_ascii_uppercase());
-        let Ok(raw) = env::var(&key) else {
+        // pydantic-settings matches the prefix case-insensitively, so an
+        // existing stack that exports `vogt_log_level` loads the same value
+        // as one that exports `VOGT_LOG_LEVEL`.
+        let Some(raw) = env_value(&key) else {
             continue;
         };
         values.insert(
@@ -478,15 +505,20 @@ fn env_settings() -> Result<Map<String, Value>, String> {
     Ok(values)
 }
 
+fn env_value(name: &str) -> Option<String> {
+    env::vars().find_map(|(key, value)| {
+        (key.eq_ignore_ascii_case(name) && !value.is_empty()).then_some(value)
+    })
+}
+
 fn parse_env_value(field: &FieldDoc, raw: &str) -> Result<Value, String> {
     match field.kind {
-        Kind::Bool => Ok(Value::Bool(parse_bool(raw)?)),
-        Kind::Int { .. } => {
-            let number: i64 = raw
-                .parse()
-                .map_err(|_| format!("expected an integer, got {raw:?}"))?;
-            Ok(Value::Number(number.into()))
-        }
+        Kind::Bool => Ok(Value::Bool(parse_bool(raw.trim())?)),
+        Kind::Int { .. } => Ok(Value::Number(
+            int_from_str(raw)
+                .ok_or_else(|| format!("expected an integer, got {raw:?}"))?
+                .into(),
+        )),
         Kind::String
         | Kind::Path
         | Kind::OptString
@@ -506,10 +538,52 @@ fn parse_env_value(field: &FieldDoc, raw: &str) -> Result<Value, String> {
 
 fn parse_bool(raw: &str) -> Result<bool, String> {
     match raw.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
+        "1" | "true" | "yes" | "on" | "y" | "t" => Ok(true),
+        "0" | "false" | "no" | "off" | "n" | "f" => Ok(false),
         _ => Err(format!("expected a boolean, got {raw:?}")),
     }
+}
+
+/// Pydantic's lax mode. A bool may arrive as a string (`"yes"`, `"1"`) or an
+/// integer (`1`, `0`), and an int as a string (`"7"`, `"1_000"`, `" 5 "`), a
+/// whole float (`7.0`) or a bool (`true` → 1). Rejecting these strictly is what
+/// made an existing stack's TOML fail to load.
+fn as_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(flag) => Some(*flag),
+        Value::Number(number) => number.as_i64().and_then(|n| match n {
+            1 => Some(true),
+            0 => Some(false),
+            _ => None,
+        }),
+        Value::String(text) => parse_bool(text.trim()).ok(),
+        _ => None,
+    }
+}
+
+fn as_int(value: &Value) -> Option<i64> {
+    match value {
+        Value::Number(number) => number.as_i64().or_else(|| {
+            number.as_f64().and_then(|n| {
+                (n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64)
+                    .then_some(n as i64)
+            })
+        }),
+        Value::String(text) => int_from_str(text),
+        Value::Bool(flag) => Some(i64::from(*flag)),
+        _ => None,
+    }
+}
+
+fn int_from_str(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim().replace('_', "");
+    if let Ok(number) = trimmed.parse::<i64>() {
+        return Some(number);
+    }
+    trimmed.parse::<f64>().ok().and_then(|number| {
+        (number.fract() == 0.0 && number >= i64::MIN as f64 && number <= i64::MAX as f64)
+            .then_some(number as i64)
+    })
 }
 
 fn config_from_map(values: &Map<String, Value>) -> Result<VogtConfig, String> {
@@ -559,9 +633,7 @@ fn apply_field(config: &mut VogtConfig, field: &FieldDoc, value: &Value) -> Resu
             }
         }
         Kind::Bool => {
-            let flag = value
-                .as_bool()
-                .ok_or_else(|| format!("{name} must be a boolean"))?;
+            let flag = as_bool(value).ok_or_else(|| format!("{name} must be a boolean"))?;
             match name {
                 "fronted" => config.fronted = flag,
                 "log_requests" => config.log_requests = flag,
@@ -658,9 +730,7 @@ fn opt_path(name: &str, value: &Value) -> Result<Option<PathBuf>, String> {
 }
 
 fn expect_int(name: &str, value: &Value, min: i64, max: Option<i64>) -> Result<i64, String> {
-    let number = value
-        .as_i64()
-        .ok_or_else(|| format!("{name} must be an integer"))?;
+    let number = as_int(value).ok_or_else(|| format!("{name} must be an integer"))?;
     if number < min {
         return Err(format!("{name} must be >= {min}"));
     }
@@ -1493,6 +1563,56 @@ mod tests {
         guard.set("VOGT_DATA_DIR", "/from/env");
         let config = load_config(&Map::new()).unwrap();
         assert_eq!(config.data_dir, PathBuf::from("/from/env"));
+    }
+
+    #[test]
+    fn an_env_name_matches_regardless_of_case() {
+        let mut guard = clean();
+        guard.set("vogt_log_level", "debug");
+        guard.set("Vogt_Retention_Days", "9");
+        let config = load_config(&Map::new()).unwrap();
+        assert_eq!(config.log_level, LogLevel::Debug);
+        assert_eq!(config.retention_days, 9);
+    }
+
+    #[test]
+    fn lax_values_load_the_way_pydantic_loads_them() {
+        let dir = std::env::temp_dir().join(format!("vogt-cfg-lax-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("vogt.toml");
+        std::fs::write(
+            &file,
+            "fronted = \"yes\"\nretention_days = \"7\"\nlog_slow_request_ms = 250.0\n",
+        )
+        .unwrap();
+        let mut guard = clean();
+        guard.set(CONFIG_FILE_ENV, file.to_str().unwrap());
+        guard.set("VOGT_FRONTED", "y");
+        guard.set("VOGT_RETENTION_DAYS", "1_000");
+        let config = load_config(&Map::new()).unwrap();
+        assert!(config.fronted);
+        assert_eq!(config.retention_days, 1000);
+        assert_eq!(config.log_slow_request_ms, 250);
+    }
+
+    #[test]
+    fn map_settings_merge_across_sources() {
+        let dir = std::env::temp_dir().join(format!("vogt-cfg-merge-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("vogt.toml");
+        std::fs::write(&file, "[forge_token_files]\ngithub = \"/from/file\"\n").unwrap();
+        let mut guard = clean();
+        guard.set(CONFIG_FILE_ENV, file.to_str().unwrap());
+        guard.set("VOGT_FORGE_TOKEN_FILES", "{\"gitlab\":\"/from/env\"}");
+        let config = load_config(&Map::new()).unwrap();
+        assert_eq!(
+            config.forge_token_files.get("github").map(PathBuf::as_path),
+            Some(Path::new("/from/file"))
+        );
+        assert_eq!(
+            config.forge_token_files.get("gitlab").map(PathBuf::as_path),
+            Some(Path::new("/from/env"))
+        );
     }
 
     #[test]
