@@ -260,6 +260,7 @@ where
             state,
             until,
             entry,
+            decided_at: now_of(&clock),
         },
     )
 }
@@ -271,6 +272,7 @@ struct TriageDecision {
     state: TriageState,
     until: Option<Moment>,
     entry: Value,
+    decided_at: Moment,
 }
 
 /// Split out so the closure is built against the concrete store. Against the
@@ -283,15 +285,13 @@ fn record_triage<C: Clock + 'static, I: IdFactory + 'static>(
     reason: &str,
     decision: TriageDecision,
 ) -> Result<Value, VogtError> {
-    // Read inside the write, as Python's body calls the clock: one tick later
-    // than the reads that built the entry, which is what the audit `at` shows.
-    let decided_at = now_of(writing.clock());
     audited_write(writing, operation, reason, move |txn, actor| {
         let TriageDecision {
             entry_key,
             state,
             until,
             entry,
+            decided_at,
         } = decision;
         let triage = InboxTriage {
             entry_key: entry_key.clone(),
@@ -627,7 +627,7 @@ where
     }
 
     for grant in view.list_session_grants(Some("pending"), None, MAX_SCAN)? {
-        if grant.effective_state(now_of(&ctx.clock)) == "pending" {
+        if grant.state == crate::core::GrantState::Pending {
             entries.push(grant_entry(view, &grant, &projects, &live_by_id)?);
         }
     }
