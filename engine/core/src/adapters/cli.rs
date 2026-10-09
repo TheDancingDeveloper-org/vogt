@@ -129,6 +129,19 @@ fn usage(text: String) -> CliResult {
     }
 }
 
+/// An unrecognized-argument error. argparse writes the root usage synopsis
+/// (not the whole help page) and the `vogt: error:` line to stderr, and exits 2.
+fn unrecognized(arguments: &str) -> CliResult {
+    CliResult {
+        exit_code: EXIT_USAGE,
+        stdout: String::new(),
+        stderr: format!(
+            "{}\nvogt: error: unrecognized arguments: {arguments}\n",
+            usage_synopsis().trim_end()
+        ),
+    }
+}
+
 /// Parse `argv` (without the program name) against the registry.
 fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseOutcome {
     let argv_rest = argv;
@@ -173,10 +186,9 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             continue;
         }
         if positional.is_empty() && flag.starts_with('-') {
-            return ParseOutcome::Result(usage(format!(
-                "error: unrecognised argument {flag}\n{}",
-                format_top(registry)
-            )));
+            // Every leftover token, flag and value, is reported together.
+            let rest = argv_rest[index..].join(" ");
+            return ParseOutcome::Result(unrecognized(&rest));
         }
         if !command_complete && !flag.starts_with('-') {
             positional.push(flag.clone());
@@ -188,10 +200,8 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             // A flag between the group word and the subcommand is a root
             // usage error, matching argparse: `work --json get` reports
             // "unrecognized arguments" against the top-level usage.
-            return ParseOutcome::Result(usage(format!(
-                "{}\nvogt: error: unrecognized arguments: {flag}\n",
-                format_top(registry).trim_end()
-            )));
+            let rest = argv_rest[index..].join(" ");
+            return ParseOutcome::Result(unrecognized(&rest));
         }
         flags.push(flag.clone());
         index += 1;
@@ -231,11 +241,8 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             // A flag right after the group word is a root-level usage error,
             // not the operation's help: argparse reports "unrecognized
             // arguments" against the top-level usage.
-            if let Some(flag) = flags.first().filter(|flag| flag.starts_with('-')) {
-                return ParseOutcome::Result(usage(format!(
-                    "{}\nvogt: error: unrecognized arguments: {flag}\n",
-                    format_top(registry).trim_end()
-                )));
+            if flags.first().is_some_and(|flag| flag.starts_with('-')) {
+                return ParseOutcome::Result(unrecognized(&flags.join(" ")));
             }
             let unknown = positional
                 .get(path.len())
@@ -270,11 +277,17 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             json,
             data_dir,
         }),
-        Err(message) if message.starts_with("root: ") => ParseOutcome::Result(usage(format!(
-            "{}\nvogt: error: {}\n",
-            format_top(registry).trim_end(),
-            message.trim_start_matches("root: ")
-        ))),
+        Err(message) if message.starts_with("root: ") => {
+            let detail = message.trim_start_matches("root: ");
+            if let Some(arguments) = detail.strip_prefix("unrecognized arguments: ") {
+                ParseOutcome::Result(unrecognized(arguments))
+            } else {
+                ParseOutcome::Result(usage(format!(
+                    "{}\nvogt: error: {detail}\n",
+                    format_top(registry).trim_end(),
+                )))
+            }
+        }
         Err(message) if message.starts_with("domain: ") => ParseOutcome::Result(CliResult {
             exit_code: EXIT_ERROR,
             stdout: String::new(),
@@ -471,7 +484,11 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
             (field.clone(), None)
         };
         let Some(property) = properties.get(&property_name) else {
-            return Err(format!("unrecognised argument --{name}"));
+            // An unknown flag on a finished command is a root usage error.
+            // argparse collects every leftover token, flag and value, and
+            // reports them together.
+            let rest = argv[index..].join(" ");
+            return Err(format!("root: unrecognized arguments: {rest}"));
         };
         if is_bool(property) {
             let value = match (forced_bool, inline) {
@@ -711,9 +728,16 @@ fn is_json_value(property: &Value) -> bool {
     types.iter().any(|kind| kind == "object" || kind == "array")
 }
 
+fn usage_synopsis() -> String {
+    // argparse wraps the usage line at 80 columns, indenting the continuation.
+    "usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json]\n            <command> ...\n"
+        .to_string()
+}
+
 fn format_top(registry: &OperationRegistry) -> String {
     let mut out = String::new();
-    out.push_str("usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json] <command> ...\n\n");
+    out.push_str(&usage_synopsis());
+    out.push('\n');
     out.push_str(DESCRIPTION);
     out.push_str("\n\npositional arguments:\n");
     for (name, summary) in top_commands(registry) {
@@ -1335,12 +1359,48 @@ mod tests {
             "test",
             &mut no_dispatch,
         );
-        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
         assert!(
-            result.stdout.contains("unrecognized arguments: --json"),
+            result
+                .stderr
+                .contains("usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json]"),
             "{}",
-            result.stdout
+            result.stderr
         );
+        assert!(
+            result
+                .stderr
+                .contains("unrecognized arguments: --json get --ref WI-7"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn an_unknown_flag_on_a_leaf_command_is_a_root_usage_error() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["status", "--bogus", "9"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result
+                .stderr
+                .contains("usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json]"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("unrecognized arguments: --bogus 9"),
+            "{}",
+            result.stderr
+        );
+        assert!(!result.stderr.contains("unrecognised"), "{}", result.stderr);
     }
 
     #[test]
