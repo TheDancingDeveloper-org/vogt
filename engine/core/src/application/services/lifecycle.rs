@@ -34,7 +34,7 @@ struct Manifest {
     vogt_version: String,
     declared_schema_version: i64,
     observed_schema_version: i64,
-    taken_at: String,
+    taken_at: Moment,
     engine_state: String,
     import_root: Option<String>,
 }
@@ -47,7 +47,7 @@ impl Manifest {
             "vogt_version": self.vogt_version,
             "declared_schema_version": self.declared_schema_version,
             "observed_schema_version": self.observed_schema_version,
-            "taken_at": self.taken_at,
+            "taken_at": crate::core::to_iso(self.taken_at),
             "engine_state": self.engine_state,
             "import_root": self.import_root,
         })
@@ -69,7 +69,12 @@ impl Manifest {
             vogt_version: text("vogt_version").to_string(),
             declared_schema_version: field("declared_schema_version").unwrap_or(0),
             observed_schema_version: field("observed_schema_version").unwrap_or(0),
-            taken_at: text("taken_at").to_string(),
+            taken_at: crate::core::from_iso(text("taken_at")).map_err(|_| {
+                VogtError::InvalidRequest(format!(
+                    "backup manifest taken_at {value:?} is not a timestamp",
+                    value = text("taken_at")
+                ))
+            })?,
             engine_state: raw
                 .get("engine_state")
                 .and_then(Value::as_str)
@@ -97,7 +102,13 @@ pub fn backup<C: Clock, I: IdFactory>(
         .and_then(Value::as_str)
         .filter(|label| !label.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| taken_at.to_iso().replace(['-', ':', '+'], ""));
+        .unwrap_or_else(|| {
+            // strftime("%Y%m%dT%H%M%SZ"): no separators, no fraction, a Z.
+            format!(
+                "{}Z",
+                crate::core::to_iso(taken_at)[..19].replace(['-', ':'], "")
+            )
+        });
     let destination = params
         .get("destination")
         .and_then(Value::as_str)
@@ -141,11 +152,11 @@ pub fn backup<C: Clock, I: IdFactory>(
         vogt_version: VERSION.to_string(),
         declared_schema_version: ctx.declared.schema_version(),
         observed_schema_version: ctx.observed.schema_version(),
-        taken_at: taken_at.to_iso(),
+        taken_at,
         engine_state: engine_state.clone(),
         import_root: Some(ctx.config.resolved_import_root().display().to_string()),
     };
-    let text = serde_json::to_string_pretty(&manifest.to_json()).expect("manifest is json") + "\n";
+    let text = crate::decisions::python_json_dumps_indent(&manifest.to_json(), 2) + "\n";
     std::fs::write(destination.join(MANIFEST_NAME), text)
         .map_err(|err| VogtError::InvalidRequest(format!("writing the manifest failed: {err}")))?;
 
@@ -155,7 +166,9 @@ pub fn backup<C: Clock, I: IdFactory>(
         "instance",
         &instance_id,
         &json!({"path": destination.display().to_string(), "reason": reason}),
-        taken_at,
+        // Python reads the clock again here, after the copy. A clock that
+        // advances between the two reads records a later moment than taken_at.
+        now(ctx),
     )?;
 
     Ok(json!({
@@ -163,7 +176,7 @@ pub fn backup<C: Clock, I: IdFactory>(
         "instance_id": instance_id,
         "declared_schema_version": manifest.declared_schema_version,
         "observed_schema_version": manifest.observed_schema_version,
-        "taken_at": manifest.taken_at,
+        "taken_at": crate::core::to_iso(manifest.taken_at),
         "engine_state": engine_state,
         "import_root": manifest.import_root,
     }))
@@ -243,7 +256,7 @@ pub fn restore<C: Clock, I: IdFactory>(
             "this replaces the stores in {data_dir} with the backup taken at {taken}. \
              Pass --confirm.",
             data_dir = ctx.config.resolved_data_dir().display(),
-            taken = manifest.taken_at
+            taken = crate::core::to_iso(manifest.taken_at)
         )));
     }
 
@@ -281,7 +294,7 @@ pub fn restore<C: Clock, I: IdFactory>(
     Ok(json!({
         "source": source.display().to_string(),
         "instance_id": manifest.instance_id,
-        "restored_from": manifest.taken_at,
+        "restored_from": crate::core::to_iso(manifest.taken_at),
         "migrations_applied": migrated.applied,
         "declared_schema_version": ctx.declared.schema_version(),
         "engine_state": engine_state,
@@ -320,14 +333,12 @@ fn snapshot(source: &Path, target: &Path) -> Result<(), VogtError> {
             source = source.display()
         ))
     })?;
-    backup
-        .run_to_completion(100, std::time::Duration::from_millis(250), None)
-        .map_err(|err| {
-            VogtError::InvalidRequest(format!(
-                "snapshotting {source} failed: {err}",
-                source = source.display()
-            ))
-        })
+    backup.step(-1).map(|_| ()).map_err(|err| {
+        VogtError::InvalidRequest(format!(
+            "snapshotting {source} failed: {err}",
+            source = source.display()
+        ))
+    })
 }
 
 /// Copy the engine's state directory, and say what happened either way. Not
@@ -775,6 +786,48 @@ mod tests {
             matches!(error, VogtError::NotFound(message) if message.contains("no project with slug"))
         );
         assert!(!destination.exists(), "nothing was written");
+    }
+
+    #[test]
+    fn a_garbled_taken_at_is_refused_before_anything_is_touched() {
+        let source = opened();
+        let taken = backup(
+            ctx(&source),
+            &json!({"destination": ctx(&source).config.resolved_data_dir().join("snap").display().to_string(), "reason": "why"}),
+        )
+        .unwrap();
+        let manifest_path = PathBuf::from(taken["path"].as_str().unwrap()).join(MANIFEST_NAME);
+        let mut manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest["taken_at"] = json!("not a time");
+        std::fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+        let target = opened();
+        let before = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        let error = restore(
+            ctx(&target),
+            &json!({"source": taken["path"], "confirm": true, "reason": "why"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(message) if message.contains("not a timestamp"))
+        );
+        let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        assert_eq!(after, before, "the live store was not replaced");
+    }
+
+    #[test]
+    fn the_default_label_is_the_compact_timestamp() {
+        let built = opened();
+        let result = backup(ctx(&built), &json!({"reason": "why"})).unwrap();
+        let name = PathBuf::from(result["path"].as_str().unwrap())
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        // The clock advances once per read, and backup reads it for the
+        // instance id, the label, and the event.
+        assert_eq!(name, "20231114T221323Z");
     }
 
     #[test]
