@@ -55,13 +55,11 @@ fn list_work<C: Clock, I: IdFactory>(
         .transpose()?;
     if let Some(project_row) = project_row.as_ref() {
         if !upstream::is_linked(project_row) {
-            return Ok(json!({
-                "items": [],
-                "total": 0,
-                "link_state": "unlinked",
-                "mode": mode,
-                "detail": unlinked_detail(&view, project_row)?,
-            }));
+            let mut result = work_page(mode, offset, Vec::new(), 0, Some("unlinked"));
+            result["detail"] = unlinked_detail(&view, project_row)?
+                .map(Value::String)
+                .unwrap_or(Value::Null);
+            return Ok(result);
         }
     }
     let work_filter = WorkFilter {
@@ -147,16 +145,17 @@ fn work_page(
             }
         })
         .collect();
-    let mut result = json!({
+    // `WorkListResult`'s field order, every key present. A scoped list and a
+    // global one carry the same shape; `link_state` and `detail` are null where
+    // they do not apply, and `next_offset` is null on the last page.
+    json!({
         "items": items,
         "total": total,
         "mode": mode,
         "next_offset": (!page.is_empty() && following < total).then_some(following),
-    });
-    if let Some(link_state) = link_state {
-        result["link_state"] = Value::String(link_state.to_string());
-    }
-    result
+        "link_state": link_state,
+        "detail": Value::Null,
+    })
 }
 
 /// What an unlinked project's empty list is hiding, and how to reach it. An
@@ -235,4 +234,38 @@ fn strings(value: Option<&Value>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::work_page;
+    use serde_json::Value;
+
+    #[test]
+    fn the_envelope_carries_every_key_in_the_model_order() {
+        // `WorkListResult`'s field order, with the nulls present. A global list
+        // has no link state and an empty page has no next offset, and neither
+        // is a reason to drop the key.
+        let page = work_page("summary", 0, Vec::new(), 0, None);
+        let keys: Vec<&String> = page.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            [
+                "items",
+                "total",
+                "mode",
+                "next_offset",
+                "link_state",
+                "detail"
+            ]
+        );
+        assert_eq!(page["next_offset"], Value::Null);
+        assert_eq!(page["link_state"], Value::Null);
+        assert_eq!(page["detail"], Value::Null);
+
+        let scoped = work_page("full", 0, Vec::new(), 0, Some("unlinked"));
+        let scoped_keys: Vec<&String> = scoped.as_object().unwrap().keys().collect();
+        assert_eq!(scoped_keys, keys);
+        assert_eq!(scoped["link_state"], "unlinked");
+    }
 }
