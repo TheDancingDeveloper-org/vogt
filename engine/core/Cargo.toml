@@ -29,6 +29,7 @@ scrypt = "0.12.0"
 subtle = "2.6.1"
 hex = "0.4.3"
 base64 = "0.23.1"
+unicode-general-category = "1.1.0"
 # The adapter HTTP client. `http1` below handles plain http with the standard
 # library; https (GitHub, an https peer) needs a TLS stack. native-certs trusts
 # the platform store, so a private CA that Python trusts is trusted here too.

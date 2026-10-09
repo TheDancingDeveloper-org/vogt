@@ -225,7 +225,9 @@ pub const IDS_ENV: &str = "VOGT_TEST_IDS";
 
 /// Python's `repr` for a string. It prefers single quotes and switches to
 /// double quotes when the value holds an apostrophe and no double quote, so
-/// ` x ` reads `' x '` and `it's` reads `"it's"`.
+/// ` x ` reads `' x '` and `it's` reads `"it's"`. A character `str.isprintable`
+/// rejects — anything but a graphic or U+0020 — is `\xNN`, `\uNNNN` or
+/// `\UNNNNNNNN`.
 pub fn py_repr(raw: &str) -> String {
     let quote = if raw.contains('\'') && !raw.contains('"') {
         '"'
@@ -243,11 +245,41 @@ pub fn py_repr(raw: &str) -> String {
                 out.push('\\');
                 out.push(c);
             }
+            c if !py_printable(c) => push_py_escape(&mut out, c),
             c => out.push(c),
         }
     }
     out.push(quote);
     out
+}
+
+/// `str.isprintable`: a graphic character or a space, and the only space is
+/// U+0020. C0/C1 controls, format characters, line and paragraph separators,
+/// private-use and unassigned code points are all rejected.
+fn py_printable(ch: char) -> bool {
+    if ch.is_control() || (ch.is_whitespace() && ch != ' ') {
+        return false;
+    }
+    use unicode_general_category::GeneralCategory;
+    !matches!(
+        unicode_general_category::get_general_category(ch),
+        GeneralCategory::Unassigned
+            | GeneralCategory::PrivateUse
+            | GeneralCategory::Surrogate
+            | GeneralCategory::Format
+            | GeneralCategory::Control
+    )
+}
+
+fn push_py_escape(out: &mut String, ch: char) {
+    let cp = u32::from(ch);
+    if cp < 0x100 {
+        out.push_str(&format!("\\x{cp:02x}"));
+    } else if cp < 0x10000 {
+        out.push_str(&format!("\\u{cp:04x}"));
+    } else {
+        out.push_str(&format!("\\U{cp:08x}"));
+    }
 }
 
 /// `VOGT_TEST_CLOCK_START`. Empty is unset. Anything that is not a timestamp is
