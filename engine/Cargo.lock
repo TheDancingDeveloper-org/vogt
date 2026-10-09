@@ -4252,6 +4252,7 @@ dependencies = [
  "chrono",
  "clap",
  "fancy-regex",
+ "getrandom 0.2.17",
  "hex",
  "hmac 0.12.1",
  "libc",

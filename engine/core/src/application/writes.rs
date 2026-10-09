@@ -114,6 +114,13 @@ impl<'a, C, I, D> WriteContext<'a, C, I, D> {
     pub fn ids(&self) -> &Arc<std::sync::Mutex<I>> {
         &self.ids
     }
+
+    /// The store the write runs against. A decision that must survive a rolled
+    /// back write — a refused login — is recorded through this, on the store's
+    /// own connection, rather than inside the transaction.
+    pub fn store(&self) -> &'a D {
+        self.declared
+    }
 }
 
 /// Resolve the acting principal to an Actor row, creating it if new.

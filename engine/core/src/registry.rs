@@ -8,6 +8,7 @@
 
 pub mod operations;
 mod schemas;
+pub mod validate;
 
 use std::collections::{HashMap, HashSet};
 
@@ -207,6 +208,16 @@ impl Operation {
         ctx: Option<&crate::application::context::Built>,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, VogtError> {
+        // Defaults and bounds come from the recorded pydantic schema, so every
+        // transport applies them before a service sees the parameters. The CLI
+        // validates first and reports a usage error; this catches HTTP and MCP,
+        // which have no earlier check. An operation whose service is not ported
+        // still reports that, rather than a schema error about parameters it
+        // never reads.
+        let params = match (service_for(self.name), self.handler) {
+            (None, Handler::NotPorted) => params,
+            _ => validate::prepare(self.name, params)?,
+        };
         match self.handler {
             Handler::RegistryDump => Ok(dump()),
             Handler::NotPorted => match (service_for(self.name), ctx) {

@@ -69,7 +69,21 @@ pub fn run(
                     ));
                 }
             };
-            match dispatch(operation, invocation.params) {
+            // Validated here, before the service, so a bad argument is a usage
+            // error (exit 2) as argparse-then-pydantic makes it, rather than the
+            // domain error `Operation::run` would report. The service validates
+            // again for HTTP and MCP, which never pass through here.
+            let params = match registry::validate::prepare(operation.name, invocation.params) {
+                Ok(params) => params,
+                Err(error) => {
+                    return CliResult {
+                        exit_code: EXIT_USAGE,
+                        stdout: String::new(),
+                        stderr: format!("error: {}\n", error.message()),
+                    };
+                }
+            };
+            match dispatch(operation, params) {
                 Ok(result) => {
                     let rendered = if invocation.json {
                         to_json(&result)

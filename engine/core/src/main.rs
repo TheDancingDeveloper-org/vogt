@@ -552,25 +552,41 @@ async fn shutdown() {
 mod data_dir_tests {
     use super::resolve_data_dir;
 
+    /// The config tests read and write the same variables, and cargo runs the
+    /// suite in parallel, so a test that touches the environment takes the lock
+    /// those tests take. Without it these two fail intermittently.
+    fn with_data_dir(value: Option<&std::path::Path>, body: impl FnOnce()) {
+        let _guard = crate::config::env_lock();
+        let saved = std::env::var("VOGT_DATA_DIR").ok();
+        match value {
+            Some(dir) => unsafe { std::env::set_var("VOGT_DATA_DIR", dir) },
+            None => unsafe { std::env::remove_var("VOGT_DATA_DIR") },
+        }
+        body();
+        match saved {
+            Some(previous) => unsafe { std::env::set_var("VOGT_DATA_DIR", previous) },
+            None => unsafe { std::env::remove_var("VOGT_DATA_DIR") },
+        }
+    }
+
     /// `VOGT_DATA_DIR` alone names the instance. A pod sets nothing else, so a
     /// status that fell back to the XDG default would read the wrong one.
     #[test]
     fn the_env_var_names_the_data_dir_when_no_flag_is_given() {
         let dir = std::env::temp_dir().join(format!("vogt-datadir-{}", std::process::id()));
-        // SAFETY: this test owns the variable and restores it before returning.
-        unsafe { std::env::set_var("VOGT_DATA_DIR", &dir) };
-        let resolved = resolve_data_dir(None).unwrap();
-        unsafe { std::env::remove_var("VOGT_DATA_DIR") };
-        assert_eq!(resolved.as_path(), dir.as_path());
+        with_data_dir(Some(&dir), || {
+            let resolved = resolve_data_dir(None).unwrap();
+            assert_eq!(resolved.as_path(), dir.as_path());
+        });
     }
 
     #[test]
     fn the_flag_overrides_the_env_var() {
         let from_env = std::env::temp_dir().join("vogt-from-env");
         let from_flag = std::env::temp_dir().join("vogt-from-flag");
-        unsafe { std::env::set_var("VOGT_DATA_DIR", &from_env) };
-        let resolved = resolve_data_dir(Some(from_flag.clone())).unwrap();
-        unsafe { std::env::remove_var("VOGT_DATA_DIR") };
-        assert_eq!(resolved.as_path(), from_flag.as_path());
+        with_data_dir(Some(&from_env), || {
+            let resolved = resolve_data_dir(Some(from_flag.clone())).unwrap();
+            assert_eq!(resolved.as_path(), from_flag.as_path());
+        });
     }
 }
