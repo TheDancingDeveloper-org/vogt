@@ -1607,6 +1607,7 @@ pub mod http1 {
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(timeout)
             .timeout(timeout)
+            .tls_config(tls_config())
             .build();
         let mut request = agent.request(method, url);
         for (name, value) in headers {
@@ -1630,6 +1631,22 @@ pub mod http1 {
             .read_to_end(&mut buf)
             .map_err(|error| error.to_string())?;
         Ok((status, buf))
+    }
+
+    /// Trust the platform certificate store. `rustls-native-certs` reads
+    /// `SSL_CERT_FILE` before the system store, so a private CA that Python
+    /// trusts is trusted here too. The bundled Mozilla roots are the fallback
+    /// for a host whose store cannot be read.
+    fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
+        let mut store = rustls::RootCertStore::empty();
+        for cert in rustls_native_certs::load_native_certs().unwrap_or_default() {
+            let _ = store.add(cert);
+        }
+        std::sync::Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(store)
+                .with_no_client_auth(),
+        )
     }
 
     fn exchange_plain(

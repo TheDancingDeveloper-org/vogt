@@ -30,9 +30,15 @@ subtle = "2.6.1"
 hex = "0.4.3"
 base64 = "0.23.1"
 # The adapter HTTP client. `http1` below handles plain http with the standard
-# library; https (GitHub, an https peer) needs a TLS stack, and ureq on rustls
-# is the smallest blocking one. No native-tls, so no system OpenSSL.
-ureq = { version = "2", features = ["tls"], default-features = false }
+# library; https (GitHub, an https peer) needs a TLS stack. native-certs trusts
+# the platform store, so a private CA that Python trusts is trusted here too.
+# No OpenSSL.
+ureq = { version = "2", features = ["tls", "native-certs"], default-features = false }
+# The same rustls ureq speaks, so the client can hand it a trust store built
+# from the platform certificates (which honour SSL_CERT_FILE) instead of only
+# the bundled Mozilla roots.
+rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-native-certs = "0.7"
 hmac = "0.12"
 aes = "0.8"
 cbc = "0.1"
