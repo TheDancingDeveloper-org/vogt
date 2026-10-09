@@ -124,6 +124,15 @@ async fn dispatch<C: Clock, I: IdFactory>(
         )
     };
     if let Err(denial) = granted {
+        if matches!(denial, auth_gate::Denial::Unrecorded { .. }) {
+            // A decision that could not be recorded must not describe the store
+            // failure. The client gets the same plain 500 `/mcp` gives.
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("content-type", "text/plain; charset=utf-8")
+                .body(Body::from("Internal Server Error"))
+                .expect("a fixed response builds");
+        }
         return error_response(&denial.error());
     }
     match operation.run(None, serde_json::Value::Null) {

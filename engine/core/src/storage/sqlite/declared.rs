@@ -63,19 +63,11 @@ pub struct SqliteDeclaredStore<C, I> {
     synchronous: String,
 }
 
-#[allow(dead_code)]
 impl<C, I> SqliteDeclaredStore<C, I>
 where
     C: Clock,
     I: IdFactory,
 {
-    /// The current time and a fresh id, from the clock and factory this store
-    /// was opened with. The HTTP gate uses these so a recorded decision carries
-    /// the same clock and id sequence as everything else the store writes.
-    fn stamp_and_id(&self, prefix: &str) -> (Moment, String) {
-        self.mint(prefix)
-    }
-
     pub fn mint(&self, prefix: &str) -> (Moment, String) {
         let now = self
             .clock
@@ -131,6 +123,8 @@ where
 
     /// The id factory this store counts with. The context holds the same one,
     /// because a second factory starts again at one and the two collide.
+    // Used by the write tests, which live outside this crate's binary target.
+    #[allow(dead_code)]
     pub fn id_factory(&self) -> &Arc<std::sync::Mutex<I>> {
         &self.ids
     }
