@@ -176,7 +176,7 @@ pub fn backup<C: Clock, I: IdFactory>(
         "instance_id": instance_id,
         "declared_schema_version": manifest.declared_schema_version,
         "observed_schema_version": manifest.observed_schema_version,
-        "taken_at": crate::core::to_iso(manifest.taken_at),
+        "taken_at": crate::core::to_json_timestamp(manifest.taken_at),
         "engine_state": engine_state,
         "import_root": manifest.import_root,
     }))
@@ -294,7 +294,7 @@ pub fn restore<C: Clock, I: IdFactory>(
     Ok(json!({
         "source": source.display().to_string(),
         "instance_id": manifest.instance_id,
-        "restored_from": crate::core::to_iso(manifest.taken_at),
+        "restored_from": crate::core::to_json_timestamp(manifest.taken_at),
         "migrations_applied": migrated.applied,
         "declared_schema_version": ctx.declared.schema_version(),
         "engine_state": engine_state,
@@ -533,7 +533,7 @@ pub fn export_instance<C: Clock, I: IdFactory>(
             ))
         })?;
     }
-    let text = serde_json::to_string_pretty(&payload).expect("export is json") + "\n";
+    let text = crate::decisions::python_json_dumps_indent(&payload, 2) + "\n";
     std::fs::write(&destination, text).map_err(|err| {
         VogtError::InvalidRequest(format!(
             "writing {destination} failed: {err}",
@@ -828,6 +828,8 @@ mod tests {
         // The clock advances once per read, and backup reads it for the
         // instance id, the label, and the event.
         assert_eq!(name, "20231114T221323Z");
+        // The answer uses pydantic's JSON spelling, with Z rather than +00:00.
+        assert!(result["taken_at"].as_str().unwrap().ends_with('Z'));
     }
 
     #[test]

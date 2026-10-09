@@ -366,6 +366,13 @@ pub fn to_iso(moment: Moment) -> String {
     moment.to_iso()
 }
 
+/// A timestamp as pydantic's `mode="json"` renders a UTC datetime: the same as
+/// `to_iso`, except the offset is `Z` rather than `+00:00`. Answers use this;
+/// storage keeps `to_iso`.
+pub fn to_json_timestamp(moment: Moment) -> String {
+    moment.to_iso().replace("+00:00", "Z")
+}
+
 /// Parse what CPython 3.12 `datetime.fromisoformat` accepts, as aware UTC.
 ///
 /// The grammar is `_parse_isoformat_date` and `_parse_isoformat_time`: fixed
