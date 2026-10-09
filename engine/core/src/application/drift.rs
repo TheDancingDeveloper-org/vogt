@@ -125,8 +125,11 @@ fn detect<C: Clock + 'static, I: IdFactory + 'static>(
         }
         let proposal = proposal_for(ctx, finding)?;
         let id = proposal.id.clone();
-        raise(ctx, proposal, &reason)?;
-        raised.push(id.clone());
+        raise(ctx, &proposal, &reason)?;
+        // The answer carries the proposal as it was raised, not as it stands
+        // after auto-accept. Python appends the in-memory value before
+        // resolving, so an auto-accepted proposal comes back open.
+        raised.push(proposal);
         if auto_accept && decisions::auto_acceptable(&finding.kind) {
             let fixed = format!(
                 "auto-accepted under the shipped low-risk policy ({} is a state-sync kind)",
@@ -136,12 +139,12 @@ fn detect<C: Clock + 'static, I: IdFactory + 'static>(
             auto_accepted.push(id);
         }
     }
-    let superseded = reconcile(ctx)?;
+    let superseded = reconcile(ctx, &findings, &reason)?;
     let not_collected = not_collected_of(&ctx.declared.read()?, &ctx.observed)?;
     let mut kinds: Vec<&str> = decisions::AUTO_ACCEPTABLE_KINDS.to_vec();
     kinds.sort_unstable();
     Ok(json!({
-        "raised": raised_proposals(&ctx.declared.read()?, &raised)?,
+        "raised": raised,
         "auto_accepted": auto_accepted,
         "already_open": found - raised.len(),
         "superseded": superseded,
@@ -310,13 +313,13 @@ fn proposal_for<C: Clock, I: IdFactory>(
 
 fn raise<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
-    proposal: crate::core::DriftProposal,
+    proposal: &crate::core::DriftProposal,
     reason: &str,
 ) -> Result<(), VogtError> {
     let reason = reason.to_string();
     let mut write = write_of(ctx);
     audited_write(&mut write, "drift.detect", &reason, |txn, _actor| {
-        txn.insert_drift(&proposal)?;
+        txn.insert_drift(proposal)?;
         let mut summary = serde_json::Map::new();
         summary.insert("kind".to_string(), Value::String(proposal.kind.clone()));
         summary.insert(
@@ -330,10 +333,10 @@ fn raise<C: Clock + 'static, I: IdFactory + 'static>(
             }
         }
         Ok(WriteOutcome {
-            result: serde_json::to_value(&proposal).unwrap_or(Value::Null),
+            result: serde_json::to_value(proposal).unwrap_or(Value::Null),
             entity_kind: "drift_proposal".to_string(),
             entity_id: proposal.id.clone(),
-            payload: serde_json::to_value(&proposal).unwrap_or(Value::Null),
+            payload: serde_json::to_value(proposal).unwrap_or(Value::Null),
             event_kind: DRIFT_RAISED_EVENT.to_string(),
             summary: Value::Object(summary),
         })
@@ -341,36 +344,29 @@ fn raise<C: Clock + 'static, I: IdFactory + 'static>(
     Ok(())
 }
 
-/// `detect` returns the proposals it raised, re-read so a row that was
-/// auto-accepted comes back resolved rather than open.
-fn raised_proposals(
-    view: &impl ReadView,
-    ids: &[String],
-) -> Result<Vec<crate::core::DriftProposal>, VogtError> {
-    let mut out = Vec::with_capacity(ids.len());
-    for id in ids {
-        if let Some(proposal) = view.drift_by_id(id)? {
-            out.push(proposal);
-        }
-    }
-    Ok(out)
-}
-
-/// Coverage-gated reconciliation. A reappearing finding clears a stale flag;
-/// an absent one is marked only once its collector has swept again since the
-/// proposal opened. Nothing is auto-resolved.
+/// Coverage-gated reconciliation against the findings this run already read.
+/// A reappearing finding clears a stale flag; an absent one is marked only
+/// once its collector has swept again since the proposal opened, and only
+/// once — a proposal already flagged is left alone. Nothing is auto-resolved.
 fn reconcile<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
+    findings: &[DriftFinding],
+    reason: &str,
 ) -> Result<Vec<String>, VogtError> {
     let open = ctx
         .declared
         .read()?
-        .list_drift(Some("open"), None, None, 1000)?;
-    let current: BTreeSet<(String, String, String)> =
-        findings_of(&ctx.declared.read()?, &ctx.observed)?
-            .into_iter()
-            .map(|finding| (finding.kind, finding.subject_kind, finding.subject_id))
-            .collect();
+        .list_drift(Some("open"), None, None, 10_000)?;
+    let current: BTreeSet<(String, String, String)> = findings
+        .iter()
+        .map(|finding| {
+            (
+                finding.kind.clone(),
+                finding.subject_kind.clone(),
+                finding.subject_id.clone(),
+            )
+        })
+        .collect();
     let coverage = ctx.observed.coverage()?;
     let mut marked = Vec::new();
     for proposal in open {
@@ -380,28 +376,37 @@ fn reconcile<C: Clock + 'static, I: IdFactory + 'static>(
             proposal.subject_id.clone(),
         );
         if current.contains(&key) {
-            if proposal.superseded_detail.is_some() {
-                mark(ctx, &proposal.id, None, None)?;
+            if proposal.superseded_at.is_some() {
+                mark(ctx, &proposal, None, None, reason)?;
             }
             continue;
         }
-        let Some(collector) = proposal
+        if proposal.superseded_at.is_some() {
+            continue;
+        }
+        let collector = proposal
             .evidence_snapshot
             .get("collector")
             .and_then(Value::as_str)
-        else {
-            continue;
-        };
+            .unwrap_or("");
         let name = current_collector(collector);
         let Some(finished) = coverage.get(name).and_then(|sweep| sweep.finished_at) else {
             continue;
         };
         if finished > proposal.opened_at {
             let detail = format!(
-                "no longer detected by {name} after its sweep at {}",
+                "{collector} completed a sweep at {}, after this was raised, and \
+                 the condition that raised it no longer reproduces — the evidence \
+                 snapshot above is what it was raised on",
                 finished.to_iso()
             );
-            mark(ctx, &proposal.id, Some(detail), Some(finished))?;
+            mark(
+                ctx,
+                &proposal,
+                Some(detail),
+                Some(clock_now(&ctx.clock)),
+                reason,
+            )?;
             marked.push(proposal.id);
         }
     }
@@ -410,13 +415,16 @@ fn reconcile<C: Clock + 'static, I: IdFactory + 'static>(
 
 fn mark<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
-    id: &str,
+    proposal: &crate::core::DriftProposal,
     detail: Option<String>,
     at: Option<Moment>,
+    reason: &str,
 ) -> Result<(), VogtError> {
-    let id = id.to_string();
+    let id = proposal.id.clone();
+    let kind = proposal.kind.clone();
+    let reason = reason.to_string();
     let mut write = write_of(ctx);
-    audited_write(&mut write, "drift.detect", "reconcile", |txn, _actor| {
+    audited_write(&mut write, "drift.detect", &reason, |txn, _actor| {
         txn.mark_drift_superseded(&id, detail.as_deref(), at)?;
         let updated = txn.drift_by_id(&id)?;
         Ok(WriteOutcome {
@@ -428,7 +436,11 @@ fn mark<C: Clock + 'static, I: IdFactory + 'static>(
                 .map(|proposal| serde_json::to_value(proposal).unwrap_or(Value::Null))
                 .unwrap_or(Value::Null),
             event_kind: DRIFT_SUPERSEDED_EVENT.to_string(),
-            summary: json!({ "detail": detail }),
+            summary: json!({
+                "kind": kind,
+                "superseded": at.is_some(),
+                "detail": detail,
+            }),
         })
     })?;
     Ok(())
@@ -498,10 +510,15 @@ fn version_findings(
 }
 
 fn dependency_findings(
-    _declared: &impl ReadView,
+    declared: &impl ReadView,
     observed: &impl ObservedStore,
 ) -> Result<Vec<DriftFinding>, VogtError> {
     let mut out = Vec::new();
+    let slugs: BTreeMap<String, String> = declared
+        .list_projects(1000, 0)?
+        .into_iter()
+        .map(|project| (project.id, project.slug))
+        .collect();
     for dep in observed.dep_refs(None, None)? {
         if dep.to_project_id.is_some() {
             continue;
@@ -517,9 +534,10 @@ fn dependency_findings(
         if scope == SCOPE_INTERNAL {
             continue;
         }
-        let Some(slug) = dep.from_project_slug.as_deref() else {
-            continue;
-        };
+        let slug = slugs
+            .get(&dep.from_project_id)
+            .map(String::as_str)
+            .unwrap_or(dep.from_project_id.as_str());
         let manifest = dep.manifest.as_deref();
         let finding = if scope == SCOPE_BROKEN {
             decisions::broken_path_dependency(
