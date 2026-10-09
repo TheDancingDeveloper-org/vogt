@@ -558,7 +558,7 @@ def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
         "GITEA_MCP_TOKEN": "y",
     }
     procs = [
-        subprocess.Popen(  # noqa: S603 — fixed argv, no shell
+        subprocess.Popen(
             ["bash", str(BOOTSTRAP)],
             env=env,
             cwd=tmp_path,
@@ -598,7 +598,8 @@ def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
     assert config.read_text(encoding="utf-8").count("[mcp_servers.") == 3
 
     # A config that does not parse is not appended to.
-    config.write_text("[mcp_servers.github-ro]\n[mcp_servers.github-ro]\n", encoding="utf-8")
+    duplicate = "[mcp_servers.github-ro]\n[mcp_servers.github-ro]\n"
+    config.write_text(duplicate, encoding="utf-8")
     broken = subprocess.run(
         ["bash", str(BOOTSTRAP)],
         env=env,
@@ -609,6 +610,4 @@ def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
     )
     assert broken.returncode == 0, broken.stderr
     assert "not valid TOML" in broken.stderr
-    assert config.read_text(encoding="utf-8") == (
-        "[mcp_servers.github-ro]\n[mcp_servers.github-ro]\n"
-    )
+    assert config.read_text(encoding="utf-8") == duplicate
