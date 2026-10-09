@@ -55,11 +55,7 @@ where
         }));
     }
     let project_id = match project.as_deref() {
-        Some(slug) => Some(
-            view.project_by_slug(slug)?
-                .ok_or_else(|| VogtError::NotFound(format!("no project {slug:?}")))?
-                .id,
-        ),
+        Some(slug) => Some(crate::application::resolve::project(&view, slug)?.id),
         None => None,
     };
     let slugs: BTreeMap<String, String> = view

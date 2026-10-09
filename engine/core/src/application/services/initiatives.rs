@@ -56,13 +56,13 @@ where
 
     let (declared, _, principal, clock, ids, _) = context_parts(ctx);
     let now = now_of(&clock);
-    let id = next_id(&ids, "ini");
     let mut writing = write_context(declared, principal, Arc::clone(&clock), Arc::clone(&ids));
     let made = insert_initiative(
         &mut writing,
         &reason,
+        &ids,
         Initiative {
-            id,
+            id: String::new(),
             slug,
             title,
             body,
@@ -86,7 +86,8 @@ fn insert_initiative<C: Clock + 'static, I: IdFactory + 'static>(
         crate::storage::sqlite::declared::SqliteDeclaredStore<C, I>,
     >,
     reason: &str,
-    made: Initiative,
+    ids: &std::sync::Arc<std::sync::Mutex<I>>,
+    mut made: Initiative,
 ) -> Result<Initiative, VogtError> {
     audited_write(writing, "initiative.create", reason, |txn, _actor| {
         if txn.initiative_by_slug(&made.slug)?.is_some() {
@@ -95,6 +96,9 @@ fn insert_initiative<C: Clock + 'static, I: IdFactory + 'static>(
                 crate::core::py_repr(&made.slug),
             )));
         }
+        // Minted after the duplicate check, as Python's id factory runs inside
+        // the write body: a rejected duplicate must not burn an `ini_` id.
+        made.id = next_id(ids, "ini");
         txn.insert_initiative(&made)?;
         Ok(WriteOutcome::new(
             made.clone(),
