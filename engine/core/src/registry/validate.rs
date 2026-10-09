@@ -37,7 +37,7 @@ pub fn prepare(operation: &str, params: Value) -> Result<Value, VogtError> {
                     if problem.text.contains("[type=") {
                         problem
                     } else {
-                        finish(&problem.text, &input_for(&problem.text, &given_value))
+                        finish(&problem, &input_for(&problem.text, &given_value))
                     }
                 })
                 .collect();
@@ -103,10 +103,10 @@ fn apply_object(
                         resolved.insert(name.clone(), default.clone());
                     }
                 } else if required_of(schema).iter().any(|item| item == name) {
-                    problems.push(FieldError::bare(&pydantic(
+                    problems.push(pydantic(
                         &descend(location, Loc::Field(name.clone())),
                         "Field required",
-                    )));
+                    ));
                 }
             }
         }
@@ -169,18 +169,12 @@ fn check_value(
         }
         return if schema.get("format").and_then(Value::as_str) == Some("date-time") {
             Err(stamp(
-                &[FieldError::bare(&pydantic(
-                    location,
-                    "Input should be a valid datetime",
-                ))],
+                &[pydantic(location, "Input should be a valid datetime")],
                 &value,
             ))
         } else {
             Err(stamp(
-                &[FieldError::bare(&pydantic(
-                    location,
-                    &expected_input(schema),
-                ))],
+                &[pydantic(location, &expected_input(schema))],
                 &value,
             ))
         };
@@ -193,10 +187,10 @@ fn check_value(
                     .and_then(Value::as_str)
                     .unwrap_or("object");
                 return Err(stamp(
-                    &[FieldError::bare(&pydantic(
+                    &[pydantic(
                         location,
                         &format!("Input should be a valid dictionary or instance of {model}"),
-                    ))],
+                    )],
                     &value,
                 ));
             };
@@ -207,11 +201,14 @@ fn check_value(
     // The definition lives on the operation's own schema.
     if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
         let Some(target) = root.pointer(reference.trim_start_matches('#')) else {
-            return Err(vec![FieldError::bare(&format!(
-                "{}\n  {} refers to an unknown type",
-                dotted(location),
-                dotted(location)
-            ))]);
+            return Err(vec![FieldError::at(
+                location,
+                &format!(
+                    "{}\n  {} refers to an unknown type",
+                    dotted(location),
+                    dotted(location)
+                ),
+            )]);
         };
         return check_value(operation, location, target, value, root);
     }
@@ -226,10 +223,7 @@ fn check_value(
                 // is a different complaint, made inside `check_string`.
                 if !value.is_string() {
                     return Err(stamp(
-                        &[FieldError::bare(&pydantic(
-                            location,
-                            "Input should be a valid datetime",
-                        ))],
+                        &[pydantic(location, "Input should be a valid datetime")],
                         &value,
                     ));
                 }
@@ -258,7 +252,7 @@ fn check_value(
 fn stamp(problems: &[FieldError], input: &Value) -> Vec<FieldError> {
     problems
         .iter()
-        .map(|problem| finish(&problem.text, input))
+        .map(|problem| finish(problem, input))
         .collect()
 }
 
@@ -302,53 +296,50 @@ fn check_string(
                 [one] => (*one).to_string(),
                 [rest @ .., last] => format!("{}' or '{last}", rest.join("', '")),
             };
-            return Err(vec![FieldError::bare(&pydantic(
+            return Err(vec![pydantic(
                 location,
                 &format!("Input should be '{listed}'"),
-            ))]);
+            )]);
         }
     }
     let Value::String(text) = &stripped else {
-        return Err(vec![FieldError::bare(&pydantic(
-            location,
-            "Input should be a valid string",
-        ))]);
+        return Err(vec![pydantic(location, "Input should be a valid string")]);
     };
     if let Some(min) = bound(schema, "minLength") {
         if (text.chars().count() as i64) < min {
             let noun = if min == 1 { "character" } else { "characters" };
-            return Err(vec![FieldError::bare(&pydantic(
+            return Err(vec![pydantic(
                 location,
                 &format!("String should have at least {min} {noun}"),
-            ))]);
+            )]);
         }
     }
     if let Some(max) = bound(schema, "maxLength") {
         if (text.chars().count() as i64) > max {
             let noun = if max == 1 { "character" } else { "characters" };
-            return Err(vec![FieldError::bare(&pydantic(
+            return Err(vec![pydantic(
                 location,
                 &format!("String should have at most {max} {noun}"),
-            ))]);
+            )]);
         }
     }
     if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
         if let Ok(expression) = regex::Regex::new(pattern) {
             if !expression.is_match(text) {
-                return Err(vec![FieldError::bare(&pydantic(
+                return Err(vec![pydantic(
                     location,
                     &format!("String should match pattern '{pattern}'"),
-                ))]);
+                )]);
             }
         }
     }
     if schema.get("format").and_then(Value::as_str) == Some("date-time") && !is_datetime(text) {
         // A bool or null never got past the string check above. A string that is
         // not a datetime is the parse failure, and the corpus's are all too short.
-        return Err(vec![FieldError::bare(&pydantic(
+        return Err(vec![pydantic(
             location,
             "Input should be a valid datetime or date, input is too short",
-        ))]);
+        )]);
     }
     Ok(stripped)
 }
@@ -384,14 +375,14 @@ fn check_preference_value(
     };
     match serde_json::from_str::<Value>(text) {
         Ok(parsed @ Value::Object(_)) => Ok(parsed),
-        Ok(_) => Err(vec![FieldError::bare(&pydantic(
+        Ok(_) => Err(vec![pydantic(
             location,
             "Input should be a valid dictionary",
-        ))]),
-        Err(_) => Err(vec![FieldError::bare(&pydantic(
+        )]),
+        Err(_) => Err(vec![pydantic(
             location,
             "Value error, value is not valid JSON: Expecting value",
-        ))]),
+        )]),
     }
 }
 
@@ -425,17 +416,17 @@ fn check_integer(
                     return Ok(value);
                 } else {
                     let bound = bound(schema, "maximum").unwrap_or(i64::MAX);
-                    return Err(vec![FieldError::bare(&pydantic(
+                    return Err(vec![pydantic(
                         location,
                         &format!("Input should be less than or equal to {bound}"),
-                    ))]);
+                    )]);
                 }
             }
             None => {
-                return Err(vec![FieldError::bare(&pydantic(
+                return Err(vec![pydantic(
                     location,
                     "Input should be a valid integer, got a number with a fractional part",
-                ))]);
+                )]);
             }
         },
         Value::Bool(flag) => Some(i64::from(*flag)),
@@ -450,10 +441,10 @@ fn check_integer(
                 return Ok(value);
             }
         }
-        return Err(vec![FieldError::bare(&pydantic(
+        return Err(vec![pydantic(
             location,
             "Input should be a valid integer, unable to parse string as an integer",
-        ))]);
+        )]);
     };
     check_bounds(operation, location, schema, number)?;
     Ok(Value::from(number))
@@ -485,10 +476,10 @@ fn check_boolean(
     };
     match flag {
         Some(flag) => Ok(Value::from(flag)),
-        None => Err(vec![FieldError::bare(&pydantic(
+        None => Err(vec![pydantic(
             location,
             "Input should be a valid boolean, unable to interpret input",
-        ))]),
+        )]),
     }
 }
 
@@ -503,25 +494,22 @@ fn check_number(
         _ => None,
     };
     let Some(number) = number else {
-        return Err(vec![FieldError::bare(&pydantic(
-            location,
-            "Input should be a valid number",
-        ))]);
+        return Err(vec![pydantic(location, "Input should be a valid number")]);
     };
     if let Some(min) = schema.get("minimum").and_then(Value::as_f64) {
         if number < min {
-            return Err(vec![FieldError::bare(&pydantic(
+            return Err(vec![pydantic(
                 location,
                 &format!("Input should be greater than or equal to {min}"),
-            ))]);
+            )]);
         }
     }
     if let Some(max) = schema.get("maximum").and_then(Value::as_f64) {
         if number > max {
-            return Err(vec![FieldError::bare(&pydantic(
+            return Err(vec![pydantic(
                 location,
                 &format!("Input should be less than or equal to {max}"),
-            ))]);
+            )]);
         }
     }
     Ok(value)
@@ -535,18 +523,18 @@ fn check_bounds(
 ) -> Result<(), Vec<FieldError>> {
     if let Some(min) = bound(schema, "minimum") {
         if number < min {
-            return Err(vec![FieldError::bare(&pydantic(
+            return Err(vec![pydantic(
                 location,
                 &format!("Input should be greater than or equal to {min}"),
-            ))]);
+            )]);
         }
     }
     if let Some(max) = bound(schema, "maximum") {
         if number > max {
-            return Err(vec![FieldError::bare(&pydantic(
+            return Err(vec![pydantic(
                 location,
                 &format!("Input should be less than or equal to {max}"),
-            ))]);
+            )]);
         }
     }
     Ok(())
@@ -572,23 +560,20 @@ fn check_array(
             }
         }
         return Err(stamp(
-            &[FieldError::bare(&pydantic(
-                location,
-                "Input should be a valid list",
-            ))],
+            &[pydantic(location, "Input should be a valid list")],
             &value,
         ));
     };
     if let Some(min) = bound(schema, "minItems") {
         if (items.len() as i64) < min {
             return Err(stamp(
-                &[FieldError::bare(&pydantic(
+                &[pydantic(
                     location,
                     &format!(
                         "List should have at least {min} item after validation, not {}",
                         items.len()
                     ),
-                ))],
+                )],
                 &Value::Array(items),
             ));
         }
@@ -596,10 +581,10 @@ fn check_array(
     if let Some(max) = bound(schema, "maxItems") {
         if (items.len() as i64) > max {
             return Err(stamp(
-                &[FieldError::bare(&pydantic(
+                &[pydantic(
                     location,
                     &format!("List should have at most {max} items"),
-                ))],
+                )],
                 &Value::Array(items),
             ));
         }
@@ -646,8 +631,8 @@ fn expected_input(schema: &Value) -> String {
 
 /// The field and the complaint, in the shape pydantic prints. The tail that names
 /// the rejected value is added by `finish` once that value is known.
-fn pydantic(location: &[Loc], complaint: &str) -> String {
-    format!("{}\n  {complaint}", dotted(location))
+fn pydantic(location: &[Loc], complaint: &str) -> FieldError {
+    FieldError::at(location, &format!("{}\n  {complaint}", dotted(location)))
 }
 
 /// Pydantic's error code. The complaint decides it, except that a null is
@@ -746,11 +731,18 @@ fn render_full(value: &Value) -> String {
 
 /// Attach the rejected value to a complaint, and keep the structured half: the
 /// location, the error code, the message and the value itself.
-fn finish(problem: &str, input: &Value) -> FieldError {
-    let Some((field, complaint)) = problem.split_once("\n  ") else {
-        return FieldError::bare(problem);
+fn finish(problem: &FieldError, input: &Value) -> FieldError {
+    let Some((field, complaint)) = problem.text.split_once("\n  ") else {
+        return FieldError::bare(&problem.text);
     };
-    let loc = parse_loc(field);
+    // The steps were recorded when the complaint was built. Reading them back
+    // out of the dotted text would split a key that looks like an index path:
+    // an unknown key literally named `x.0` is one field, not a field and an index.
+    let loc = if problem.loc.is_empty() {
+        parse_loc(field)
+    } else {
+        problem.loc.clone()
+    };
     let code = error_code(complaint, input);
     let text = format!(
         "{field}\n  {complaint} [type={code}, input_value={}, input_type={}]\n    \

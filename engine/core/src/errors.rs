@@ -290,8 +290,15 @@ pub struct FieldError {
 impl FieldError {
     /// A complaint that carries no structured half yet. `finish` fills it in.
     pub fn bare(text: &str) -> Self {
+        Self::at(&[], text)
+    }
+
+    /// A complaint that already knows where it failed, before `finish` fills in
+    /// the structured half. The steps are kept rather than recovered from the
+    /// text, which cannot tell a key named `x.0` from a field and an index.
+    pub fn at(loc: &[Loc], text: &str) -> Self {
         Self {
-            loc: Vec::new(),
+            loc: loc.to_vec(),
             error_type: String::new(),
             msg: String::new(),
             input: serde_json::Value::Null,
