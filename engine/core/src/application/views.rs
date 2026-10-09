@@ -332,8 +332,15 @@ fn gather<C: Clock, I: IdFactory>(
         let overlays = view.work_overlays(&keys)?;
         let confirmed = ctx.observed.last_confirmed(&keys)?;
         let filter_set = SuppressionFilter::build(&view.list_suppressions(false, 1000)?);
-        let mut covered: std::collections::HashSet<String> =
-            ranked.iter().map(|row| row.reference.clone()).collect();
+        // Every observed subject is present before any PR is dropped, so a PR
+        // collapses under the issue it implements even when that issue is seen
+        // later. Adopted subjects count too; declared refs do not — a PR
+        // implementing a WI-n is its own row. Python's `present_subjects`.
+        let mut present: std::collections::HashSet<String> = observations
+            .iter()
+            .map(|observation| observation.subject_key.clone())
+            .collect();
+        present.extend(adopted.keys().cloned());
         let mut suppressed = 0;
         let mut observed_count = 0;
         let mut closed_by_overlay = 0;
@@ -346,7 +353,7 @@ fn gather<C: Clock, I: IdFactory>(
                 continue;
             }
             let targets = crate::decisions::implemented_targets(observation);
-            if !targets.is_empty() && targets.iter().any(|target| covered.contains(target)) {
+            if !targets.is_empty() && targets.iter().any(|target| present.contains(target)) {
                 continue;
             }
             if adopted.contains_key(&observation.subject_key) {
@@ -437,7 +444,6 @@ fn gather<C: Clock, I: IdFactory>(
                     &score.total,
                 ),
             });
-            covered.insert(observation.subject_key.clone());
             observed_count += 1;
         }
         let closed = ctx
@@ -497,6 +503,10 @@ fn ranked_row(
         "score": score,
         "updated_at": item.updated_at,
         "item": item,
+        "observation_kind": serde_json::Value::Null,
+        "source_url": serde_json::Value::Null,
+        "observed_at": serde_json::Value::Null,
+        "adopted_as": serde_json::Value::Null,
     })
 }
 
@@ -530,6 +540,7 @@ fn observed_row(
         "labels": observation.payload.get("labels").cloned().unwrap_or(serde_json::json!([])),
         "score": score,
         "updated_at": observation.observed_at,
+        "item": serde_json::Value::Null,
         "observation_kind": observation.kind,
         "source_url": observation.source_url,
         "observed_at": observation.observed_at,
@@ -565,10 +576,10 @@ fn backlog<C: Clock, I: IdFactory>(
         .get("offset")
         .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
-    let freshness =
-        crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
+    // Freshness is the last clock read, after the unlinked check and the
+    // gather, so its age matches Python's (views.py reads it after ranking).
     if let Some(project) = project {
-        if let Some(marker) = unlinked_scope(ctx, project, &freshness)? {
+        if let Some(marker) = unlinked_scope(ctx, project)? {
             return Ok(marker);
         }
     }
@@ -586,6 +597,8 @@ fn backlog<C: Clock, I: IdFactory>(
             .unwrap_or(true),
     };
     let gathered = gather(ctx, &query)?;
+    let freshness =
+        crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
     let total = gathered.ranked.len() as i64;
     let start = offset.max(0) as usize;
     let page: Vec<serde_json::Value> = gathered
@@ -618,13 +631,14 @@ fn backlog<C: Clock, I: IdFactory>(
 fn unlinked_scope<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     project: &str,
-    freshness: &serde_json::Value,
 ) -> Result<Option<serde_json::Value>, VogtError> {
     let view = ctx.declared.read()?;
     let project_row = crate::application::resolve::project(&view, project)?;
     if crate::application::upstream::is_linked(&project_row) {
         return Ok(None);
     }
+    let freshness =
+        crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
     let pending = view.count_work_items(&crate::storage::interface::WorkFilter {
         project_id: Some(project_row.id.clone()),
         exclude_terminal: true,
@@ -633,6 +647,7 @@ fn unlinked_scope<C: Clock, I: IdFactory>(
     Ok(Some(serde_json::json!({
         "items": [],
         "total_considered": 0,
+        "next_offset": serde_json::Value::Null,
         "declared": 0,
         "observed": 0,
         "suppressed": 0,
@@ -644,14 +659,16 @@ fn unlinked_scope<C: Clock, I: IdFactory>(
     })))
 }
 
-/// `summary` drops each row's full work item; `full` returns the row untouched.
+/// `summary` nulls each row's full work item in place, so the key stays where
+/// `RankedItem` puts it (after `updated_at`). Inserting it would append the key
+/// and every summary row would differ. `full` returns the row untouched.
 fn projected(row: &serde_json::Value, mode: &str) -> serde_json::Value {
     if mode == "full" {
         return row.clone();
     }
     let mut summary = row.clone();
-    if let serde_json::Value::Object(map) = &mut summary {
-        map.insert("item".to_string(), serde_json::Value::Null);
+    if let Some(item) = summary.get_mut("item") {
+        *item = serde_json::Value::Null;
     }
     summary
 }
@@ -667,4 +684,60 @@ fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::projected;
+
+    #[test]
+    fn a_summary_row_nulls_item_in_place() {
+        // `RankedItem` puts `item` after `updated_at` and before the observed
+        // fields. Nulling it must not move the key to the end.
+        let row = serde_json::json!({
+            "origin": "declared",
+            "classified": true,
+            "ref": "WI-1",
+            "title": "t",
+            "kind": "feature",
+            "state": "open",
+            "priority": "p2",
+            "project_slug": null,
+            "trust_state": "unverified",
+            "labels": [],
+            "score": 1.0,
+            "updated_at": "2026-01-01T00:00:00Z",
+            "item": {"ref": "WI-1"},
+            "observation_kind": null,
+            "source_url": null,
+            "observed_at": null,
+            "adopted_as": null,
+        });
+        let summary = projected(&row, "summary");
+        let keys: Vec<&String> = summary.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            [
+                "origin",
+                "classified",
+                "ref",
+                "title",
+                "kind",
+                "state",
+                "priority",
+                "project_slug",
+                "trust_state",
+                "labels",
+                "score",
+                "updated_at",
+                "item",
+                "observation_kind",
+                "source_url",
+                "observed_at",
+                "adopted_as",
+            ]
+        );
+        assert!(summary["item"].is_null());
+        assert_eq!(projected(&row, "full")["item"]["ref"], "WI-1");
+    }
 }
