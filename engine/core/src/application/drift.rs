@@ -40,7 +40,6 @@ const KIND_CI_CHECK: &str = "ci.check";
 const KIND_POSTURE: &str = "forge.posture";
 
 const COLLECTOR_ISSUES: &str = "gh-issues";
-const COLLECTOR_DEPS: &str = "dep-refs";
 
 const OBSERVATION_LIMIT: i64 = 200;
 
@@ -106,13 +105,27 @@ fn detect<C: Clock + 'static, I: IdFactory + 'static>(
     }
     let findings = findings_of(&ctx.declared.read()?, &ctx.observed)?;
     let found = findings.len();
+    // Read once, before the loop. Python skips a finding that is already open
+    // with no write at all (`drift_service.py`); checking inside the write
+    // committed an empty audit row and an empty event for every one of them,
+    // and re-reading per finding also collapsed two same-key findings in a
+    // single run, which Python raises both of.
+    let already = ctx.declared.read()?.open_drift_subjects()?;
 
     let mut raised = Vec::new();
     let mut auto_accepted = Vec::new();
-    for finding in findings {
-        let Some(id) = raise(ctx, &finding, &reason)? else {
+    for finding in &findings {
+        let key = (
+            finding.kind.clone(),
+            finding.subject_kind.clone(),
+            finding.subject_id.clone(),
+        );
+        if already.contains(&key) {
             continue;
-        };
+        }
+        let proposal = proposal_for(ctx, finding)?;
+        let id = proposal.id.clone();
+        raise(ctx, proposal, &reason)?;
         raised.push(id.clone());
         if auto_accept && decisions::auto_acceptable(&finding.kind) {
             let fixed = format!(
@@ -128,7 +141,7 @@ fn detect<C: Clock + 'static, I: IdFactory + 'static>(
     let mut kinds: Vec<&str> = decisions::AUTO_ACCEPTABLE_KINDS.to_vec();
     kinds.sort_unstable();
     Ok(json!({
-        "raised": raised,
+        "raised": raised_proposals(&ctx.declared.read()?, &raised)?,
         "auto_accepted": auto_accepted,
         "already_open": found - raised.len(),
         "superseded": superseded,
@@ -167,9 +180,8 @@ fn resolve_drift<C: Clock + 'static, I: IdFactory + 'static>(
 ) -> Result<Value, VogtError> {
     if !RESOLUTIONS.contains(&resolution) {
         return Err(VogtError::InvalidRequest(format!(
-            "resolution must be one of {}, got {}",
-            crate::core::py_repr(&RESOLUTIONS.join(", ")),
-            crate::core::py_repr(resolution)
+            "resolution must be one of {}",
+            RESOLUTIONS.join(", ")
         )));
     }
     let id = id.to_string();
@@ -188,13 +200,12 @@ fn resolve_drift<C: Clock + 'static, I: IdFactory + 'static>(
                 proposal.status
             )));
         }
-        let now = clock_now(&clock);
         let change_applied = if resolution == "accepted" {
-            apply(txn, &proposal, now)?
+            apply(txn, &proposal, clock_now(&clock))?
         } else {
             false
         };
-        txn.resolve_drift(&id, &resolution, &actor.id, &reason, now)?;
+        txn.resolve_drift(&id, &resolution, &actor.id, &reason, clock_now(&clock))?;
         let updated = txn.drift_by_id(&id)?.ok_or_else(|| {
             VogtError::NotFound(format!("no drift proposal {}", crate::core::py_repr(&id)))
         })?;
@@ -261,84 +272,88 @@ fn apply(
     }
 }
 
-fn raise<C: Clock + 'static, I: IdFactory + 'static>(
+/// The proposal, built before the write. Python draws the id and the opened-at
+/// timestamp before `audited_write` (`drift_service.py`), and the row carries
+/// no project slug — the slug is resolved only for the event summary.
+fn proposal_for<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     finding: &DriftFinding,
+) -> Result<crate::core::DriftProposal, VogtError> {
+    let write = write_of(ctx);
+    let id = write
+        .ids()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .next("dft");
+    let now = clock_now(write.clock());
+    Ok(crate::core::DriftProposal {
+        id,
+        kind: finding.kind.clone(),
+        subject_kind: finding.subject_kind.clone(),
+        subject_id: finding.subject_id.clone(),
+        project_id: finding.project_id.clone(),
+        project_slug: None,
+        summary: finding.summary.clone(),
+        evidence_observation_id: finding.evidence_observation_id.clone(),
+        evidence_snapshot: evidence_json(&finding.evidence),
+        proposed_change: finding.proposed_change.clone(),
+        status: crate::core::DriftStatus::Open,
+        opened_at: now,
+        superseded_at: None,
+        superseded_detail: None,
+        resolved_by_actor_id: None,
+        resolved_by_identity_ref: None,
+        resolved_at: None,
+        resolution_reason: None,
+    })
+}
+
+fn raise<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    proposal: crate::core::DriftProposal,
     reason: &str,
-) -> Result<Option<String>, VogtError> {
-    let finding = finding.clone();
+) -> Result<(), VogtError> {
     let reason = reason.to_string();
     let mut write = write_of(ctx);
-    let ids = std::sync::Arc::clone(write.ids());
-    let clock = std::sync::Arc::clone(write.clock());
     audited_write(&mut write, "drift.detect", &reason, |txn, _actor| {
-        let open = txn.open_drift_subjects()?;
-        let key = (
-            finding.kind.clone(),
-            finding.subject_kind.clone(),
-            finding.subject_id.clone(),
-        );
-        if open.contains(&key) {
-            // Already an open question. Python returns None from the body,
-            // which the write still commits, so the transaction id is spent.
-            return Ok(WriteOutcome {
-                result: Value::Null,
-                entity_kind: "drift_proposal".to_string(),
-                entity_id: String::new(),
-                payload: Value::Null,
-                event_kind: String::new(),
-                summary: Value::Null,
-            });
-        }
-        let id = ids
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .next("dft");
-        let now = clock_now(&clock);
-        let slug = match finding.project_id.as_deref() {
-            Some(project_id) => txn.project_by_id(project_id)?.map(|project| project.slug),
-            None => None,
-        };
-        let proposal = crate::core::DriftProposal {
-            id: id.clone(),
-            kind: finding.kind.clone(),
-            subject_kind: finding.subject_kind.clone(),
-            subject_id: finding.subject_id.clone(),
-            project_id: finding.project_id.clone(),
-            project_slug: slug.clone(),
-            summary: finding.summary.clone(),
-            evidence_observation_id: finding.evidence_observation_id.clone(),
-            evidence_snapshot: evidence_json(&finding.evidence),
-            proposed_change: finding.proposed_change.clone(),
-            status: crate::core::DriftStatus::Open,
-            opened_at: now,
-            superseded_at: None,
-            superseded_detail: None,
-            resolved_by_actor_id: None,
-            resolved_by_identity_ref: None,
-            resolved_at: None,
-            resolution_reason: None,
-        };
         txn.insert_drift(&proposal)?;
         let mut summary = serde_json::Map::new();
-        summary.insert("kind".to_string(), Value::String(finding.kind.clone()));
+        summary.insert("kind".to_string(), Value::String(proposal.kind.clone()));
         summary.insert(
             "summary".to_string(),
-            Value::String(finding.summary.clone()),
+            Value::String(proposal.summary.clone()),
         );
-        if let Some(slug) = slug {
-            summary.insert("project".to_string(), Value::String(slug));
+        // Omitted, not null, when the proposal names no project.
+        if let Some(project_id) = proposal.project_id.as_deref() {
+            if let Some(project) = txn.project_by_id(project_id)? {
+                summary.insert("project".to_string(), Value::String(project.slug));
+            }
         }
         Ok(WriteOutcome {
-            result: Value::String(id),
+            result: serde_json::to_value(&proposal).unwrap_or(Value::Null),
             entity_kind: "drift_proposal".to_string(),
             entity_id: proposal.id.clone(),
             payload: serde_json::to_value(&proposal).unwrap_or(Value::Null),
             event_kind: DRIFT_RAISED_EVENT.to_string(),
             summary: Value::Object(summary),
         })
-    })
-    .map(|raised| raised.as_str().map(str::to_string))
+    })?;
+    Ok(())
+}
+
+/// `detect` returns the proposals it raised, re-read so a row that was
+/// auto-accepted comes back resolved rather than open.
+fn raised_proposals(
+    view: &impl ReadView,
+    ids: &[String],
+) -> Result<Vec<crate::core::DriftProposal>, VogtError> {
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids {
+        if let Some(proposal) = view.drift_by_id(id)? {
+            out.push(proposal);
+        }
+    }
+    Ok(out)
 }
 
 /// Coverage-gated reconciliation. A reappearing finding clears a stale flag;
@@ -442,19 +457,32 @@ fn version_findings(
             Some(&project.id),
             false,
             false,
-            1,
+            100,
         )?;
-        let Some(observation) = observations.first() else {
+        // The greatest tag string, not the newest observation. An empty tag is
+        // skipped rather than winning, and a project whose tags are all empty
+        // raises nothing.
+        let best = observations
+            .iter()
+            .filter(|observation| {
+                observation
+                    .payload
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .is_some_and(|tag| !tag.is_empty())
+            })
+            .max_by_key(|observation| {
+                observation
+                    .payload
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            });
+        let Some(observation) = best else {
             continue;
         };
-        let tag = observation
-            .payload
-            .get("tag")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        if tag.is_empty() {
-            continue;
-        }
+        let tag = observation.payload["tag"].as_str().unwrap_or("");
         if let Some(finding) = decisions::version_mismatch(
             &project.id,
             &project.slug,
@@ -489,15 +517,17 @@ fn dependency_findings(
         if scope == SCOPE_INTERNAL {
             continue;
         }
-        let slug = dep.from_project_slug.as_deref().unwrap_or("");
-        let manifest = dep.manifest.as_deref().unwrap_or("");
+        let Some(slug) = dep.from_project_slug.as_deref() else {
+            continue;
+        };
+        let manifest = dep.manifest.as_deref();
         let finding = if scope == SCOPE_BROKEN {
             decisions::broken_path_dependency(
                 &dep.subject_key,
                 &dep.from_project_id,
                 slug,
                 &dep.raw_target,
-                Some(manifest),
+                manifest,
                 snapshot(&observation),
                 Some(&observation.id),
             )
@@ -507,7 +537,7 @@ fn dependency_findings(
                 &dep.from_project_id,
                 slug,
                 &dep.raw_target,
-                Some(manifest),
+                manifest,
                 snapshot(&observation),
                 Some(&observation.id),
             )
@@ -821,9 +851,15 @@ fn not_collected_of(
         return Ok(Vec::new());
     }
     let swept = observed.coverage_by_project()?;
+    // `{collector: {project_id: moment}}`. A project counts as swept when it
+    // appears under any collector, so the values are what matter.
+    let mut seen = BTreeSet::new();
+    for projects in swept.values() {
+        seen.extend(projects.keys().cloned());
+    }
     let mut slugs = Vec::new();
     for project in declared.list_projects(1000, 0)? {
-        if !swept.contains_key(&project.id) {
+        if !seen.contains(&project.id) {
             slugs.push(project.slug);
         }
     }
@@ -851,7 +887,7 @@ fn evidence_json(evidence: &Option<EvidenceSnapshot>) -> Value {
     json!({
         "subject_key": evidence.subject_key,
         "content_digest": evidence.content_digest,
-        "observed_at": evidence.observed_at.to_json(),
+        "observed_at": evidence.observed_at.to_iso(),
         "collector": evidence.collector,
         "payload": evidence.payload,
     })
@@ -931,5 +967,69 @@ fn clock_now<C: Clock>(clock: &std::sync::Arc<std::sync::Mutex<C>>) -> Moment {
         .now()
 }
 
-#[allow(dead_code)]
-const _DEP_COLLECTOR: &str = COLLECTOR_DEPS;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{ActorKind, Principal, SequentialIds, StepClock};
+
+    fn context() -> Built {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-drift-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let principal = Principal::new("local:test-user", ActorKind::Human, "Test").unwrap();
+        let built = crate::application::context::build_context(
+            config,
+            Some(principal.clone()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!()
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared.bootstrap(&principal).unwrap();
+        built
+    }
+
+    #[test]
+    fn detect_refuses_when_nothing_has_been_swept() {
+        let ctx = context();
+        let error = drift_detect_op(&ctx, json!({"reason": "parity"})).unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(ref message) if message.contains("run `sweep` first")),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_resolution_outside_the_three_is_refused_without_quotes() {
+        let ctx = context();
+        let error = drift_resolve_op(
+            &ctx,
+            json!({"id": "dft_0001", "resolution": "maybe", "reason": "parity"}),
+        )
+        .unwrap_err();
+        let VogtError::InvalidRequest(message) = error else {
+            panic!("{error}")
+        };
+        assert_eq!(
+            message,
+            "resolution must be one of accepted, rejected, contested"
+        );
+    }
+}
