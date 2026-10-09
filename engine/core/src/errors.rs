@@ -286,6 +286,22 @@ mod tests {
     }
 
     #[test]
+    fn the_codes_match_pythons_error_table() {
+        let raw = include_str!("../tests/error_table.json");
+        let python: Vec<(String, u16)> = serde_json::from_str(raw).unwrap();
+        let mut rust: Vec<(String, u16)> = error_table()
+            .iter()
+            .map(|(code, status)| ((*code).to_string(), *status))
+            .filter(|(code, _)| code != "transition_rejected")
+            .collect();
+        rust.sort();
+        assert_eq!(rust.len(), python.len());
+        for (left, right) in rust.iter().zip(&python) {
+            assert_eq!(left, right);
+        }
+    }
+
+    #[test]
     fn every_code_round_trips_with_its_status() {
         assert_eq!(error_table().len(), 35);
         let mut seen = std::collections::BTreeSet::new();
