@@ -622,6 +622,29 @@ vocab!(RelationKind {
 });
 vocab!(InitiativeState { Open, Closed });
 vocab!(MatchKind { Exact, Pattern });
+vocab!(LinkRelation {
+    Completion,
+    Reference
+});
+vocab!(TokenKind {
+    Api,
+    Session,
+    Agent
+});
+vocab!(AuthOutcome { Allow, Deny });
+vocab!(WriteBackAction {
+    Create,
+    Comment,
+    Label,
+    Close,
+    Reopen
+});
+vocab!(WriteBackOutcome {
+    Attempted,
+    Succeeded,
+    Failed,
+    Skipped
+});
 
 pub type LifecycleState = &'static str;
 
@@ -1053,6 +1076,110 @@ pub struct ContractExemption {
     pub declared_at: Moment,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WorkLink {
+    pub work_item_id: String,
+    pub subject_key: String,
+    pub origin_kind: String,
+    pub source_url: Option<String>,
+    pub relation: LinkRelation,
+    pub created_at: Moment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CodingSession {
+    pub id: String,
+    pub engine_session_id: String,
+    pub project_id: String,
+    pub work_item_id: Option<String>,
+    pub actor_id: String,
+    pub cwd: String,
+    pub template: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub reason: String,
+    pub started_at: Moment,
+    pub stopped_at: Option<Moment>,
+}
+
+/// The hash only. A model that could round-trip the secret is one that leaks
+/// it into logs and API responses.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Token {
+    pub id: String,
+    pub actor_id: String,
+    pub actor_identity_ref: Option<String>,
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub kind: TokenKind,
+    pub created_at: Moment,
+    pub expires_at: Option<Moment>,
+    pub last_used_at: Option<Moment>,
+    pub revoked_at: Option<Moment>,
+    pub revoked_reason: Option<String>,
+}
+
+impl Token {
+    pub fn active(&self) -> bool {
+        self.revoked_at.is_none()
+    }
+}
+
+/// The hash is deliberately absent: the storage layer writes and reads it, so
+/// no listing, result or audit payload can carry it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PasswordCredential {
+    pub actor_id: String,
+    pub actor_identity_ref: Option<String>,
+    pub username: String,
+    pub scopes: Vec<String>,
+    pub created_at: Moment,
+    pub updated_at: Moment,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AuthDecision {
+    pub id: String,
+    pub at: Moment,
+    pub decision: AuthOutcome,
+    pub reason_code: String,
+    pub operation: String,
+    pub scope: Option<String>,
+    pub actor_id: Option<String>,
+    pub token_id: Option<String>,
+    pub identity_ref: Option<String>,
+    pub transport: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WriteBackRecord {
+    pub id: String,
+    pub at: Moment,
+    pub project_id: Option<String>,
+    pub work_item_id: Option<String>,
+    pub actor_id: String,
+    pub action: WriteBackAction,
+    pub subject_key: Option<String>,
+    pub policy: String,
+    pub outcome: WriteBackOutcome,
+    pub reason: String,
+    pub detail: Option<String>,
+    pub source_url: Option<String>,
+}
+
+/// No token field. The encrypted PAT lives in its own column and is read
+/// through a dedicated accessor, so this entity can never carry it out.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ForgeAccount {
+    pub actor_id: String,
+    pub host: String,
+    pub login: String,
+    pub scopes: String,
+    pub created_at: Moment,
+    pub updated_at: Moment,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,6 +1447,26 @@ mod tests {
             "\"closed\""
         );
         assert!(serde_json::from_str::<RelationKind>("\"invented\"").is_err());
+        assert_eq!(
+            serde_json::to_string(&LinkRelation::Completion).unwrap(),
+            "\"completion\""
+        );
+        assert_eq!(
+            serde_json::to_string(&TokenKind::Agent).unwrap(),
+            "\"agent\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AuthOutcome::Deny).unwrap(),
+            "\"deny\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WriteBackAction::Reopen).unwrap(),
+            "\"reopen\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WriteBackOutcome::Skipped).unwrap(),
+            "\"skipped\""
+        );
     }
 
     #[test]

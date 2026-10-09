@@ -100,10 +100,7 @@ fn announce_hooks() {
         }
     }
     if !active.is_empty() {
-        eprintln!(
-            "deterministic test hooks are active: {}",
-            active.join(", ")
-        );
+        eprintln!("deterministic test hooks are active: {}", active.join(", "));
     }
 }
 
