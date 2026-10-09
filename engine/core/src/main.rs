@@ -88,6 +88,9 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // The hash a missing username is verified against. Computed off the request
+    // path, so the first unknown user costs one scrypt rather than two.
+    std::thread::spawn(crate::application::services::auth::warm_dummy_hash);
     // `vogt-mcp-remote`: stdio in, streamable HTTP out. A missing URL is exit 2,
     // because an agent that spawns the bridge with nothing configured should
     // see a setup error rather than a hang.

@@ -165,17 +165,28 @@ pub fn renewed_expiry(
 
 /// `scrypt$n$r$p$<salt>$<hash>`, the form `hash_password` stores.
 pub fn hash_password(password: &str, salt: &[u8]) -> Result<String, String> {
-    check_password_length(password)?;
-    let digest = scrypt_of(
+    hash_password_at(
         password,
         salt,
         PASSWORD_SCRYPT_N,
         PASSWORD_SCRYPT_R,
         PASSWORD_SCRYPT_P,
     )
-    .map_err(|err| err.to_string())?;
+}
+
+/// The same stored form at a chosen cost. Tests pass a small `n` so a suite
+/// does not pay the production scrypt five times over; nothing else should.
+pub fn hash_password_at(
+    password: &str,
+    salt: &[u8],
+    n: u32,
+    r: u32,
+    p: u32,
+) -> Result<String, String> {
+    check_password_length(password)?;
+    let digest = scrypt_of(password, salt, n, r, p).map_err(|err| err.to_string())?;
     Ok(format!(
-        "{PASSWORD_SCHEME}${PASSWORD_SCRYPT_N}${PASSWORD_SCRYPT_R}${PASSWORD_SCRYPT_P}${}${}$",
+        "{PASSWORD_SCHEME}${n}${r}${p}${}${}$",
         b64(salt),
         b64(&digest)
     )

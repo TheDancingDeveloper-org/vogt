@@ -166,7 +166,7 @@ fn expiry_from(now: Moment, days: i64) -> Result<Moment, VogtError> {
 }
 /// the operation: falling back to a zeroed buffer would mint a credential from a
 /// secret anyone can guess.
-fn random_array<const N: usize>() -> Result<[u8; N], VogtError> {
+pub(super) fn random_array<const N: usize>() -> Result<[u8; N], VogtError> {
     let mut entropy = [0u8; N];
     getrandom::getrandom(&mut entropy).map_err(|_| {
         VogtError::InvalidRequest("the operating system refused to supply random bytes".to_string())
@@ -694,7 +694,7 @@ fn login<C: Clock + 'static, I: IdFactory + 'static>(
             ctx,
             AuthOutcome::Deny,
             BAD_PASSWORD,
-            now,
+            None,
             actor.as_ref().map(|actor| actor.identity_ref.clone()),
             None,
         )?;
@@ -729,7 +729,7 @@ fn login<C: Clock + 'static, I: IdFactory + 'static>(
         ctx,
         AuthOutcome::Allow,
         LOGIN_OK,
-        now,
+        token["actor_id"].as_str().map(str::to_string),
         Some(actor.identity_ref.clone()),
         token["id"].as_str().map(str::to_string),
     )?;
@@ -819,6 +819,12 @@ fn dummy_hash() -> &'static str {
     &HASH
 }
 
+/// Forces the dummy hash to be computed. `main` calls it at startup; the first
+/// login in a test process calls it too, which is the same moment.
+pub fn warm_dummy_hash() {
+    let _ = dummy_hash();
+}
+
 /// The process-local failure window. The store keeps the durable record in
 /// `auth_decisions`; this only shapes the reply, which is why it is not read
 /// back from there.
@@ -829,6 +835,15 @@ fn throttle() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec
     THROTTLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Tests share one process and one throttle, so a reset in one test lands in
+/// the middle of another's window. Every test that logs in holds this for its
+/// whole body.
+#[cfg(test)]
+fn throttle_gate() -> &'static std::sync::Mutex<()> {
+    static GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    &GATE
+}
+
 /// `Some(seconds)` when the username is locked out.
 fn throttle_check(username: &str, now: Moment) -> Option<i64> {
     let mut guard = throttle()
@@ -837,8 +852,10 @@ fn throttle_check(username: &str, now: Moment) -> Option<i64> {
     let window = guard.get_mut(username)?;
     window.retain(|at| now.seconds_since(*at) <= LOGIN_FAILURE_WINDOW_SECONDS as f64);
     if window.len() >= LOGIN_FAILURE_LIMIT {
+        // Python's `int(total_seconds())` truncates, so a remainder of 60.9
+        // reads as 60, and a remainder below a second still says 1.
         let retry = LOGIN_FAILURE_WINDOW_SECONDS as f64 - now.seconds_since(window[0]);
-        return Some(retry.floor().max(1.0) as i64);
+        return Some((retry as i64).max(1));
     }
     None
 }
@@ -872,19 +889,24 @@ fn record_decision<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     decision: AuthOutcome,
     code: &str,
-    now: Moment,
+    actor_id: Option<String>,
     identity_ref: Option<String>,
     token_id: Option<String>,
 ) -> Result<(), VogtError> {
-    let id = ctx.id_factory.lock().expect("the id lock").next("aud");
+    // A decision id is `aut_`, from its own counter, not the audit counter:
+    // under hooks the audit row and the decision rows must not share a
+    // sequence. The moment is a fresh clock read, not the one the attempt
+    // started with.
+    let id = ctx.id_factory.lock().expect("the id lock").next("aut");
+    let at = ctx.clock.lock().expect("the clock lock").now();
     ctx.declared.record_auth_decision(&AuthDecision {
         id,
-        at: now,
+        at,
         decision,
         reason_code: code.to_string(),
         operation: AUTH_LOGIN.to_string(),
         scope: None,
-        actor_id: None,
+        actor_id,
         token_id,
         identity_ref,
         transport: "http".to_string(),
@@ -892,7 +914,7 @@ fn record_decision<C: Clock, I: IdFactory>(
     })
 }
 
-fn username_of(raw: &str) -> Result<String, VogtError> {
+pub(super) fn username_of(raw: &str) -> Result<String, VogtError> {
     auth::normalise_username(raw).map_err(VogtError::InvalidRequest)
 }
 
@@ -902,7 +924,7 @@ fn scopes_of(raw: &str) -> Result<Vec<String>, VogtError> {
         .map_err(VogtError::InvalidRequest)
 }
 
-fn password_hash_of(password: &str) -> Result<String, VogtError> {
+pub(super) fn password_hash_of(password: &str) -> Result<String, VogtError> {
     let salt = random_array::<PASSWORD_SALT_BYTES>()?;
     auth::hash_password(password, &salt).map_err(VogtError::InvalidRequest)
 }
@@ -916,6 +938,9 @@ mod tests {
     /// wrong because the denial and the session live on different connections.
     #[test]
     fn a_wrong_password_is_recorded_and_the_right_one_signs_in() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         throttle_reset();
         let dir = std::env::temp_dir().join(format!("vogt-login-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -969,6 +994,25 @@ mod tests {
             .map(|decision| decision.reason_code.as_str())
             .collect();
         assert_eq!(kinds, vec!["login_ok", "bad_password"]);
+        // Decision ids come from the `aut` counter, not the audit counter, and
+        // the allow row names the actor the session was minted for.
+        assert!(
+            decisions.iter().all(|d| d.id.starts_with("aut_")),
+            "{decisions:?}"
+        );
+        let allow = &decisions[0];
+        assert_eq!(
+            allow.actor_id.as_deref(),
+            session["token"]["actor_id"].as_str()
+        );
+        assert_eq!(allow.token_id.as_deref(), session["token"]["id"].as_str());
+        let deny = &decisions[1];
+        assert!(deny.actor_id.is_none());
+        assert!(deny.token_id.is_none());
+        assert_eq!(deny.identity_ref.as_deref(), Some("human:ada"));
+        // Each row reads the clock again, so the stepped clock puts them a
+        // second apart rather than sharing the attempt's moment.
+        assert!(allow.at.unix_seconds() > deny.at.unix_seconds());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -976,17 +1020,20 @@ mod tests {
     /// refusal names the wait rather than repeating the generic sentence.
     #[test]
     fn a_username_that_keeps_failing_is_locked_out() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         throttle_reset();
-        let (dir, built) = fresh("throttle");
+        let (dir, built) = fresh_at("throttle", crate::core::Moment::from_unix(1_700_000_000, 0));
+        // The credential is stored at a test cost, so the five refusals and the
+        // lockout verify cheaply. The clock steps one second a read, so the
+        // window is the injected clock's, not the wall.
         create_user_op(
             &built,
-            serde_json::json!({
-                "username": "lock",
-                "password": "correct horse battery",
-                "reason": "first user",
-            }),
+            serde_json::json!({"username": "lock", "password": "correct horse battery", "reason": "first"}),
         )
         .unwrap();
+        cheapen(&dir, "lock", "correct horse battery");
         for _ in 0..5 {
             let wrong = login_op(
                 &built,
@@ -1007,10 +1054,8 @@ mod tests {
             "{locked}"
         );
         assert!(matches!(locked, VogtError::LoginThrottled(_)));
-        // The lockout did not verify the password, so it leaves no decision row.
         let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
-        let denials = view.list_auth_decisions(Some("deny"), 10).unwrap();
-        assert_eq!(denials.len(), 5);
+        assert_eq!(view.list_auth_decisions(Some("deny"), 10).unwrap().len(), 5);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1018,6 +1063,9 @@ mod tests {
     /// with the same sentence, and the miss still verifies a hash.
     #[test]
     fn an_unknown_user_and_a_disabled_user_read_the_same() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         throttle_reset();
         let (dir, built) = fresh("same");
         create_user_op(
@@ -1029,6 +1077,7 @@ mod tests {
             }),
         )
         .unwrap();
+        cheapen(&dir, "ada", "correct horse battery");
         let wrong = login_op(
             &built,
             serde_json::json!({"username": "disa", "password": "nope"}),
@@ -1064,6 +1113,13 @@ mod tests {
     }
 
     fn fresh(name: &str) -> (std::path::PathBuf, crate::application::context::Built) {
+        fresh_at(name, crate::core::Moment::from_unix(1_700_000_000, 0))
+    }
+
+    fn fresh_at(
+        name: &str,
+        start: crate::core::Moment,
+    ) -> (std::path::PathBuf, crate::application::context::Built) {
         let dir = std::env::temp_dir().join(format!("vogt-login-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1075,7 +1131,14 @@ mod tests {
             ..crate::config::VogtConfig::default()
         };
         let built = crate::application::context::build_context(
-            config, None, None, None, None, None, None, None,
+            config,
+            None,
+            Some(crate::core::StepClock::new(start)),
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         (dir, built)
@@ -1085,6 +1148,9 @@ mod tests {
     /// old password stops working.
     #[test]
     fn setting_a_password_revokes_the_sessions() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         throttle_reset();
         let (dir, built) = fresh("passwd");
         create_user_op(
@@ -1092,6 +1158,7 @@ mod tests {
             serde_json::json!({"username": "setp", "password": "correct horse battery", "reason": "first"}),
         )
         .unwrap();
+        cheapen(&dir, "setp", "correct horse battery");
         let session = login_op(
             &built,
             serde_json::json!({"username": "setp", "password": "correct horse battery"}),
@@ -1131,6 +1198,9 @@ mod tests {
     /// Removing a login keeps the actor and refuses the password afterwards.
     #[test]
     fn removing_a_user_keeps_the_actor() {
+        let _gate = throttle_gate()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         throttle_reset();
         let (dir, built) = fresh("remove");
         create_user_op(
@@ -1138,6 +1208,7 @@ mod tests {
             serde_json::json!({"username": "gone", "password": "correct horse battery", "reason": "first"}),
         )
         .unwrap();
+        cheapen(&dir, "gone", "correct horse battery");
         let removed = remove_user_op(
             &built,
             serde_json::json!({"username": "gone", "reason": "left"}),
@@ -1167,5 +1238,17 @@ mod tests {
             "{missing}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Replace a stored hash with one at a test cost, so login verifies in
+    /// microseconds. The production cost stays in `hash_password`.
+    fn cheapen(dir: &std::path::Path, username: &str, password: &str) {
+        let cheap = auth::hash_password_at(password, b"0123456789abcdef", 1 << 4, 8, 1).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("declared.sqlite3")).unwrap();
+        conn.execute(
+            "UPDATE password_credentials SET password_hash = ?1 WHERE username = ?2",
+            [cheap, username.to_string()],
+        )
+        .unwrap();
     }
 }
