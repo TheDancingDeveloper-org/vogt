@@ -399,6 +399,32 @@ impl EngineClient {
             .map(|_| EngineSession::from_payload(&payload)))
     }
 
+    /// Rename a session, live or hibernated. `false` when the engine no longer
+    /// had it; a name the engine refuses is its 400, said.
+    pub fn rename_session(&self, session_id: &str, name: &str) -> Result<bool, VogtError> {
+        let payload = self.call(
+            &format!("/api/sessions/{}", quote(session_id)),
+            "PATCH",
+            Some(&serde_json::json!({"name": name})),
+            true,
+            None,
+        )?;
+        Ok(!payload.is_null())
+    }
+
+    /// Kill a session if it still runs and forget it. `false` when the engine
+    /// no longer had it.
+    pub fn remove_session(&self, session_id: &str) -> Result<bool, VogtError> {
+        let payload = self.call(
+            &format!("/api/sessions/{}", quote(session_id)),
+            "DELETE",
+            None,
+            true,
+            None,
+        )?;
+        Ok(!payload.is_null())
+    }
+
     /// Choose an option of the dialog on screen. A dialog that is gone, changed,
     /// or lacks the option is a `Conflict` naming why.
     pub fn answer_session(
@@ -570,6 +596,126 @@ impl EngineClient {
             .unwrap_or(false))
     }
 
+    /// `GET /api/status`: the engine's own operational report.
+    pub fn operational_status(&self) -> Result<Value, VogtError> {
+        let payload = self.call("/api/status", "GET", None, false, None)?;
+        if !payload.is_object() {
+            return Err(VogtError::EngineUnavailable(format!(
+                "the {} answered GET /api/status with no object",
+                self.label
+            )));
+        }
+        Ok(payload)
+    }
+
+    // -- quick chats (WI-1097) ------------------------------------------------
+
+    /// The engine's chats, or `None` when it has chats off (404).
+    pub fn chat_list(
+        &self,
+        q: Option<&str>,
+        archived: &str,
+        limit: i64,
+    ) -> Result<Option<Vec<Value>>, VogtError> {
+        let mut query = format!("archived={}&limit={limit}", quote(archived));
+        if let Some(q) = q.filter(|q| !q.is_empty()) {
+            query.push_str(&format!("&q={}", quote(q)));
+        }
+        let payload = self.call(&format!("/api/chats?{query}"), "GET", None, true, None)?;
+        if payload.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(
+            payload
+                .as_array()
+                .map(|rows| rows.iter().filter(|row| row.is_object()).cloned().collect())
+                .unwrap_or_default(),
+        ))
+    }
+
+    pub fn chat_get(&self, chat_id: &str, tail: i64) -> Result<Option<Value>, VogtError> {
+        self.chat_call(&format!("/{}?tail={tail}", quote(chat_id)), "GET", None, 0)
+    }
+
+    pub fn chat_create(&self, body: &Value, wait_s: i64) -> Result<Option<Value>, VogtError> {
+        self.chat_call("", "POST", Some(body), wait_s)
+    }
+
+    pub fn chat_send(&self, chat_id: &str, body: &Value) -> Result<Option<Value>, VogtError> {
+        let wait = body.get("wait_secs").and_then(Value::as_i64).unwrap_or(0);
+        self.chat_call(&format!("/{}/messages", quote(chat_id)), "POST", Some(body), wait)
+    }
+
+    /// A person's answer to a chat's approval. `person` says whether the
+    /// principal behind it is one; the engine refuses anyone else.
+    pub fn chat_decide(
+        &self,
+        chat_id: &str,
+        approval_id: &str,
+        allow: bool,
+        message: Option<&str>,
+        person: bool,
+    ) -> Result<Option<Value>, VogtError> {
+        let mut body = serde_json::json!({"allow": allow, "person": person});
+        if let Some(message) = message.filter(|m| !m.is_empty()) {
+            body["message"] = Value::String(message.to_string());
+        }
+        self.chat_call(
+            &format!("/{}/approvals/{}", quote(chat_id), quote(approval_id)),
+            "POST",
+            Some(&body),
+            0,
+        )
+    }
+
+    pub fn chat_set_model(&self, chat_id: &str, model: &str) -> Result<Option<Value>, VogtError> {
+        self.chat_call(
+            &format!("/{}/model", quote(chat_id)),
+            "POST",
+            Some(&serde_json::json!({"model": model})),
+            0,
+        )
+    }
+
+    pub fn chat_interrupt(&self, chat_id: &str) -> Result<Option<Value>, VogtError> {
+        self.chat_call(
+            &format!("/{}/interrupt", quote(chat_id)),
+            "POST",
+            Some(&serde_json::json!({})),
+            0,
+        )
+    }
+
+    pub fn chat_archive(&self, chat_id: &str, archived: bool) -> Result<Option<Value>, VogtError> {
+        self.chat_call(
+            &format!("/{}/archive", quote(chat_id)),
+            "POST",
+            Some(&serde_json::json!({"archived": archived})),
+            0,
+        )
+    }
+
+    pub fn chat_promote(&self, chat_id: &str, body: &Value) -> Result<Option<Value>, VogtError> {
+        self.chat_call(&format!("/{}/promote", quote(chat_id)), "POST", Some(body), 0)
+    }
+
+    /// One `/api/chats` call; `None` on a 404 (no such chat, or chats off). A
+    /// send that waits for its reply outlasts the ordinary timeout.
+    fn chat_call(
+        &self,
+        suffix: &str,
+        method: &str,
+        payload: Option<&Value>,
+        wait_s: i64,
+    ) -> Result<Option<Value>, VogtError> {
+        let timeout = (wait_s > 0).then(|| self.timeout + Duration::from_secs(wait_s as u64));
+        let answer = self.call(&format!("/api/chats{suffix}"), method, payload, true, timeout)?;
+        if answer.is_null() {
+            return Ok(None);
+        }
+        Ok(Some(if answer.is_object() { answer } else { Value::Object(Map::new()) }))
+    }
+
     /// Raise `EngineUnavailable` unless the engine answers its liveness probe.
     pub fn healthz(&self) -> Result<(), VogtError> {
         self.call("/healthz", "GET", None, false, None).map(|_| ())
@@ -659,6 +805,15 @@ impl EngineClient {
         }
         if status == 403 {
             let said = engine_error_text(&String::from_utf8_lossy(&response));
+            // The WI-983 person gate is a different refusal from a missing
+            // grant: "forbidden: person required: …" means the session names no
+            // person, not that the caller lacks a capability.
+            if let Some(reason) = said.strip_prefix("forbidden: person required") {
+                let detail = reason.trim().trim_start_matches(':').trim();
+                return Err(VogtError::PersonRequired(
+                    nonempty(detail).unwrap_or_else(|| "person required".to_string()),
+                ));
+            }
             if let Some(reason) = said.strip_prefix("forbidden: ") {
                 return Err(VogtError::GrantRefused(reason.to_string()));
             }
@@ -1380,13 +1535,19 @@ fn nonempty(text: &str) -> Option<String> {
 }
 
 /// One HTTP/1.1 exchange. Public so the other urllib-style adapters share it
-/// rather than each carrying a copy. Only `http` is spoken.
+/// rather than each carrying a copy. `http` is spoken by the standard library;
+/// `https` goes through ureq on rustls, because GitHub and an https peer are
+/// both real callers.
 pub mod http1 {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
 
     use super::BTreeMap;
+
+    /// The most of a response body kept. A peer or a misbehaving engine must
+    /// not be able to grow memory without bound.
+    const MAX_BODY: usize = 8 * 1024 * 1024;
 
     pub fn exchange(
         url: &str,
@@ -1395,12 +1556,76 @@ pub mod http1 {
         body: &[u8],
         timeout: Duration,
     ) -> Result<(u16, Vec<u8>), String> {
+        exchange_limited(url, method, headers, body, timeout, MAX_BODY)
+    }
+
+    /// Like `exchange`, but the body is capped at `limit` bytes while it is
+    /// read, not after. A peer's 512 KiB bound has to hold memory, not just the
+    /// value returned.
+    pub fn exchange_limited(
+        url: &str,
+        method: &str,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+        timeout: Duration,
+        limit: usize,
+    ) -> Result<(u16, Vec<u8>), String> {
+        if url.starts_with("https://") {
+            return exchange_tls(url, method, headers, body, timeout, limit);
+        }
+        exchange_plain(url, method, headers, body, timeout, limit)
+    }
+
+    fn exchange_tls(
+        url: &str,
+        method: &str,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+        timeout: Duration,
+        limit: usize,
+    ) -> Result<(u16, Vec<u8>), String> {
+        let agent = ureq::AgentBuilder::new().timeout_connect(timeout).timeout(timeout).build();
+        let mut request = agent.request(method, url);
+        for (name, value) in headers {
+            request = request.set(name, value);
+        }
+        let response = if body.is_empty() {
+            request.call()
+        } else {
+            request.send_bytes(body)
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(ureq::Error::Status(_, response)) => response,
+            Err(error) => return Err(error.to_string()),
+        };
+        let status = response.status();
+        let mut buf = Vec::new();
+        response
+            .into_reader()
+            .take(limit as u64)
+            .read_to_end(&mut buf)
+            .map_err(|error| error.to_string())?;
+        Ok((status, buf))
+    }
+
+    fn exchange_plain(
+        url: &str,
+        method: &str,
+        headers: &BTreeMap<String, String>,
+        body: &[u8],
+        timeout: Duration,
+        limit: usize,
+    ) -> Result<(u16, Vec<u8>), String> {
         let (host, port, path) = split_http_url(url)?;
         let mut stream = TcpStream::connect((host, port)).map_err(|error| error.to_string())?;
         stream.set_read_timeout(Some(timeout)).ok();
         stream.set_write_timeout(Some(timeout)).ok();
+        // The default port stays off the Host header; any other port is part of
+        // the authority and must be sent.
+        let host_header = if port == 80 { host.to_string() } else { format!("{host}:{port}") };
         let mut request =
-            format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+            format!("{method} {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n");
         for (name, value) in headers {
             request.push_str(&format!("{name}: {value}\r\n"));
         }
@@ -1414,6 +1639,7 @@ pub mod http1 {
             .map_err(|error| error.to_string())?;
         let mut raw = Vec::new();
         stream
+            .take(limit as u64)
             .read_to_end(&mut raw)
             .map_err(|error| error.to_string())?;
         parse_response(&raw)

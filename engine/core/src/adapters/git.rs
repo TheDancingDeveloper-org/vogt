@@ -6,8 +6,8 @@
 //! environment and appears in no command line, no configuration file and no
 //! stored URL.
 
-use std::fs;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -350,17 +350,23 @@ fn askpass(
         env.remove("GIT_ASKPASS");
         return Ok(env);
     };
-    if let Some(dir) = helper_dir {
-        fs::create_dir_all(dir).map_err(|error| {
-            VogtError::GitUnavailable(format!("could not create the askpass directory: {error}"))
-        })?;
-    }
-    let fallback = std::env::temp_dir();
-    let parent = helper_dir.unwrap_or(fallback.as_path());
-    let dir = parent.join(format!("vogt-askpass-{}", std::process::id()));
-    fs::create_dir_all(&dir).map_err(|error| {
+    // Unique per invocation, never per process and never a predictable path:
+    // concurrent clones must not share a dir (the first cleanup would delete
+    // the other's helper), and a fixed /tmp path lets another local user
+    // pre-create it or swap askpass.sh so it runs with VOGT_GIT_TOKEN set.
+    let _ = helper_dir;
+    let mut random = [0u8; 8];
+    File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut random))
+        .map_err(|error| VogtError::GitUnavailable(format!("no randomness for askpass: {error}")))?;
+    let dir = std::env::temp_dir().join(format!(
+        "vogt-askpass-{}",
+        random.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    ));
+    fs::create_dir(&dir).map_err(|error| {
         VogtError::GitUnavailable(format!("could not create the askpass helper: {error}"))
     })?;
+    set_mode(&dir, 0o700);
     let script = dir.join("askpass.sh");
     fs::File::create(&script)
         .and_then(|mut file| file.write_all(ASKPASS_SCRIPT.as_bytes()))
@@ -391,6 +397,15 @@ fn drop_askpass(env: &std::collections::HashMap<String, String>) {
     }
 }
 
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).ok();
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) {}
+
 fn run_git(
     args: &[&str],
     cwd: &Path,
@@ -407,43 +422,71 @@ fn run_git(
     if let Some(env) = env {
         command.env_clear().envs(env);
     }
-    let child = command.spawn().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         VogtError::GitUnavailable(format!(
             "git {} failed: {error}",
             args.first().copied().unwrap_or("")
         ))
     })?;
-    let finished = wait_for(child, timeout).map_err(|error| {
-        VogtError::GitUnavailable(format!(
-            "git {} failed: {error}",
-            args.first().copied().unwrap_or("")
-        ))
-    })?;
-    if !finished.status.success() {
-        return Err(VogtError::GitCommandFailed(format!(
-            "git {} failed: {}",
-            args.first().copied().unwrap_or(""),
-            redact(String::from_utf8_lossy(&finished.stderr).trim())
-        )));
-    }
-    Ok(String::from_utf8_lossy(&finished.stdout).trim().to_string())
-}
-
-fn wait_for(child: std::process::Child, timeout: Duration) -> Result<std::process::Output, String> {
+    // Drain both pipes on their own threads while the wait is polled. Polling
+    // try_wait on unread pipes deadlocks once git writes more than a pipe
+    // buffer — a `status` over a few thousand untracked files.
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
+    let out_thread = std::thread::spawn(move || read_capped(stdout));
+    let err_thread = std::thread::spawn(move || read_capped(stderr));
     let started = std::time::Instant::now();
-    let mut child = child;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().map_err(|error| error.to_string()),
+            Ok(Some(status)) => break status,
             Ok(None) if started.elapsed() > timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("timed out after {}s", timeout.as_secs()));
+                let _ = out_thread.join();
+                let _ = err_thread.join();
+                return Err(VogtError::GitUnavailable(format!(
+                    "git {} timed out after {}s",
+                    args.first().copied().unwrap_or(""),
+                    timeout.as_secs()
+                )));
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(error) => return Err(error.to_string()),
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                let _ = out_thread.join();
+                let _ = err_thread.join();
+                return Err(VogtError::GitUnavailable(format!(
+                    "git {} failed: {error}",
+                    args.first().copied().unwrap_or("")
+                )));
+            }
+        }
+    };
+    let out = out_thread.join().unwrap_or_default();
+    let err = err_thread.join().unwrap_or_default();
+    if !status.success() {
+        return Err(VogtError::GitCommandFailed(format!(
+            "git {} failed: {}",
+            args.first().copied().unwrap_or(""),
+            redact(String::from_utf8_lossy(&err).trim())
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
+/// Read a child's pipe, keeping the first 8 MiB so a runaway command cannot
+/// grow memory without bound.
+fn read_capped(mut pipe: impl Read) -> Vec<u8> {
+    const CAP: usize = 8 * 1024 * 1024;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while buf.len() < CAP {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(read) => buf.extend_from_slice(&chunk[..read.min(CAP - buf.len())]),
+            Err(_) => break,
         }
     }
+    buf
 }
 
 /// Keep git's diagnostics useful without repeating a credential.

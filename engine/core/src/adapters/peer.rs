@@ -105,11 +105,15 @@ impl PeerClient {
             body.truncate(MAX_RESPONSE_BYTES);
             return Ok((status, body));
         }
-        match super::engine::http1::exchange(url, "GET", headers, b"", self.timeout) {
-            Ok((status, mut body)) => {
-                body.truncate(MAX_RESPONSE_BYTES);
-                Ok((status, body))
-            }
+        match super::engine::http1::exchange_limited(
+            url,
+            "GET",
+            headers,
+            b"",
+            self.timeout,
+            MAX_RESPONSE_BYTES,
+        ) {
+            Ok((status, body)) => Ok((status, body)),
             Err(error) => Err(peer_error(
                 "unreachable",
                 format!("the peer is not answering: {error}"),

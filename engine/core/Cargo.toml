@@ -29,6 +29,10 @@ scrypt = "0.12.0"
 subtle = "2.6.1"
 hex = "0.4.3"
 base64 = "0.23.1"
+# The adapter HTTP client. `http1` below handles plain http with the standard
+# library; https (GitHub, an https peer) needs a TLS stack, and ureq on rustls
+# is the smallest blocking one. No native-tls, so no system OpenSSL.
+ureq = { version = "2", features = ["tls"], default-features = false }
 hmac = "0.12"
 aes = "0.8"
 cbc = "0.1"

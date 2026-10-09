@@ -16,6 +16,10 @@
   403
  ],
  [
+  "engine_unavailable",
+  502
+ ],
+ [
   "forge_accounts_not_configured",
   400
  ],
@@ -26,6 +30,18 @@
  [
   "forge_publish_refused",
   409
+ ],
+ [
+  "forgejo_unavailable",
+  502
+ ],
+ [
+  "git_unavailable",
+  502
+ ],
+ [
+  "github_unavailable",
+  502
  ],
  [
   "grant_refused",
@@ -98,6 +114,14 @@
  [
   "not_initialized",
   409
+ ],
+ [
+  "peer_unavailable",
+  502
+ ],
+ [
+  "person_required",
+  403
  ],
  [
   "preference_version_conflict",

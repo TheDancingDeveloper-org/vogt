@@ -9,8 +9,6 @@
 //! read, and every message is redacted with the observability redactor before
 //! it leaves here. Transcript content is untrusted data.
 
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
