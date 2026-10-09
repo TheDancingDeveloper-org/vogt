@@ -748,17 +748,32 @@ fn finish(problem: &str, input: &Value) -> FieldError {
 }
 
 /// A dotted location back into pydantic's steps. `cells.2.lane_key` is a field,
-/// then an index, then a field — the dotted form cannot say which, but the
-/// steps are built here, where an all-digit step is an index.
+/// then an index, then a field. The validator only ever joins with a dot before
+/// an array index (`cells.2`) or after one (`cells.2.lane_key`), so a step that
+/// is not all digits keeps every dot inside it: a key literally named `nam.e`
+/// is one field, the way pydantic reports it.
 fn parse_loc(field: &str) -> Vec<Loc> {
-    field
-        .split('.')
-        .filter(|step| !step.is_empty())
-        .map(|step| match step.parse::<usize>() {
-            Ok(index) if index.to_string() == step => Loc::Index(index),
-            _ => Loc::Field(step.to_string()),
-        })
-        .collect()
+    let mut steps = Vec::new();
+    let mut rest = field;
+    while !rest.is_empty() {
+        let (index, after) = match rest.find('.') {
+            Some(dot) => (&rest[..dot], &rest[dot + 1..]),
+            None => (rest, ""),
+        };
+        if let Ok(parsed) = index.parse::<usize>() {
+            if parsed.to_string() == index {
+                steps.push(Loc::Index(parsed));
+                rest = after;
+                continue;
+            }
+        }
+        let end = after
+            .find('.')
+            .map_or(rest.len(), |dot| index.len() + 1 + dot);
+        steps.push(Loc::Field(rest[..end].to_string()));
+        rest = rest[end..].trim_start_matches('.');
+    }
+    steps
 }
 
 /// A string keeps its first 24 and last 23 characters; anything else keeps 25 and

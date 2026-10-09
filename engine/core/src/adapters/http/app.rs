@@ -461,6 +461,14 @@ async fn dispatch<C: Clock, I: IdFactory>(
         Err(err) if err.to_string().contains("length limit") => return payload_too_large(),
         Err(_) => return payload_too_large(),
     };
+    // Starlette reads the body as text and answers 400 when the bytes are not
+    // UTF-8, before JSON parsing, so the status differs from a 422.
+    if std::str::from_utf8(&body).is_err() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"detail": "There was an error parsing the body"}),
+        );
+    }
     let Some(operation_path) = path.strip_prefix(API_PREFIX) else {
         return not_found();
     };
@@ -588,15 +596,21 @@ fn read_body(body: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>, 
         return Err(VogtError::InvalidRequest("missing\nbody".to_string()));
     }
     match serde_json::from_slice::<serde_json::Value>(&neutralise_nonfinite(body)) {
-        Ok(serde_json::Value::Object(object)) => Ok(object),
+        Ok(serde_json::Value::Object(object)) => match lone_surrogate(body) {
+            Some(field) => Err(VogtError::InvalidRequest(format!("string_unicode\n{field}"))),
+            None => Ok(object),
+        },
         Ok(_) => Err(VogtError::InvalidRequest(
             "model_attributes_type\nInput should be a valid dictionary or object to extract fields from"
                 .to_string(),
         )),
-        Err(_error) => Err(VogtError::InvalidRequest(format!(
-            "json_invalid\n{}",
-            json_error_pos(body)
-        ))),
+        Err(_error) => match lone_surrogate(body) {
+            Some(field) => Err(VogtError::InvalidRequest(format!("string_unicode\n{field}"))),
+            None => Err(VogtError::InvalidRequest(format!(
+                "json_invalid\n{}",
+                json_error_pos(body)
+            ))),
+        },
     }
 }
 
@@ -849,8 +863,12 @@ fn invalid_arguments(error: &VogtError, source: &str) -> Response {
 /// which is inside the token, so the position comes from scanning the body with
 /// CPython's rules instead.
 fn json_error_pos(body: &[u8]) -> usize {
+    // Whitespace after the value is legal, so a body that parses ends at its
+    // last non-whitespace byte. `json.loads` reports "Extra data" at the first
+    // non-whitespace byte past the value.
     match scan_value(body, 0) {
-        Scan::End(at) | Scan::Fail(at) => at,
+        Scan::End(at) => skip_ws(body, at),
+        Scan::Fail(at) => at,
     }
 }
 
@@ -868,8 +886,9 @@ fn scan_value(body: &[u8], mut at: usize) -> Scan {
         b'{' => scan_object(body, at),
         b'[' => scan_array(body, at),
         b'"' => scan_string(body, at),
-        b't' | b'f' | b'n' | b'N' | b'I' | b'-' => scan_literal(body, at),
-        b'0'..=b'9' => scan_number(body, at),
+        b'-' if body[at..].starts_with(b"-Infinity") => scan_literal(body, at),
+        b'-' | b'0'..=b'9' => scan_number(body, at),
+        b't' | b'f' | b'n' | b'N' | b'I' => scan_literal(body, at),
         _ => Scan::Fail(at),
     }
 }
@@ -894,7 +913,18 @@ fn scan_object(body: &[u8], start: usize) -> Scan {
         };
         at = skip_ws(body, at);
         match body.get(at) {
-            Some(b',') => at = skip_ws(body, at + 1),
+            Some(b',') => {
+                at = skip_ws(body, at + 1);
+                // Python 3.12 reports a comma that does not introduce another
+                // value at the first non-whitespace byte after it, or one past
+                // the end when the body stops there.
+                if body
+                    .get(at)
+                    .is_none_or(|byte| matches!(byte, b'}' | b']' | b','))
+                {
+                    return Scan::Fail(at);
+                }
+            }
             Some(b'}') => return Scan::End(at + 1),
             _ => return Scan::Fail(at),
         }
@@ -913,7 +943,15 @@ fn scan_array(body: &[u8], start: usize) -> Scan {
         };
         at = skip_ws(body, at);
         match body.get(at) {
-            Some(b',') => at = skip_ws(body, at + 1),
+            Some(b',') => {
+                at = skip_ws(body, at + 1);
+                if body
+                    .get(at)
+                    .is_none_or(|byte| matches!(byte, b'}' | b']' | b','))
+                {
+                    return Scan::Fail(at);
+                }
+            }
             Some(b']') => return Scan::End(at + 1),
             _ => return Scan::Fail(at),
         }
@@ -929,14 +967,30 @@ fn scan_string(body: &[u8], start: usize) -> Scan {
     }
     let mut at = start + 1;
     while let Some(byte) = body.get(at).copied() {
+        // json.loads is strict: a raw control character inside a string is an
+        // error at that character, not an unterminated string.
+        if byte < 0x20 {
+            return Scan::Fail(at);
+        }
         if byte == b'\\' {
             let Some(next) = body.get(at + 1).copied() else {
-                return Scan::Fail(body.len());
+                // A backslash with nothing after it never closes the string.
+                return Scan::Fail(start);
             };
             if next == b'u' {
-                let hex =
-                    (2..6).all(|offset| body.get(at + offset).is_some_and(u8::is_ascii_hexdigit));
-                if !hex {
+                let hex = (2..6)
+                    .take_while(|offset| body.get(at + offset).is_some())
+                    .take_while(|offset| body[at + offset].is_ascii_hexdigit())
+                    .count();
+                if hex < 4 {
+                    // "Invalid \uXXXX escape", one past the backslash, whether
+                    // the digits are wrong or the body runs out first.
+                    return Scan::Fail(at + 1);
+                }
+                if at + 6 == body.len() {
+                    // Four digits that end the body are still that error. Only
+                    // once something follows them is the string unterminated,
+                    // which fails at the opening quote.
                     return Scan::Fail(at + 1);
                 }
                 at += 6;
@@ -951,14 +1005,23 @@ fn scan_string(body: &[u8], start: usize) -> Scan {
             at += 1;
         }
     }
-    Scan::Fail(body.len())
+    // CPython reports an unterminated string at the opening quote, with the
+    // message "Unterminated string starting at".
+    Scan::Fail(start)
 }
 
 fn scan_literal(body: &[u8], start: usize) -> Scan {
     let rest = &body[start..];
-    let word = [b"true".as_slice(), b"false", b"null", b"NaN", b"Infinity"]
-        .into_iter()
-        .find(|word| rest.starts_with(word));
+    let word = [
+        b"true".as_slice(),
+        b"false",
+        b"null",
+        b"NaN",
+        b"Infinity",
+        b"-Infinity",
+    ]
+    .into_iter()
+    .find(|word| rest.starts_with(word));
     match word {
         Some(word) => Scan::End(start + word.len()),
         None => Scan::Fail(start),
@@ -970,12 +1033,14 @@ fn scan_literal(body: &[u8], start: usize) -> Scan {
 fn scan_number(body: &[u8], start: usize) -> Scan {
     let mut at = start;
     if body[at] == b'-' {
-        at += 1;
-        if body.get(at).is_none() {
-            return Scan::Fail(at);
+        if body[at..].starts_with(b"-Infinity") {
+            return Scan::End(at + "-Infinity".len());
         }
-        if body[at..].starts_with(b"Infinity") {
-            return Scan::End(at + "Infinity".len());
+        at += 1;
+        // A `-` with no digit after it was never a number: `-`, `-x` and a
+        // minus that ends the body all fail at the `-` itself.
+        if !body.get(at).is_some_and(u8::is_ascii_digit) {
+            return Scan::Fail(start);
         }
     }
     let digits = if body.get(at) == Some(&b'0') {
@@ -990,7 +1055,7 @@ fn scan_number(body: &[u8], start: usize) -> Scan {
     if body.get(at) == Some(&b'.') {
         let fraction = count_digits(&body[at + 1..]);
         if fraction == 0 {
-            return Scan::Fail(start);
+            return Scan::End(at);
         }
         at += 1 + fraction;
     }
@@ -1007,7 +1072,10 @@ fn scan_number(body: &[u8], start: usize) -> Scan {
         }
         let exponent = count_digits(&body[exp..]);
         if exponent == 0 {
-            return Scan::Fail(start);
+            // `15e`, `15e+` and `15e-` all end the number at the `e`, and the
+            // error is reported there. The sign is consumed and then given back
+            // when no digit follows it.
+            return Scan::End(at);
         }
         at = exp + exponent;
     }
@@ -1022,9 +1090,10 @@ fn count_digits(bytes: &[u8]) -> usize {
 }
 
 /// `NaN`, `Infinity` and `-Infinity` are numbers to CPython's `json.loads` and a
-/// decode error to serde. Rewriting each as `null` lets the parse succeed, and
-/// the validator then rejects the field for its type, which is what pydantic
-/// does with the NaN it was handed.
+/// decode error to serde. Each bare token is rewritten as `null`, outside of
+/// strings, so the parse succeeds and the validator rejects the field for its
+/// type. A number too large for f64, such as `1e999`, is kept by
+/// `arbitrary_precision` and rejected the same way.
 fn neutralise_nonfinite(body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len());
     let mut at = 0;
@@ -1048,7 +1117,7 @@ fn neutralise_nonfinite(body: &[u8]) -> Vec<u8> {
             in_string = true;
         }
         let rest = &body[at..];
-        let token = [b"Infinity".as_slice(), b"NaN"]
+        let token = [b"-Infinity".as_slice(), b"Infinity", b"NaN"]
             .into_iter()
             .find(|token| rest.starts_with(token));
         if let Some(token) = token {
@@ -1097,7 +1166,52 @@ fn body_parse_error(message: &str) -> (&'static str, String, Vec<String>) {
             vec!["body".to_string()],
         );
     }
+    if let Some(field) = message.strip_prefix("string_unicode\n") {
+        return (
+            "string_unicode",
+            "Input should be a valid string, unable to parse raw data as a unicode string"
+                .to_string(),
+            vec!["body".to_string(), field.to_string()],
+        );
+    }
     ("value_error", message.to_string(), vec!["body".to_string()])
+}
+
+/// The first object field whose string holds a lone surrogate. `json.loads`
+/// accepts `\ud800` and pydantic then rejects the field as `string_unicode`.
+/// serde decodes it as a replacement character, so the field has to be found in
+/// the raw body.
+fn lone_surrogate(body: &[u8]) -> Option<String> {
+    let mut at = 0;
+    while at + 5 < body.len() {
+        if body[at] == b'\\' && body[at + 1] == b'u' && is_surrogate_digits(&body[at + 2..at + 6]) {
+            return field_before(body, at);
+        }
+        at += 1;
+    }
+    None
+}
+
+fn is_surrogate_digits(digits: &[u8]) -> bool {
+    if digits.len() < 4 || !digits.iter().all(u8::is_ascii_hexdigit) {
+        return false;
+    }
+    let value = std::str::from_utf8(digits)
+        .ok()
+        .and_then(|text| u32::from_str_radix(text, 16).ok());
+    value.is_some_and(|value| (0xD800..=0xDFFF).contains(&value))
+}
+
+fn field_before(body: &[u8], at: usize) -> Option<String> {
+    // The key is the quoted word before the colon that introduces this value.
+    // The quotes inside the value itself belong to the string, not the key.
+    let head = &body[..at];
+    let colon = head.iter().rposition(|byte| *byte == b':')?;
+    let close = head[..colon].iter().rposition(|byte| *byte == b'"')?;
+    let open = head[..close].iter().rposition(|byte| *byte == b'"')?;
+    std::str::from_utf8(&head[open + 1..close])
+        .ok()
+        .map(str::to_string)
 }
 
 fn bearer(header: Option<&axum::http::HeaderValue>) -> Option<String> {
@@ -1401,6 +1515,7 @@ mod tests {
             (br#"{"name":"\q"}"#.as_slice(), "9"),
             (br#"{"name":"\u12"}"#.as_slice(), "10"),
             (br#"{"name":01}"#.as_slice(), "9"),
+            (br#"{"name":"a","rea"#.as_slice(), "12"),
         ] {
             let (status, body) = post_bytes(running.addr, "/api/labels", given);
             assert!(
@@ -1418,6 +1533,12 @@ mod tests {
         assert!(body.contains("\"loc\":[\"body\",\"name\"]"), "{body}");
         assert!(!body.contains("json_invalid"), "{body}");
         let _ = status;
+        let (status, body) = post_bytes(running.addr, "/api/labels", b"\xff");
+        assert_eq!(status, 400, "{body}");
+        assert!(
+            body.contains("There was an error parsing the body"),
+            "{body}"
+        );
         for scalar in ["true", "1.5"] {
             let (status, body) = post_typed(
                 running.addr,
