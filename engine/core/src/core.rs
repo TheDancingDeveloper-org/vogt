@@ -1089,6 +1089,56 @@ pub fn default_workflow(kind: &str) -> Workflow {
     }
 }
 
+impl Workflow {
+    /// The persisted shape: the initial state and the transition map, in the
+    /// map's insertion order. Ports `Workflow.to_definition`.
+    pub fn to_definition(&self) -> serde_json::Value {
+        serde_json::json!({
+            "initial_state": self.initial_state,
+            "transitions": serde_json::Map::from_iter(self.transitions.iter().map(
+                |(source, targets)| (source.clone(), serde_json::json!(targets)),
+            )),
+        })
+    }
+
+    /// A stored definition back into a machine. A missing `transitions` map is
+    /// an error; a source whose targets are not a list is skipped; a missing
+    /// initial state is `open`. Ports `Workflow.from_definition`.
+    pub fn from_definition(kind: &str, definition: &serde_json::Value) -> Result<Self, String> {
+        let raw = definition
+            .get("transitions")
+            .and_then(serde_json::Value::as_object);
+        let Some(raw) = raw else {
+            return Err(format!(
+                "workflow definition for {kind} has no transitions map"
+            ));
+        };
+        let transitions = raw
+            .iter()
+            .filter_map(|(source, targets)| {
+                targets.as_array().map(|targets| {
+                    (
+                        source.clone(),
+                        targets
+                            .iter()
+                            .map(|target| target.as_str().unwrap_or_default().to_string())
+                            .collect(),
+                    )
+                })
+            })
+            .collect();
+        let initial = definition
+            .get("initial_state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(DEFAULT_INITIAL_STATE);
+        Ok(Self {
+            kind: kind.to_string(),
+            initial_state: initial.to_string(),
+            transitions,
+        })
+    }
+}
+
 pub fn check_completion_allowed(
     to_state: &str,
     blockers: &[(&str, &str)],
@@ -2029,6 +2079,25 @@ mod tests {
         let local = local_principal("sprooty");
         assert_eq!(local.identity_ref, "local:sprooty");
         assert_eq!(local.kind, ActorKind::Human);
+    }
+
+    #[test]
+    fn a_definition_round_trips_and_a_mapless_one_is_refused() {
+        let workflow = default_workflow("bug");
+        let stored = workflow.to_definition();
+        let restored = Workflow::from_definition("bug", &stored).unwrap();
+        assert_eq!(restored, workflow);
+
+        let skipped = serde_json::json!({"transitions": {"open": ["done"], "bad": "nope"}});
+        let partial = Workflow::from_definition("bug", &skipped).unwrap();
+        assert_eq!(
+            partial.transitions,
+            vec![("open".to_string(), vec!["done".to_string()])]
+        );
+        assert_eq!(partial.initial_state, "open");
+
+        let err = Workflow::from_definition("bug", &serde_json::json!({})).unwrap_err();
+        assert!(err.contains("has no transitions map"), "{err}");
     }
 
     #[test]

@@ -263,12 +263,7 @@ impl ForgeTransport for GitHubClient {
         Ok(GitHubClient::identity(self)?.map(|who| (who.login, who.scopes)))
     }
 
-    fn send(
-        &self,
-        method: &str,
-        path: &str,
-        body: Option<&Value>,
-    ) -> Result<Value, VogtError> {
+    fn send(&self, method: &str, path: &str, body: Option<&Value>) -> Result<Value, VogtError> {
         self.send(method, path, body)
     }
 }

@@ -62,8 +62,9 @@ pub fn accepted_request_id(raw: Option<&str>) -> Option<String> {
 
 /// Run `body` with the correlation id bound to the current task. The scope is
 /// the binding, the way Python's `ContextVar` token is: it cannot leak onto
-/// the next request a worker picks up, and a task spawned inside the scope
-/// inherits it.
+/// the next request a worker picks up. Unlike a `ContextVar`, a `tokio::spawn`
+/// inside the scope does not inherit it, so a task that should carry the id
+/// wraps itself in `with_request_id`.
 pub async fn with_request_id<F, T>(request_id: String, body: F) -> T
 where
     F: std::future::Future<Output = T>,
