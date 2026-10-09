@@ -19,7 +19,7 @@ use crate::decisions::{
     ContractResult, ContractTree, CriterionResult, Recommendation, Scaffold,
 };
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ObservedStore, WriteTxn};
+use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
 use crate::storage::observed_types::PendingObservation;
 
 /// The evidence kind a recorded contract check lands under.
@@ -34,6 +34,9 @@ const CONTRACT_CHECKED_EVENT: &str = "contract.checked";
 
 /// The event an adoption change appends, whether it opts in or back out.
 const CONTRACT_ADOPTION_EVENT: &str = "contract.adoption_changed";
+
+/// The event an exemption change appends, whether it declares or withdraws.
+const CONTRACT_EXEMPTION_EVENT: &str = "contract.exemption_changed";
 
 /// What a project that never adopted the contract is told, and why that is not
 /// a criticism.
@@ -440,6 +443,155 @@ fn record_adoption<C: Clock + 'static, I: IdFactory + 'static>(
             payload: json!({ "contract_adopted": adopted }),
             event_kind: CONTRACT_ADOPTION_EVENT.to_string(),
             summary: json!({ "slug": project_slug, "adopted": adopted }),
+        })
+    })
+}
+
+/// Declare that a criterion cannot apply to a project, or withdraw that.
+///
+/// Not an exemption from a rule the project could keep: a statement that the
+/// rule does not describe this project. It carries an author and a reason
+/// because the difference between the two is an argument somebody has to make.
+pub fn contract_inapplicable_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    change_exemption(ctx, &params, true)
+}
+
+pub fn contract_applicable_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    change_exemption(ctx, &params, false)
+}
+
+fn change_exemption(ctx: &Built, params: &Value, declare: bool) -> Result<Value, VogtError> {
+    let operation = if declare {
+        "contract.inapplicable"
+    } else {
+        "contract.applicable"
+    };
+    let field = |name: &str| {
+        params
+            .get(name)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| VogtError::InvalidRequest(format!("{operation} needs a {name}")))
+    };
+    let slug = field("project")?;
+    let rule = field("rule")?;
+    let target = field("target")?;
+    let reason = field("reason")?;
+    crate::with_ctx!(ctx, |ctx| apply_exemption(
+        ctx, operation, &slug, &rule, &target, &reason, declare
+    ))
+}
+
+fn apply_exemption<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    operation: &str,
+    slug: &str,
+    rule: &str,
+    target: &str,
+    reason: &str,
+    declare: bool,
+) -> Result<Value, VogtError> {
+    let project = resolve::project(&ctx.declared.read()?, slug)?;
+    let now = clock_now(&ctx.clock);
+    let mut write = write_of(ctx);
+    record_exemption(
+        &mut write,
+        operation,
+        reason,
+        &ExemptionChange {
+            now,
+            project_id: project.id,
+            project_slug: project.slug,
+            rule: rule.to_string(),
+            target: target.to_string(),
+            reason: reason.to_string(),
+            declare,
+        },
+    )
+}
+
+struct ExemptionChange {
+    now: crate::core::Moment,
+    project_id: String,
+    project_slug: String,
+    rule: String,
+    target: String,
+    reason: String,
+    declare: bool,
+}
+
+fn record_exemption<C: Clock + 'static, I: IdFactory + 'static>(
+    write: &mut crate::application::writes::WriteContext<
+        '_,
+        C,
+        I,
+        crate::storage::sqlite::declared::SqliteDeclaredStore<C, I>,
+    >,
+    operation: &str,
+    reason: &str,
+    change: &ExemptionChange,
+) -> Result<Value, VogtError> {
+    let project_id = change.project_id.clone();
+    let project_slug = change.project_slug.clone();
+    let rule = change.rule.clone();
+    let target = change.target.clone();
+    let declared_reason = change.reason.clone();
+    let declare = change.declare;
+    let now = change.now;
+    // The id factory lives on the write context, so the id is minted here
+    // rather than before the write. It is consumed only when declaring.
+    let id = write
+        .ids()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .next("cex");
+    audited_write(write, operation, reason, |txn, actor| {
+        let removed = if declare {
+            txn.insert_contract_exemption(&crate::core::ContractExemption {
+                id,
+                project_id: project_id.clone(),
+                project_slug: Some(project_slug.clone()),
+                rule: rule.clone(),
+                target: target.clone(),
+                reason: declared_reason,
+                declared_by: if actor.identity_ref.is_empty() {
+                    actor.id.clone()
+                } else {
+                    actor.identity_ref.clone()
+                },
+                declared_at: now,
+            })?;
+            false
+        } else {
+            !txn.delete_contract_exemption(&project_id, &rule, &target)?
+        };
+        let exemptions: Vec<Value> = txn
+            .contract_exemptions(&project_id)?
+            .into_iter()
+            .map(|exemption| {
+                json!({
+                    "rule": exemption.rule,
+                    "target": exemption.target,
+                    "reason": exemption.reason,
+                    "declared_by": exemption.declared_by,
+                    "declared_at": exemption.declared_at.to_json(),
+                })
+            })
+            .collect();
+        let detail = if declare {
+            format!("{target} is recorded as unmeetable by {project_slug}; it is reported, and not counted as a failure")
+        } else if removed {
+            format!("{target} was not declared inapplicable here")
+        } else {
+            format!("{target} applies to {project_slug} again")
+        };
+        Ok(WriteOutcome {
+            result: json!({ "project": project_slug, "declared": declare, "exemptions": exemptions, "detail": detail }),
+            entity_kind: "project".to_string(),
+            entity_id: project_id.clone(),
+            payload: json!({ "rule": rule, "target": target }),
+            event_kind: CONTRACT_EXEMPTION_EVENT.to_string(),
+            summary: json!({ "slug": project_slug, "target": target, "inapplicable": declare }),
         })
     })
 }

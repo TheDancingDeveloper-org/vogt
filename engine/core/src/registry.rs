@@ -132,6 +132,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "contract.check" => Some(crate::application::contracts::contract_check_op),
         "contract.adopt" => Some(crate::application::contracts::contract_adopt_op),
         "contract.decline" => Some(crate::application::contracts::contract_decline_op),
+        "contract.inapplicable" => Some(crate::application::contracts::contract_inapplicable_op),
+        "contract.applicable" => Some(crate::application::contracts::contract_applicable_op),
         "why" => Some(crate::application::views::why_op),
         _ => None,
     }
