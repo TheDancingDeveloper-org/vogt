@@ -621,6 +621,7 @@ vocab!(RelationKind {
     ImplementedBy
 });
 vocab!(InitiativeState { Open, Closed });
+vocab!(MatchKind { Exact, Pattern });
 
 pub type LifecycleState = &'static str;
 
@@ -1018,6 +1019,40 @@ pub struct Comment {
     pub created_at: Moment,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Suppression {
+    pub id: String,
+    pub match_kind: MatchKind,
+    pub subject_key_or_pattern: String,
+    pub scope_project_id: Option<String>,
+    pub scope_project_slug: Option<String>,
+    pub actor_id: String,
+    pub actor_identity_ref: Option<String>,
+    pub reason: String,
+    pub created_at: Moment,
+    pub revoked_at: Option<Moment>,
+    pub revoked_reason: Option<String>,
+}
+
+impl Suppression {
+    /// A suppression holds until someone revokes it.
+    pub fn active(&self) -> bool {
+        self.revoked_at.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContractExemption {
+    pub id: String,
+    pub project_id: String,
+    pub project_slug: Option<String>,
+    pub rule: String,
+    pub target: String,
+    pub reason: String,
+    pub declared_by: String,
+    pub declared_at: Moment,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1234,6 +1269,30 @@ mod tests {
             refused.contains("VOGT_TEST_CLOCK_START, VOGT_TEST_IDS"),
             "{refused}"
         );
+    }
+
+    #[test]
+    fn a_suppression_is_active_until_it_is_revoked() {
+        assert_eq!(
+            serde_json::to_string(&MatchKind::Pattern).unwrap(),
+            "\"pattern\""
+        );
+        let mut suppression = Suppression {
+            id: "sup_0001".to_string(),
+            match_kind: MatchKind::Exact,
+            subject_key_or_pattern: "git:main".to_string(),
+            scope_project_id: None,
+            scope_project_slug: None,
+            actor_id: "act_0001".to_string(),
+            actor_identity_ref: None,
+            reason: "noise".to_string(),
+            created_at: from_iso("2026-01-02T03:04:05+00:00").unwrap(),
+            revoked_at: None,
+            revoked_reason: None,
+        };
+        assert!(suppression.active());
+        suppression.revoked_at = Some(suppression.created_at);
+        assert!(!suppression.active());
     }
 
     #[test]
