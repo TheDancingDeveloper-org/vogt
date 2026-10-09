@@ -143,5 +143,11 @@ jobs:
         # waiting for the next review to notice the drift.
         run: uv run python scripts/gen_registry.py --check
 
+      - name: validator corpus matches pydantic
+        # The corpus is pydantic's own verdict on every probe. This fails the
+        # moment a model changes what pydantic accepts or how it refuses,
+        # instead of the Rust test comparing against a stale recording.
+        run: uv run python scripts/gen_validator_corpus.py --check
+
       - name: drift ledger (report only)
         run: uv run python scripts/drift_ledger.py

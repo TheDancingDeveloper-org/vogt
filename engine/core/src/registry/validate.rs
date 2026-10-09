@@ -662,27 +662,72 @@ mod tests {
         );
     }
 
-    /// Compare against the reviewer's pydantic corpus. Ignored by default
-    /// because the corpus lives outside the tree.
-    #[test]
-    #[ignore]
-    fn matches_the_pydantic_corpus() {
-        let corpus: Vec<serde_json::Value> =
-            serde_json::from_str(&std::fs::read_to_string("/tmp/rrbv-data/corpus.json").unwrap())
-                .unwrap();
-        let mut rows = Vec::new();
-        for case in corpus {
-            let op = case["op"].as_str().unwrap();
-            let outcome = match prepare(op, case["params"].clone()) {
-                Ok(value) => serde_json::json!({"ok": true, "dump": value}),
-                Err(error) => serde_json::json!({"ok": false, "msg": error.message()}),
-            };
-            rows.push(serde_json::json!({"op": op, "tag": case["tag"], "rs": outcome}));
+    /// A resolved value matches pydantic's dump when every field Rust kept has
+    /// the same value there. A field whose default is null is left absent here
+    /// and present as null in the dump, and that difference is not a mismatch:
+    /// the services read either as "not given".
+    fn resolved_matches(resolved: &serde_json::Value, dump: &serde_json::Value) -> bool {
+        match (resolved, dump) {
+            (serde_json::Value::Object(resolved), serde_json::Value::Object(dump)) => resolved
+                .iter()
+                .all(|(name, value)| dump.get(name).is_some_and(|d| resolved_matches(value, d))),
+            (serde_json::Value::Array(resolved), serde_json::Value::Array(dump)) => {
+                resolved.len() == dump.len()
+                    && resolved
+                        .iter()
+                        .zip(dump)
+                        .all(|(r, d)| resolved_matches(r, d))
+            }
+            _ => resolved == dump,
         }
-        std::fs::write(
-            "/tmp/rrbv-data/rust.json",
-            serde_json::to_string(&rows).unwrap(),
-        )
-        .unwrap();
+    }
+
+    /// Every probe in `tests/parity/validator_corpus.json`, recorded from
+    /// pydantic by `scripts/gen_validator_corpus.py`. An accepted probe must
+    /// resolve to the same parameters; a refused one must say the same thing.
+    /// Pydantic's `[type=...]` tag and its documentation link are not part of
+    /// the comparison yet.
+    #[test]
+    fn matches_the_pydantic_corpus() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/parity/validator_corpus.json");
+        let corpus: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let mut failures = Vec::new();
+        for case in &corpus {
+            let op = case["op"].as_str().unwrap();
+            let tag = case["tag"].as_str().unwrap();
+            let expected = &case["py"];
+            match prepare(op, case["params"].clone()) {
+                Ok(value) => {
+                    if !expected["ok"].as_bool().unwrap() {
+                        failures.push(format!("{op} {tag}: rust accepted, pydantic refused"));
+                    } else if !resolved_matches(&value, &expected["dump"]) {
+                        failures.push(format!(
+                            "{op} {tag}: resolved {value} != {}",
+                            expected["dump"]
+                        ));
+                    }
+                }
+                Err(error) => {
+                    if expected["ok"].as_bool().unwrap() {
+                        failures.push(format!("{op} {tag}: rust refused, pydantic accepted"));
+                    } else if error.message() != expected["text"].as_str().unwrap() {
+                        failures.push(format!(
+                            "{op} {tag}:\n  rust: {}\n  pydantic: {}",
+                            error.message(),
+                            expected["text"].as_str().unwrap()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} probes differ:\n{}",
+            failures.len(),
+            corpus.len(),
+            failures.join("\n")
+        );
     }
 }
