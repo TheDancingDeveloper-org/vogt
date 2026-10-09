@@ -284,7 +284,7 @@ fn inbox_triage_transitions_and_their_refusals() {
         inbox::inbox_archive_op(&built, json!({"entry_key": key, "reason": "again"})).unwrap_err();
     match again {
         VogtError::InvalidTriageState(message) => {
-            assert_eq!(message, format!("Inbox entry {key:?} is already archived"));
+            assert_eq!(message, format!("Inbox entry {} is already archived", crate::core::py_repr(&key)));
         }
         other => panic!("unexpected {other:?}"),
     }

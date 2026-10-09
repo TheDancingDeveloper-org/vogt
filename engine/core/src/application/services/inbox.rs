@@ -236,7 +236,8 @@ where
     if let Some(existing) = existing.as_ref() {
         if existing.state == state && state != TriageState::Snoozed {
             return Err(VogtError::InvalidTriageState(format!(
-                "Inbox entry {entry_key:?} is already {state}"
+                "Inbox entry {} is already {state}",
+                crate::core::py_repr(&entry_key)
             )));
         }
         if state == TriageState::Snoozed && existing.state == TriageState::Archived {
@@ -559,11 +560,16 @@ where
         ));
     }
 
-    // The live engine session list (blocked sessions, approval dialogs) is not
-    // ported. Bound branches are: their verdict comes from the checks already
-    // read and the declared overlays, so no live engine is involved. A pending
-    // grant is too, and a target that is not in the live list is exactly the
-    // entry Python builds for a session that is not running now.
+    // The live engine session list names grant targets and surfaces sessions
+    // waiting on a person. An engine that is down or unconfigured leaves both
+    // empty, exactly as Python does.
+    let live = match &ctx.engine {
+        Some(engine) => engine.list_sessions().unwrap_or_default(),
+        None => Vec::new(),
+    };
+    let live_by_id: BTreeMap<&str, &crate::adapters::engine::EngineSession> =
+        live.iter().map(|session| (session.id.as_str(), session)).collect();
+
     let mut checks_by_branch: BTreeMap<(String, String), Vec<Observation>> = BTreeMap::new();
     for observation in &checks_all {
         let Some(project_id) = observation.project_id.clone() else {
@@ -620,7 +626,24 @@ where
 
     for grant in view.list_session_grants(Some("pending"), None, MAX_SCAN)? {
         if grant.effective_state(now_of(&ctx.clock)) == "pending" {
-            entries.push(grant_entry(view, &grant, &projects)?);
+            entries.push(grant_entry(view, &grant, &projects, &live_by_id)?);
+        }
+    }
+
+    for session in &live {
+        let declared = view.session_by_engine_id(&session.id)?;
+        if let Some(blocked) = &session.blocked {
+            if session.alive {
+                entries.push(blocked_entry(
+                    ctx, session, blocked, declared.as_ref(), &projects, view,
+                )?);
+            }
+        }
+        if matches!(
+            session.activity.as_str(),
+            "waiting-for-input" | "awaiting-approval" | "errored"
+        ) {
+            entries.push(session_entry(ctx, session, declared.as_ref(), &projects, view)?);
         }
     }
 
@@ -1000,30 +1023,55 @@ fn bound_branch_entry<C: Clock, I: IdFactory>(
     })
 }
 
-/// A grant a session asked for and a person has yet to decide. The target's
-/// live detail is absent here — `Built` carries no session list — which is the
-/// same entry Python builds when the session is not running now.
+/// A grant a session asked for and a person has yet to decide. The target is
+/// named as the person knows it — title, role, agent, project — because
+/// approving the right secret for the wrong session is the mistake this entry
+/// must not invite. A target absent from the live list is the "not running
+/// now" entry.
 fn grant_entry(
     view: &impl ReadView,
     grant: &crate::core::SessionGrant,
     projects: &BTreeMap<String, Project>,
+    live: &BTreeMap<&str, &crate::adapters::engine::EngineSession>,
 ) -> Result<Value, VogtError> {
+    let target = live.get(grant.target_engine_session_id.as_str()).copied();
     let declared = view.session_by_engine_id(&grant.target_engine_session_id)?;
     let project = declared
         .as_ref()
         .and_then(|session| projects.get(&session.project_id));
-    let label = &grant.target_engine_session_id;
-    let mut facts = vec!["not running now".to_string()];
+    let label = target
+        .filter(|session| !session.name.is_empty())
+        .map(|session| session.name.as_str())
+        .unwrap_or(grant.target_engine_session_id.as_str());
+    let mut facts: Vec<String> = Vec::new();
+    if let Some(target) = target {
+        facts.push(target.role.clone());
+        if let Some(agent) = &target.conversation_agent {
+            facts.push(agent.clone());
+        }
+        if let Some(mode) = &target.permission_mode {
+            facts.push(format!("permission {mode}"));
+        }
+    } else {
+        facts.push("not running now".to_string());
+    }
     if let Some(project) = project {
         facts.push(format!("project {}", project.slug));
     }
     if let Some(session) = declared.as_ref() {
         facts.push(session.id.clone());
     }
-    let itself = grant.requested_by == format!("agent:engine:{label}")
-        || declared
-            .as_ref()
-            .is_some_and(|session| grant.requested_by == format!("agent:session:{}", session.id));
+    let requester = view
+        .actor_by_id(&grant.requested_by)?
+        .or(view.actor_by_identity(&grant.requested_by)?);
+    let requested_by = requester
+        .as_ref()
+        .map(|actor| actor.identity_ref.clone())
+        .unwrap_or_else(|| grant.requested_by.clone());
+    let itself = requested_by == format!("agent:engine:{}", grant.target_engine_session_id)
+        || declared.as_ref().is_some_and(|session| {
+            requested_by == format!("agent:session:{}", session.id)
+        });
     let who = if itself {
         "itself".to_string()
     } else {
@@ -1042,21 +1090,14 @@ fn grant_entry(
     };
     let summary = truncate(
         &format!(
-            "{} asks for {item} for {who}: {uses}, for {} min once approved. Reason: {}",
-            grant.requested_by,
+            "{requested_by} asks for {item} for {who}: {uses}, for {} min once approved. Reason: {}",
             grant.ttl_seconds / 60,
             grant.reason
         ),
         1000,
     );
-    let requester = view.actor_by_identity(&grant.requested_by)?;
     let actor = ActorClass {
-        login: Some(
-            requester
-                .as_ref()
-                .map(|actor| actor.identity_ref.clone())
-                .unwrap_or_else(|| grant.requested_by.clone()),
-        ),
+        login: Some(requested_by.clone()),
         kind: Some(match &requester {
             Some(actor) if actor.kind == crate::core::ActorKind::Human => actors::ActorKind::Human,
             _ => actors::ActorKind::Bot,
@@ -1091,14 +1132,14 @@ fn grant_entry(
             "evidence_snapshot": {
                 "grant_id": grant.id,
                 "target": grant.target_engine_session_id,
-                "target_name": Value::Null,
-                "target_role": Value::Null,
-                "target_agent": Value::Null,
-                "target_permission_mode": Value::Null,
-                "target_alive": false,
+                "target_name": target.map(|session| session.name.clone()),
+                "target_role": target.map(|session| session.role.clone()),
+                "target_agent": target.and_then(|session| session.conversation_agent.clone()),
+                "target_permission_mode": target.and_then(|session| session.permission_mode.clone()),
+                "target_alive": target.is_some(),
                 "target_session": declared.as_ref().map(|session| session.id.clone()),
                 "project": project.map(|project| project.slug.clone()),
-                "requested_by": grant.requested_by,
+                "requested_by": requested_by,
                 "requester_is_target": itself,
                 "var": grant.var,
                 "project_id": grant.project_id,
@@ -1113,6 +1154,144 @@ fn grant_entry(
 /// Python renders a missing optional as the literal `None`.
 fn py_none(value: Option<&str>) -> &str {
     value.unwrap_or("None")
+}
+
+/// A session whose agent reported it cannot go on without a person. Keyed by
+/// the report's time, so a new report after an archived one surfaces again.
+fn blocked_entry<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    session: &crate::adapters::engine::EngineSession,
+    blocked: &crate::adapters::engine::EngineBlocked,
+    declared: Option<&crate::core::CodingSession>,
+    projects: &BTreeMap<String, Project>,
+    view: &impl ReadView,
+) -> Result<Value, VogtError> {
+    let project = declared.and_then(|session| projects.get(&session.project_id));
+    let reference = bound_ref(view, declared, session.work_item.as_deref())?;
+    let todo = blocked.items.join("; ");
+    let summary = truncate(
+        &format!(
+            "{}{}",
+            blocked.reason,
+            if todo.is_empty() { String::new() } else { format!(" — to do: {todo}") }
+        ),
+        1000,
+    );
+    let name = if session.name.is_empty() { session.id.as_str() } else { session.name.as_str() };
+    let title = match &reference {
+        Some(reference) => format!("{reference} session {name} is blocked on you"),
+        None => format!("Session {name} is blocked on you"),
+    };
+    Ok(entry(EntrySpec {
+        entry_key: format!(
+            "agent:session:{}:blocked:{}",
+            session.id,
+            blocked.since.as_deref().unwrap_or("unknown")
+        ),
+        source: "agent",
+        kind: "session.blocked",
+        occurred_at: Some(
+            when(blocked.since.as_deref().map(Value::from).as_ref()).unwrap_or_else(|| now_of(&ctx.clock)),
+        ),
+        observed_at: None,
+        title: &title,
+        summary: &summary,
+        project_slug: project.map(|project| project.slug.as_str()),
+        work_item_ref: reference.as_deref(),
+        source_subject_key: &session.id,
+        source_url: None,
+        trust_state: "unverified".to_string(),
+        freshness: "live",
+        action: action_of("session", json!({"session_id": session.id})),
+        actor: &actors::system_actor(),
+        extra: json!({"session_id": session.id, "provisional": true}),
+    }))
+}
+
+/// A session waiting on a person: an approval dialog, input, or an error.
+fn session_entry<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    session: &crate::adapters::engine::EngineSession,
+    declared: Option<&crate::core::CodingSession>,
+    projects: &BTreeMap<String, Project>,
+    view: &impl ReadView,
+) -> Result<Value, VogtError> {
+    let project = declared.and_then(|session| projects.get(&session.project_id));
+    let reference = bound_ref(view, declared, session.work_item.as_deref())?;
+    let name = if session.name.is_empty() { session.id.as_str() } else { session.name.as_str() };
+    let label = match &reference {
+        Some(reference) => format!("{reference} {name}"),
+        None => name.to_string(),
+    };
+    let (title, summary) = if session.activity == "awaiting-approval" {
+        let what = session
+            .approval
+            .as_ref()
+            .map(|approval| approval.command_excerpt.split_whitespace().collect::<Vec<_>>().join(" "))
+            .unwrap_or_default();
+        let left = session
+            .approval
+            .as_ref()
+            .and_then(|approval| approval.deadline_seconds)
+            .map(|seconds| format!(" Auto-deny in {seconds}s."))
+            .unwrap_or_default();
+        let question = session
+            .approval
+            .as_ref()
+            .map(|approval| approval.question.as_str())
+            .unwrap_or("Permission dialog.");
+        (
+            format!("Session {label} is asking for approval"),
+            truncate(format!("{question}{left} {what}").trim(), 1000),
+        )
+    } else {
+        (
+            format!("Session {label} needs attention"),
+            format!("Session is {}.", session.activity),
+        )
+    };
+    Ok(entry(EntrySpec {
+        entry_key: format!(
+            "agent:session:{}:{}:{}",
+            session.id,
+            session.activity,
+            session.activity_changed_at.as_deref().unwrap_or("unknown")
+        ),
+        source: "agent",
+        kind: "session.attention",
+        occurred_at: Some(
+            when(session.activity_changed_at.as_deref().map(Value::from).as_ref())
+                .unwrap_or_else(|| now_of(&ctx.clock)),
+        ),
+        observed_at: None,
+        title: &title,
+        summary: &summary,
+        project_slug: project.map(|project| project.slug.as_str()),
+        work_item_ref: reference.as_deref(),
+        source_subject_key: &session.id,
+        source_url: None,
+        trust_state: "unverified".to_string(),
+        freshness: "live",
+        action: action_of("session", json!({"session_id": session.id})),
+        actor: &actors::system_actor(),
+        extra: json!({"session_id": session.id, "provisional": true}),
+    }))
+}
+
+/// The work item a session serves: the core's row for a session Vogt started,
+/// the engine's label for one the GUI started.
+fn bound_ref(
+    view: &impl ReadView,
+    declared: Option<&crate::core::CodingSession>,
+    label: Option<&str>,
+) -> Result<Option<String>, VogtError> {
+    if let Some(declared) = declared {
+        let Some(work_item_id) = &declared.work_item_id else {
+            return Ok(None);
+        };
+        return Ok(view.work_item_by_id(work_item_id)?.map(|item| item.reference));
+    }
+    Ok(label.map(str::to_string))
 }
 
 fn drift_entry(
