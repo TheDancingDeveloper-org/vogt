@@ -15,6 +15,7 @@ pub mod freshness;
 pub mod install;
 pub mod work;
 
+pub mod import_merge;
 mod inbox;
 mod initiatives;
 pub mod lifecycle;
@@ -53,6 +54,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "backup" => lifecycle::backup_op,
         "restore" => lifecycle::restore_op,
         "export" => lifecycle::export_op,
+        "import" => import_merge::import_op,
         _ => return None,
     })
 }

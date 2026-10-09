@@ -421,7 +421,7 @@ fn now<C: Clock, I: IdFactory>(ctx: &AppContext<C, I>) -> Moment {
 }
 
 /// `Path.expanduser`: a leading `~` or `~/` becomes the home directory.
-fn expand_user(path: &Path) -> PathBuf {
+pub(crate) fn expand_user(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     let Some(rest) = text.strip_prefix('~') else {
         return path.to_path_buf();
