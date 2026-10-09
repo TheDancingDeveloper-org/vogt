@@ -24,12 +24,24 @@ use crate::core::{Moment, Observation, WorkItem, WorkOverlay, DONE, TERMINAL_STA
 /// digit string, fixed notation for an exponent in `-4..=15`, otherwise
 /// `d.ddde±XX` with an exponent of at least two digits, and `.0` on an integer.
 pub fn canonical_json(payload: &Value) -> String {
+    render_python_json(payload, false, true)
+}
+
+/// `json.dumps` as Python stores it: `", "` / `": "` separators and
+/// `ensure_ascii=True`. Keys are sorted only where the Python call sorts them
+/// (`sort_keys=True` for a workflow definition, not for an exclusions list).
+pub fn python_json_dumps(payload: &Value, sort_keys: bool) -> String {
+    render_python_json(payload, true, sort_keys)
+}
+
+fn render_python_json(value: &Value, spaced: bool, sort_keys: bool) -> String {
     let mut out = String::new();
-    write_python_json(&mut out, payload);
+    write_python_json(&mut out, value, spaced, sort_keys);
     out
 }
 
-fn write_python_json(out: &mut String, value: &Value) {
+fn write_python_json(out: &mut String, value: &Value, spaced: bool, sort_keys: bool) {
+    let (item_gap, key_gap) = if spaced { (", ", ": ") } else { (",", ":") };
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(true) => out.push_str("true"),
@@ -40,23 +52,25 @@ fn write_python_json(out: &mut String, value: &Value) {
             out.push('[');
             for (index, item) in items.iter().enumerate() {
                 if index > 0 {
-                    out.push(',');
+                    out.push_str(item_gap);
                 }
-                write_python_json(out, item);
+                write_python_json(out, item, spaced, sort_keys);
             }
             out.push(']');
         }
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            if sort_keys {
+                keys.sort();
+            }
             out.push('{');
             for (index, key) in keys.iter().enumerate() {
                 if index > 0 {
-                    out.push(',');
+                    out.push_str(item_gap);
                 }
                 write_python_string(out, key);
-                out.push(':');
-                write_python_json(out, &map[*key]);
+                out.push_str(key_gap);
+                write_python_json(out, &map[*key], spaced, sort_keys);
             }
             out.push('}');
         }

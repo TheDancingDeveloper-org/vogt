@@ -635,11 +635,30 @@ pub trait WriteTxn: ReadView {
         workflow: &Workflow,
         at: Moment,
     ) -> Result<(), crate::errors::VogtError>;
+    // The field list is Python's signature, not a struct: the transaction
+    // allocates the id and stamps the revision, so the caller cannot pass them.
+    #[allow(clippy::too_many_arguments)]
     fn append_audit(
         &mut self,
-        record: &AuditRecord,
+        actor: &Actor,
+        operation: &str,
+        entity_kind: &str,
+        entity_id: &str,
+        reason: &str,
+        payload_digest: &str,
+        at: Moment,
     ) -> Result<AuditRecord, crate::errors::VogtError>;
-    fn append_event(&mut self, event: &Event) -> Result<Event, crate::errors::VogtError>;
+    #[allow(clippy::too_many_arguments)]
+    fn append_event(
+        &mut self,
+        kind: &str,
+        entity_kind: &str,
+        entity_id: &str,
+        actor_id: Option<&str>,
+        audit_id: Option<&str>,
+        summary: &serde_json::Value,
+        at: Moment,
+    ) -> Result<Event, crate::errors::VogtError>;
 }
 
 /// The declared store: the write plane.

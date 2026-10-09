@@ -774,18 +774,21 @@ impl Workflow {
     }
 
     /// The stored form: `{"initial_state", "transitions"}` with keys sorted,
-    /// matching `json.dumps(..., sort_keys=True)`.
+    /// matching `json.dumps(..., sort_keys=True)` — spaced separators and
+    /// non-ASCII escaped as `\uXXXX`, the same bytes Python writes.
     pub fn to_definition_json(&self) -> String {
         let transitions: BTreeMap<&str, &Vec<String>> = self
             .transitions
             .iter()
             .map(|(source, targets)| (source.as_str(), targets))
             .collect();
-        serde_json::json!({
-            "initial_state": self.initial_state,
-            "transitions": transitions,
-        })
-        .to_string()
+        crate::decisions::python_json_dumps(
+            &serde_json::json!({
+                "initial_state": self.initial_state,
+                "transitions": transitions,
+            }),
+            true,
+        )
     }
 
     /// Inverse of `to_definition_json`. A definition without a transitions
@@ -796,19 +799,27 @@ impl Workflow {
             .get("transitions")
             .and_then(|item| item.as_object())
             .ok_or_else(|| format!("workflow definition for {kind} has no transitions map"))?;
-        let transitions = raw
-            .iter()
-            .filter_map(|(source, targets)| {
-                targets.as_array().map(|list| {
-                    (
-                        source.clone(),
-                        list.iter()
-                            .filter_map(|item| item.as_str().map(str::to_string))
-                            .collect(),
-                    )
-                })
-            })
-            .collect();
+        // serde_json reorders object keys, but the definition is stored in the
+        // order it was written and that order is part of the value: a reloaded
+        // workflow must compare equal to the one saved. The keys are read back
+        // in the order they appear in the text.
+        let mut transitions: Vec<(String, Vec<String>)> = Vec::new();
+        if let Some(body) = transitions_object(text) {
+            for key in object_keys_in_order(body) {
+                let Some(list) = raw.get(&key).and_then(|item| item.as_array()) else {
+                    continue;
+                };
+                transitions.push((
+                    key,
+                    list.iter()
+                        .map(|item| match item {
+                            serde_json::Value::String(text) => text.clone(),
+                            other => other.to_string(),
+                        })
+                        .collect(),
+                ));
+            }
+        }
         let initial = value
             .get("initial_state")
             .and_then(|item| item.as_str())
@@ -856,6 +867,75 @@ impl Workflow {
         }
         None
     }
+}
+
+/// The text inside the `transitions` object, braces excluded.
+fn transitions_object(text: &str) -> Option<&str> {
+    let start = text.find("\"transitions\"")?;
+    let after = &text[start + "\"transitions\"".len()..];
+    let open = after.find('{')?;
+    let body = &after[open + 1..];
+    let mut depth = 1i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in body.bytes().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&body[..index]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Top-level keys of one JSON object body, in the order they were written.
+fn object_keys_in_order(body: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut string_start = 0usize;
+    for (index, byte) in body.bytes().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+                if depth == 0 && body[index + 1..].trim_start().starts_with(':') {
+                    keys.push(body[string_start..index].to_string());
+                }
+            }
+            continue;
+        }
+        match byte {
+            b'"' => {
+                in_string = true;
+                string_start = index + 1;
+            }
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => depth -= 1,
+            _ => {}
+        }
+    }
+    keys
 }
 
 pub fn default_workflow(kind: &str) -> Workflow {
@@ -1276,6 +1356,7 @@ vocab!(TriageState {
 
 /// Append-only ledger row. Ports `AuditRecord` (`entities.py`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuditRecord {
     pub id: String,
     pub txn_id: String,
@@ -1293,6 +1374,7 @@ pub struct AuditRecord {
 /// Published change. Ports `Event`. `summary` is the JSON object the feed
 /// carries; an absent actor or audit row stays `None`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Event {
     pub seq: i64,
     pub kind: String,
@@ -1307,6 +1389,7 @@ pub struct Event {
 /// A machine-raised question, resolved by a human or an agent. Ports
 /// `DriftProposal`. `status` is the four-value literal, not a free string.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DriftProposal {
     pub id: String,
     pub kind: String,
@@ -1331,6 +1414,7 @@ pub struct DriftProposal {
 /// The shared, audited decision attached to one Inbox occurrence. Ports
 /// `InboxTriage`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InboxTriage {
     pub entry_key: String,
     pub state: TriageState,
@@ -1343,6 +1427,7 @@ pub struct InboxTriage {
 
 /// One per-actor setting. Ports `ActorPreference`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActorPreference {
     pub actor_id: String,
     pub key: String,
@@ -1354,6 +1439,7 @@ pub struct ActorPreference {
 /// One reference from a project to another. Ports `DepRef`. No lockfile is
 /// parsed and no package version is resolved.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DepRef {
     pub subject_key: String,
     pub from_project_id: String,
@@ -1369,6 +1455,7 @@ pub struct DepRef {
 /// A coverage record. Ports `Sweep`. `outcome` defaults to `running` until a
 /// sweep finishes, which is what makes "absent" different from "not collected".
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sweep {
     pub id: String,
     pub collector: String,
@@ -1376,7 +1463,7 @@ pub struct Sweep {
     pub started_at: Moment,
     pub finished_at: Option<Moment>,
     pub outcome: SweepOutcome,
-    pub stats: serde_json::Value,
+    pub stats: BTreeMap<String, i64>,
     pub detail: Option<String>,
 }
 
