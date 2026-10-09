@@ -14,6 +14,7 @@ use super::payloads::{comparison, decoded_content, quote_path};
 use super::provider::ForgeProvider;
 use super::transport::{api_path, as_list, ForgeResponse, ForgeTransport};
 use super::writeback::{WriteBackOutcome, WriteBackResult};
+use crate::core::py_repr;
 use crate::errors::VogtError;
 
 /// The one host this provider answers for.
@@ -508,7 +509,8 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
     ) -> Result<WriteBackResult, VogtError> {
         if state != "closed" && state != "open" {
             return Err(VogtError::InvalidRequest(format!(
-                "{state:?} is not a state; use 'closed' or 'open'"
+                "{} is not a state; use 'closed' or 'open'",
+                py_repr(state)
             )));
         }
         self.write(
@@ -555,10 +557,11 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         let response = match self.transport.send("POST", "/user/repos", Some(&payload)) {
             Err(error) if error.message().contains("422") => {
                 return Err(VogtError::RemoteRepoExists(format!(
-                    "github.com already has a repository named {name:?} reachable by this \
+                    "github.com already has a repository named {} reachable by this \
                      account; `forge.publish` never adopts or overwrites an existing remote — \
                      pick another name, or attach to the existing repository with `forge link` \
-                     after setting the project's repo_url"
+                     after setting the project's repo_url",
+                    py_repr(name)
                 )));
             }
             other => other?,

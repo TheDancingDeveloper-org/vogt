@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::{Map, Value};
 
+use crate::core::py_repr;
 use crate::errors::VogtError;
 
 pub const USER_AGENT: &str = "vogt";
@@ -566,8 +567,9 @@ impl EngineClient {
         )?;
         if payload.is_null() {
             return Err(VogtError::NotFound(format!(
-                "the {} has no session {session_id:?}",
-                self.label
+                "the {} has no session {}",
+                self.label,
+                py_repr(session_id)
             )));
         }
         Ok(if payload.is_object() {
@@ -766,11 +768,14 @@ impl EngineClient {
         let said = engine_error_text(&text);
         match status {
             400 => Err(VogtError::InvalidRequest(
-                nonempty(&said).unwrap_or_else(|| format!("the {} refused the version {version:?}", self.label)),
+                nonempty(&said).unwrap_or_else(|| {
+                    format!("the {} refused the version {}", self.label, py_repr(version))
+                }),
             )),
             404 => Err(VogtError::NotFound(format!(
-                "the {} knows no agent CLI named {tool:?}",
-                self.label
+                "the {} knows no agent CLI named {}",
+                self.label,
+                py_repr(tool)
             ))),
             409 => Err(VogtError::Conflict(
                 nonempty(&said).unwrap_or_else(|| format!("{tool} {version} was not made current")),
