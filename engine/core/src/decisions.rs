@@ -708,17 +708,7 @@ fn py_literal(value: &Value) -> String {
 }
 
 fn py_quote(text: &str) -> String {
-    let escaped = text
-        .replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t");
-    if text.contains('\'') && !text.contains('"') {
-        format!("\"{escaped}\"")
-    } else {
-        format!("'{escaped}'")
-    }
+    crate::core::py_repr(text)
 }
 
 /// The work-item subject keys a PR observation says it implements. Empty for
@@ -3455,6 +3445,7 @@ fn python_pattern(pattern: &str) -> String {
     let mut class = false;
     let mut class_first = true;
     let mut class_prev = ' ';
+    let mut range_start = ' ';
     let mut class_range = false;
     let mut ignore_case = false;
     let mut group = 0;
@@ -3536,6 +3527,7 @@ fn python_pattern(pattern: &str) -> String {
             class = true;
             class_first = true;
             class_prev = ' ';
+            range_start = ' ';
             class_range = false;
             out.push(ch);
         } else if ch == ']' && class {
@@ -3558,10 +3550,11 @@ fn python_pattern(pattern: &str) -> String {
                 }
             }
             if opens_range {
+                range_start = class_prev;
                 class_range = true;
             }
             if class_range && ignore_case && ch != '-' {
-                out.push_str(&folded_range(class_prev, ch));
+                out.push_str(&folded_range(range_start, ch));
             }
             class_prev = ch;
             class_first = false;
@@ -4184,6 +4177,23 @@ mod activity_tests {
             ranged.contains("z"),
             "the range end was swallowed: {ranged}"
         );
+        // The fold spans the range's real start, not the dash that precedes the
+        // end, so [h-j] does not take in K, S or İ.
+        let narrow = python_pattern("(?i)[h-j]");
+        assert!(
+            !narrow.contains('\u{212a}'),
+            "the fold spanned the dash: {narrow}"
+        );
+    }
+
+    #[test]
+    fn a_quoted_string_matches_python_repr() {
+        // `py_quote` is Python's repr: an apostrophe inside double quotes is not
+        // escaped, and a control character is.
+        let quoted = py_display(&serde_json::json!(["it's"]));
+        assert_eq!(quoted, r#"["it's"]"#);
+        let control = py_display(&serde_json::json!(["a\u{000b}b"]));
+        assert_eq!(control, r#"['a\x0bb']"#);
     }
 }
 
