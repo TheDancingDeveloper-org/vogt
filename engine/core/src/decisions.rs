@@ -677,6 +677,29 @@ fn py_or(value: Option<&Value>, fallback: &str) -> String {
     }
 }
 
+/// `str()` of a value used as a summary, where a list or dict is rendered the
+/// way Python prints one: single quotes, a space after each comma, `True` and
+/// `None`, keys in insertion order.
+fn py_display(value: &Value) -> String {
+    match value {
+        Value::String(text) => format!("'{text}'"),
+        Value::Bool(flag) => if *flag { "True" } else { "False" }.to_string(),
+        Value::Null => "None".to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::Array(items) => {
+            let parts: Vec<String> = items.iter().map(py_display).collect();
+            format!("[{}]", parts.join(", "))
+        }
+        Value::Object(map) => {
+            let parts: Vec<String> = map
+                .iter()
+                .map(|(key, item)| format!("'{key}': {}", py_display(item)))
+                .collect();
+            format!("{{{}}}", parts.join(", "))
+        }
+    }
+}
+
 /// The work-item subject keys a PR observation says it implements. Empty for
 /// anything that is not a PR, or a PR that named no work — never a guess.
 pub fn implemented_targets(observation: &Observation) -> std::collections::BTreeSet<String> {
@@ -2595,6 +2618,87 @@ mod runtime_tests {
 
 use std::sync::LazyLock;
 
+/// Python's `\w`, one character wide so a look-behind stays fixed length: a
+/// letter or digit in any script, or an underscore, but never a combining mark.
+const PY_WORD: &str = r"\p{Alphabetic}|\d|_";
+/// Python's `\s`: Unicode whitespace plus the C0 controls U+001C to U+001F.
+const PY_SPACE: &str = r"[\s\x1c-\x1f]";
+
+/// Rewrite a Python pattern so the `regex` crate reads its classes the way
+/// Python does. Covers `\b`, `\w`, `\s`, `\S` and `\d`, which is everything the
+/// activity patterns use.
+fn python_pattern(pattern: &str) -> String {
+    let mut out = String::new();
+    let mut chars = pattern.chars();
+    let mut escaped = false;
+    #[allow(clippy::while_let_on_iterator)]
+    while let Some(ch) = chars.next() {
+        if escaped {
+            match ch {
+                'b' => out.push_str(&format!(
+                    r"(?:(?<!{PY_WORD})(?={PY_WORD})|(?<={PY_WORD})(?!{PY_WORD}))"
+                )),
+                'B' => out.push_str(&format!(
+                    r"(?:(?<!{PY_WORD})(?!{PY_WORD})|(?<={PY_WORD})(?={PY_WORD}))"
+                )),
+                'w' => out.push_str(&format!("(?:{PY_WORD})")),
+                's' => out.push_str(PY_SPACE),
+                'S' => out.push_str(&format!("(?:(?!{PY_SPACE}).)")),
+                'd' => out.push_str(r"\d"),
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            }
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// `re.sub` over a translated pattern: a `$1` in the replacement is the first
+/// group, and `$$` is a literal dollar.
+fn sub(pattern: &fancy_regex::Regex, replacement: &str, text: &str) -> String {
+    let mut out = String::new();
+    let mut cursor = 0;
+    for found in pattern.captures_iter(text).flatten() {
+        let whole = found.get(0).expect("match");
+        out.push_str(&text[cursor..whole.start()]);
+        let mut chars = replacement.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '$' {
+                match chars.peek() {
+                    Some('$') => {
+                        chars.next();
+                        out.push('$');
+                    }
+                    Some(digit) if digit.is_ascii_digit() => {
+                        let index = digit.to_digit(10).expect("digit") as usize;
+                        chars.next();
+                        if let Some(group) = found.get(index) {
+                            out.push_str(group.as_str());
+                        }
+                    }
+                    _ => out.push('$'),
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+        cursor = whole.end();
+    }
+    out.push_str(&text[cursor..]);
+    out
+}
+
+fn python_regex(pattern: &str) -> fancy_regex::Regex {
+    fancy_regex::Regex::new(&python_pattern(pattern)).expect("pattern")
+}
+
 pub const SUMMARY_LIMIT: usize = 300;
 pub const EXCERPT_HEAD: usize = 200;
 pub const EXCERPT_TAIL: usize = 200;
@@ -2606,12 +2710,10 @@ static PEM_BLOCK: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
     fancy_regex::Regex::new(r"(?s)-----BEGIN [A-Z0-9 ]+-----.*?(?:-----END [A-Z0-9 ]+-----|\z)")
         .expect("pattern")
 });
-static JWT_SHAPE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}")
-        .expect("pattern")
-});
-static TOKEN_SHAPES: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(concat!(
+static JWT_SHAPE: LazyLock<fancy_regex::Regex> =
+    LazyLock::new(|| python_regex(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}"));
+static TOKEN_SHAPES: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    fancy_regex::Regex::new(&python_pattern(concat!(
         r"(?:",
         r"\bgh[pousr]_[A-Za-z0-9]{20,}",
         r"|\bgithub_pat_[A-Za-z0-9_]{20,}",
@@ -2627,20 +2729,18 @@ static TOKEN_SHAPES: LazyLock<regex::Regex> = LazyLock::new(|| {
         r"|\b(?:pk|rk|sk)_(?:live|test)_[A-Za-z0-9]{16,}",
         r"|\bAGE-SECRET-KEY-1[0-9A-Z]{20,}",
         r")",
-    ))
+    )))
     .expect("pattern")
 });
-static AUTH_HEADER: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(
+static AUTH_HEADER: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    python_regex(
         "(?i)\\b((?:authorization|x-api-key|api-key|x-auth-token|private-token)\\s*[:=]\\s*(?:bearer\\s+|basic\\s+|token\\s+)?)[^\\s\"',;]+",
     )
-    .expect("pattern")
 });
-static BEARER_TOKEN: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}").expect("pattern")
-});
-static URL_USERINFO: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"(://)[^/\s:@]+:[^/\s@]+@").expect("pattern"));
+static BEARER_TOKEN: LazyLock<fancy_regex::Regex> =
+    LazyLock::new(|| python_regex(r"(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]{8,}"));
+static URL_USERINFO: LazyLock<fancy_regex::Regex> =
+    LazyLock::new(|| python_regex(r"(://)[^/\s:@]+:[^/\s@]+@"));
 
 const SECRET_NAME: &str = concat!(
     r"[A-Za-z0-9_.-]*(?:token|secret|passw(?:or)?d|passwd|pwd|api[_-]?key|apikey",
@@ -2648,26 +2748,26 @@ const SECRET_NAME: &str = concat!(
     r"|session[_-]?key|signing[_-]?key|webhook[_-]?url|dsn)[A-Za-z0-9_.-]*"
 );
 
-static JSON_PAIR: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(&format!(
+static JSON_PAIR: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    fancy_regex::Regex::new(&python_pattern(&format!(
         r#"(?i)("{SECRET_NAME}"\s*:\s*)("(?:[^"\\\n]|\\.)*"|[^\s,}}\]]+)"#
-    ))
+    )))
     .expect("pattern")
 });
-static FLAG_VALUE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(&format!(
+static FLAG_VALUE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    fancy_regex::Regex::new(&python_pattern(&format!(
         r#"(?i)(--?{SECRET_NAME}[ =])("[^"\n]*"|'[^'\n]*'|[^\s"']+)"#
-    ))
+    )))
     .expect("pattern")
 });
-static ASSIGNMENT: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(&format!(
+static ASSIGNMENT: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    fancy_regex::Regex::new(&python_pattern(&format!(
         r#"(?i)\b({SECRET_NAME})(\s*[=:]\s*)("[^"\n]*"|'[^'\n]*'|[^\s"',;\}}&]+)"#
-    ))
+    )))
     .expect("pattern")
 });
-static LONG_HEX: LazyLock<regex::Regex> =
-    LazyLock::new(|| regex::Regex::new(r"\b[A-Fa-f0-9]{48,}\b").expect("pattern"));
+static LONG_HEX: LazyLock<fancy_regex::Regex> =
+    LazyLock::new(|| python_regex(r"\b[A-Fa-f0-9]{48,}\b"));
 static LONG_BLOB: LazyLock<regex::Regex> =
     LazyLock::new(|| regex::Regex::new(r"[A-Za-z0-9+_=-]{32,}").expect("pattern"));
 
@@ -2677,33 +2777,25 @@ pub fn activity_redact(text: &str) -> String {
     if text.is_empty() {
         return String::new();
     }
-    let mut out = PEM_BLOCK.replace_all(text, "[REDACTED:pem]").into_owned();
-    out = JWT_SHAPE.replace_all(&out, "[REDACTED:jwt]").into_owned();
-    out = TOKEN_SHAPES
-        .replace_all(&out, "[REDACTED:token]")
-        .into_owned();
-    out = AUTH_HEADER
-        .replace_all(&out, format!("$1{REDACTED}"))
-        .into_owned();
-    out = BEARER_TOKEN
-        .replace_all(&out, format!("$1{REDACTED}"))
-        .into_owned();
-    out = URL_USERINFO.replace_all(&out, "$1[REDACTED]@").into_owned();
-    out = JSON_PAIR
-        .replace_all(&out, format!("$1\"{REDACTED}\""))
-        .into_owned();
-    out = FLAG_VALUE
-        .replace_all(&out, format!("$1{REDACTED}"))
-        .into_owned();
-    out = ASSIGNMENT
-        .replace_all(&out, format!("$1$2{REDACTED}"))
-        .into_owned();
-    out = LONG_HEX.replace_all(&out, REDACTED).into_owned();
-    LONG_BLOB
-        .replace_all(&out, |caps: &regex::Captures<'_>| {
-            activity_blob(caps.get(0).expect("match").as_str())
-        })
-        .into_owned()
+    let mut out = sub(&PEM_BLOCK, "[REDACTED:pem]", text);
+    out = sub(&JWT_SHAPE, "[REDACTED:jwt]", &out);
+    out = sub(&TOKEN_SHAPES, "[REDACTED:token]", &out);
+    out = sub(&AUTH_HEADER, &format!("$1{REDACTED}"), &out);
+    out = sub(&BEARER_TOKEN, &format!("$1{REDACTED}"), &out);
+    out = sub(&URL_USERINFO, "$1[REDACTED]@", &out);
+    out = sub(&JSON_PAIR, &format!("$1\"{REDACTED}\""), &out);
+    out = sub(&FLAG_VALUE, &format!("$1{REDACTED}"), &out);
+    out = sub(&ASSIGNMENT, &format!("$1$2{REDACTED}"), &out);
+    out = sub(&LONG_HEX, REDACTED, &out);
+    let mut kept = String::new();
+    let mut cursor = 0;
+    for found in LONG_BLOB.find_iter(&out) {
+        kept.push_str(&out[cursor..found.start()]);
+        kept.push_str(&activity_blob(found.as_str()));
+        cursor = found.end();
+    }
+    kept.push_str(&out[cursor..]);
+    kept
 }
 
 /// A long mixed-case alphanumeric with a digit is random by construction. A
@@ -2719,8 +2811,8 @@ fn activity_blob(text: &str) -> String {
     }
 }
 
-static DUMP_COMMAND: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(concat!(
+static DUMP_COMMAND: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    python_regex(concat!(
         r"(?i)\.config\.environment|\bconfig\.environment\b|\bprintenv\b",
         r"|(?:^|[;&|(]\s*|\bsudo\s+)env\s*(?:$|[;&|)])|\bdeclare\s+-x\b|\bexport\s+-p\b",
         r"|\bkubectl\s+config\s+view|kube/?config\b|\bk3s\.yaml\b",
@@ -2728,32 +2820,26 @@ static DUMP_COMMAND: LazyLock<regex::Regex> = LazyLock::new(|| {
         r"|\binfisical\s+(?:secrets|export|run)\b|\bsecrets?\s+(?:get|export|list|show)\b",
         r"|\bGetStack\b|\bGetVariable\b|\bListVariables\b|\bvault\s+(?:kv\s+)?read\b",
     ))
-    .expect("pattern")
 });
 static KUBECONFIG_SHAPE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
-    fancy_regex::Regex::new(concat!(
+    python_regex(concat!(
         r"(?is)client-(?:key|certificate)-data\s*:|certificate-authority-data\s*:",
         r"|\bkind\s*:\s*Config\b[\s\S]*\busers\s*:",
     ))
-    .expect("pattern")
 });
-static ENV_LINE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(r"(?m)^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=\S").expect("pattern")
-});
+static ENV_LINE: LazyLock<fancy_regex::Regex> =
+    LazyLock::new(|| python_regex(r"(?m)^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=\S"));
 
 pub fn dumps_secrets(command: &str) -> bool {
-    DUMP_COMMAND.is_match(command)
+    DUMP_COMMAND.is_match(command).unwrap_or(true)
 }
 
 pub fn looks_like_dump(output: &str) -> bool {
-    if KUBECONFIG_SHAPE.is_match(output).unwrap_or(false) {
+    if KUBECONFIG_SHAPE.is_match(output).unwrap_or(true) {
         return true;
     }
-    ENV_LINE
-        .find_iter(output)
-        .filter(|found| found.start() < SCAN_WINDOW)
-        .count()
-        >= 3
+    let window: String = output.chars().take(SCAN_WINDOW).collect();
+    ENV_LINE.find_iter(&window).flatten().count() >= 3
 }
 
 fn one_line(text: &str) -> String {
@@ -2769,7 +2855,7 @@ fn cut(text: &str, limit: usize) -> String {
 }
 
 pub fn excerpt(output: &str) -> String {
-    if output.len() <= 2 * SCAN_WINDOW {
+    if output.chars().count() <= 2 * SCAN_WINDOW {
         let cleaned = one_line(&activity_redact(output));
         if cleaned.chars().count() <= EXCERPT_HEAD + EXCERPT_TAIL {
             return cleaned;
@@ -2785,12 +2871,20 @@ pub fn excerpt(output: &str) -> String {
             .collect();
         return format!("{head} … {tail}");
     }
-    let head: String = one_line(&activity_redact(&output[..SCAN_WINDOW]))
+    let head_src: String = output.chars().take(SCAN_WINDOW).collect();
+    let head: String = one_line(&activity_redact(&head_src))
         .chars()
         .take(EXCERPT_HEAD)
         .collect();
-    let tail_src = one_line(&activity_redact(&output[output.len() - SCAN_WINDOW..]));
-    let tail: String = tail_src
+    let tail_src: String = output
+        .chars()
+        .rev()
+        .take(SCAN_WINDOW)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    let tail: String = one_line(&activity_redact(&tail_src))
         .chars()
         .rev()
         .take(EXCERPT_TAIL)
@@ -2820,28 +2914,25 @@ pub fn summarize_input(call_input: &serde_json::Value) -> String {
     let text = match call_input {
         serde_json::Value::String(text) => text.clone(),
         serde_json::Value::Object(map) => {
-            let picked: Vec<&str> = SUMMARY_FIELDS
+            let picked: Vec<String> = SUMMARY_FIELDS
                 .iter()
-                .filter_map(|key| {
-                    map.get(*key)
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|text| !text.is_empty())
+                .filter_map(|key| match map.get(*key) {
+                    Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(text)) if text.is_empty() => None,
+                    Some(serde_json::Value::String(text)) => Some(text.clone()),
+                    Some(value) => Some(py_display(value)),
+                    None => None,
                 })
                 .collect();
             if picked.is_empty() {
-                serde_json::to_string(call_input).unwrap_or_default()
+                python_json_dumps(call_input, true)
             } else {
                 picked.into_iter().take(2).collect::<Vec<_>>().join(" ")
             }
         }
-        serde_json::Value::Array(parts) => parts
-            .iter()
-            .map(|part| match part {
-                serde_json::Value::String(text) => text.clone(),
-                other => other.to_string(),
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
+        serde_json::Value::Array(parts) => {
+            parts.iter().map(py_display).collect::<Vec<_>>().join(" ")
+        }
         serde_json::Value::Null => String::new(),
         other => other.to_string(),
     };
@@ -2890,11 +2981,11 @@ pub const DEFAULT_SERVICES: &[(&str, &str)] = &[
 ];
 
 pub struct ServiceMatcher {
-    patterns: Vec<(String, regex::Regex)>,
+    patterns: Vec<(String, fancy_regex::Regex)>,
 }
 
 impl ServiceMatcher {
-    pub fn build(overrides: &[(&str, &str)]) -> Self {
+    pub fn build(overrides: &[(&str, &str)]) -> Result<Self, String> {
         let mut merged: Vec<(String, String)> = DEFAULT_SERVICES
             .iter()
             .map(|(name, pattern)| ((*name).to_string(), (*pattern).to_string()))
@@ -2909,32 +3000,27 @@ impl ServiceMatcher {
             }
         }
         merged.sort_by(|left, right| left.0.cmp(&right.0));
-        Self {
-            patterns: merged
-                .into_iter()
-                .map(|(name, pattern)| {
-                    (
-                        name,
-                        regex::RegexBuilder::new(&pattern)
-                            .case_insensitive(true)
-                            .build()
-                            .expect("service pattern"),
-                    )
-                })
-                .collect(),
+        let mut patterns = Vec::new();
+        for (name, pattern) in merged {
+            patterns.push((
+                name,
+                fancy_regex::Regex::new(&python_pattern(&format!("(?i){pattern}")))
+                    .map_err(|error| error.to_string())?,
+            ));
         }
+        Ok(Self { patterns })
     }
 
     pub fn tags(&self, tool: &str, call_input: &serde_json::Value) -> Vec<String> {
         let text = match call_input {
             serde_json::Value::String(text) => text.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
+            other => python_json_dumps(other, true),
         };
         let window: String = text.chars().take(4 * SCAN_WINDOW).collect();
         let haystack = format!("{tool} {window}");
         self.patterns
             .iter()
-            .filter(|(_, pattern)| pattern.is_match(&haystack))
+            .filter(|(_, pattern)| pattern.is_match(&haystack).unwrap_or(true))
             .map(|(name, _)| name.clone())
             .collect()
     }
@@ -2950,22 +3036,20 @@ const SHELL_TOOLS: &[&str] = &[
 ];
 const FAILURE_WINDOW: usize = 1_000;
 
-static EXIT_STATUS: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(concat!(
+static EXIT_STATUS: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    python_regex(concat!(
         r"(?im)^\s*(?:Script failed\b|Process exited with code [1-9]",
         r"|Exit code:?\s*[1-9]|exit status [1-9]|Command failed with exit code [1-9])",
     ))
-    .expect("pattern")
 });
-static FAILURE_LINE: LazyLock<regex::Regex> = LazyLock::new(|| {
-    regex::Regex::new(concat!(
+static FAILURE_LINE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
+    python_regex(concat!(
         r"(?im)^\s*(?:error\b|fatal:|ERROR\b|Error:|panic:",
         r"|Traceback \(most recent call last\)",
         r"|.*\bcommand not found\b|.*\bpermission denied\b|.*\bNo such file or directory\b",
         r"|.*\b(?:401 Unauthorized|403 Forbidden|HTTP (?:401|403|404|500|502|503|504))\b",
         r"|.*\bconnection refused\b|.*\b(?:timed out|deadline exceeded)\b|<tool_use_error>)",
     ))
-    .expect("pattern")
 });
 
 pub fn is_error(output: &str, flagged: Option<bool>, tool: &str) -> bool {
@@ -2973,20 +3057,20 @@ pub fn is_error(output: &str, flagged: Option<bool>, tool: &str) -> bool {
         return true;
     }
     let window: String = output.chars().take(FAILURE_WINDOW).collect();
-    if EXIT_STATUS.is_match(&window) {
+    if EXIT_STATUS.is_match(&window).unwrap_or(true) {
         return true;
     }
     if !SHELL_TOOLS.contains(&tool) {
         return false;
     }
-    FAILURE_LINE.is_match(&window)
+    FAILURE_LINE.is_match(&window).unwrap_or(true)
 }
 
 pub fn result_excerpt(output: &str, error: bool, withheld: bool) -> Option<String> {
     if !error {
         return None;
     }
-    if withheld || looks_like_dump(output) {
+    if withheld || looks_like_dump(&output.chars().take(2 * SCAN_WINDOW).collect::<String>()) {
         return Some(WITHHELD.to_string());
     }
     Some(excerpt(output))
@@ -3073,7 +3157,31 @@ mod activity_tests {
             ""
         ));
         let tags = ServiceMatcher::build(&[])
+            .expect("default patterns")
             .tags("Bash", &serde_json::json!({"command": "gh pr view 1"}));
         assert!(tags.contains(&"github".to_string()), "{tags:?}");
+
+        // A combining mark is a boundary in Python, so the value is still redacted.
+        let marked = format!("x\u{0301}password={}", "hunter2");
+        assert!(!activity_redact(&marked).contains("hunter2"));
+        // The env window is the first 8192 characters, and a line only counts
+        // when its match ends inside it. At 4100 accented characters the first
+        // line starts past the window, so only two count and nothing is withheld.
+        assert!(!looks_like_dump(&format!("{}{env}", "é".repeat(4100))));
+        assert!(looks_like_dump(&format!("{env}{}", "é".repeat(4100))));
+
+        // The window is counted in characters: a multi-byte character at byte
+        // 8192 must not panic, and must not change which half is kept.
+        let long = format!("Error: {}", "é".repeat(9_000));
+        let excerpted = excerpt(&long);
+        assert!(excerpted.starts_with("Error:"));
+        assert!(excerpted.contains('é'));
+
+        let summary = summarize_input(&serde_json::json!({"command": ["bash", "-lc", "ls"]}));
+        assert_eq!(summary, "['bash', '-lc', 'ls']");
+        assert_eq!(
+            summarize_input(&serde_json::json!({"pattern": true})),
+            "True"
+        );
     }
 }
