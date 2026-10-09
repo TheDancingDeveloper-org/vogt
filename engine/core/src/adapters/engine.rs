@@ -1561,7 +1561,7 @@ fn nonempty(text: &str) -> Option<String> {
 /// both real callers.
 pub mod http1 {
     use std::io::{Read, Write};
-    use std::net::TcpStream;
+    use std::net::{TcpStream, ToSocketAddrs};
     use std::time::Duration;
 
     use super::BTreeMap;
@@ -1847,7 +1847,10 @@ pub mod http1 {
         limit: usize,
     ) -> Result<(u16, Vec<u8>), String> {
         let (host, port, path) = split_http_url(url)?;
-        let mut stream = TcpStream::connect((host, port)).map_err(|error| error.to_string())?;
+        // `connect` waits for the OS default, which is minutes on a blackholed
+        // address. Python's urllib bounds the connect by the same timeout as the
+        // request, so each resolved address gets that budget and no more.
+        let mut stream = connect_within(host, port, timeout)?;
         stream.set_read_timeout(Some(timeout)).ok();
         stream.set_write_timeout(Some(timeout)).ok();
         // The default port stays off the Host header; any other port is part of
@@ -1876,6 +1879,24 @@ pub mod http1 {
             .read_to_end(&mut raw)
             .map_err(|error| error.to_string())?;
         parse_response(&raw)
+    }
+
+    /// Connect to the first address that answers, spending at most `timeout` on
+    /// each. A host that resolves to several addresses tries the next when one
+    /// refuses or times out, which is what `TcpStream::connect` does, but with a
+    /// bound on the wait.
+    fn connect_within(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
+        let addresses = (host, port)
+            .to_socket_addrs()
+            .map_err(|error| error.to_string())?;
+        let mut last = String::from("no address resolved");
+        for address in addresses {
+            match TcpStream::connect_timeout(&address, timeout) {
+                Ok(stream) => return Ok(stream),
+                Err(error) => last = error.to_string(),
+            }
+        }
+        Err(last)
     }
 
     fn split_http_url(url: &str) -> Result<(&str, u16, String), String> {
@@ -2114,5 +2135,22 @@ mod tests {
     #[test]
     fn no_engine_configured_is_none_not_an_error() {
         assert!(EngineClient::from_config(Some("  "), None).is_none());
+    }
+
+    #[test]
+    fn a_blackholed_host_fails_within_the_timeout() {
+        // 192.0.2.1 is TEST-NET-1, which is not routable, so a connect waits
+        // for the OS default unless the client bounds it. The budget is short
+        // so the test stays quick; the production default is the same call.
+        let mut client = EngineClient::new("http://192.0.2.1:9", None, None);
+        client.timeout = Duration::from_millis(500);
+        let started = std::time::Instant::now();
+        let error = client.healthz().unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the connect waited {:?}, past the timeout",
+            started.elapsed()
+        );
+        assert_eq!(error.code(), "engine_unavailable");
     }
 }
