@@ -30,6 +30,9 @@ pub struct McpHttpResponse {
     pub status: u16,
     /// `None` for a notification, whose 202 carries no body.
     pub body: Option<Value>,
+    /// The authorization to record, set on a `tools/call` that reached an
+    /// operation. The front door writes it; the route only decides it.
+    pub decision: Option<AuthDecisionRecord>,
 }
 
 /// Answer one request body with the streamable-HTTP envelope.
@@ -60,11 +63,25 @@ pub fn respond<G: ToolGrant>(
     registry: &crate::registry::OperationRegistry,
     grant: &G,
 ) -> McpHttpResponse {
-    match Dispatcher::new(registry, grant, McpTransport::Http).handle(message) {
-        Some(response) => json_response(response),
+    let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Http);
+    let decision = message
+        .get("method")
+        .and_then(Value::as_str)
+        .filter(|method| *method == "tools/call")
+        .and_then(|_| message.get("params"))
+        .and_then(Value::as_object)
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str)
+        .and_then(|name| authorize(registry, grant, name));
+    match dispatcher.handle(message) {
+        Some(response) => McpHttpResponse {
+            decision,
+            ..json_response(response)
+        },
         None => McpHttpResponse {
             status: ACCEPTED,
             body: None,
+            decision: None,
         },
     }
 }
@@ -73,6 +90,7 @@ fn json_response(body: Value) -> McpHttpResponse {
     McpHttpResponse {
         status: OK,
         body: Some(body),
+        decision: None,
     }
 }
 
@@ -138,11 +156,83 @@ impl ToolGrant for ScopeGrant {
         registry: &crate::registry::OperationRegistry,
         operation: &crate::registry::Operation,
     ) -> bool {
-        if !super::framing::exposed_over_mcp(registry, operation) {
-            return false;
+        super::framing::exposed_over_mcp(registry, operation) && self.permitted(operation)
+    }
+
+    fn denial(&self, operation: &crate::registry::Operation) -> String {
+        if operation.mutating && !self.writes_enabled {
+            format!(
+                "{} is a write, and this server was started read-only",
+                operation.name
+            )
+        } else {
+            let held = self
+                .scopes
+                .iter()
+                .map(|scope| scope.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{} requires the {} scope; this token holds {}",
+                operation.name,
+                super::framing::python_repr(operation.scope.as_str()),
+                if held.is_empty() { "nothing" } else { &held }
+            )
         }
+    }
+}
+
+impl ScopeGrant {
+    /// The scope and the writes gate, without the transport exclusion. An
+    /// operation the transport does not carry is an unknown tool, not a
+    /// refusal, so the two checks stay separate.
+    fn permitted(&self, operation: &crate::registry::Operation) -> bool {
         self.effective().contains(&operation.scope) && (!operation.mutating || self.writes_enabled)
     }
+}
+
+/// One recorded authorization, matching the row `authorize()` writes.
+///
+/// `services/auth.py` records an allow or a deny for every `tools/call` that
+/// reaches a real operation, with transport `mcp-http`, before the call runs.
+/// The route has no store of its own, so it hands the decision to whoever
+/// mounted it; dropping it would leave the audit trail short exactly where a
+/// refusal is most worth recording.
+pub struct AuthDecisionRecord {
+    pub decision: &'static str,
+    pub reason_code: &'static str,
+    pub operation: String,
+    pub scope: String,
+    pub transport: &'static str,
+}
+
+pub const MCP_HTTP_TRANSPORT: &str = "mcp-http";
+
+/// The decision `authorize()` would record for this call, or `None` when the
+/// call never reached an operation (bad arguments, an unknown tool).
+pub fn authorize<G: ToolGrant>(
+    registry: &crate::registry::OperationRegistry,
+    grant: &G,
+    name: &str,
+) -> Option<AuthDecisionRecord> {
+    let operation = registry.by_mcp_tool(name).ok()?;
+    if !super::framing::exposed_over_mcp(registry, operation) {
+        return None;
+    }
+    let allowed = grant.allows(registry, operation);
+    Some(AuthDecisionRecord {
+        decision: if allowed { "allow" } else { "deny" },
+        reason_code: if allowed {
+            "token_valid"
+        } else if operation.mutating {
+            "writes_disabled"
+        } else {
+            "missing_scope"
+        },
+        operation: operation.name.to_owned(),
+        scope: operation.scope.as_str().to_owned(),
+        transport: MCP_HTTP_TRANSPORT,
+    })
 }
 
 #[cfg(test)]
@@ -262,9 +352,68 @@ mod tests {
         let body = response.body.unwrap();
         assert_eq!(response.status, OK);
         assert_eq!(body["result"]["isError"], true);
-        assert!(body["result"]["content"][0]["text"]
+        let text = body["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("work.create is a write, and this server was started read-only"),
+            "{text}"
+        );
+        let decision = response.decision.unwrap();
+        assert_eq!(decision.decision, "deny");
+        assert_eq!(decision.reason_code, "writes_disabled");
+        assert_eq!(decision.transport, "mcp-http");
+    }
+
+    #[test]
+    fn a_missing_scope_names_what_the_token_holds() {
+        let response = respond(
+            &message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "work_list", "arguments": {}}
+            })),
+            &registry(),
+            &ScopeGrant::new(vec![], true),
+        );
+        let text = response.body.unwrap()["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
-            .starts_with("forbidden"));
+            .to_owned();
+        assert!(text.contains("requires the 'read' scope"), "{text}");
+        assert!(text.contains("holds nothing"), "{text}");
+        assert_eq!(response.decision.unwrap().reason_code, "missing_scope");
+    }
+
+    #[test]
+    fn an_allowed_call_records_an_allow() {
+        let response = respond(
+            &message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "work_list"}
+            })),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], false),
+        );
+        let decision = response.decision.unwrap();
+        assert_eq!(decision.decision, "allow");
+        assert_eq!(decision.reason_code, "token_valid");
+        assert_eq!(decision.operation, "work.list");
+    }
+
+    #[test]
+    fn an_unknown_tool_is_a_protocol_error_and_records_nothing() {
+        let response = respond(
+            &message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "session_token"}
+            })),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Admin], true),
+        );
+        let body = response.body.unwrap();
+        assert_eq!(body["error"]["code"], -32601);
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("'session_token'"));
+        assert!(response.decision.is_none());
     }
 }

@@ -63,6 +63,16 @@ pub struct ServeReport {
 /// absent rather than present and refusing.
 pub trait ToolGrant {
     fn allows(&self, registry: &OperationRegistry, operation: &Operation) -> bool;
+
+    /// Why a call was refused, in the words the caller sees.
+    ///
+    /// The default is the stdio path, which never reaches this: it grants
+    /// everything. The HTTP grant names the cause, because "forbidden" tells a
+    /// model nothing it can act on.
+    fn denial(&self, operation: &Operation) -> String {
+        let _ = operation;
+        "forbidden".to_owned()
+    }
 }
 
 /// Every MCP-exposed operation, which is what a local stdio session may do.
@@ -274,7 +284,10 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
             }
         };
         if !self.grant.allows(self.registry, operation) {
-            return result(Some(message_id), tool_error("forbidden", "forbidden"));
+            return result(
+                Some(message_id),
+                tool_error("forbidden", &self.grant.denial(operation)),
+            );
         }
         // The service behind nearly every operation is not ported yet, and
         // saying so is a failed tool result the model can read — never a
@@ -330,7 +343,7 @@ fn json_falsy(value: &Value) -> bool {
 }
 
 /// Python's `repr` for a string: single quotes, with the usual escapes.
-fn python_repr(text: &str) -> String {
+pub(super) fn python_repr(text: &str) -> String {
     let mut out = String::from("'");
     for ch in text.chars() {
         match ch {
