@@ -18,10 +18,19 @@
 #     is comparable.
 #   observed_at, last_swept_at, oldest_relevant_sweep, age_seconds — all read
 #     from ctx.clock, which the step clock fixes.
+#
+# The HTTP run dumps the declared store. The background sweeps write
+# `sweep.completed` rows into its `events` table, and `events.seq` is
+# AUTOINCREMENT, so a sweep between two declared writes shifts every later seq
+# (WI-1152). The dump query excludes those rows, which leaves the sequences the
+# script itself produced. The rest of the declared tables — audit,
+# auth_decisions, tokens, events, actors, labels — are fixed by the hooks and
+# compare verbatim. The observed store is not dumped: it holds the sweeps
+# themselves, which drift the same way.
 why = "collector evidence names the machine; everything the hooks make deterministic compares verbatim"
 keys = [
   "collectors", "suppression", "evidence_snapshot", "evidence_observation_id",
-  "secret", "data_dir",
+  "secret", "token_hash", "data_dir",
 ]
 
 [paths]

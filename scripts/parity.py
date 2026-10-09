@@ -217,9 +217,17 @@ def _dump(data: Path) -> dict[str, Any]:
         ]
         dumped: dict[str, Any] = {}
         for table in tables:
+            # `events.seq` is AUTOINCREMENT and never reused, so a background
+            # sweep that lands between two declared writes shifts every later
+            # seq (WI-1152). Drop those rows in the query rather than after
+            # reading them, so the sequences that remain are the ones the
+            # script itself produced.
+            where = ""
+            if table == "events":
+                where = " WHERE kind != 'sweep.completed'"
             rows = [
                 _normalise(dict(row), data.parent, data)
-                for row in conn.execute(f"SELECT * FROM {table}")
+                for row in conn.execute(f"SELECT * FROM {table}{where}")
             ]
             if rows:
                 dumped[table] = rows
@@ -289,7 +297,7 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
         server = subprocess.Popen(
-            [binary, "--data-dir", str(data), "serve", "--host", "127.0.0.1", "--port", str(port), "--no-auth"],
+            [binary, "--data-dir", str(data), "serve", "--host", "127.0.0.1", "--port", str(port)],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -298,19 +306,35 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         try:
             base = f"http://127.0.0.1:{port}"
             _wait_until(f"{base}/health/live", server)
+            token: str | None = None
             for step in steps:
                 spec = step["http"]
+                headers = dict(spec.get("headers") or {})
+                if spec.get("auth") == "issued":
+                    if token is None:
+                        raise SystemExit(f"{step['operation']} needs an issued token")
+                    headers["Authorization"] = f"Bearer {token}"
+                body = spec.get("body")
+                payload_bytes = json.dumps(body).encode() if body is not None else None
+                if payload_bytes is not None:
+                    headers.setdefault("Content-Type", "application/json")
                 request = urllib.request.Request(
                     f"{base}{spec['path']}",
+                    data=payload_bytes,
                     method=spec["method"],
-                    headers=spec.get("headers") or {},
+                    headers=headers,
                 )
                 try:
                     with urllib.request.urlopen(request) as response:
                         status, payload = response.status, response.read()
                 except urllib.error.HTTPError as error:
                     status, payload = error.code, error.read()
-                result: Any = json.loads(payload) if payload else None
+                result: Any = None
+                if payload:
+                    try:
+                        result = json.loads(payload)
+                    except json.JSONDecodeError:
+                        result = {"unparseable": payload.decode(errors="replace")[:300]}
                 recorded.append(
                     {
                         "operation": step["operation"],
@@ -320,6 +344,13 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                         ),
                     }
                 )
+                if spec.get("capture") == "token":
+                    token = result["secret"]
+            # The declared tables only. The background sweeps write `sweep.completed`
+            # events whose ids change between runs (WI-1152), so those rows are
+            # dropped; everything else in the declared store compares verbatim.
+            dumped = _normalise(_dump(data), Path(scratch), data)["declared"]
+            recorded.append({"operation": "dump", "result": dumped})
         finally:
             server.terminate()
             server.wait(timeout=10)

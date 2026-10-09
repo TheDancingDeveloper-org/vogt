@@ -299,6 +299,84 @@
    "expect": {
     "exit": 1
    }
+  },
+  {
+   "operation": "work.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "work.list",
+   "params": {
+    "project": "missing"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "backlog",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "backlog",
+   "params": {
+    "project": "missing"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
+   "operation": "install.bootstrap",
+   "http": {
+    "method": "POST",
+    "path": "/api/install/bootstrap",
+    "body": {"display_name": "Ada Lovelace"},
+    "capture": "token"
+   }
+  },
+  {
+   "operation": "label.create",
+   "http": {
+    "method": "POST",
+    "path": "/api/labels",
+    "auth": "issued",
+    "body": {"name": "bug", "reason": "seed"}
+   }
+  },
+  {
+   "operation": "token.issue",
+   "http": {
+    "method": "POST",
+    "path": "/api/tokens",
+    "auth": "issued",
+    "body": {"actor": "human:ada-lovelace", "name": "reader", "scopes": "read", "reason": "a read token"},
+    "capture": "token"
+   }
+  },
+  {
+   "operation": "label.create",
+   "http": {
+    "method": "POST",
+    "path": "/api/labels",
+    "auth": "issued",
+    "body": {"name": "chore", "reason": "should be refused"}
+   }
+  },
+  {
+   "operation": "auth.logout",
+   "http": {
+    "method": "POST",
+    "path": "/api/auth/logout",
+    "auth": "issued",
+    "body": {"reason": "done"}
+   }
   }
  ]
 }

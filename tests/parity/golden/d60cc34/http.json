@@ -32,7 +32,7 @@
     "operation": "http.connection_info",
     "result": {
       "api_path": "/api",
-      "authentication": "none (loopback)",
+      "authentication": "bearer token",
       "health_path": "/health/ready",
       "mcp_path": "/mcp",
       "name": "vogt",
@@ -46,5 +46,499 @@
       "writes_enabled": true
     },
     "status": 200
+  },
+  {
+    "operation": "install.bootstrap",
+    "result": {
+      "actor": {
+        "created_at": "2026-01-02T03:04:06Z",
+        "disabled": false,
+        "display_name": "Ada Lovelace",
+        "id": "act_0002",
+        "identity_ref": "human:ada-lovelace",
+        "kind": "human"
+      },
+      "secret": "<volatile>",
+      "token": {
+        "actor_id": "act_0002",
+        "actor_identity_ref": "human:ada-lovelace",
+        "created_at": "2026-01-02T03:04:05Z",
+        "expires_at": null,
+        "id": "tok_0001",
+        "kind": "api",
+        "last_used_at": null,
+        "name": "first-run browser token",
+        "revoked_at": null,
+        "revoked_reason": null,
+        "scopes": [
+          "admin"
+        ]
+      },
+      "username": null,
+      "warning": "This is the only time the secret is shown. It is not stored and cannot be recovered \u2014 losing it means issuing another over the loopback surface."
+    },
+    "status": 200
+  },
+  {
+    "operation": "label.create",
+    "result": {
+      "label": {
+        "color": null,
+        "created_at": "2026-01-02T03:04:06Z",
+        "id": "lbl_0001",
+        "name": "bug"
+      }
+    },
+    "status": 200
+  },
+  {
+    "operation": "token.issue",
+    "result": {
+      "secret": "<volatile>",
+      "token": {
+        "actor_id": "act_0002",
+        "actor_identity_ref": "human:ada-lovelace",
+        "created_at": "2026-01-02T03:04:06Z",
+        "expires_at": null,
+        "id": "tok_0002",
+        "kind": "api",
+        "last_used_at": null,
+        "name": "reader",
+        "revoked_at": null,
+        "revoked_reason": null,
+        "scopes": [
+          "read"
+        ]
+      },
+      "warning": "This is the only time the secret is shown. Store it in a file and point VOGT_TOKEN_FILE at it \u2014 never in argv or a URL."
+    },
+    "status": 200
+  },
+  {
+    "operation": "label.create",
+    "result": {
+      "error": {
+        "code": "forbidden",
+        "message": "label.create requires the 'work.write' scope; this token holds read"
+      }
+    },
+    "status": 403
+  },
+  {
+    "operation": "auth.logout",
+    "result": {
+      "revoked": true,
+      "token": {
+        "actor_id": "act_0002",
+        "actor_identity_ref": "human:ada-lovelace",
+        "created_at": "2026-01-02T03:04:06Z",
+        "expires_at": null,
+        "id": "tok_0002",
+        "kind": "api",
+        "last_used_at": "2026-01-02T03:04:06Z",
+        "name": "reader",
+        "revoked_at": "2026-01-02T03:04:06Z",
+        "revoked_reason": "done",
+        "scopes": [
+          "read"
+        ]
+      }
+    },
+    "status": 200
+  },
+  {
+    "operation": "dump",
+    "result": {
+      "actors": [
+        {
+          "created_at": "2026-01-02T03:04:07+00:00",
+          "disabled": 0,
+          "display_name": "parity",
+          "id": "act_0001",
+          "identity_ref": "local:parity",
+          "kind": "human"
+        },
+        {
+          "created_at": "2026-01-02T03:04:06+00:00",
+          "disabled": 0,
+          "display_name": "Ada Lovelace",
+          "id": "act_0002",
+          "identity_ref": "human:ada-lovelace",
+          "kind": "human"
+        }
+      ],
+      "audit": [
+        {
+          "actor_id": "act_0001",
+          "at": "2026-01-02T03:04:07+00:00",
+          "entity_id": "ins_0001",
+          "entity_kind": "instance",
+          "id": "aud_0001",
+          "operation": "instance.init",
+          "payload_digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "reason": "instance bootstrap",
+          "revision": 0,
+          "txn_id": "txn_0001"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:06+00:00",
+          "entity_id": "act_0002",
+          "entity_kind": "actor",
+          "id": "aud_0002",
+          "operation": "actor.auto_register",
+          "payload_digest": "sha256:f048663fe2132cd9b91019018cfef9e1445f0ee3e9f8d9989dffddc1a0c0eda9",
+          "reason": "first authenticated use by human:ada-lovelace; auto-registered so the write it accompanies can be attributed",
+          "revision": 1,
+          "txn_id": "txn_0002"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:07+00:00",
+          "entity_id": "tok_0001",
+          "entity_kind": "token",
+          "id": "aud_0003",
+          "operation": "install.bootstrap",
+          "payload_digest": "sha256:b19d0ae7d972de7a7d247d64fc4db90184619cd1db18a41a4d0e6b2a31a72d32",
+          "reason": "first-run install bootstrap for human:ada-lovelace",
+          "revision": 1,
+          "txn_id": "txn_0002"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:07+00:00",
+          "entity_id": "lbl_0001",
+          "entity_kind": "label",
+          "id": "aud_0004",
+          "operation": "label.create",
+          "payload_digest": "sha256:1b0a972c9944e759355152203a12fb36104f692b1f1911217107dcd4f75b8ccd",
+          "reason": "seed",
+          "revision": 2,
+          "txn_id": "txn_0003"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:07+00:00",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0005",
+          "operation": "token.issue",
+          "payload_digest": "sha256:1efafbf3c435f850162b7fdb5f1a1f97b97eb7bae0490f291c1731c7a390ee5a",
+          "reason": "a read token",
+          "revision": 3,
+          "txn_id": "txn_0004"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:07+00:00",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "id": "aud_0006",
+          "operation": "auth.logout",
+          "payload_digest": "sha256:77f2ce31482b0061e1a20b86d2de25c0b43a6eaff6c025be826208b0dec15fe3",
+          "reason": "done",
+          "revision": 4,
+          "txn_id": "txn_0005"
+        }
+      ],
+      "auth_decisions": [
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0001",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "label.create",
+          "reason_code": "token_valid",
+          "scope": "work.write",
+          "token_id": "tok_0001",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0002",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "token.issue",
+          "reason_code": "token_valid",
+          "scope": "admin",
+          "token_id": "tok_0001",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "deny",
+          "detail": null,
+          "id": "aut_0003",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "label.create",
+          "reason_code": "missing_scope",
+          "scope": "work.write",
+          "token_id": "tok_0002",
+          "transport": "http"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:05+00:00",
+          "decision": "allow",
+          "detail": null,
+          "id": "aut_0004",
+          "identity_ref": "human:ada-lovelace",
+          "operation": "auth.logout",
+          "reason_code": "token_valid",
+          "scope": "read",
+          "token_id": "tok_0002",
+          "transport": "http"
+        }
+      ],
+      "events": [
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:06+00:00",
+          "audit_id": "aud_0002",
+          "entity_id": "act_0002",
+          "entity_kind": "actor",
+          "kind": "actor.auto_register",
+          "seq": 1,
+          "summary": "{\"identity_ref\": \"human:ada-lovelace\", \"kind\": \"human\"}"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:07+00:00",
+          "audit_id": "aud_0003",
+          "entity_id": "tok_0001",
+          "entity_kind": "token",
+          "kind": "install.bootstrapped",
+          "seq": 2,
+          "summary": "{\"actor\": \"human:ada-lovelace\", \"scopes\": [\"admin\"]}"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:07+00:00",
+          "audit_id": "aud_0004",
+          "entity_id": "lbl_0001",
+          "entity_kind": "label",
+          "kind": "label.created",
+          "seq": 3,
+          "summary": "{\"name\": \"bug\"}"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:07+00:00",
+          "audit_id": "aud_0005",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "token.issued",
+          "seq": 4,
+          "summary": "{\"actor\": \"human:ada-lovelace\", \"scopes\": [\"read\"]}"
+        },
+        {
+          "actor_id": "act_0002",
+          "at": "2026-01-02T03:04:07+00:00",
+          "audit_id": "aud_0006",
+          "entity_id": "tok_0002",
+          "entity_kind": "token",
+          "kind": "auth.session_closed",
+          "seq": 5,
+          "summary": "{\"actor\": \"human:ada-lovelace\"}"
+        }
+      ],
+      "install_latch": [
+        {
+          "closed_at": "2026-01-02T03:04:05+00:00",
+          "id": 1,
+          "reason": "a person holds a credential"
+        }
+      ],
+      "labels": [
+        {
+          "color": null,
+          "created_at": "2026-01-02T03:04:06+00:00",
+          "id": "lbl_0001",
+          "name": "bug"
+        }
+      ],
+      "meta": [
+        {
+          "key": "instance_id",
+          "value": "ins_0001"
+        },
+        {
+          "key": "revision",
+          "value": "4"
+        },
+        {
+          "key": "work_ref_seq",
+          "value": "0"
+        },
+        {
+          "key": "created_at",
+          "value": "2026-01-02T03:04:07+00:00"
+        }
+      ],
+      "migration_lock": [
+        {
+          "acquired_at": null,
+          "holder": null,
+          "id": 1
+        }
+      ],
+      "migrations": [
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "83cf77f4abe04e89c2efa22271c6d9275532f1dd37a270b7667226b3748ae643",
+          "id": "0001_foundation"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "f690b73e4b9523cd85b818ac11c6fecf086c020683324dccbc03ec3d7b59627d",
+          "id": "0002_work"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "9032649fc02951fe5d6340a6f9576a45b8d7197057990c68dca834a1d26f48b8",
+          "id": "0003_observed_first"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "cc588f67774949d31caf0305200e557cc666617b8f5a2469f958f511944ee3f4",
+          "id": "0004_drift"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "0e2adf0935fc90a6810710297ab3490edb430b47d9d169a2166ae189c24223b2",
+          "id": "0005_tokens"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "37b95c74c33d9d7c5ee649ab72b265b4de517b41a40cb3a2c768099f210b0f58",
+          "id": "0006_writeback"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "47c82ee427931ca7c0a3a8d047298ffe5c2b2ad49ff06f83b00acf59306a1ff6",
+          "id": "0007_sessions"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "f533369dd3625830341933caac68f4611a02d0e4055b9d37a62db9c59f731ce3",
+          "id": "0008_superseded_drift"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "b0ca1559346b05c6ef818b3b65c2ae798f05c755c7a0dd326c73227da770c226",
+          "id": "0009_inbox_triage"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "de3f70faf7ccb5fd276455a9a56eb7a731c8334fb6964ea6d5eb2407dbcb03f5",
+          "id": "0010_session_model"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "7b4ab541ce8b97e31f1871373c6400e7a6390bdc70356fe703f3aa5e29211582",
+          "id": "0011_contract_adoption"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "c819361c246e6c76035ed27c1a296d723235259c449a2ee2ce192163b8cb8a3a",
+          "id": "0012_forge_accounts"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "fa8e380cd0761fe49bf3a46fd7e9305799fe8f142fdc331c71d2a0836fa00c3f",
+          "id": "0013_upstream_truth"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "2fef3fae64abd522ef65b21eef63f5a93d2b44ded81e5836da1288639a59a70d",
+          "id": "0014_native_migration"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "6f60bd5cae2d90f79cfb72228c88b21927958bdeedc7f00da59835c3e18a928c",
+          "id": "0015_work_overlay_branches"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "e9d6f101a8d95929b51b6dd9a4d1ccc0e3a732e49fd605c60de3ee849be7a113",
+          "id": "0016_perf_indexes"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "3131bbedaed1c58d3997598f18e8f30d103ec6f1447d38dcaa2a2846f1b7d8f8",
+          "id": "0017_password_credentials"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "a04732a0b920af03fc8731b513260caf81d25216533efb8c8eac030185371c00",
+          "id": "0018_actor_preferences"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "2c307b06be247b5b5739230750785d9209dee953a22da0354952ebe1cf45811d",
+          "id": "0019_session_grants"
+        },
+        {
+          "applied_at": "2026-01-02T03:04:05+00:00",
+          "checksum": "e5fd2b7bd062d50c9d21a923df3176e9e5b69e9fb06b0dd6bf75b295d694b761",
+          "id": "0020_install_latch"
+        }
+      ],
+      "tokens": [
+        {
+          "actor_id": "act_0002",
+          "created_at": "2026-01-02T03:04:05+00:00",
+          "expires_at": null,
+          "id": "tok_0001",
+          "kind": "api",
+          "last_used_at": "2026-01-02T03:04:06+00:00",
+          "name": "first-run browser token",
+          "revoked_at": null,
+          "revoked_reason": null,
+          "scopes": "[\"admin\"]",
+          "token_hash": "<volatile>"
+        },
+        {
+          "actor_id": "act_0002",
+          "created_at": "2026-01-02T03:04:06+00:00",
+          "expires_at": null,
+          "id": "tok_0002",
+          "kind": "api",
+          "last_used_at": "2026-01-02T03:04:06+00:00",
+          "name": "reader",
+          "revoked_at": "2026-01-02T03:04:06+00:00",
+          "revoked_reason": "done",
+          "scopes": "[\"read\"]",
+          "token_hash": "<volatile>"
+        }
+      ],
+      "workflow_defs": [
+        {
+          "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+          "kind": "feature",
+          "updated_at": "2026-01-02T03:04:05+00:00"
+        },
+        {
+          "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+          "kind": "bug",
+          "updated_at": "2026-01-02T03:04:05+00:00"
+        },
+        {
+          "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+          "kind": "chore",
+          "updated_at": "2026-01-02T03:04:05+00:00"
+        },
+        {
+          "definition": "{\"initial_state\": \"open\", \"transitions\": {\"blocked\": [\"open\", \"in_progress\", \"wont_do\"], \"done\": [\"open\"], \"in_progress\": [\"review\", \"blocked\", \"open\", \"wont_do\"], \"open\": [\"in_progress\", \"blocked\", \"wont_do\"], \"review\": [\"done\", \"in_progress\", \"blocked\", \"wont_do\"], \"wont_do\": [\"open\"]}}",
+          "kind": "question",
+          "updated_at": "2026-01-02T03:04:05+00:00"
+        }
+      ]
+    }
   }
 ]
