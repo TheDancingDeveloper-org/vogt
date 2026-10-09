@@ -730,7 +730,7 @@ pub trait ObservedStore {
         &self,
         sweep_id: &str,
         outcome: SweepOutcome,
-        stats: &BTreeMap<String, i64>,
+        stats: &[(&str, i64)],
         at: Moment,
         detail: Option<&str>,
     ) -> Result<(), crate::errors::VogtError>;

@@ -243,10 +243,12 @@ where
         &self,
         sweep_id: &str,
         outcome: SweepOutcome,
-        stats: &BTreeMap<String, i64>,
+        stats: &[(&str, i64)],
         at: Moment,
         detail: Option<&str>,
     ) -> Result<(), VogtError> {
+        // Python's json.dumps keeps the caller's insertion order and does
+        // not sort, so the pair order here is the byte order in the row.
         let rendered = render_stats(stats);
         let conn = self.open(true)?;
         write_tx(&conn, || {
@@ -972,14 +974,14 @@ fn count_table(conn: &Connection, table: &str) -> Result<i64, VogtError> {
     .map_err(sql_err)
 }
 
-fn render_stats(stats: &BTreeMap<String, i64>) -> String {
+fn render_stats(stats: &[(&str, i64)]) -> String {
     let payload = serde_json::Value::Object(
         stats
             .iter()
-            .map(|(key, value)| (key.clone(), serde_json::json!(value)))
+            .map(|(key, value)| ((*key).to_string(), serde_json::json!(value)))
             .collect(),
     );
-    crate::decisions::python_json_dumps(&payload, true)
+    crate::decisions::python_json_dumps(&payload, false)
 }
 
 fn vocab_text<T: serde::Serialize>(value: T) -> String {
@@ -1274,11 +1276,20 @@ mod tests {
             .finish_sweep(
                 &sweep.id,
                 SweepOutcome::Ok,
-                &BTreeMap::from([("new".into(), 2)]),
+                // Deliberately not alphabetical: Python's json.dumps keeps
+                // insertion order, so "projects" stays ahead of "new".
+                &[("projects", 1), ("new", 2), ("unchanged", 0)],
                 later,
                 None,
             )
             .unwrap();
+        // The row keeps the caller's order. A sorted map would put "new"
+        // first and disagree with Python's json.dumps.
+        let stored: String = rusqlite::Connection::open(dir.join("observed.sqlite3"))
+            .unwrap()
+            .query_row("SELECT stats FROM sweeps", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(stored, r#"{"projects": 1, "new": 2, "unchanged": 0}"#);
 
         // The projection is rebuilt separately, never by append.
         let rebuilt = store.rebuild_latest().unwrap();

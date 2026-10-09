@@ -4,7 +4,7 @@
 //! boolean another operation branches on, and nothing re-checks on a timer.
 //! `contract evaluate` stores nothing; `contract check` records when asked.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
@@ -348,10 +348,12 @@ fn record_findings<O: ObservedStore>(
     };
     let sweep = observed.begin_sweep(CONTRACT_COLLECTOR, std::slice::from_ref(&project.id), now)?;
     let stats = observed.append(&sweep.id, &[finding], now)?;
-    let mut recorded = BTreeMap::new();
-    recorded.insert("projects".to_string(), 1);
-    recorded.insert("new".to_string(), stats.new);
-    recorded.insert("unchanged".to_string(), stats.unchanged);
+    // Ordered, matching Python's json.dumps(stats): projects, new, unchanged.
+    let recorded = [
+        ("projects", 1i64),
+        ("new", stats.new),
+        ("unchanged", stats.unchanged),
+    ];
     observed.finish_sweep(
         &sweep.id,
         crate::core::SweepOutcome::Ok,
