@@ -3417,6 +3417,26 @@ fn folded(ch: char) -> Option<&'static str> {
         _ => None,
     }
 }
+
+/// The folded characters a range covers. Under `(?i)` Python's `[a-z]` matches
+/// `İ` and `ı`, not only the literal `i`, so a range is widened by every letter
+/// it contains.
+fn folded_range(start: char, end: char) -> String {
+    let mut extra = String::new();
+    for (letter, fold) in [
+        ('i', "İı"),
+        ('I', "İı"),
+        ('s', "ſ"),
+        ('S', "ſ"),
+        ('k', "K"),
+        ('K', "K"),
+    ] {
+        if start <= letter && letter <= end && !extra.contains(fold) {
+            extra.push_str(fold);
+        }
+    }
+    extra
+}
 /// The body of `PY_WORD`, for a class that cannot hold a group. The trailing
 /// `]` of the set is dropped.
 const PY_WORD_CLASS: &str = r"\p{L}\p{N}_--[^\x00-\u{1c88}\u{1c8b}-\u{a7ca}\u{a7ce}-\u{a7d9}\u{a7dd}-\u{105bf}\u{105f4}-\u{10d3f}\u{10d66}-\u{10d6e}\u{10d86}-\u{10ec1}\u{10ec5}-\u{1137f}\u{1138a}\u{1138c}-\u{1138d}\u{1138f}\u{113b6}\u{113b8}-\u{113d0}\u{113d2}\u{113d4}-\u{116cf}\u{116e4}-\u{11bbf}\u{11be1}-\u{11bef}\u{11bfa}-\u{1345f}\u{143fb}-\u{160ff}\u{1611e}-\u{1612f}\u{1613a}-\u{16d3f}\u{16d6d}-\u{16d6f}\u{16d7a}-\u{18cfe}\u{18d00}-\u{1ccef}\u{1ccfa}-\u{1e5cf}\u{1e5ee}-\u{1e5ef}\u{1e5fb}-\u{2ebef}\u{2ee5e}-\u{10ffff}]";
@@ -3433,6 +3453,8 @@ fn python_pattern(pattern: &str) -> String {
     let mut chars = pattern.chars().peekable();
     let mut escaped = false;
     let mut class = false;
+    let mut class_negated = false;
+    let mut class_start = ' ';
     let mut ignore_case = false;
     let mut group = 0;
     #[allow(clippy::while_let_on_iterator)]
@@ -3440,11 +3462,13 @@ fn python_pattern(pattern: &str) -> String {
         if escaped {
             if class {
                 match ch {
-                    'w' => out.push_str(&format!("[{PY_WORD_CLASS}]")),
-                    'W' => out.push_str(&format!("[^{PY_WORD_CLASS}]")),
+                    'w' => out.push_str(PY_WORD_CLASS),
+                    'W' => out.push_str(r"\W"),
                     's' => out.push_str(PY_SPACE_CLASS),
-                    'S' => out.push_str(&format!("][^{PY_SPACE_CLASS}")),
-                    'd' => out.push_str(r"\d"),
+                    // Python's non-whitespace, as ranges: a class cannot hold
+                    // the group `\S` becomes outside one.
+                    'S' => out.push_str(r"\x00-\x08\x0e-\x1b\x21-\x84\x86-\x9f\u{a1}-\u{167f}\u{1681}-\u{1fff}\u{200b}-\u{2027}\u{202a}-\u{202e}\u{2030}-\u{205e}\u{2060}-\u{2fff}\u{3001}-\u{10ffff}"),
+                    'd' => out.push_str(r"0-9"),
                     'D' => out.push_str(r"\D"),
                     'b' => out.push('\u{0008}'),
                     other => {
@@ -3464,7 +3488,7 @@ fn python_pattern(pattern: &str) -> String {
                     'W' => out.push_str(&format!(r"(?:(?!(?-i:{PY_WORD}))(?s:.))")),
                     's' => out.push_str(&format!("[{PY_SPACE_CLASS}]")),
                     'S' => out.push_str(&format!(r"(?:(?![{PY_SPACE_CLASS}])(?s:.))")),
-                    'd' => out.push_str(r"\d"),
+                    'd' => out.push_str(r"[0-9]"),
                     other => {
                         out.push('\\');
                         out.push(other);
@@ -3499,26 +3523,41 @@ fn python_pattern(pattern: &str) -> String {
             if !closed {
                 group += 1;
             }
-        } else if ch == '(' {
+        } else if ch == '(' && !class {
             group += 1;
             out.push(ch);
-        } else if ch == ')' && group > 0 {
+        } else if ch == ')' && !class && group > 0 {
             group -= 1;
             out.push(ch);
-        } else if ch == '[' && !class && group == 0 && starts_any_class(&mut chars) {
+        } else if ch == '[' && !class && starts_any_class(&mut chars) {
             out.push_str("(?s:.)");
-        } else if ch == '[' && !class && group == 0 {
+        } else if ch == '[' && !class {
             class = true;
+            class_negated = chars.peek() == Some(&'^');
+            class_start = ' ';
             out.push(ch);
         } else if ch == ']' && class {
             class = false;
             out.push(ch);
         } else if class {
             out.push(ch);
-            if ignore_case {
-                if let Some(extra) = folded(ch) {
-                    out.push_str(extra);
+            if ignore_case && !class_negated {
+                if class_start == '-' {
+                    class_start = ' ';
+                } else if ch == '-' && class_start != ' ' {
+                    let start = class_start;
+                    class_start = '-';
+                    if let Some(&end) = chars.peek() {
+                        out.push_str(&folded_range(start, end));
+                    }
+                } else {
+                    class_start = ch;
+                    if let Some(extra) = folded(ch) {
+                        out.push_str(extra);
+                    }
                 }
+            } else {
+                class_start = ch;
             }
         } else if ignore_case && folded(ch).is_some() {
             let extra = folded(ch).expect("checked");
@@ -4101,6 +4140,25 @@ mod activity_tests {
         let hex = "a".repeat(48);
         let newer = format!("{hex}\u{1ccf0}");
         assert!(!activity_redact(&newer).contains(&hex), "{newer}");
+
+        // `(?i)` widens a range, not only a literal, so `ı` inside `[A-Za-z0-9]`
+        // is still part of the token and the tail does not survive.
+        let ranged = format!("Bearer secrettoKen{};", "\u{131}");
+        let redacted = activity_redact(&ranged);
+        assert!(redacted.contains("[REDACTED]"), "{redacted}");
+        assert!(!redacted.contains('\u{131}'), "{redacted}");
+        let tail = format!("Bearer abcdefgh{}SECRETSECRETTAIL", "\u{131}");
+        assert!(!activity_redact(&tail).contains("TAIL"), "{tail}");
+        let named = format!("password{}x=hunter2", "\u{131}");
+        assert!(!activity_redact(&named).contains("hunter2"), "{named}");
+
+        // A class inside a group stays a class: the escapes are rewritten, not
+        // pasted in as the literal text of the rewrite.
+        let grouped = python_pattern(r"(?i)(?:[\w.-]+)");
+        assert!(
+            !grouped.contains("?-i:"),
+            "a class rewrite leaked as text: {grouped}"
+        );
     }
 }
 
