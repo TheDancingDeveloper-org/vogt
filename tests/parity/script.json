@@ -312,6 +312,18 @@
    }
   },
   {
+   "operation": "work.update",
+   "params": {
+    "ref": "WI-1",
+    "title": "parity item renamed",
+    "priority": "p1",
+    "reason": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
    "operation": "work.create",
    "params": {
     "kind": "chore",

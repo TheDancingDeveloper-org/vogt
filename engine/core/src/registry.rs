@@ -161,6 +161,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "bugs" => Some(crate::application::views::bugs_op),
         "work.list" => Some(crate::application::services::work::list_op),
         "work.create" => Some(crate::application::services::work::create_op),
+        "work.update" => Some(crate::application::services::work::update_op),
         "project.register" => Some(crate::application::projects::register_op),
         "project.create" => Some(crate::application::projects::create_op),
         "project.scaffold" => Some(crate::application::projects::scaffold_op),

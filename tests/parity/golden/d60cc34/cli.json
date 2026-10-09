@@ -1177,6 +1177,40 @@
         "body": "",
         "created_at": "2026-01-02T03:04:05Z",
         "effort": null,
+        "id": "wrk_0001",
+        "initiative_id": null,
+        "kind": "chore",
+        "labels": [],
+        "origin": "created",
+        "priority": "p1",
+        "project_id": null,
+        "project_slug": null,
+        "ref": "WI-1",
+        "relations": [],
+        "state": "open",
+        "superseded_by": null,
+        "title": "parity item renamed",
+        "trust_state": "unverified",
+        "updated_at": "2026-01-02T03:04:05Z"
+      },
+      "live_sessions": [],
+      "sessions": [],
+      "walked": []
+    },
+    "exit": 0,
+    "operation": "work.update"
+  },
+  {
+    "body": {
+      "branches": [],
+      "comments": [],
+      "git": null,
+      "item": {
+        "assignee_actor_id": null,
+        "assignee_identity_ref": null,
+        "body": "",
+        "created_at": "2026-01-02T03:04:05Z",
+        "effort": null,
         "id": "wrk_0002",
         "initiative_id": null,
         "kind": "chore",
@@ -1213,11 +1247,11 @@
       "items": [
         {
           "kind": "chore",
-          "priority": "p2",
+          "priority": "p1",
           "project_slug": null,
           "ref": "WI-1",
           "state": "open",
-          "title": "parity item"
+          "title": "parity item renamed"
         },
         {
           "kind": "chore",
@@ -1263,13 +1297,13 @@
           "observation_kind": null,
           "observed_at": null,
           "origin": "declared",
-          "priority": "p2",
+          "priority": "p1",
           "project_slug": null,
           "ref": "WI-1",
-          "score": 22.0,
+          "score": 52.0,
           "source_url": null,
           "state": "open",
-          "title": "parity item",
+          "title": "parity item renamed",
           "trust_state": "unverified",
           "updated_at": "2026-01-02T03:04:05Z"
         },

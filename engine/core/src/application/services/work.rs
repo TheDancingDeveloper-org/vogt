@@ -1,5 +1,6 @@
-//! `work.list` and the native half of `work.create`. Ports `list_work` and
-//! `_create_native` in `services/work.py`.
+//! `work.list`, the native half of `work.create`, and the native half of
+//! `work.update`. Ports `list_work`, `_create_native` and `_update_native` in
+//! `services/work.py`.
 //!
 //! On a linked project the list is the forge mirror joined to the overlay; a
 //! global list carries every linked project's upstream items alongside the
@@ -24,16 +25,22 @@ use crate::core::{
     TERMINAL_STATES,
 };
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ReadView, WorkFilter, WriteTxn};
+use crate::storage::interface::{DeclaredStore, ReadView, WorkFilter, WorkItemUpdate, WriteTxn};
 
 const WORK_CREATE: &str = "work.create";
 const WORK_CREATED_EVENT: &str = "work.created";
+const WORK_UPDATE: &str = "work.update";
+const WORK_UPDATED_EVENT: &str = "work.updated";
 
 const UNLINKED_STILL_WORKS: &str = "Native items (WI-n) on this project still take comments, \
      transitions (including to done) and field edits by ref";
 
 pub fn create_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| create_work(ctx, params))
+}
+
+pub fn update_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| update_work(ctx, params))
 }
 
 pub fn list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
@@ -64,7 +71,7 @@ where
         ));
     };
     if !upstream::is_linked(&project) {
-        return Err(refuse_unlinked(&project));
+        return Err(refuse_unlinked(&project, "work.create"));
     }
     // Decision 9: the forge write-through runs before anything local exists.
     // The precondition chain is local — policy, then a forge credential — and
@@ -138,9 +145,15 @@ fn parse_create(params: Value) -> Result<CreateParams, VogtError> {
     })
 }
 
-fn refuse_unlinked(project: &Project) -> VogtError {
+fn refuse_unlinked(project: &Project, operation: &str) -> VogtError {
+    refuse_unlinked_for(project, operation)
+}
+
+/// Decision 10's refusal. `operation` is the phrase the message leads with:
+/// `work.create`, or `work.update with labels`.
+fn refuse_unlinked_for(project: &Project, operation: &str) -> VogtError {
     VogtError::NotLinked(format!(
-        "work.create needs a forge-linked project, and {} is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or pass `local_only: true` to keep a native item in this project. {UNLINKED_STILL_WORKS}.",
+        "{operation} needs a forge-linked project, and {} is not linked: link it (`forge link`, or re-import through `project import`) or publish it (`forge publish`) first; or pass `local_only: true` to keep a native item in this project. {UNLINKED_STILL_WORKS}.",
         crate::core::py_repr(&project.slug)
     ))
 }
@@ -311,6 +324,214 @@ where
                 payload,
                 WORK_CREATED_EVENT,
                 summary,
+            ))
+        },
+    )?;
+    Ok(json!({
+        "item": stored,
+        "comments": [],
+        "sessions": [],
+        "branches": [],
+        "git": null,
+        "walked": [],
+        "live_sessions": [],
+    }))
+}
+
+/// Change a native item's fields. State changes go through `transition`.
+///
+/// A native item on an unlinked project refuses only when the edit touches
+/// labels, which are shared vocabulary with the forge (decision 10); every
+/// other field stays a local edit. An item that exists only upstream — the
+/// forge mirror, not a declared row — is the write-through, which is not
+/// ported and fails typed rather than writing an overlay the forge never
+/// confirmed. The initiative re-projection that follows a committed update is
+/// a forge write and is not done here.
+fn update_work<C, I>(ctx: &AppContext<C, I>, params: Value) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let params = parse_update(params)?;
+    let view = ctx.declared.read()?;
+    let native = view.work_item_by_ref(&params.reference)?.is_some();
+    if !native {
+        return Err(VogtError::UpstreamWriteFailed(format!(
+            "work.update of {} is an upstream item, and the write-through is not ported — nothing was stored locally",
+            crate::core::py_repr(&params.reference),
+        )));
+    }
+    let item = resolve::work_item(&view, &params.reference)?;
+    if params.touches_labels() {
+        if let Some(project_id) = item.project_id.as_deref() {
+            if let Some(project) = view.project_by_id(project_id)? {
+                if !upstream::is_linked(&project) {
+                    return Err(refuse_unlinked_for(&project, "work.update with labels"));
+                }
+            }
+        }
+    }
+    drop(view);
+    update_native(ctx, &params)
+}
+
+struct UpdateParams {
+    reference: String,
+    title: Option<String>,
+    body: Option<String>,
+    priority: Option<String>,
+    effort: Option<String>,
+    project: Option<String>,
+    initiative: Option<String>,
+    assignee: Option<String>,
+    clear_effort: bool,
+    clear_assignee: bool,
+    clear_initiative: bool,
+    add_labels: Vec<String>,
+    remove_labels: Vec<String>,
+    reason: String,
+}
+
+impl UpdateParams {
+    fn touches_labels(&self) -> bool {
+        !self.add_labels.is_empty() || !self.remove_labels.is_empty()
+    }
+}
+
+fn parse_update(params: Value) -> Result<UpdateParams, VogtError> {
+    let Value::Object(map) = params else {
+        return Err(VogtError::InvalidRequest(
+            "work.update takes an object".to_string(),
+        ));
+    };
+    let text = |key: &str| match map.get(key) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.clone()),
+        Some(_) => Some(String::new()),
+    };
+    let reference = text("ref")
+        .or_else(|| text("id"))
+        .ok_or_else(|| VogtError::InvalidRequest("ref is required".into()))?;
+    let names = |key: &str| {
+        map.get(key)
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let flag = |key: &str| map.get(key).and_then(Value::as_bool).unwrap_or(false);
+    Ok(UpdateParams {
+        reference,
+        title: text("title"),
+        body: text("body"),
+        priority: text("priority"),
+        effort: text("effort"),
+        project: text("project"),
+        initiative: text("initiative"),
+        assignee: text("assignee"),
+        clear_effort: flag("clear_effort"),
+        clear_assignee: flag("clear_assignee"),
+        clear_initiative: flag("clear_initiative"),
+        add_labels: names("add_labels"),
+        remove_labels: names("remove_labels"),
+        reason: text("reason").unwrap_or_default(),
+    })
+}
+
+fn update_native<C, I>(ctx: &AppContext<C, I>, params: &UpdateParams) -> Result<Value, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let mut writing = crate::application::context::write_of(ctx);
+    let clock = std::sync::Arc::clone(writing.clock());
+    let reference = params.reference.clone();
+    let title = params.title.clone();
+    let body = params.body.clone();
+    let priority = params.priority.clone();
+    let effort = params.effort.clone();
+    let project = params.project.clone();
+    let initiative = params.initiative.clone();
+    let assignee = params.assignee.clone();
+    let clear_effort = params.clear_effort;
+    let clear_assignee = params.clear_assignee;
+    let clear_initiative = params.clear_initiative;
+    let add_labels = params.add_labels.clone();
+    let remove_labels = params.remove_labels.clone();
+    let stored = audited_write(
+        &mut writing,
+        WORK_UPDATE,
+        &params.reason,
+        move |txn, _actor| {
+            let item = resolve::work_item(txn, &reference)?;
+            for name in &add_labels {
+                resolve::label_exists(txn, name)?;
+            }
+            let priority = match priority.as_deref() {
+                Some(value) => Some(value.parse::<Priority>().map_err(|_| {
+                    VogtError::InvalidRequest(
+                        "priority must be one of p0, p1, p2, p3, p4".to_string(),
+                    )
+                })?),
+                None => None,
+            };
+            let effort = match effort.as_deref() {
+                Some(value) => Some(value.parse::<Effort>().map_err(|_| {
+                    VogtError::InvalidRequest(
+                        "effort must be one of trivial, small, medium, large".to_string(),
+                    )
+                })?),
+                None => None,
+            };
+            let assignee_id = assignee
+                .as_deref()
+                .map(|identity| resolve::actor(txn, identity).map(|found| found.id))
+                .transpose()?;
+            let initiative_id = initiative
+                .as_deref()
+                .map(|slug| resolve::initiative(txn, slug).map(|found| found.id))
+                .transpose()?;
+            let project_id = project
+                .as_deref()
+                .map(|slug| resolve::project(txn, slug).map(|found| found.id))
+                .transpose()?;
+            let now = super::now_of(&clock);
+            txn.update_work_item(
+                &item.id,
+                &WorkItemUpdate {
+                    title,
+                    body,
+                    state: None,
+                    priority: priority.map(|value| value.to_string()),
+                    effort: effort.map(|value| value.to_string()),
+                    assignee_actor_id: assignee_id,
+                    initiative_id,
+                    project_id,
+                    clear_effort,
+                    clear_assignee,
+                    clear_initiative,
+                    add_labels,
+                    remove_labels,
+                    superseded_by: None,
+                },
+                now,
+            )?;
+            let updated = txn
+                .work_item_by_id(&item.id)?
+                .ok_or_else(|| VogtError::NotFound(format!("no work item {}", item.reference)))?;
+            let payload = serde_json::to_value(&updated).unwrap_or(Value::Null);
+            Ok(WriteOutcome::new(
+                payload.clone(),
+                "work_item",
+                &item.id,
+                payload,
+                WORK_UPDATED_EVENT,
+                json!({"ref": item.reference}),
             ))
         },
     )?;
@@ -562,7 +783,7 @@ fn strings(value: Option<&Value>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_work, work_page};
+    use super::{create_work, update_work, work_page};
     use crate::application::context::{build_context, Built};
     use crate::core::{
         ActorKind, LinkState, Moment, Principal, Project, SequentialIds, StepClock, WriteBack,
@@ -684,6 +905,54 @@ mod tests {
         .unwrap();
         assert_eq!(second["item"]["ref"], "WI-2");
         assert_eq!(second["item"]["state"], "open");
+    }
+
+    #[test]
+    fn an_update_changes_the_title_and_keeps_the_ref() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        create_work(
+            ctx,
+            json!({"kind": "chore", "title": "one", "reason": "test"}),
+        )
+        .unwrap();
+        let updated = update_work(
+            ctx,
+            json!({"ref": "WI-1", "title": "renamed", "priority": "p0", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(updated["item"]["ref"], "WI-1");
+        assert_eq!(updated["item"]["title"], "renamed");
+        assert_eq!(updated["item"]["priority"], "p0");
+        assert_eq!(updated["item"]["kind"], "chore");
+    }
+
+    #[test]
+    fn a_label_edit_on_an_unlinked_project_is_refused() {
+        let built = opened();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!("opened() builds a step clock");
+        };
+        insert_project(&built, "beta", false, WriteBack::Disabled);
+        create_work(
+            ctx,
+            json!({"kind": "chore", "title": "one", "project": "beta", "local_only": true, "reason": "test"}),
+        )
+        .unwrap();
+        let refused = update_work(
+            ctx,
+            json!({"ref": "WI-1", "add_labels": ["parity"], "reason": "test"}),
+        )
+        .unwrap_err();
+        assert!(matches!(refused, VogtError::NotLinked(_)), "{refused}");
+        let retitled = update_work(
+            ctx,
+            json!({"ref": "WI-1", "title": "still editable", "reason": "test"}),
+        )
+        .unwrap();
+        assert_eq!(retitled["item"]["title"], "still editable");
     }
 
     #[test]
