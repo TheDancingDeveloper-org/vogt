@@ -3453,8 +3453,9 @@ fn python_pattern(pattern: &str) -> String {
     let mut chars = pattern.chars().peekable();
     let mut escaped = false;
     let mut class = false;
-    let mut class_negated = false;
-    let mut class_start = ' ';
+    let mut class_first = true;
+    let mut class_prev = ' ';
+    let mut class_range = false;
     let mut ignore_case = false;
     let mut group = 0;
     #[allow(clippy::while_let_on_iterator)]
@@ -3462,13 +3463,13 @@ fn python_pattern(pattern: &str) -> String {
         if escaped {
             if class {
                 match ch {
-                    'w' => out.push_str(PY_WORD_CLASS),
+                    'w' => out.push_str(&format!("[{PY_WORD_CLASS}]")),
                     'W' => out.push_str(r"\W"),
                     's' => out.push_str(PY_SPACE_CLASS),
                     // Python's non-whitespace, as ranges: a class cannot hold
                     // the group `\S` becomes outside one.
                     'S' => out.push_str(r"\x00-\x08\x0e-\x1b\x21-\x84\x86-\x9f\u{a1}-\u{167f}\u{1681}-\u{1fff}\u{200b}-\u{2027}\u{202a}-\u{202e}\u{2030}-\u{205e}\u{2060}-\u{2fff}\u{3001}-\u{10ffff}"),
-                    'd' => out.push_str(r"0-9"),
+                    'd' => out.push_str(r"\d"),
                     'D' => out.push_str(r"\D"),
                     'b' => out.push('\u{0008}'),
                     other => {
@@ -3488,7 +3489,7 @@ fn python_pattern(pattern: &str) -> String {
                     'W' => out.push_str(&format!(r"(?:(?!(?-i:{PY_WORD}))(?s:.))")),
                     's' => out.push_str(&format!("[{PY_SPACE_CLASS}]")),
                     'S' => out.push_str(&format!(r"(?:(?![{PY_SPACE_CLASS}])(?s:.))")),
-                    'd' => out.push_str(r"[0-9]"),
+                    'd' => out.push_str(r"\d"),
                     other => {
                         out.push('\\');
                         out.push(other);
@@ -3533,31 +3534,39 @@ fn python_pattern(pattern: &str) -> String {
             out.push_str("(?s:.)");
         } else if ch == '[' && !class {
             class = true;
-            class_negated = chars.peek() == Some(&'^');
-            class_start = ' ';
+            class_first = true;
+            class_prev = ' ';
+            class_range = false;
             out.push(ch);
         } else if ch == ']' && class {
             class = false;
             out.push(ch);
         } else if class {
+            // A '-' is a range operator only between two endpoints. One that
+            // ends the class, or follows another range, is a literal, so the
+            // trailing '-' of `[A-Za-z0-9._~+/=-]` still matches a dash.
+            let range = ch == '-'
+                && !class_first
+                && class_prev != '-'
+                && !class_range
+                && !matches!(chars.peek(), Some(']') | None);
             out.push(ch);
-            if ignore_case && !class_negated {
-                if class_start == '-' {
-                    class_start = ' ';
-                } else if ch == '-' && class_start != ' ' {
-                    let start = class_start;
-                    class_start = '-';
-                    if let Some(&end) = chars.peek() {
-                        out.push_str(&folded_range(start, end));
-                    }
-                } else {
-                    class_start = ch;
-                    if let Some(extra) = folded(ch) {
-                        out.push_str(extra);
-                    }
+            let opens_range = range;
+            if !opens_range && !class_range && ignore_case {
+                if let Some(extra) = folded(ch) {
+                    out.push_str(extra);
                 }
-            } else {
-                class_start = ch;
+            }
+            if opens_range {
+                class_range = true;
+            }
+            if class_range && ignore_case && ch != '-' {
+                out.push_str(&folded_range(class_prev, ch));
+            }
+            class_prev = ch;
+            class_first = false;
+            if ch != '-' {
+                class_range = false;
             }
         } else if ignore_case && folded(ch).is_some() {
             let extra = folded(ch).expect("checked");
@@ -4158,6 +4167,22 @@ mod activity_tests {
         assert!(
             !grouped.contains("?-i:"),
             "a class rewrite leaked as text: {grouped}"
+        );
+
+        // A trailing '-' is a literal dash, and a range's folded characters come
+        // after the range rather than inside it.
+        assert!(!activity_redact("Bearer abcd-efgh-SECRETTAIL").contains("SECRETTAIL"));
+        assert!(!activity_redact("x bearer ab-cdefghSECRETTAIL").contains("SECRETTAIL"));
+        assert!(!activity_redact(r#""secret-token": "hunter2""#).contains("hunter2"));
+        let assigned = activity_redact("password=hunter2:x");
+        assert!(
+            !assigned.contains("hunter2"),
+            "the value survived: {assigned}"
+        );
+        let ranged = python_pattern("(?i)[a-z]");
+        assert!(
+            ranged.contains("z"),
+            "the range end was swallowed: {ranged}"
         );
     }
 }
