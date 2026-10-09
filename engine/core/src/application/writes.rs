@@ -77,9 +77,9 @@ pub fn validate_reason(reason: &str) -> Result<String, VogtError> {
 /// from request data.
 pub struct WriteContext<'a, C, I, D> {
     declared: &'a D,
-    principal_identity_ref: &'a str,
+    principal_identity_ref: String,
     principal_kind: crate::core::ActorKind,
-    principal_display_name: &'a str,
+    principal_display_name: String,
     /// Shared with the stores, so a body that draws an id continues the count
     /// the store itself has already advanced.
     clock: Arc<std::sync::Mutex<C>>,
@@ -95,9 +95,9 @@ impl<'a, C, I, D> WriteContext<'a, C, I, D> {
     ) -> Self {
         Self {
             declared,
-            principal_identity_ref: &principal.identity_ref,
+            principal_identity_ref: principal.identity_ref.clone(),
             principal_kind: principal.kind,
-            principal_display_name: &principal.display_name,
+            principal_display_name: principal.display_name.clone(),
             clock,
             ids,
         }
@@ -120,6 +120,23 @@ impl<'a, C, I, D> WriteContext<'a, C, I, D> {
     /// own connection, rather than inside the transaction.
     pub fn store(&self) -> &'a D {
         self.declared
+    }
+
+    /// Attribute this write to someone other than the request's principal.
+    ///
+    /// Login is the one caller. The request arrives with no credential, so the
+    /// context's principal is whoever the adapter defaulted to, and the session
+    /// must be audited to the person who just proved the password. The fields
+    /// stay private; nothing reads them back out of request data.
+    pub fn set_principal(
+        &mut self,
+        identity_ref: &str,
+        kind: crate::core::ActorKind,
+        display_name: &str,
+    ) {
+        self.principal_identity_ref = identity_ref.to_string();
+        self.principal_kind = kind;
+        self.principal_display_name = display_name.to_string();
     }
 }
 
@@ -224,9 +241,9 @@ where
     let mut txn = ctx.declared.write()?;
     let actor = ensure_actor(
         &mut txn,
-        ctx.principal_identity_ref,
+        ctx.principal_identity_ref.as_str(),
         ctx.principal_kind,
-        ctx.principal_display_name,
+        ctx.principal_display_name.as_str(),
         &ctx.clock,
         &ctx.ids,
     )?;
@@ -284,9 +301,9 @@ where
     let mut txn = ctx.declared.write()?;
     let actor = ensure_actor(
         &mut txn,
-        ctx.principal_identity_ref,
+        ctx.principal_identity_ref.as_str(),
         ctx.principal_kind,
-        ctx.principal_display_name,
+        ctx.principal_display_name.as_str(),
         &ctx.clock,
         &ctx.ids,
     )?;

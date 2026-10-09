@@ -21,6 +21,12 @@ const TOKEN_ISSUED_EVENT: &str = "token.issued";
 const TOKEN_REVOKED_EVENT: &str = "token.revoked";
 const USER_CREATE: &str = "user.create";
 const USER_CREATED_EVENT: &str = "user.created";
+const USER_SET_PASSWORD: &str = "user.set_password";
+const USER_REMOVE: &str = "user.remove";
+const USER_PASSWORD_SET_EVENT: &str = "user.password_set";
+const USER_REMOVED_EVENT: &str = "user.removed";
+const AUTH_LOGOUT: &str = "auth.logout";
+const SESSION_CLOSED_EVENT: &str = "auth.session_closed";
 const AUTH_LOGIN: &str = "auth.login";
 const AUTH_LOGIN_EVENT: &str = "auth.login";
 
@@ -52,6 +58,16 @@ fn issue_token<C: Clock + 'static, I: IdFactory + 'static>(
     let expires_in_days = params["expires_in_days"].as_i64();
 
     let (secret, token_hash) = auth::issue(&random_array::<TOKEN_ENTROPY_BYTES>()?);
+    // Read before the write, as Python does. `ensure_actor` then auto-registers
+    // a new principal, and only after that does the body read `created_at`, so a
+    // hook that takes time falls between the expiry and the creation.
+    let expires_at = match expires_in_days {
+        Some(days) => {
+            let now = ctx.clock.lock().expect("the clock lock").now();
+            Some(expiry_from(now, days)?)
+        }
+        None => None,
+    };
 
     let mut writing = write_of(ctx);
     let issued = issue_recorded(
@@ -62,7 +78,7 @@ fn issue_token<C: Clock + 'static, I: IdFactory + 'static>(
             holder_ref,
             scopes,
             token_hash,
-            expires_in_days,
+            expires_at,
         },
     )?;
 
@@ -80,7 +96,7 @@ struct IssueRequest {
     holder_ref: String,
     scopes: Vec<String>,
     token_hash: String,
-    expires_in_days: Option<i64>,
+    expires_at: Option<Moment>,
 }
 
 /// The audited half of an issue, split out so the closure is built against the
@@ -96,7 +112,7 @@ fn issue_recorded<C: Clock + 'static, I: IdFactory + 'static>(
     let holder_ref = request.holder_ref.clone();
     let scopes = request.scopes.clone();
     let token_hash = request.token_hash.clone();
-    let expires_in_days = request.expires_in_days;
+    let expires_at = request.expires_at;
     let clock = std::sync::Arc::clone(write.clock());
     let ids = std::sync::Arc::clone(write.ids());
     audited_write(
@@ -104,17 +120,6 @@ fn issue_recorded<C: Clock + 'static, I: IdFactory + 'static>(
         TOKEN_ISSUE,
         reason,
         move |txn: &mut _, _actor: &Actor| {
-            // The expiry is read first and the id drawn last, matching Python:
-            // `expires_at` is computed before the write, the holder is resolved
-            // before the token id, and `created_at` is read inside the body, so
-            // a hook that takes time falls between the two readings.
-            let expires_at = match expires_in_days {
-                Some(days) => Some(expiry_from(
-                    clock.lock().expect("the clock lock").now(),
-                    days,
-                )?),
-                None => None,
-            };
             let holder = resolve::actor(txn, &holder_ref)?;
             let now = clock.lock().expect("the clock lock").now();
             let token_id = ids.lock().expect("the id lock").next("tok");
@@ -378,8 +383,15 @@ pub fn list_users_op(ctx: &Built, _params: Value) -> Result<Value, VogtError> {
     })
 }
 
-/// `auth.login`, as the registry calls it. Unauthenticated by construction: the
-/// credential, not the principal, decides who the session belongs to.
+/// `auth.login`. Not a registry operation: Python mounts it by hand at
+/// `/api/auth/login`, because the caller holds no credential yet and every
+/// registry route sits behind authorization. The service is what that route
+/// will call.
+///
+/// Every refusal costs the same scrypt and answers with the same sentence, so
+/// the timing and the text say nothing about whether the username exists, the
+/// password was wrong, or the account is disabled. The `auth_decisions` row
+/// names the real reason for the operator.
 pub fn login_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| login(ctx, &params))
 }
@@ -388,214 +400,243 @@ fn login<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     params: &Value,
 ) -> Result<Value, VogtError> {
-    let username = username_of(params["username"].as_str().unwrap_or(""))?;
+    // A malformed username is the same refusal as a wrong password, not a
+    // validation error that would confirm the shape Python accepts.
+    let username = match auth::normalise_username(params["username"].as_str().unwrap_or("")) {
+        Ok(username) => username,
+        Err(_) => return Err(login_refused()),
+    };
     let password = params["password"].as_str().unwrap_or("");
     let session_name = params["session_name"]
         .as_str()
         .unwrap_or("browser session")
         .to_string();
+    let now = ctx.clock.lock().expect("the clock lock").now();
+
+    // Before any lookup. Five failures inside a minute refuse even the right
+    // password, and a wrong guess during the lockout gets the same sentence as
+    // every other refusal, so the reply never confirms a guess.
+    if let Some(retry) = throttle_check(&username, now) {
+        return Err(VogtError::LoginThrottled(format!(
+            "too many failed logins for '{username}'; try again in {retry} seconds"
+        )));
+    }
+
+    let view = ctx.declared.read()?;
+    let credential = view.password_credential_by_username(&username)?;
+    let stored = match &credential {
+        Some(credential) => view.password_hash(&credential.actor_id)?,
+        None => None,
+    };
+    let actor = match &credential {
+        Some(credential) => view.actor_by_id(&credential.actor_id)?,
+        None => None,
+    };
+    drop(view);
+
+    // A miss verifies against the dummy hash, so it costs the same scrypt as a
+    // hit. A dangling credential, a disabled account and a wrong password all
+    // fall through to the one refusal.
+    let ok = auth::verify_password(password, stored.as_deref().unwrap_or(dummy_hash()));
+    if credential.is_none()
+        || stored.is_none()
+        || actor.is_none()
+        || actor.as_ref().is_some_and(|actor| actor.disabled)
+        || !ok
+    {
+        throttle_failed(&username, now);
+        record_decision(
+            ctx,
+            AuthOutcome::Deny,
+            BAD_PASSWORD,
+            now,
+            actor.as_ref().map(|actor| actor.identity_ref.clone()),
+            None,
+        )?;
+        return Err(login_refused());
+    }
+    throttle_succeeded(&username);
+
+    let actor = actor.expect("the refusal above returned when there was no actor");
+    let credential = credential.expect("the refusal above returned when there was none");
+    let joined = credential.scopes.join(",");
+    let scopes = auth::parse_scopes(&joined).map_err(VogtError::InvalidRequest)?;
     let (secret, token_hash) = auth::issue(&random_array::<TOKEN_ENTROPY_BYTES>()?);
+    let expires_at = Moment::from_unix(
+        now.unix_seconds() + ctx.config.session_ttl_days * 86_400,
+        now.nanos(),
+    );
 
     let mut writing = write_of(ctx);
-    let (actor, token) = login_recorded(
+    writing.set_principal(&actor.identity_ref, actor.kind, &actor.display_name);
+    let token = login_recorded(
         &mut writing,
         &LoginRequest {
-            username,
-            password: password.to_string(),
             session_name,
+            scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
             token_hash,
-            ttl_seconds: ctx.config.session_ttl_days * 86_400,
+            now,
+            expires_at,
+            reason: format!("password login by {username}"),
         },
+    )?;
+    record_decision(
+        ctx,
+        AuthOutcome::Allow,
+        LOGIN_OK,
+        now,
+        Some(actor.identity_ref.clone()),
+        token["id"].as_str().map(str::to_string),
     )?;
     Ok(serde_json::json!({ "actor": actor, "token": token, "secret": secret }))
 }
 
 struct LoginRequest {
-    username: String,
-    password: String,
     session_name: String,
+    scopes: Vec<String>,
     token_hash: String,
-    ttl_seconds: i64,
+    now: Moment,
+    expires_at: Moment,
+    reason: String,
 }
 
 fn login_recorded<C: Clock + 'static, I: IdFactory + 'static>(
     write: &mut SqliteWrite<'_, C, I>,
     request: &LoginRequest,
-) -> Result<(Value, Value), VogtError> {
-    let username = request.username.clone();
-    let password = request.password.clone();
+) -> Result<Value, VogtError> {
     let session_name = request.session_name.clone();
+    let scopes = request.scopes.clone();
     let token_hash = request.token_hash.clone();
-    let ttl_seconds = request.ttl_seconds;
-    let clock = std::sync::Arc::clone(write.clock());
-    let clock_for_body = std::sync::Arc::clone(&clock);
+    let now = request.now;
+    let expires_at = request.expires_at;
+    let reason = request.reason.clone();
     let ids = std::sync::Arc::clone(write.ids());
-    let ids_for_body = std::sync::Arc::clone(&ids);
-    let outcome = audited_write(
+    audited_write(
         write,
         AUTH_LOGIN,
-        "signed in",
-        move |txn: &mut _, _actor: &Actor| {
-            let now = clock_for_body.lock().expect("the clock lock").now();
-            let credential = txn.password_credential_by_username(&username)?;
-            let (holder, scopes) = match &credential {
-                Some(credential) => {
-                    let holder = txn
-                        .actor_by_id(&credential.actor_id)?
-                        .expect("a credential names an actor that exists");
-                    if holder.disabled {
-                        return Err(denied(
-                            "actor_disabled",
-                            &username,
-                            "that account is disabled",
-                        ));
-                    }
-                    (holder, credential.scopes.clone())
-                }
-                None => {
-                    return Err(denied(
-                        "unknown_user",
-                        &username,
-                        "unknown username or wrong password",
-                    ));
-                }
-            };
-            let stored = txn.password_hash(&holder.id)?.unwrap_or_default();
-            if !auth::verify_password(&password, &stored) {
-                return Err(denied(
-                    "bad_password",
-                    &username,
-                    "unknown username or wrong password",
-                ));
-            }
-            let window = now.unix_seconds() - LOGIN_FAILURE_WINDOW_SECONDS;
-            let failures = recent_denials(txn, &username, window)?;
-            if failures.len() >= LOGIN_FAILURE_LIMIT {
-                let retry = failures[0].at.unix_seconds() + LOGIN_FAILURE_WINDOW_SECONDS
-                    - now.unix_seconds();
-                return Err(denied(
-                    "rate_limited",
-                    &username,
-                    &format!("too many failed logins for '{username}'; try again in {retry}s"),
-                ));
-            }
-            let token_id = ids_for_body.lock().expect("the id lock").next("tok");
+        &reason,
+        move |txn: &mut _, holder: &Actor| {
             let token = Token {
-                id: token_id.clone(),
+                id: ids.lock().expect("the id lock").next("tok"),
                 actor_id: holder.id.clone(),
                 actor_identity_ref: Some(holder.identity_ref.clone()),
                 name: session_name.clone(),
                 scopes: scopes.clone(),
                 kind: crate::core::TokenKind::Session,
                 created_at: now,
-                expires_at: Some(Moment::from_unix(
-                    now.unix_seconds() + ttl_seconds,
-                    now.nanos(),
-                )),
+                expires_at: Some(expires_at),
                 last_used_at: None,
                 revoked_at: None,
                 revoked_reason: None,
             };
             txn.insert_token(&token, &token_hash)?;
-            let decision = AuthDecision {
-                id: String::new(),
-                at: now,
-                decision: AuthOutcome::Allow,
-                reason_code: "login".to_string(),
-                operation: AUTH_LOGIN.to_string(),
-                scope: None,
-                actor_id: Some(holder.id.clone()),
-                token_id: Some(token.id.clone()),
-                identity_ref: Some(holder.identity_ref.clone()),
-                transport: "http".to_string(),
-                detail: Some(username.clone()),
-            };
-            let payload = serde_json::json!({
-                "actor": serde_json::to_value(&holder).expect("an actor serialises"),
-                "token": serde_json::to_value(&token).expect("a token serialises"),
-                "decision": serde_json::to_value(&decision).expect("a decision serialises"),
-            });
             Ok(WriteOutcome::new(
-                payload,
-                "session",
+                serde_json::to_value(&token).expect("a token serialises"),
+                "token",
                 &token.id,
-                serde_json::json!({ "username": username, "scopes": scopes }),
-                AUTH_LOGIN_EVENT,
+                serde_json::json!({
+                    "actor": holder.identity_ref,
+                    "scopes": scopes,
+                    "name": token.name,
+                    "kind": "session",
+                    "expires_at": expires_at.to_json(),
+                }),
+                SESSION_OPENED_EVENT,
                 serde_json::json!({ "actor": holder.identity_ref }),
             ))
         },
-    );
-    let (actor, token) = match outcome {
-        Ok(mut outcome) => {
-            let mut decision: AuthDecision =
-                serde_json::from_value(outcome["decision"].take()).expect("the decision is ours");
-            decision.id = ids.lock().expect("the id lock").next("aud");
-            write.store().record_auth_decision(&decision)?;
-            (outcome["actor"].clone(), outcome["token"].clone())
-        }
-        Err(error) => {
-            if let Some((reason_code, username, message)) = denial_of(&error) {
-                let now = clock.lock().expect("the clock lock").now();
-                let id = ids.lock().expect("the id lock").next("aud");
-                write.store().record_auth_decision(&AuthDecision {
-                    id,
-                    at: now,
-                    decision: AuthOutcome::Deny,
-                    reason_code: reason_code.to_string(),
-                    operation: AUTH_LOGIN.to_string(),
-                    scope: None,
-                    actor_id: None,
-                    token_id: None,
-                    identity_ref: None,
-                    transport: "http".to_string(),
-                    detail: Some(username.to_string()),
-                })?;
-                return Err(VogtError::Unauthenticated(message.to_string()));
-            }
-            return Err(error);
-        }
-    };
-    Ok((actor, token))
+    )
 }
 
-/// A refusal the login body returns. The reason code and username ride in front
-/// of the message so the caller records the denial after the transaction rolls
-/// back. Recorded inside it, the row would vanish with the rollback and the
-/// throttle would never see it.
-fn denied(reason_code: &str, username: &str, message: &str) -> VogtError {
-    VogtError::Unauthenticated(format!(
-        "denied\u{1f}{reason_code}\u{1f}{username}\u{1f}{message}"
-    ))
+/// The one sentence every refusal uses. Distinct reasons stay in the decision
+/// row, never in the reply.
+fn login_refused() -> VogtError {
+    VogtError::Unauthenticated("the username or password is not right".to_string())
 }
 
-fn denial_of(error: &VogtError) -> Option<(&str, &str, &str)> {
-    let VogtError::Unauthenticated(text) = error else {
-        return None;
-    };
-    let mut parts = text.split('\u{1f}');
-    if parts.next() != Some("denied") {
-        return None;
+const BAD_PASSWORD: &str = "bad_password";
+const LOGIN_OK: &str = "login_ok";
+const SESSION_OPENED_EVENT: &str = "auth.session_opened";
+
+/// Verified against when the username names nobody, so a miss costs the same
+/// scrypt as a hit. Computed once; the value never matters.
+fn dummy_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        auth::hash_password(
+            "not-a-real-password",
+            &random_array::<PASSWORD_SALT_BYTES>().unwrap(),
+        )
+        .unwrap()
+    })
+}
+
+/// The process-local failure window. The store keeps the durable record in
+/// `auth_decisions`; this only shapes the reply, which is why it is not read
+/// back from there.
+fn throttle() -> &'static std::sync::Mutex<std::collections::HashMap<String, Vec<Moment>>> {
+    static THROTTLE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Vec<Moment>>>,
+    > = std::sync::OnceLock::new();
+    THROTTLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// `Some(seconds)` when the username is locked out.
+fn throttle_check(username: &str, now: Moment) -> Option<i64> {
+    let mut guard = throttle().lock().expect("the throttle lock");
+    let window = guard.entry(username.to_string()).or_default();
+    window.retain(|at| now.unix_seconds() - at.unix_seconds() <= LOGIN_FAILURE_WINDOW_SECONDS);
+    if window.len() >= LOGIN_FAILURE_LIMIT {
+        let retry = LOGIN_FAILURE_WINDOW_SECONDS - (now.unix_seconds() - window[0].unix_seconds());
+        return Some(retry.max(1));
     }
-    Some((parts.next()?, parts.next()?, parts.next()?))
+    None
 }
 
-/// The denials for this username inside the window, oldest first, as
-/// `_recent_failures` reads them. The storage filter takes a decision, not a
-/// window, so the window is applied here.
-fn recent_denials(
-    txn: &mut impl ReadView,
-    username: &str,
-    since_unix: i64,
-) -> Result<Vec<AuthDecision>, VogtError> {
-    let mut failures: Vec<AuthDecision> = txn
-        .list_auth_decisions(Some("deny"), 500)?
-        .into_iter()
-        .filter(|decision| {
-            decision.detail.as_deref() == Some(username) && decision.at.unix_seconds() >= since_unix
-        })
-        .collect();
-    failures.sort_by_key(|decision| decision.at.unix_seconds());
-    Ok(failures)
+fn throttle_failed(username: &str, now: Moment) {
+    throttle()
+        .lock()
+        .expect("the throttle lock")
+        .entry(username.to_string())
+        .or_default()
+        .push(now);
+}
+
+fn throttle_succeeded(username: &str) {
+    throttle()
+        .lock()
+        .expect("the throttle lock")
+        .remove(username);
+}
+
+/// Tests share one process, so one test's failures would lock the next test's
+/// username. Production never calls this.
+fn throttle_reset() {
+    throttle().lock().expect("the throttle lock").clear();
+}
+
+fn record_decision<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    decision: AuthOutcome,
+    code: &str,
+    now: Moment,
+    identity_ref: Option<String>,
+    token_id: Option<String>,
+) -> Result<(), VogtError> {
+    let id = ctx.id_factory.lock().expect("the id lock").next("aud");
+    ctx.declared.record_auth_decision(&AuthDecision {
+        id,
+        at: now,
+        decision,
+        reason_code: code.to_string(),
+        operation: AUTH_LOGIN.to_string(),
+        scope: None,
+        actor_id: None,
+        token_id,
+        identity_ref,
+        transport: "http".to_string(),
+        detail: None,
+    })
 }
 
 fn username_of(raw: &str) -> Result<String, VogtError> {
@@ -622,6 +663,7 @@ mod tests {
     /// wrong because the denial and the session live on different connections.
     #[test]
     fn a_wrong_password_is_recorded_and_the_right_one_signs_in() {
+        throttle_reset();
         let dir = std::env::temp_dir().join(format!("vogt-login-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -655,12 +697,7 @@ mod tests {
             serde_json::json!({"username": "ada", "password": "nope"}),
         )
         .unwrap_err();
-        assert!(
-            wrong
-                .message()
-                .contains("unknown username or wrong password"),
-            "{wrong}"
-        );
+        assert_eq!(wrong.message(), "the username or password is not right");
 
         let session = login_op(
             &built,
@@ -678,7 +715,116 @@ mod tests {
             .iter()
             .map(|decision| decision.reason_code.as_str())
             .collect();
-        assert_eq!(kinds, vec!["login", "bad_password"]);
+        assert_eq!(kinds, vec!["login_ok", "bad_password"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Five failures inside the minute refuse even the right password, and the
+    /// refusal names the wait rather than repeating the generic sentence.
+    #[test]
+    fn a_username_that_keeps_failing_is_locked_out() {
+        throttle_reset();
+        let (dir, built) = fresh("throttle");
+        create_user_op(
+            &built,
+            serde_json::json!({
+                "username": "ada",
+                "password": "correct horse battery",
+                "reason": "first user",
+            }),
+        )
+        .unwrap();
+        for _ in 0..5 {
+            let wrong = login_op(
+                &built,
+                serde_json::json!({"username": "ada", "password": "nope"}),
+            )
+            .unwrap_err();
+            assert_eq!(wrong.message(), "the username or password is not right");
+        }
+        let locked = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": "correct horse battery"}),
+        )
+        .unwrap_err();
+        assert!(
+            locked
+                .message()
+                .contains("too many failed logins for 'ada'"),
+            "{locked}"
+        );
+        assert!(matches!(locked, VogtError::LoginThrottled(_)));
+        // The lockout did not verify the password, so it leaves no decision row.
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        let denials = view.list_auth_decisions(Some("deny"), 10).unwrap();
+        assert_eq!(denials.len(), 5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An unknown username, a disabled account and a wrong password all answer
+    /// with the same sentence, and the miss still verifies a hash.
+    #[test]
+    fn an_unknown_user_and_a_disabled_user_read_the_same() {
+        throttle_reset();
+        let (dir, built) = fresh("same");
+        create_user_op(
+            &built,
+            serde_json::json!({
+                "username": "ada",
+                "password": "correct horse battery",
+                "reason": "first user",
+            }),
+        )
+        .unwrap();
+        let wrong = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": "nope"}),
+        )
+        .unwrap_err();
+        let unknown = login_op(
+            &built,
+            serde_json::json!({"username": "nobody", "password": "correct horse battery"}),
+        )
+        .unwrap_err();
+        assert_eq!(wrong.message(), unknown.message());
+        assert_eq!(unknown.message(), "the username or password is not right");
+
+        // The store interface has no disable method; the row is the flag.
+        let db = dir.join("declared.sqlite3");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute(
+            "UPDATE actors SET disabled = 1 WHERE identity_ref = 'human:ada'",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+        let disabled = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": "correct horse battery"}),
+        )
+        .unwrap_err();
+        assert_eq!(disabled.message(), wrong.message());
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        let denials = view.list_auth_decisions(Some("deny"), 10).unwrap();
+        assert!(denials.iter().all(|d| d.reason_code == "bad_password"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn fresh(name: &str) -> (std::path::PathBuf, crate::application::context::Built) {
+        let dir = std::env::temp_dir().join(format!("vogt-login-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir.clone(),
+            ..crate::config::VogtConfig::default()
+        };
+        let built = crate::application::context::build_context(
+            config, None, None, None, None, None, None, None,
+        )
+        .unwrap();
+        (dir, built)
     }
 }
