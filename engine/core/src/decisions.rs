@@ -2114,18 +2114,21 @@ fn managed_span(body: &str) -> &str {
 /// The `#<n> -> checked?` map inside the managed region only, so a checkbox a
 /// person wrote in their own prose is never read as a member's state. A number
 /// repeated in the region keeps its last reading, in the order first seen.
-pub fn parse_checkbox_states(body: &str) -> Vec<(i64, bool)> {
+pub fn parse_checkbox_states(body: &str) -> Vec<(String, bool)> {
     let span = managed_span(body);
     if span.is_empty() {
         return Vec::new();
     }
-    let pattern = regex::Regex::new(r"(?m)^\s*- \[([ xX])\]\s+#(\d+)\b").expect("pattern");
-    let mut order: Vec<(i64, bool)> = Vec::new();
-    for found in pattern.captures_iter(span) {
-        let Ok(number) = found[2].parse::<i64>() else {
-            continue;
-        };
-        let checked = found[1].eq_ignore_ascii_case("x");
+    let pattern = fancy_regex::Regex::new(&python_pattern(r"(?m)^\s*- \[([ xX])\]\s+#(\d+)\b"))
+        .expect("pattern");
+    let mut order: Vec<(String, bool)> = Vec::new();
+    for found in pattern.captures_iter(span).flatten() {
+        let number = found.get(2).expect("number").as_str().to_string();
+        let checked = found
+            .get(1)
+            .expect("mark")
+            .as_str()
+            .eq_ignore_ascii_case("x");
         if let Some(slot) = order.iter_mut().find(|(seen, _)| *seen == number) {
             slot.1 = checked;
         } else {
@@ -2161,7 +2164,7 @@ mod projection_tests {
         assert!(spliced.starts_with("A note."));
         assert_eq!(
             parse_checkbox_states(&spliced),
-            vec![(12, true), (13, false)]
+            vec![("12".into(), true), ("13".into(), false)]
         );
         assert!(body_has_marker(Some(&spliced), "alpha"));
         assert!(!body_has_marker(Some(&spliced), "beta"));
@@ -2179,7 +2182,7 @@ mod projection_tests {
             format!("{MANAGED_START}\n- [ ] #5 a\n- [x] #5 b\n- [ ] #3 c\n{MANAGED_END}");
         assert_eq!(
             parse_checkbox_states(&repeated),
-            vec![(5, true), (3, false)]
+            vec![("5".into(), true), ("3".into(), false)]
         );
         // Only a space or an x ticks a box, and the number needs its boundary.
         let noise = format!("{MANAGED_START}\n- [y] #5\n- [] #5\n- [x]#5\n{MANAGED_END}");
@@ -2252,7 +2255,11 @@ fn dependabot_update_name(name: &str) -> bool {
         return false;
     };
     let tail = &name[marker + " - Update #".len()..];
-    !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit())
+    let digit = fancy_regex::Regex::new(r"^\d$").expect("digit");
+    !tail.is_empty()
+        && tail
+            .chars()
+            .all(|c| digit.is_match(&c.to_string()).unwrap_or(false))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2322,9 +2329,9 @@ fn ci_conclusion_of(check: &crate::core::Observation) -> Option<String> {
 }
 
 /// When a run ran, for ordering: its own `updated_at`, then its run number,
-/// then when Vogt observed it. A boolean run number counts as Python's `int`
-/// of it, and a number past `i64` still orders above every smaller one.
-fn ci_ran_at(check: &crate::core::Observation) -> (String, RunNumber, crate::core::Moment) {
+/// then when Vogt observed it. Only a real integer counts; a bool, a float, a
+/// string or a missing value all order as 0, the way `isinstance(n, int)` reads.
+fn ci_ran_at(check: &crate::core::Observation) -> (String, (bool, u64, i64), crate::core::Moment) {
     (
         payload_str(&check.payload, "updated_at")
             .unwrap_or("")
@@ -2334,22 +2341,17 @@ fn ci_ran_at(check: &crate::core::Observation) -> (String, RunNumber, crate::cor
     )
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum RunNumber {
-    Missing,
-    Counted(i64),
-    Beyond,
-}
-
-fn run_number_of(payload: &serde_json::Value) -> RunNumber {
+/// A plain integer, kept whole even past `i64`. Anything else — a bool, a
+/// float, a string, a missing value — is 0.
+fn run_number_of(payload: &serde_json::Value) -> (bool, u64, i64) {
     match payload.get("run_number") {
-        Some(serde_json::Value::Bool(true)) => RunNumber::Counted(1),
-        Some(serde_json::Value::Number(number)) => match number.as_i64() {
-            Some(value) => RunNumber::Counted(value),
-            None if number.as_u64().is_some() => RunNumber::Beyond,
-            None => RunNumber::Missing,
-        },
-        _ => RunNumber::Missing,
+        Some(serde_json::Value::Number(number)) if number.is_i64() || number.is_u64() => {
+            match number.as_i64() {
+                Some(value) => (false, 0, value),
+                None => (true, number.as_u64().unwrap_or(0), 0),
+            }
+        }
+        _ => (false, 0, 0),
     }
 }
 
@@ -2402,6 +2404,11 @@ pub fn watched_failures(
             if let Some(slot) = newest.iter_mut().find(|(held, _, _)| held == &key) {
                 slot.1 = index;
                 slot.2 = conclusion;
+                places
+                    .iter_mut()
+                    .find(|(held, _)| held == &key)
+                    .expect("a lane was stored with the run")
+                    .1 = lane;
             } else {
                 newest.push((key.clone(), index, conclusion));
                 places.push((key, lane));
@@ -2496,6 +2503,7 @@ pub fn branch_ci(checks: &[crate::core::Observation], branch: &str) -> Option<Br
             }
         }
     }
+    latest.sort_by(|left, right| left.0.cmp(&right.0));
     let runs: Vec<BranchRun> = latest
         .into_iter()
         .map(|(workflow, check)| BranchRun {
@@ -2656,6 +2664,27 @@ mod ci_alert_tests {
         assert_eq!(found.len(), 2);
         assert_eq!(found[0].observation.project_id.as_deref(), Some("p"));
         assert!(found[1].observation.project_id.is_none());
+
+        // A later run on the same lane replaces the ref the earlier one matched.
+        let mut v1 = check("v1", "push", "build", "failure", "2026-10-09T01:00:00Z");
+        let mut v2 = check("v2", "push", "build", "failure", "2026-10-09T02:00:00Z");
+        v1.payload["branch"] = serde_json::json!("v1");
+        v2.payload["branch"] = serde_json::json!("v2");
+        let replaced = watched_failures(&[v1, v2], &[], &["v*"]);
+        assert_eq!(replaced.len(), 1);
+        assert_eq!(replaced[0].lane.reference, "v2");
+
+        // Runs come out sorted by workflow, not in the order they were seen.
+        let test = check("main", "push", "test", "success", "2026-10-09T01:00:00Z");
+        let build = check("main", "push", "build", "success", "2026-10-09T01:00:00Z");
+        let ci = branch_ci(&[test, build], "main").unwrap();
+        assert_eq!(
+            ci.runs
+                .iter()
+                .map(|run| run.workflow.as_str())
+                .collect::<Vec<_>>(),
+            vec!["build", "test"]
+        );
     }
 }
 
@@ -2694,13 +2723,13 @@ pub fn runtime_from_command(command: Option<&str>) -> CommandRuntime {
         }
         let following = words.get(index + 1).map(String::as_str);
         if matches!(word.as_str(), "--model" | "-m") {
-            if let Some(value) = following {
+            if let Some(value) = following.filter(|text| !text.is_empty()) {
                 model = Some(value.to_string());
             }
         } else if let Some(value) = word.strip_prefix("--model=") {
             model = Some(value.to_string());
         } else if word == "--effort" {
-            if let Some(value) = following {
+            if let Some(value) = following.filter(|text| !text.is_empty()) {
                 effort = Some(value.to_string());
             }
         } else if let Some(value) = word.strip_prefix("--effort=") {
@@ -2745,12 +2774,20 @@ fn split_command(command: &str) -> Vec<String> {
             }
             (Some(open), c) if c == open => quote = None,
             (None, '\\') => match chars.next() {
-                Some('\n') => {}
-                Some(c) => current.push(c),
+                Some('\n') => started = true,
+                Some(c) => {
+                    current.push(c);
+                    started = true;
+                }
                 None => ok = false,
             },
             (Some('"'), '\\') => match chars.peek().copied() {
-                Some(c @ ('"' | '\\' | '\n')) => {
+                Some('\n') => {
+                    chars.next();
+                    current.push('\\');
+                    current.push('\n');
+                }
+                Some(c @ ('"' | '\\')) => {
                     chars.next();
                     current.push(c);
                 }
@@ -2779,7 +2816,7 @@ fn split_command(command: &str) -> Vec<String> {
         words
     } else {
         command
-            .split([' ', '\t', '\r', '\n'])
+            .split(|ch: char| ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}'))
             .filter(|word| !word.is_empty())
             .map(str::to_string)
             .collect()
@@ -2861,10 +2898,10 @@ mod runtime_tests {
         assert!(runtime_from_command(None).agent.is_none());
         assert!(runtime_from_command(Some("")).model.is_none());
 
-        // An empty quoted token is a word of its own, so the flag takes it
-        // rather than the word after it.
+        // An empty quoted token is a word, but an empty flag value is absent,
+        // so the effort stays unset and the agent is the word after it.
         let quoted = runtime_from_command(Some("--effort '' claude"));
-        assert_eq!(quoted.effort.as_deref(), Some(""));
+        assert!(quoted.effort.is_none());
         assert_eq!(quoted.agent.as_deref(), Some("claude"));
         let kept = runtime_from_command(Some(r#""a\$b" claude"#));
         assert_eq!(kept.agent.as_deref(), Some("claude"));
