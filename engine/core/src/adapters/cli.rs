@@ -1499,11 +1499,7 @@ mod tests {
     #[test]
     fn a_negative_number_is_a_value_not_a_flag() {
         let registry = default_registry();
-        let mut seen: Option<Value> = None;
-        let mut dispatch = |_operation: &Operation, params: Value| {
-            seen = Some(params);
-            Ok(Value::Null)
-        };
+        let mut dispatch = |_operation: &Operation, _params: Value| Ok(Value::Null);
         let result = run(
             &argv(&[
                 "token",
@@ -1521,8 +1517,18 @@ mod tests {
             "test",
             &mut dispatch,
         );
-        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stdout);
-        assert_eq!(seen.expect("dispatched")["expires_in_days"], -5);
+        // -5 parsed as a value and the shared validator rejected it: ge=1.
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            result.stderr.contains("expires_in_days"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("greater than or equal to 1"),
+            "{}",
+            result.stderr
+        );
     }
 
     #[test]
