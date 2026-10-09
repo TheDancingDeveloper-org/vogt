@@ -3530,7 +3530,18 @@ fn python_pattern(pattern: &str) -> String {
                 out.push(next);
                 if next == ':' || next == '=' || next == '!' {
                     // A group body or a lookahead. The body is translated by the
-                    // loop, not copied, and it is not a flag string.
+                    // loop, not copied, and it is not a flag string. A `=` after
+                    // `P` is a backreference, whose name is copied unchanged.
+                    if next == '=' && flag.ends_with('P') {
+                        named = true;
+                        while let Some(in_name) = chars.next() {
+                            out.push(in_name);
+                            if in_name == ')' {
+                                closed = true;
+                                break;
+                            }
+                        }
+                    }
                     break;
                 }
                 if next == '<' {
@@ -4312,6 +4323,10 @@ mod activity_tests {
         let named = python_pattern(r"(?i)(?P<kk>x)");
         fancy_regex::Regex::new(&named)
             .unwrap_or_else(|err| panic!("the group name was folded: {named}: {err}"));
+        // A backreference's name is copied too, so it still compiles.
+        let backref = python_pattern(r"(?i)(?P<sik>k)(?P=sik)");
+        fancy_regex::Regex::new(&backref)
+            .unwrap_or_else(|err| panic!("the backreference was folded: {backref}: {err}"));
     }
 
     #[test]
