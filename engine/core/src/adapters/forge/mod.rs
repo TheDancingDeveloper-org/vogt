@@ -10,13 +10,16 @@
 //! decides whether a write goes upstream, and the verb set is append-only by
 //! construction — there is no delete, force, or replace.
 
+mod collectors;
 mod edges;
 mod forgejo;
 mod github;
 mod kinds;
+mod lanes;
 mod models;
 mod payloads;
 mod provider;
+mod sync;
 mod transport;
 mod writeback;
 
