@@ -1204,5 +1204,10 @@
     "body": null,
     "exit": 1,
     "operation": "bugs"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "deps"
   }
 ]

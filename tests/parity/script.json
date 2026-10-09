@@ -349,6 +349,15 @@
    }
   },
   {
+   "operation": "deps",
+   "params": {
+    "project": "missing"
+   },
+   "expect": {
+    "exit": 1
+   }
+  },
+  {
    "operation": "install.bootstrap",
    "http": {
     "method": "POST",

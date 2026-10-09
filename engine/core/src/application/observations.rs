@@ -70,6 +70,254 @@ fn list<C: Clock, I: IdFactory>(
     Ok(json!({ "observations": found, "total": found.len(), "detail": Value::Null }))
 }
 
+const KIND_DEP_SCAN: &str = "dep_scan";
+const KIND_MIRRORED_SOURCE: &str = "mirrored_source";
+const NOT_COLLECTED: &str = "no sweep has run; dependency references are not collected";
+
+/// The dependency graph around one project. Ports `deps`.
+///
+/// An empty graph is three different answers — nothing references out, the
+/// manifests are in a format `dep-refs` does not parse, or nothing has walked
+/// the project — and `status` plus `detail` say which one it is.
+pub fn deps_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| deps(ctx, &params))
+}
+
+fn deps<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let slug = params
+        .get("project")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VogtError::InvalidRequest("deps needs a project".to_string()))?;
+    let freshness = crate::application::services::freshness::freshness_of(
+        &ctx.observed,
+        crate::application::services::now_of(&ctx.clock),
+    )?;
+    if !ctx.observed.has_evidence_tables()? {
+        return Ok(json!({
+            "project": slug,
+            "references_out": [],
+            "referenced_by": [],
+            "unresolved": 0,
+            "mirrors": [],
+            "mirrored_by": [],
+            "status": "not_collected",
+            "manifests_read": 0,
+            "unsupported_manifests": [],
+            "unreadable_manifests": [],
+            "detail": NOT_COLLECTED,
+            "freshness": freshness,
+        }));
+    }
+    let view = ctx.declared.read()?;
+    let project = resolve::project(&view, slug)?;
+    let out = ctx.observed.dep_refs(Some(&project.id), None)?;
+    let incoming = ctx.observed.dep_refs(None, Some(&project.id))?;
+    let (mirrors, mirrored_by) = mirrors_of(ctx, &view, &project.id)?;
+    let scan = scan_of(ctx, &project.id)?;
+    let references = out.len();
+    let unresolved = out.iter().filter(|row| row.to_project_id.is_none()).count();
+    Ok(json!({
+        "project": project.slug,
+        "references_out": named(&view, &out)?,
+        "referenced_by": named(&view, &incoming)?,
+        "unresolved": unresolved,
+        "mirrors": mirrors,
+        "mirrored_by": mirrored_by,
+        "status": if scan.is_some() { "collected" } else { "not_collected" },
+        "manifests_read": scan.as_ref().map_or(0, |scan| scan.manifests_read),
+        "unsupported_manifests": scan.as_ref().map_or_else(Vec::new, |scan| scan.unsupported.clone()),
+        "unreadable_manifests": scan.as_ref().map_or_else(Vec::new, |scan| scan.unreadable.clone()),
+        "detail": deps_detail(scan.as_ref(), references),
+        "freshness": freshness,
+    }))
+}
+
+struct ScanRecord {
+    manifests_read: i64,
+    unsupported: Vec<String>,
+    unreadable: Vec<String>,
+}
+
+/// The project's newest `dep_scan`, or `None` where nothing has walked it.
+fn scan_of<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project_id: &str,
+) -> Result<Option<ScanRecord>, VogtError> {
+    let seen = ctx.observed.latest(
+        &[KIND_DEP_SCAN.to_string()],
+        Some(project_id),
+        false,
+        false,
+        1,
+    )?;
+    let Some(observation) = seen.first() else {
+        return Ok(None);
+    };
+    let payload = &observation.payload;
+    Ok(Some(ScanRecord {
+        manifests_read: count_of(payload.get("manifests_read")),
+        unsupported: strings_of(payload.get("unsupported_manifests")),
+        unreadable: strings_of(payload.get("unreadable_manifests")),
+    }))
+}
+
+/// A payload number, read as one only when it is one. A bool is not one.
+fn count_of(value: Option<&Value>) -> i64 {
+    match value {
+        Some(Value::Number(number)) => number.as_i64().unwrap_or(0),
+        _ => 0,
+    }
+}
+
+fn strings_of(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| item.to_string().trim_matches('"').to_string())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Which zero this is, and nothing when it is not one.
+fn deps_detail(scan: Option<&ScanRecord>, references: usize) -> Value {
+    let Some(scan) = scan else {
+        return json!(
+            "`dep-refs` has never walked this project, so these counts are \
+             'not collected' rather than 'nothing to find' — run `sweep`"
+        );
+    };
+    if references > 0 {
+        return Value::Null;
+    }
+    if !scan.unsupported.is_empty() {
+        let shown = scan
+            .unsupported
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return json!(format!(
+            "no references found, and {} manifest(s) are in a format `dep-refs` does not read \
+             ({shown}): this zero is the collector's reach, not the project's graph",
+            scan.unsupported.len()
+        ));
+    }
+    if !scan.unreadable.is_empty() {
+        let shown = scan
+            .unreadable
+            .iter()
+            .take(5)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        return json!(format!(
+            "no references found, and {} manifest(s) would not parse ({shown})",
+            scan.unreadable.len()
+        ));
+    }
+    if scan.manifests_read == 0 {
+        return json!("no manifest was found in this project at all");
+    }
+    Value::Null
+}
+
+/// Mirrored-source relations this project is either end of.
+fn mirrors_of<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    view: &dyn ReadView,
+    project_id: &str,
+) -> Result<(Vec<Value>, Vec<Value>), VogtError> {
+    let slugs: std::collections::BTreeMap<String, String> = view
+        .list_projects(10_000, 0)?
+        .into_iter()
+        .map(|project| (project.id, project.slug))
+        .collect();
+    let mut mirrors = Vec::new();
+    let mut mirrored_by = Vec::new();
+    for observation in ctx.observed.latest(
+        &[KIND_MIRRORED_SOURCE.to_string()],
+        None,
+        false,
+        false,
+        10_000,
+    )? {
+        let payload = &observation.payload;
+        let Some(carrier) = observation.project_id.as_deref() else {
+            continue;
+        };
+        let published_id = payload
+            .get("mirrors_project_id")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let view_of = json!({
+            "package": text_of(payload.get("package")),
+            "project": slugs.get(carrier).cloned().unwrap_or_else(|| carrier.to_string()),
+            "mirrors": slugs.get(published_id).cloned().unwrap_or_else(|| {
+                text_of(payload.get("mirrors_project_slug"))
+            }),
+            "local_path": text_of(payload.get("local_path")),
+            "manifest": optional_text(payload.get("manifest")),
+            "local_version": optional_text(payload.get("local_version")),
+            "published_version": optional_text(payload.get("published_version")),
+            "observed_at": observation.observed_at,
+        });
+        if carrier == project_id {
+            mirrors.push(view_of.clone());
+        }
+        if published_id == project_id {
+            mirrored_by.push(view_of);
+        }
+    }
+    Ok((mirrors, mirrored_by))
+}
+
+fn text_of(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+fn optional_text(value: Option<&Value>) -> Value {
+    match value {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::String(text)) => json!(text),
+        Some(other) => json!(other.to_string()),
+    }
+}
+
+/// Attach slugs, so a reference reads without a second lookup.
+fn named(view: &dyn ReadView, refs: &[crate::core::DepRef]) -> Result<Vec<Value>, VogtError> {
+    let mut named = Vec::with_capacity(refs.len());
+    for row in refs {
+        let mut value = serde_json::to_value(row).map_err(|err| {
+            VogtError::InvalidRequest(format!("a dependency reference will not serialise: {err}"))
+        })?;
+        let from_slug = view
+            .project_by_id(&row.from_project_id)?
+            .map(|project| project.slug);
+        let to_slug = row
+            .to_project_id
+            .as_deref()
+            .and_then(|id| view.project_by_id(id).ok().flatten())
+            .map(|project| project.slug);
+        if let Some(object) = value.as_object_mut() {
+            object.insert("from_project_slug".to_string(), json!(from_slug));
+            object.insert("to_project_slug".to_string(), json!(to_slug));
+        }
+        named.push(value);
+    }
+    Ok(named)
+}
+
 /// Apply the retention policy to observation history.
 ///
 /// The newest observation per subject is kept indefinitely, and so is anything
