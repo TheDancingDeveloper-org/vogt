@@ -221,7 +221,13 @@ fn main() -> ExitCode {
         );
         std::process::exit(code);
     }
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(
+        std::iter::once(std::ffi::OsString::from("vogt-core")).chain(
+            expand_global_prefixes(&argv)
+                .into_iter()
+                .map(std::ffi::OsString::from),
+        ),
+    );
     if let Err(error) = validate_hooks(None) {
         eprintln!("{error}");
         return ExitCode::from(1);
@@ -302,6 +308,68 @@ fn is_global_prefix(arg: &str, option: &str) -> bool {
 /// on `serve`, and stealing that flag would stop a deployment booting.
 fn is_help_flag(arg: &str) -> bool {
     arg == "--help" || arg == "-h" || is_global_prefix(arg, "help")
+}
+
+/// Rewrite a unique prefix of a global option to the spelling clap knows.
+///
+/// clap does not abbreviate, so `vogt --data DIR init` reached this parser and
+/// exited 2. `--data` and `--data-d` become `--data-dir`; `--js` becomes
+/// `--json`. An attached value stays attached (`--data=DIR`). A prefix that is
+/// not unique, or that belongs to `serve` (`--h` is also `--host`), is left
+/// alone.
+fn expand_global_prefixes(argv: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(argv.len());
+    let mut index = 0usize;
+    // Only the tokens before the command word are globals. `serve --host` must
+    // not be rewritten because `--host` starts with `h`.
+    let mut before_command = true;
+    while index < argv.len() {
+        let arg = &argv[index];
+        if !before_command {
+            out.push(arg.clone());
+            index += 1;
+            continue;
+        }
+        if let Some(option) = canonical_global(arg) {
+            let value = arg.split_once('=').map(|(_, value)| value);
+            match option {
+                "data-dir" => {
+                    out.push("--data-dir".to_string());
+                    if let Some(value) = value {
+                        out.push(value.to_string());
+                    }
+                }
+                "json" => out.push("--json".to_string()),
+                other => out.push(format!("--{other}")),
+            }
+            index += 1;
+            continue;
+        }
+        if !arg.starts_with('-') {
+            before_command = false;
+        }
+        out.push(arg.clone());
+        index += 1;
+    }
+    out
+}
+
+/// The canonical global name when `arg` is an exact match or a unique prefix.
+fn canonical_global(arg: &str) -> Option<&'static str> {
+    const GLOBALS: [&str; 4] = ["help", "version", "data-dir", "json"];
+    let name = arg.split_once('=').map(|(head, _)| head).unwrap_or(arg);
+    let name = name.strip_prefix("--")?;
+    if GLOBALS.contains(&name) {
+        return GLOBALS.iter().copied().find(|option| *option == name);
+    }
+    let matches: Vec<&&str> = GLOBALS
+        .iter()
+        .filter(|option| option.starts_with(name) && !name.is_empty())
+        .collect();
+    match matches.as_slice() {
+        [one] => Some(one),
+        _ => None,
+    }
 }
 
 /// Validate the hooks and name the ones that are set, once. A value that is not

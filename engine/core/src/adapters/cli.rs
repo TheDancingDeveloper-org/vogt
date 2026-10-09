@@ -205,8 +205,11 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             continue;
         }
         if positional.is_empty() && flag.starts_with('-') {
-            // Every leftover token, flag and value, is reported together.
-            let rest = argv_rest[index..].join(" ");
+            // An unknown flag before the command is unrecognized, but argparse
+            // keeps parsing: `--jsonx work list` reports `--jsonx` and still
+            // sees `work list` as the command. The run stops at the next token
+            // that is a real command word or a global it does know.
+            let rest = unrecognized_globals(&argv_rest[index..], registry).join(" ");
             return ParseOutcome::Result(unrecognized(&rest));
         }
         if !command_complete && !flag.starts_with('-') {
@@ -215,7 +218,7 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             index += 1;
             continue;
         }
-        if !command_complete && flag.starts_with('-') {
+        if !command_complete && flag.starts_with('-') && !is_help_flag(flag) {
             // A flag between the group word and the subcommand is a root
             // usage error, matching argparse: `work --json get` reports
             // "unrecognized arguments" against the top-level usage.
@@ -247,9 +250,13 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             )));
         }
         CommandMatch::Group { path } => {
-            // `--help` on a group, or a bare group name, prints the group.
-            let show = positional.len() == path.len()
-                || flags.first().is_some_and(|token| is_help_flag(token));
+            // `--help` on a group prints the group page and exits 0. argparse
+            // writes `usage: vogt work [-h] <subcommand> ...` with the
+            // subcommands and the options section.
+            if flags.iter().any(|flag| is_help_flag(flag)) {
+                return ParseOutcome::Result(ok_out(format_group(registry, &path)));
+            }
+            let show = positional.len() == path.len();
             if show && flags.is_empty() {
                 // A bare group is a usage error (exit 2) and prints the root
                 // help, which is what argparse does for an incomplete command.
@@ -640,12 +647,27 @@ fn match_global(flag: &str) -> Option<&'static str> {
     }
     let matches: Vec<&&str> = GLOBAL_OPTIONS
         .iter()
-        .filter(|option| option.starts_with(name))
+        .filter(|option| option.starts_with(name) && !name.is_empty())
         .collect();
     match matches.as_slice() {
         [one] => Some(global_spelling(one)),
         _ => None,
     }
+}
+
+/// An unknown flag before the command, up to the next token argparse still
+/// parses: a real command word, or a global option it recognises. `--jsonx work
+/// list` reports `--jsonx`; `--jsonx --zz work list` reports `--jsonx --zz`.
+fn unrecognized_globals<'a>(tail: &'a [String], registry: &OperationRegistry) -> &'a [String] {
+    let operations = cli_operations(registry);
+    let heads: std::collections::BTreeSet<&str> =
+        operations.iter().map(|op| op.path[0].as_str()).collect();
+    for (offset, token) in tail.iter().enumerate().skip(1) {
+        if heads.contains(token.as_str()) || match_global(token).is_some() {
+            return &tail[..offset];
+        }
+    }
+    tail
 }
 
 fn global_spelling(name: &str) -> &'static str {
@@ -1028,8 +1050,11 @@ fn format_top(registry: &OperationRegistry) -> String {
     let mut out = String::new();
     out.push_str(&usage_synopsis());
     out.push('\n');
-    out.push_str(DESCRIPTION);
-    out.push_str("\n\npositional arguments:\n");
+    for line in wrap_text(DESCRIPTION, wrap_width()) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str("\npositional arguments:\n");
     for (name, summary) in top_commands(registry) {
         out.push_str(&format!("  {name:<22}{summary}\n"));
     }
@@ -1069,8 +1094,35 @@ fn top_commands(registry: &OperationRegistry) -> Vec<(String, String)> {
 fn format_group(registry: &OperationRegistry, path: &[String]) -> String {
     let mut out = String::new();
     let joined = path.join(" ");
-    out.push_str(&format!("usage: vogt {joined} <subcommand> ...\n\n"));
-    out.push_str(&format!("{joined} operations\n\nsubcommands:\n"));
+    out.push_str(&command_usage(
+        &format!("vogt {joined}"),
+        &["[-h]".to_string()],
+        &["<subcommand>".to_string(), "...".to_string()],
+    ));
+    out.push_str("\n\npositional arguments:\n  <subcommand>\n");
+    let rows = group_rows(registry, path);
+    let longest = rows
+        .iter()
+        .map(|(name, _)| name.chars().count())
+        .max()
+        .unwrap_or(0);
+    // argparse's subcommand column: the longest name plus its indent of 4, then
+    // two spaces, capped at 24. `work` lands on 15, `label` on 14.
+    let column = (longest + 4 + 2).min(24);
+    for (name, summary) in &rows {
+        out.push_str(&option_row(name, summary, column, 4));
+    }
+    out.push_str("\noptions:\n");
+    out.push_str(&option_row(
+        "-h, --help",
+        "show this help message and exit",
+        15,
+        2,
+    ));
+    out
+}
+
+fn group_rows(registry: &OperationRegistry, path: &[String]) -> Vec<(String, String)> {
     let mut shown = BTreeMap::<String, String>::new();
     let mut order = Vec::new();
     for op in cli_operations(registry) {
@@ -1089,11 +1141,13 @@ fn format_group(registry: &OperationRegistry, path: &[String]) -> String {
         shown.insert(name.clone(), summary);
         order.push(name);
     }
-    for name in order {
-        let summary = &shown[&name];
-        out.push_str(&format!("  {name:<22}{summary}\n"));
-    }
-    out
+    order
+        .into_iter()
+        .map(|name| {
+            let summary = shown.remove(&name).unwrap_or_default();
+            (name, summary)
+        })
+        .collect()
 }
 
 fn format_operation(operation: &Operation) -> String {
@@ -2031,6 +2085,80 @@ mod tests {
         let root = run(&argv(&["--he"]), &registry, "test", &mut no_dispatch);
         assert_eq!(root.exit_code, EXIT_OK, "{}", root.stderr);
         assert!(root.stdout.contains("usage: vogt"), "{}", root.stdout);
+        assert!(
+            root.stdout.contains("provenance and\n"),
+            "the description is not wrapped: {}",
+            root.stdout
+        );
+    }
+
+    #[test]
+    fn group_help_is_the_subcommand_page() {
+        let registry = default_registry();
+        let work = run(
+            &argv(&["work", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(work.exit_code, EXIT_OK, "{}", work.stderr);
+        assert!(work.stderr.is_empty(), "{}", work.stderr);
+        assert!(
+            work.stdout
+                .starts_with("usage: vogt work [-h] <subcommand> ...\n"),
+            "{}",
+            work.stdout
+        );
+        assert!(
+            work.stdout.contains("positional arguments:"),
+            "{}",
+            work.stdout
+        );
+        assert!(
+            work.stdout.contains("\n    list         "),
+            "{}",
+            work.stdout
+        );
+        assert!(
+            work.stdout.contains("(`id` is accepted for `ref`)."),
+            "{}",
+            work.stdout
+        );
+        assert!(work.stdout.contains("-h, --help"), "{}", work.stdout);
+
+        let label = run(
+            &argv(&["label", "--he"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(label.exit_code, EXIT_OK, "{}", label.stderr);
+        assert!(
+            label
+                .stdout
+                .starts_with("usage: vogt label [-h] <subcommand> ...\n"),
+            "{}",
+            label.stdout
+        );
+    }
+
+    #[test]
+    fn an_unknown_global_stops_before_the_command() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["--jsonx", "work", "list"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result.stderr.contains("unrecognized arguments: --jsonx\n"),
+            "{}",
+            result.stderr
+        );
+        assert!(!result.stderr.contains("work list"), "{}", result.stderr);
     }
 
     fn an_unknown_flag_stops_the_report_before_a_later_known_flag() {
