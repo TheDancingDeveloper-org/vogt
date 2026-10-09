@@ -289,35 +289,26 @@ fn gather<C: Clock, I: IdFactory>(
         project.as_ref().map(|project| project.id.as_str()),
         now_of(&ctx.clock),
     )?;
-    // Branch age is measured from the read above. Scoring takes its own read,
-    // below, once the candidates exist — Python's `_score_all(..., now=ctx.clock())`
-    // is a separate call from `build_git_signals(..., now=ctx.clock())`.
-    let mut ranked = Vec::new();
+    // Scoring waits until both halves are assembled. The candidates carry their
+    // ranking inputs; the clock they score against is read once, afterwards.
+    let mut declared_rows: Vec<DeclaredScore> = Vec::new();
     for item in &items {
         let (open_pr, branch_activity) = signals.for_ref(&item.reference);
-        // One read per candidate, in the order Python builds them: declared
-        // rows do not read the clock while they are assembled, so they all
-        // share the scoring read.
-        let mut inputs = RankingInputs::at(now_of(&ctx.clock));
-        inputs.blocking_fan_out = fan_out.get(&item.id).copied().unwrap_or(0);
-        inputs.initiative_weight = item
-            .initiative_id
-            .as_ref()
-            .and_then(|id| weights.get(id).copied())
-            .unwrap_or(0);
-        inputs.is_terminal = crate::core::TERMINAL_STATES.contains(&item.state.as_str());
-        inputs.open_pr = open_pr;
-        inputs.branch_activity_seconds = branch_activity;
-        let score = score_item(&Rankable::from_work_item(item), &inputs);
-        ranked.push(RankedRow {
-            score: score.total,
-            reference: item.reference.clone(),
-            value: ranked_row("declared", true, item, &score.total),
+        declared_rows.push(DeclaredScore {
+            item,
+            open_pr,
+            branch_activity,
+            fan_out: fan_out.get(&item.id).copied().unwrap_or(0),
+            initiative_weight: item
+                .initiative_id
+                .as_ref()
+                .and_then(|id| weights.get(id).copied())
+                .unwrap_or(0),
         });
     }
-    let declared = ranked.len() as i64;
+    let declared = declared_rows.len() as i64;
 
-    let (observed, suppressed, closed) = if ctx.observed.has_evidence_tables()? {
+    let (mut ranked, observed, suppressed, closed) = if ctx.observed.has_evidence_tables()? {
         let mut kinds = vec!["forge.issue".to_string(), "marker".to_string()];
         if query.include_prs {
             kinds.push("forge.pull_request".to_string());
@@ -346,6 +337,7 @@ fn gather<C: Clock, I: IdFactory>(
             .map(|observation| observation.subject_key.clone())
             .collect();
         present.extend(adopted.keys().cloned());
+        let mut observed_rows: Vec<ObservedScore> = Vec::new();
         let mut suppressed = 0;
         let mut observed_count = 0;
         let mut closed_by_overlay = 0;
@@ -407,58 +399,44 @@ fn gather<C: Clock, I: IdFactory>(
             {
                 continue;
             }
-            // Trust reads the clock once per observed row while the candidate is
-            // built, before scoring. Python's `trust_for` does that, and the
-            // step clock advances a second per read, so scoring has to come
-            // after it or every score is one second too fresh.
             let trust = trust_for(
                 ctx,
                 observation.observed_at,
                 confirmed.get(&observation.subject_key).copied(),
             );
             let (open_pr, branch_activity) = signals.for_ref(&observation.subject_key);
-            let mut inputs = RankingInputs::at(now_of(&ctx.clock));
-            inputs.open_pr = open_pr;
-            inputs.branch_activity_seconds = branch_activity;
-            let rankable = Rankable {
-                id: observation.subject_key.clone(),
-                reference: observation.subject_key.clone(),
-                priority: priority.clone(),
-                updated_at: observation.observed_at,
-                trust_state: trust.clone(),
-                state: "observed".to_string(),
-                has_initiative: false,
-            };
-            let score = score_item(&rankable, &inputs);
             let project_slug = observation
                 .project_id
                 .as_ref()
                 .and_then(|id| view.project_by_id(id).ok().flatten())
                 .map(|project| project.slug);
-            ranked.push(RankedRow {
-                score: score.total,
-                reference: observation.subject_key.clone(),
-                value: observed_row(
-                    observation,
-                    &ObservedFields {
-                        kind,
-                        priority: &priority,
-                        trust: &trust,
-                        state: &state,
-                        project_slug: project_slug.as_deref(),
-                        adopted_as: adopted.get(&observation.subject_key).map(String::as_str),
-                    },
-                    &score.total,
-                ),
+            observed_rows.push(ObservedScore {
+                observation,
+                kind,
+                priority,
+                trust,
+                state,
+                project_slug,
+                adopted_as: adopted.get(&observation.subject_key).cloned(),
+                open_pr,
+                branch_activity,
             });
         }
+        // Python reads the clock at `views.py:423` for git signals, once per
+        // observed row inside `trust_for` (`views.py:189`) while assembling
+        // them, then once at `views.py:554` for `_score_all`. Both halves
+        // score from that last read, so it comes after the observed loop.
         let closed = ctx
             .observed
             .count_closed(&kinds, project.as_ref().map(|project| project.id.as_str()))?
             + closed_by_overlay;
-        (observed_count, suppressed, closed)
+        let scored = score_rows(&declared_rows, &observed_rows, now_of(&ctx.clock));
+        (scored, observed_count, suppressed, closed)
     } else {
-        (0, 0, 0)
+        // No observed rows, so no `trust_for` reads: the scoring read is the
+        // second one, straight after the git-signals read.
+        let scored = score_rows(&declared_rows, &[], now_of(&ctx.clock));
+        (scored, 0, 0, 0)
     };
 
     ranked.sort_by(|left, right| {
@@ -476,6 +454,80 @@ fn gather<C: Clock, I: IdFactory>(
         closed,
         excluded_unlinked,
     })
+}
+
+fn score_rows(
+    declared_rows: &[DeclaredScore<'_>],
+    observed_rows: &[ObservedScore<'_>],
+    now: Moment,
+) -> Vec<RankedRow> {
+    let mut scored = Vec::new();
+    for row in declared_rows {
+        let mut inputs = RankingInputs::at(now);
+        inputs.blocking_fan_out = row.fan_out;
+        inputs.initiative_weight = row.initiative_weight;
+        inputs.is_terminal = crate::core::TERMINAL_STATES.contains(&row.item.state.as_str());
+        inputs.open_pr = row.open_pr;
+        inputs.branch_activity_seconds = row.branch_activity;
+        let score = score_item(&Rankable::from_work_item(row.item), &inputs);
+        scored.push(RankedRow {
+            score: score.total,
+            reference: row.item.reference.clone(),
+            value: ranked_row("declared", true, row.item, &score.total),
+        });
+    }
+    for row in observed_rows {
+        let mut inputs = RankingInputs::at(now);
+        inputs.open_pr = row.open_pr;
+        inputs.branch_activity_seconds = row.branch_activity;
+        let rankable = Rankable {
+            id: row.observation.subject_key.clone(),
+            reference: row.observation.subject_key.clone(),
+            priority: row.priority.clone(),
+            updated_at: row.observation.observed_at,
+            trust_state: row.trust.clone(),
+            state: "observed".to_string(),
+            has_initiative: false,
+        };
+        let score = score_item(&rankable, &inputs);
+        scored.push(RankedRow {
+            score: score.total,
+            reference: row.observation.subject_key.clone(),
+            value: observed_row(
+                row.observation,
+                &ObservedFields {
+                    kind: row.kind,
+                    priority: &row.priority,
+                    trust: &row.trust,
+                    state: &row.state,
+                    project_slug: row.project_slug.as_deref(),
+                    adopted_as: row.adopted_as.as_deref(),
+                },
+                &score.total,
+            ),
+        });
+    }
+    scored
+}
+
+struct DeclaredScore<'a> {
+    item: &'a crate::core::WorkItem,
+    open_pr: bool,
+    branch_activity: Option<i64>,
+    fan_out: i64,
+    initiative_weight: i64,
+}
+
+struct ObservedScore<'a> {
+    observation: &'a crate::core::Observation,
+    kind: &'static str,
+    priority: String,
+    trust: String,
+    state: String,
+    project_slug: Option<String>,
+    adopted_as: Option<String>,
+    open_pr: bool,
+    branch_activity: Option<i64>,
 }
 
 fn initiative_weights(
