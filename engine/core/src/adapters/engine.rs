@@ -643,7 +643,12 @@ impl EngineClient {
 
     pub fn chat_send(&self, chat_id: &str, body: &Value) -> Result<Option<Value>, VogtError> {
         let wait = body.get("wait_secs").and_then(Value::as_i64).unwrap_or(0);
-        self.chat_call(&format!("/{}/messages", quote(chat_id)), "POST", Some(body), wait)
+        self.chat_call(
+            &format!("/{}/messages", quote(chat_id)),
+            "POST",
+            Some(body),
+            wait,
+        )
     }
 
     /// A person's answer to a chat's approval. `person` says whether the
@@ -696,7 +701,12 @@ impl EngineClient {
     }
 
     pub fn chat_promote(&self, chat_id: &str, body: &Value) -> Result<Option<Value>, VogtError> {
-        self.chat_call(&format!("/{}/promote", quote(chat_id)), "POST", Some(body), 0)
+        self.chat_call(
+            &format!("/{}/promote", quote(chat_id)),
+            "POST",
+            Some(body),
+            0,
+        )
     }
 
     /// One `/api/chats` call; `None` on a 404 (no such chat, or chats off). A
@@ -709,11 +719,21 @@ impl EngineClient {
         wait_s: i64,
     ) -> Result<Option<Value>, VogtError> {
         let timeout = (wait_s > 0).then(|| self.timeout + Duration::from_secs(wait_s as u64));
-        let answer = self.call(&format!("/api/chats{suffix}"), method, payload, true, timeout)?;
+        let answer = self.call(
+            &format!("/api/chats{suffix}"),
+            method,
+            payload,
+            true,
+            timeout,
+        )?;
         if answer.is_null() {
             return Ok(None);
         }
-        Ok(Some(if answer.is_object() { answer } else { Value::Object(Map::new()) }))
+        Ok(Some(if answer.is_object() {
+            answer
+        } else {
+            Value::Object(Map::new())
+        }))
     }
 
     /// Raise `EngineUnavailable` unless the engine answers its liveness probe.
@@ -1584,7 +1604,10 @@ pub mod http1 {
         timeout: Duration,
         limit: usize,
     ) -> Result<(u16, Vec<u8>), String> {
-        let agent = ureq::AgentBuilder::new().timeout_connect(timeout).timeout(timeout).build();
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(timeout)
+            .timeout(timeout)
+            .build();
         let mut request = agent.request(method, url);
         for (name, value) in headers {
             request = request.set(name, value);
@@ -1623,7 +1646,11 @@ pub mod http1 {
         stream.set_write_timeout(Some(timeout)).ok();
         // The default port stays off the Host header; any other port is part of
         // the authority and must be sent.
-        let host_header = if port == 80 { host.to_string() } else { format!("{host}:{port}") };
+        let host_header = if port == 80 {
+            host.to_string()
+        } else {
+            format!("{host}:{port}")
+        };
         let mut request =
             format!("{method} {path} HTTP/1.1\r\nHost: {host_header}\r\nConnection: close\r\n");
         for (name, value) in headers {

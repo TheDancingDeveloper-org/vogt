@@ -221,7 +221,11 @@ where
 {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
-        if !meta.target().starts_with(LOGGER_NAMESPACE) || !self.emits(meta.level()) {
+        // Python sets the root logger to WARNING and only `vogt.*` to the
+        // configured level, so a dependency's warning is kept and its chatter
+        // is not.
+        let ours = meta.target().starts_with(LOGGER_NAMESPACE);
+        if !((ours && self.emits(meta.level())) || *meta.level() <= Level::WARN) {
             return;
         }
         let mut visitor = FieldVisitor {

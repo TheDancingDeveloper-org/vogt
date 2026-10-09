@@ -358,10 +358,15 @@ fn askpass(
     let mut random = [0u8; 8];
     File::open("/dev/urandom")
         .and_then(|mut source| source.read_exact(&mut random))
-        .map_err(|error| VogtError::GitUnavailable(format!("no randomness for askpass: {error}")))?;
+        .map_err(|error| {
+            VogtError::GitUnavailable(format!("no randomness for askpass: {error}"))
+        })?;
     let dir = std::env::temp_dir().join(format!(
         "vogt-askpass-{}",
-        random.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        random
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
     ));
     fs::create_dir(&dir).map_err(|error| {
         VogtError::GitUnavailable(format!("could not create the askpass helper: {error}"))
