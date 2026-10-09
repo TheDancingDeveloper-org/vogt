@@ -7,6 +7,7 @@ pub mod brief;
 pub mod context;
 pub mod contracts;
 pub mod instance;
+pub mod observations;
 pub mod resolve;
 pub mod services;
 pub mod suppressions;

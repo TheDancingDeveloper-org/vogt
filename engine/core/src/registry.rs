@@ -138,6 +138,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "suppress" => Some(crate::application::suppressions::suppress_op),
         "suppression.list" => Some(crate::application::suppressions::suppression_list_op),
         "suppression.revoke" => Some(crate::application::suppressions::suppression_revoke_op),
+        "observations.list" => Some(crate::application::observations::observations_list_op),
+        "observations.prune" => Some(crate::application::observations::observations_prune_op),
         "why" => Some(crate::application::views::why_op),
         other => crate::application::services::service_for(other),
     }
