@@ -84,12 +84,13 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
 }
 
 /// The process config, with this route's data directory. Read once, when the
-/// state is built. A config that cannot be read falls back to the defaults
-/// rather than refusing to serve, because the route's own store is already open
-/// and the defaults are what every request used to get silently.
+/// state is built. A config that cannot be read is fatal: falling back to the
+/// defaults would silently turn `install_bootstrap_enabled` back on for an
+/// operator who had switched it off. `serve` has already exited on the same
+/// error, so a failure here means the state was built some other way.
 fn loaded_config(data_dir: &std::path::Path) -> crate::config::VogtConfig {
     let mut config = crate::config::load_config(&serde_json::Map::new())
-        .unwrap_or_else(|_| crate::config::VogtConfig::default());
+        .expect("the configuration could not be read; refusing to serve on the defaults");
     config.data_dir = data_dir.to_path_buf();
     config
 }
@@ -372,7 +373,18 @@ fn bootstrap_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
     let mut out = serde_json::Map::new();
     for field in ["display_name", "identity_ref", "token_name", "username"] {
         match object.get(field) {
-            None => {}
+            // Absent and explicit null are the same thing: the field is optional
+            // and the service applies its default. `token_name` defaults to the
+            // name the web wizard never sends, so an omitted one must not land as
+            // an empty string.
+            None | Some(serde_json::Value::Null) => {
+                if field == "token_name" {
+                    out.insert(
+                        field.to_string(),
+                        serde_json::Value::String("first-run browser token".to_string()),
+                    );
+                }
+            }
             Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
                 out.insert(
                     field.to_string(),
@@ -395,7 +407,7 @@ fn bootstrap_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
         ));
     }
     match object.get("password") {
-        None => {}
+        None | Some(serde_json::Value::Null) => {}
         Some(serde_json::Value::String(password)) => {
             out.insert(
                 "password".to_string(),
@@ -901,6 +913,16 @@ mod tests {
         );
         let (status, _) = post_json(running.addr, "/api/install/bootstrap", "{}");
         assert_eq!(status, 422);
+        // An explicit null is "not given", not a type error. The service then
+        // decides it cannot derive an identity, which is its own answer.
+        let (status, body) = post_json(
+            running.addr,
+            "/api/install/bootstrap",
+            r#"{"display_name":"!!!","identity_ref":null}"#,
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_ne!(status, 422, "{body}");
+        assert_ne!(json["error"]["code"], "invalid_arguments");
         let (status, body) = request(running.addr, "GET", "/api/install/status", None);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(
@@ -924,6 +946,7 @@ mod tests {
             json["secret"].as_str().is_some_and(|s| !s.is_empty()),
             "{body}"
         );
+        assert_eq!(json["token"]["name"], "first-run browser token", "{body}");
         let (status, body) = post_json(
             running.addr,
             "/api/install/bootstrap",
