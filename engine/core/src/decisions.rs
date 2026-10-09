@@ -3527,8 +3527,13 @@ fn python_pattern(pattern: &str) -> String {
             let mut closed = false;
             while let Some(next) = chars.next() {
                 out.push(next);
-                if next == ')' || next == ':' {
-                    closed = next == ')';
+                if next == ':' || next == '<' {
+                    // A `:` opens a grouping body and a `<` a lookaround. Either
+                    // way the body is translated by the loop, not copied.
+                    break;
+                }
+                if next == ')' {
+                    closed = true;
                     break;
                 }
                 flag.push(next);
@@ -4268,6 +4273,13 @@ mod activity_tests {
             fancy_regex::Regex::new(&translated)
                 .unwrap_or_else(|err| panic!("{pattern} did not compile: {translated}: {err}"));
         }
+        // A lookbehind's body is translated too, so its `\w` is Python's word
+        // class rather than the engine's.
+        let lookbehind = python_pattern(r"(?i)(?<!\w)tok");
+        assert!(
+            lookbehind.contains(PY_WORD_CLASS),
+            "the lookbehind was copied raw: {lookbehind}"
+        );
     }
 
     #[test]
