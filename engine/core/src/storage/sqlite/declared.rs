@@ -1,10 +1,6 @@
-//! Declared SQLite store, first half. Ports the project, actor, label,
-//! workflow, initiative and contract parts of
-//! `src/vogt/storage/sqlite/declared.py`.
+//! Declared SQLite store. Ports `src/vogt/storage/sqlite/declared.py`.
 //!
 //! SQL stays next to the Python so ordering and the `ON CONFLICT` sites match.
-//! Methods owned by later store chunks return `VogtError::InvalidRequest`
-//! naming the chunk, rather than a guessed row.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -16,7 +12,7 @@ use crate::core::{
     AuthDecision, Clock, CodingSession, Comment, ContractExemption, DriftProposal, Event,
     ForgeAccount, IdFactory, InboxTriage, Initiative, InitiativeState, Label, Moment,
     PasswordCredential, Principal, Project, RelationKind, SessionGrant, Suppression, Token,
-    WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackRecord,
+    WorkItem, WorkLink, WorkOverlay, Workflow, WriteBackAction, WriteBackOutcome, WriteBackRecord,
 };
 use crate::errors::VogtError;
 use crate::storage::interface::{
@@ -37,12 +33,6 @@ const META_CLONED_BACKUP_TAKEN_AT: &str = "cloned_backup_taken_at";
 const INIT_OPERATION: &str = "instance.init";
 const INIT_REASON: &str = "instance bootstrap";
 const WORK_REF_PREFIX: &str = "WI-";
-
-fn later<T>(name: &str) -> Result<T, VogtError> {
-    Err(VogtError::InvalidRequest(format!(
-        "{name} belongs to a later declared-store chunk"
-    )))
-}
 
 fn sql_err(err: rusqlite::Error) -> VogtError {
     // A constraint, lock or I/O failure is the store breaking, not the caller
@@ -318,13 +308,44 @@ where
     }
     fn publish_event(
         &self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &serde_json::Value,
-        _: Moment,
+        kind: &str,
+        entity_kind: &str,
+        entity_id: &str,
+        summary: &serde_json::Value,
+        at: Moment,
     ) -> Result<Event, VogtError> {
-        later("publish_event")
+        // Not a declared write: no audit row and the revision stays put,
+        // which is what lets a collector keep its promise never to write
+        // the declared store while the application publishes for it.
+        let conn = self.open_initialized()?;
+        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
+        let outcome = (|| -> Result<Event, rusqlite::Error> {
+            let rendered = crate::decisions::python_json_dumps(summary, false);
+            conn.execute(
+                "INSERT INTO events (kind, entity_kind, entity_id, actor_id, audit_id, summary, at) VALUES (?, ?, ?, NULL, NULL, ?, ?)",
+                params![kind, entity_kind, entity_id, rendered, to_iso(at)],
+            )?;
+            Ok(Event {
+                seq: conn.last_insert_rowid(),
+                kind: kind.to_string(),
+                entity_kind: entity_kind.to_string(),
+                entity_id: entity_id.to_string(),
+                actor_id: None,
+                audit_id: None,
+                summary: summary.clone(),
+                at,
+            })
+        })();
+        match outcome {
+            Ok(event) => {
+                conn.execute("COMMIT", []).map_err(sql_err)?;
+                Ok(event)
+            }
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", []);
+                Err(sql_err(err))
+            }
+        }
     }
 
     fn read(&self) -> Result<Self::Read<'_>, VogtError> {
@@ -750,26 +771,82 @@ impl ReadView for SqliteReadView {
     fn contract_exemptions(&self, project_id: &str) -> Result<Vec<ContractExemption>, VogtError> {
         many(&self.conn, "SELECT e.*, p.slug AS project_slug FROM contract_exemptions e JOIN projects p ON p.id = e.project_id WHERE e.project_id = ? ORDER BY e.rule, e.target", params![project_id], row_exemption)
     }
-    fn work_links_for_subjects(&self, _: &[String]) -> Result<BTreeMap<String, String>, VogtError> {
-        later("work_links")
+    fn work_links_for_subjects(
+        &self,
+        subject_keys: &[String],
+    ) -> Result<BTreeMap<String, String>, VogtError> {
+        let mut found = BTreeMap::new();
+        for slice in subject_keys.chunks(500) {
+            let placeholders = vec!["?"; slice.len()].join(", ");
+            let rows = many(
+                &self.conn,
+                &format!(
+                    "SELECT l.subject_key AS subject_key, w.ref AS ref FROM work_links l JOIN work_items w ON w.id = l.work_item_id WHERE l.subject_key IN ({placeholders})"
+                ),
+                rusqlite::params_from_iter(slice),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            found.extend(rows);
+        }
+        Ok(found)
     }
     fn work_links_for_subjects_by_item(
         &self,
-        _: &str,
+        work_item_id: &str,
     ) -> Result<BTreeMap<String, String>, VogtError> {
-        later("work_links_by_item")
+        let rows = many(
+            &self.conn,
+            "SELECT subject_key, origin_kind FROM work_links WHERE work_item_id = ?",
+            [work_item_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        Ok(rows.into_iter().collect())
     }
-    fn work_item_by_subject(&self, _: &str) -> Result<Option<WorkItem>, VogtError> {
-        later("work_item_by_subject")
+    fn work_item_by_subject(&self, subject_key: &str) -> Result<Option<WorkItem>, VogtError> {
+        let row = one(
+            &self.conn,
+            &format!("{WORK_SELECT} JOIN work_links l ON l.work_item_id = w.id WHERE l.subject_key = ? LIMIT 1"),
+            [subject_key],
+            row_work_base,
+        )?;
+        row.map(|base| finish_work_item(&self.conn, base))
+            .transpose()
     }
-    fn work_overlay(&self, _: &str) -> Result<Option<WorkOverlay>, VogtError> {
-        later("work_overlay")
+    fn work_overlay(&self, subject_key: &str) -> Result<Option<WorkOverlay>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM work_overlay WHERE subject_key = ?",
+            [subject_key],
+            row_overlay,
+        )
     }
-    fn work_overlays(&self, _: &[String]) -> Result<BTreeMap<String, WorkOverlay>, VogtError> {
-        later("work_overlays")
+    fn work_overlays(
+        &self,
+        subject_keys: &[String],
+    ) -> Result<BTreeMap<String, WorkOverlay>, VogtError> {
+        let mut found = BTreeMap::new();
+        for slice in subject_keys.chunks(500) {
+            let placeholders = vec!["?"; slice.len()].join(", ");
+            let rows = many(
+                &self.conn,
+                &format!("SELECT * FROM work_overlay WHERE subject_key IN ({placeholders})"),
+                rusqlite::params_from_iter(slice),
+                row_overlay,
+            )?;
+            found.extend(
+                rows.into_iter()
+                    .map(|overlay| (overlay.subject_key.clone(), overlay)),
+            );
+        }
+        Ok(found)
     }
-    fn bound_branch_overlays(&self, _: i64) -> Result<Vec<WorkOverlay>, VogtError> {
-        later("bound_branch_overlays")
+    fn bound_branch_overlays(&self, limit: i64) -> Result<Vec<WorkOverlay>, VogtError> {
+        many(
+            &self.conn,
+            "SELECT * FROM work_overlay WHERE branches != '[]' ORDER BY updated_at DESC, subject_key LIMIT ?",
+            [limit],
+            row_overlay,
+        )
     }
     fn token_by_hash(&self, token_hash: &str) -> Result<Option<Token>, VogtError> {
         one(
@@ -976,10 +1053,23 @@ impl ReadView for SqliteReadView {
     }
     fn list_writeback_actions(
         &self,
-        _: Option<&str>,
-        _: i64,
+        outcome: Option<&str>,
+        limit: i64,
     ) -> Result<Vec<WriteBackRecord>, VogtError> {
-        later("list_writeback_actions")
+        match outcome {
+            Some(value) => many(
+                &self.conn,
+                "SELECT * FROM writeback_actions WHERE outcome = ? ORDER BY at DESC, id DESC LIMIT ?",
+                params![value, limit],
+                row_writeback,
+            ),
+            None => many(
+                &self.conn,
+                "SELECT * FROM writeback_actions ORDER BY at DESC, id DESC LIMIT ?",
+                [limit],
+                row_writeback,
+            ),
+        }
     }
     fn drift_evidence_ids(&self) -> Result<BTreeSet<String>, VogtError> {
         let rows = many(
@@ -1667,11 +1757,30 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
             .map_err(sql_err)?
             > 0)
     }
-    fn insert_work_link(&mut self, _: &WorkLink) -> Result<(), VogtError> {
-        later("insert_work_link")
+    fn insert_work_link(&mut self, link: &WorkLink) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO work_links (work_item_id, subject_key, origin_kind, source_url, relation, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                link.work_item_id, link.subject_key, link.origin_kind, link.source_url,
+                vocab_text(link.relation), to_iso(link.created_at),
+            ],
+        ).map(|_| ()).map_err(sql_err)
     }
-    fn upsert_work_overlay(&mut self, _: &WorkOverlay) -> Result<(), VogtError> {
-        later("upsert_work_overlay")
+    fn upsert_work_overlay(&mut self, overlay: &WorkOverlay) -> Result<(), VogtError> {
+        // created_at keeps the existing row's value on conflict: the overlay
+        // records when local semantics first attached, and updated_at carries
+        // when they last moved.
+        let branches =
+            crate::decisions::python_json_dumps(&serde_json::json!(overlay.branches), false);
+        self.view.conn.execute(
+            "INSERT INTO work_overlay (subject_key, project_id, rank, workflow_state, priority, effort, assignee_actor_id, initiative_id, branches, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(subject_key) DO UPDATE SET project_id = excluded.project_id, rank = excluded.rank, workflow_state = excluded.workflow_state, priority = excluded.priority, effort = excluded.effort, assignee_actor_id = excluded.assignee_actor_id, initiative_id = excluded.initiative_id, branches = excluded.branches, updated_at = excluded.updated_at",
+            params![
+                overlay.subject_key, overlay.project_id, overlay.rank, overlay.workflow_state,
+                overlay.priority.map(vocab_text), overlay.effort.map(vocab_text),
+                overlay.assignee_actor_id, overlay.initiative_id, branches,
+                to_iso(overlay.created_at), to_iso(overlay.updated_at),
+            ],
+        ).map(|_| ()).map_err(sql_err)
     }
     fn insert_token(&mut self, token: &Token, token_hash: &str) -> Result<(), VogtError> {
         let scopes = crate::decisions::python_json_dumps(&serde_json::json!(token.scopes), false);
@@ -1954,8 +2063,15 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
             .map_err(sql_err)?
             > 0)
     }
-    fn insert_writeback(&mut self, _: &WriteBackRecord) -> Result<(), VogtError> {
-        later("insert_writeback")
+    fn insert_writeback(&mut self, record: &WriteBackRecord) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO writeback_actions (id, at, project_id, work_item_id, actor_id, action, subject_key, policy, outcome, reason, detail, source_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                record.id, to_iso(record.at), record.project_id, record.work_item_id,
+                record.actor_id, vocab_text(record.action), record.subject_key, record.policy,
+                vocab_text(record.outcome), record.reason, record.detail, record.source_url,
+            ],
+        ).map(|_| ()).map_err(sql_err)
     }
     fn insert_session(&mut self, session: &CodingSession) -> Result<(), VogtError> {
         self.view.conn.execute(
@@ -4003,6 +4119,71 @@ fn row_event(row: &Row<'_>) -> rusqlite::Result<Event> {
     })
 }
 
+fn vocab_cell<T: serde::de::DeserializeOwned>(row: &Row<'_>, column: &str) -> rusqlite::Result<T> {
+    let text: String = row.get(column)?;
+    serde_json::from_value(serde_json::Value::String(text)).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })
+}
+
+fn opt_vocab_cell<T: serde::de::DeserializeOwned>(
+    row: &Row<'_>,
+    column: &str,
+) -> rusqlite::Result<Option<T>> {
+    let text: Option<String> = row.get(column)?;
+    text.map(|value| {
+        serde_json::from_value(serde_json::Value::String(value)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })
+    })
+    .transpose()
+}
+
+fn row_overlay(row: &Row<'_>) -> rusqlite::Result<WorkOverlay> {
+    let branches: Option<String> = row.get("branches")?;
+    Ok(WorkOverlay {
+        subject_key: row.get("subject_key")?,
+        project_id: row.get("project_id")?,
+        rank: row.get("rank")?,
+        workflow_state: row.get("workflow_state")?,
+        priority: opt_vocab_cell(row, "priority")?,
+        effort: opt_vocab_cell(row, "effort")?,
+        assignee_actor_id: row.get("assignee_actor_id")?,
+        initiative_id: row.get("initiative_id")?,
+        branches: branches
+            .filter(|text| !text.is_empty())
+            .map(|text| serde_json::from_str(&text))
+            .transpose()
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?
+            .unwrap_or_default(),
+        created_at: moment(row, "created_at")?,
+        updated_at: moment(row, "updated_at")?,
+    })
+}
+
+fn row_writeback(row: &Row<'_>) -> rusqlite::Result<WriteBackRecord> {
+    Ok(WriteBackRecord {
+        id: row.get("id")?,
+        at: moment(row, "at")?,
+        project_id: row.get("project_id")?,
+        work_item_id: row.get("work_item_id")?,
+        actor_id: row.get("actor_id")?,
+        action: vocab_cell::<WriteBackAction>(row, "action")?,
+        subject_key: row.get("subject_key")?,
+        policy: row.get("policy")?,
+        outcome: vocab_cell::<WriteBackOutcome>(row, "outcome")?,
+        reason: row.get("reason")?,
+        detail: row.get("detail")?,
+        source_url: row.get("source_url")?,
+    })
+}
+
 fn row_audit(row: &Row<'_>) -> rusqlite::Result<AuditRecord> {
     Ok(AuditRecord {
         id: row.get("id")?,
@@ -4091,4 +4272,137 @@ fn audit_where(query: &AuditQuery) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         },
         params_box,
     )
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::tests::{moment, project, store};
+    use super::*;
+
+    #[test]
+    fn an_overlay_keeps_its_first_created_at_and_a_link_resolves_the_item() {
+        let dir = std::env::temp_dir().join(format!("vogt-overlay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let now = moment();
+        let later_at = Moment::from_unix(1_700_000_900, 0);
+        let project = project(&store, "linked");
+        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let mut txn = store.write().unwrap();
+        let reference = txn.next_work_ref().unwrap();
+        txn.insert_project(&project).unwrap();
+        txn.insert_work_item(&WorkItem {
+            id: "wrk_1".into(),
+            reference: reference.clone(),
+            kind: "bug".parse().unwrap(),
+            title: "leaks".into(),
+            body: String::new(),
+            state: "open".into(),
+            priority: "p2".parse().unwrap(),
+            effort: None,
+            project_id: Some(project.id.clone()),
+            project_slug: None,
+            initiative_id: None,
+            origin: "created".parse().unwrap(),
+            trust_state: "unverified".parse().unwrap(),
+            assignee_actor_id: None,
+            assignee_identity_ref: None,
+            labels: Vec::new(),
+            relations: Vec::new(),
+            superseded_by: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+        txn.insert_work_link(&WorkLink {
+            work_item_id: "wrk_1".into(),
+            subject_key: "gh:1".into(),
+            origin_kind: "issue".into(),
+            source_url: None,
+            relation: "completion".parse().unwrap(),
+            created_at: now,
+        })
+        .unwrap();
+        let overlay = WorkOverlay {
+            subject_key: "gh:1".into(),
+            project_id: project.id.clone(),
+            rank: Some(1.5),
+            workflow_state: Some("triage".into()),
+            priority: Some("p1".parse().unwrap()),
+            effort: None,
+            assignee_actor_id: Some(actor.id.clone()),
+            initiative_id: None,
+            branches: vec!["fix/leaks".into()],
+            created_at: now,
+            updated_at: now,
+        };
+        txn.upsert_work_overlay(&overlay).unwrap();
+        txn.upsert_work_overlay(&WorkOverlay {
+            updated_at: later_at,
+            rank: Some(2.0),
+            ..overlay.clone()
+        })
+        .unwrap();
+        txn.insert_writeback(&WriteBackRecord {
+            id: "wb_1".into(),
+            at: now,
+            project_id: Some(project.id.clone()),
+            work_item_id: Some("wrk_1".into()),
+            actor_id: actor.id.clone(),
+            action: "comment".parse().unwrap(),
+            subject_key: Some("gh:1".into()),
+            policy: "on-demand".into(),
+            outcome: "succeeded".parse().unwrap(),
+            reason: "posted".into(),
+            detail: None,
+            source_url: None,
+        })
+        .unwrap();
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        let kept = view.work_overlay("gh:1").unwrap().unwrap();
+        assert_eq!(kept.created_at, now);
+        assert_eq!(kept.updated_at, later_at);
+        assert_eq!(kept.rank, Some(2.0));
+        assert_eq!(kept.priority, Some("p1".parse().unwrap()));
+        assert_eq!(kept.branches, vec!["fix/leaks".to_string()]);
+        assert_eq!(view.bound_branch_overlays(10).unwrap(), vec![kept.clone()]);
+        let resolved = view.work_item_by_subject("gh:1").unwrap().unwrap();
+        assert_eq!(resolved.reference, reference);
+        assert_eq!(
+            view.work_links_for_subjects(&["gh:1".into()])
+                .unwrap()
+                .get("gh:1")
+                .map(String::as_str),
+            Some(reference.as_str())
+        );
+        assert_eq!(
+            view.work_links_for_subjects_by_item("wrk_1")
+                .unwrap()
+                .get("gh:1")
+                .map(String::as_str),
+            Some("issue")
+        );
+        let written = view.list_writeback_actions(Some("succeeded"), 10).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(view
+            .list_writeback_actions(Some("failed"), 10)
+            .unwrap()
+            .is_empty());
+
+        let event = store
+            .publish_event(
+                "observed",
+                "work_item",
+                "wrk_1",
+                &serde_json::json!({"note": "seen"}),
+                now,
+            )
+            .unwrap();
+        assert_eq!(event.summary["note"], "seen");
+        assert_eq!(event.actor_id, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
