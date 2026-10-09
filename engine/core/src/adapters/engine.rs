@@ -1633,17 +1633,18 @@ pub mod http1 {
         Ok((status, buf))
     }
 
-    /// Trust the platform certificate store plus, when `SSL_CERT_FILE` or
-    /// `SSL_CERT_DIR` is set, that bundle too. Built once: loading the store
-    /// reads and parses a few hundred kilobytes, which is wasted on every
-    /// request.
+    /// Trust the platform certificate store, plus `SSL_CERT_FILE` when it is set.
+    /// Built once: loading the store reads and parses a few hundred kilobytes,
+    /// which is wasted on every request.
     ///
     /// `rustls-native-certs` returns only the environment bundle when either
     /// variable is set, and an empty store when the file is missing, so every
-    /// HTTPS request would then fail with no explanation. Python's urllib
-    /// keeps the file *and* the platform roots. The variables are read, never
-    /// written: changing the process environment races with every other thread
-    /// and with a git child spawned in between.
+    /// HTTPS request would then fail with no explanation. Python's urllib keeps
+    /// `SSL_CERT_FILE` *and* the platform roots, but `SSL_CERT_DIR` replaces the
+    /// platform capath, so a set directory is used instead of the platform
+    /// roots. The variables are read, never written: changing the process
+    /// environment races with every other thread and with a git child spawned in
+    /// between.
     fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
         use std::sync::OnceLock;
         static CONFIG: OnceLock<std::sync::Arc<rustls::ClientConfig>> = OnceLock::new();
@@ -1666,13 +1667,13 @@ pub mod http1 {
             .clone()
     }
 
-    /// The environment bundle unioned with the platform roots.
+    /// The environment bundle, plus the platform roots unless `SSL_CERT_DIR`
+    /// replaces them.
     ///
     /// A missing `SSL_CERT_FILE` is reported rather than trusted as an empty
-    /// store. The platform roots come from a child process that does not
-    /// inherit the two variables, because `openssl_probe::probe` returns the
-    /// environment path when it is set and finding the platform bundle means
-    /// asking without it — which cannot be done by unsetting it here.
+    /// store. The platform roots come from `openssl-probe`'s candidate
+    /// directories, skipping the environment step, because the probe returns
+    /// the environment path and then stops while an override is set.
     fn merged_root_certs() -> Vec<rustls::pki_types::CertificateDer<'static>> {
         let mut certs = Vec::new();
         for (variable, kind) in [("SSL_CERT_FILE", "file"), ("SSL_CERT_DIR", "dir")] {
@@ -1680,16 +1681,21 @@ pub mod http1 {
                 continue;
             };
             match load_pem_path(std::path::Path::new(&path), kind == "dir") {
-	                Ok(mut loaded) => certs.append(&mut loaded),
-	                Err(error) => eprintln!(
-	                    "vogt: {variable}={} could not be read ({error}); trusting the platform roots only",
-	                    std::path::Path::new(&path).display()
-	                ),
-	            }
+                Ok(mut loaded) => certs.append(&mut loaded),
+                Err(error) => eprintln!(
+                    "vogt: {variable}={} could not be read ({error}); trusting the platform roots only",
+                    std::path::Path::new(&path).display()
+                ),
+            }
         }
-        match platform_root_certs() {
-            Ok(mut loaded) => certs.append(&mut loaded),
-            Err(error) => eprintln!("vogt: platform certificate store unavailable: {error}"),
+        // Python's urllib uses SSL_CERT_DIR instead of the platform capath, so
+        // an operator who narrows trust that way does not also trust the public
+        // roots. SSL_CERT_FILE is additive and the platform roots stay.
+        if std::env::var_os("SSL_CERT_DIR").is_none() {
+            match platform_root_certs() {
+                Ok(mut loaded) => certs.append(&mut loaded),
+                Err(error) => eprintln!("vogt: platform certificate store unavailable: {error}"),
+            }
         }
         certs
     }
@@ -1728,27 +1734,23 @@ pub mod http1 {
             .map_err(|error| error.to_string())
     }
 
-    /// The platform bundle, found without `SSL_CERT_FILE` or `SSL_CERT_DIR`.
-    ///
-    /// `openssl_probe::probe` returns the environment path and then stops, so
-    /// it never names the platform bundle while an override is set. The
-    /// variables are not touched here. The platform location is the first
-    /// bundle file and hashed `certs` directory inside the directories the
-    /// probe itself reports as candidates — its search, with the environment
-    /// step left out.
+    /// The platform bundle file. The hashed `certs` directory beside it holds the
+    /// same certificates, so it is read only when no bundle file exists.
     fn platform_root_certs() -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
         let (file, dir) = platform_cert_paths();
-        let mut certs = Vec::new();
         if let Some(file) = file {
-            certs.append(&mut load_pem_file(&file)?);
+            let certs = load_pem_file(&file)?;
+            if !certs.is_empty() {
+                return Ok(certs);
+            }
         }
         if let Some(dir) = dir {
-            certs.append(&mut load_pem_path(&dir, true)?);
+            let certs = load_pem_path(&dir, true)?;
+            if !certs.is_empty() {
+                return Ok(certs);
+            }
         }
-        if certs.is_empty() {
-            return Err("no platform certificate bundle found".to_string());
-        }
-        Ok(certs)
+        Err("no platform certificate bundle found".to_string())
     }
 
     /// `(bundle file, hashed directory)` from `openssl_probe`'s candidates.

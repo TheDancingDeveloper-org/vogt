@@ -851,7 +851,7 @@ fn runs(repo: &RepoRef, response: &ForgeResponse) -> Vec<ForgeCheck> {
 /// and a `://` later in the path is just part of the path. The host compare
 /// is case-sensitive, as `parsed.hostname != "github.com"` is.
 pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
-    let raw = repo_url?.trim();
+    let raw = crate::adapters::text::python_strip(repo_url?);
     let mut candidate = raw.strip_prefix("git+").unwrap_or(raw).to_string();
     candidate = candidate.replace("git@github.com:", "github.com/");
     for prefix in ["https://", "http://", "ssh://"] {
@@ -875,10 +875,12 @@ pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
 /// `urlparse` drops tabs, carriage returns and line feeds, then takes a scheme
 /// only when the text before the first colon is all scheme characters. A
 /// doubled scheme (`https://https://…`) is therefore read as scheme `https`
-/// and host `https`, while a `://` after a slash is just part of the path. A
-/// port that is not an integer makes `urlparse` raise, which the caller
-/// treats as "not a repository". A path parameter (`;…`) is not part of the
-/// path. The hostname comes back lowercased.
+/// and host `https`, while a `://` after a slash is just part of the path.
+/// The port is not read: `repo_of` never touches `parsed.port`, and `urlparse`
+/// does not raise on a non-numeric one, so `github.com:abc/o/r` is a
+/// repository. A path parameter (`;…`) is stripped only from the last path
+/// segment, which is where `urlparse._splitparams` splits. The hostname comes
+/// back lowercased.
 fn parse_prefixed(candidate: &str) -> Option<(String, String, String, String)> {
     let cleaned: String = candidate
         .chars()
@@ -913,22 +915,22 @@ fn parse_prefixed(candidate: &str) -> Option<(String, String, String, String)> {
         return None;
     }
     let host = raw_host.rsplit('@').next().unwrap_or(raw_host);
-    let (host, port) = match host.rsplit_once(':') {
-        Some((name, port)) => (name, Some(port)),
-        None => (host, None),
-    };
+    let host = host.rsplit_once(':').map_or(host, |(name, _port)| name);
     if host.is_empty() {
         return None;
     }
-    // urlparse().port raises ValueError on a non-numeric port, and the client
-    // turns that into "not a repository". An empty port is fine.
-    if let Some(port) = port {
-        if !port.is_empty() && port.parse::<u16>().is_err() {
-            return None;
-        }
-    }
-    let path = path.split(';').next().unwrap_or(&path).to_string();
+    let path = split_params(&path);
     Some((host.to_ascii_lowercase(), path, query, fragment))
+}
+
+/// `urlparse._splitparams`: a `;` splits parameters off only when it sits in
+/// the last path segment. One earlier in the path is part of the path.
+fn split_params(path: &str) -> String {
+    let segment = path.rfind('/').map_or(0, |at| at + 1);
+    match path[segment..].find(';') {
+        Some(at) => path[..segment + at].to_string(),
+        None => path.to_string(),
+    }
 }
 
 fn valid_name(name: &str) -> bool {
@@ -963,6 +965,8 @@ mod tests {
             "gi\tt@github.com:o/r",
             "https:\n//github.com/o/r",
             "\u{80}https://github.com/o/r",
+            "https://github.com/o/r;x/y",
+            "github.com/o/r;p/q.git",
             "https://github.com/o/r?x=1",
             "https://github.com/o/r#f",
         ] {
@@ -981,6 +985,10 @@ mod tests {
             "https://user:pw@github.com:443/o/r.git",
             "git+https://github.com/o/r",
             "git+ssh://git@github.com:o/r",
+            "https://github.com:abc/o/r",
+            "github.com:99999/o/r",
+            "github.com: 1/o/r",
+            "\u{1f}https://github.com/o/r",
         ] {
             assert_eq!(
                 repo_of(Some(case)),

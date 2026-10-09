@@ -9,4 +9,5 @@ pub mod github;
 pub mod http;
 pub mod mcp;
 pub mod peer;
+pub mod text;
 pub mod transcripts;
