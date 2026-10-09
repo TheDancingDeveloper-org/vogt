@@ -271,36 +271,12 @@ impl ForgeTransport for GitHubClient {
 #[allow(unused_imports)]
 pub use forge::api_path;
 
-/// Extract `(owner, repo)` from a project's repository URL. A project with no
-/// GitHub URL is not an error — it is a project that does not live on GitHub.
+/// Extract `(owner, repo)` from a project's repository URL. One definition,
+/// the forge provider's, which matches Python's `urlsplit` host handling:
+/// case-insensitive, with userinfo and port stripped, and an empty query
+/// accepted.
 pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
-    let candidate = repo_url?.trim().trim_start_matches("git+");
-    if candidate.is_empty() {
-        return None;
-    }
-    let candidate = candidate.replace("git@github.com:", "github.com/");
-    let candidate = ["https://", "http://", "ssh://"]
-        .iter()
-        .find_map(|prefix| candidate.strip_prefix(prefix))
-        .unwrap_or(&candidate);
-    // A query or fragment carries injection metacharacters into no legitimate
-    // repo URL, so its presence is itself disqualifying.
-    if candidate.contains('?') || candidate.contains('#') {
-        return None;
-    }
-    let (host, path) = candidate.split_once('/')?;
-    let host = host.split('@').next_back().unwrap_or(host);
-    if host != SUPPORTED_HOST {
-        return None;
-    }
-    let path = path.trim_end_matches(".git").trim_matches('/');
-    let mut parts = path.split('/');
-    let owner = parts.next().unwrap_or("");
-    let repo = parts.next().unwrap_or("");
-    if !valid_name(owner) || !valid_name(repo) {
-        return None;
-    }
-    Some((owner.to_string(), repo.to_string()))
+    crate::adapters::forge::repo_of(repo_url)
 }
 
 /// What a forge permits in an owner or repository name. Owner and repo are

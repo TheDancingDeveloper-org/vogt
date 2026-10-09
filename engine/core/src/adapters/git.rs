@@ -106,7 +106,7 @@ pub fn clone_repository(request: &CloneRequest) -> Result<CloneOutcome, VogtErro
             destination.display()
         ))
     })?;
-    let env = askpass(request.token.as_deref(), request.helper_dir.as_deref())?;
+    let helper = AskPass::new(request.token.as_deref(), request.helper_dir.as_deref())?;
     run_git(
         &[
             "clone",
@@ -116,10 +116,9 @@ pub fn clone_repository(request: &CloneRequest) -> Result<CloneOutcome, VogtErro
             &destination.to_string_lossy(),
         ],
         destination.parent().unwrap_or(Path::new(".")),
-        Some(&env),
+        Some(helper.env()),
         CLONE_TIMEOUT,
     )?;
-    drop_askpass(&env);
     Ok(CloneOutcome {
         destination: destination.clone(),
         revision: read(&destination, &["rev-parse", "HEAD"])?,
@@ -171,14 +170,13 @@ pub fn inspect_publish_source(root: &Path) -> Result<PublishSource, VogtError> {
 /// Push one branch, plainly — never `--force`, on any path.
 pub fn push_branch(request: &PushRequest) -> Result<PushOutcome, VogtError> {
     let refspec = format!("{}:refs/heads/{}", request.branch, request.branch);
-    let env = askpass(request.token.as_deref(), request.helper_dir.as_deref())?;
+    let helper = AskPass::new(request.token.as_deref(), request.helper_dir.as_deref())?;
     let pushed = run_git(
         &["push", &request.remote, &refspec],
         &request.root,
-        Some(&env),
+        Some(helper.env()),
         CLONE_TIMEOUT,
     );
-    drop_askpass(&env);
     if let Err(error) = pushed {
         if let VogtError::GitCommandFailed(detail) = &error {
             let lower = detail.to_lowercase();
@@ -299,15 +297,14 @@ fn origin_head(
     helper_dir: Option<&Path>,
 ) -> Option<String> {
     let refspec = format!("refs/heads/{branch}");
-    let env = askpass(token, helper_dir).ok()?;
+    let helper = AskPass::new(token, helper_dir).ok()?;
     let out = run_git(
         &["ls-remote", "origin", &refspec],
         destination,
-        Some(&env),
+        Some(helper.env()),
         GIT_TIMEOUT,
     )
     .ok();
-    drop_askpass(&env);
     out.filter(|text| !text.is_empty())
         .and_then(|text| text.split_whitespace().next().map(str::to_string))
 }
@@ -335,70 +332,87 @@ fn normalise(remote: &str) -> String {
         .to_lowercase()
 }
 
-/// The environment one git invocation runs under, with the askpass helper in
-/// place when there is a token. `VOGT_ASKPASS_DIR` names the directory the
-/// caller must remove afterwards.
-fn askpass(
-    token: Option<&str>,
-    helper_dir: Option<&Path>,
-) -> Result<std::collections::HashMap<String, String>, VogtError> {
-    let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
-    // Never let git stop for input: in a server process an interactive prompt
-    // is an indefinite hang.
-    env.insert("GIT_TERMINAL_PROMPT".to_string(), "0".to_string());
-    let Some(token) = token else {
-        env.remove("GIT_ASKPASS");
-        return Ok(env);
-    };
-    // Unique per invocation, never per process and never a predictable path:
-    // concurrent clones must not share a dir (the first cleanup would delete
-    // the other's helper), and a fixed /tmp path lets another local user
-    // pre-create it or swap askpass.sh so it runs with VOGT_GIT_TOKEN set.
-    let _ = helper_dir;
-    let mut random = [0u8; 8];
-    File::open("/dev/urandom")
-        .and_then(|mut source| source.read_exact(&mut random))
-        .map_err(|error| {
-            VogtError::GitUnavailable(format!("no randomness for askpass: {error}"))
-        })?;
-    let dir = std::env::temp_dir().join(format!(
-        "vogt-askpass-{}",
-        random
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    ));
-    fs::create_dir(&dir).map_err(|error| {
-        VogtError::GitUnavailable(format!("could not create the askpass helper: {error}"))
-    })?;
-    set_mode(&dir, 0o700);
-    let script = dir.join("askpass.sh");
-    fs::File::create(&script)
-        .and_then(|mut file| file.write_all(ASKPASS_SCRIPT.as_bytes()))
-        .map_err(|error| {
-            VogtError::GitUnavailable(format!("could not write the askpass helper: {error}"))
-        })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).ok();
-    }
-    env.insert(
-        "GIT_ASKPASS".to_string(),
-        script.to_string_lossy().to_string(),
-    );
-    env.insert("VOGT_GIT_USERNAME".to_string(), TOKEN_USERNAME.to_string());
-    env.insert("VOGT_GIT_TOKEN".to_string(), token.to_string());
-    env.insert(
-        "VOGT_ASKPASS_DIR".to_string(),
-        dir.to_string_lossy().to_string(),
-    );
-    Ok(env)
+/// The environment one git invocation runs under, plus the directory its
+/// askpass helper lives in. Dropping it removes the helper, so a clone that
+/// fails or times out cannot leave the script behind.
+struct AskPass {
+    env: std::collections::HashMap<String, String>,
+    dir: Option<PathBuf>,
 }
 
-fn drop_askpass(env: &std::collections::HashMap<String, String>) {
-    if let Some(dir) = env.get("VOGT_ASKPASS_DIR") {
-        let _ = fs::remove_dir_all(dir);
+impl AskPass {
+    fn new(token: Option<&str>, helper_dir: Option<&Path>) -> Result<Self, VogtError> {
+        let mut env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        env.insert("GIT_TERMINAL_PROMPT".to_string(), "0".to_string());
+        let Some(token) = token else {
+            env.remove("GIT_ASKPASS");
+            return Ok(Self { env, dir: None });
+        };
+        // Unique per invocation, and inside `helper_dir` when one is named: a
+        // hardened deployment mounts /tmp noexec, so the helper has to be
+        // created where it can be executed.
+        let mut random = [0u8; 8];
+        File::open("/dev/urandom")
+            .and_then(|mut source| source.read_exact(&mut random))
+            .map_err(|error| {
+                VogtError::GitUnavailable(format!("no randomness for askpass: {error}"))
+            })?;
+        let parent = helper_dir
+            .map(Path::to_path_buf)
+            .unwrap_or_else(std::env::temp_dir);
+        let dir = parent.join(format!(
+            "vogt-askpass-{}",
+            random
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ));
+        // 0700 at creation, so there is no umask window and no chmod to skip.
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&dir).map_err(|error| {
+            VogtError::GitUnavailable(format!("could not create the askpass helper: {error}"))
+        })?;
+        let script = dir.join("askpass.sh");
+        if let Err(error) =
+            fs::File::create(&script).and_then(|mut file| file.write_all(ASKPASS_SCRIPT.as_bytes()))
+        {
+            let _ = fs::remove_dir_all(&dir);
+            return Err(VogtError::GitUnavailable(format!(
+                "could not write the askpass helper: {error}"
+            )));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).ok();
+        }
+        env.insert(
+            "GIT_ASKPASS".to_string(),
+            script.to_string_lossy().to_string(),
+        );
+        env.insert("VOGT_GIT_USERNAME".to_string(), TOKEN_USERNAME.to_string());
+        env.insert("VOGT_GIT_TOKEN".to_string(), token.to_string());
+        Ok(Self {
+            env,
+            dir: Some(dir),
+        })
+    }
+
+    fn env(&self) -> &std::collections::HashMap<String, String> {
+        &self.env
+    }
+}
+
+impl Drop for AskPass {
+    fn drop(&mut self) {
+        if let Some(dir) = self.dir.take() {
+            let _ = fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -625,9 +639,15 @@ mod tests {
     fn the_askpass_helper_carries_the_credential_by_environment() {
         let dir = std::env::temp_dir().join(format!("vogt-askpass-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let env = askpass(Some("sekret"), Some(&dir)).unwrap();
+        fs::create_dir_all(&dir).unwrap();
+        let helper = AskPass::new(Some("sekret"), Some(&dir)).unwrap();
+        let env = helper.env();
         let script = PathBuf::from(env.get("GIT_ASKPASS").unwrap());
         assert!(script.is_file(), "the helper must exist");
+        assert!(
+            script.starts_with(&dir),
+            "a named helper dir must hold the script, not /tmp"
+        );
         assert_eq!(
             env.get("VOGT_GIT_TOKEN").map(String::as_str),
             Some("sekret")
@@ -646,7 +666,7 @@ mod tests {
             !text.contains("sekret"),
             "the token must not be written into the script"
         );
-        drop_askpass(&env);
+        drop(helper);
         assert!(!script.exists(), "the helper is removed after the call");
         let _ = fs::remove_dir_all(&dir);
     }

@@ -28,6 +28,7 @@ mod urls;
 mod writeback;
 
 pub use edges::{parse_edges, ParsedEdge, FROM_BODY, FROM_BRANCH, FROM_TITLE};
+pub use github::repo_of;
 pub use kinds::{current_collector, COLLECTOR_ALIASES};
 pub use models::{
     ForgeActor, ForgeCapabilities, ForgeCheck, ForgeComparison, ForgeIssue, ForgeJob, ForgeLabel,
