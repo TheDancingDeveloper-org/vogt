@@ -73,7 +73,12 @@ pub fn grant_list_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
         .get("limit")
         .and_then(Value::as_i64)
         .ok_or_else(|| VogtError::InvalidRequest("session.grant_list needs a limit".to_string()))?;
-    crate::with_ctx!(ctx, |ctx| list(ctx, state.as_deref(), target.as_deref(), limit))
+    crate::with_ctx!(ctx, |ctx| list(
+        ctx,
+        state.as_deref(),
+        target.as_deref(),
+        limit
+    ))
 }
 
 struct Request<'a> {
@@ -111,8 +116,7 @@ fn request<C: Clock + 'static, I: IdFactory + 'static>(
         || !plain_name(&project)
     {
         return Err(VogtError::InvalidRequest(
-            "secret_name and project_id must be plain names (letters, digits, . _ - /)"
-                .to_string(),
+            "secret_name and project_id must be plain names (letters, digits, . _ - /)".to_string(),
         ));
     }
     let var = asked
@@ -143,41 +147,46 @@ fn request<C: Clock + 'static, I: IdFactory + 'static>(
     let mut write = write_of(ctx);
     let ids = std::sync::Arc::clone(write.ids());
     let clock = std::sync::Arc::clone(write.clock());
-    audited_write(&mut write, "session.grant_request", &reason, |txn, actor| {
-        let grant = SessionGrant {
-            id: ids
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .next("grt"),
-            target_engine_session_id: target_engine_id.clone(),
-            kind: GrantKind::Credential,
-            var: Some(var.clone()),
-            project_id: Some(project.clone()),
-            secret_name: Some(secret.clone()),
-            capability: None,
-            uses,
-            ttl_seconds: asked.ttl_seconds,
-            reason: reason.clone(),
-            requested_by: actor.id.clone(),
-            requested_at: clock_now(&clock),
-            state: GrantState::Pending,
-            decided_by: None,
-            decided_at: None,
-            decision_reason: None,
-            expires_at: None,
-            revoked_by: None,
-            revoked_at: None,
-        };
-        txn.insert_session_grant(&grant)?;
-        Ok(WriteOutcome {
-            result: json!({ "grant": view_of(txn, &grant, clock_now(&clock))? }),
-            entity_kind: "session_grant".to_string(),
-            entity_id: grant.id.clone(),
-            payload: serde_json::to_value(&grant).unwrap_or(Value::Null),
-            event_kind: GRANT_REQUESTED_EVENT.to_string(),
-            summary: summary_of(&grant),
-        })
-    })
+    audited_write(
+        &mut write,
+        "session.grant_request",
+        &reason,
+        |txn, actor| {
+            let grant = SessionGrant {
+                id: ids
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .next("grt"),
+                target_engine_session_id: target_engine_id.clone(),
+                kind: GrantKind::Credential,
+                var: Some(var.clone()),
+                project_id: Some(project.clone()),
+                secret_name: Some(secret.clone()),
+                capability: None,
+                uses,
+                ttl_seconds: asked.ttl_seconds,
+                reason: reason.clone(),
+                requested_by: actor.id.clone(),
+                requested_at: clock_now(&clock),
+                state: GrantState::Pending,
+                decided_by: None,
+                decided_at: None,
+                decision_reason: None,
+                expires_at: None,
+                revoked_by: None,
+                revoked_at: None,
+            };
+            txn.insert_session_grant(&grant)?;
+            Ok(WriteOutcome {
+                result: json!({ "grant": view_of(txn, &grant, clock_now(&clock))? }),
+                entity_kind: "session_grant".to_string(),
+                entity_id: grant.id.clone(),
+                payload: serde_json::to_value(&grant).unwrap_or(Value::Null),
+                event_kind: GRANT_REQUESTED_EVENT.to_string(),
+                summary: summary_of(&grant),
+            })
+        },
+    )
 }
 
 /// Approve or deny a pending grant. A person's decision, never an agent's.
@@ -224,7 +233,14 @@ fn decide<C: Clock + 'static, I: IdFactory + 'static>(
             "reason": grant.reason,
         }),
     )?;
-    match record_decision(ctx, &grant, reason, true, Some(decided_at), Some(expires_at)) {
+    match record_decision(
+        ctx,
+        &grant,
+        reason,
+        true,
+        Some(decided_at),
+        Some(expires_at),
+    ) {
         Ok(result) => Ok(result),
         Err(error) => {
             // The record did not say approved, so the engine must not hold a
@@ -258,7 +274,10 @@ fn revoke<C: Clock + 'static, I: IdFactory + 'static>(
             .declared
             .read()?
             .actor_by_identity(&ctx.principal.identity_ref)?;
-        if asker.as_ref().is_none_or(|actor| actor.id != grant.requested_by) {
+        if asker
+            .as_ref()
+            .is_none_or(|actor| actor.id != grant.requested_by)
+        {
             return Err(VogtError::GrantRefused(format!(
                 "only a person, or the session that asked for it, revokes a grant \
                  ({} did neither)",
@@ -318,7 +337,11 @@ fn list<C: Clock, I: IdFactory>(
         }
         target = own;
     }
-    let stored = if state == Some("expired") { Some("approved") } else { state };
+    let stored = if state == Some("expired") {
+        Some("approved")
+    } else {
+        state
+    };
     let now = clock_now(&ctx.clock);
     let view = ctx.declared.read()?;
     let rows = view.list_session_grants(stored, target.as_deref(), limit)?;
@@ -351,7 +374,10 @@ fn check_requester<C: Clock, I: IdFactory>(
         )));
     };
     let asker = engine_of(ctx)?.get_session(&own)?;
-    if asker.as_ref().is_none_or(|session| session.role != "oversight") {
+    if asker
+        .as_ref()
+        .is_none_or(|session| session.role != "oversight")
+    {
         return Err(VogtError::GrantRefused(
             "only an oversight session asks for a grant on another session's \
              behalf; ask your overseer, or ask for your own session"
@@ -411,7 +437,10 @@ fn record_decision<C: Clock + 'static, I: IdFactory + 'static>(
     let clock = std::sync::Arc::clone(write.clock());
     audited_write(&mut write, "session.grant_decide", &reason, |txn, actor| {
         let current = txn.session_grant(&grant_id)?;
-        if current.as_ref().is_none_or(|row| row.state != GrantState::Pending) {
+        if current
+            .as_ref()
+            .is_none_or(|row| row.state != GrantState::Pending)
+        {
             let state = current.map_or("gone".to_string(), |row| row.state.to_string());
             return Err(VogtError::Conflict(format!(
                 "grant {grant_id} is {state}, not pending"
@@ -419,7 +448,11 @@ fn record_decision<C: Clock + 'static, I: IdFactory + 'static>(
         }
         let current = current.unwrap();
         let decided = SessionGrant {
-            state: if approved { GrantState::Approved } else { GrantState::Denied },
+            state: if approved {
+                GrantState::Approved
+            } else {
+                GrantState::Denied
+            },
             decided_by: Some(actor.id.clone()),
             decided_at: Some(decided_at.unwrap_or_else(|| clock_now(&clock))),
             decision_reason: Some(reason.clone()),
@@ -451,11 +484,7 @@ fn resolve_target<C: Clock, I: IdFactory>(
     Ok(target.to_string())
 }
 
-fn view_of(
-    view: &impl ReadView,
-    grant: &SessionGrant,
-    now: Moment,
-) -> Result<Value, VogtError> {
+fn view_of(view: &impl ReadView, grant: &SessionGrant, now: Moment) -> Result<Value, VogtError> {
     Ok(json!({
         "id": grant.id,
         "target": grant.target_engine_session_id,
@@ -531,7 +560,8 @@ fn env_name(value: &str) -> bool {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
         _ => return false,
     }
-    value.len() <= 128 && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    value.len() <= 128
+        && chars.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn parse_uses(uses: &str) -> Result<crate::core::GrantUses, VogtError> {
@@ -548,9 +578,9 @@ fn parse_uses(uses: &str) -> Result<crate::core::GrantUses, VogtError> {
 fn engine_of<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
 ) -> Result<&crate::adapters::engine::EngineClient, VogtError> {
-    ctx.engine.as_ref().ok_or_else(|| {
-        VogtError::EngineUnavailable("no session engine is configured".to_string())
-    })
+    ctx.engine
+        .as_ref()
+        .ok_or_else(|| VogtError::EngineUnavailable("no session engine is configured".to_string()))
 }
 
 fn field(params: &Value, operation: &str, name: &str) -> Result<String, VogtError> {
