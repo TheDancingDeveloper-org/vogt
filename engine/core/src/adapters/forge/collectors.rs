@@ -135,8 +135,11 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// a `]` and `[]]x` matches `]x`.
 fn character_class(pattern: &[char]) -> Option<(Vec<char>, &[char])> {
     let mut end = pattern.iter().position(|char| *char == ']')?;
-    if end == 0 {
-        end = pattern[1..].iter().position(|char| *char == ']')? + 1;
+    let lead = pattern
+        .first()
+        .is_some_and(|char| matches!(char, '!' | '^'));
+    if end == 0 || (lead && end == 1) {
+        end = pattern[end + 1..].iter().position(|char| *char == ']')? + end + 1;
     }
     Some((pattern[..end].to_vec(), &pattern[end + 1..]))
 }

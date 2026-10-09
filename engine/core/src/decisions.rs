@@ -2400,6 +2400,7 @@ fn ci_ran_at(check: &crate::core::Observation) -> (String, (bool, u64, i64), cra
 /// float, a string, a missing value — is 0.
 fn run_number_of(payload: &serde_json::Value) -> (bool, u64, i64) {
     match payload.get("run_number") {
+        Some(serde_json::Value::Bool(true)) => (false, 0, 1),
         Some(serde_json::Value::Number(number)) if number.is_i64() || number.is_u64() => {
             match number.as_i64() {
                 Some(value) => (false, 0, value),
@@ -2829,7 +2830,10 @@ fn split_command(command: &str) -> Vec<String> {
             }
             (Some(open), c) if c == open => quote = None,
             (None, '\\') => match chars.next() {
-                Some('\n') => started = true,
+                Some('\n') => {
+                    current.push('\n');
+                    started = true;
+                }
                 Some(c) => {
                     current.push(c);
                     started = true;
@@ -3744,5 +3748,23 @@ mod contract_tests {
         assert!(readme
             .instruction
             .contains("`project scaffold` writes README.md "));
+    }
+}
+
+#[cfg(test)]
+mod r49 {
+    use super::*;
+    #[test]
+    fn kubeconfig_and_marked_token() {
+        assert!(looks_like_dump("kind: Config\nclusters:\n- x\nusers:\n"));
+        assert!(looks_like_dump("kind:Config xyz users:"));
+        let key = format!("\t\u{345}sk-{}{}", "ab".repeat(9), "\u{216b}");
+        assert!(
+            !activity_redact(&key).contains("sk-"),
+            "{}",
+            activity_redact(&key)
+        );
+        let split = split_command("--effort\\\n\u{1c}\rclaude");
+        assert_eq!(split, vec!["--effort\n\u{1c}", "claude"]);
     }
 }
