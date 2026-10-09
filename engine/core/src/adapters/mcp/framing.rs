@@ -348,7 +348,7 @@ fn tool_error(code: &str, message: &str) -> Value {
 
 /// Python's truthiness for a JSON value: `None`, `[]`, `0`, `""` and `false`
 /// are all falsy, and both handlers write `params or {}`.
-fn json_falsy(value: &Value) -> bool {
+pub(super) fn json_falsy(value: &Value) -> bool {
     match value {
         Value::Null => true,
         Value::Bool(value) => !value,

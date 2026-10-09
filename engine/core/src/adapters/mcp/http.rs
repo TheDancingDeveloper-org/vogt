@@ -81,9 +81,13 @@ pub fn respond_recording<G: ToolGrant, R: AuthRecorder>(
     let decision = decision_for(message, registry, grant);
     if let Some(decision) = &decision {
         if let Err(failure) = recorder.record(decision) {
+            // The store's own text stays server-side. A remote caller gets the
+            // plain 500 Starlette would have sent, not a SQLite message and not
+            // an id that failed to normalise.
+            let _ = failure;
             return McpHttpResponse {
                 status: 500,
-                body: Some(error(message.get("id").cloned(), &failure)),
+                body: Some(Value::String("Internal Server Error".to_owned())),
                 decision: None,
             };
         }
@@ -255,24 +259,21 @@ fn decision_for<G: ToolGrant>(
     if message.get("method").and_then(Value::as_str) != Some("tools/call") {
         return None;
     }
+    // A notification is answered before the call, so it is never authorized and
+    // never recorded. That includes a null id: Python's `raw_id is None` holds
+    // for both an absent key and a JSON null.
+    message.get("id").filter(|id| !id.is_null())?;
     let params = message.get("params").and_then(Value::as_object)?;
     let name = params.get("name").and_then(Value::as_str)?;
-    if let Some(arguments) = params.get("arguments").filter(|value| !json_falsy(value)) {
+    if let Some(arguments) = params
+        .get("arguments")
+        .filter(|value| !super::framing::json_falsy(value))
+    {
         if !arguments.is_object() {
             return None;
         }
     }
     authorize(registry, grant, name)
-}
-
-fn json_falsy(value: &Value) -> bool {
-    match value {
-        Value::Null | Value::Bool(false) => true,
-        Value::Array(items) => items.is_empty(),
-        Value::String(text) => text.is_empty(),
-        Value::Number(number) => number.as_i64() == Some(0),
-        _ => false,
-    }
 }
 
 /// The decision `authorize()` would record for this call, or `None` when the
@@ -546,6 +547,43 @@ mod tests {
             .to_owned();
         assert!(text.contains("holds project.write, writeback"), "{text}");
         let _ = response;
+    }
+
+    #[test]
+    fn a_float_zero_argument_is_falsy_and_still_recorded() {
+        let response = respond(
+            &message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "work_list", "arguments": 0.0}
+            })),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], false),
+        );
+        assert!(response.body.unwrap().get("error").is_none());
+        assert!(
+            response.decision.is_some(),
+            "0.0 is falsy, so the call runs and is recorded"
+        );
+    }
+
+    #[test]
+    fn a_notification_records_nothing_even_when_the_store_fails() {
+        struct Refusing;
+        impl AuthRecorder for Refusing {
+            fn record(&mut self, _: &AuthDecisionRecord) -> Result<(), String> {
+                Err("down".to_owned())
+            }
+        }
+        let response = respond_recording(
+            &message(
+                json!({"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "work_list"}}),
+            ),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], false),
+            &mut Refusing,
+        );
+        assert_eq!(response.status, ACCEPTED);
+        assert!(response.decision.is_none());
     }
 
     #[test]
