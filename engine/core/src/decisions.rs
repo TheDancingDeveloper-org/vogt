@@ -4083,6 +4083,24 @@ mod activity_tests {
         let marked = format!("\t\u{345}sk-{}", "ab".repeat(9));
         assert!(activity_redact(&marked).contains("[REDACTED:token]"));
         assert_eq!(summarize_input(&serde_json::json!(["it's", 1])), "it's 1");
+
+        // `(?i)` folds İ and ı onto i, so a dotted capital still names the header.
+        let dotted = format!("AUTHOR{}ZATION: {}", "\u{130}", "s3cr3tvalue");
+        assert!(
+            !activity_redact(&dotted).contains("s3cr3tvalue"),
+            "{dotted}"
+        );
+        let dotless = format!("author{}zation: {}", "\u{131}", "s3cr3tvalue");
+        assert!(
+            !activity_redact(&dotless).contains("s3cr3tvalue"),
+            "{dotless}"
+        );
+
+        // U+1CCF0 is a word character in Unicode 16 but not in Python's Unicode
+        // 15, so the boundary beside it holds and the run is still redacted.
+        let hex = "a".repeat(48);
+        let newer = format!("{hex}\u{1ccf0}");
+        assert!(!activity_redact(&newer).contains(&hex), "{newer}");
     }
 }
 
