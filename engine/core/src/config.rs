@@ -1668,9 +1668,16 @@ mod tests {
 
         // A fractional part of all zeros is the integer. A real fraction, a
         // trailing dot and scientific notation are not.
-        for (raw, want) in [("5.0", Some(5)), (" 5.0 ", Some(5)), ("1_000.0", Some(1000))] {
+        for (raw, want) in [
+            ("5.0", Some(5)),
+            (" 5.0 ", Some(5)),
+            ("1_000.0", Some(1000)),
+        ] {
             guard.set("VOGT_RETENTION_DAYS", raw);
-            assert_eq!(load_config(&Map::new()).unwrap().retention_days, want.unwrap());
+            assert_eq!(
+                load_config(&Map::new()).unwrap().retention_days,
+                want.unwrap()
+            );
         }
         for raw in ["5.5", "5.", "1e3"] {
             guard.set("VOGT_RETENTION_DAYS", raw);

@@ -27,6 +27,7 @@ use base64::engine::general_purpose::URL_SAFE;
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 use crate::config::VogtConfig;
 use crate::errors::VogtError;
@@ -43,10 +44,19 @@ type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Fernet encrypt/decrypt for one instance's account-linking key.
-#[derive(Debug)]
+///
+/// The key halves are not part of the debug output: a cipher that prints its
+/// own key into a log line has stored the secret in the place it was built to
+/// keep secrets out of.
 pub struct ForgeAccountCipher {
     signing_key: [u8; 16],
     encryption_key: [u8; 16],
+}
+
+impl std::fmt::Debug for ForgeAccountCipher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ForgeAccountCipher([redacted])")
+    }
 }
 
 impl ForgeAccountCipher {
@@ -100,8 +110,10 @@ impl ForgeAccountCipher {
         if token.len() < HEADER_LEN + HMAC_LEN || token[0] != VERSION {
             return Err(bad_token());
         }
-        let (signed, mac) = token.split_at(token.len() - HMAC_LEN);
-        if self.mac(signed) != mac {
+        let (signed, presented) = token.split_at(token.len() - HMAC_LEN);
+        // Constant time, as `HMAC.verify` is: a byte-by-byte compare would
+        // leak how much of a forged tag matched.
+        if self.mac(signed).ct_eq(presented).unwrap_u8() != 1 {
             return Err(bad_token());
         }
         let iv: [u8; IV_LEN] = signed[1 + TIMESTAMP_LEN..HEADER_LEN].try_into().unwrap();
@@ -174,14 +186,29 @@ fn bad_token() -> VogtError {
     )
 }
 
+/// `base64.urlsafe_b64decode`, which is what `cryptography` decodes a Fernet
+/// key and token with.
+///
+/// That is wider than the urlsafe alphabet: the standard alphabet (`+`, `/`)
+/// is accepted, so a key from `openssl rand -base64 32` works, and characters
+/// outside either alphabet are skipped rather than rejected. It is also
+/// stricter in one direction: the padding must already be correct, because
+/// adding a missing `=` would accept a 43-character key that Python refuses,
+/// and a rollback to Python would then find every stored token unreadable.
 fn decode_b64(bytes: &[u8]) -> Result<Vec<u8>, base64::DecodeError> {
-    // Fernet keys and tokens are urlsafe base64 with padding. Accept a missing
-    // pad too, since a hand-written key file often drops the trailing `=`.
-    let mut padded = bytes.to_vec();
-    while !padded.len().is_multiple_of(4) {
-        padded.push(b'=');
+    let mut cleaned = Vec::with_capacity(bytes.len());
+    for byte in bytes {
+        match byte {
+            b'+' => cleaned.push(b'-'),
+            b'/' => cleaned.push(b'_'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'=' => cleaned.push(*byte),
+            _ => {}
+        }
     }
-    URL_SAFE.decode(padded)
+    if !cleaned.len().is_multiple_of(4) {
+        return Err(base64::DecodeError::InvalidPadding);
+    }
+    URL_SAFE.decode(cleaned)
 }
 
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
@@ -232,6 +259,27 @@ mod tests {
 
     fn cipher() -> ForgeAccountCipher {
         ForgeAccountCipher::new(&decode_b64(KEY.as_bytes()).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn a_standard_alphabet_key_works_and_an_unpadded_one_does_not() {
+        // `openssl rand -base64 32` emits `+` and `/`. Python accepts it.
+        let standard = KEY.replace('-', "+").replace('_', "/");
+        assert!(ForgeAccountCipher::new(&decode_b64(standard.as_bytes()).unwrap()).is_ok());
+        // A space inside the key is skipped, as urlsafe_b64decode skips it.
+        let spaced = format!("{} {}", &KEY[..20], &KEY[20..]);
+        assert_eq!(decode_b64(spaced.as_bytes()).unwrap().len(), KEY_LEN);
+        // An unpadded 43-character key is what Python refuses, so Rust must
+        // too: accepting it would make a rollback unable to read the tokens.
+        let unpadded = KEY.trim_end_matches('=');
+        assert!(decode_b64(unpadded.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn the_debug_output_does_not_carry_the_key() {
+        let rendered = format!("{:?}", cipher());
+        assert!(!rendered.contains("0000"), "{rendered}");
+        assert!(rendered.contains("redacted"), "{rendered}");
     }
 
     #[test]
