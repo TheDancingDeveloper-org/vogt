@@ -4,6 +4,7 @@
 //! behaviour lands in later port chunks.
 
 mod actors;
+#[allow(dead_code)]
 mod adapters;
 mod application;
 mod auth;

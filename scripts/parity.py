@@ -89,6 +89,10 @@ def main(argv: list[str] | None = None) -> int:
         golden = [step for step in golden if step["operation"].startswith("dump.")]
     elif args.only:
         golden = [step for step in golden if step["operation"].startswith(args.only)]
+        # A CLI run always records dump.after_init first, even when the script
+        # was filtered. The prefix applies to the script, so the baseline dump
+        # is not part of what --only asks to compare.
+        recorded = [step for step in recorded if step["operation"].startswith(args.only)]
     return _diff(golden, recorded, args.only)
 
 

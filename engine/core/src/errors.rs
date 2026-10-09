@@ -47,6 +47,29 @@ pub enum VogtError {
     InvalidParams(String),
     MigrationError(String),
     MigrationLocked(String),
+    /// The session engine did not answer or refused the credential
+    /// (`adapters/engine/client.py`). Optional by design: callers degrade, they
+    /// do not crash. 502, the same status as every other upstream adapter.
+    EngineUnavailable(String),
+    /// `git` is missing, failed, or could not reach the remote
+    /// (`adapters/git/clone.py`).
+    GitUnavailable(String),
+    /// git ran and exited non-zero. A subclass of `GitUnavailable` that keeps
+    /// its parent's code and status, because "git said no" and "git could not
+    /// be run" mean opposite things to a caller reading a checkout.
+    GitCommandFailed(String),
+    /// GitHub did not answer or refused the credential (`adapters/github/client.py`).
+    GitHubUnavailable(String),
+    /// A peer instance could not be reached, refused, or answered nonsense
+    /// (`adapters/peer.py`). `status` is `unreachable`, `refused` or
+    /// `invalid_response`.
+    PeerUnavailable {
+        status: String,
+        message: String,
+    },
+    /// The Forgejo instance did not answer or refused the credential
+    /// (`adapters/forgejo/client.py`).
+    ForgejoUnavailable(String),
     /// `TransitionRejected` in `core/workflow.py`. The message already starts
     /// with the rule, and `rule` is the field the workflow tests read.
     TransitionRejected {
@@ -91,8 +114,15 @@ impl VogtError {
             | Self::MissingReason(m)
             | Self::InvalidParams(m)
             | Self::MigrationError(m)
-            | Self::MigrationLocked(m) => m,
-            Self::TransitionRejected { message, .. } => message,
+            | Self::MigrationLocked(m)
+            | Self::EngineUnavailable(m)
+            | Self::GitUnavailable(m)
+            | Self::GitCommandFailed(m)
+            | Self::GitHubUnavailable(m)
+            | Self::ForgejoUnavailable(m) => m,
+            Self::PeerUnavailable { message, .. } | Self::TransitionRejected { message, .. } => {
+                message
+            }
         }
     }
 
@@ -133,6 +163,11 @@ impl VogtError {
             Self::InvalidParams(_) => "invalid_params",
             Self::MigrationError(_) => "migration_error",
             Self::MigrationLocked(_) => "migration_locked",
+            Self::EngineUnavailable(_) => "engine_unavailable",
+            Self::GitUnavailable(_) | Self::GitCommandFailed(_) => "git_unavailable",
+            Self::GitHubUnavailable(_) => "github_unavailable",
+            Self::PeerUnavailable { .. } => "peer_unavailable",
+            Self::ForgejoUnavailable(_) => "forgejo_unavailable",
             Self::TransitionRejected { .. } => "transition_rejected",
         }
     }
@@ -169,7 +204,13 @@ impl VogtError {
             | Self::InvalidSnooze(_)
             | Self::MissingReason(_) => 400,
             Self::LoginThrottled(_) => 429,
-            Self::UpstreamWriteFailed(_) => 502,
+            Self::UpstreamWriteFailed(_)
+            | Self::EngineUnavailable(_)
+            | Self::GitUnavailable(_)
+            | Self::GitCommandFailed(_)
+            | Self::GitHubUnavailable(_)
+            | Self::PeerUnavailable { .. }
+            | Self::ForgejoUnavailable(_) => 502,
             Self::InvalidParams(_) => 422,
             Self::MigrationError(_) => 500,
             Self::MigrationLocked(_) => 503,
@@ -232,6 +273,11 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("invalid_params", 422),
         ("migration_error", 500),
         ("migration_locked", 503),
+        ("engine_unavailable", 502),
+        ("git_unavailable", 502),
+        ("github_unavailable", 502),
+        ("peer_unavailable", 502),
+        ("forgejo_unavailable", 502),
         ("transition_rejected", 409),
     ]
 }
@@ -277,6 +323,14 @@ mod tests {
             "invalid_params" => VogtError::InvalidParams(message),
             "migration_error" => VogtError::MigrationError(message),
             "migration_locked" => VogtError::MigrationLocked(message),
+            "engine_unavailable" => VogtError::EngineUnavailable(message),
+            "git_unavailable" => VogtError::GitUnavailable(message),
+            "github_unavailable" => VogtError::GitHubUnavailable(message),
+            "peer_unavailable" => VogtError::PeerUnavailable {
+                status: "refused".to_string(),
+                message,
+            },
+            "forgejo_unavailable" => VogtError::ForgejoUnavailable(message),
             "transition_rejected" => VogtError::TransitionRejected {
                 rule: "transition.not_allowed".to_string(),
                 message,
@@ -292,7 +346,21 @@ mod tests {
         let mut rust: Vec<(String, u16)> = error_table()
             .iter()
             .map(|(code, status)| ((*code).to_string(), *status))
-            .filter(|(code, _)| code != "transition_rejected")
+            .filter(|(code, _)| {
+                // The snapshot is `errors.py` as it stood when it was captured,
+                // which predates `engine_unavailable` and the adapter codes,
+                // and never had `transition_rejected`. They stay in the Rust
+                // table and are excluded only from this comparison.
+                !matches!(
+                    code.as_str(),
+                    "transition_rejected"
+                        | "engine_unavailable"
+                        | "git_unavailable"
+                        | "github_unavailable"
+                        | "peer_unavailable"
+                        | "forgejo_unavailable"
+                )
+            })
             .collect();
         rust.sort();
         assert_eq!(rust.len(), python.len());
@@ -303,7 +371,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 35);
+        assert_eq!(error_table().len(), 40);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");
