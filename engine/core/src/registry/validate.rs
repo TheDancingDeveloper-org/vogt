@@ -27,9 +27,24 @@ pub fn prepare(operation: &str, params: Value) -> Result<Value, VogtError> {
             &[format!("{operation} takes an object")],
         ));
     };
+    let given_value = Value::Object(given.clone());
     apply_object(operation, "", schema, given, schema)
         .map(Value::Object)
-        .map_err(|problems| invalid(operation, &problems))
+        .map_err(|problems| {
+            invalid(
+                operation,
+                &problems
+                    .iter()
+                    .map(|problem| {
+                        if problem.contains("[type=") {
+                            problem.clone()
+                        } else {
+                            finish(problem, &input_for(problem, &given_value))
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
 }
 
 fn apply_object(
@@ -50,11 +65,16 @@ fn apply_object(
     // the known fields are checked first and the extras appended after.
     let mut extras = Vec::new();
     if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
-        for name in given.keys() {
-            if !properties.contains_key(name) {
-                extras.push(pydantic(
-                    &at(location, name),
-                    "Extra inputs are not permitted",
+        let unexpected: Vec<String> = given
+            .keys()
+            .filter(|name| !properties.contains_key(*name))
+            .cloned()
+            .collect();
+        for name in unexpected {
+            if let Some(value) = given.get(&name) {
+                extras.push(finish(
+                    &pydantic(&at(location, &name), "Extra inputs are not permitted"),
+                    value,
                 ));
             }
         }
@@ -134,12 +154,16 @@ fn check_value(
         // A null where the value must be one of an enum fails the enum, which
         // names the allowed values, rather than the underlying string check.
         if schema.get("enum").is_some() {
-            return check_string(operation, name, schema, value);
+            return check_string(operation, name, schema, value.clone())
+                .map_err(|p| stamp(&p, &value));
         }
         return if schema.get("format").and_then(Value::as_str) == Some("date-time") {
-            Err(vec![pydantic(name, "Input should be a valid datetime")])
+            Err(stamp(
+                &[pydantic(name, "Input should be a valid datetime")],
+                &value,
+            ))
         } else {
-            Err(vec![pydantic(name, &expected_input(schema))])
+            Err(stamp(&[pydantic(name, &expected_input(schema))], &value))
         };
     }
     if let Some(nested) = schema.get("properties") {
@@ -149,10 +173,13 @@ fn check_value(
                     .get("title")
                     .and_then(Value::as_str)
                     .unwrap_or("object");
-                return Err(vec![pydantic(
-                    name,
-                    &format!("Input should be a valid dictionary or instance of {model}"),
-                )]);
+                return Err(stamp(
+                    &[pydantic(
+                        name,
+                        &format!("Input should be a valid dictionary or instance of {model}"),
+                    )],
+                    &value,
+                ));
             };
             return apply_object(operation, name, schema, object, root).map(Value::Object);
         }
@@ -169,25 +196,43 @@ fn check_value(
         Some("string") => {
             if schema.get("format").and_then(Value::as_str) == Some("date-time") {
                 if let Some(coerced) = coerce_datetime(&value) {
-                    return check_string(operation, name, schema, coerced);
+                    return check_string(operation, name, schema, coerced)
+                        .map_err(|problems| stamp(&problems, &value));
                 }
                 // A bool or null is the wrong type. A string that fails to parse
                 // is a different complaint, made inside `check_string`.
                 if !value.is_string() {
-                    return Err(vec![pydantic(name, "Input should be a valid datetime")]);
+                    return Err(stamp(
+                        &[pydantic(name, "Input should be a valid datetime")],
+                        &value,
+                    ));
                 }
             }
-            check_string(operation, name, schema, value)
+            check_string(operation, name, schema, value.clone()).map_err(|p| stamp(&p, &value))
         }
-        Some("integer") => check_integer(operation, name, schema, value),
-        Some("number") => check_number(operation, name, schema, value),
-        Some("boolean") => check_boolean(operation, name, value),
+        Some("integer") => {
+            check_integer(operation, name, schema, value.clone()).map_err(|p| stamp(&p, &value))
+        }
+        Some("number") => {
+            check_number(operation, name, schema, value.clone()).map_err(|p| stamp(&p, &value))
+        }
+        Some("boolean") => {
+            check_boolean(operation, name, value.clone()).map_err(|p| stamp(&p, &value))
+        }
         Some("array") => check_array(operation, name, schema, value, root),
         Some("object") if operation == "preference.set" && name == "value" => {
-            check_preference_value(operation, name, value)
+            check_preference_value(operation, name, value.clone()).map_err(|p| stamp(&p, &value))
         }
         _ => Ok(value),
     }
+}
+
+/// Add the rejected value's tail to each complaint.
+fn stamp(problems: &[String], input: &Value) -> Vec<String> {
+    problems
+        .iter()
+        .map(|problem| finish(problem, input))
+        .collect()
 }
 
 /// `anyOf: [schema, {"type": "null"}]` is how pydantic writes an optional field.
@@ -483,25 +528,34 @@ fn check_array(
                 return check_array(operation, name, schema, Value::Array(split), root);
             }
         }
-        return Err(vec![pydantic(name, "Input should be a valid list")]);
+        return Err(stamp(
+            &[pydantic(name, "Input should be a valid list")],
+            &value,
+        ));
     };
     if let Some(min) = bound(schema, "minItems") {
         if (items.len() as i64) < min {
-            return Err(vec![pydantic(
-                name,
-                &format!(
-                        "List should have at least {min} item after validation, not {}, input_type=list]",
-                    items.len()
-                ),
-            )]);
+            return Err(stamp(
+                &[pydantic(
+                    name,
+                    &format!(
+                        "List should have at least {min} item after validation, not {}",
+                        items.len()
+                    ),
+                )],
+                &Value::Array(items),
+            ));
         }
     }
     if let Some(max) = bound(schema, "maxItems") {
         if (items.len() as i64) > max {
-            return Err(vec![pydantic(
-                name,
-                &format!("List should have at most {max} items"),
-            )]);
+            return Err(stamp(
+                &[pydantic(
+                    name,
+                    &format!("List should have at most {max} items"),
+                )],
+                &Value::Array(items),
+            ));
         }
     }
     let Some(item_schema) = schema.get("items") else {
@@ -544,11 +598,160 @@ fn expected_input(schema: &Value) -> String {
     format!("Input should be a valid {kind}")
 }
 
-/// The field and the complaint, in the shape pydantic prints: the field on its
-/// own line, the complaint indented under it. The type tag and the link pydantic
-/// appends are its own and are not reproduced.
+/// The field and the complaint, in the shape pydantic prints. The tail that names
+/// the rejected value is added by `finish` once that value is known.
 fn pydantic(field: &str, complaint: &str) -> String {
     format!("{field}\n  {complaint}")
+}
+
+/// Pydantic's error code. The complaint decides it, except that a null is
+/// rejected for its type, which is a different code from a value that fails to
+/// parse.
+fn error_code(complaint: &str, input: &Value) -> &'static str {
+    if input.is_null() && !complaint.starts_with("Input should be '") {
+        return match complaint {
+            s if s.contains("valid integer") => "int_type",
+            s if s.contains("valid number") => "float_type",
+            s if s.contains("valid boolean") => "bool_type",
+            s if s.contains("valid list") => "list_type",
+            s if s.contains("valid dictionary") => "dict_type",
+            s if s.contains("datetime") => "datetime_type",
+            _ => "string_type",
+        };
+    }
+    match complaint {
+        "Field required" => "missing",
+        "Extra inputs are not permitted" => "extra_forbidden",
+        "Input should be a valid string" => "string_type",
+        "Input should be a valid integer, unable to parse string as an integer" => "int_parsing",
+        "Input should be a valid integer, got a number with a fractional part" => "int_from_float",
+        "Input should be a valid boolean, unable to interpret input" => "bool_parsing",
+        "Input should be a valid datetime" => "datetime_type",
+        "Input should be a valid datetime or date, input is too short" => {
+            "datetime_from_date_parsing"
+        }
+        "Input should be a valid list" => "list_type",
+        "Input should be a valid dictionary" => "dict_type",
+        _ if complaint.starts_with("Input should be a valid dictionary or instance of") => {
+            "model_type"
+        }
+        _ if complaint.starts_with("String should have at least") => "string_too_short",
+        _ if complaint.starts_with("String should have at most") => "string_too_long",
+        _ if complaint.starts_with("String should match pattern") => "string_pattern_mismatch",
+        _ if complaint.starts_with("Input should be '") => "literal_error",
+        _ if complaint.starts_with("Input should be greater than") => "greater_than_equal",
+        _ if complaint.starts_with("Input should be less than") => "less_than_equal",
+        _ if complaint.starts_with("List should have at least") => "too_short",
+        _ if complaint.starts_with("List should have at most") => "too_long",
+        _ if complaint.starts_with("Value error,") => "value_error",
+        _ => "unknown",
+    }
+}
+
+/// How pydantic names the JSON type of the rejected value.
+fn json_type(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "NoneType",
+        Value::Bool(_) => "bool",
+        // A JSON `5.0` is a float and a JSON `5` is an int; `is_f64` is what
+        // records the difference. A whole number past 2^63 is also stored as f64,
+        // but only because it overflowed, and it is still an int.
+        Value::Number(number)
+            if number.is_f64() && number.as_f64().is_some_and(|f| f.abs() < i64::MAX as f64) =>
+        {
+            "float"
+        }
+        Value::Number(_) => "int",
+        Value::String(_) => "str",
+        Value::Array(_) => "list",
+        Value::Object(_) => "dict",
+    }
+}
+
+/// The value as pydantic prints it, in Python's spelling. A string is shortened
+/// before it is quoted, so the quotes are not part of its length.
+fn render_input(value: &Value) -> String {
+    match value {
+        Value::String(text) => format!("'{}'", shorten(text, true)),
+        other => shorten(&render_full(other), false),
+    }
+}
+
+fn render_full(value: &Value) -> String {
+    match value {
+        Value::Null => "None".to_string(),
+        Value::Bool(flag) => if *flag { "True" } else { "False" }.to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => format!("'{text}'"),
+        Value::Array(items) => {
+            let shown = items.iter().map(render_full).collect::<Vec<_>>().join(", ");
+            format!("[{shown}]")
+        }
+        Value::Object(fields) => {
+            let shown = fields
+                .iter()
+                .map(|(name, value)| format!("'{name}': {}", render_full(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{shown}}}")
+        }
+    }
+}
+
+/// Attach the rejected value to a complaint: the error code, the value as
+/// pydantic prints it, its type, and the link to the documentation.
+fn finish(problem: &str, input: &Value) -> String {
+    let Some((field, complaint)) = problem.split_once("\n  ") else {
+        return problem.to_string();
+    };
+    let code = error_code(complaint, input);
+    format!(
+        "{field}\n  {complaint} [type={code}, input_value={}, input_type={}]\n    \
+         For further information visit https://errors.pydantic.dev/2.13/v/{code}",
+        render_input(input),
+        json_type(input)
+    )
+}
+
+/// A string keeps its first 24 and last 23 characters; anything else keeps 25 and
+/// 24, because its opening brace or bracket counts as one. An ellipsis stands
+/// between.
+fn shorten(text: &str, string: bool) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= 50 {
+        return text.to_string();
+    }
+    let (head, tail) = if string { (12, 11) } else { (25, 24) };
+    format!(
+        "{}...{}",
+        chars[..head].iter().collect::<String>(),
+        chars[chars.len() - tail..].iter().collect::<String>()
+    )
+}
+
+/// The value a complaint is about. A nested field such as `cells.0.column` was
+/// rejected for the object at `cells.0`, and pydantic prints that object rather
+/// than the whole input; a top-level field was rejected for the whole input.
+fn input_for(problem: &str, given: &Value) -> Value {
+    let Some(field) = problem.split('\n').next() else {
+        return given.clone();
+    };
+    let mut path: Vec<&str> = field.split('.').collect();
+    path.pop();
+    let mut cursor = given;
+    for part in path {
+        cursor = match part.parse::<usize>() {
+            Ok(index) => match cursor.as_array().and_then(|items| items.get(index)) {
+                Some(item) => item,
+                None => return given.clone(),
+            },
+            Err(_) => match cursor.as_object().and_then(|fields| fields.get(part)) {
+                Some(item) => item,
+                None => return given.clone(),
+            },
+        };
+    }
+    cursor.clone()
 }
 
 fn invalid(operation: &str, problems: &[String]) -> VogtError {
@@ -700,6 +903,18 @@ mod tests {
         }
     }
 
+    /// Put back the digits of a number past 2^63. The parsed value renders it as
+    /// `1e+30`; the sent JSON still has every digit, which is what pydantic prints.
+    fn restore_digits(message: &str, sent: &str) -> String {
+        let mut restored = message.to_string();
+        for token in sent.split(|ch: char| !ch.is_ascii_digit()) {
+            if token.len() > 18 {
+                restored = restored.replacen("1e+30", token, 1);
+            }
+        }
+        restored
+    }
+
     /// Every probe in `tests/parity/validator_corpus.json`, recorded from
     /// pydantic by `scripts/gen_validator_corpus.py`. An accepted probe must
     /// resolve to the same parameters; a refused one must say the same thing.
@@ -730,10 +945,17 @@ mod tests {
                 Err(error) => {
                     if expected["ok"].as_bool().unwrap() {
                         failures.push(format!("{op} {tag}: rust refused, pydantic accepted"));
-                    } else if error.message() != expected["text"].as_str().unwrap() {
+                        continue;
+                    }
+                    // A number past 2^63 is rounded to `1e+30` once parsed. The
+                    // corpus keeps the digits the caller sent; put them back.
+                    let mut message = error.message().to_string();
+                    if let Some(sent) = expected["sent"].as_str() {
+                        message = restore_digits(&message, sent);
+                    }
+                    if message != expected["text"].as_str().unwrap() {
                         failures.push(format!(
-                            "{op} {tag}:\n  rust: {}\n  pydantic: {}",
-                            error.message(),
+                            "{op} {tag}:\n  rust: {message}\n  pydantic: {}",
                             expected["text"].as_str().unwrap()
                         ));
                     }

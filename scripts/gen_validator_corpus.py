@@ -166,8 +166,13 @@ def verdict(operation, raw: dict) -> dict:
     try:
         model = operation.params_model.model_validate(raw)
     except pydantic.ValidationError as exc:
-        text = DOC_LINK.sub("", TAIL.sub("", f"invalid arguments for {operation.name}:\n{exc}"))
-        return {"ok": False, "text": text.rstrip()}
+        return {
+            "ok": False,
+            "text": f"invalid arguments for {operation.name}:\n{exc}".rstrip(),
+            # The parameters as sent, so a number past 2^63 keeps its digits.
+            # JSON parsing rounds it, and the comparison puts the digits back.
+            "sent": json.dumps(raw, ensure_ascii=False),
+        }
     return {"ok": True, "dump": model.model_dump(mode="json")}
 
 
