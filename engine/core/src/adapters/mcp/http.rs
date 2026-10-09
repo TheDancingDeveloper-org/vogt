@@ -28,11 +28,21 @@ const OK: u16 = 200;
 /// One HTTP response from the MCP route.
 pub struct McpHttpResponse {
     pub status: u16,
-    /// `None` for a notification, whose 202 carries no body.
-    pub body: Option<Value>,
+    /// The body, and how to send it. `None` for a notification, whose 202
+    /// carries nothing.
+    pub body: Option<McpBody>,
     /// The authorization to record, set on a `tools/call` that reached an
     /// operation. The front door writes it; the route only decides it.
     pub decision: Option<AuthDecisionRecord>,
+}
+
+/// What the body is. A normal answer is JSON; a 500 is the bare text Starlette
+/// sends, and encoding it as JSON would wrap it in quotes.
+#[derive(Debug)]
+pub enum McpBody {
+    Json(Value),
+    /// `text/plain; charset=utf-8`, exactly as written.
+    Text(String),
 }
 
 /// Answer one request body with the streamable-HTTP envelope.
@@ -84,10 +94,12 @@ pub fn respond_recording<G: ToolGrant, R: AuthRecorder>(
             // The store's own text stays server-side. A remote caller gets the
             // plain 500 Starlette would have sent, not a SQLite message and not
             // an id that failed to normalise.
-            let _ = failure;
+            // Server-side only. The caller gets the plain text, never the
+            // store's own words.
+            tracing::error!("mcp authorization could not be recorded: {failure}");
             return McpHttpResponse {
                 status: 500,
-                body: Some(Value::String("Internal Server Error".to_owned())),
+                body: Some(McpBody::Text("Internal Server Error".to_owned())),
                 decision: None,
             };
         }
@@ -109,7 +121,7 @@ pub fn respond_recording<G: ToolGrant, R: AuthRecorder>(
 fn json_response(body: Value) -> McpHttpResponse {
     McpHttpResponse {
         status: OK,
-        body: Some(body),
+        body: Some(McpBody::Json(body)),
         decision: None,
     }
 }
@@ -321,6 +333,13 @@ mod tests {
         OperationRegistry::new(build_operations()).unwrap()
     }
 
+    fn json_body(response: &McpHttpResponse) -> &Value {
+        match &response.body {
+            Some(McpBody::Json(value)) => value,
+            _ => panic!("expected a JSON body"),
+        }
+    }
+
     fn message(value: Value) -> Map<String, Value> {
         match value {
             Value::Object(map) => map,
@@ -332,7 +351,7 @@ mod tests {
     fn bad_json_is_a_200_carrying_the_error() {
         let response = handle_http("not json", &registry(), &ScopeGrant::new(vec![], false));
         assert_eq!(response.status, OK);
-        let body = response.body.unwrap();
+        let body = json_body(&response);
         assert_eq!(body["error"]["code"], -32602);
         assert!(body["error"]["message"]
             .as_str()
@@ -358,7 +377,7 @@ mod tests {
             &registry(),
             &ScopeGrant::new(vec![Scope::Read], false),
         );
-        let tools = response.body.unwrap()["result"]["tools"].clone();
+        let tools = json_body(&response)["result"]["tools"].clone();
         let names: Vec<&str> = tools
             .as_array()
             .unwrap()
@@ -383,10 +402,8 @@ mod tests {
             &message(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
             &registry(),
             &ScopeGrant::new(vec![Scope::WorkWrite], true),
-        )
-        .body
-        .unwrap();
-        let names: Vec<&str> = read_write["result"]["tools"]
+        );
+        let names: Vec<&str> = json_body(&read_write)["result"]["tools"]
             .as_array()
             .unwrap()
             .iter()
@@ -399,10 +416,8 @@ mod tests {
             &message(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})),
             &registry(),
             &ScopeGrant::new(vec![Scope::Admin], false),
-        )
-        .body
-        .unwrap();
-        let frozen_names: Vec<&str> = frozen["result"]["tools"]
+        );
+        let frozen_names: Vec<&str> = json_body(&frozen)["result"]["tools"]
             .as_array()
             .unwrap()
             .iter()
@@ -425,7 +440,7 @@ mod tests {
             &registry(),
             &ScopeGrant::new(vec![Scope::Read], false),
         );
-        let body = response.body.unwrap();
+        let body = json_body(&response);
         assert_eq!(response.status, OK);
         assert_eq!(body["result"]["isError"], true);
         let text = body["result"]["content"][0]["text"].as_str().unwrap();
@@ -449,7 +464,7 @@ mod tests {
             &registry(),
             &ScopeGrant::new(vec![], true),
         );
-        let text = response.body.unwrap()["result"]["content"][0]["text"]
+        let text = json_body(&response)["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -489,14 +504,14 @@ mod tests {
             &registry(),
             &ScopeGrant::new(vec![Scope::Read], false),
         );
-        assert_eq!(answered.body.unwrap()["id"], Value::Null);
+        assert_eq!(json_body(&answered)["id"], Value::Null);
 
         let object_id = respond(
             &message(json!({"jsonrpc": "2.0", "id": {"x": 1}, "method": "nope"})),
             &registry(),
             &ScopeGrant::new(vec![Scope::Read], false),
         );
-        let body = object_id.body.unwrap();
+        let body = json_body(&object_id);
         assert_eq!(body["id"], Value::Null);
         assert_eq!(body["error"]["code"], -32601);
     }
@@ -524,7 +539,7 @@ mod tests {
             &registry(),
             &ScopeGrant::new(vec![Scope::Read], false),
         );
-        assert_eq!(response.body.unwrap()["error"]["code"], -32602);
+        assert_eq!(json_body(&response)["error"]["code"], -32602);
         assert!(response.decision.is_none());
     }
 
@@ -541,7 +556,7 @@ mod tests {
                 true,
             ),
         );
-        let text = response.body.unwrap()["result"]["content"][0]["text"]
+        let text = json_body(&response)["result"]["content"][0]["text"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -559,7 +574,7 @@ mod tests {
             &registry(),
             &ScopeGrant::new(vec![Scope::Read], false),
         );
-        assert!(response.body.unwrap().get("error").is_none());
+        assert!(json_body(&response).get("error").is_none());
         assert!(
             response.decision.is_some(),
             "0.0 is falsy, so the call runs and is recorded"
@@ -617,7 +632,7 @@ mod tests {
             &registry(),
             &ScopeGrant::new(vec![Scope::Admin], true),
         );
-        let body = response.body.unwrap();
+        let body = json_body(&response);
         assert_eq!(body["error"]["code"], -32601);
         assert!(body["error"]["message"]
             .as_str()
