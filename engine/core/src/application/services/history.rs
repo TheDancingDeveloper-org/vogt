@@ -64,7 +64,12 @@ where
     let project_id = match &project {
         Some(slug) => Some(
             view.project_by_slug(slug)?
-                .ok_or_else(|| VogtError::NotFound(format!("no project with slug {slug:?}")))?
+                .ok_or_else(|| {
+                    VogtError::NotFound(format!(
+                        "no project with slug {}",
+                        crate::core::py_repr(slug)
+                    ))
+                })?
                 .id,
         ),
         None => None,
@@ -230,8 +235,9 @@ mod tests {
     fn an_unknown_project_is_not_found() {
         let built = opened();
         let error = list_audit(ctx(&built), json!({"project": "nope"})).unwrap_err();
-        assert!(
-            matches!(error, VogtError::NotFound(message) if message.contains("no project with slug"))
-        );
+        assert!(matches!(
+            error,
+            VogtError::NotFound(message) if message == "no project with slug 'nope'"
+        ));
     }
 }
