@@ -41,7 +41,10 @@ pub fn init(
         &declared_path(data_dir),
         root.as_deref().map(|path| path.join("declared")).as_deref(),
     )?;
-    let now = stamp_if(clock, declared_due > 0);
+    // Python's `migrate` reads the clock whether or not anything is pending, so
+    // a no-op declared check still moves the hook clock one tick. Only a database
+    // that does not exist yet is free: there is nothing to check.
+    let now = stamp_if(clock, declared_existed || declared_due > 0);
     let declared = migrator::open_and_migrate(
         &declared_path(data_dir),
         "declared",

@@ -490,14 +490,16 @@ async fn dispatch<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error),
     };
-    // The gate and the operation read one clock, and they read it once. On the
-    // step routes that clock is fresh for this request and restarts at the hook's
-    // start (`step_clock_for`), so the decision, the entity and the audit land at
-    // the same three instants every request. Authorizing on the process clock
-    // instead spent the request's first tick on the touch, and every later stamp
-    // landed one past Python.
+    // The gate and the operation read one clock. On the step routes that clock is
+    // fresh for this request and restarts at the hook's start (`step_clock_for`),
+    // the same helper `/mcp` uses. `--no-auth` is Python's `local()`, which reads
+    // no clock at all, so the operation's own first read stays at the start.
     let request_store = request_store(&state, clock_for);
-    let now = request_store.now();
+    let now = if state.no_auth {
+        crate::core::Moment::from_unix(0, 0)
+    } else {
+        request_store.now()
+    };
     let granted = auth_gate::authorize(
         &request_store,
         AuthRequest {
@@ -595,7 +597,26 @@ fn query_object(operation: &str, query: Option<&str>) -> serde_json::Value {
         let key = percent_decode(key);
         let decoded = percent_decode(value);
         let coerced = coerce_query(&schema, &key, &decoded);
-        object.insert(key, coerced);
+        // A repeated key on a list field is the list. FastAPI collects
+        // `?sources=a&sources=b` into `["a", "b"]`; keeping only the last value
+        // hands the validator a string and it reports `list_type`. A scalar keeps
+        // the last value, because a list of one is not that scalar.
+        let repeats = schema
+            .and_then(|schema| schema.pointer(&format!("/properties/{key}/type")))
+            .and_then(serde_json::Value::as_str)
+            == Some("array");
+        match object.get_mut(&key) {
+            Some(existing) if repeats => match existing {
+                serde_json::Value::Array(items) => items.push(coerced),
+                single => {
+                    let first = single.take();
+                    *single = serde_json::Value::Array(vec![first, coerced]);
+                }
+            },
+            _ => {
+                object.insert(key, coerced);
+            }
+        }
     }
     serde_json::Value::Object(object)
 }
@@ -740,13 +761,34 @@ fn payload_too_large() -> Response {
 /// `InvalidRequest`, so the detail carries that whole message; the code and the
 /// fixed message are what `tests/test_http.py` asserts.
 fn invalid_arguments(error: &VogtError) -> Response {
+    // Python's `_jsonable_errors` writes one entry per rejected field, and every
+    // part of `loc` is a string, index included (`app.py:143`). A failure that
+    // carries no structured report falls back to the whole-body entry.
+    let detail = match crate::errors::take_validation(error) {
+        Some(report) => report
+            .errors
+            .iter()
+            .map(|problem| {
+                serde_json::json!({
+                    "loc": problem.loc,
+                    "msg": problem.msg,
+                    "type": problem.error_type,
+                })
+            })
+            .collect::<Vec<_>>(),
+        None => vec![serde_json::json!({
+            "loc": ["body"],
+            "msg": error.message(),
+            "type": "value_error",
+        })],
+    };
     json_response(
         StatusCode::UNPROCESSABLE_ENTITY,
         serde_json::json!({
             "error": {
                 "code": "invalid_arguments",
                 "message": "request does not match the operation's parameters",
-                "detail": [{"loc": ["body"], "msg": error.message(), "type": "value_error"}],
+                "detail": detail,
             }
         }),
     )
@@ -913,7 +955,18 @@ mod tests {
     }
 
     #[test]
-    fn a_repeated_query_key_keeps_its_last_value() {
+    fn a_repeated_query_key_is_reported_per_field() {
+        // The refusal names the field, not the whole body, and it names it once
+        // even though the key was given twice.
+        let running = serve(true);
+        let (status, body) = request(running.addr, "GET", "/api/work?sources=a&sources=b", None);
+        assert_eq!(status, 422, "{body}");
+        assert!(body.contains("\"loc\":[\"sources\"]"), "{body}");
+    }
+
+    #[test]
+    fn a_repeated_scalar_keeps_its_last_value() {
+        // A scalar field cannot be a list of one, so the last value stands alone.
         let running = serve(true);
         let (status, body) = request(running.addr, "GET", "/api/labels?limit=0&limit=5", None);
         assert_eq!(status, 200, "{body}");

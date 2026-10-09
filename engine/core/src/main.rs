@@ -36,7 +36,7 @@ pub const VERSION: &str = match option_env!("VOGT_VERSION") {
 };
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
@@ -78,6 +78,20 @@ enum Command {
         /// is what `/connection-info` reports as "bearer token".
         #[arg(long)]
         no_auth: bool,
+        /// Refuse every write. The same switch as `VOGT_READ_ONLY`.
+        #[arg(long)]
+        read_only: bool,
+        /// Do not run the background sweep. There is no scheduler yet, so this
+        /// changes nothing.
+        #[arg(long)]
+        no_schedule: bool,
+        /// PEM file with the TLS certificate. The key is read from `--tls-key`
+        /// when that is given, and from this file otherwise.
+        #[arg(long)]
+        tls_cert: Option<PathBuf>,
+        /// PEM file with the private key, when it is not in `--tls-cert`.
+        #[arg(long)]
+        tls_key: Option<PathBuf>,
     },
     /// Create or migrate the instance in a data directory.
     Init {
@@ -158,8 +172,8 @@ fn main() -> ExitCode {
     // not-ported stub breaks instance bootstrap. Every other registry command
     // goes through the generated adapter.
     // `--help` on serve and init is the generated page, so it lists the schema
-    // flags clap does not know (--tls-cert, --read-only, --no-schedule).
-    // Running them stays on this binary's own path.
+    // flags. clap accepts the same three: --read-only, --no-schedule and
+    // --tls-cert. A deployment that passes them must boot.
     let help = argv.iter().any(|arg| arg == "--help" || arg == "-h");
     let command = command_word(&argv);
     if !matches!(command, Some("serve" | "init")) || help {
@@ -213,7 +227,20 @@ fn main() -> ExitCode {
             host,
             port,
             no_auth,
-        } => serve(&host, port, cli.data_dir, cli.json, no_auth),
+            read_only,
+            no_schedule: _,
+            tls_cert,
+            tls_key,
+        } => serve(ServeArgs {
+            host: &host,
+            port,
+            data_dir: cli.data_dir,
+            json: cli.json,
+            no_auth,
+            read_only,
+            tls_cert: tls_cert.as_deref(),
+            tls_key: tls_key.as_deref(),
+        }),
         Command::Init { check } => init(cli.data_dir, check, cli.json),
     }
 }
@@ -368,7 +395,28 @@ fn render_text(body: &serde_json::Value) -> String {
     lines.join("\n")
 }
 
-fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: bool) -> ExitCode {
+struct ServeArgs<'a> {
+    host: &'a str,
+    port: u16,
+    data_dir: Option<PathBuf>,
+    json: bool,
+    no_auth: bool,
+    read_only: bool,
+    tls_cert: Option<&'a Path>,
+    tls_key: Option<&'a Path>,
+}
+
+fn serve(args: ServeArgs<'_>) -> ExitCode {
+    let ServeArgs {
+        host,
+        port,
+        data_dir,
+        json,
+        no_auth,
+        read_only,
+        tls_cert,
+        tls_key,
+    } = args;
     // Logging is a server concern. Python configures it in `serve` from the
     // resolved config and leaves the CLI and the stdio transport quiet, so a
     // JSON-log deployment and a `debug` level only apply here. `load_config`
@@ -423,7 +471,9 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
         None,
     )
     .expect("the hooks were validated at startup");
-    let writes_enabled = std::env::var("VOGT_READ_ONLY").ok().is_none();
+    // `--read-only` and `VOGT_READ_ONLY` are the same switch. Python reads the
+    // flag from the invocation and the variable from the environment.
+    let writes_enabled = !read_only && std::env::var("VOGT_READ_ONLY").ok().is_none();
     let health = adapters::http::openapi::router().merge(adapters::http::health::router(
         adapters::http::health::HealthState {
             data_dir: data_dir.clone(),
@@ -511,17 +561,28 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
             return ExitCode::from(1);
         }
     };
+    let scheme = if tls_cert.is_some() { "https" } else { "http" };
     if json {
         println!(
-            "{{\"url\":\"http://{host}:{port}\",\"data_dir\":\"{}\"}}",
+            "{{\"url\":\"{scheme}://{host}:{port}\",\"data_dir\":\"{}\"}}",
             data_dir.display()
         );
     }
     let result = runtime.block_on(async move {
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown())
-            .await
+        match tls_cert {
+            Some(pem) => {
+                let tls = load_tls(pem, tls_key)?;
+                axum_server::bind_rustls(addr, tls)
+                    .serve(router.into_make_service())
+                    .await
+            }
+            None => {
+                let listener = tokio::net::TcpListener::bind(addr).await?;
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(shutdown())
+                    .await
+            }
+        }
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -549,6 +610,41 @@ fn resolve_data_dir(given: Option<PathBuf>) -> Result<PathBuf, String> {
 
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+/// The TLS config for `--tls-cert`. Python loads the PEM with stdlib `ssl` and
+/// reports the failure as `invalid_request`; a file that will not parse, or one
+/// with no private key, is the same error here.
+fn load_tls(
+    cert: &Path,
+    key: Option<&Path>,
+) -> std::io::Result<axum_server::tls_rustls::RustlsConfig> {
+    let cert_bytes = std::fs::read(cert)?;
+    let key_bytes = match key {
+        Some(path) => std::fs::read(path)?,
+        None => cert_bytes.clone(),
+    };
+    let mut reader = std::io::BufReader::new(cert_bytes.as_slice());
+    let certs = rustls_pemfile::certs(&mut reader)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(std::io::Error::other)?;
+    let mut reader = std::io::BufReader::new(key_bytes.as_slice());
+    let key = rustls_pemfile::private_key(&mut reader)
+        .map_err(std::io::Error::other)?
+        .ok_or_else(|| std::io::Error::other("the PEM holds no private key"))?;
+    Ok(axum_server::tls_rustls::RustlsConfig::from_config(
+        std::sync::Arc::new(rustls_server_config(certs, key)?),
+    ))
+}
+
+fn rustls_server_config(
+    certs: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+) -> Result<rustls::ServerConfig, std::io::Error> {
+    rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|err| std::io::Error::other(err.to_string()))
 }
 
 #[cfg(test)]

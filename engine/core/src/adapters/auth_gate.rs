@@ -172,8 +172,12 @@ fn resolve<S: DeclaredStore>(
     };
     // The token was presented and it is live, so this request used it whether or
     // not the scope check that follows allows the operation. Python stamps here,
-    // before authorize, from the same instant the expiry check already read.
-    slide(store, &token, now, session_ttl_days);
+    // before authorize, and it reads the clock a second time for the touch: the
+    // expiry check used the context's first read and the touch uses the next one
+    // (`auth.py:146`, then `auth.py:166`). The renewal is measured from that
+    // second read, so passing the decision's instant renews one boundary early.
+    let touched = store.now();
+    slide(store, &token, touched, session_ttl_days);
     let held: Vec<&str> = token.scopes.iter().map(String::as_str).collect();
     let (permitted, reason) = allows(
         &held,
@@ -376,10 +380,8 @@ const TOUCH_DEBOUNCE_SECONDS: i64 = 5 * 60;
 /// once less than half that lifetime remains. An API or agent token never
 /// slides — doing so would quietly make an expiring token permanent.
 fn slide<S: DeclaredStore>(store: &S, token: &Token, now: Moment, session_ttl_days: i64) {
-    // Python's `_touch` measures the debounce and the half-life renewal from the
-    // instant the caller already read for the expiry check. Reading the clock
-    // again here lands `last_used_at` a tick later, and on a step clock that tick
-    // is also the one the operation's own stamps are counted from.
+    // `now` is the touch's own read, one tick after the decision's instant.
+    // Python's `_touch` measures the debounce and the half-life renewal from it.
     let ttl = session_ttl_days.saturating_mul(24 * 60 * 60);
     let renewal = match token.kind {
         TokenKind::Session => token.expires_at.and_then(|expires| {
