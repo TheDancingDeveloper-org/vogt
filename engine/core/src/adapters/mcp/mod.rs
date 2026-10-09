@@ -6,5 +6,5 @@
 //! of it.
 
 mod bridge;
-mod framing;
-mod http;
+pub mod framing;
+pub mod http;

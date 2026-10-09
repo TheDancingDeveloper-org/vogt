@@ -277,9 +277,13 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
         auth_enabled: !no_auth,
         writes_enabled: true,
     });
-    let router = health.merge(adapters::http::app::router(
-        adapters::http::app::AppState::from_default(),
-    ));
+    let router = health
+        .merge(adapters::http::app::router(
+            adapters::http::app::AppState::from_default(),
+        ))
+        .merge(adapters::http::mcp::router(adapters::http::mcp::McpState {
+            recorder: (),
+        }));
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(err) => {

@@ -236,6 +236,7 @@ impl ScopeGrant {
 /// The route has no store of its own, so it hands the decision to whoever
 /// mounted it; dropping it would leave the audit trail short exactly where a
 /// refusal is most worth recording.
+#[derive(Clone)]
 pub struct AuthDecisionRecord {
     pub decision: &'static str,
     pub reason_code: &'static str,
