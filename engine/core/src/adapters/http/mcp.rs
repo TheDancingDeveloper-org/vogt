@@ -141,26 +141,38 @@ async fn handle<C: Clock, I: IdFactory>(
 
 /// The context a tool call runs against, with the authenticated principal on it.
 ///
-/// Built the way `/api` builds its own: the data directory from the state, the
-/// identity from the grant, and the clock and ids from the hook environment so
-/// the service draws the same sequence the route's rows did.
+/// The principal comes off the grant: `kind` and `display_name` are the actor
+/// row the gate already loaded, so an agent's token stays an agent instead of
+/// being recorded as a person, and the token rides with it for `auth.whoami`.
+///
+/// The clock and the id factory are still the hook environment's, not the
+/// store's. `Operation::run` takes `&Built`, whose variants own their clock, so
+/// the route cannot hand it the `Arc` handles the store already holds. That
+/// needs `Built` to carry them, which is `application::context`.
 fn context_for<C: Clock, I: IdFactory>(
     state: &McpState<C, I>,
     grant: &auth_gate::Grant,
 ) -> Option<crate::application::context::Built> {
-    use crate::core::{local_principal, os_user, ActorKind, Principal};
+    use crate::core::{local_principal, os_user, Principal};
     let config = crate::config::VogtConfig {
         data_dir: state.data_dir.clone(),
         ..crate::config::VogtConfig::default()
     };
     let principal = match &grant.identity_ref {
         Some(identity_ref) if !identity_ref.is_empty() => {
-            Principal::new(identity_ref, ActorKind::Human, identity_ref).ok()
+            Principal::new(identity_ref, grant.kind, &grant.display_name).ok()
         }
         _ => Some(local_principal(&os_user())),
     };
     crate::application::context::build_context(
-        config, principal, None, None, None, None, None, None,
+        config,
+        principal,
+        None,
+        None,
+        grant.token.clone(),
+        None,
+        None,
+        None,
     )
     .ok()
 }
