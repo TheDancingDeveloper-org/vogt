@@ -685,7 +685,7 @@ fn py_display(value: &Value) -> String {
         Value::String(text) => text.clone(),
         Value::Bool(flag) => if *flag { "True" } else { "False" }.to_string(),
         Value::Null => "None".to_string(),
-        Value::Number(number) => number.to_string(),
+        Value::Number(number) => py_number(number),
         Value::Array(items) => {
             let parts: Vec<String> = items.iter().map(py_literal).collect();
             format!("[{}]", parts.join(", "))
@@ -709,6 +709,26 @@ fn py_literal(value: &Value) -> String {
 
 fn py_quote(text: &str) -> String {
     crate::core::py_repr(text)
+}
+
+/// `str` of a number. serde prints `0.00000001` where Python prints `1e-07`.
+fn py_number(number: &serde_json::Number) -> String {
+    let Some(value) = number.as_f64() else {
+        return number.to_string();
+    };
+    if value.is_finite() && value.abs() != 0.0 {
+        let magnitude = value.abs().log10();
+        if !(-4.0..16.0).contains(&magnitude) {
+            let mut rendered = format!("{value:.15e}");
+            if let Some((mantissa, exponent)) = rendered.split_once('e') {
+                let trimmed = mantissa.trim_end_matches('0').trim_end_matches('.');
+                let (sign, digits) = exponent.split_at(1);
+                rendered = format!("{trimmed}e{sign}{digits:0>2}");
+            }
+            return rendered;
+        }
+    }
+    number.to_string()
 }
 
 /// The work-item subject keys a PR observation says it implements. Empty for
@@ -3916,7 +3936,7 @@ pub fn summarize_input(call_input: &serde_json::Value) -> String {
             parts.iter().map(py_display).collect::<Vec<_>>().join(" ")
         }
         serde_json::Value::Null => String::new(),
-        other => other.to_string(),
+        other => py_display(other),
     };
     let window: String = text.chars().take(4 * SCAN_WINDOW).collect();
     cut(&one_line(&activity_redact(&window)), SUMMARY_LIMIT)
@@ -4255,6 +4275,10 @@ mod activity_tests {
         assert_eq!(quoted, r#"["it's"]"#);
         let control = py_display(&serde_json::json!(["a\u{000b}b"]));
         assert_eq!(control, r#"['a\x0bb']"#);
+        // `str(True)` is `True`, and a small float uses an exponent.
+        assert_eq!(summarize_input(&serde_json::json!(true)), "True");
+        assert_eq!(py_display(&serde_json::json!(1e-7)), "1e-07");
+        assert_eq!(py_display(&serde_json::json!(1e-5)), "1e-05");
     }
 
     #[test]
