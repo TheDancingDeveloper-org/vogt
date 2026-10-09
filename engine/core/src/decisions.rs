@@ -1174,3 +1174,250 @@ mod tests {
         assert_eq!(upstream_state(&merged, None, "open"), "done");
     }
 }
+
+// What a session overseer should look at first. Ports `core/oversight.py`.
+//
+// The order is decided from facts the engine reported, with the reason in
+// words — never a bare rank — so the table says why a row is at the top.
+// Pure: the clock is a parameter, and nothing here reads storage or the
+// engine. Every reason string is copied from the Python, because the two
+// compare them.
+
+/// Lower first. `stalled` sits above `running` because a turn that has printed
+/// nothing for a long time is worth a look before one that is busy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attention {
+    Approval,
+    Blocked,
+    Waiting,
+    Stalled,
+    Running,
+    Idle,
+    Hibernated,
+    Exited,
+    Unknown,
+}
+
+impl Attention {
+    pub fn order(self) -> u8 {
+        match self {
+            Self::Approval => 0,
+            Self::Blocked => 1,
+            Self::Waiting => 2,
+            Self::Stalled => 3,
+            Self::Running => 4,
+            Self::Idle => 5,
+            Self::Hibernated => 6,
+            Self::Exited => 7,
+            Self::Unknown => 8,
+        }
+    }
+
+    /// The classes a person, or a driver acting for one, must act on.
+    pub fn needs_you(self) -> bool {
+        matches!(self, Self::Approval | Self::Blocked | Self::Waiting)
+    }
+}
+
+/// Startup gates an agent CLI stops at before any work, as words.
+fn gate_words(kind: &str) -> Option<&'static str> {
+    match kind {
+        "folder-trust" => Some("folder trust"),
+        "external-imports" => Some("external CLAUDE.md imports"),
+        "read-outside-cwd" => Some("read outside the working directory"),
+        _ => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verdict {
+    pub attention: Attention,
+    pub reason: String,
+}
+
+/// Where one session belongs in the oversight table, and why.
+#[allow(clippy::too_many_arguments)]
+pub fn classify(
+    activity: Option<&str>,
+    alive: Option<bool>,
+    ready: Option<bool>,
+    approval_question: Option<&str>,
+    blocker: Option<&str>,
+    approval_kind: Option<&str>,
+    last_output_at: Option<crate::core::Moment>,
+    now: crate::core::Moment,
+    stall_after_secs: i64,
+) -> Verdict {
+    let verdict = |attention: Attention, reason: String| Verdict { attention, reason };
+    if activity == Some("hibernated") {
+        return verdict(
+            Attention::Hibernated,
+            "hibernated to free memory; wake it to continue".to_string(),
+        );
+    }
+    if activity.is_none() || alive.is_none() {
+        return verdict(
+            Attention::Unknown,
+            "the engine could not be asked".to_string(),
+        );
+    }
+    if activity == Some("stopped") {
+        return verdict(Attention::Exited, "stopped on request".to_string());
+    }
+    if alive == Some(false) {
+        return verdict(
+            Attention::Exited,
+            format!("its process ended ({})", activity.unwrap_or_default()),
+        );
+    }
+    if approval_question.is_some() || activity == Some("awaiting-approval") {
+        if let (Some(gate), Some(question)) = (
+            approval_kind.and_then(gate_words),
+            approval_question.filter(|text| !text.is_empty()),
+        ) {
+            return verdict(
+                Attention::Approval,
+                format!("stopped at a startup gate ({gate}): {question}"),
+            );
+        }
+        return verdict(
+            Attention::Approval,
+            match approval_question.filter(|text| !text.is_empty()) {
+                Some(question) => format!("asking for approval: {question}"),
+                None => "showing a permission dialog".to_string(),
+            },
+        );
+    }
+    if let Some(blocker) = blocker.filter(|text| !text.is_empty()) {
+        return verdict(
+            Attention::Blocked,
+            format!("blocked on a person: {blocker}"),
+        );
+    }
+    if activity == Some("waiting-for-input") || (activity == Some("idle") && ready == Some(true)) {
+        return verdict(
+            Attention::Waiting,
+            "at its prompt, waiting for the next instruction".to_string(),
+        );
+    }
+    if activity == Some("running") {
+        if let Some(last) = last_output_at {
+            let quiet = now.seconds_since(last) as i64;
+            if quiet >= stall_after_secs {
+                let minutes = quiet / 60;
+                return verdict(
+                    Attention::Stalled,
+                    format!("running, but nothing printed for {minutes} min"),
+                );
+            }
+        }
+        return verdict(Attention::Running, "working".to_string());
+    }
+    verdict(
+        Attention::Idle,
+        "resting, not at a recognised prompt".to_string(),
+    )
+}
+
+#[cfg(test)]
+mod oversight_tests {
+    use super::*;
+
+    fn now() -> crate::core::Moment {
+        crate::core::from_iso("2026-10-09T03:00:00Z").unwrap()
+    }
+
+    fn classify_running(quiet_for_secs: i64) -> Verdict {
+        let moment = now();
+        classify(
+            Some("running"),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            Some(crate::core::Moment::from_unix(
+                moment.unix_seconds() - quiet_for_secs,
+                0,
+            )),
+            moment,
+            600,
+        )
+    }
+
+    #[test]
+    fn the_order_puts_what_needs_a_person_first() {
+        let ranked = [
+            Attention::Idle,
+            Attention::Approval,
+            Attention::Running,
+            Attention::Blocked,
+            Attention::Unknown,
+            Attention::Waiting,
+            Attention::Stalled,
+        ];
+        let mut sorted = ranked.to_vec();
+        sorted.sort_by_key(|attention| attention.order());
+        assert_eq!(
+            sorted,
+            [
+                Attention::Approval,
+                Attention::Blocked,
+                Attention::Waiting,
+                Attention::Stalled,
+                Attention::Running,
+                Attention::Idle,
+                Attention::Unknown,
+            ]
+        );
+        assert!(Attention::Approval.needs_you());
+        assert!(!Attention::Stalled.needs_you());
+    }
+
+    #[test]
+    fn a_quiet_turn_is_stalled_and_a_gate_is_named() {
+        assert_eq!(classify_running(600).attention, Attention::Stalled);
+        assert_eq!(
+            classify_running(600).reason,
+            "running, but nothing printed for 10 min"
+        );
+        assert_eq!(classify_running(540).attention, Attention::Running);
+
+        let gate = classify(
+            Some("awaiting-approval"),
+            Some(true),
+            None,
+            Some("trust this folder?"),
+            None,
+            Some("folder-trust"),
+            None,
+            now(),
+            600,
+        );
+        assert_eq!(gate.attention, Attention::Approval);
+        assert_eq!(
+            gate.reason,
+            "stopped at a startup gate (folder trust): trust this folder?"
+        );
+    }
+
+    #[test]
+    fn an_unasked_engine_is_unknown_and_a_dead_process_has_exited() {
+        let unknown = classify(None, Some(true), None, None, None, None, None, now(), 600);
+        assert_eq!(unknown.attention, Attention::Unknown);
+
+        let ended = classify(
+            Some("crashed"),
+            Some(false),
+            None,
+            None,
+            None,
+            None,
+            None,
+            now(),
+            600,
+        );
+        assert_eq!(ended.reason, "its process ended (crashed)");
+    }
+}
