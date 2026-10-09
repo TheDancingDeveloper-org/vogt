@@ -191,6 +191,12 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
         Arc::clone(store.id_factory()),
         store.synchronous(),
     );
+    // The operation context gets its own clock, restarted the same way the
+    // request store's was. Python builds a fresh context per call
+    // (`context.py`), so the service's rows start again at the hook's start
+    // instead of continuing the clock the gate and the decision row already
+    // ticked. A wall clock has nothing to restart, and keeps the shared one.
+    let operation_clock = clock_for(store.clock());
     // One read of the request's clock. The gate's expiry check and the decision
     // row below both use it; reading again for the row would land it a tick
     // later than Python's.
@@ -216,7 +222,7 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
         scopes: grant.scopes.clone(),
         writes_enabled: state.writes_enabled,
     };
-    let built = context_for(&request_store, &state, &grant, build);
+    let built = context_for(&request_store, &state, &grant, build, operation_clock);
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
     if let Some(context) = built.as_ref() {
         dispatcher = dispatcher.with_context(context);
@@ -238,13 +244,15 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
 /// being recorded as a person, and the token rides with it for `auth.whoami`.
 ///
 /// The id factory is the store's own handle, so the service's writes continue
-/// the sequence the decision row started. The clock is the route's choice: a
-/// step clock restarts at the hook's start, a wall clock is the store's.
+/// the sequence the decision row started. The clock is not: the gate and the
+/// decision row already ticked the store's, and Python's per-call context
+/// starts again at the hook's start, so the route hands in a fresh one.
 fn context_for<C: Clock, I: IdFactory>(
     store: &SqliteDeclaredStore<C, I>,
     state: &McpState<C, I>,
     grant: &auth_gate::Grant,
     build: ContextBuild<C, I>,
+    clock: Arc<Mutex<C>>,
 ) -> Option<crate::application::context::Built> {
     use crate::core::{local_principal, os_user, Principal};
     let config = state.config.clone();
@@ -257,7 +265,7 @@ fn context_for<C: Clock, I: IdFactory>(
     Some(build(
         config,
         principal,
-        Arc::clone(store.clock()),
+        clock,
         Arc::clone(store.id_factory()),
         grant.token.clone(),
     ))
@@ -335,9 +343,13 @@ fn record_call<C: Clock, I: IdFactory>(
 ) -> Result<(), Denial> {
     use crate::storage::interface::DeclaredStore;
     let held: Vec<&str> = grant.scopes.iter().map(String::as_str).collect();
+    // `--no-auth` is the local console: Python lets it write even with
+    // `--read-only`, the way `/api` does. A presented token is still bound by
+    // the switch.
+    let writes_enabled = state.writes_enabled || state.no_auth;
     let (permitted, reason) = crate::auth::allows(
         &held,
-        state.writes_enabled,
+        writes_enabled,
         operation.scope.as_str(),
         operation.mutating,
     );
