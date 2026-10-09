@@ -85,13 +85,16 @@ enum Command {
         /// changes nothing.
         #[arg(long)]
         no_schedule: bool,
-        /// PEM file with the TLS certificate. The key is read from `--tls-key`
-        /// when that is given, and from this file otherwise.
+        /// PEM file with the TLS certificate. Given with `--tls-key` or not at all.
         #[arg(long)]
         tls_cert: Option<PathBuf>,
-        /// PEM file with the private key, when it is not in `--tls-cert`.
+        /// PEM file with the private key. Given with `--tls-cert` or not at all.
         #[arg(long)]
         tls_key: Option<PathBuf>,
+        /// The inverse of `--read-only`, so a generated invocation that passes it
+        /// boots. Writes are allowed unless `--read-only` says otherwise.
+        #[arg(long, overrides_with = "read_only", hide = true)]
+        no_read_only: bool,
     },
     /// Create or migrate the instance in a data directory.
     Init {
@@ -231,6 +234,7 @@ fn main() -> ExitCode {
             no_schedule: _,
             tls_cert,
             tls_key,
+            no_read_only: _,
         } => serve(ServeArgs {
             host: &host,
             port,
@@ -554,6 +558,13 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
                 ),
             )),
     };
+    // `--tls-cert` and `--tls-key` arrive together or not at all. One without the
+    // other would either serve plain HTTP while the operator believes TLS is on,
+    // or refuse a certificate Python accepts. A path that is not a file is named.
+    if let Err(error) = check_tls(tls_cert, tls_key) {
+        eprintln!("error: invalid_request: {error}");
+        return ExitCode::from(1);
+    }
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(err) => {
@@ -572,7 +583,14 @@ fn serve(args: ServeArgs<'_>) -> ExitCode {
         match tls_cert {
             Some(pem) => {
                 let tls = load_tls(pem, tls_key)?;
+                let handle = axum_server::Handle::new();
+                let signal = handle.clone();
+                tokio::spawn(async move {
+                    shutdown().await;
+                    signal.graceful_shutdown(None);
+                });
                 axum_server::bind_rustls(addr, tls)
+                    .handle(handle)
                     .serve(router.into_make_service())
                     .await
             }
@@ -612,6 +630,22 @@ async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
+/// `--tls-cert` and `--tls-key` are a pair. Python refuses one without the
+/// other, and names a path that is not a file, both as `invalid_request`.
+fn check_tls(cert: Option<&Path>, key: Option<&Path>) -> Result<(), String> {
+    if cert.is_some() != key.is_some() {
+        return Err("--tls-cert and --tls-key are given together or not at all".to_string());
+    }
+    for (label, path) in [("--tls-cert", cert), ("--tls-key", key)] {
+        if let Some(path) = path {
+            if !path.is_file() {
+                return Err(format!("{label}: no such file: {}", path.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The TLS config for `--tls-cert`. Python loads the PEM with stdlib `ssl` and
 /// reports the failure as `invalid_request`; a file that will not parse, or one
 /// with no private key, is the same error here.
@@ -641,10 +675,48 @@ fn rustls_server_config(
     certs: Vec<rustls::pki_types::CertificateDer<'static>>,
     key: rustls::pki_types::PrivateKeyDer<'static>,
 ) -> Result<rustls::ServerConfig, std::io::Error> {
-    rustls::ServerConfig::builder()
+    // Two crates pull rustls in with different cryptography: ureq with ring,
+    // axum-server with aws-lc-rs. Neither is the default, so `builder()` panics
+    // with exit 101 on any valid certificate. ring is named explicitly. aws-lc-rs
+    // needs a C toolchain to build, and nothing here asks for it.
+    let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+    rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|err| std::io::Error::other(err.to_string()))?
         .with_no_client_auth()
         .with_single_cert(certs, key)
         .map_err(|err| std::io::Error::other(err.to_string()))
+}
+
+#[cfg(test)]
+mod tls_tests {
+    use super::check_tls;
+    use std::path::Path;
+
+    #[test]
+    fn one_flag_without_the_other_is_refused() {
+        let text = check_tls(Some(Path::new("c.pem")), None).unwrap_err();
+        assert_eq!(
+            text,
+            "--tls-cert and --tls-key are given together or not at all"
+        );
+        assert!(check_tls(None, Some(Path::new("k.pem"))).is_err());
+    }
+
+    #[test]
+    fn a_missing_file_is_named() {
+        let text = check_tls(
+            Some(Path::new("no-such-cert.pem")),
+            Some(Path::new("no-such-key.pem")),
+        )
+        .unwrap_err();
+        assert_eq!(text, "--tls-cert: no such file: no-such-cert.pem");
+    }
+
+    #[test]
+    fn neither_flag_is_fine() {
+        assert!(check_tls(None, None).is_ok());
+    }
 }
 
 #[cfg(test)]

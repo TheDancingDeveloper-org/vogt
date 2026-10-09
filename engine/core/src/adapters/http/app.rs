@@ -200,18 +200,21 @@ async fn login<C: Clock, I: IdFactory>(
     // must be refused before the body is read. Otherwise any web page can POST a
     // username and burn its throttle window.
     if !json_content_type(request.headers().get("content-type")) {
-        return invalid_arguments(&VogtError::InvalidRequest(
-            "invalid arguments for auth.login:\n1 validation error for request body\nbody\n  \
-             Input should be a valid JSON object"
-                .to_string(),
-        ));
+        return invalid_arguments(
+            &VogtError::InvalidRequest(
+                "invalid arguments for auth.login:\n1 validation error for request body\nbody\n  \
+                 Input should be a valid JSON object"
+                    .to_string(),
+            ),
+            "body",
+        );
     }
     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
         .unwrap_or_default();
     let params = match login_params(&body) {
         Ok(params) => params,
-        Err(error) => return invalid_arguments(&error),
+        Err(error) => return invalid_arguments(&error, "body"),
     };
     let request_store = request_store(&state, clock_for);
     let built = context_for_login(&request_store, &state, build);
@@ -332,11 +335,14 @@ async fn install_bootstrap<C: Clock, I: IdFactory>(
     request: Request<Body>,
 ) -> Response {
     if !json_content_type(request.headers().get("content-type")) {
-        return invalid_arguments(&VogtError::InvalidRequest(
-            "invalid arguments for install.bootstrap:\n1 validation error for request body\nbody\n  \
-             Input should be a valid JSON object"
-                .to_string(),
-        ));
+        return invalid_arguments(
+            &VogtError::InvalidRequest(
+                "invalid arguments for install.bootstrap:\n1 validation error for request body\nbody\n  \
+                 Input should be a valid JSON object"
+                    .to_string(),
+            ),
+            "body",
+        );
     }
     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024 + 1).await;
     let body = match body {
@@ -346,7 +352,7 @@ async fn install_bootstrap<C: Clock, I: IdFactory>(
     };
     let params = match bootstrap_params(&body) {
         Ok(params) => params,
-        Err(error) => return invalid_arguments(&error),
+        Err(error) => return invalid_arguments(&error, "body"),
     };
     let Some(built) = context_for_login(&request_store(&state, clock_for), &state, build) else {
         return error_response(&VogtError::InvalidRequest(
@@ -482,13 +488,21 @@ async fn dispatch<C: Clock, I: IdFactory>(
     // Parse, then validate, and only then the gate. Both are the caller's
     // mistake, so both answer 422 and write no auth row. The check is the shared
     // one `Operation::run` applies, not one of this adapter's own.
+    // A read takes its arguments from the query string and a write from the body,
+    // and FastAPI prefixes `loc` with that source: `["query", "sources", "1"]`,
+    // `["body", "bogus"]`.
+    let source = if operation.route.method == HttpMethod::Get {
+        "query"
+    } else {
+        "body"
+    };
     let params = match parse_params(operation, query.as_deref(), &content_type, &body) {
         Ok(params) => params,
-        Err(error) => return invalid_arguments(&error),
+        Err(error) => return invalid_arguments(&error, source),
     };
     let params = match validate::prepare(operation.name, params) {
         Ok(params) => params,
-        Err(error) => return invalid_arguments(&error),
+        Err(error) => return invalid_arguments(&error, source),
     };
     // The gate and the operation read one clock. On the step routes that clock is
     // fresh for this request and restarts at the hook's start (`step_clock_for`),
@@ -599,12 +613,11 @@ fn query_object(operation: &str, query: Option<&str>) -> serde_json::Value {
         let coerced = coerce_query(&schema, &key, &decoded);
         // A repeated key on a list field is the list. FastAPI collects
         // `?sources=a&sources=b` into `["a", "b"]`; keeping only the last value
-        // hands the validator a string and it reports `list_type`. A scalar keeps
-        // the last value, because a list of one is not that scalar.
-        let repeats = schema
-            .and_then(|schema| schema.pointer(&format!("/properties/{key}/type")))
-            .and_then(serde_json::Value::as_str)
-            == Some("array");
+        // hands the validator a string and it reports `list_type`. The list may be
+        // wrapped in `anyOf`, the way an `Optional[list]` is, so the type is read
+        // the same way `coerce_query` reads it. A scalar keeps the last value,
+        // because a list of one is not that scalar.
+        let repeats = field_type(&schema, &key) == Some("array");
         match object.get_mut(&key) {
             Some(existing) if repeats => match existing {
                 serde_json::Value::Array(items) => items.push(coerced),
@@ -626,10 +639,7 @@ fn query_object(operation: &str, query: Option<&str>) -> serde_json::Value {
 /// that type is sent as that type and anything else stays a string for the
 /// validator to reject.
 fn coerce_query(schema: &Option<&serde_json::Value>, field: &str, text: &str) -> serde_json::Value {
-    let kind = schema
-        .and_then(|schema| schema.pointer(&format!("/properties/{field}/type")))
-        .or_else(|| schema.and_then(|schema| schema.pointer(&format!("/properties/{field}/anyOf"))))
-        .and_then(json_type);
+    let kind = field_type(schema, field);
     match kind {
         Some("integer") => text
             .parse::<i64>()
@@ -648,6 +658,16 @@ fn coerce_query(schema: &Option<&serde_json::Value>, field: &str, text: &str) ->
         },
         _ => serde_json::Value::String(text.to_string()),
     }
+}
+
+/// The declared type of one field, reading `type` or, for a nullable field, the
+/// non-null member of `anyOf`. `Optional[list]` is `anyOf` whose member is
+/// `array`, and a repeat check that only reads `type` misses it.
+fn field_type<'a>(schema: &Option<&'a serde_json::Value>, field: &str) -> Option<&'a str> {
+    schema
+        .and_then(|schema| schema.pointer(&format!("/properties/{field}/type")))
+        .or_else(|| schema.and_then(|schema| schema.pointer(&format!("/properties/{field}/anyOf"))))
+        .and_then(json_type)
 }
 
 fn json_type(value: &serde_json::Value) -> Option<&str> {
@@ -760,17 +780,20 @@ fn payload_too_large() -> Response {
 /// Python's 422 envelope. The validator reports one error as a single
 /// `InvalidRequest`, so the detail carries that whole message; the code and the
 /// fixed message are what `tests/test_http.py` asserts.
-fn invalid_arguments(error: &VogtError) -> Response {
+fn invalid_arguments(error: &VogtError, source: &str) -> Response {
     // Python's `_jsonable_errors` writes one entry per rejected field, and every
-    // part of `loc` is a string, index included (`app.py:143`). A failure that
-    // carries no structured report falls back to the whole-body entry.
+    // part of `loc` is a string, index included (`app.py:143`). The first part is
+    // where the value came from, which the validator does not know. A failure
+    // that carries no structured report falls back to the whole-body entry.
     let detail = match crate::errors::take_validation(error) {
         Some(report) => report
             .errors
             .iter()
             .map(|problem| {
+                let mut loc = vec![source.to_string()];
+                loc.extend(problem.loc.iter().map(crate::errors::Loc::as_text));
                 serde_json::json!({
-                    "loc": problem.loc.iter().map(crate::errors::Loc::as_text).collect::<Vec<_>>(),
+                    "loc": loc,
                     "msg": problem.msg,
                     "type": problem.error_type,
                 })
@@ -961,7 +984,7 @@ mod tests {
         let running = serve(true);
         let (status, body) = request(running.addr, "GET", "/api/work?sources=a&sources=b", None);
         assert_eq!(status, 422, "{body}");
-        assert!(body.contains("\"loc\":[\"sources\"]"), "{body}");
+        assert!(body.contains("\"loc\":[\"query\",\"sources\"]"), "{body}");
     }
 
     #[test]

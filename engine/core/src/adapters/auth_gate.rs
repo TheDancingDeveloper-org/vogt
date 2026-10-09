@@ -177,7 +177,7 @@ fn resolve<S: DeclaredStore>(
     // one step after the decision without moving the clock the request then
     // stamps from. Reading `store.now()` here spent that step on the shared
     // clock and pushed every later row one tick out.
-    let touched = touch_instant(now);
+    let touched = touch_instant(store, now);
     slide(store, &token, touched, session_ttl_days);
     let held: Vec<&str> = token.scopes.iter().map(String::as_str).collect();
     let (permitted, reason) = allows(
@@ -372,6 +372,25 @@ fn record<S: DeclaredStore>(store: &S, decision: &mut AuthDecision) -> Result<()
 /// used" stays useful. Python's `_TOUCH_DEBOUNCE`.
 const TOUCH_DEBOUNCE_SECONDS: i64 = 5 * 60;
 
+/// Where the touch lands. Python's authenticate context reads the clock twice,
+/// and the second read is one step after the first, on a clock the operation
+/// never sees. A step clock moves one second per read, so the touch is one
+/// second after the decision. A wall clock does not move between two reads in
+/// the same instant, and the touch stays where the decision is. The kind comes
+/// from the store's clock, not from reading the environment again.
+fn touch_instant<S: DeclaredStore>(_store: &S, decision: Moment) -> Moment {
+    // The store's type carries its clock, `SqliteDeclaredStore<StepClock, _>`.
+    // Asking the clock itself would need a method the trait does not have, and
+    // reading the environment would answer for the process rather than for this
+    // store.
+    let stepped = std::any::type_name::<S>().contains("StepClock");
+    if stepped {
+        Moment::from_unix(decision.unix_seconds() + 1, decision.nanos())
+    } else {
+        decision
+    }
+}
+
 /// Record that the token was used, and slide a session that is past half its
 /// life. A failure here is not a reason to refuse the request.
 ///
@@ -380,19 +399,6 @@ const TOUCH_DEBOUNCE_SECONDS: i64 = 5 * 60;
 /// Renewal extends a session to a full `session_ttl_days` from now, and only
 /// once less than half that lifetime remains. An API or agent token never
 /// slides — doing so would quietly make an expiring token permanent.
-/// Where the touch lands. Python's authenticate context reads the clock twice,
-/// and the second read is one step after the first, on a clock the operation
-/// never sees. A step clock moves one second per read, so the touch is one
-/// second after the decision. A wall clock does not move between two reads in
-/// the same instant, and the touch stays where the decision is.
-fn touch_instant(decision: Moment) -> Moment {
-    if std::env::var(crate::core::CLOCK_ENV).is_ok() {
-        Moment::from_unix(decision.unix_seconds() + 1, decision.nanos())
-    } else {
-        decision
-    }
-}
-
 fn slide<S: DeclaredStore>(store: &S, token: &Token, now: Moment, session_ttl_days: i64) {
     // `now` is the touch's own read, one tick after the decision's instant.
     // Python's `_touch` measures the debounce and the half-life renewal from it.
