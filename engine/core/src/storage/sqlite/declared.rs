@@ -68,20 +68,6 @@ where
     C: Clock,
     I: IdFactory,
 {
-    pub fn mint(&self, prefix: &str) -> (Moment, String) {
-        let now = self
-            .clock
-            .lock()
-            .expect("the clock lock is not poisoned")
-            .now();
-        let id = self
-            .ids
-            .lock()
-            .expect("the id lock is not poisoned")
-            .next(prefix);
-        (now, id)
-    }
-
     pub fn new(path: PathBuf, clock: C, ids: I) -> Self {
         Self::shared(
             path,
@@ -174,8 +160,11 @@ where
     C: Clock,
     I: IdFactory,
 {
-    fn stamp_and_id(&self, prefix: &str) -> (Moment, String) {
-        self.mint(prefix)
+    fn now(&self) -> Moment {
+        self.clock
+            .lock()
+            .expect("the clock lock is not poisoned")
+            .now()
     }
 
     fn next_id(&self, prefix: &str) -> String {

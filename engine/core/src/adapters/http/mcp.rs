@@ -336,7 +336,8 @@ fn record_call<C: Clock, I: IdFactory>(
         operation.scope.as_str(),
         operation.mutating,
     );
-    let (at, id) = store.mint("aut");
+    let at = store.now();
+    let id = store.next_id("aut");
     let local = state.no_auth;
     let decision = crate::core::AuthDecision {
         id,
