@@ -12,7 +12,7 @@
 //! A decision that cannot be recorded fails closed: the operation does not run.
 
 use crate::auth::{allows, hash_token, MISSING_SCOPE, TOKEN_OK, WRITES_DISABLED};
-use crate::core::{AuthDecision, AuthOutcome, Moment, Token, TokenKind};
+use crate::core::{Actor, ActorKind, AuthDecision, AuthOutcome, Moment, Token, TokenKind};
 use crate::errors::VogtError;
 use crate::registry::{Operation, Scope, Transport};
 use crate::storage::interface::{DeclaredStore, ReadView};
@@ -52,12 +52,19 @@ impl Denial {
     }
 }
 
-/// What a request that passed the gate may do.
+/// What a request that passed the gate may do. `kind` and `display_name` come
+/// from the actor row the gate already loaded to check `disabled`, so a route
+/// builds its principal from them instead of assuming a human.
 pub struct Grant {
     pub actor_id: String,
     pub identity_ref: Option<String>,
+    pub kind: ActorKind,
+    pub display_name: String,
     pub token_id: String,
     pub scopes: Vec<String>,
+    /// The token that authenticated the request, secret-free. `None` for the
+    /// `--no-auth` caller, who holds no credential.
+    pub token: Option<Token>,
 }
 
 /// How long a session token's expiry moves forward on each use, in seconds.
@@ -106,15 +113,18 @@ fn resolve<S: DeclaredStore>(
         let principal = crate::core::local_principal(&crate::core::os_user());
         return Ok(Grant {
             actor_id: String::new(),
-            identity_ref: Some(principal.identity_ref),
+            identity_ref: Some(principal.identity_ref.clone()),
+            kind: principal.kind,
+            display_name: principal.display_name,
             token_id: "no-auth".to_string(),
             scopes: vec!["admin".to_string()],
+            token: None,
         });
     }
     let Some(secret) = presented else {
         return Err(Denial::NoBearer);
     };
-    let token = match lookup(store, secret, now) {
+    let (token, actor) = match lookup(store, secret, now) {
         Ok(token) => token,
         Err(rejection) => {
             record(
@@ -189,10 +199,13 @@ fn resolve<S: DeclaredStore>(
         slide(store, &token, now);
     }
     Ok(Grant {
-        actor_id: token.actor_id,
-        identity_ref: token.actor_identity_ref,
-        token_id: token.id,
-        scopes: token.scopes,
+        actor_id: token.actor_id.clone(),
+        identity_ref: token.actor_identity_ref.clone(),
+        kind: actor.kind,
+        display_name: actor.display_name,
+        token_id: token.id.clone(),
+        scopes: token.scopes.clone(),
+        token: Some(token),
     })
 }
 
@@ -202,12 +215,16 @@ struct Rejection {
     /// has none; a revoked, expired or disabled one keeps its actor and token
     /// id, because the operator needs to see whose credential was refused.
     token: Option<Token>,
+    /// The actor behind the token, kept so a refusal can name it. `None` when
+    /// the actor was never loaded, which is every refusal except a disabled one.
+    actor: Option<Actor>,
 }
 
 fn lookup_failed(_: VogtError) -> Box<Rejection> {
     Box::new(Rejection {
         code: "lookup_failed",
         token: None,
+        actor: None,
     })
 }
 
@@ -215,7 +232,11 @@ fn lookup_failed(_: VogtError) -> Box<Rejection> {
 /// says which check failed; the caller is told none of them.
 const TOKEN_INVALID: &str = "the presented token is not valid";
 
-fn lookup<S: DeclaredStore>(store: &S, secret: &str, now: Moment) -> Result<Token, Box<Rejection>> {
+fn lookup<S: DeclaredStore>(
+    store: &S,
+    secret: &str,
+    now: Moment,
+) -> Result<(Token, Actor), Box<Rejection>> {
     let hashed = hash_token(secret);
     let view = store.read().map_err(lookup_failed)?;
     let found = view.token_by_hash(&hashed).map_err(lookup_failed)?;
@@ -223,12 +244,14 @@ fn lookup<S: DeclaredStore>(store: &S, secret: &str, now: Moment) -> Result<Toke
         return Err(Box::new(Rejection {
             code: "unknown_token",
             token: None,
+            actor: None,
         }));
     };
     if token.revoked_at.is_some() {
         return Err(Box::new(Rejection {
             code: "token_revoked",
             token: Some(token),
+            actor: None,
         }));
     }
     if let Some(expires) = token.expires_at {
@@ -236,6 +259,7 @@ fn lookup<S: DeclaredStore>(store: &S, secret: &str, now: Moment) -> Result<Toke
             return Err(Box::new(Rejection {
                 code: "token_expired",
                 token: Some(token),
+                actor: None,
             }));
         }
     }
@@ -244,9 +268,13 @@ fn lookup<S: DeclaredStore>(store: &S, secret: &str, now: Moment) -> Result<Toke
         return Err(Box::new(Rejection {
             code: "actor_disabled",
             token: Some(token),
+            actor: None,
         }));
     }
-    Ok(token)
+    Ok((
+        token,
+        actor.expect("the check above returned when there was none"),
+    ))
 }
 
 struct Recorded<'a> {

@@ -16,7 +16,7 @@ use axum::response::Response;
 use axum::Router;
 
 use crate::adapters::auth_gate::{self, Grant, Request as AuthRequest};
-use crate::core::{local_principal, os_user, ActorKind, Clock, IdFactory, Principal};
+use crate::core::{local_principal, os_user, Clock, IdFactory, Principal};
 use crate::errors::VogtError;
 use crate::registry::{
     default_registry, validate, HttpMethod, Operation, OperationRegistry, Transport,
@@ -96,30 +96,23 @@ async fn login<C: Clock, I: IdFactory>(
     State(state): State<Arc<AppState<C, I>>>,
     request: Request<Body>,
 ) -> Response {
+    // `text/plain` is a CORS simple request, so a missing or wrong content type
+    // must be refused before the body is read. Otherwise any web page can POST a
+    // username and burn its throttle window.
+    if !json_content_type(request.headers().get("content-type")) {
+        return invalid_arguments(&VogtError::InvalidRequest(
+            "invalid arguments for auth.login:\n1 validation error for request body\nbody\n  \
+             Input should be a valid JSON object"
+                .to_string(),
+        ));
+    }
     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
         .unwrap_or_default();
-    let params =
-        match serde_json::from_slice::<serde_json::Value>(&body) {
-            Ok(serde_json::Value::Object(object)) => serde_json::Value::Object(object),
-            _ => return invalid_arguments(&VogtError::InvalidRequest(
-                "invalid arguments for auth.login:\n1 validation error for request body\nbody\n  \
-                 Input should be a valid JSON object"
-                    .to_string(),
-            )),
-        };
-    for field in ["username", "password"] {
-        if params
-            .get(field)
-            .and_then(serde_json::Value::as_str)
-            .is_none()
-        {
-            return invalid_arguments(&VogtError::InvalidRequest(format!(
-                "invalid arguments for auth.login:\n1 validation error for LoginParams\n{field}\n  \
-                 Field required"
-            )));
-        }
-    }
+    let params = match login_params(&body) {
+        Ok(params) => params,
+        Err(error) => return invalid_arguments(&error),
+    };
     let built = context_for_login(&state);
     let Some(built) = built else {
         return error_response(&VogtError::InvalidRequest(
@@ -130,6 +123,85 @@ async fn login<C: Clock, I: IdFactory>(
         Ok(value) => json_response(StatusCode::OK, value),
         Err(error) => error_response(&error),
     }
+}
+
+/// `LoginParams` (`models.py`). Not a registry operation, so the shared
+/// validator has no schema for it; the constraints are small enough to state.
+/// `username` and `session_name` are `Name` (stripped, at least one character),
+/// `password` is at least one character, and an extra field is forbidden.
+/// Anything else is a 422 that never reaches `login_op`, so it counts no
+/// throttle failure and writes no decision row.
+fn login_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
+    let object =
+        match serde_json::from_slice::<serde_json::Value>(body) {
+            Ok(serde_json::Value::Object(object)) => object,
+            _ => return Err(VogtError::InvalidRequest(
+                "invalid arguments for auth.login:\n1 validation error for request body\nbody\n  \
+                 Input should be a valid JSON object"
+                    .to_string(),
+            )),
+        };
+    for key in object.keys() {
+        if !["username", "password", "session_name"].contains(&key.as_str()) {
+            return Err(VogtError::InvalidRequest(format!(
+                "invalid arguments for auth.login:\n1 validation error for LoginParams\n{key}\n  \
+                 Extra inputs are not permitted"
+            )));
+        }
+    }
+    let mut out = serde_json::Map::new();
+    for field in ["username", "password"] {
+        let Some(text) = object.get(field).and_then(serde_json::Value::as_str) else {
+            return Err(VogtError::InvalidRequest(format!(
+                "invalid arguments for auth.login:\n1 validation error for LoginParams\n{field}\n  \
+                 Field required"
+            )));
+        };
+        let text = if field == "username" {
+            text.trim()
+        } else {
+            text
+        };
+        if text.is_empty() {
+            return Err(VogtError::InvalidRequest(format!(
+                "invalid arguments for auth.login:\n1 validation error for LoginParams\n{field}\n  \
+                 String should have at least 1 character"
+            )));
+        }
+        out.insert(
+            field.to_string(),
+            serde_json::Value::String(text.to_string()),
+        );
+    }
+    let session_name = match object.get("session_name") {
+        None => "browser session".to_string(),
+        Some(serde_json::Value::String(name)) if !name.trim().is_empty() => name.trim().to_string(),
+        Some(_) => {
+            return Err(VogtError::InvalidRequest(
+                "invalid arguments for auth.login:\n1 validation error for LoginParams\n\
+                 session_name\n  Input should be a valid string"
+                    .to_string(),
+            ))
+        }
+    };
+    out.insert(
+        "session_name".to_string(),
+        serde_json::Value::String(session_name),
+    );
+    Ok(serde_json::Value::Object(out))
+}
+
+fn json_content_type(header: Option<&axum::http::HeaderValue>) -> bool {
+    header
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        })
 }
 
 async fn dispatch<C: Clock, I: IdFactory>(
@@ -307,7 +379,7 @@ fn context_for<C: Clock, I: IdFactory>(
     };
     let principal = match &grant.identity_ref {
         Some(identity_ref) if !identity_ref.is_empty() => {
-            Principal::new(identity_ref, ActorKind::Human, identity_ref).ok()
+            Principal::new(identity_ref, grant.kind, &grant.display_name).ok()
         }
         _ => Some(local_principal(&os_user())),
     };
@@ -323,10 +395,12 @@ fn context_for<C: Clock, I: IdFactory>(
 fn context_for_login<C: Clock, I: IdFactory>(
     state: &AppState<C, I>,
 ) -> Option<crate::application::context::Built> {
-    let config = crate::config::VogtConfig {
-        data_dir: state.data_dir.clone(),
-        ..crate::config::VogtConfig::default()
-    };
+    // The loaded config, not `VogtConfig::default()`. The default fixes
+    // `session_ttl_days` at 30, so an operator who set `VOGT_SESSION_TTL_DAYS`
+    // would silently get 30-day bearers. Only the data directory is the route's
+    // own, because the store was opened on it.
+    let mut config = crate::config::load_config(&serde_json::Map::new()).ok()?;
+    config.data_dir = state.data_dir.clone();
     crate::application::context::build_context(config, None, None, None, None, None, None, None)
         .ok()
 }
@@ -458,10 +532,26 @@ mod tests {
     }
 
     fn post_body(addr: std::net::SocketAddr, path: &str, body: &str) -> (u16, String) {
+        post_typed(addr, path, body, None)
+    }
+
+    fn post_json(addr: std::net::SocketAddr, path: &str, body: &str) -> (u16, String) {
+        post_typed(addr, path, body, Some("application/json"))
+    }
+
+    fn post_typed(
+        addr: std::net::SocketAddr,
+        path: &str,
+        body: &str,
+        content_type: Option<&str>,
+    ) -> (u16, String) {
         let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let typed = content_type
+            .map(|value| format!("Content-Type: {value}\r\n"))
+            .unwrap_or_default();
         write!(
             stream,
-            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\n{typed}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
             body.len()
         )
         .unwrap();
@@ -543,16 +633,42 @@ mod tests {
     #[test]
     fn login_is_public_and_validates_before_anything_else() {
         let running = serve(false);
-        let (status, body) = post_body(running.addr, "/api/auth/login", "{}");
+        let (status, body) = post_json(running.addr, "/api/auth/login", "{}");
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(status, 422, "{body}");
         assert_eq!(json["error"]["code"], "invalid_arguments");
     }
 
     #[test]
+    fn login_rejects_a_body_that_is_not_json_before_the_throttle() {
+        let running = serve(true);
+        // No content type at all. This is the cross-site case: a plain form post
+        // must not reach the service, because five of them would lock the
+        // username out.
+        let (status, _) = post_body(
+            running.addr,
+            "/api/auth/login",
+            r#"{"username":"alice","password":"whatever"}"#,
+        );
+        assert_eq!(status, 422);
+        let (status, _) = post_json(
+            running.addr,
+            "/api/auth/login",
+            r#"{"username":"alice","password":"x","extra":1}"#,
+        );
+        assert_eq!(status, 422);
+        let (status, _) = post_json(
+            running.addr,
+            "/api/auth/login",
+            r#"{"username":"alice","password":""}"#,
+        );
+        assert_eq!(status, 422);
+    }
+
+    #[test]
     fn login_refuses_an_unknown_user_with_the_one_sentence() {
         let running = serve(true);
-        let (status, body) = post_body(
+        let (status, body) = post_json(
             running.addr,
             "/api/auth/login",
             r#"{"username":"nobody","password":"whatever"}"#,

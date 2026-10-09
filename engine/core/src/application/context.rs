@@ -281,6 +281,38 @@ where
     I: IdFactory,
 {
     let resolved = principal.unwrap_or_else(|| local_principal(&crate::core::os_user()));
+    let clock = Arc::new(std::sync::Mutex::new(clock));
+    let ids = Arc::new(std::sync::Mutex::new(ids));
+    context_from(
+        config,
+        Some(resolved),
+        clock,
+        ids,
+        token,
+        engine,
+        peer,
+        public_identity,
+    )
+}
+
+// The signature mirrors `build_context` in context.py; splitting it would
+// hide which argument is which.
+#[allow(clippy::too_many_arguments)]
+fn context_from<C, I>(
+    config: VogtConfig,
+    principal: Option<Principal>,
+    clock: Arc<std::sync::Mutex<C>>,
+    ids: Arc<std::sync::Mutex<I>>,
+    token: Option<Token>,
+    engine: Option<EngineClient>,
+    peer: Option<PeerClient>,
+    public_identity: Option<PublicIdentity>,
+) -> AppContext<C, I>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let resolved = principal.unwrap_or_else(|| local_principal(&crate::core::os_user()));
     let engine = engine.or_else(|| {
         EngineClient::from_config(
             config.engine_url.as_deref(),
@@ -299,8 +331,6 @@ where
             None,
         )
     });
-    let clock = Arc::new(std::sync::Mutex::new(clock));
-    let ids = Arc::new(std::sync::Mutex::new(ids));
     let synchronous = config.sqlite_synchronous.as_str();
     AppContext {
         declared: SqliteDeclaredStore::shared(
@@ -326,6 +356,32 @@ where
         public_identity: public_identity.unwrap_or_else(|| identity_of(&config)),
         config,
     }
+}
+
+/// A context over a clock and an id factory something else already holds.
+///
+/// `build_context` wraps whatever it is given in a fresh `Arc`, so a second
+/// context over the same data directory draws its own ids and ticks its own
+/// clock. The HTTP and MCP routes already hold both inside the store they
+/// authenticate against; this builds the request context on those same handles,
+/// so a decision row and the write it guards count from one sequence.
+///
+/// The HTTP registry routes cannot call this yet: `Operation::run` takes
+/// `&Built`, whose variants own their clock, and sharing the store's handles
+/// needs `Built` to carry the `Arc`. MCP builds its own context and can.
+#[allow(dead_code)]
+pub fn context_on<C, I>(
+    config: VogtConfig,
+    principal: Option<Principal>,
+    clock: Arc<std::sync::Mutex<C>>,
+    ids: Arc<std::sync::Mutex<I>>,
+    token: Option<Token>,
+) -> AppContext<C, I>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    context_from(config, principal, clock, ids, token, None, None, None)
 }
 
 /// What the configuration itself says about where clients arrive.
