@@ -13,6 +13,7 @@
 pub mod auth;
 pub mod freshness;
 pub mod install;
+pub mod work;
 
 mod inbox;
 mod initiatives;
