@@ -45,7 +45,10 @@ fn versions<C: crate::core::Clock, I: crate::core::IdFactory>(
             "lanes": [],
             "configured": 0,
             "detail": "deploy_lanes is not configured, so deployed versions are not collected",
-            "freshness": freshness_of(ctx)?,
+            "freshness": crate::application::services::freshness::freshness_of(
+                &ctx.observed,
+                crate::application::services::now_of(&ctx.clock),
+            )?,
         }));
     }
     let mut lanes = ctx.config.deploy_lanes.clone();
@@ -81,7 +84,10 @@ fn versions<C: crate::core::Clock, I: crate::core::IdFactory>(
         "lanes": views,
         "configured": configured,
         "detail": detail,
-        "freshness": freshness_of(ctx)?,
+        "freshness": crate::application::services::freshness::freshness_of(
+            &ctx.observed,
+            crate::application::services::now_of(&ctx.clock),
+        )?,
     }))
 }
 
@@ -234,58 +240,6 @@ fn text(value: Option<&Value>) -> Option<&str> {
 
 fn integer(value: Option<&Value>) -> Option<i64> {
     value.and_then(Value::as_i64)
-}
-
-/// How old the evidence behind an aggregating answer is. Ports `freshness_of`
-/// in `views.py`: the oldest relevant sweep, because an answer is exactly as
-/// fresh as the least fresh thing it depends on.
-fn freshness_of<C: crate::core::Clock, I: crate::core::IdFactory>(
-    ctx: &AppContext<C, I>,
-) -> Result<Value, VogtError> {
-    if !ctx.observed.has_evidence_tables()? {
-        return Ok(json!({
-            "status": "never_swept",
-            "detail": "no sweep has run; observed subjects are not collected",
-        }));
-    }
-    let newest = ctx.observed.coverage()?;
-    if newest.is_empty() {
-        return Ok(json!({
-            "status": "never_swept",
-            "detail": "no collector has completed a sweep yet",
-        }));
-    }
-    let now = ctx
-        .clock
-        .lock()
-        .expect("the clock lock is not poisoned")
-        .now();
-    let mut ages = Map::new();
-    let mut oldest: Option<crate::core::Moment> = None;
-    for (name, sweep) in &newest {
-        let finished = sweep.finished_at.unwrap_or(sweep.started_at);
-        ages.insert(
-            name.clone(),
-            json!(format!(
-                "{}s ago ({})",
-                now.unix_seconds() - finished.unix_seconds(),
-                sweep.outcome
-            )),
-        );
-        if oldest.is_none_or(|so_far| finished < so_far) {
-            oldest = Some(finished);
-        }
-    }
-    let partial = newest
-        .values()
-        .any(|sweep| sweep.outcome.to_string() != "ok");
-    Ok(json!({
-        "status": if partial { "partial" } else { "fresh" },
-        "oldest_relevant_sweep": oldest,
-        "age_seconds": oldest.map(|moment| now.unix_seconds() - moment.unix_seconds()),
-        "collectors": ages,
-        "detail": if partial { Value::String("at least one collector reported a partial or failed sweep".to_string()) } else { Value::Null },
-    }))
 }
 
 trait OrObject {

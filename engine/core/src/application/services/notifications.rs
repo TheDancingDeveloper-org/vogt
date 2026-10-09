@@ -46,7 +46,10 @@ where
             "total": 0,
             "unread": 0,
             "by_reason": {},
-            "freshness": never_swept(),
+            "freshness": crate::application::services::freshness::freshness_of(
+                observed,
+                now_of(&clock),
+            )?,
             "detail": "no sweep has run; notifications are not collected",
             "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
         }));
@@ -119,7 +122,7 @@ where
         "total": total,
         "unread": unread,
         "by_reason": by_reason,
-        "freshness": freshness_of(observed, now_of(&clock))?,
+        "freshness": crate::application::services::freshness::freshness_of(observed, now_of(&clock))?,
         "detail": detail,
         "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
     }))
@@ -148,63 +151,4 @@ fn stamp_of(row: &Observation) -> String {
 
 fn text_of(payload: &Value, key: &str) -> Option<String> {
     payload.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
-/// `views.freshness_of`: an answer is as fresh as the least fresh collector it
-/// depends on. A collector that has never finished makes the answer partial.
-pub(super) fn freshness_of(
-    observed: &impl ObservedStore,
-    now: crate::core::Moment,
-) -> Result<Value, VogtError> {
-    if !observed.has_evidence_tables()? {
-        return Ok(never_swept());
-    }
-    let newest = observed.coverage()?;
-    if newest.is_empty() {
-        return Ok(json!({
-            "status": "never_swept",
-            "oldest_relevant_sweep": Value::Null,
-            "age_seconds": Value::Null,
-            "collectors": {},
-            "detail": "no collector has completed a sweep yet",
-        }));
-    }
-    let mut collectors = serde_json::Map::new();
-    let mut oldest: Option<crate::core::Moment> = None;
-    let mut partial = false;
-    for (name, sweep) in &newest {
-        let finished = sweep.finished_at.unwrap_or(sweep.started_at);
-        let age = now.seconds_since(finished) as i64;
-        collectors.insert(
-            name.clone(),
-            Value::String(format!("{age}s ago ({})", sweep.outcome)),
-        );
-        if oldest.is_none_or(|held| finished < held) {
-            oldest = Some(finished);
-        }
-        if sweep.outcome.to_string() != "ok" {
-            partial = true;
-        }
-    }
-    Ok(json!({
-        "status": if partial { "partial" } else { "fresh" },
-        "oldest_relevant_sweep": oldest.map(|moment| moment.to_json()),
-        "age_seconds": oldest.map(|moment| now.seconds_since(moment) as i64),
-        "collectors": collectors,
-        "detail": if partial {
-            Some("at least one collector reported a partial or failed sweep")
-        } else {
-            None
-        },
-    }))
-}
-
-fn never_swept() -> Value {
-    json!({
-        "status": "never_swept",
-        "oldest_relevant_sweep": Value::Null,
-        "age_seconds": Value::Null,
-        "collectors": {},
-        "detail": "no sweep has run; observed subjects are not collected",
-    })
 }

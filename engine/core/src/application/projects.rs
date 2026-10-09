@@ -2,8 +2,8 @@
 //! Ports `src/vogt/application/services/projects.py`.
 //!
 //! `project.import` is not exposed: the clone it performs is a later service.
-//! Ranked backlog and collector freshness are not ported either, so the brief
-//! says `not_collected` for those rather than inventing a zero.
+//! Ranked backlog is not ported, so the brief says `not_collected` for the
+//! counts that come out of the gather rather than inventing a zero.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -52,8 +52,6 @@ const KIND_DEP_SCAN: &str = "dep_scan";
 
 /// Ranked backlog is `views._gather`, which is not ported.
 const BACKLOG_NOT_COLLECTED: &str = "ranked backlog is not ported yet";
-/// `freshness_of` is not ported, so no collector age is invented.
-const FRESHNESS_NOT_COLLECTED: &str = "collector freshness is not ported yet";
 
 // --- parameters -------------------------------------------------------------
 
@@ -595,24 +593,55 @@ fn list_projects<C: Clock, I: IdFactory>(
     let view = ctx.declared.read()?;
     let projects = view.list_projects(params.limit, params.offset)?;
     let total = view.counts()?.projects;
-    // WI-1067: deferred until the work service lands. `create_writability`
-    // reads work-item rules that are not ported, so every project is reported
-    // writable with that reason rather than a guessed gate.
     let listings: Vec<Value> = projects
         .iter()
         .map(|project| {
             let mut listing = serde_json::to_value(project).unwrap_or(Value::Null);
             if let Value::Object(map) = &mut listing {
-                map.insert("writable".to_string(), Value::Bool(true));
-                map.insert(
-                    "writable_reason".to_string(),
-                    Value::String("work item writes are not ported yet".to_string()),
-                );
+                let (writable, reason) = writability(project);
+                map.insert("writable".to_string(), Value::Bool(writable));
+                map.insert("writable_reason".to_string(), Value::String(reason));
             }
             listing
         })
         .collect();
     Ok(json!({"projects": listings, "total": total}))
+}
+
+/// Whether `work.create` lands in a project right now. Ports
+/// `work.create_writability`.
+///
+/// An unlinked project is refused outright: there is no forge issue to write
+/// through to, so the answer depends only on the link state. A linked one also
+/// needs the write-back policy to permit `create`. The credential gate beyond
+/// that (`writeback._writer_provider`) is not ported, so a linked project whose
+/// policy allows the action is reported with that gap named rather than as a
+/// guessed yes.
+fn writability(project: &Project) -> (bool, String) {
+    if project.link_state == LinkState::Unlinked {
+        return (
+            false,
+            "not forge-linked: work.create refuses with project_not_linked. Pass \
+             local_only=true for a local record, or link (`forge link`) or publish \
+             (`forge publish`) the project."
+                .to_string(),
+        );
+    }
+    let policy = project.write_back.to_string();
+    if !crate::adapters::forge::permits(&policy, "create") {
+        return (
+            false,
+            format!(
+                "write-back policy is {}, which does not permit 'create'",
+                py_repr(&policy)
+            ),
+        );
+    }
+    (
+        false,
+        "forge credential resolution is not ported, so a linked project's write is not confirmed"
+            .to_string(),
+    )
 }
 
 fn brief_project<C: Clock, I: IdFactory>(
@@ -666,7 +695,10 @@ fn brief_project<C: Clock, I: IdFactory>(
         "compliance_checked_at": if adopted { project.compliance_checked_at } else { None },
         "ci_status": ci_summary(ctx, &project.id)?,
         "dependencies": dependency_summary(ctx, &project.id)?,
-        "freshness": {"status": "never_swept", "detail": FRESHNESS_NOT_COLLECTED},
+        "freshness": crate::application::services::freshness::freshness_of(
+            &ctx.observed,
+            now_of(&ctx.clock),
+        )?,
         "backlog_limit": params.backlog_limit,
         "mode": params.mode,
     }))

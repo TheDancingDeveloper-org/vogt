@@ -28,24 +28,23 @@ fn metrics<C: crate::core::Clock, I: crate::core::IdFactory>(
 ) -> Result<Value, VogtError> {
     let projects_total = ctx.declared.read()?.counts()?.projects;
     let revision = ctx.declared.read()?.current_revision()?;
-    let generated_at = ctx
-        .clock
-        .lock()
-        .expect("the clock lock is not poisoned")
-        .now();
+    let generated_at = crate::application::services::now_of(&ctx.clock);
+    // `list_drift` is ported, so this badge is a real answer. The inbox, work
+    // and backlog badges read services that are not, and a null there means
+    // "not available", which is distinct from a counted zero.
+    let drift_present = !ctx
+        .declared
+        .read()?
+        .list_drift(Some("open"), None, None, 1)?
+        .is_empty();
     Ok(json!({
-        // The badge honours the caller's saved Inbox filter (WI-840). Search
-        // text is not part of a saved filter, so it never moves the badge.
-        // Neither the badge nor the filter is ported yet.
         "inbox_active": Value::Null,
         "inbox_active_unfiltered": Value::Null,
         "inbox_filter": Value::Null,
         "projects_total": projects_total,
-        // list_work, backlog and list_drift are not ported yet, so these stay
-        // absent rather than reporting a zero that would read as "none".
         "work_total": Value::Null,
         "backlog_total_considered": Value::Null,
-        "drift_present": Value::Null,
+        "drift_present": drift_present,
         "revision": revision,
         "generated_at": generated_at,
     }))
@@ -94,7 +93,9 @@ mod tests {
         assert_eq!(result["projects_total"], 0);
         assert!(result["inbox_active"].is_null());
         assert!(result["work_total"].is_null());
-        assert!(result["drift_present"].is_null());
+        // No proposals exist, so the ported drift badge answers false rather
+        // than null.
+        assert_eq!(result["drift_present"], false);
         assert_eq!(result["revision"], 0);
     }
 }

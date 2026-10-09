@@ -11,6 +11,7 @@
 //! over the clock and the id factory.
 
 pub mod auth;
+pub mod freshness;
 
 mod inbox;
 mod initiatives;
