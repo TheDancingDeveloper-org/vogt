@@ -306,6 +306,17 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
                 ),
             })
         }
+        Err(message) if message.starts_with("arg: ") => {
+            let detail = message.trim_start_matches("arg: ");
+            let path = operation.cli.path.join(" ");
+            let page = format_operation(operation);
+            let synopsis = page.split("\n\n").next().unwrap_or(&page);
+            ParseOutcome::Result(CliResult {
+                exit_code: EXIT_USAGE,
+                stdout: String::new(),
+                stderr: format!("{synopsis}\nvogt {path}: error: {detail}\n"),
+            })
+        }
         Err(message) => ParseOutcome::Result(usage(format!(
             "error: {message}\n{}",
             format_operation(operation)
@@ -446,9 +457,22 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
             index += 1;
             continue;
         }
+        let token_text = token.clone();
         let (name, inline) = match token.split_once('=') {
             Some((flag, value)) => (flag.trim_start_matches("--"), Some(value.to_string())),
             None => (token.trim_start_matches("--"), None),
+        };
+        // argparse abbreviates a long option to any unique prefix, and an
+        // exact match wins before the prefix search. `--lim` is `--limit`;
+        // `--re` matches several and is an error.
+        let (name, inline) = match resolve_abbrev(name, inline, &properties) {
+            Ok(resolved) => resolved,
+            Err(candidates) => {
+                let shown = token_text;
+                return Err(format!(
+                    "arg: ambiguous option: {shown} could match {candidates}"
+                ));
+            }
         };
         let field = name.replace('-', "_");
 
@@ -488,7 +512,7 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
                 values.insert(secret.to_string(), Value::String(read_secret_stdin()?));
                 continue;
             }
-            let value = take_value(argv, &mut index, inline)?;
+            let value = take_value(argv, &mut index, inline, &name)?;
             // Only the last file is read. An earlier missing file is ignored,
             // matching argparse, which keeps the final value.
             secret_files.insert(secret.to_string(), value);
@@ -529,7 +553,7 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
             index += 1;
             continue;
         }
-        let raw = take_value(argv, &mut index, inline)?;
+        let raw = take_value(argv, &mut index, inline, &name)?;
         let parsed =
             coerce(&raw, property).map_err(|message| format!("argument --{name}: {message}"))?;
         if is_list(property) {
@@ -576,15 +600,60 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
 /// They are when every required flag is already present, or when a known flag
 /// later in the tail supplies one that is still missing: argparse only reports
 /// the words once the command would otherwise be complete.
+/// Resolve an option abbreviation the way argparse does. An exact match wins
+/// before any prefix is considered. Otherwise every long option the text is a
+/// prefix of is a candidate: one candidate resolves, several are ambiguous.
+fn resolve_abbrev(
+    name: &str,
+    inline: Option<String>,
+    properties: &Map<String, Value>,
+) -> Result<(String, Option<String>), String> {
+    let options = option_names(properties);
+    if options.iter().any(|option| option == name) {
+        return Ok((name.to_string(), inline));
+    }
+    let matches: Vec<&String> = options
+        .iter()
+        .filter(|option| option.starts_with(name))
+        .collect();
+    match matches.as_slice() {
+        [one] => Ok(((*one).clone(), inline)),
+        [] => Ok((name.to_string(), inline)),
+        many => Err(many
+            .iter()
+            .map(|option| format!("--{option}"))
+            .collect::<Vec<_>>()
+            .join(", ")),
+    }
+}
+
+/// Every long option a command accepts, dashed, in the order argparse lists
+/// them: the schema's order, a boolean's `--no-` form straight after it, then a
+/// secret's `--file` and `--stdin` forms.
+fn option_names(properties: &Map<String, Value>) -> Vec<String> {
+    let mut names = Vec::new();
+    for (field, property) in properties {
+        let dashed = field.replace('_', "-");
+        names.push(dashed.clone());
+        if is_bool(property) && !dashed.starts_with("no-") {
+            names.push(format!("no-{dashed}"));
+        }
+        if is_secret(field) {
+            names.push(format!("{dashed}-file"));
+            names.push(format!("{dashed}-stdin"));
+        }
+    }
+    names
+}
+
 fn known_flag(token: &str, properties: &Map<String, Value>) -> bool {
     let name = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
     let field = name.trim_start_matches("--").replace('-', "_");
-    let known = properties.contains_key(&field)
+    properties.contains_key(&field)
         || field
             .strip_prefix("no_")
             .is_some_and(|base| properties.contains_key(base))
-        || secret_name(&field).is_some_and(|secret| properties.contains_key(secret));
-    known
+        || secret_name(&field).is_some_and(|secret| properties.contains_key(secret))
 }
 
 /// The unrecognized run: every token up to the first known flag that follows an
@@ -642,26 +711,21 @@ fn take_value(
     argv: &[String],
     index: &mut usize,
     inline: Option<String>,
+    option: &str,
 ) -> Result<String, String> {
     if let Some(value) = inline {
         *index += 1;
         return Ok(value);
     }
-    let next = argv.get(*index + 1).ok_or_else(|| {
-        format!(
-            "--{} requires a value",
-            argv[*index].trim_start_matches("--")
-        )
-    })?;
+    let next = argv
+        .get(*index + 1)
+        .ok_or_else(|| format!("arg: argument --{option}: expected one argument"))?;
     // A negative number is a value, not a flag. argparse's
     // `_negative_number_matcher` does the same when no option looks like a
     // negative number, which none of ours do. `-5` and `-5.5` are values;
     // `--foo` and `-h` are not.
     if next.starts_with('-') && next != "-" && !is_negative_number(next) {
-        return Err(format!(
-            "--{} requires a value",
-            argv[*index].trim_start_matches("--")
-        ));
+        return Err(format!("arg: argument --{option}: expected one argument"));
     }
     *index += 2;
     Ok(next.clone())
@@ -1774,6 +1838,62 @@ mod tests {
     }
 
     #[test]
+    fn a_unique_prefix_is_the_option() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["work", "get", "--r", "WI-1"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_ne!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            !result.stderr.contains("unrecognized"),
+            "--r was not taken as --ref: {}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_prefix_names_every_match() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["work", "update", "--ref", "WI-1", "--re", "r"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result
+                .stderr
+                .contains("ambiguous option: --re could match --ref, --remove-labels, --reason"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_missing_option_value_names_the_option_on_stderr() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["work", "list", "--limit"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
+        assert!(
+            result
+                .stderr
+                .contains("argument --limit: expected one argument"),
+            "{}",
+            result.stderr
+        );
+    }
+
     fn an_unknown_flag_stops_the_report_before_a_later_known_flag() {
         let registry = default_registry();
         let result = run(
