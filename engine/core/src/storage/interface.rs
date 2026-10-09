@@ -140,7 +140,8 @@ pub struct BoardCellQuery {
 /// An unfinished `depends_on` target, named so a rejection can list it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Blocker {
-    pub reference: String,
+    /// `ref` in Python (`work.py` reads `.ref`). `r#ref` keeps the name.
+    pub r#ref: String,
     pub state: String,
 }
 
@@ -185,8 +186,10 @@ pub struct WorkItemUpdate {
 }
 
 /// How `list_audit` and `count_audit` narrow the ledger. One object because the
-/// two must filter the same way.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// two must filter the same way. `limit` is required, as it is in Python, so
+/// this does not implement `Default`. `count_audit` ignores `limit` and
+/// `offset`: the total counts matches, not the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditQuery {
     pub limit: i64,
     pub offset: i64,
@@ -200,32 +203,51 @@ pub struct AuditQuery {
 
 /// Reads. A transaction and a store's read handle both implement this.
 pub trait ReadView {
-    fn instance_id(&self) -> String;
-    fn clone_stamp(&self) -> Option<CloneStamp>;
-    fn current_revision(&self) -> i64;
-    fn latest_event_seq(&self) -> i64;
-    fn counts(&self) -> Counts;
+    fn instance_id(&self) -> Result<String, crate::errors::VogtError>;
+    fn clone_stamp(&self) -> Result<Option<CloneStamp>, crate::errors::VogtError>;
+    fn current_revision(&self) -> Result<i64, crate::errors::VogtError>;
+    fn latest_event_seq(&self) -> Result<i64, crate::errors::VogtError>;
+    fn counts(&self) -> Result<Counts, crate::errors::VogtError>;
 
-    fn actor_by_identity(&self, identity_ref: &str) -> Option<Actor>;
-    fn actor_by_id(&self, actor_id: &str) -> Option<Actor>;
-    fn list_actors(&self, limit: i64, offset: i64) -> Vec<Actor>;
+    fn actor_by_identity(
+        &self,
+        identity_ref: &str,
+    ) -> Result<Option<Actor>, crate::errors::VogtError>;
+    fn actor_by_id(&self, actor_id: &str) -> Result<Option<Actor>, crate::errors::VogtError>;
+    fn list_actors(&self, limit: i64, offset: i64) -> Result<Vec<Actor>, crate::errors::VogtError>;
 
-    fn project_by_slug(&self, slug: &str) -> Option<Project>;
-    fn project_by_id(&self, project_id: &str) -> Option<Project>;
-    fn list_projects(&self, limit: i64, offset: i64) -> Vec<Project>;
+    fn project_by_slug(&self, slug: &str) -> Result<Option<Project>, crate::errors::VogtError>;
+    fn project_by_id(&self, project_id: &str) -> Result<Option<Project>, crate::errors::VogtError>;
+    fn list_projects(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Project>, crate::errors::VogtError>;
 
-    fn work_item_by_id(&self, work_item_id: &str) -> Option<WorkItem>;
-    fn work_item_by_ref(&self, reference: &str) -> Option<WorkItem>;
-    fn list_work_items(&self, filter: &WorkFilter) -> Vec<WorkItem>;
-    fn count_work_items(&self, filter: &WorkFilter) -> i64;
+    fn work_item_by_id(
+        &self,
+        work_item_id: &str,
+    ) -> Result<Option<WorkItem>, crate::errors::VogtError>;
+    fn work_item_by_ref(
+        &self,
+        reference: &str,
+    ) -> Result<Option<WorkItem>, crate::errors::VogtError>;
+    fn list_work_items(
+        &self,
+        filter: &WorkFilter,
+    ) -> Result<Vec<WorkItem>, crate::errors::VogtError>;
+    fn count_work_items(&self, filter: &WorkFilter) -> Result<i64, crate::errors::VogtError>;
 
-    fn board_high_water(&self, filter: &WorkFilter) -> Option<(Moment, String)>;
+    fn board_high_water(
+        &self,
+        filter: &WorkFilter,
+    ) -> Result<Option<(Moment, String)>, crate::errors::VogtError>;
     fn board_counts(
         &self,
         filter: &WorkFilter,
         lane_mode: &str,
         high_water: Option<&(Moment, String)>,
-    ) -> BTreeMap<(String, String), i64>;
+    ) -> Result<BTreeMap<(String, String), i64>, crate::errors::VogtError>;
     fn board_work_items(
         &self,
         filter: &WorkFilter,
@@ -233,72 +255,183 @@ pub trait ReadView {
         cells: &[BoardCellQuery],
         high_water: Option<&(Moment, String)>,
         limit: i64,
-    ) -> BTreeMap<(String, String), Vec<WorkItem>>;
+    ) -> Result<BTreeMap<(String, String), Vec<WorkItem>>, crate::errors::VogtError>;
 
-    fn blocking_fan_out(&self, work_item_ids: &[String]) -> BTreeMap<String, i64>;
-    fn unfinished_blockers(&self, work_item_id: &str, terminal_states: &[&str]) -> Vec<Blocker>;
+    fn blocking_fan_out(
+        &self,
+        work_item_ids: &[String],
+    ) -> Result<BTreeMap<String, i64>, crate::errors::VogtError>;
+    fn unfinished_blockers(
+        &self,
+        work_item_id: &str,
+        terminal_states: &[&str],
+    ) -> Result<Vec<Blocker>, crate::errors::VogtError>;
 
-    fn comments_for(&self, work_item_id: &str, limit: i64) -> Vec<Comment>;
-    fn label_by_name(&self, name: &str) -> Option<Label>;
-    fn list_labels(&self, limit: i64, offset: i64) -> Vec<Label>;
-    fn initiative_by_id(&self, initiative_id: &str) -> Option<Initiative>;
-    fn initiative_by_slug(&self, slug: &str) -> Option<Initiative>;
-    fn list_initiatives(&self, limit: i64, offset: i64) -> Vec<Initiative>;
-    fn workflow_for(&self, kind: &str) -> Workflow;
+    fn comments_for(
+        &self,
+        work_item_id: &str,
+        limit: i64,
+    ) -> Result<Vec<Comment>, crate::errors::VogtError>;
+    fn label_by_name(&self, name: &str) -> Result<Option<Label>, crate::errors::VogtError>;
+    fn list_labels(&self, limit: i64, offset: i64) -> Result<Vec<Label>, crate::errors::VogtError>;
+    fn initiative_by_id(
+        &self,
+        initiative_id: &str,
+    ) -> Result<Option<Initiative>, crate::errors::VogtError>;
+    fn initiative_by_slug(
+        &self,
+        slug: &str,
+    ) -> Result<Option<Initiative>, crate::errors::VogtError>;
+    fn list_initiatives(
+        &self,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Initiative>, crate::errors::VogtError>;
+    fn workflow_for(&self, kind: &str) -> Result<Workflow, crate::errors::VogtError>;
 
-    fn list_suppressions(&self, include_revoked: bool, limit: i64) -> Vec<Suppression>;
-    fn suppression_by_id(&self, suppression_id: &str) -> Option<Suppression>;
-    fn contract_exemptions(&self, project_id: &str) -> Vec<ContractExemption>;
+    fn list_suppressions(
+        &self,
+        include_revoked: bool,
+        limit: i64,
+    ) -> Result<Vec<Suppression>, crate::errors::VogtError>;
+    fn suppression_by_id(
+        &self,
+        suppression_id: &str,
+    ) -> Result<Option<Suppression>, crate::errors::VogtError>;
+    fn contract_exemptions(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ContractExemption>, crate::errors::VogtError>;
 
-    fn work_links_for_subjects(&self, subject_keys: &[String]) -> BTreeMap<String, String>;
-    fn work_links_for_subjects_by_item(&self, work_item_id: &str) -> BTreeMap<String, String>;
-    fn work_item_by_subject(&self, subject_key: &str) -> Option<WorkItem>;
-    fn work_overlay(&self, subject_key: &str) -> Option<WorkOverlay>;
-    fn work_overlays(&self, subject_keys: &[String]) -> BTreeMap<String, WorkOverlay>;
-    fn bound_branch_overlays(&self, limit: i64) -> Vec<WorkOverlay>;
+    fn work_links_for_subjects(
+        &self,
+        subject_keys: &[String],
+    ) -> Result<BTreeMap<String, String>, crate::errors::VogtError>;
+    fn work_links_for_subjects_by_item(
+        &self,
+        work_item_id: &str,
+    ) -> Result<BTreeMap<String, String>, crate::errors::VogtError>;
+    fn work_item_by_subject(
+        &self,
+        subject_key: &str,
+    ) -> Result<Option<WorkItem>, crate::errors::VogtError>;
+    fn work_overlay(
+        &self,
+        subject_key: &str,
+    ) -> Result<Option<WorkOverlay>, crate::errors::VogtError>;
+    fn work_overlays(
+        &self,
+        subject_keys: &[String],
+    ) -> Result<BTreeMap<String, WorkOverlay>, crate::errors::VogtError>;
+    fn bound_branch_overlays(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<WorkOverlay>, crate::errors::VogtError>;
 
-    fn token_by_hash(&self, token_hash: &str) -> Option<Token>;
-    fn token_by_id(&self, token_id: &str) -> Option<Token>;
-    fn list_tokens(&self, include_revoked: bool, limit: i64) -> Vec<Token>;
-    fn tokens_for_actor(&self, actor_id: &str, include_revoked: bool) -> Vec<Token>;
-    fn list_auth_decisions(&self, decision: Option<&str>, limit: i64) -> Vec<AuthDecision>;
+    fn token_by_hash(&self, token_hash: &str) -> Result<Option<Token>, crate::errors::VogtError>;
+    fn token_by_id(&self, token_id: &str) -> Result<Option<Token>, crate::errors::VogtError>;
+    fn list_tokens(
+        &self,
+        include_revoked: bool,
+        limit: i64,
+    ) -> Result<Vec<Token>, crate::errors::VogtError>;
+    fn tokens_for_actor(
+        &self,
+        actor_id: &str,
+        include_revoked: bool,
+    ) -> Result<Vec<Token>, crate::errors::VogtError>;
+    fn list_auth_decisions(
+        &self,
+        decision: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AuthDecision>, crate::errors::VogtError>;
 
-    fn password_credential_by_username(&self, username: &str) -> Option<PasswordCredential>;
-    fn password_credential_for_actor(&self, actor_id: &str) -> Option<PasswordCredential>;
-    fn password_hash(&self, actor_id: &str) -> Option<String>;
-    fn list_password_credentials(&self) -> Vec<PasswordCredential>;
+    fn password_credential_by_username(
+        &self,
+        username: &str,
+    ) -> Result<Option<PasswordCredential>, crate::errors::VogtError>;
+    fn password_credential_for_actor(
+        &self,
+        actor_id: &str,
+    ) -> Result<Option<PasswordCredential>, crate::errors::VogtError>;
+    fn password_hash(&self, actor_id: &str) -> Result<Option<String>, crate::errors::VogtError>;
+    fn list_password_credentials(
+        &self,
+    ) -> Result<Vec<PasswordCredential>, crate::errors::VogtError>;
 
-    fn forge_account(&self, actor_id: &str, host: &str) -> Option<ForgeAccount>;
-    fn forge_accounts_for_actor(&self, actor_id: &str) -> Vec<ForgeAccount>;
-    fn forge_account_secret(&self, actor_id: &str, host: &str) -> Option<String>;
+    fn forge_account(
+        &self,
+        actor_id: &str,
+        host: &str,
+    ) -> Result<Option<ForgeAccount>, crate::errors::VogtError>;
+    fn forge_accounts_for_actor(
+        &self,
+        actor_id: &str,
+    ) -> Result<Vec<ForgeAccount>, crate::errors::VogtError>;
+    fn forge_account_secret(
+        &self,
+        actor_id: &str,
+        host: &str,
+    ) -> Result<Option<String>, crate::errors::VogtError>;
 
     fn list_drift(
         &self,
-        status: &str,
+        status: Option<&str>,
         kind: Option<&str>,
         project_id: Option<&str>,
         limit: i64,
-    ) -> Vec<DriftProposal>;
-    fn drift_by_id(&self, proposal_id: &str) -> Option<DriftProposal>;
-    fn open_drift_subjects(&self) -> BTreeSet<(String, String, String)>;
-    fn list_writeback_actions(&self, outcome: Option<&str>, limit: i64) -> Vec<WriteBackRecord>;
-    fn drift_evidence_ids(&self) -> BTreeSet<String>;
+    ) -> Result<Vec<DriftProposal>, crate::errors::VogtError>;
+    fn drift_by_id(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<DriftProposal>, crate::errors::VogtError>;
+    fn open_drift_subjects(
+        &self,
+    ) -> Result<BTreeSet<(String, String, String)>, crate::errors::VogtError>;
+    fn list_writeback_actions(
+        &self,
+        outcome: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<WriteBackRecord>, crate::errors::VogtError>;
+    fn drift_evidence_ids(&self) -> Result<BTreeSet<String>, crate::errors::VogtError>;
 
-    fn inbox_triage_by_key(&self, entry_key: &str) -> Option<InboxTriage>;
-    fn inbox_triage_by_keys(&self, entry_keys: &[String]) -> BTreeMap<String, InboxTriage>;
-    fn list_inbox_triage(&self, limit: i64) -> Vec<InboxTriage>;
-    fn actor_preference(&self, actor_id: &str, key: &str) -> Option<ActorPreference>;
-    fn actor_preferences(&self, actor_id: &str) -> Vec<ActorPreference>;
+    fn inbox_triage_by_key(
+        &self,
+        entry_key: &str,
+    ) -> Result<Option<InboxTriage>, crate::errors::VogtError>;
+    fn inbox_triage_by_keys(
+        &self,
+        entry_keys: &[String],
+    ) -> Result<BTreeMap<String, InboxTriage>, crate::errors::VogtError>;
+    fn list_inbox_triage(&self, limit: i64) -> Result<Vec<InboxTriage>, crate::errors::VogtError>;
+    fn actor_preference(
+        &self,
+        actor_id: &str,
+        key: &str,
+    ) -> Result<Option<ActorPreference>, crate::errors::VogtError>;
+    fn actor_preferences(
+        &self,
+        actor_id: &str,
+    ) -> Result<Vec<ActorPreference>, crate::errors::VogtError>;
 
-    fn session_by_id(&self, session_id: &str) -> Option<CodingSession>;
-    fn session_grant(&self, grant_id: &str) -> Option<SessionGrant>;
-    fn session_by_engine_id(&self, engine_session_id: &str) -> Option<CodingSession>;
+    fn session_by_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CodingSession>, crate::errors::VogtError>;
+    fn session_grant(
+        &self,
+        grant_id: &str,
+    ) -> Result<Option<SessionGrant>, crate::errors::VogtError>;
+    fn session_by_engine_id(
+        &self,
+        engine_session_id: &str,
+    ) -> Result<Option<CodingSession>, crate::errors::VogtError>;
     fn list_session_grants(
         &self,
         state: Option<&str>,
         target_engine_session_id: Option<&str>,
         limit: i64,
-    ) -> Vec<SessionGrant>;
+    ) -> Result<Vec<SessionGrant>, crate::errors::VogtError>;
     fn list_sessions(
         &self,
         project_id: Option<&str>,
@@ -306,26 +439,46 @@ pub trait ReadView {
         include_stopped: bool,
         limit: i64,
         offset: i64,
-    ) -> Vec<CodingSession>;
+    ) -> Result<Vec<CodingSession>, crate::errors::VogtError>;
 
-    fn list_events(&self, after: i64, limit: i64, entity_id: Option<&str>) -> Vec<Event>;
-    fn list_audit(&self, query: &AuditQuery) -> Vec<AuditRecord>;
-    fn count_audit(&self, query: &AuditQuery) -> i64;
+    fn list_events(
+        &self,
+        after: i64,
+        limit: i64,
+        entity_id: Option<&str>,
+    ) -> Result<Vec<Event>, crate::errors::VogtError>;
+    fn list_audit(&self, query: &AuditQuery) -> Result<Vec<AuditRecord>, crate::errors::VogtError>;
+    fn count_audit(&self, query: &AuditQuery) -> Result<i64, crate::errors::VogtError>;
 }
 
 /// A write transaction. Also a read view, so a writer never opens a second
 /// connection to see what it just wrote.
 pub trait WriteTxn: ReadView {
+    /// Commit this transaction. Dropping it without committing rolls back,
+    /// which is what Python's `write()` does when the body raises.
+    fn commit(self) -> Result<(), crate::errors::VogtError>
+    where
+        Self: Sized;
     fn txn_id(&self) -> &str;
     fn revision(&self) -> i64;
 
-    fn insert_actor(&mut self, actor: &Actor);
-    fn insert_project(&mut self, project: &Project);
-    fn update_project(&mut self, project_id: &str, update: &ProjectUpdate, at: Moment);
+    fn insert_actor(&mut self, actor: &Actor) -> Result<(), crate::errors::VogtError>;
+    fn insert_project(&mut self, project: &Project) -> Result<(), crate::errors::VogtError>;
+    fn update_project(
+        &mut self,
+        project_id: &str,
+        update: &ProjectUpdate,
+        at: Moment,
+    ) -> Result<(), crate::errors::VogtError>;
 
-    fn next_work_ref(&mut self) -> String;
-    fn insert_work_item(&mut self, item: &WorkItem);
-    fn update_work_item(&mut self, work_item_id: &str, update: &WorkItemUpdate, at: Moment);
+    fn next_work_ref(&mut self) -> Result<String, crate::errors::VogtError>;
+    fn insert_work_item(&mut self, item: &WorkItem) -> Result<(), crate::errors::VogtError>;
+    fn update_work_item(
+        &mut self,
+        work_item_id: &str,
+        update: &WorkItemUpdate,
+        at: Moment,
+    ) -> Result<(), crate::errors::VogtError>;
 
     fn insert_relation(
         &mut self,
@@ -333,43 +486,89 @@ pub trait WriteTxn: ReadView {
         related_id: &str,
         kind: RelationKind,
         at: Moment,
-    );
-    fn delete_relation(&mut self, work_item_id: &str, related_id: &str, kind: RelationKind)
-        -> bool;
+    ) -> Result<(), crate::errors::VogtError>;
+    fn delete_relation(
+        &mut self,
+        work_item_id: &str,
+        related_id: &str,
+        kind: RelationKind,
+    ) -> Result<bool, crate::errors::VogtError>;
 
-    fn insert_label(&mut self, label: &Label);
-    fn insert_initiative(&mut self, initiative: &Initiative);
-    fn update_initiative(&mut self, initiative: &Initiative);
-    fn insert_comment(&mut self, comment: &Comment);
+    fn insert_label(&mut self, label: &Label) -> Result<(), crate::errors::VogtError>;
+    fn insert_initiative(
+        &mut self,
+        initiative: &Initiative,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn update_initiative(
+        &mut self,
+        initiative: &Initiative,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn insert_comment(&mut self, comment: &Comment) -> Result<(), crate::errors::VogtError>;
 
-    fn insert_suppression(&mut self, suppression: &Suppression);
-    fn revoke_suppression(&mut self, suppression_id: &str, at: Moment) -> bool;
-    fn insert_contract_exemption(&mut self, exemption: &ContractExemption);
-    fn delete_contract_exemption(&mut self, project_id: &str, rule: &str, target: &str) -> bool;
+    fn insert_suppression(
+        &mut self,
+        suppression: &Suppression,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn revoke_suppression(
+        &mut self,
+        suppression_id: &str,
+        actor_id: &str,
+        reason: &str,
+        at: Moment,
+    ) -> Result<bool, crate::errors::VogtError>;
+    fn insert_contract_exemption(
+        &mut self,
+        exemption: &ContractExemption,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn delete_contract_exemption(
+        &mut self,
+        project_id: &str,
+        rule: &str,
+        target: &str,
+    ) -> Result<bool, crate::errors::VogtError>;
 
-    fn insert_work_link(&mut self, link: &WorkLink);
-    fn upsert_work_overlay(&mut self, overlay: &WorkOverlay);
+    fn insert_work_link(&mut self, link: &WorkLink) -> Result<(), crate::errors::VogtError>;
+    fn upsert_work_overlay(
+        &mut self,
+        overlay: &WorkOverlay,
+    ) -> Result<(), crate::errors::VogtError>;
 
-    fn insert_token(&mut self, token: &Token, token_hash: &str);
+    fn insert_token(
+        &mut self,
+        token: &Token,
+        token_hash: &str,
+    ) -> Result<(), crate::errors::VogtError>;
     fn carry_credentials(
         &mut self,
         carried: &CarriedCredentials,
         reason: &str,
         at: Moment,
-    ) -> CarryReport;
-    fn set_instance_identity(&mut self, instance_id: &str, stamp: &CloneStamp);
-    fn revoke_token(&mut self, token_id: &str, at: Moment) -> bool;
-    fn reinstate_token(&mut self, token_id: &str) -> bool;
+    ) -> Result<CarryReport, crate::errors::VogtError>;
+    fn set_instance_identity(
+        &mut self,
+        instance_id: &str,
+        stamp: &CloneStamp,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn revoke_token(
+        &mut self,
+        token_id: &str,
+        reason: &str,
+        at: Moment,
+    ) -> Result<bool, crate::errors::VogtError>;
+    fn reinstate_token(&mut self, token_id: &str) -> Result<bool, crate::errors::VogtError>;
 
     fn upsert_password_credential(
         &mut self,
         actor_id: &str,
         username: &str,
         password_hash: &str,
-        scopes: &str,
+        scopes: &[String],
         at: Moment,
-    );
-    fn delete_password_credential(&mut self, actor_id: &str) -> bool;
+    ) -> Result<(), crate::errors::VogtError>;
+    fn delete_password_credential(
+        &mut self,
+        actor_id: &str,
+    ) -> Result<bool, crate::errors::VogtError>;
     fn upsert_forge_account(
         &mut self,
         actor_id: &str,
@@ -378,25 +577,69 @@ pub trait WriteTxn: ReadView {
         scopes: &str,
         encrypted_token: &str,
         at: Moment,
-    );
-    fn delete_forge_account(&mut self, actor_id: &str, host: &str) -> bool;
+    ) -> Result<(), crate::errors::VogtError>;
+    fn delete_forge_account(
+        &mut self,
+        actor_id: &str,
+        host: &str,
+    ) -> Result<bool, crate::errors::VogtError>;
 
-    fn insert_writeback(&mut self, record: &WriteBackRecord);
-    fn insert_session(&mut self, session: &CodingSession);
-    fn insert_session_grant(&mut self, grant: &SessionGrant);
-    fn update_session_grant(&mut self, grant: &SessionGrant);
-    fn set_session_work_item(&mut self, session_id: &str, work_item_id: Option<&str>);
-    fn mark_session_stopped(&mut self, session_id: &str, at: Moment);
+    fn insert_writeback(
+        &mut self,
+        record: &WriteBackRecord,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn insert_session(&mut self, session: &CodingSession) -> Result<(), crate::errors::VogtError>;
+    fn insert_session_grant(
+        &mut self,
+        grant: &SessionGrant,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn update_session_grant(
+        &mut self,
+        grant: &SessionGrant,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn set_session_work_item(
+        &mut self,
+        session_id: &str,
+        work_item_id: Option<&str>,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn mark_session_stopped(
+        &mut self,
+        session_id: &str,
+        at: Moment,
+    ) -> Result<(), crate::errors::VogtError>;
 
-    fn insert_drift(&mut self, proposal: &DriftProposal);
-    fn upsert_inbox_triage(&mut self, triage: &InboxTriage);
-    fn upsert_actor_preference(&mut self, preference: &ActorPreference);
-    fn mark_drift_superseded(&mut self, proposal_id: &str, at: Moment) -> bool;
-    fn resolve_drift(&mut self, proposal_id: &str, at: Moment) -> bool;
+    fn insert_drift(&mut self, proposal: &DriftProposal) -> Result<(), crate::errors::VogtError>;
+    fn upsert_inbox_triage(&mut self, triage: &InboxTriage)
+        -> Result<(), crate::errors::VogtError>;
+    fn upsert_actor_preference(
+        &mut self,
+        preference: &ActorPreference,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn mark_drift_superseded(
+        &mut self,
+        proposal_id: &str,
+        detail: Option<&str>,
+        at: Option<Moment>,
+    ) -> Result<bool, crate::errors::VogtError>;
+    fn resolve_drift(
+        &mut self,
+        proposal_id: &str,
+        status: &str,
+        actor_id: &str,
+        reason: &str,
+        at: Moment,
+    ) -> Result<bool, crate::errors::VogtError>;
 
-    fn upsert_workflow(&mut self, workflow: &Workflow, at: Moment);
-    fn append_audit(&mut self, record: &AuditRecord) -> AuditRecord;
-    fn append_event(&mut self, event: &Event) -> Event;
+    fn upsert_workflow(
+        &mut self,
+        workflow: &Workflow,
+        at: Moment,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn append_audit(
+        &mut self,
+        record: &AuditRecord,
+    ) -> Result<AuditRecord, crate::errors::VogtError>;
+    fn append_event(&mut self, event: &Event) -> Result<Event, crate::errors::VogtError>;
 }
 
 /// The declared store: the write plane.
@@ -414,20 +657,30 @@ pub trait DeclaredStore {
     fn bundled_schema_version(&self) -> i64;
     fn bootstrap(&self, principal: &Principal)
         -> Result<BootstrapResult, crate::errors::VogtError>;
-    fn credentials(&self) -> CarriedCredentials;
-    fn record_auth_decision(&self, decision: &AuthDecision);
-    fn touch_token(&self, token_id: &str, at: Moment, expires_at: Option<Moment>);
-    fn prune_auth_decisions(&self, allow_before: Moment, deny_before: Moment) -> i64;
+    fn credentials(&self) -> Result<CarriedCredentials, crate::errors::VogtError>;
+    fn record_auth_decision(&self, decision: &AuthDecision)
+        -> Result<(), crate::errors::VogtError>;
+    fn touch_token(
+        &self,
+        token_id: &str,
+        at: Moment,
+        expires_at: Option<Moment>,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn prune_auth_decisions(
+        &self,
+        allow_before: Moment,
+        deny_before: Moment,
+    ) -> Result<i64, crate::errors::VogtError>;
     fn publish_event(
         &self,
         kind: &str,
         entity_kind: &str,
         entity_id: &str,
-        summary: &str,
+        summary: &serde_json::Value,
         at: Moment,
-    ) -> Event;
-    fn read(&self) -> Self::Read<'_>;
-    fn write(&self) -> Self::Write<'_>;
+    ) -> Result<Event, crate::errors::VogtError>;
+    fn read(&self) -> Result<Self::Read<'_>, crate::errors::VogtError>;
+    fn write(&self) -> Result<Self::Write<'_>, crate::errors::VogtError>;
 }
 
 /// The observed store: append-oriented evidence plus collector coverage.
@@ -437,25 +690,45 @@ pub trait ObservedStore {
     fn schema_version(&self) -> i64;
     fn bundled_schema_version(&self) -> i64;
 
-    fn bind_instance(&self, instance_id: &str);
-    fn rebind_instance(&self, instance_id: &str);
-    fn instance_id(&self) -> Option<String>;
-    fn has_evidence_tables(&self) -> bool;
+    fn bind_instance(&self, instance_id: &str) -> Result<(), crate::errors::VogtError>;
+    fn rebind_instance(&self, instance_id: &str) -> Result<(), crate::errors::VogtError>;
+    fn instance_id(&self) -> Result<Option<String>, crate::errors::VogtError>;
+    fn has_evidence_tables(&self) -> Result<bool, crate::errors::VogtError>;
 
-    fn begin_sweep(&self, collector: &str, scope: &[String], at: Moment) -> Sweep;
+    fn begin_sweep(
+        &self,
+        collector: &str,
+        scope: &[String],
+        at: Moment,
+    ) -> Result<Sweep, crate::errors::VogtError>;
     fn finish_sweep(
         &self,
         sweep_id: &str,
         outcome: SweepOutcome,
-        stats: &AppendStats,
+        stats: &BTreeMap<String, i64>,
         at: Moment,
         detail: Option<&str>,
-    );
-    fn append(&self, sweep_id: &str, findings: &[PendingObservation], at: Moment) -> AppendStats;
-    fn list_sweeps(&self, collector: Option<&str>, limit: i64) -> Vec<Sweep>;
-    fn coverage(&self) -> BTreeMap<String, Sweep>;
-    fn coverage_by_project(&self) -> BTreeMap<String, BTreeMap<String, Moment>>;
-    fn fail_sweeps(&self, sweep_ids: &[String], detail: &str);
+    ) -> Result<(), crate::errors::VogtError>;
+    fn append(
+        &self,
+        sweep_id: &str,
+        findings: &[PendingObservation],
+        at: Moment,
+    ) -> Result<AppendStats, crate::errors::VogtError>;
+    fn list_sweeps(
+        &self,
+        collector: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<Sweep>, crate::errors::VogtError>;
+    fn coverage(&self) -> Result<BTreeMap<String, Sweep>, crate::errors::VogtError>;
+    fn coverage_by_project(
+        &self,
+    ) -> Result<BTreeMap<String, BTreeMap<String, Moment>>, crate::errors::VogtError>;
+    fn fail_sweeps(
+        &self,
+        sweep_ids: &[String],
+        detail: &str,
+    ) -> Result<(), crate::errors::VogtError>;
 
     fn list_observations(
         &self,
@@ -464,7 +737,7 @@ pub trait ObservedStore {
         subject_key: Option<&str>,
         limit: i64,
         offset: i64,
-    ) -> Vec<Observation>;
+    ) -> Result<Vec<Observation>, crate::errors::VogtError>;
     fn latest(
         &self,
         kinds: &[String],
@@ -472,38 +745,72 @@ pub trait ObservedStore {
         promoted_only: bool,
         exclude_closed: bool,
         limit: i64,
-    ) -> Vec<Observation>;
-    fn latest_by_subject(&self, subject_key: &str) -> Option<Observation>;
-    fn count_closed(&self, kinds: &[String], project_id: Option<&str>) -> i64;
+    ) -> Result<Vec<Observation>, crate::errors::VogtError>;
+    fn latest_by_subject(
+        &self,
+        subject_key: &str,
+    ) -> Result<Option<Observation>, crate::errors::VogtError>;
+    fn count_closed(
+        &self,
+        kinds: &[String],
+        project_id: Option<&str>,
+    ) -> Result<i64, crate::errors::VogtError>;
 
-    fn get_watermark(&self, collector: &str, project_id: &str) -> Option<String>;
-    fn set_watermark(&self, collector: &str, project_id: &str, watermark: &str, at: Moment);
-    fn touch_subjects(&self, subject_keys: &[String], at: Moment);
-    fn last_confirmed(&self, subject_keys: &[String]) -> BTreeMap<String, Moment>;
+    fn get_watermark(
+        &self,
+        collector: &str,
+        project_id: &str,
+    ) -> Result<Option<String>, crate::errors::VogtError>;
+    fn set_watermark(
+        &self,
+        collector: &str,
+        project_id: &str,
+        watermark: Option<&str>,
+        at: Moment,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn touch_subjects(
+        &self,
+        subject_keys: &[String],
+        at: Moment,
+    ) -> Result<(), crate::errors::VogtError>;
+    fn last_confirmed(
+        &self,
+        subject_keys: &[String],
+    ) -> Result<BTreeMap<String, Moment>, crate::errors::VogtError>;
 
-    fn dep_refs(&self, from_project_id: Option<&str>, to_project_id: Option<&str>) -> Vec<DepRef>;
-    fn counts(&self) -> BTreeMap<String, i64>;
-    fn rebuild_latest(&self) -> i64;
-    fn replace_dep_refs(&self, rows: &[DepRefRow]) -> i64;
-    fn prune(&self, before: Moment, protected_observation_ids: &BTreeSet<String>) -> PruneReport;
+    fn dep_refs(
+        &self,
+        from_project_id: Option<&str>,
+        to_project_id: Option<&str>,
+    ) -> Result<Vec<DepRef>, crate::errors::VogtError>;
+    fn counts(&self) -> Result<BTreeMap<String, i64>, crate::errors::VogtError>;
+    fn rebuild_latest(&self) -> Result<i64, crate::errors::VogtError>;
+    fn replace_dep_refs(&self, rows: &[DepRefRow]) -> Result<i64, crate::errors::VogtError>;
+    fn prune(
+        &self,
+        before: Moment,
+        protected_observation_ids: &BTreeSet<String>,
+    ) -> Result<PruneReport, crate::errors::VogtError>;
 
-    fn activity_cursors(&self) -> BTreeMap<String, TranscriptCursor>;
+    fn activity_cursors(
+        &self,
+    ) -> Result<BTreeMap<String, TranscriptCursor>, crate::errors::VogtError>;
     fn index_activity(
         &self,
         sweep_id: &str,
         batch: &ActivityBatch,
         at: Moment,
-    ) -> ActivityIndexStats;
+    ) -> Result<ActivityIndexStats, crate::errors::VogtError>;
     fn search_activity(
         &self,
         query: &ActivityQuery,
         limit: i64,
         offset: i64,
-    ) -> Vec<ActivityEventRow>;
+    ) -> Result<Vec<ActivityEventRow>, crate::errors::VogtError>;
     fn summarize_activity(
         &self,
         query: &ActivityQuery,
         limit: i64,
         offset: i64,
-    ) -> Vec<ActivitySessionRow>;
+    ) -> Result<Vec<ActivitySessionRow>, crate::errors::VogtError>;
 }

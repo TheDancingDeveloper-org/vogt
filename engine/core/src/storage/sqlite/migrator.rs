@@ -56,13 +56,6 @@ impl Migration {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Report {
-    pub store: String,
-    pub applied: Vec<String>,
-    pub version: i64,
-}
-
 #[derive(Debug)]
 pub enum MigrateError {
     Sql(rusqlite::Error),
@@ -89,6 +82,12 @@ impl From<rusqlite::Error> for MigrateError {
 impl From<std::io::Error> for MigrateError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err)
+    }
+}
+
+impl From<MigrateError> for crate::errors::VogtError {
+    fn from(err: MigrateError) -> Self {
+        crate::errors::VogtError::MigrationError(err.to_string())
     }
 }
 
@@ -219,11 +218,11 @@ pub fn migrate(
     directory: Option<&Path>,
     holder: &str,
     now: &str,
-) -> Result<Report, MigrateError> {
+) -> Result<crate::storage::interface::MigrationReport, MigrateError> {
     ensure_framework(conn)?;
     let available = load_migrations(store, directory)?;
     acquire_lock(conn, store, holder, now)?;
-    let result: Result<Report, MigrateError> = (|| {
+    let result: Result<crate::storage::interface::MigrationReport, MigrateError> = (|| {
         verify_forward_only(conn, store, &available)?;
         let applied = applied_ids(conn)?;
         let pending: Vec<&Migration> = available
@@ -233,7 +232,7 @@ pub fn migrate(
         for migration in &pending {
             apply_one(conn, store, migration, now)?;
         }
-        Ok(Report {
+        Ok(crate::storage::interface::MigrationReport {
             store: store.to_string(),
             applied: pending
                 .iter()
@@ -390,7 +389,7 @@ pub fn open_and_migrate(
     directory: Option<&Path>,
     holder: &str,
     now: &str,
-) -> Result<Report, MigrateError> {
+) -> Result<crate::storage::interface::MigrationReport, MigrateError> {
     let mut conn = connect(path)?;
     migrate(&mut conn, store, directory, holder, now)
 }

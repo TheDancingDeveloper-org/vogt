@@ -18,3 +18,5 @@ pub fn declared_path(data_dir: &Path) -> PathBuf {
 pub fn observed_path(data_dir: &Path) -> PathBuf {
     data_dir.join(OBSERVED_DB_NAME)
 }
+
+pub mod declared;

@@ -755,6 +755,53 @@ impl Workflow {
         Ok(())
     }
 
+    /// The stored form: `{"initial_state", "transitions"}` with keys sorted,
+    /// matching `json.dumps(..., sort_keys=True)`.
+    pub fn to_definition_json(&self) -> String {
+        let transitions: BTreeMap<&str, &Vec<String>> = self
+            .transitions
+            .iter()
+            .map(|(source, targets)| (source.as_str(), targets))
+            .collect();
+        serde_json::json!({
+            "initial_state": self.initial_state,
+            "transitions": transitions,
+        })
+        .to_string()
+    }
+
+    /// Inverse of `to_definition_json`. A definition without a transitions
+    /// object is refused, matching `Workflow.from_definition`.
+    pub fn from_definition_json(kind: &str, text: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(text).map_err(|err| err.to_string())?;
+        let raw = value
+            .get("transitions")
+            .and_then(|item| item.as_object())
+            .ok_or_else(|| format!("workflow definition for {kind} has no transitions map"))?;
+        let transitions = raw
+            .iter()
+            .filter_map(|(source, targets)| {
+                targets.as_array().map(|list| {
+                    (
+                        source.clone(),
+                        list.iter()
+                            .filter_map(|item| item.as_str().map(str::to_string))
+                            .collect(),
+                    )
+                })
+            })
+            .collect();
+        let initial = value
+            .get("initial_state")
+            .and_then(|item| item.as_str())
+            .unwrap_or(DEFAULT_INITIAL_STATE);
+        Ok(Self {
+            kind: kind.to_string(),
+            initial_state: initial.to_string(),
+            transitions,
+        })
+    }
+
     pub fn shortest_path(&self, from_state: &str, to_state: &str) -> Option<Vec<String>> {
         if from_state == to_state {
             return Some(vec![from_state.to_string()]);
@@ -1180,53 +1227,99 @@ pub struct ForgeAccount {
     pub updated_at: Moment,
 }
 
-/// Append-only ledger row. Ports `AuditRecord`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+vocab!(SweepOutcome {
+    Running,
+    Ok,
+    Partial,
+    Failed
+});
+vocab!(RefKind {
+    Path,
+    Git,
+    Declared,
+    Inherited
+});
+vocab!(DriftStatus {
+    Open,
+    Accepted,
+    Rejected,
+    Contested
+});
+vocab!(TriageState {
+    Active,
+    Archived,
+    Snoozed
+});
+
+/// Append-only ledger row. Ports `AuditRecord` (`entities.py`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AuditRecord {
     pub id: String,
+    pub txn_id: String,
     pub revision: i64,
     pub actor_id: String,
+    pub actor_identity_ref: String,
     pub operation: String,
     pub entity_kind: String,
     pub entity_id: String,
     pub reason: String,
+    pub payload_digest: String,
     pub at: Moment,
 }
 
-/// Published change. Ports `Event`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Published change. Ports `Event`. `summary` is the JSON object the feed
+/// carries; an absent actor or audit row stays `None`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Event {
     pub seq: i64,
     pub kind: String,
     pub entity_kind: String,
     pub entity_id: String,
-    pub summary: String,
+    pub actor_id: Option<String>,
+    pub audit_id: Option<String>,
+    pub summary: serde_json::Value,
     pub at: Moment,
 }
 
-/// A proposed correction of declared state. Ports `DriftProposal`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A machine-raised question, resolved by a human or an agent. Ports
+/// `DriftProposal`. `status` is the four-value literal, not a free string.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DriftProposal {
     pub id: String,
     pub kind: String,
+    pub subject_kind: String,
+    pub subject_id: String,
     pub project_id: Option<String>,
-    pub subject_key: String,
-    pub status: String,
-    pub detail: String,
-    pub created_at: Moment,
+    pub project_slug: Option<String>,
+    pub summary: String,
+    pub evidence_observation_id: Option<String>,
+    pub evidence_snapshot: serde_json::Value,
+    pub proposed_change: serde_json::Value,
+    pub status: DriftStatus,
+    pub opened_at: Moment,
+    pub superseded_at: Option<Moment>,
+    pub superseded_detail: Option<String>,
+    pub resolved_by_actor_id: Option<String>,
+    pub resolved_by_identity_ref: Option<String>,
+    pub resolved_at: Option<Moment>,
+    pub resolution_reason: Option<String>,
 }
 
-/// One person's disposition of an inbox entry. Ports `InboxTriage`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The shared, audited decision attached to one Inbox occurrence. Ports
+/// `InboxTriage`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InboxTriage {
     pub entry_key: String,
+    pub state: TriageState,
+    pub snooze_until: Option<Moment>,
     pub actor_id: String,
-    pub state: String,
-    pub updated_at: Moment,
+    pub actor_identity_ref: Option<String>,
+    pub decided_at: Moment,
+    pub occurrence_snapshot: serde_json::Value,
 }
 
-/// A per-actor preference. Ports `ActorPreference`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One per-actor setting. Ports `ActorPreference`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ActorPreference {
     pub actor_id: String,
     pub key: String,
@@ -1235,38 +1328,38 @@ pub struct ActorPreference {
     pub updated_at: Moment,
 }
 
-/// A resolved dependency edge. Ports `DepRef`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One reference from a project to another. Ports `DepRef`. No lockfile is
+/// parsed and no package version is resolved.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DepRef {
     pub subject_key: String,
     pub from_project_id: String,
-    pub ref_kind: String,
+    pub from_project_slug: Option<String>,
+    pub ref_kind: RefKind,
     pub raw_target: String,
     pub manifest: Option<String>,
     pub to_project_id: Option<String>,
+    pub to_project_slug: Option<String>,
     pub observed_at: Moment,
 }
 
-/// One collector run. Ports `Sweep`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A coverage record. Ports `Sweep`. `outcome` defaults to `running` until a
+/// sweep finishes, which is what makes "absent" different from "not collected".
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Sweep {
     pub id: String,
     pub collector: String,
-    pub outcome: String,
+    pub scope: Vec<String>,
     pub started_at: Moment,
     pub finished_at: Option<Moment>,
-}
-
-/// How a sweep ended. Ports `SweepOutcome`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SweepOutcome {
-    Ok,
-    Partial,
-    Failed,
+    pub outcome: SweepOutcome,
+    pub stats: serde_json::Value,
+    pub detail: Option<String>,
 }
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
@@ -1685,6 +1778,76 @@ mod tests {
             pending.effective_state(Moment::from_unix(1_800_000_000, 0)),
             "pending"
         );
+    }
+
+    #[test]
+    fn the_seven_ported_entities_round_trip_python_json() {
+        // Pinned against pydantic model_dump(mode="json") for the same values.
+        let cases: &[(&str, &str)] = &[
+            (
+                "AuditRecord",
+                r#"{"actor_id":"act_1","actor_identity_ref":"local:a","at":"2024-01-02T00:00:00Z","entity_id":"prj_1","entity_kind":"project","id":"aud_1","operation":"op","payload_digest":"sha256:0000000000000000000000000000000000000000000000000000000000000000","reason":"because","revision":3,"txn_id":"txn_1"}"#,
+            ),
+            (
+                "Event",
+                r#"{"actor_id":null,"at":"2024-01-02T00:00:00Z","audit_id":null,"entity_id":"prj_1","entity_kind":"project","kind":"created","seq":1,"summary":{"verb":"created"}}"#,
+            ),
+            (
+                "DriftProposal",
+                r#"{"evidence_observation_id":null,"evidence_snapshot":{},"id":"dft_1","kind":"status","opened_at":"2024-01-02T00:00:00Z","project_id":null,"project_slug":null,"proposed_change":{},"resolution_reason":null,"resolved_at":null,"resolved_by_actor_id":null,"resolved_by_identity_ref":null,"status":"open","subject_id":"prj_1","subject_kind":"project","summary":"s","superseded_at":null,"superseded_detail":null}"#,
+            ),
+            (
+                "InboxTriage",
+                r#"{"actor_id":"act_1","actor_identity_ref":null,"decided_at":"2024-01-02T00:00:00Z","entry_key":"k","occurrence_snapshot":{},"snooze_until":null,"state":"active"}"#,
+            ),
+            (
+                "ActorPreference",
+                r#"{"actor_id":"act_1","key":"theme","updated_at":"2024-01-02T00:00:00Z","value":{"mode":"dark"},"version":1}"#,
+            ),
+            (
+                "DepRef",
+                r#"{"from_project_id":"prj_1","from_project_slug":null,"manifest":null,"observed_at":"2024-01-02T00:00:00Z","raw_target":"../x","ref_kind":"path","subject_key":"sub","to_project_id":null,"to_project_slug":null}"#,
+            ),
+            (
+                "Sweep",
+                r#"{"collector":"git","detail":null,"finished_at":null,"id":"swp_1","outcome":"running","scope":["prj_1"],"started_at":"2024-01-02T00:00:00Z","stats":{}}"#,
+            ),
+        ];
+        for (name, json) in cases {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            let back = match *name {
+                "AuditRecord" => serde_json::to_value(
+                    serde_json::from_value::<AuditRecord>(value.clone()).unwrap(),
+                )
+                .unwrap(),
+                "Event" => {
+                    serde_json::to_value(serde_json::from_value::<Event>(value.clone()).unwrap())
+                        .unwrap()
+                }
+                "DriftProposal" => serde_json::to_value(
+                    serde_json::from_value::<DriftProposal>(value.clone()).unwrap(),
+                )
+                .unwrap(),
+                "InboxTriage" => serde_json::to_value(
+                    serde_json::from_value::<InboxTriage>(value.clone()).unwrap(),
+                )
+                .unwrap(),
+                "ActorPreference" => serde_json::to_value(
+                    serde_json::from_value::<ActorPreference>(value.clone()).unwrap(),
+                )
+                .unwrap(),
+                "DepRef" => {
+                    serde_json::to_value(serde_json::from_value::<DepRef>(value.clone()).unwrap())
+                        .unwrap()
+                }
+                "Sweep" => {
+                    serde_json::to_value(serde_json::from_value::<Sweep>(value.clone()).unwrap())
+                        .unwrap()
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(back, value, "{name}");
+        }
     }
 
     #[test]

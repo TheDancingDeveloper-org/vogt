@@ -9,12 +9,13 @@
 
 use std::path::Path;
 
-use crate::storage::sqlite::migrator::{self, Report};
+use crate::storage::interface::MigrationReport;
+use crate::storage::sqlite::migrator;
 use crate::storage::sqlite::{declared_path, observed_path};
 
 pub struct InitOutcome {
-    pub declared: Report,
-    pub observed: Report,
+    pub declared: MigrationReport,
+    pub observed: MigrationReport,
     pub created: bool,
     pub instance_id: String,
 }
