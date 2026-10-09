@@ -9,8 +9,10 @@
 
 use std::path::Path;
 
+use crate::application::context::Built;
 use crate::core::{Clock, IdFactory, SequentialIds};
-use crate::storage::interface::MigrationReport;
+use crate::errors::VogtError;
+use crate::storage::interface::{DeclaredStore, MigrationReport, ObservedStore, ReadView};
 use crate::storage::sqlite::migrator;
 use crate::storage::sqlite::{declared_path, observed_path};
 
@@ -279,9 +281,50 @@ fn bind_instance(
     }
 }
 
-/// `LOGNAME`, then `USER`, then a fallback. `getpass.getuser` reads `LOGNAME`.
 /// The next instant. A step clock walks one second per read, the way Python's
 /// does; without one the wall clock is read once.
+/// `status`, as the registry calls it. Ports `status` in
+/// `services/instance.py`.
+pub fn status_op(ctx: &Built, _params: serde_json::Value) -> Result<serde_json::Value, VogtError> {
+    match ctx {
+        Built::SystemRandom(ctx) => status(ctx),
+        Built::SystemSequential(ctx) => status(ctx),
+        Built::StepRandom(ctx) => status(ctx),
+        Built::StepSequential(ctx) => status(ctx),
+    }
+}
+
+/// What this instance is and how much is in it.
+fn status<C: Clock, I: IdFactory>(
+    ctx: &crate::application::context::AppContext<C, I>,
+) -> Result<serde_json::Value, VogtError> {
+    let view = ctx.declared.read()?;
+    let counts = view.counts()?;
+    let stamp = view.clone_stamp()?;
+    Ok(serde_json::json!({
+        "vogt_version": crate::VERSION,
+        "instance_id": view.instance_id()?,
+        "data_dir": ctx.config.resolved_data_dir().display().to_string(),
+        "principal": ctx.principal.identity_ref,
+        "revision": view.current_revision()?,
+        "declared_schema_version": ctx.declared.schema_version(),
+        "observed_schema_version": ctx.observed.schema_version(),
+        "counts": {
+            "projects": counts.projects,
+            "actors": counts.actors,
+            "events": counts.events,
+            "audit": counts.audit,
+            "work_items": counts.work_items,
+            "initiatives": counts.initiatives,
+        },
+        "clone": stamp.map(|stamp| serde_json::json!({
+            "source_instance_id": stamp.source_instance_id,
+            "cloned_at": stamp.cloned_at.to_json(),
+            "backup_taken_at": stamp.backup_taken_at.to_json(),
+        })),
+    }))
+}
+
 fn stamp(clock: &mut Option<crate::core::StepClock>) -> String {
     match clock {
         Some(clock) => crate::core::to_iso(Clock::now(clock)),

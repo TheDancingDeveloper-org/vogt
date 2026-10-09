@@ -309,8 +309,8 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
         // The service behind nearly every operation is not ported yet, and
         // saying so is a failed tool result the model can read — never a
         // protocol error, and never an empty success.
-        let body = match operation.run() {
-            Ok(()) => json!({
+        let body = match operation.run(None, serde_json::Value::Null) {
+            Ok(_value) => json!({
                 "content": [{"type": "text", "text": "{}"}],
                 "structuredContent": {},
                 "isError": false,

@@ -106,7 +106,27 @@ impl Transport {
     }
 }
 
-/// Why a handler cannot run yet. Services replace this as they land.
+/// The service behind an operation, once it is ported.
+///
+/// One signature for every operation: the context the hooks built, and the
+/// parameters the transport already parsed. The result is the JSON the
+/// transport sends back. An operation that is not in the table has not been
+/// ported, which is a failure and never an empty success.
+pub type ServiceFn = fn(
+    &crate::application::context::Built,
+    serde_json::Value,
+) -> Result<serde_json::Value, VogtError>;
+
+/// The service for an operation, or `None` while it is still `not_ported`.
+///
+/// The table lives here, not in the generated operation list, so a service
+/// landing adds one arm and touches none of the four transports that call it.
+pub fn service_for(name: &str) -> Option<ServiceFn> {
+    match name {
+        "status" => Some(crate::application::instance::status_op),
+        _ => None,
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Handler {
     /// The service for this operation is not ported. Running it returns the
@@ -161,14 +181,27 @@ impl Operation {
         self.name.replace('.', "_")
     }
 
-    /// Run the operation. `not_ported` is a failure, never a success.
-    pub fn run(&self) -> Result<(), VogtError> {
+    /// Run the operation. An operation with no service yet is a failure, never a
+    /// success, and the message names the operation so the caller can see which
+    /// one is missing.
+    pub fn run(
+        &self,
+        ctx: Option<&crate::application::context::Built>,
+        params: serde_json::Value,
+    ) -> Result<serde_json::Value, VogtError> {
         match self.handler {
-            Handler::NotPorted => Err(VogtError::InvalidRequest(format!(
-                "{} is not available in this build: its service has not been ported yet",
-                self.name
-            ))),
-            Handler::RegistryDump => Ok(()),
+            Handler::RegistryDump => Ok(dump()),
+            Handler::NotPorted => match (service_for(self.name), ctx) {
+                (Some(service), Some(ctx)) => service(ctx, params),
+                (Some(_), None) => Err(VogtError::InvalidRequest(format!(
+                    "{} needs an instance context and none was given",
+                    self.name
+                ))),
+                (None, _) => Err(VogtError::InvalidRequest(format!(
+                    "{} is not available in this build: its service has not been ported yet",
+                    self.name
+                ))),
+            },
         }
     }
 }
@@ -660,7 +693,7 @@ mod tests {
     fn not_ported_is_a_failure() {
         let registry = registry();
         let operation = registry.get("work.create").unwrap();
-        let error = operation.run().unwrap_err();
+        let error = operation.run(None, serde_json::json!({})).unwrap_err();
         assert!(
             error.message().contains("not been ported"),
             "{}",

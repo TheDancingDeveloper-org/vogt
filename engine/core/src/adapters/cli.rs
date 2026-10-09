@@ -996,7 +996,7 @@ mod tests {
 
     fn no_dispatch(operation: &Operation, _params: Value) -> Result<Value, VogtError> {
         // The registry's own answer for a service that has not landed.
-        operation.run()?;
+        operation.run(None, Value::Null)?;
         Ok(Value::Null)
     }
 

@@ -169,21 +169,24 @@ fn main() -> ExitCode {
             &argv,
             &registry::default_registry(),
             VERSION,
-            &mut |operation, params| {
-                operation.run()?;
-                match operation.handler {
-                    // The manifest takes no parameters and reads no store.
-                    // `params` and `data_dir` are named here so the first
-                    // ported service receives them instead of a discarded
-                    // argument.
-                    registry::Handler::RegistryDump => {
-                        let _ = (&params, &data_dir);
-                        Ok(registry::dump())
+            &mut |operation, params| match operation.handler {
+                // The manifest takes no parameters and reads no store.
+                registry::Handler::RegistryDump => {
+                    let _ = (&params, &data_dir);
+                    operation.run(None, params)
+                }
+                registry::Handler::NotPorted => {
+                    // The data directory is where the instance lives. A service
+                    // that needs one gets the context built over it; a service
+                    // that has not landed gets the honest-unavailable error.
+                    let mut config = config::VogtConfig::default();
+                    if let Some(dir) = &data_dir {
+                        config.data_dir = std::path::PathBuf::from(dir);
                     }
-                    registry::Handler::NotPorted => {
-                        let _ = (params, data_dir.clone());
-                        Ok(serde_json::Value::Null)
-                    }
+                    let built = application::context::build_context(
+                        config, None, None, None, None, None, None, None,
+                    )?;
+                    operation.run(Some(&built), params)
                 }
             },
             &mut std::io::stdout(),
