@@ -164,16 +164,27 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             return ExitCode::from(1);
         }
+        let data_dir = adapters::cli::data_dir_of(&argv);
         let code = adapters::cli::main_cli(
             &argv,
             &registry::default_registry(),
             VERSION,
-            &mut |operation, _params| {
+            &mut |operation, params| {
                 operation.run()?;
-                if operation.handler == registry::Handler::RegistryDump {
-                    return Ok(registry::dump());
+                match operation.handler {
+                    // The manifest takes no parameters and reads no store.
+                    // `params` and `data_dir` are named here so the first
+                    // ported service receives them instead of a discarded
+                    // argument.
+                    registry::Handler::RegistryDump => {
+                        let _ = (&params, &data_dir);
+                        Ok(registry::dump())
+                    }
+                    registry::Handler::NotPorted => {
+                        let _ = (params, data_dir.clone());
+                        Ok(serde_json::Value::Null)
+                    }
                 }
-                Ok(serde_json::Value::Null)
             },
             &mut std::io::stdout(),
             &mut std::io::stderr(),

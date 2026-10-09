@@ -105,11 +105,13 @@ fn ok_out(text: String) -> CliResult {
     }
 }
 
+/// A usage error. argparse prints the help and the error on stdout, so a bare
+/// invocation and a bare group do too. stderr stays empty.
 fn usage(text: String) -> CliResult {
     CliResult {
         exit_code: EXIT_USAGE,
-        stdout: String::new(),
-        stderr: text,
+        stdout: text,
+        stderr: String::new(),
     }
 }
 
@@ -1013,7 +1015,7 @@ mod tests {
         let registry = default_registry();
         let result = run(&argv(&["nope"]), &registry, "test", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_USAGE);
-        assert!(result.stderr.contains("unknown command"));
+        assert!(result.stdout.contains("unknown command"));
     }
 
     #[test]
@@ -1039,7 +1041,7 @@ mod tests {
             result.stderr, result.stdout
         );
         assert!(
-            result.stderr.contains("required"),
+            result.stdout.contains("required"),
             "STDERR={:?} STDOUT={}",
             result.stderr,
             result.stdout
@@ -1227,7 +1229,7 @@ mod tests {
         );
         assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
         assert!(
-            result.stderr.contains("invalid choice"),
+            result.stdout.contains("invalid choice"),
             "{}",
             result.stderr
         );
@@ -1351,7 +1353,7 @@ mod tests {
         );
         assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
         assert!(
-            result.stderr.contains("not allowed with"),
+            result.stdout.contains("not allowed with"),
             "{}",
             result.stderr
         );
@@ -1392,7 +1394,7 @@ mod tests {
         let registry = default_registry();
         let result = run(&argv(&["work"]), &registry, "test", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
-        assert!(result.stderr.contains("usage: vogt"), "{}", result.stderr);
+        assert!(result.stdout.contains("usage: vogt"), "{}", result.stdout);
     }
 
     #[test]
@@ -1407,6 +1409,6 @@ mod tests {
             &mut no_dispatch,
         );
         assert_eq!(result.exit_code, EXIT_USAGE);
-        assert!(result.stderr.contains("invalid choice"));
+        assert!(result.stdout.contains("invalid choice"));
     }
 }
