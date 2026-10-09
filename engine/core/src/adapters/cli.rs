@@ -728,10 +728,47 @@ fn is_json_value(property: &Value) -> bool {
     types.iter().any(|kind| kind == "object" || kind == "array")
 }
 
+/// The column width argparse wraps at: `$COLUMNS` minus 2, or 78 when the
+/// variable is unset or not a usable number. Read once, because a test or a
+/// caller may change the environment afterwards.
+fn wrap_width() -> usize {
+    static WIDTH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *WIDTH.get_or_init(|| {
+        std::env::var("COLUMNS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|columns| *columns > 2)
+            .unwrap_or(80)
+            - 2
+    })
+}
+
 fn usage_synopsis() -> String {
-    // argparse wraps the usage line at 80 columns, indenting the continuation.
-    "usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json]\n            <command> ...\n"
-        .to_string()
+    // argparse breaks only when the next token would pass the wrap width, and
+    // the continuation lines up under the first argument.
+    let width = wrap_width();
+    let indent = "usage: vogt ".len();
+    let parts = [
+        "[-h]",
+        "[--version]",
+        "[--data-dir DATA_DIR]",
+        "[--json]",
+        "<command> ...",
+    ];
+    let mut lines: Vec<String> = vec!["usage: vogt".to_string()];
+    for part in parts {
+        let line = lines.last().expect("a line exists");
+        if line.len() + 1 + part.len() <= width {
+            let line = lines.last_mut().expect("a line exists");
+            line.push(' ');
+            line.push_str(part);
+        } else {
+            lines.push(format!("{:indent$}{part}", "", indent = indent));
+        }
+    }
+    let mut out = lines.join("\n");
+    out.push('\n');
+    out
 }
 
 fn format_top(registry: &OperationRegistry) -> String {
