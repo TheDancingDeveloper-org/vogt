@@ -983,18 +983,24 @@ fn is_json_value(property: &Value) -> bool {
 }
 
 /// The column width argparse wraps at: `$COLUMNS` minus 2, or 78 when the
-/// variable is unset or not a usable number. Read once, because a test or a
-/// caller may change the environment afterwards.
+/// variable is unset or not a usable number. The override is per thread, so a
+/// test can pin its width without racing the others; argparse reads the
+/// terminal size when it formats, not at startup.
 fn wrap_width() -> usize {
-    static WIDTH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *WIDTH.get_or_init(|| {
-        std::env::var("COLUMNS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|columns| *columns > 2)
-            .unwrap_or(80)
-            - 2
+    WIDTH_OVERRIDE.with(|override_width| {
+        override_width.get().unwrap_or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|columns| *columns > 2)
+                .unwrap_or(80)
+                - 2
+        })
     })
+}
+
+thread_local! {
+    static WIDTH_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 fn usage_synopsis() -> String {
@@ -1054,8 +1060,9 @@ fn format_top(registry: &OperationRegistry) -> String {
     let mut out = String::new();
     out.push_str(&usage_synopsis());
     out.push('\n');
-    // argparse wraps the description at the terminal width, which is 80 here.
-    for line in wrap_text(DESCRIPTION, 64) {
+    // argparse wraps the description at the terminal width minus 2, which is
+    // what `wrap_width` already is.
+    for line in wrap_text(DESCRIPTION, wrap_width()) {
         out.push_str(&line);
         out.push('\n');
     }
@@ -1207,14 +1214,15 @@ fn format_operation(operation: &Operation) -> String {
     let indent = 2usize;
     let width = wrap_width();
     // argparse caps the help column at 24, and on a narrow terminal at
-    // `max(width - 20, 4)`. A flag longer than `width - 11` is excluded from
-    // the measurement, so it cannot push the column out.
+    // `max(width - 20, 4)`. Every invocation counts toward the longest,
+    // however long, so a metavar or choices list past the cap still pushes
+    // the column out to it: `work relate`'s `--kind {…}` is 68 wide and the
+    // help starts at 23.
     let max_help_position = 24.min((width.saturating_sub(20)).max(indent * 2));
     let action_max = rows
         .iter()
         .map(|(flag, _)| flag.chars().count() + indent)
         .chain(["-h, --help".chars().count() + indent])
-        .filter(|length| *length <= width.saturating_sub(11))
         .max()
         .unwrap_or(0);
     let help_column = (action_max + 2).min(max_help_position);
@@ -1686,6 +1694,20 @@ pub fn secret_path_is_file(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Run one invocation as if the terminal were 80 columns, which is the
+    /// width the help layout is compared against.
+    fn at_eighty(
+        argv: &[String],
+        registry: &OperationRegistry,
+        version: &str,
+        dispatch: &mut impl FnMut(&Operation, Value) -> Result<Value, VogtError>,
+    ) -> CliResult {
+        WIDTH_OVERRIDE.with(|override_width| override_width.set(Some(78)));
+        let result = super::run(argv, registry, version, dispatch);
+        WIDTH_OVERRIDE.with(|override_width| override_width.set(None));
+        result
+    }
     use crate::registry::default_registry;
 
     fn no_dispatch(operation: &Operation, _params: Value) -> Result<Value, VogtError> {
@@ -1701,7 +1723,7 @@ mod tests {
     #[test]
     fn help_lists_every_cli_command_group() {
         let registry = default_registry();
-        let result = run(&argv(&["--help"]), &registry, "test", &mut no_dispatch);
+        let result = at_eighty(&argv(&["--help"]), &registry, "test", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_OK);
         assert!(result.stdout.contains("usage: vogt"));
         assert!(result.stdout.contains("positional arguments"));
@@ -1712,7 +1734,7 @@ mod tests {
     #[test]
     fn version_exits_zero() {
         let registry = default_registry();
-        let result = run(&argv(&["--version"]), &registry, "9.9.9", &mut no_dispatch);
+        let result = at_eighty(&argv(&["--version"]), &registry, "9.9.9", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_OK);
         assert_eq!(result.stdout, "vogt 9.9.9\n");
     }
@@ -1720,7 +1742,7 @@ mod tests {
     #[test]
     fn unknown_command_is_usage() {
         let registry = default_registry();
-        let result = run(&argv(&["nope"]), &registry, "test", &mut no_dispatch);
+        let result = at_eighty(&argv(&["nope"]), &registry, "test", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_USAGE);
         assert!(result.stdout.contains("unknown command"));
     }
@@ -1728,7 +1750,7 @@ mod tests {
     #[test]
     fn operation_help_shows_schema_flags() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["work", "get", "--help"]),
             &registry,
             "test",
@@ -1741,7 +1763,7 @@ mod tests {
     #[test]
     fn missing_required_flag_is_usage() {
         let registry = default_registry();
-        let result = run(&argv(&["work", "get"]), &registry, "test", &mut no_dispatch);
+        let result = at_eighty(&argv(&["work", "get"]), &registry, "test", &mut no_dispatch);
         assert_eq!(
             result.exit_code, EXIT_USAGE,
             "STDERR={:?} STDOUT={}",
@@ -1765,7 +1787,7 @@ mod tests {
             seen = Some(params);
             Ok(serde_json::json!({"ok": true}))
         };
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "--json",
                 "work",
@@ -1795,7 +1817,7 @@ mod tests {
     #[test]
     fn a_domain_error_exits_one() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["work", "get", "--ref", "WI-7"]),
             &registry,
             "test",
@@ -1813,7 +1835,7 @@ mod tests {
     #[test]
     fn secret_file_is_read_and_a_plain_password_flag_is_refused() {
         let registry = default_registry();
-        let help = run(
+        let help = at_eighty(
             &argv(&["user", "create", "--help"]),
             &registry,
             "test",
@@ -1824,7 +1846,7 @@ mod tests {
         assert!(help.stdout.contains("--password-stdin"), "{}", help.stdout);
         assert!(!help.stdout.contains("--password PASSWORD"));
 
-        let refused = run(
+        let refused = at_eighty(
             &argv(&[
                 "user",
                 "create",
@@ -1848,7 +1870,7 @@ mod tests {
             seen = Some(params);
             Ok(Value::Null)
         };
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "user",
                 "create",
@@ -1876,7 +1898,7 @@ mod tests {
             seen = Some(params);
             Ok(Value::Null)
         };
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "work",
                 "create",
@@ -1906,7 +1928,7 @@ mod tests {
             seen = Some(params);
             Ok(Value::Null)
         };
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "work",
                 "create",
@@ -1928,7 +1950,7 @@ mod tests {
     #[test]
     fn an_optional_literal_rejects_a_value_outside_its_choices() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "work", "update", "--ref", "WI-7", "--effort", "huge", "--reason", "because",
             ]),
@@ -1947,7 +1969,7 @@ mod tests {
     #[test]
     fn a_missing_secret_off_a_terminal_exits_one() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["user", "create", "--username", "ada", "--reason", "because"]),
             &registry,
             "test",
@@ -1965,7 +1987,7 @@ mod tests {
     #[test]
     fn a_global_flag_after_a_group_word_is_usage() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["work", "--json", "get", "--ref", "WI-7"]),
             &registry,
             "test",
@@ -1992,7 +2014,7 @@ mod tests {
     #[test]
     fn an_unknown_flag_on_a_leaf_command_is_a_root_usage_error() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["status", "--bogus", "9"]),
             &registry,
             "test",
@@ -2018,7 +2040,7 @@ mod tests {
     #[test]
     fn a_unique_prefix_is_the_option() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["work", "get", "--r", "WI-1"]),
             &registry,
             "test",
@@ -2035,7 +2057,7 @@ mod tests {
     #[test]
     fn an_ambiguous_prefix_names_every_match() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["work", "update", "--ref", "WI-1", "--re", "r"]),
             &registry,
             "test",
@@ -2055,7 +2077,7 @@ mod tests {
     #[test]
     fn a_missing_option_value_names_the_option_on_stderr() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["work", "list", "--limit"]),
             &registry,
             "test",
@@ -2075,7 +2097,7 @@ mod tests {
     #[test]
     fn a_global_prefix_before_the_command_is_the_option() {
         let registry = default_registry();
-        let json = run(
+        let json = at_eighty(
             &argv(&["--js", "work", "list"]),
             &registry,
             "test",
@@ -2084,11 +2106,11 @@ mod tests {
         assert_ne!(json.exit_code, EXIT_USAGE, "{}", json.stderr);
         assert!(!json.stderr.contains("unrecognized"), "{}", json.stderr);
 
-        let version = run(&argv(&["--vers"]), &registry, "9.9.9", &mut no_dispatch);
+        let version = at_eighty(&argv(&["--vers"]), &registry, "9.9.9", &mut no_dispatch);
         assert_eq!(version.exit_code, EXIT_OK, "{}", version.stderr);
         assert_eq!(version.stdout, "vogt 9.9.9\n");
 
-        let missing = run(&argv(&["--d"]), &registry, "test", &mut no_dispatch);
+        let missing = at_eighty(&argv(&["--d"]), &registry, "test", &mut no_dispatch);
         assert_eq!(missing.exit_code, EXIT_USAGE, "{}", missing.stderr);
         assert!(missing.stdout.is_empty(), "{}", missing.stdout);
         assert!(
@@ -2112,7 +2134,7 @@ mod tests {
     #[test]
     fn a_help_prefix_prints_the_help() {
         let registry = default_registry();
-        let sub = run(
+        let sub = at_eighty(
             &argv(&["work", "list", "--he"]),
             &registry,
             "test",
@@ -2125,7 +2147,7 @@ mod tests {
             sub.stdout
         );
 
-        let short = run(
+        let short = at_eighty(
             &argv(&["work", "list", "--h"]),
             &registry,
             "test",
@@ -2134,12 +2156,12 @@ mod tests {
         assert_eq!(short.exit_code, EXIT_OK, "{}", short.stderr);
         assert_eq!(short.stdout, sub.stdout);
 
-        let root = run(&argv(&["--he"]), &registry, "test", &mut no_dispatch);
+        let root = at_eighty(&argv(&["--he"]), &registry, "test", &mut no_dispatch);
         assert_eq!(root.exit_code, EXIT_OK, "{}", root.stderr);
         assert!(root.stdout.contains("usage: vogt"), "{}", root.stdout);
         assert!(
             root.stdout
-                .contains("state, with\nprovenance and freshness"),
+                .contains("with provenance and\nfreshness on every answer."),
             "{}",
             root.stdout
         );
@@ -2148,7 +2170,7 @@ mod tests {
     #[test]
     fn group_help_is_the_subcommand_page() {
         let registry = default_registry();
-        let work = run(
+        let work = at_eighty(
             &argv(&["work", "--help"]),
             &registry,
             "test",
@@ -2184,7 +2206,7 @@ mod tests {
             work.stdout
         );
 
-        let label = run(
+        let label = at_eighty(
             &argv(&["label", "--he"]),
             &registry,
             "test",
@@ -2210,7 +2232,7 @@ mod tests {
     #[test]
     fn a_nullable_required_field_is_an_optional_flag() {
         let registry = default_registry();
-        let help = run(
+        let help = at_eighty(
             &argv(&["session", "bind", "--help"]),
             &registry,
             "test",
@@ -2228,7 +2250,7 @@ mod tests {
             help.stdout
         );
 
-        let result = run(
+        let result = at_eighty(
             &argv(&["session", "bind", "--id", "x", "--reason", "r"]),
             &registry,
             "test",
@@ -2247,9 +2269,33 @@ mod tests {
     }
 
     #[test]
+    fn a_long_choices_list_pushes_the_help_column_to_the_cap() {
+        let registry = default_registry();
+        let help = at_eighty(
+            &argv(&["work", "relate", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(help.exit_code, EXIT_OK, "{}", help.stderr);
+        assert!(
+            help.stdout
+                .contains("  -h, --help            show this help"),
+            "the choices list must push the column to 23:\n{}",
+            help.stdout
+        );
+        assert!(
+            help.stdout
+                .contains("  --target TARGET       The other work item's reference."),
+            "{}",
+            help.stdout
+        );
+    }
+
+    #[test]
     fn an_unknown_global_stops_before_the_command() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["--jsonx", "work", "list"]),
             &registry,
             "test",
@@ -2267,7 +2313,7 @@ mod tests {
 
     fn an_unknown_flag_stops_the_report_before_a_later_known_flag() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "work", "update", "--ref", "WI-1", "--labels", "bug", "--reason", "r",
             ]),
@@ -2293,7 +2339,7 @@ mod tests {
     #[test]
     fn bare_words_after_a_complete_command_are_all_unrecognized() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "work", "update", "--ref", "WI-1", "--reason", "r", "extra1", "--zz", "3",
             ]),
@@ -2323,7 +2369,7 @@ mod tests {
             seen = Some(params);
             Ok(Value::Null)
         };
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "user",
                 "create",
@@ -2356,7 +2402,7 @@ mod tests {
             seen = Some(params);
             Ok(Value::Null)
         };
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "user",
                 "create",
@@ -2381,7 +2427,7 @@ mod tests {
     #[test]
     fn a_secret_file_and_stdin_together_are_usage() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "user",
                 "create",
@@ -2411,7 +2457,7 @@ mod tests {
         let mut dispatch = |_operation: &Operation, _params: Value| {
             Ok(serde_json::json!({"name": "ada", "active": true, "items": []}))
         };
-        let result = run(
+        let result = at_eighty(
             &argv(&["registry", "dump"]),
             &registry,
             "test",
@@ -2426,7 +2472,7 @@ mod tests {
     #[test]
     fn optional_flags_are_bracketed_and_a_bad_int_names_the_flag() {
         let registry = default_registry();
-        let help = run(
+        let help = at_eighty(
             &argv(&["token", "issue", "--help"]),
             &registry,
             "test",
@@ -2439,7 +2485,7 @@ mod tests {
             help.stdout
         );
         assert!(help.stdout.contains("--actor"), "{}", help.stdout);
-        let bad = run(
+        let bad = at_eighty(
             &argv(&[
                 "token",
                 "issue",
@@ -2471,7 +2517,7 @@ mod tests {
     fn a_negative_number_is_a_value_not_a_flag() {
         let registry = default_registry();
         let mut dispatch = |_operation: &Operation, _params: Value| Ok(Value::Null);
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "token",
                 "issue",
@@ -2510,7 +2556,7 @@ mod tests {
             seen = true;
             Ok(Value::Null)
         };
-        let result = run(
+        let result = at_eighty(
             &argv(&["--data-dir", "/tmp/x9", "registry", "dump"]),
             &registry,
             "test",
@@ -2524,7 +2570,7 @@ mod tests {
     #[test]
     fn a_global_flag_after_the_command_is_usage() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&["registry", "dump", "--data-dir", "/tmp/nope"]),
             &registry,
             "test",
@@ -2536,7 +2582,7 @@ mod tests {
     #[test]
     fn a_bare_group_is_usage() {
         let registry = default_registry();
-        let result = run(&argv(&["work"]), &registry, "test", &mut no_dispatch);
+        let result = at_eighty(&argv(&["work"]), &registry, "test", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
         assert!(result.stdout.contains("usage: vogt"), "{}", result.stdout);
     }
@@ -2544,7 +2590,7 @@ mod tests {
     #[test]
     fn bad_enum_is_usage() {
         let registry = default_registry();
-        let result = run(
+        let result = at_eighty(
             &argv(&[
                 "work", "create", "--kind", "nope", "--title", "x", "--reason", "because",
             ]),
