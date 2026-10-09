@@ -244,7 +244,6 @@ fn gather<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     query: &GatherQuery<'_>,
 ) -> Result<Gathered, VogtError> {
-    let now = now_of(&ctx.clock);
     let view = ctx.declared.read()?;
     let project = query
         .project
@@ -288,8 +287,11 @@ fn gather<C: Clock, I: IdFactory>(
     let signals = git_signals(
         ctx,
         project.as_ref().map(|project| project.id.as_str()),
-        now,
+        now_of(&ctx.clock),
     )?;
+    // The one clock read the scoring uses, taken after the candidate reads, as
+    // Python's `_score_all(..., now=ctx.clock())` does.
+    let now = now_of(&ctx.clock);
     let mut ranked = Vec::new();
     for item in &items {
         let (open_pr, branch_activity) = signals.for_ref(&item.reference);
@@ -391,6 +393,9 @@ fn gather<C: Clock, I: IdFactory>(
                 }
             }
             let kind = crate::decisions::work_kind_of(observation);
+            // Counted before the kind and priority filters, as Python's
+            // `observed.append` is: a filtered-out subject still counts.
+            observed_count += 1;
             if !query.kinds.is_empty() && !query.kinds.iter().any(|wanted| wanted == kind) {
                 continue;
             }
@@ -404,11 +409,9 @@ fn gather<C: Clock, I: IdFactory>(
                 observation.observed_at,
                 confirmed.get(&observation.subject_key).copied(),
             );
-            if !query.trust_states.is_empty()
-                && !query.trust_states.iter().any(|wanted| wanted == &trust)
-            {
-                continue;
-            }
+            // Trust narrows only the declared half. Python passes `trust_states`
+            // into the work filter and never checks it against an observed
+            // subject, so a stale observed row survives `--trust-states verified`.
             let (open_pr, branch_activity) = signals.for_ref(&observation.subject_key);
             let mut inputs = RankingInputs::at(now);
             inputs.open_pr = open_pr;
@@ -444,7 +447,6 @@ fn gather<C: Clock, I: IdFactory>(
                     &score.total,
                 ),
             });
-            observed_count += 1;
         }
         let closed = ctx
             .observed
