@@ -3400,13 +3400,26 @@ mod runtime_tests {
 
 use std::sync::LazyLock;
 
-/// Python's `\w` is `str.isalnum()` or `_`. The case-folding is switched off
-/// inside it: under `(?i)` the engine folds U+0345 to ι and then counts that
-/// combining mark as a letter, which erases the word boundary and lets a
-/// credential through. Python never case-folds a character class.
-const PY_WORD: &str = r"(?-i:[\p{L}\p{N}_])";
-/// The same class written inside `[...]`, where a group is not allowed.
-const PY_WORD_CLASS: &str = r"\p{L}\p{N}_";
+/// Python's `\w` is `str.isalnum()` or `_`, decided by Unicode 15. The engine
+/// here is on Unicode 16, whose new letters are word characters it counts and
+/// Python does not, so a boundary next to one drifts. The case-folding is
+/// switched off inside the class: under `(?i)` the engine folds U+0345 to ι
+/// and then counts that combining mark as a letter, which erases the word
+/// boundary and lets a credential through. Python never case-folds a class.
+const PY_WORD: &str = r"[\p{L}\p{N}_--[^\x00-\u{1c88}\u{1c8b}-\u{a7ca}\u{a7ce}-\u{a7d9}\u{a7dd}-\u{105bf}\u{105f4}-\u{10d3f}\u{10d66}-\u{10d6e}\u{10d86}-\u{10ec1}\u{10ec5}-\u{1137f}\u{1138a}\u{1138c}-\u{1138d}\u{1138f}\u{113b6}\u{113b8}-\u{113d0}\u{113d2}\u{113d4}-\u{116cf}\u{116e4}-\u{11bbf}\u{11be1}-\u{11bef}\u{11bfa}-\u{1345f}\u{143fb}-\u{160ff}\u{1611e}-\u{1612f}\u{1613a}-\u{16d3f}\u{16d6d}-\u{16d6f}\u{16d7a}-\u{18cfe}\u{18d00}-\u{1ccef}\u{1ccfa}-\u{1e5cf}\u{1e5ee}-\u{1e5ef}\u{1e5fb}-\u{2ebef}\u{2ee5e}-\u{10ffff}]]";
+/// The characters an ASCII letter also matches under `(?i)`. Python case-folds
+/// and the engine does not: `İ`/`ı` fold to `i`, `ſ` to `s`, `K` to `k`.
+fn folded(ch: char) -> Option<&'static str> {
+    match ch {
+        'i' | 'I' => Some("İı"),
+        's' | 'S' => Some("ſ"),
+        'k' | 'K' => Some("K"),
+        _ => None,
+    }
+}
+/// The body of `PY_WORD`, for a class that cannot hold a group. The trailing
+/// `]` of the set is dropped.
+const PY_WORD_CLASS: &str = r"\p{L}\p{N}_--[^\x00-\u{1c88}\u{1c8b}-\u{a7ca}\u{a7ce}-\u{a7d9}\u{a7dd}-\u{105bf}\u{105f4}-\u{10d3f}\u{10d66}-\u{10d6e}\u{10d86}-\u{10ec1}\u{10ec5}-\u{1137f}\u{1138a}\u{1138c}-\u{1138d}\u{1138f}\u{113b6}\u{113b8}-\u{113d0}\u{113d2}\u{113d4}-\u{116cf}\u{116e4}-\u{11bbf}\u{11be1}-\u{11bef}\u{11bfa}-\u{1345f}\u{143fb}-\u{160ff}\u{1611e}-\u{1612f}\u{1613a}-\u{16d3f}\u{16d6d}-\u{16d6f}\u{16d7a}-\u{18cfe}\u{18d00}-\u{1ccef}\u{1ccfa}-\u{1e5cf}\u{1e5ee}-\u{1e5ef}\u{1e5fb}-\u{2ebef}\u{2ee5e}-\u{10ffff}]";
 /// Python's `\s`: Unicode whitespace plus the C0 controls U+001C to U+001F.
 const PY_SPACE_CLASS: &str = r"\s\x1c-\x1f";
 
@@ -3420,17 +3433,17 @@ fn python_pattern(pattern: &str) -> String {
     let mut chars = pattern.chars().peekable();
     let mut escaped = false;
     let mut class = false;
+    let mut ignore_case = false;
+    let mut group = 0;
     #[allow(clippy::while_let_on_iterator)]
     while let Some(ch) = chars.next() {
         if escaped {
             if class {
                 match ch {
-                    'w' => out.push_str(PY_WORD_CLASS),
-                    'W' => out.push_str(r"\P{L}\P{N}"),
+                    'w' => out.push_str(&format!("[{PY_WORD_CLASS}]")),
+                    'W' => out.push_str(&format!("[^{PY_WORD_CLASS}]")),
                     's' => out.push_str(PY_SPACE_CLASS),
-                    'S' => {
-                        out.push_str("][^\\s\\x1c-\\x1f");
-                    }
+                    'S' => out.push_str(&format!("][^{PY_SPACE_CLASS}")),
                     'd' => out.push_str(r"\d"),
                     'D' => out.push_str(r"\D"),
                     'b' => out.push('\u{0008}'),
@@ -3442,15 +3455,15 @@ fn python_pattern(pattern: &str) -> String {
             } else {
                 match ch {
                     'b' => out.push_str(&format!(
-                        r"(?:(?<!{PY_WORD})(?={PY_WORD})|(?<={PY_WORD})(?!{PY_WORD}))"
+                        r"(?-i:(?:(?<!{PY_WORD})(?={PY_WORD})|(?<={PY_WORD})(?!{PY_WORD})))"
                     )),
                     'B' => out.push_str(&format!(
-                        r"(?:(?<!{PY_WORD})(?!{PY_WORD})|(?<={PY_WORD})(?={PY_WORD}))"
+                        r"(?-i:(?:(?<!{PY_WORD})(?!{PY_WORD})|(?<={PY_WORD})(?={PY_WORD})))"
                     )),
-                    'w' => out.push_str(PY_WORD),
-                    'W' => out.push_str(&format!("(?:(?!{PY_WORD}).)")),
+                    'w' => out.push_str(&format!("(?-i:{PY_WORD})")),
+                    'W' => out.push_str(&format!(r"(?:(?!(?-i:{PY_WORD}))(?s:.))")),
                     's' => out.push_str(&format!("[{PY_SPACE_CLASS}]")),
-                    'S' => out.push_str(&format!("(?:(?![{PY_SPACE_CLASS}]).)")),
+                    'S' => out.push_str(&format!(r"(?:(?![{PY_SPACE_CLASS}])(?s:.))")),
                     'd' => out.push_str(r"\d"),
                     other => {
                         out.push('\\');
@@ -3461,14 +3474,56 @@ fn python_pattern(pattern: &str) -> String {
             escaped = false;
         } else if ch == '\\' {
             escaped = true;
-        } else if ch == '[' && !class && starts_any_class(&mut chars) {
-            out.push_str("(?s:.)");
-        } else {
-            if ch == '[' && !class {
-                class = true;
-            } else if ch == ']' && class {
-                class = false;
+        } else if ch == '(' && chars.peek() == Some(&'?') {
+            out.push(ch);
+            let mut flag = String::new();
+            let mut closed = false;
+            while let Some(next) = chars.next() {
+                out.push(next);
+                if next == ')' || next == ':' {
+                    closed = next == ')';
+                    break;
+                }
+                flag.push(next);
             }
+            let flags = flag.trim_start_matches('?');
+            if !flags.starts_with('P') && !flags.contains('<') {
+                if let Some(rest) = flags.strip_prefix('-') {
+                    if rest.contains('i') {
+                        ignore_case = false;
+                    }
+                } else if flags.contains('i') {
+                    ignore_case = true;
+                }
+            }
+            if !closed {
+                group += 1;
+            }
+        } else if ch == '(' {
+            group += 1;
+            out.push(ch);
+        } else if ch == ')' && group > 0 {
+            group -= 1;
+            out.push(ch);
+        } else if ch == '[' && !class && group == 0 && starts_any_class(&mut chars) {
+            out.push_str("(?s:.)");
+        } else if ch == '[' && !class && group == 0 {
+            class = true;
+            out.push(ch);
+        } else if ch == ']' && class {
+            class = false;
+            out.push(ch);
+        } else if class {
+            out.push(ch);
+            if ignore_case {
+                if let Some(extra) = folded(ch) {
+                    out.push_str(extra);
+                }
+            }
+        } else if ignore_case && folded(ch).is_some() {
+            let extra = folded(ch).expect("checked");
+            out.push_str(&format!("[{ch}{extra}]"));
+        } else {
             out.push(ch);
         }
     }
@@ -3478,7 +3533,7 @@ fn python_pattern(pattern: &str) -> String {
 /// `[\s\S]` and its swaps mean "any character, including a newline". Consumes
 /// the class when the iterator starts with one.
 fn starts_any_class(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
-    for pair in [r"\s\S", r"\S\s", r"\w\W", r"\W\w", r"\d\D", r"\D\d"] {
+    for pair in ["\\s\\S", "\\S\\s", "\\w\\W", "\\W\\w", "\\d\\D", "\\D\\d"] {
         let class = format!("{pair}]");
         let ahead: String = chars.clone().take(class.chars().count()).collect();
         if ahead == class {
@@ -3525,7 +3580,8 @@ fn sub(pattern: &fancy_regex::Regex, replacement: &str, text: &str) -> String {
 }
 
 fn python_regex(pattern: &str) -> fancy_regex::Regex {
-    fancy_regex::Regex::new(&python_pattern(pattern)).expect("pattern")
+    let translated = python_pattern(pattern);
+    fancy_regex::Regex::new(&translated).unwrap_or_else(|err| panic!("pattern {translated}: {err}"))
 }
 
 pub const SUMMARY_LIMIT: usize = 300;
@@ -3542,7 +3598,7 @@ static PEM_BLOCK: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
 static JWT_SHAPE: LazyLock<fancy_regex::Regex> =
     LazyLock::new(|| python_regex(r"\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}"));
 static TOKEN_SHAPES: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
-    fancy_regex::Regex::new(&python_pattern(concat!(
+    let source = concat!(
         r"(?:",
         r"\bgh[pousr]_[A-Za-z0-9]{20,}",
         r"|\bgithub_pat_[A-Za-z0-9_]{20,}",
@@ -3558,8 +3614,9 @@ static TOKEN_SHAPES: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
         r"|\b(?:pk|rk|sk)_(?:live|test)_[A-Za-z0-9]{16,}",
         r"|\bAGE-SECRET-KEY-1[0-9A-Z]{20,}",
         r")",
-    )))
-    .expect("pattern")
+    );
+    let translated = python_pattern(source);
+    fancy_regex::Regex::new(&translated).expect("pattern")
 });
 static AUTH_HEADER: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
     python_regex(
@@ -3641,20 +3698,24 @@ fn activity_blob(text: &str) -> String {
 }
 
 static DUMP_COMMAND: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
-    python_regex(concat!(
+    let source = concat!(
         r"(?i)\.config\.environment|\bconfig\.environment\b|\bprintenv\b",
         r"|(?:^|[;&|(]\s*|\bsudo\s+)env\s*(?:$|[;&|)])|\bdeclare\s+-x\b|\bexport\s+-p\b",
         r"|\bkubectl\s+config\s+view|kube/?config\b|\bk3s\.yaml\b",
         r"|\bcat\s+[^\s|;]*\.env\b|/proc/[^\s]*/environ\b",
         r"|\binfisical\s+(?:secrets|export|run)\b|\bsecrets?\s+(?:get|export|list|show)\b",
         r"|\bGetStack\b|\bGetVariable\b|\bListVariables\b|\bvault\s+(?:kv\s+)?read\b",
-    ))
+    );
+    let translated = python_pattern(source);
+    fancy_regex::Regex::new(&translated).expect("pattern")
 });
 static KUBECONFIG_SHAPE: LazyLock<fancy_regex::Regex> = LazyLock::new(|| {
-    python_regex(concat!(
+    let source = concat!(
         r"(?is)client-(?:key|certificate)-data\s*:|certificate-authority-data\s*:",
         r"|\bkind\s*:\s*Config\b[\s\S]*\busers\s*:",
-    ))
+    );
+    let translated = python_pattern(source);
+    fancy_regex::Regex::new(&translated).expect("pattern")
 });
 static ENV_LINE: LazyLock<fancy_regex::Regex> =
     LazyLock::new(|| python_regex(r"(?m)^\s*(?:export\s+)?[A-Z][A-Z0-9_]{2,}=\S"));
