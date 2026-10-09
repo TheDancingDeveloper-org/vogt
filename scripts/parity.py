@@ -217,17 +217,9 @@ def _dump(data: Path) -> dict[str, Any]:
         ]
         dumped: dict[str, Any] = {}
         for table in tables:
-            # `events.seq` is AUTOINCREMENT and never reused, so a background
-            # sweep that lands between two declared writes shifts every later
-            # seq (WI-1152). Drop those rows in the query rather than after
-            # reading them, so the sequences that remain are the ones the
-            # script itself produced.
-            where = ""
-            if table == "events":
-                where = " WHERE kind != 'sweep.completed'"
             rows = [
                 _normalise(dict(row), data.parent, data)
-                for row in conn.execute(f"SELECT * FROM {table}{where}")
+                for row in conn.execute(f"SELECT * FROM {table}")
             ]
             if rows:
                 dumped[table] = rows
@@ -296,8 +288,16 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             port = sock.getsockname()[1]
+        # `--no-schedule` on both binaries. A background sweep between two
+        # declared writes consumes AUTOINCREMENT `events.seq` values that are
+        # never reused, so later sequences shift, and it races `auth.logout`
+        # into a 500 (WI-1152). With the scheduler off, no sweep row is written
+        # and the declared dump compares verbatim.
         server = subprocess.Popen(
-            [binary, "--data-dir", str(data), "serve", "--host", "127.0.0.1", "--port", str(port)],
+            [
+                binary, "--data-dir", str(data), "serve",
+                "--host", "127.0.0.1", "--port", str(port), "--no-schedule",
+            ],
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -307,6 +307,7 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             base = f"http://127.0.0.1:{port}"
             _wait_until(f"{base}/health/live", server)
             token: str | None = None
+            secrets: list[str] = []
             for step in steps:
                 spec = step["http"]
                 headers = dict(spec.get("headers") or {})
@@ -346,10 +347,11 @@ def _run_http(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 )
                 if spec.get("capture") == "token":
                     token = result["secret"]
-            # The declared tables only. The background sweeps write `sweep.completed`
-            # events whose ids change between runs (WI-1152), so those rows are
-            # dropped; everything else in the declared store compares verbatim.
+                    secrets.append(token)
+            # The declared tables only. The server was started with
+            # `--no-schedule`, so no background sweep writes into them.
             dumped = _normalise(_dump(data), Path(scratch), data)["declared"]
+            _mark_token_hash(dumped, secrets)
             recorded.append({"operation": "dump", "result": dumped})
         finally:
             server.terminate()
@@ -370,6 +372,27 @@ def _wait_until(url: str, server: subprocess.Popen[str], attempts: int = 50) -> 
                 raise SystemExit(f"server exited before answering {url}: {reason}")
             time.sleep(0.1)
     raise SystemExit(f"server never answered {url}")
+
+
+def _mark_token_hash(dumped: dict[str, Any], secrets: list[str]) -> None:
+    """Replace a token hash that is the SHA-256 of a captured secret.
+
+    `hash_token` is deterministic, so a matching hash is the scheme agreeing,
+    not a value that has to be compared. A hash that matches none of the
+    captured secrets stays as it was, which is how a scheme divergence shows
+    up. Scoped to the tokens table of this dump: `token_hash` is not a global
+    volatile key, because blanking it on the CLI would hide the same
+    divergence there. Every captured secret is kept, not just the last one,
+    because the bootstrap token and the issued token are different rows.
+    """
+    import hashlib
+
+    expected = {
+        hashlib.sha256(secret.encode("utf-8")).hexdigest() for secret in secrets
+    }
+    for row in dumped.get("tokens") or []:
+        if isinstance(row, dict) and row.get("token_hash") in expected:
+            row["token_hash"] = "<hash-of-secret>"
 
 
 def _normalise(value: Any, root: Path, data: Path, operation: str | None = None) -> Any:

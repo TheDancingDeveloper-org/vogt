@@ -501,7 +501,7 @@
           "revoked_at": null,
           "revoked_reason": null,
           "scopes": "[\"admin\"]",
-          "token_hash": "<volatile>"
+          "token_hash": "<hash-of-secret>"
         },
         {
           "actor_id": "act_0002",
@@ -514,7 +514,7 @@
           "revoked_at": "2026-01-02T03:04:06+00:00",
           "revoked_reason": "done",
           "scopes": "[\"read\"]",
-          "token_hash": "<volatile>"
+          "token_hash": "<hash-of-secret>"
         }
       ],
       "workflow_defs": [

@@ -1131,5 +1131,50 @@
     "body": null,
     "exit": 1,
     "operation": "inbox.restore"
+  },
+  {
+    "body": {
+      "detail": null,
+      "items": [],
+      "link_state": null,
+      "mode": "summary",
+      "next_offset": null,
+      "total": 0
+    },
+    "exit": 0,
+    "operation": "work.list"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "work.list"
+  },
+  {
+    "body": {
+      "closed_upstream": 0,
+      "declared": 0,
+      "excluded_unlinked": 0,
+      "freshness": {
+        "age_seconds": null,
+        "collectors": "<volatile>",
+        "detail": "no collector has completed a sweep yet",
+        "oldest_relevant_sweep": null,
+        "status": "never_swept"
+      },
+      "items": [],
+      "link_state": null,
+      "next_offset": null,
+      "observed": 0,
+      "scope": "global",
+      "suppressed": 0,
+      "total_considered": 0
+    },
+    "exit": 0,
+    "operation": "backlog"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "backlog"
   }
 ]

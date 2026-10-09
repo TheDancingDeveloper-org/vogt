@@ -19,18 +19,23 @@
 #   observed_at, last_swept_at, oldest_relevant_sweep, age_seconds — all read
 #     from ctx.clock, which the step clock fixes.
 #
-# The HTTP run dumps the declared store. The background sweeps write
-# `sweep.completed` rows into its `events` table, and `events.seq` is
-# AUTOINCREMENT, so a sweep between two declared writes shifts every later seq
-# (WI-1152). The dump query excludes those rows, which leaves the sequences the
-# script itself produced. The rest of the declared tables — audit,
+# The HTTP run dumps the declared store. The server is started with
+# `--no-schedule`, so the background sweep never runs: it would consume
+# AUTOINCREMENT `events.seq` values between declared writes and race
+# `auth.logout` into a 500 (WI-1152). With it off, the declared tables — audit,
 # auth_decisions, tokens, events, actors, labels — are fixed by the hooks and
 # compare verbatim. The observed store is not dumped: it holds the sweeps
 # themselves, which drift the same way.
+#
+# `token_hash` is deliberately not in this list. Python-issued tokens must
+# verify under Rust, and `core/auth.py` `hash_token` is a deterministic SHA-256,
+# so the HTTP dump checks the stored hash against the captured secret and
+# writes `<hash-of-secret>` only when it matches. A blank global key would hide
+# a scheme divergence on the CLI too.
 why = "collector evidence names the machine; everything the hooks make deterministic compares verbatim"
 keys = [
   "collectors", "suppression", "evidence_snapshot", "evidence_observation_id",
-  "secret", "token_hash", "data_dir",
+  "secret", "data_dir",
 ]
 
 [paths]
