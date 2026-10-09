@@ -10,25 +10,56 @@ use std::path::Path;
 use rusqlite::Connection;
 
 pub const BUSY_TIMEOUT_MS: u32 = 5_000;
-pub const DEFAULT_SYNCHRONOUS: &str = "NORMAL";
+pub const DEFAULT_SYNCHRONOUS: &str = "normal";
 
+const SYNCHRONOUS_SETTINGS: &[&str] = &["off", "normal", "full", "extra"];
+
+/// Open a connection with Vogt's pragmas applied.
+///
+/// `create` false and a missing file is `FileNotFoundError` in Python; here it
+/// is `Err`. `synchronous` is checked against a fixed set because a PRAGMA
+/// takes no bound parameters.
 pub fn connect(path: &Path) -> rusqlite::Result<Connection> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            rusqlite::Error::SqliteFailure(
-                rusqlite::ffi::Error {
-                    code: rusqlite::ffi::ErrorCode::CannotOpen,
-                    extended_code: 0,
-                },
-                Some(err.to_string()),
-            )
-        })?;
+    connect_with(path, true, DEFAULT_SYNCHRONOUS)
+}
+
+pub fn connect_with(path: &Path, create: bool, synchronous: &str) -> rusqlite::Result<Connection> {
+    if !SYNCHRONOUS_SETTINGS.contains(&synchronous.to_ascii_lowercase().as_str()) {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::Unknown,
+                extended_code: 0,
+            },
+            Some(format!("unknown synchronous setting: {synchronous:?}")),
+        ));
+    }
+    if !create && !path.exists() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ffi::ErrorCode::CannotOpen,
+                extended_code: 0,
+            },
+            Some(format!("no database at {}", path.display())),
+        ));
+    }
+    if create {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|err| {
+                rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error {
+                        code: rusqlite::ffi::ErrorCode::CannotOpen,
+                        extended_code: 0,
+                    },
+                    Some(err.to_string()),
+                )
+            })?;
+        }
     }
     let conn = Connection::open(path)?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     conn.pragma_update(None, "busy_timeout", BUSY_TIMEOUT_MS)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", DEFAULT_SYNCHRONOUS)?;
+    conn.pragma_update(None, "synchronous", synchronous.to_ascii_uppercase())?;
     Ok(conn)
 }
 

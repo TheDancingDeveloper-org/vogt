@@ -56,8 +56,9 @@ impl Migration {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
+    pub store: String,
     pub applied: Vec<String>,
     pub version: i64,
 }
@@ -233,6 +234,7 @@ pub fn migrate(
             apply_one(conn, store, migration, now)?;
         }
         Ok(Report {
+            store: store.to_string(),
             applied: pending
                 .iter()
                 .map(|migration| migration.id.clone())
@@ -279,12 +281,12 @@ fn verify_forward_only(
         match known {
             None => {
                 return Err(MigrateError::Message(format!(
-                    "{store}: migration {id} is applied in the database but absent from this build"
+                    "{store}: migration {id} is applied in the database but absent from this build — the database is ahead of the code. Migrations are forward-only; restore a backup or deploy the newer build."
                 )));
             }
             Some(migration) if migration.checksum != checksum => {
                 return Err(MigrateError::Message(format!(
-                    "{store}: migration {id} was modified after being applied"
+                    "{store}: migration {id} was modified after being applied. Migrations are forward-only — add a new migration instead of editing an applied one."
                 )));
             }
             Some(_) => {}
@@ -396,6 +398,7 @@ pub fn open_and_migrate(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::sqlite::connection::connect_with;
 
     #[test]
     fn the_embedded_sql_matches_the_checkout() {
@@ -466,6 +469,269 @@ mod tests {
                 .unwrap()
                 .unix_seconds()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    const NOW: &str = "2026-08-12T05:00:00+00:00";
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-mig-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_migration(directory: &Path, name: &str, sql: &str) {
+        std::fs::create_dir_all(directory).unwrap();
+        std::fs::write(directory.join(name), sql).unwrap();
+    }
+
+    #[test]
+    fn applies_pending_migrations_in_order() {
+        let dir = scratch("order");
+        let migrations = dir.join("migrations");
+        write_migration(&migrations, "0001_a.sql", "CREATE TABLE a (id TEXT);");
+        write_migration(&migrations, "0002_b.sql", "CREATE TABLE b (id TEXT);");
+        let mut conn = connect(&dir.join("db.sqlite3")).unwrap();
+
+        let report = migrate(&mut conn, "test", Some(&migrations), "test/1", NOW).unwrap();
+
+        assert_eq!(report.applied, ["0001_a", "0002_b"]);
+        assert_eq!(report.version, 2);
+        assert_eq!(report.store, "test");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrating_twice_applies_nothing() {
+        let dir = scratch("twice");
+        let migrations = dir.join("migrations");
+        write_migration(&migrations, "0001_a.sql", "CREATE TABLE a (id TEXT);");
+        let mut conn = connect(&dir.join("db.sqlite3")).unwrap();
+
+        migrate(&mut conn, "test", Some(&migrations), "test/1", NOW).unwrap();
+        let second = migrate(&mut conn, "test", Some(&migrations), "test/1", NOW).unwrap();
+
+        assert!(second.applied.is_empty());
+        assert_eq!(second.version, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn editing_an_applied_migration_fails_loudly() {
+        let dir = scratch("edit");
+        let migrations = dir.join("migrations");
+        let path = migrations.join("0001_a.sql");
+        write_migration(&migrations, "0001_a.sql", "CREATE TABLE a (id TEXT);");
+        let mut conn = connect(&dir.join("db.sqlite3")).unwrap();
+        migrate(&mut conn, "test", Some(&migrations), "test/1", NOW).unwrap();
+
+        std::fs::write(&path, "CREATE TABLE a (id TEXT, extra TEXT);").unwrap();
+
+        let err = migrate(&mut conn, "test", Some(&migrations), "test/1", NOW)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("forward-only"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_database_ahead_of_the_code_fails_loudly() {
+        let dir = scratch("ahead");
+        let migrations = dir.join("migrations");
+        write_migration(&migrations, "0001_a.sql", "CREATE TABLE a (id TEXT);");
+        write_migration(&migrations, "0002_b.sql", "CREATE TABLE b (id TEXT);");
+        let mut conn = connect(&dir.join("db.sqlite3")).unwrap();
+        migrate(&mut conn, "test", Some(&migrations), "test/1", NOW).unwrap();
+
+        std::fs::remove_file(migrations.join("0002_b.sql")).unwrap();
+
+        let err = migrate(&mut conn, "test", Some(&migrations), "test/1", NOW)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ahead of the code"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failing_migration_rolls_back_and_is_not_recorded() {
+        let dir = scratch("rollback");
+        let migrations = dir.join("migrations");
+        write_migration(
+            &migrations,
+            "0001_a.sql",
+            "CREATE TABLE a (id TEXT);\nCREATE TABLE a (x TEXT);",
+        );
+        let mut conn = connect(&dir.join("db.sqlite3")).unwrap();
+
+        let err = migrate(&mut conn, "test", Some(&migrations), "test/1", NOW)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("0001_a failed"), "{err}");
+
+        let tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert!(!tables.contains(&"a".to_string()));
+        let recorded: i64 = conn
+            .query_row("SELECT COUNT(*) FROM migrations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(recorded, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn duplicate_migration_numbers_are_rejected() {
+        let dir = scratch("dup");
+        let migrations = dir.join("migrations");
+        write_migration(&migrations, "0001_a.sql", "CREATE TABLE a (id TEXT);");
+        write_migration(&migrations, "0001_b.sql", "CREATE TABLE b (id TEXT);");
+
+        let err = load_migrations("test", Some(&migrations))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate migration number"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shipped_migration_ids_are_an_append_only_prefix() {
+        // Identities already delivered to instances. New migrations append
+        // after this prefix; renaming one of these is unsafe because a
+        // deployed database records the full id.
+        let declared = [
+            "0001_foundation",
+            "0002_work",
+            "0003_observed_first",
+            "0004_drift",
+            "0005_tokens",
+            "0006_writeback",
+            "0007_sessions",
+            "0008_superseded_drift",
+            "0009_inbox_triage",
+            "0010_session_model",
+        ];
+        let observed = [
+            "0001_foundation",
+            "0002_evidence",
+            "0003_inherited_dep_refs",
+        ];
+        for (store, shipped) in [("declared", &declared[..]), ("observed", &observed[..])] {
+            let available = load_migrations(store, None).unwrap();
+            for (position, shipped_id) in shipped.iter().enumerate() {
+                let actual = available
+                    .get(position)
+                    .map(|migration| migration.id.as_str())
+                    .unwrap_or("<missing>");
+                assert_eq!(actual, *shipped_id, "{store} position {}", position + 1);
+            }
+        }
+    }
+
+    #[test]
+    fn split_statements_ignores_comments_and_strings() {
+        let script = "
+        -- a comment with a ; semicolon
+        INSERT INTO t (v) VALUES ('a;b');
+        CREATE TABLE u (id TEXT)
+        ";
+        assert_eq!(
+            split_statements(script),
+            [
+                "INSERT INTO t (v) VALUES ('a;b')",
+                "CREATE TABLE u (id TEXT)",
+            ]
+        );
+    }
+
+    #[test]
+    fn shipped_migrations_bring_both_stores_up() {
+        let dir = scratch("shipped");
+        for store in ["declared", "observed"] {
+            let mut conn = connect(&dir.join(format!("{store}.sqlite3"))).unwrap();
+            assert_eq!(applied_version(&conn).unwrap(), 0);
+            let report = migrate(&mut conn, store, None, "test/1", NOW).unwrap();
+            assert_eq!(
+                report.applied.first().map(String::as_str),
+                Some("0001_foundation")
+            );
+            let mut sorted = report.applied.clone();
+            sorted.sort();
+            assert_eq!(report.applied, sorted);
+            assert_eq!(applied_version(&conn).unwrap(), report.applied.len() as i64);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_old_database_opens_and_migrates_forward() {
+        // A database written by an earlier build (only 0001) upgrades through
+        // the embedded SQL and keeps the row it already held.
+        let dir = scratch("upgrade");
+        let old = dir.join("old");
+        let shipped = load_migrations("declared", None).unwrap();
+        let first = shipped
+            .iter()
+            .find(|migration| migration.number() == 1)
+            .unwrap();
+        write_migration(&old, &format!("{}.sql", first.id), &first.sql);
+
+        let path = dir.join("declared.sqlite3");
+        let mut conn = connect(&path).unwrap();
+        migrate(&mut conn, "declared", Some(&old), "old/1", NOW).unwrap();
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('instance_id', 'inst_old')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let mut conn = connect_with(&path, false, "off").unwrap();
+        let report = migrate(&mut conn, "declared", None, "new/2", NOW).unwrap();
+        assert!(
+            report.applied.contains(&"0002_work".to_string()),
+            "{:?}",
+            report.applied
+        );
+        let kept: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'instance_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "inst_old");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_database_is_not_created_and_a_bad_synchronous_is_refused() {
+        let dir = scratch("connect");
+        let missing = dir.join("absent.sqlite3");
+        let err = connect_with(&missing, false, "normal")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no database"), "{err}");
+        assert!(!missing.exists());
+
+        let present = dir.join("present.sqlite3");
+        connect(&present).unwrap();
+        let err = connect_with(&present, false, "sometimes")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown synchronous setting"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

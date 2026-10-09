@@ -1180,6 +1180,91 @@ pub struct ForgeAccount {
     pub updated_at: Moment,
 }
 
+/// Append-only ledger row. Ports `AuditRecord`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuditRecord {
+    pub id: String,
+    pub revision: i64,
+    pub actor_id: String,
+    pub operation: String,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub reason: String,
+    pub at: Moment,
+}
+
+/// Published change. Ports `Event`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Event {
+    pub seq: i64,
+    pub kind: String,
+    pub entity_kind: String,
+    pub entity_id: String,
+    pub summary: String,
+    pub at: Moment,
+}
+
+/// A proposed correction of declared state. Ports `DriftProposal`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftProposal {
+    pub id: String,
+    pub kind: String,
+    pub project_id: Option<String>,
+    pub subject_key: String,
+    pub status: String,
+    pub detail: String,
+    pub created_at: Moment,
+}
+
+/// One person's disposition of an inbox entry. Ports `InboxTriage`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InboxTriage {
+    pub entry_key: String,
+    pub actor_id: String,
+    pub state: String,
+    pub updated_at: Moment,
+}
+
+/// A per-actor preference. Ports `ActorPreference`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActorPreference {
+    pub actor_id: String,
+    pub key: String,
+    pub value: serde_json::Value,
+    pub version: i64,
+    pub updated_at: Moment,
+}
+
+/// A resolved dependency edge. Ports `DepRef`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DepRef {
+    pub subject_key: String,
+    pub from_project_id: String,
+    pub ref_kind: String,
+    pub raw_target: String,
+    pub manifest: Option<String>,
+    pub to_project_id: Option<String>,
+    pub observed_at: Moment,
+}
+
+/// One collector run. Ports `Sweep`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sweep {
+    pub id: String,
+    pub collector: String,
+    pub outcome: String,
+    pub started_at: Moment,
+    pub finished_at: Option<Moment>,
+}
+
+/// How a sweep ended. Ports `SweepOutcome`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepOutcome {
+    Ok,
+    Partial,
+    Failed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
