@@ -99,18 +99,21 @@ async fn login<C: Clock, I: IdFactory>(
     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
         .unwrap_or_default();
-    let params = match serde_json::from_slice::<serde_json::Value>(&body) {
-        Ok(serde_json::Value::Object(object)) => serde_json::Value::Object(object),
-        _ => {
-            return invalid_arguments(&VogtError::InvalidRequest(
+    let params =
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(serde_json::Value::Object(object)) => serde_json::Value::Object(object),
+            _ => return invalid_arguments(&VogtError::InvalidRequest(
                 "invalid arguments for auth.login:\n1 validation error for request body\nbody\n  \
                  Input should be a valid JSON object"
                     .to_string(),
-            ))
-        }
-    };
+            )),
+        };
     for field in ["username", "password"] {
-        if params.get(field).and_then(serde_json::Value::as_str).is_none() {
+        if params
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .is_none()
+        {
             return invalid_arguments(&VogtError::InvalidRequest(format!(
                 "invalid arguments for auth.login:\n1 validation error for LoginParams\n{field}\n  \
                  Field required"
