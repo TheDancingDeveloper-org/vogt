@@ -16,7 +16,7 @@ use axum::response::Response;
 use axum::Router;
 
 use crate::adapters::auth_gate::{self, Grant, Request as AuthRequest};
-use crate::core::{local_principal, os_user, Clock, IdFactory, Principal};
+use crate::core::{Clock, IdFactory, Principal};
 use crate::errors::VogtError;
 use crate::registry::{
     default_registry, validate, HttpMethod, Operation, OperationRegistry, Transport,
@@ -541,7 +541,20 @@ async fn dispatch<C: Clock, I: IdFactory>(
             return error_response(&denial.error());
         }
     };
-    let built = context_for(&request_store, &state, &grant, build);
+    let principal = match auth_gate::principal_for(&grant) {
+        Ok(principal) => principal,
+        // An authenticated grant with no usable identity must not run as the
+        // local operator. The decision row is already written, so this is the
+        // same plain 500 an unrecorded decision gets.
+        Err(_) => {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header("content-type", "text/plain; charset=utf-8")
+                .body(Body::from("Internal Server Error"))
+                .expect("a fixed response builds");
+        }
+    };
+    let built = context_for(&request_store, &state, &grant, principal, build);
     match operation.run(built.as_ref(), params) {
         Ok(value) => json_response(StatusCode::OK, value),
         // Not ported is not the caller's fault, so it is not a 400. The shared
@@ -776,17 +789,12 @@ fn context_for<C: Clock, I: IdFactory>(
     store: &SqliteDeclaredStore<C, I>,
     state: &AppState<C, I>,
     grant: &Grant,
+    principal: crate::core::Principal,
     build: ContextBuild<C, I>,
 ) -> Option<crate::application::context::Built> {
-    let principal = match &grant.identity_ref {
-        Some(identity_ref) if !identity_ref.is_empty() => {
-            Principal::new(identity_ref, grant.kind, &grant.display_name).ok()
-        }
-        _ => Some(local_principal(&os_user())),
-    };
     Some(build(
         state.config.clone(),
-        principal,
+        Some(principal),
         Arc::clone(store.clock()),
         Arc::clone(store.id_factory()),
         grant.token.clone(),

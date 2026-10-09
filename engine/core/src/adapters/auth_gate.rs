@@ -243,6 +243,33 @@ fn resolve<S: DeclaredStore>(
     })
 }
 
+/// The principal a grant acts as.
+///
+/// Only the `--no-auth` grant, which holds no token, is the local operator.
+/// An authenticated grant names its actor, and one whose actor has no
+/// identity is refused rather than silently treated as that person: a person
+/// passes the gates an agent does not. `Principal::new` refusing the identity
+/// is the same failure, reported instead of dropped.
+pub fn principal_for(grant: &Grant) -> Result<crate::core::Principal, &'static str> {
+    let Some(identity_ref) = grant.identity_ref.as_deref() else {
+        return no_identity(grant);
+    };
+    if identity_ref.is_empty() {
+        return no_identity(grant);
+    }
+    crate::core::Principal::new(identity_ref, grant.kind, &grant.display_name)
+        .map_err(|_| "the token's actor has no usable identity")
+}
+
+/// The local operator when the grant is the no-auth one, and a refusal when an
+/// authenticated grant arrived without an identity.
+fn no_identity(grant: &Grant) -> Result<crate::core::Principal, &'static str> {
+    if grant.token.is_none() {
+        return Ok(crate::core::local_principal(&crate::core::os_user()));
+    }
+    Err("the token's actor has no identity")
+}
+
 struct Rejection {
     code: &'static str,
     /// The token the refusal belongs to, when one was found. An unknown token
@@ -420,5 +447,55 @@ fn slide<S: DeclaredStore>(store: &S, token: &Token, now: Moment, session_ttl_da
     }
     if let Err(error) = store.touch_token(&token.id, now, renewal) {
         tracing::warn!("the token's last use could not be recorded: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{principal_for, Grant};
+    use crate::core::ActorKind;
+
+    fn grant(identity_ref: Option<&str>, token: bool) -> Grant {
+        Grant {
+            actor_id: "act_1".to_string(),
+            identity_ref: identity_ref.map(str::to_string),
+            kind: ActorKind::Agent,
+            display_name: "worker".to_string(),
+            token_id: "tok_1".to_string(),
+            scopes: vec!["read".to_string()],
+            token: token.then(|| crate::core::Token {
+                id: "tok_1".to_string(),
+                actor_id: "act_1".to_string(),
+                actor_identity_ref: identity_ref.map(str::to_string),
+                kind: crate::core::TokenKind::Api,
+                scopes: vec!["read".to_string()],
+                name: String::new(),
+                created_at: crate::core::Moment::from_unix(0, 0),
+                last_used_at: None,
+                expires_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn an_authenticated_grant_keeps_its_actor() {
+        let principal = principal_for(&grant(Some("agent:worker"), true)).unwrap();
+        assert_eq!(principal.identity_ref, "agent:worker");
+        assert_eq!(principal.kind, ActorKind::Agent);
+    }
+
+    #[test]
+    fn the_no_auth_grant_is_the_local_operator() {
+        let principal = principal_for(&grant(None, false)).unwrap();
+        assert!(principal.identity_ref.starts_with("local:"));
+        assert_eq!(principal.kind, ActorKind::Human);
+    }
+
+    #[test]
+    fn an_authenticated_grant_with_no_identity_is_refused() {
+        assert!(principal_for(&grant(None, true)).is_err());
+        assert!(principal_for(&grant(Some(""), true)).is_err());
     }
 }

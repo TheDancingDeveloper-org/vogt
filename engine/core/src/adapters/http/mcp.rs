@@ -217,6 +217,17 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
         Ok(grant) => grant,
         Err(denial) => return unauthenticated(denial),
     };
+    let principal = match auth_gate::principal_for(&grant) {
+        Ok(principal) => principal,
+        // An authenticated grant whose actor has no identity must not run as
+        // the local operator. The caller already authenticated, so this is the
+        // plain 500 an unrecorded decision gets.
+        Err(_) => {
+            return unauthenticated(Denial::Unrecorded {
+                failure: "the token's actor has no identity".to_string(),
+            });
+        }
+    };
     if let Some(operation) = called_operation(&message, &registry) {
         if let Err(denial) = record_call(&request_store, &state, &grant, operation, now) {
             return refusal(&message, operation, &grant, denial);
@@ -230,7 +241,14 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
         scopes: grant.scopes.clone(),
         writes_enabled: state.writes_enabled || state.no_auth,
     };
-    let built = context_for(&request_store, &state, &grant, build, operation_clock);
+    let built = context_for(
+        &request_store,
+        &state,
+        &grant,
+        principal,
+        build,
+        operation_clock,
+    );
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
     if let Some(context) = built.as_ref() {
         dispatcher = dispatcher.with_context(context);
@@ -259,20 +277,13 @@ fn context_for<C: Clock, I: IdFactory>(
     store: &SqliteDeclaredStore<C, I>,
     state: &McpState<C, I>,
     grant: &auth_gate::Grant,
+    principal: crate::core::Principal,
     build: ContextBuild<C, I>,
     clock: Arc<Mutex<C>>,
 ) -> Option<crate::application::context::Built> {
-    use crate::core::{local_principal, os_user, Principal};
-    let config = state.config.clone();
-    let principal = match &grant.identity_ref {
-        Some(identity_ref) if !identity_ref.is_empty() => {
-            Principal::new(identity_ref, grant.kind, &grant.display_name).ok()
-        }
-        _ => Some(local_principal(&os_user())),
-    };
     Some(build(
-        config,
-        principal,
+        state.config.clone(),
+        Some(principal),
         clock,
         Arc::clone(store.id_factory()),
         grant.token.clone(),
