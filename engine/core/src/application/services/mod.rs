@@ -17,6 +17,7 @@ pub mod work;
 
 mod inbox;
 mod initiatives;
+pub mod lifecycle;
 mod notifications;
 mod preferences;
 
@@ -49,6 +50,8 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "inbox.archive" => inbox::inbox_archive_op,
         "inbox.snooze" => inbox::inbox_snooze_op,
         "inbox.restore" => inbox::inbox_restore_op,
+        "backup" => lifecycle::backup_op,
+        "restore" => lifecycle::restore_op,
         _ => return None,
     })
 }
