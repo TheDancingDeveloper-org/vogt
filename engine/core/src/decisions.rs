@@ -3454,6 +3454,7 @@ fn python_pattern(pattern: &str) -> String {
     let mut class_prev = ' ';
     let mut range_start = ' ';
     let mut class_range = false;
+    let mut class_held = false;
     let mut ignore_case = false;
     let mut group = 0;
     #[allow(clippy::while_let_on_iterator)]
@@ -3536,8 +3537,14 @@ fn python_pattern(pattern: &str) -> String {
             class_prev = ' ';
             range_start = ' ';
             class_range = false;
+            class_held = false;
             out.push(ch);
         } else if ch == ']' && class {
+            if class_held && ignore_case {
+                if let Some(extra) = folded(class_prev) {
+                    out.push_str(extra);
+                }
+            }
             class = false;
             out.push(ch);
         } else if class {
@@ -3551,17 +3558,27 @@ fn python_pattern(pattern: &str) -> String {
                 && !matches!(chars.peek(), Some(']') | None);
             out.push(ch);
             let opens_range = range;
-            if !opens_range && !class_range && ignore_case {
-                if let Some(extra) = folded(ch) {
-                    out.push_str(extra);
-                }
-            }
             if opens_range {
                 range_start = class_prev;
                 class_range = true;
+                class_held = false;
             }
             if class_range && ignore_case && ch != '-' {
+                // After the end, not after the start: `[k-z]` would otherwise
+                // read `[kK-z]`, a range whose endpoints no longer sort.
                 out.push_str(&folded_range(range_start, ch));
+            } else if !opens_range && !class_range && ignore_case {
+                // A letter's fold waits one character. Emitted immediately it
+                // would land between a range's start and its dash.
+                if class_held {
+                    if let Some(extra) = folded(class_prev) {
+                        out.push_str(extra);
+                    }
+                }
+                class_held = folded(ch).is_some();
+            }
+            if !class_range && !opens_range && ch == ']' {
+                class_held = false;
             }
             class_prev = ch;
             class_first = false;
@@ -4215,6 +4232,19 @@ mod activity_tests {
             !narrow.contains('\u{212a}'),
             "the fold spanned the dash: {narrow}"
         );
+        // A range whose start itself folds must still compile: the extras come
+        // after the end, so `[k-z]` is not read as a range from `k` to `ſ`.
+        for pattern in [
+            "(?i)[k-z]",
+            "(?i)[I-Z]",
+            "(?i)[S-Z]",
+            "(?i)[^i-n]",
+            "(?i)[i-i]",
+        ] {
+            let translated = python_pattern(pattern);
+            fancy_regex::Regex::new(&translated)
+                .unwrap_or_else(|err| panic!("{pattern} did not compile: {translated}: {err}"));
+        }
     }
 
     #[test]
