@@ -103,9 +103,12 @@ fn resolve<S: DeclaredStore>(
         decision_id,
     } = request;
     if no_auth {
+        // Python's loopback caller is `local:<os-user>`, a human principal, not
+        // a bare "local". The actor id stays empty because no actor row exists.
+        let principal = crate::core::local_principal(&crate::core::os_user());
         return Ok(Grant {
-            actor_id: "local".to_string(),
-            identity_ref: None,
+            actor_id: String::new(),
+            identity_ref: Some(principal.identity_ref),
             token_id: "no-auth".to_string(),
             scopes: vec!["admin".to_string()],
         });
@@ -185,8 +188,6 @@ fn resolve<S: DeclaredStore>(
                 operation_name: operation.name,
             }),
         )?;
-    }
-    if record_allow {
         slide(store, &token, now);
     }
     Ok(Grant {
