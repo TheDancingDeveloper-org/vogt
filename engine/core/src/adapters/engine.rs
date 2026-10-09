@@ -1682,10 +1682,20 @@ pub mod http1 {
             };
             match load_pem_path(std::path::Path::new(&path), kind == "dir") {
                 Ok(mut loaded) => certs.append(&mut loaded),
-                Err(error) => eprintln!(
-                    "vogt: {variable}={} could not be read ({error}); trusting the platform roots only",
-                    std::path::Path::new(&path).display()
-                ),
+                Err(error) => {
+                    // SSL_CERT_DIR replaces the platform roots, so a directory
+                    // that cannot be read leaves the store empty. Saying the
+                    // platform roots are trusted would be the opposite of true.
+                    let fallback = if kind == "dir" {
+                        "trusting nothing"
+                    } else {
+                        "trusting the platform roots only"
+                    };
+                    eprintln!(
+                        "vogt: {variable}={} could not be read ({error}); {fallback}",
+                        std::path::Path::new(&path).display()
+                    );
+                }
             }
         }
         // Python's urllib uses SSL_CERT_DIR instead of the platform capath, so

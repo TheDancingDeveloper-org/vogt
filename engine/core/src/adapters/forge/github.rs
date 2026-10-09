@@ -911,7 +911,7 @@ fn parse_prefixed(candidate: &str) -> Option<(String, String, String, String)> {
         Some((host, path)) => (host, path.to_string()),
         None => (authority_and_path, String::new()),
     };
-    if raw_host.is_empty() {
+    if raw_host.is_empty() || authority_rejected(raw_host) {
         return None;
     }
     let host = raw_host.rsplit('@').next().unwrap_or(raw_host);
@@ -921,6 +921,18 @@ fn parse_prefixed(candidate: &str) -> Option<(String, String, String, String)> {
     }
     let path = split_params(&path);
     Some((host.to_ascii_lowercase(), path, query, fragment))
+}
+
+/// `urlparse` raises `ValueError` on a netloc it cannot read, and `repo_of`
+/// does not catch it, so those URLs are not repositories. That is a netloc with
+/// a bracket (an IPv6 host that is missing, unbalanced, or not the host) or any
+/// non-ASCII character, which the NFKC check rejects when it normalises to a
+/// delimiter. Rejecting every such netloc is fail-closed: a real `github.com`
+/// netloc is ASCII and has no brackets.
+fn authority_rejected(authority: &str) -> bool {
+    authority
+        .chars()
+        .any(|ch| !ch.is_ascii() || matches!(ch, '[' | ']'))
 }
 
 /// `urlparse._splitparams`: a `;` splits parameters off only when it sits in
@@ -995,6 +1007,22 @@ mod tests {
                 Some(("o".to_owned(), "r".to_owned())),
                 "{case:?}"
             );
+        }
+        // urlparse raises on these, and repo_of does not catch it. A bracket or
+        // a non-ASCII character anywhere in the netloc is that raise.
+        for case in [
+            "github.com:1]/o/r",
+            "github.com:]/o/r",
+            "github.com:[1/o/r",
+            "github.com:x]y/o/r",
+            "github.com:\u{ff1a}/o/r",
+            "u]@github.com/o/r",
+            "u[@github.com/o/r",
+            "x\u{ff1a}@github.com/o/r",
+            "u\u{ff20}v@github.com/o/r",
+            "[::1]@github.com/o/r",
+        ] {
+            assert_eq!(repo_of(Some(case)), None, "{case:?}");
         }
     }
 
