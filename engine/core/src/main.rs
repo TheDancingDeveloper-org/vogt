@@ -404,12 +404,14 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
     )
     .expect("the hooks were validated at startup");
     let writes_enabled = std::env::var("VOGT_READ_ONLY").ok().is_none();
-    let health = adapters::http::health::router(adapters::http::health::HealthState {
-        data_dir: data_dir.clone(),
-        version: VERSION.to_string(),
-        auth_enabled: !no_auth,
-        writes_enabled,
-    });
+    let health = adapters::http::openapi::router().merge(adapters::http::health::router(
+        adapters::http::health::HealthState {
+            data_dir: data_dir.clone(),
+            version: VERSION.to_string(),
+            auth_enabled: !no_auth,
+            writes_enabled,
+        },
+    ));
     // Both routes join the context's store, so their recorded rows use the same
     // clock and id sequence as the rest of the process, hooks included.
     let router = match &built {
