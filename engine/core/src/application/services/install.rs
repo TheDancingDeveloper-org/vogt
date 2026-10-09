@@ -119,6 +119,7 @@ fn bootstrap_request<C: Clock + 'static, I: IdFactory + 'static>(
         identity_ref: identity_ref.to_string(),
         token_name: params["token_name"]
             .as_str()
+            .filter(|name| !name.is_empty())
             .unwrap_or("first-run browser token")
             .to_string(),
         username,
@@ -261,12 +262,14 @@ mod tests {
             json!({
                 "display_name": "Ada Lovelace",
                 "password": "correct horse battery",
-                "token_name": "browser",
             }),
         )
         .unwrap();
         assert_eq!(minted["actor"]["identity_ref"], "human:ada-lovelace");
         assert_eq!(minted["token"]["kind"], "session");
+        // install.bootstrap has no recorded schema, so the validator fills
+        // nothing and the service supplies the default itself.
+        assert_eq!(minted["token"]["name"], "first-run browser token");
         assert_eq!(minted["username"], "ada-lovelace");
         assert!(minted["secret"].as_str().unwrap().starts_with("vogt_"));
         assert!(minted["token"]["expires_at"].is_string());
