@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
-use base64::engine::general_purpose::URL_SAFE;
+use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, URL_SAFE};
 use base64::Engine;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -189,12 +189,13 @@ fn bad_token() -> VogtError {
 /// `base64.urlsafe_b64decode`, which is what `cryptography` decodes a Fernet
 /// key and token with.
 ///
-/// That is wider than the urlsafe alphabet: the standard alphabet (`+`, `/`)
-/// is accepted, so a key from `openssl rand -base64 32` works, and characters
-/// outside either alphabet are skipped rather than rejected. It is also
-/// stricter in one direction: the padding must already be correct, because
-/// adding a missing `=` would accept a 43-character key that Python refuses,
-/// and a rollback to Python would then find every stored token unreadable.
+/// Wider than the urlsafe alphabet in three ways, each of which a key in the
+/// wild relies on: the standard alphabet (`+`, `/`) is accepted, so a key from
+/// `openssl rand -base64 32` works; characters outside either alphabet are
+/// skipped; and non-zero spare bits in the last character are tolerated, as is
+/// padding beyond a complete pad. It is stricter in one direction: the padding
+/// must already be present, because adding a missing `=` would accept a
+/// 43-character key that Python refuses.
 fn decode_b64(bytes: &[u8]) -> Result<Vec<u8>, base64::DecodeError> {
     let mut cleaned = Vec::with_capacity(bytes.len());
     for byte in bytes {
@@ -205,10 +206,22 @@ fn decode_b64(bytes: &[u8]) -> Result<Vec<u8>, base64::DecodeError> {
             _ => {}
         }
     }
+    // Python stops reading once the padding is complete, so an extra `=` after
+    // it is ignored rather than a reason to refuse the key.
+    if let Some(pad) = cleaned.iter().position(|byte| *byte == b'=') {
+        let kept = pad + (4 - pad % 4) % 4;
+        cleaned.truncate(kept);
+    }
     if !cleaned.len().is_multiple_of(4) {
         return Err(base64::DecodeError::InvalidPadding);
     }
-    URL_SAFE.decode(cleaned)
+    // The last character of a 32-byte key carries four spare bits. Python
+    // ignores them; refusing them would turn linking off for such a key.
+    let engine = GeneralPurpose::new(
+        &base64::alphabet::URL_SAFE,
+        GeneralPurposeConfig::new().with_decode_allow_trailing_bits(true),
+    );
+    engine.decode(cleaned)
 }
 
 fn trim_ascii(bytes: &[u8]) -> &[u8] {
@@ -273,6 +286,18 @@ mod tests {
         // too: accepting it would make a rollback unable to read the tokens.
         let unpadded = KEY.trim_end_matches('=');
         assert!(decode_b64(unpadded.as_bytes()).is_err());
+        // Non-zero spare bits in the last character, and padding past a
+        // complete pad, are both accepted by urlsafe_b64decode.
+        assert_eq!(
+            decode_b64(b"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB=")
+                .unwrap()
+                .len(),
+            KEY_LEN
+        );
+        assert_eq!(
+            decode_b64(format!("{KEY}=").as_bytes()).unwrap().len(),
+            KEY_LEN
+        );
     }
 
     #[test]
