@@ -814,27 +814,24 @@ impl Workflow {
             .get("transitions")
             .and_then(|item| item.as_object())
             .ok_or_else(|| format!("workflow definition for {kind} has no transitions map"))?;
-        // serde_json reorders object keys, but the definition is stored in the
-        // order it was written and that order is part of the value: a reloaded
-        // workflow must compare equal to the one saved. The keys are read back
-        // in the order they appear in the text.
-        let mut transitions: Vec<(String, Vec<String>)> = Vec::new();
-        if let Some(body) = transitions_object(text) {
-            for key in object_keys_in_order(body) {
-                let Some(list) = raw.get(&key).and_then(|item| item.as_array()) else {
-                    continue;
-                };
-                transitions.push((
-                    key,
-                    list.iter()
-                        .map(|item| match item {
-                            serde_json::Value::String(text) => text.clone(),
-                            other => other.to_string(),
-                        })
-                        .collect(),
-                ));
-            }
-        }
+        // serde_json is built with preserve_order, so iterating the map gives
+        // the keys in the order they were written, escapes already decoded.
+        let transitions = raw
+            .iter()
+            .filter_map(|(source, targets)| {
+                targets.as_array().map(|list| {
+                    (
+                        source.clone(),
+                        list.iter()
+                            .map(|item| match item {
+                                serde_json::Value::String(text) => text.clone(),
+                                other => other.to_string(),
+                            })
+                            .collect(),
+                    )
+                })
+            })
+            .collect();
         let initial = value
             .get("initial_state")
             .and_then(|item| item.as_str())
@@ -882,75 +879,6 @@ impl Workflow {
         }
         None
     }
-}
-
-/// The text inside the `transitions` object, braces excluded.
-fn transitions_object(text: &str) -> Option<&str> {
-    let start = text.find("\"transitions\"")?;
-    let after = &text[start + "\"transitions\"".len()..];
-    let open = after.find('{')?;
-    let body = &after[open + 1..];
-    let mut depth = 1i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (index, byte) in body.bytes().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match byte {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(&body[..index]);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Top-level keys of one JSON object body, in the order they were written.
-fn object_keys_in_order(body: &str) -> Vec<String> {
-    let mut keys = Vec::new();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut string_start = 0usize;
-    for (index, byte) in body.bytes().enumerate() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-                if depth == 0 && body[index + 1..].trim_start().starts_with(':') {
-                    keys.push(body[string_start..index].to_string());
-                }
-            }
-            continue;
-        }
-        match byte {
-            b'"' => {
-                in_string = true;
-                string_start = index + 1;
-            }
-            b'{' | b'[' => depth += 1,
-            b'}' | b']' => depth -= 1,
-            _ => {}
-        }
-    }
-    keys
 }
 
 pub fn default_workflow(kind: &str) -> Workflow {
@@ -1491,6 +1419,21 @@ pub struct Sweep {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn a_non_ascii_state_survives_its_own_definition() {
+        let workflow = Workflow {
+            kind: "bug".into(),
+            initial_state: "open".into(),
+            transitions: vec![
+                ("open".into(), vec!["été".into()]),
+                ("été".into(), vec!["open".into()]),
+            ],
+        };
+        let reloaded =
+            Workflow::from_definition_json("bug", &workflow.to_definition_json()).unwrap();
+        assert_eq!(reloaded, workflow);
+    }
 
     #[test]
     fn ulids_match_python_and_sort() {

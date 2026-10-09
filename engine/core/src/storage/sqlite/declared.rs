@@ -691,47 +691,124 @@ impl ReadView for SqliteReadView {
     fn bound_branch_overlays(&self, _: i64) -> Result<Vec<WorkOverlay>, VogtError> {
         later("bound_branch_overlays")
     }
-    fn token_by_hash(&self, _: &str) -> Result<Option<Token>, VogtError> {
-        later("token_by_hash")
+    fn token_by_hash(&self, token_hash: &str) -> Result<Option<Token>, VogtError> {
+        one(
+            &self.conn,
+            &format!("{TOKEN_SELECT} WHERE t.token_hash = ?"),
+            [token_hash],
+            row_token,
+        )
     }
-    fn token_by_id(&self, _: &str) -> Result<Option<Token>, VogtError> {
-        later("token_by_id")
+    fn token_by_id(&self, token_id: &str) -> Result<Option<Token>, VogtError> {
+        one(
+            &self.conn,
+            &format!("{TOKEN_SELECT} WHERE t.id = ?"),
+            [token_id],
+            row_token,
+        )
     }
-    fn list_tokens(&self, _: bool, _: i64) -> Result<Vec<Token>, VogtError> {
-        later("list_tokens")
+    fn list_tokens(&self, include_revoked: bool, limit: i64) -> Result<Vec<Token>, VogtError> {
+        let clause = if include_revoked {
+            ""
+        } else {
+            "WHERE t.revoked_at IS NULL"
+        };
+        many(
+            &self.conn,
+            &format!("{TOKEN_SELECT} {clause} ORDER BY t.created_at DESC, t.id DESC LIMIT ?"),
+            params![limit],
+            row_token,
+        )
     }
-    fn tokens_for_actor(&self, _: &str, _: bool) -> Result<Vec<Token>, VogtError> {
-        later("tokens_for_actor")
+    fn tokens_for_actor(
+        &self,
+        actor_id: &str,
+        include_revoked: bool,
+    ) -> Result<Vec<Token>, VogtError> {
+        let clause = if include_revoked {
+            ""
+        } else {
+            "AND t.revoked_at IS NULL"
+        };
+        many(
+            &self.conn,
+            &format!("{TOKEN_SELECT} WHERE t.actor_id = ? {clause} ORDER BY t.created_at DESC, t.id DESC"),
+            [actor_id],
+            row_token,
+        )
     }
     fn list_auth_decisions(&self, _: Option<&str>, _: i64) -> Result<Vec<AuthDecision>, VogtError> {
         later("list_auth_decisions")
     }
     fn password_credential_by_username(
         &self,
-        _: &str,
+        username: &str,
     ) -> Result<Option<PasswordCredential>, VogtError> {
-        later("password_credential_by_username")
+        one(
+            &self.conn,
+            &format!("{PASSWORD_SELECT} WHERE p.username = ?"),
+            [username],
+            row_password,
+        )
     }
     fn password_credential_for_actor(
         &self,
-        _: &str,
+        actor_id: &str,
     ) -> Result<Option<PasswordCredential>, VogtError> {
-        later("password_credential_for_actor")
+        one(
+            &self.conn,
+            &format!("{PASSWORD_SELECT} WHERE p.actor_id = ?"),
+            [actor_id],
+            row_password,
+        )
     }
-    fn password_hash(&self, _: &str) -> Result<Option<String>, VogtError> {
-        later("password_hash")
+    fn password_hash(&self, actor_id: &str) -> Result<Option<String>, VogtError> {
+        self.conn
+            .query_row(
+                "SELECT password_hash FROM password_credentials WHERE actor_id = ?",
+                [actor_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_err)
     }
     fn list_password_credentials(&self) -> Result<Vec<PasswordCredential>, VogtError> {
-        later("list_password_credentials")
+        many(
+            &self.conn,
+            &format!("{PASSWORD_SELECT} ORDER BY p.username"),
+            [],
+            row_password,
+        )
     }
-    fn forge_account(&self, _: &str, _: &str) -> Result<Option<ForgeAccount>, VogtError> {
-        later("forge_account")
+    fn forge_account(&self, actor_id: &str, host: &str) -> Result<Option<ForgeAccount>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT actor_id, host, login, scopes, created_at, updated_at FROM forge_accounts WHERE actor_id = ? AND host = ?",
+            params![actor_id, host],
+            row_forge_account,
+        )
     }
-    fn forge_accounts_for_actor(&self, _: &str) -> Result<Vec<ForgeAccount>, VogtError> {
-        later("forge_accounts_for_actor")
+    fn forge_accounts_for_actor(&self, actor_id: &str) -> Result<Vec<ForgeAccount>, VogtError> {
+        many(
+            &self.conn,
+            "SELECT actor_id, host, login, scopes, created_at, updated_at FROM forge_accounts WHERE actor_id = ? ORDER BY created_at DESC, host",
+            [actor_id],
+            row_forge_account,
+        )
     }
-    fn forge_account_secret(&self, _: &str, _: &str) -> Result<Option<String>, VogtError> {
-        later("forge_account_secret")
+    fn forge_account_secret(
+        &self,
+        actor_id: &str,
+        host: &str,
+    ) -> Result<Option<String>, VogtError> {
+        self.conn
+            .query_row(
+                "SELECT encrypted_token FROM forge_accounts WHERE actor_id = ? AND host = ?",
+                params![actor_id, host],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_err)
     }
     fn list_drift(
         &self,
@@ -1331,8 +1408,19 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
     fn upsert_work_overlay(&mut self, _: &WorkOverlay) -> Result<(), VogtError> {
         later("upsert_work_overlay")
     }
-    fn insert_token(&mut self, _: &Token, _: &str) -> Result<(), VogtError> {
-        later("insert_token")
+    fn insert_token(&mut self, token: &Token, token_hash: &str) -> Result<(), VogtError> {
+        let scopes = serde_json::to_string(&token.scopes).map_err(|err| {
+            VogtError::InvalidRequest(format!("token scopes are not JSON: {err}"))
+        })?;
+        let kind = serde_json::to_value(token.kind)
+            .expect("a token kind is a string")
+            .as_str()
+            .expect("snake_case")
+            .to_string();
+        self.view.conn.execute(
+            "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            params![token.id, token.actor_id, token.name, token_hash, scopes, kind, to_iso(token.created_at), token.expires_at.map(to_iso)],
+        ).map(|_| ()).map_err(sql_err)
     }
     fn carry_credentials(
         &mut self,
@@ -1345,38 +1433,85 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
     fn set_instance_identity(&mut self, _: &str, _: &CloneStamp) -> Result<(), VogtError> {
         later("set_instance_identity")
     }
-    fn revoke_token(&mut self, _: &str, _: &str, _: Moment) -> Result<bool, VogtError> {
-        later("revoke_token")
+    fn revoke_token(
+        &mut self,
+        token_id: &str,
+        reason: &str,
+        at: Moment,
+    ) -> Result<bool, VogtError> {
+        Ok(self.view.conn.execute(
+            "UPDATE tokens SET revoked_at = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL",
+            params![to_iso(at), reason, token_id],
+        ).map_err(sql_err)? > 0)
     }
-    fn reinstate_token(&mut self, _: &str) -> Result<bool, VogtError> {
-        later("reinstate_token")
+    fn reinstate_token(&mut self, token_id: &str) -> Result<bool, VogtError> {
+        Ok(self.view.conn.execute(
+            "UPDATE tokens SET revoked_at = NULL, revoked_reason = NULL WHERE id = ? AND revoked_at IS NOT NULL",
+            [token_id],
+        ).map_err(sql_err)? > 0)
     }
     fn upsert_password_credential(
         &mut self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &[String],
-        _: Moment,
+        actor_id: &str,
+        username: &str,
+        password_hash: &str,
+        scopes: &[String],
+        at: Moment,
     ) -> Result<(), VogtError> {
-        later("upsert_password_credential")
+        let stamp = to_iso(at);
+        let scopes = serde_json::to_string(scopes).map_err(|err| {
+            VogtError::InvalidRequest(format!("credential scopes are not JSON: {err}"))
+        })?;
+        self.view.conn.execute(
+            "INSERT INTO password_credentials (actor_id, username, password_hash, scopes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (actor_id) DO UPDATE SET username = excluded.username, password_hash = excluded.password_hash, scopes = excluded.scopes, updated_at = excluded.updated_at",
+            params![actor_id, username, password_hash, scopes, stamp, stamp],
+        ).map(|_| ()).map_err(sql_err)
     }
-    fn delete_password_credential(&mut self, _: &str) -> Result<bool, VogtError> {
-        later("delete_password_credential")
+    fn delete_password_credential(&mut self, actor_id: &str) -> Result<bool, VogtError> {
+        Ok(self
+            .view
+            .conn
+            .execute(
+                "DELETE FROM password_credentials WHERE actor_id = ?",
+                [actor_id],
+            )
+            .map_err(sql_err)?
+            > 0)
     }
     fn upsert_forge_account(
         &mut self,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: &str,
-        _: Moment,
+        actor_id: &str,
+        host: &str,
+        login: &str,
+        scopes: &str,
+        encrypted_token: &str,
+        at: Moment,
     ) -> Result<(), VogtError> {
-        later("upsert_forge_account")
+        let stamp = to_iso(at);
+        // Re-linking keeps the original created_at and rotates everything
+        // else, including the ciphertext.
+        let updated = self.view.conn.execute(
+            "UPDATE forge_accounts SET login = ?, scopes = ?, encrypted_token = ?, updated_at = ? WHERE actor_id = ? AND host = ?",
+            params![login, scopes, encrypted_token, stamp, actor_id, host],
+        ).map_err(sql_err)?;
+        if updated == 0 {
+            self.view.conn.execute(
+                "INSERT INTO forge_accounts (actor_id, host, login, scopes, encrypted_token, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                params![actor_id, host, login, scopes, encrypted_token, stamp, stamp],
+            ).map_err(sql_err)?;
+        }
+        Ok(())
     }
-    fn delete_forge_account(&mut self, _: &str, _: &str) -> Result<bool, VogtError> {
-        later("delete_forge_account")
+    fn delete_forge_account(&mut self, actor_id: &str, host: &str) -> Result<bool, VogtError> {
+        Ok(self
+            .view
+            .conn
+            .execute(
+                "DELETE FROM forge_accounts WHERE actor_id = ? AND host = ?",
+                params![actor_id, host],
+            )
+            .map_err(sql_err)?
+            > 0)
     }
     fn insert_writeback(&mut self, _: &WriteBackRecord) -> Result<(), VogtError> {
         later("insert_writeback")
@@ -2219,6 +2354,169 @@ mod more {
         assert!(view.suppression_by_id("sup_missing").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn tokens_passwords_and_forge_accounts_round_trip() {
+        let dir = std::env::temp_dir().join(format!("vogt-decl-creds-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = store(&dir);
+        let now = Moment::from_unix(1_700_000_000, 0);
+        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let mut txn = store.write().unwrap();
+        txn.insert_token(
+            &Token {
+                id: "tok_1".into(),
+                actor_id: actor.id.clone(),
+                actor_identity_ref: None,
+                name: "laptop".into(),
+                scopes: vec!["read".into(), "write".into()],
+                kind: crate::core::TokenKind::Api,
+                created_at: now,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            },
+            "hash-1",
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        let token = view.token_by_hash("hash-1").unwrap().unwrap();
+        assert_eq!(token.scopes, ["read", "write"]);
+        assert_eq!(view.token_by_id("tok_1").unwrap().unwrap().name, "laptop");
+        assert_eq!(view.list_tokens(false, 100).unwrap().len(), 1);
+
+        let mut txn = store.write().unwrap();
+        assert!(txn.revoke_token("tok_1", "lost", now).unwrap());
+        assert!(!txn.revoke_token("tok_1", "again", now).unwrap());
+        txn.commit().unwrap();
+        let view = store.read().unwrap();
+        assert!(view.list_tokens(false, 100).unwrap().is_empty());
+        assert_eq!(view.list_tokens(true, 100).unwrap().len(), 1);
+        assert_eq!(view.tokens_for_actor(&actor.id, true).unwrap().len(), 1);
+
+        let mut txn = store.write().unwrap();
+        txn.upsert_password_credential(&actor.id, "ada", "hash", &["admin".into()], now)
+            .unwrap();
+        txn.upsert_forge_account(&actor.id, "git.example", "ada", "repo", "cipher", now)
+            .unwrap();
+        txn.commit().unwrap();
+        let view = store.read().unwrap();
+        assert_eq!(
+            view.password_credential_by_username("ada")
+                .unwrap()
+                .unwrap()
+                .actor_id,
+            actor.id
+        );
+        assert_eq!(
+            view.password_hash(&actor.id).unwrap().as_deref(),
+            Some("hash")
+        );
+        assert_eq!(
+            view.forge_account_secret(&actor.id, "git.example")
+                .unwrap()
+                .as_deref(),
+            Some("cipher")
+        );
+        let created = view
+            .forge_account(&actor.id, "git.example")
+            .unwrap()
+            .unwrap()
+            .created_at;
+
+        // Re-linking rotates the secret but keeps the original created_at.
+        let later_at = Moment::from_unix(1_700_086_400, 0);
+        let mut txn = store.write().unwrap();
+        txn.upsert_forge_account(
+            &actor.id,
+            "git.example",
+            "ada",
+            "repo",
+            "cipher-2",
+            later_at,
+        )
+        .unwrap();
+        txn.commit().unwrap();
+        let view = store.read().unwrap();
+        let account = view
+            .forge_account(&actor.id, "git.example")
+            .unwrap()
+            .unwrap();
+        assert_eq!(account.created_at, created);
+        assert_eq!(account.updated_at, later_at);
+        assert_eq!(
+            view.forge_account_secret(&actor.id, "git.example")
+                .unwrap()
+                .as_deref(),
+            Some("cipher-2")
+        );
+
+        let mut txn = store.write().unwrap();
+        assert!(txn.delete_password_credential(&actor.id).unwrap());
+        assert!(txn.delete_forge_account(&actor.id, "git.example").unwrap());
+        txn.commit().unwrap();
+        let view = store.read().unwrap();
+        assert!(view
+            .password_credential_for_actor(&actor.id)
+            .unwrap()
+            .is_none());
+        assert!(view.forge_accounts_for_actor(&actor.id).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+const TOKEN_SELECT: &str = "SELECT t.*, a.identity_ref AS actor_identity_ref FROM tokens t JOIN actors a ON a.id = t.actor_id";
+
+fn row_token(row: &Row<'_>) -> rusqlite::Result<Token> {
+    let scopes: String = row.get("scopes")?;
+    let kind: String = row.get("kind")?;
+    Ok(Token {
+        id: row.get("id")?,
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        name: row.get("name")?,
+        scopes: serde_json::from_str(&scopes).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        kind: serde_json::from_value(serde_json::Value::String(kind)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        created_at: moment(row, "created_at")?,
+        expires_at: opt_moment(row, "expires_at")?,
+        last_used_at: opt_moment(row, "last_used_at")?,
+        revoked_at: opt_moment(row, "revoked_at")?,
+        revoked_reason: row.get("revoked_reason")?,
+    })
+}
+
+const PASSWORD_SELECT: &str = "SELECT p.actor_id, p.username, p.scopes, p.created_at, p.updated_at, a.identity_ref AS actor_identity_ref FROM password_credentials p JOIN actors a ON a.id = p.actor_id";
+
+fn row_password(row: &Row<'_>) -> rusqlite::Result<PasswordCredential> {
+    let scopes: String = row.get("scopes")?;
+    Ok(PasswordCredential {
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        username: row.get("username")?,
+        scopes: serde_json::from_str(&scopes).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        created_at: moment(row, "created_at")?,
+        updated_at: moment(row, "updated_at")?,
+    })
+}
+
+fn row_forge_account(row: &Row<'_>) -> rusqlite::Result<ForgeAccount> {
+    Ok(ForgeAccount {
+        actor_id: row.get("actor_id")?,
+        host: row.get("host")?,
+        login: row.get("login")?,
+        scopes: row.get("scopes")?,
+        created_at: moment(row, "created_at")?,
+        updated_at: moment(row, "updated_at")?,
+    })
 }
 
 const SUPPRESSION_SELECT: &str = "SELECT s.*, a.identity_ref AS actor_identity_ref, p.slug AS scope_project_slug FROM suppressions s JOIN actors a ON a.id = s.actor_id LEFT JOIN projects p ON p.id = s.scope_project_id";
