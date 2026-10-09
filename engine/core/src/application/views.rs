@@ -536,3 +536,135 @@ fn observed_row(
         "adopted_as": fields.adopted_as,
     })
 }
+
+/// `backlog`, as the registry calls it.
+pub fn backlog_op(ctx: &Built, params: serde_json::Value) -> Result<serde_json::Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| backlog(ctx, params))
+}
+
+/// The ranked backlog, globally or for one project. Ports `backlog`.
+///
+/// Ranking is computed over the whole candidate set before the slice, so page
+/// two is the next rows of one ordering rather than a fresh ranking of what was
+/// left. An unlinked project scope answers with the CTA marker instead of a
+/// ranked list.
+fn backlog<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, VogtError> {
+    let project = params.get("project").and_then(serde_json::Value::as_str);
+    let mode = params
+        .get("mode")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("summary");
+    let limit = params
+        .get("limit")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(50);
+    let offset = params
+        .get("offset")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+    let freshness =
+        crate::application::services::freshness::freshness_of(&ctx.observed, now_of(&ctx.clock))?;
+    if let Some(project) = project {
+        if let Some(marker) = unlinked_scope(ctx, project, &freshness)? {
+            return Ok(marker);
+        }
+    }
+    let query = GatherQuery {
+        project,
+        kinds: string_list(params.get("kinds")),
+        priorities: string_list(params.get("priorities")),
+        assignee: params.get("assignee").and_then(serde_json::Value::as_str),
+        initiative: params.get("initiative").and_then(serde_json::Value::as_str),
+        label: params.get("label").and_then(serde_json::Value::as_str),
+        trust_states: string_list(params.get("trust_states")),
+        include_prs: params
+            .get("include_prs")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true),
+    };
+    let gathered = gather(ctx, &query)?;
+    let total = gathered.ranked.len() as i64;
+    let start = offset.max(0) as usize;
+    let page: Vec<serde_json::Value> = gathered
+        .ranked
+        .iter()
+        .skip(start)
+        .take(limit.max(0) as usize)
+        .map(|row| projected(&row.value, mode))
+        .collect();
+    let following = offset + page.len() as i64;
+    Ok(serde_json::json!({
+        "items": page,
+        "total_considered": total,
+        "next_offset": (!page.is_empty() && following < total).then_some(following),
+        "declared": gathered.declared,
+        "observed": gathered.observed,
+        "suppressed": gathered.suppressed,
+        "closed_upstream": gathered.closed,
+        "link_state": project.map(|_| "linked"),
+        "excluded_unlinked": gathered.excluded_unlinked,
+        "scope": project.unwrap_or("global"),
+        "freshness": freshness,
+    }))
+}
+
+/// The link-or-publish CTA answer for an unlinked project scope, or `None` when
+/// the project is linked. `excluded_unlinked` counts the open native items a
+/// link or publish would migrate, so the surface can say what the act would
+/// carry across.
+fn unlinked_scope<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    project: &str,
+    freshness: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, VogtError> {
+    let view = ctx.declared.read()?;
+    let project_row = crate::application::resolve::project(&view, project)?;
+    if crate::application::upstream::is_linked(&project_row) {
+        return Ok(None);
+    }
+    let pending = view.count_work_items(&crate::storage::interface::WorkFilter {
+        project_id: Some(project_row.id.clone()),
+        exclude_terminal: true,
+        ..crate::storage::interface::WorkFilter::default()
+    })?;
+    Ok(Some(serde_json::json!({
+        "items": [],
+        "total_considered": 0,
+        "declared": 0,
+        "observed": 0,
+        "suppressed": 0,
+        "closed_upstream": 0,
+        "link_state": "unlinked",
+        "excluded_unlinked": pending,
+        "scope": project,
+        "freshness": freshness,
+    })))
+}
+
+/// `summary` drops each row's full work item; `full` returns the row untouched.
+fn projected(row: &serde_json::Value, mode: &str) -> serde_json::Value {
+    if mode == "full" {
+        return row.clone();
+    }
+    let mut summary = row.clone();
+    if let serde_json::Value::Object(map) = &mut summary {
+        map.insert("item".to_string(), serde_json::Value::Null);
+    }
+    summary
+}
+
+fn string_list(value: Option<&serde_json::Value>) -> Vec<String> {
+    value
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
