@@ -1506,14 +1506,15 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
         later("upsert_work_overlay")
     }
     fn insert_token(&mut self, token: &Token, token_hash: &str) -> Result<(), VogtError> {
-        let scopes = serde_json::to_string(&token.scopes).map_err(|err| {
-            VogtError::InvalidRequest(format!("token scopes are not JSON: {err}"))
-        })?;
+        let scopes = crate::decisions::python_json_dumps(&serde_json::json!(token.scopes), false);
         let kind = vocab_text(token.kind);
         self.view.conn.execute(
             "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![token.id, token.actor_id, token.name, token_hash, scopes, kind, to_iso(token.created_at), token.expires_at.map(to_iso)],
-        ).map(|_| ()).map_err(sql_err)
+        ).map_err(sql_err)?;
+        // First-run install mode closes once a person holds a credential, and
+        // it closes in the same transaction that gives them one.
+        latch_install_if_operator(&self.view.conn, token.created_at)
     }
     fn carry_credentials(
         &mut self,
@@ -1679,7 +1680,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
                 &mapped(raw)?,
             )?;
         }
-        Ok(CarryReport {
+        let report = CarryReport {
             tokens_kept: carried.tokens.len() as i64,
             source_tokens_revoked: revoked,
             password_logins_kept: carried.password_credentials.len() as i64,
@@ -1687,7 +1688,10 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
             forge_accounts_kept: carried.forge_accounts.len() as i64,
             source_forge_accounts_dropped: dropped_forge,
             actors_added: added,
-        })
+        };
+        // A carried password or a person's token closes install mode too.
+        latch_install_if_operator(&self.view.conn, at)?;
+        Ok(report)
     }
     fn set_instance_identity(
         &mut self,
@@ -1729,13 +1733,12 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
         at: Moment,
     ) -> Result<(), VogtError> {
         let stamp = to_iso(at);
-        let scopes = serde_json::to_string(scopes).map_err(|err| {
-            VogtError::InvalidRequest(format!("credential scopes are not JSON: {err}"))
-        })?;
+        let scopes = crate::decisions::python_json_dumps(&serde_json::json!(scopes), false);
         self.view.conn.execute(
             "INSERT INTO password_credentials (actor_id, username, password_hash, scopes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (actor_id) DO UPDATE SET username = excluded.username, password_hash = excluded.password_hash, scopes = excluded.scopes, updated_at = excluded.updated_at",
             params![actor_id, username, password_hash, scopes, stamp, stamp],
-        ).map(|_| ()).map_err(sql_err)
+        ).map_err(sql_err)?;
+        latch_install_if_operator(&self.view.conn, at)
     }
     fn delete_password_credential(&mut self, actor_id: &str) -> Result<bool, VogtError> {
         Ok(self
@@ -2900,6 +2903,70 @@ mod more {
         assert_eq!(token.last_used_at, Some(later_at));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn a_persons_credential_latches_install_closed_and_an_agents_does_not() {
+        let dir = std::env::temp_dir().join(format!("vogt-decl-latch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = store(&dir);
+        let now = Moment::from_unix(1_700_000_000, 0);
+        let latched = || -> bool {
+            rusqlite::Connection::open(dir.join("declared.sqlite3"))
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM install_latch", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap()
+                > 0
+        };
+        let mut txn = store.write().unwrap();
+        txn.insert_actor(&Actor {
+            id: "act_agent".into(),
+            kind: crate::core::ActorKind::Agent,
+            display_name: "stack".into(),
+            identity_ref: "agent:stack".into(),
+            disabled: false,
+            created_at: now,
+        })
+        .unwrap();
+        txn.insert_token(
+            &Token {
+                id: "tok_agent".into(),
+                actor_id: "act_agent".into(),
+                actor_identity_ref: None,
+                name: "stack".into(),
+                scopes: vec!["read".into()],
+                kind: crate::core::TokenKind::Agent,
+                created_at: now,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            },
+            "agent-secret",
+        )
+        .unwrap();
+        txn.commit().unwrap();
+        assert!(!latched(), "an agent token leaves install mode open");
+
+        let person = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let mut txn = store.write().unwrap();
+        txn.upsert_password_credential(&person.id, "ada", "hash", &["admin".into()], now)
+            .unwrap();
+        txn.commit().unwrap();
+        assert!(latched(), "a person's login closes it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Close first-run install mode once a person holds a credential. The latch
+/// only ever gets set, so removing the credential later does not reopen the
+/// door. An agent-only token leaves it open.
+fn latch_install_if_operator(conn: &Connection, at: Moment) -> Result<(), VogtError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO install_latch (id, closed_at, reason) SELECT 1, ?, 'a person holds a credential' WHERE EXISTS (SELECT 1 FROM tokens t JOIN actors a ON a.id = t.actor_id WHERE a.kind <> 'agent') OR EXISTS (SELECT 1 FROM password_credentials)",
+        [to_iso(at)],
+    ).map(|_| ()).map_err(sql_err)
 }
 
 fn vocab_text<T: serde::Serialize>(value: T) -> String {
@@ -3044,9 +3111,8 @@ fn row_token(row: &Row<'_>) -> rusqlite::Result<Token> {
         scopes: serde_json::from_str(&scopes).map_err(|err| {
             rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
         })?,
-        kind: serde_json::from_value(serde_json::Value::String(kind)).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?,
+        kind: serde_json::from_value(serde_json::Value::String(kind))
+            .unwrap_or(crate::core::TokenKind::Api),
         created_at: moment(row, "created_at")?,
         expires_at: opt_moment(row, "expires_at")?,
         last_used_at: opt_moment(row, "last_used_at")?,
