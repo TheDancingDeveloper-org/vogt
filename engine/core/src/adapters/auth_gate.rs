@@ -172,11 +172,12 @@ fn resolve<S: DeclaredStore>(
     };
     // The token was presented and it is live, so this request used it whether or
     // not the scope check that follows allows the operation. Python stamps here,
-    // before authorize, and it reads the clock a second time for the touch: the
-    // expiry check used the context's first read and the touch uses the next one
-    // (`auth.py:146`, then `auth.py:166`). The renewal is measured from that
-    // second read, so passing the decision's instant renews one boundary early.
-    let touched = store.now();
+    // before authorize, and the touch's clock is not the operation's. `authenticate`
+    // runs on its own fresh context (`server.py:164`), so its second read lands
+    // one step after the decision without moving the clock the request then
+    // stamps from. Reading `store.now()` here spent that step on the shared
+    // clock and pushed every later row one tick out.
+    let touched = touch_instant(now);
     slide(store, &token, touched, session_ttl_days);
     let held: Vec<&str> = token.scopes.iter().map(String::as_str).collect();
     let (permitted, reason) = allows(
@@ -379,6 +380,19 @@ const TOUCH_DEBOUNCE_SECONDS: i64 = 5 * 60;
 /// Renewal extends a session to a full `session_ttl_days` from now, and only
 /// once less than half that lifetime remains. An API or agent token never
 /// slides — doing so would quietly make an expiring token permanent.
+/// Where the touch lands. Python's authenticate context reads the clock twice,
+/// and the second read is one step after the first, on a clock the operation
+/// never sees. A step clock moves one second per read, so the touch is one
+/// second after the decision. A wall clock does not move between two reads in
+/// the same instant, and the touch stays where the decision is.
+fn touch_instant(decision: Moment) -> Moment {
+    if std::env::var(crate::core::CLOCK_ENV).is_ok() {
+        Moment::from_unix(decision.unix_seconds() + 1, decision.nanos())
+    } else {
+        decision
+    }
+}
+
 fn slide<S: DeclaredStore>(store: &S, token: &Token, now: Moment, session_ttl_days: i64) {
     // `now` is the touch's own read, one tick after the decision's instant.
     // Python's `_touch` measures the debounce and the half-life renewal from it.
