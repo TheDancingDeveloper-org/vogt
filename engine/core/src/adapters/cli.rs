@@ -744,44 +744,18 @@ fn wrap_width() -> usize {
 }
 
 fn usage_synopsis() -> String {
-    // argparse's HelpFormatter._format_usage: optionals and positionals wrap as
-    // separate groups, so once the line breaks a positional always starts its
-    // own line. The wrap width is $COLUMNS (80 when unset) minus 2, and a part
-    // only moves to the next line when it would not fit.
-    let width = wrap_width();
-    let prog = "vogt";
-    let opt_parts = ["[-h]", "[--version]", "[--data-dir DATA_DIR]", "[--json]"];
-    let pos_parts = ["<command>", "..."];
-    let one_line = ["usage:", prog]
-        .into_iter()
-        .chain(opt_parts)
-        .chain(pos_parts)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let body = if one_line.len() <= width {
-        one_line
-    } else {
-        let prefix = "usage: ";
-        // A short program follows the prefix on the first line. A long one takes
-        // the line to itself and the arguments indent under the prefix.
-        let short = prefix.len() + prog.len() <= width * 3 / 4;
-        let indent = " ".repeat(if short {
-            prefix.len() + prog.len() + 1
-        } else {
-            prefix.len()
-        });
-        let opt_head: &[&str] = if short { &[prog] } else { &[] };
-        let mut lines = if short {
-            wrap_parts(Some(prefix), opt_head, &opt_parts, &indent, width)
-        } else {
-            let mut lines = vec![format!("{prefix}{prog}")];
-            lines.extend(wrap_parts(None, &[], &opt_parts, &indent, width));
-            lines
-        };
-        lines.extend(wrap_parts(None, &[], &pos_parts, &indent, width));
-        lines.join("\n")
-    };
-    format!("{body}\n")
+    // The root command: optionals first, then the `<command> ...` positional as
+    // its own group, so it starts a new line once the synopsis wraps.
+    command_usage(
+        "vogt",
+        &[
+            "[-h]".to_string(),
+            "[--version]".to_string(),
+            "[--data-dir DATA_DIR]".to_string(),
+            "[--json]".to_string(),
+        ],
+        &["<command>".to_string(), "...".to_string()],
+    )
 }
 
 /// One wrapped group, measured the way argparse's `get_lines` measures it. The
@@ -898,33 +872,188 @@ fn format_operation(operation: &Operation) -> String {
     let path = operation.cli.path.join(" ");
     let schema = registry::params_schema_for(operation.name);
     let mut out = String::new();
-    out.push_str(&format!("usage: vogt {path}"));
+    // argparse's usage for a subcommand: the program is `vogt <path>`, `[-h]`
+    // leads the optionals, and the positionals (there are none here) would
+    // follow as their own group. The summary is the command's help, not its
+    // description, so it does not appear on this page.
+    let prog = format!("vogt {path}");
+    let mut opt_parts = vec!["[-h]".to_string()];
     if let Some(schema) = schema {
-        for flag in usage_flags(schema) {
-            out.push_str(&format!(" {flag}"));
-        }
+        opt_parts.extend(usage_flags(schema));
     }
-    out.push_str("\n\n");
-    if !operation.summary.is_empty() {
-        out.push_str(operation.summary);
-        out.push_str("\n\n");
-    }
+    let opt_parts = usage_parts(&opt_parts);
+    out.push_str(&command_usage(&prog, &opt_parts, &[]));
+    out.push('\n');
     out.push_str("options:\n");
-    out.push_str("  -h, --help            show this help message and exit\n");
-    if let Some(schema) = schema {
-        for (flag, help) in flag_help(schema) {
-            if help.is_empty() {
-                out.push_str(&format!("  {flag}\n"));
-            } else if flag.len() > 20 {
-                // argparse wraps a flag whose column is already full onto the
-                // next line rather than running the text into the description.
-                out.push_str(&format!("  {flag}\n                        {help}\n"));
-            } else {
-                out.push_str(&format!("  {flag:<22}{help}\n"));
-            }
+    let rows = schema.map(flag_help).unwrap_or_default();
+    // argparse's help column. The longest invocation is measured with its
+    // indent, then capped at 24, and the indent comes back off.
+    let indent = 2usize;
+    let width = wrap_width();
+    // argparse caps the help column at 24, and on a narrow terminal at
+    // `max(width - 20, 4)`.
+    let max_help_position = 24.min((width.saturating_sub(20)).max(indent * 2));
+    let action_max = rows
+        .iter()
+        .map(|(flag, _)| flag.len() + indent)
+        .chain(["-h, --help".len() + indent])
+        .max()
+        .unwrap_or(0);
+    let help_column = (action_max + 2).min(max_help_position);
+    out.push_str(&option_row(
+        "-h, --help",
+        "show this help message and exit",
+        help_column,
+        indent,
+    ));
+    for (flag, help) in &rows {
+        out.push_str(&option_row(flag, help, help_column, indent));
+    }
+    out
+}
+
+/// `usage: <prog> <options> <positionals>`, wrapped like argparse. Optionals and
+/// positionals are separate groups, so a positional starts its own line once the
+/// synopsis breaks. The width is `$COLUMNS` minus 2, and a program longer than
+/// three quarters of the width takes the first line alone.
+fn command_usage(prog: &str, opt_parts: &[String], pos_parts: &[String]) -> String {
+    let width = wrap_width();
+    let opt_refs: Vec<&str> = opt_parts.iter().map(String::as_str).collect();
+    let pos_refs: Vec<&str> = pos_parts.iter().map(String::as_str).collect();
+    let one_line = ["usage:", prog]
+        .into_iter()
+        .chain(opt_refs.iter().copied())
+        .chain(pos_refs.iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let body = if one_line.len() <= width {
+        one_line
+    } else {
+        let prefix = "usage: ";
+        let short = prefix.len() + prog.len() <= width * 3 / 4;
+        let indent = " ".repeat(if short {
+            prefix.len() + prog.len() + 1
+        } else {
+            prefix.len()
+        });
+        let mut lines = if short {
+            wrap_parts(Some(prefix), &[prog], &opt_refs, &indent, width)
+        } else {
+            let mut lines = vec![format!("{prefix}{prog}")];
+            lines.extend(wrap_parts(None, &[], &opt_refs, &indent, width));
+            lines
+        };
+        if !pos_refs.is_empty() {
+            lines.extend(wrap_parts(None, &[], &pos_refs, &indent, width));
+        }
+        lines.join("\n")
+    };
+    format!("{body}\n")
+}
+
+/// One option row. `column` is where the help text starts, indent included, and
+/// `indent` is the section indent. A flag no wider than `column - indent - 2`
+/// is padded and the help follows on the same line; a longer flag takes the
+/// line and the help starts on the next. Help wider than the remaining columns
+/// wraps.
+fn option_row(flag: &str, help: &str, column: usize, indent: usize) -> String {
+    let width = wrap_width();
+    let help_width = width.saturating_sub(column).max(11);
+    let action_width = column - indent - 2;
+    let lines = wrap_text(help, help_width);
+    let mut out = String::new();
+    if help.is_empty() {
+        out.push_str(&format!("{:indent$}{flag}\n", ""));
+    } else if flag.len() <= action_width {
+        out.push_str(&format!(
+            "{:indent$}{flag:<action_width$}  {}\n",
+            "", lines[0]
+        ));
+        for line in lines.iter().skip(1) {
+            out.push_str(&format!("{:>column$}{line}\n", ""));
+        }
+    } else {
+        out.push_str(&format!("{:indent$}{flag}\n", ""));
+        for line in &lines {
+            out.push_str(&format!("{:>column$}{line}\n", ""));
         }
     }
     out
+}
+
+/// textwrap.wrap: break on whitespace, and after a hyphen whose word has
+/// letters on both sides. A chunk that is itself longer than the width breaks
+/// wherever it has to.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for chunk in hyphen_chunks(&text) {
+        let pieces: Vec<String> = chunk
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(width.max(1))
+            .map(|piece| piece.iter().collect())
+            .collect();
+        for piece in pieces {
+            if current.is_empty() {
+                current = piece;
+            } else if current.len() + piece.len() <= width
+                && !(piece.trim().is_empty() && current.len() + piece.len() == width)
+            {
+                current.push_str(&piece);
+            } else {
+                lines.push(std::mem::take(&mut current));
+                current = piece.trim_start().to_string();
+            }
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines.iter_mut().for_each(|line| {
+        *line = line.trim_end().to_string();
+    });
+    lines
+}
+
+/// Break `text` the way textwrap's `wordsep_re` does: at whitespace, and after
+/// a hyphen that has a letter before it and a letter after it.
+fn hyphen_chunks(text: &str) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    let mut index = 0;
+    while index < chars.len() {
+        if chars[index].is_whitespace() {
+            if start < index {
+                chunks.push(chars[start..index].iter().collect());
+            }
+            let end = (index + 1..chars.len()).find(|at| !chars[*at].is_whitespace());
+            let end = end.unwrap_or(chars.len());
+            chunks.push(chars[index..end].iter().collect());
+            start = end;
+            index = end;
+            continue;
+        }
+        if chars[index] == '-'
+            && index > start
+            && chars[index - 1].is_alphabetic()
+            && index + 1 < chars.len()
+            && chars[index + 1].is_alphabetic()
+        {
+            chunks.push(chars[start..=index].iter().collect());
+            start = index + 1;
+        }
+        index += 1;
+    }
+    if start < chars.len() {
+        chunks.push(chars[start..].iter().collect());
+    }
+    chunks
 }
 
 fn usage_flags(schema: &Value) -> Vec<String> {
@@ -945,6 +1074,22 @@ fn usage_flags(schema: &Value) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// argparse's `part_regexp`: a parenthesised or bracketed group is one part,
+/// however many words it holds. Everything else splits on whitespace.
+fn usage_parts(flags: &[String]) -> Vec<String> {
+    let mut parts = Vec::new();
+    for flag in flags {
+        let bracketed = (flag.starts_with('[') && flag.ends_with(']'))
+            || (flag.starts_with('(') && flag.ends_with(')'));
+        if bracketed {
+            parts.push(flag.clone());
+        } else {
+            parts.extend(flag.split_whitespace().map(str::to_string));
+        }
+    }
+    parts
 }
 
 fn required_fields(schema: &Value) -> Vec<String> {
