@@ -6,6 +6,7 @@
 mod actors;
 #[allow(dead_code)]
 mod adapters;
+#[allow(dead_code)] // Consumed by the service layer (P1.10 onward).
 mod application;
 mod auth;
 mod branches;

@@ -73,6 +73,13 @@ where
         }
     }
 
+    /// The id factory this store counts with. A caller that mints ids for a
+    /// write the store will record uses this one, because a second factory
+    /// starts again at one and the two collide.
+    pub fn id_factory(&self) -> &std::cell::RefCell<I> {
+        &self.ids
+    }
+
     fn open(&self, create: bool) -> Result<Connection, VogtError> {
         connect_with(&self.path, create, &self.synchronous).map_err(sql_err)
     }

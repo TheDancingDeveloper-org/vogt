@@ -146,7 +146,7 @@ impl Clock for SystemClock {
 }
 
 /// One second later on every read. Selected by `VOGT_TEST_CLOCK_START`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StepClock {
     next: Moment,
 }
@@ -171,7 +171,7 @@ pub trait IdFactory {
 }
 
 /// `{prefix}_{n:04d}`, persisted as sorted JSON. `VOGT_TEST_IDS=sequential`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SequentialIds {
     path: Option<std::path::PathBuf>,
     counts: BTreeMap<String, u64>,
