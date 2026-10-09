@@ -73,6 +73,12 @@ pub trait ToolGrant {
         let _ = operation;
         "forbidden".to_owned()
     }
+
+    /// Whether writes are switched on for this caller. The stdio grant has no
+    /// such switch; the HTTP grant does, and the recorded reason depends on it.
+    fn writes_enabled(&self) -> bool {
+        true
+    }
 }
 
 /// Every MCP-exposed operation, which is what a local stdio session may do.

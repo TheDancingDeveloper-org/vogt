@@ -63,16 +63,32 @@ pub fn respond<G: ToolGrant>(
     registry: &crate::registry::OperationRegistry,
     grant: &G,
 ) -> McpHttpResponse {
+    respond_recording(message, registry, grant, &mut ())
+}
+
+/// Answer one message, recording the authorization before the call runs.
+///
+/// `authorize()` writes its row and only then runs the operation, so a store
+/// that refuses the write fails the request closed: the call never happens.
+/// The recorder is invoked first for that reason. A recorder that cannot write
+/// returns `Err`, and the route answers 500 without dispatching.
+pub fn respond_recording<G: ToolGrant, R: AuthRecorder>(
+    message: &Map<String, Value>,
+    registry: &crate::registry::OperationRegistry,
+    grant: &G,
+    recorder: &mut R,
+) -> McpHttpResponse {
+    let decision = decision_for(message, registry, grant);
+    if let Some(decision) = &decision {
+        if let Err(failure) = recorder.record(decision) {
+            return McpHttpResponse {
+                status: 500,
+                body: Some(error(message.get("id").cloned(), &failure)),
+                decision: None,
+            };
+        }
+    }
     let mut dispatcher = Dispatcher::new(registry, grant, McpTransport::Http);
-    let decision = message
-        .get("method")
-        .and_then(Value::as_str)
-        .filter(|method| *method == "tools/call")
-        .and_then(|_| message.get("params"))
-        .and_then(Value::as_object)
-        .and_then(|params| params.get("name"))
-        .and_then(Value::as_str)
-        .and_then(|name| authorize(registry, grant, name));
     match dispatcher.handle(message) {
         Some(response) => McpHttpResponse {
             decision,
@@ -159,6 +175,10 @@ impl ToolGrant for ScopeGrant {
         super::framing::exposed_over_mcp(registry, operation) && self.permitted(operation)
     }
 
+    fn writes_enabled(&self) -> bool {
+        self.writes_enabled
+    }
+
     fn denial(&self, operation: &crate::registry::Operation) -> String {
         if operation.mutating && !self.writes_enabled {
             format!(
@@ -166,12 +186,13 @@ impl ToolGrant for ScopeGrant {
                 operation.name
             )
         } else {
-            let held = self
-                .scopes
-                .iter()
-                .map(|scope| scope.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
+            // `sorted(frozenset(scopes))`: deduplicated and alphabetical, so
+            // the order the token was issued in never reaches the message.
+            let mut held_scopes: Vec<&str> =
+                self.scopes.iter().map(|scope| scope.as_str()).collect();
+            held_scopes.sort_unstable();
+            held_scopes.dedup();
+            let held = held_scopes.join(", ");
             format!(
                 "{} requires the {} scope; this token holds {}",
                 operation.name,
@@ -208,6 +229,52 @@ pub struct AuthDecisionRecord {
 
 pub const MCP_HTTP_TRANSPORT: &str = "mcp-http";
 
+/// Where an authorization is written. The front door supplies one backed by the
+/// declared store; the default records nothing, which is what a test wants.
+pub trait AuthRecorder {
+    fn record(&mut self, decision: &AuthDecisionRecord) -> Result<(), String>;
+}
+
+impl AuthRecorder for () {
+    fn record(&mut self, _decision: &AuthDecisionRecord) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// The decision for this message, or `None` when `authorize()` would not have
+/// been reached.
+///
+/// Python checks the arguments before it authorizes, so a call whose arguments
+/// are not an object is a `-32602` and records nothing — even when the tool
+/// exists and the grant would have allowed it.
+fn decision_for<G: ToolGrant>(
+    message: &Map<String, Value>,
+    registry: &crate::registry::OperationRegistry,
+    grant: &G,
+) -> Option<AuthDecisionRecord> {
+    if message.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return None;
+    }
+    let params = message.get("params").and_then(Value::as_object)?;
+    let name = params.get("name").and_then(Value::as_str)?;
+    if let Some(arguments) = params.get("arguments").filter(|value| !json_falsy(value)) {
+        if !arguments.is_object() {
+            return None;
+        }
+    }
+    authorize(registry, grant, name)
+}
+
+fn json_falsy(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(false) => true,
+        Value::Array(items) => items.is_empty(),
+        Value::String(text) => text.is_empty(),
+        Value::Number(number) => number.as_i64() == Some(0),
+        _ => false,
+    }
+}
+
 /// The decision `authorize()` would record for this call, or `None` when the
 /// call never reached an operation (bad arguments, an unknown tool).
 pub fn authorize<G: ToolGrant>(
@@ -219,16 +286,24 @@ pub fn authorize<G: ToolGrant>(
     if !super::framing::exposed_over_mcp(registry, operation) {
         return None;
     }
-    let allowed = grant.allows(registry, operation);
+    // The same order as `Grant.allows`: the writes gate first, then the
+    // scope. A write the token has no scope for is `missing_scope` when writes
+    // are enabled, not `writes_disabled`.
+    let (allowed, reason_code) = if !grant.allows(registry, operation) {
+        (
+            false,
+            if operation.mutating && !grant.writes_enabled() {
+                "writes_disabled"
+            } else {
+                "missing_scope"
+            },
+        )
+    } else {
+        (true, "token_valid")
+    };
     Some(AuthDecisionRecord {
         decision: if allowed { "allow" } else { "deny" },
-        reason_code: if allowed {
-            "token_valid"
-        } else if operation.mutating {
-            "writes_disabled"
-        } else {
-            "missing_scope"
-        },
+        reason_code,
         operation: operation.name.to_owned(),
         scope: operation.scope.as_str().to_owned(),
         transport: MCP_HTTP_TRANSPORT,
@@ -423,6 +498,75 @@ mod tests {
         let body = object_id.body.unwrap();
         assert_eq!(body["id"], Value::Null);
         assert_eq!(body["error"]["code"], -32601);
+    }
+
+    #[test]
+    fn a_write_without_the_scope_is_missing_scope_when_writes_are_on() {
+        let response = respond(
+            &message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "work_create", "arguments": {}}
+            })),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], true),
+        );
+        assert_eq!(response.decision.unwrap().reason_code, "missing_scope");
+    }
+
+    #[test]
+    fn bad_arguments_record_nothing() {
+        let response = respond(
+            &message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "work_list", "arguments": [1]}
+            })),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], false),
+        );
+        assert_eq!(response.body.unwrap()["error"]["code"], -32602);
+        assert!(response.decision.is_none());
+    }
+
+    #[test]
+    fn the_held_scopes_are_sorted_and_deduplicated() {
+        let response = respond(
+            &message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "work_create"}
+            })),
+            &registry(),
+            &ScopeGrant::new(
+                vec![Scope::Writeback, Scope::ProjectWrite, Scope::ProjectWrite],
+                true,
+            ),
+        );
+        let text = response.body.unwrap()["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert!(text.contains("holds project.write, writeback"), "{text}");
+        let _ = response;
+    }
+
+    #[test]
+    fn a_recorder_that_fails_stops_the_call() {
+        struct Refusing;
+        impl AuthRecorder for Refusing {
+            fn record(&mut self, _: &AuthDecisionRecord) -> Result<(), String> {
+                Err("the store refused the decision".to_owned())
+            }
+        }
+        let response = respond_recording(
+            &message(json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "work_list"}
+            })),
+            &registry(),
+            &ScopeGrant::new(vec![Scope::Read], false),
+            &mut Refusing,
+        );
+        assert_eq!(response.status, 500);
+        assert!(response.decision.is_none());
     }
 
     #[test]

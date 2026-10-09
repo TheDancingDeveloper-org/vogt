@@ -276,7 +276,7 @@ pub fn read_token(path: Option<&str>) -> Option<String> {
         path.to_owned()
     };
     let text = std::fs::read_to_string(resolved).ok()?;
-    let text = text.trim().to_owned();
+    let text = python_strip(&text).to_owned();
     (!text.is_empty()).then_some(text)
 }
 
@@ -300,7 +300,7 @@ pub fn resolve_token(env: &HashMap<String, String>) -> Option<String> {
     // resolves to None rather than to the file.
     if env.get("VOGT_SESSION_ID").is_some_and(|id| !id.is_empty()) {
         if let Some(token) = env.get(HTTP_TOKEN_ENV).filter(|token| !token.is_empty()) {
-            let token = token.trim();
+            let token = python_strip(token);
             return (!token.is_empty()).then(|| token.to_owned());
         }
     }
@@ -308,9 +308,15 @@ pub fn resolve_token(env: &HashMap<String, String>) -> Option<String> {
         return Some(token);
     }
     env.get(HTTP_TOKEN_ENV)
-        .map(|token| token.trim())
+        .map(|token| python_strip(token))
         .filter(|token| !token.is_empty())
         .map(str::to_owned)
+}
+
+/// `str.strip()` rather than `trim()`. Python treats U+001C to U+001F as
+/// whitespace and Rust does not, and a token of only those must come out empty.
+fn python_strip(text: &str) -> &str {
+    text.trim_matches(|ch: char| ch.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&ch))
 }
 
 /// What `main` needs and cannot have: the URL. `None` is the exit-2 case.
