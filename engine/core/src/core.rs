@@ -89,15 +89,27 @@ impl Moment {
     }
 
     pub fn to_iso(self) -> String {
+        self.render("+00:00")
+    }
+
+    /// The form pydantic writes for `model_dump(mode="json")`: a `Z` suffix
+    /// instead of `+00:00`. The storage form stays `to_iso`, because the two
+    /// are not the same string and the database columns carry the latter.
+    pub fn to_json(self) -> String {
+        self.render("Z")
+    }
+
+    fn render(self, suffix: &str) -> String {
         let rendered = chrono::DateTime::from_timestamp(self.unix_seconds, self.nanos)
             .expect("a moment built here is in range")
-            .format("%Y-%m-%dT%H:%M:%S%.6f+00:00")
+            .format("%Y-%m-%dT%H:%M:%S%.6f")
             .to_string();
-        if self.nanos == 0 {
+        let body = if self.nanos == 0 {
             rendered.replacen(".000000", "", 1)
         } else {
             rendered
-        }
+        };
+        format!("{body}{suffix}")
     }
 }
 
@@ -517,7 +529,7 @@ fn fixed(bytes: &[u8], at: usize, width: usize) -> Option<u32> {
 
 impl serde::Serialize for Moment {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.to_iso())
+        serializer.serialize_str(&self.to_json())
     }
 }
 
@@ -1153,11 +1165,22 @@ mod tests {
     #[test]
     fn the_json_names_match_python() {
         // ActorKind is snake_case and WorkItem's handle is "ref", as pydantic
-        // emits them. The moment stays in the storage form (+00:00); the "Z"
-        // form belongs to the API surface, which is not this type.
+        // emits them. A moment's JSON form is the Z suffix pydantic writes for
+        // model_dump(mode="json"); the +00:00 form is what the columns store.
         assert_eq!(
             serde_json::to_string(&ActorKind::Human).unwrap(),
             "\"human\""
+        );
+        let moment = from_iso("2026-01-02T03:04:05.123456+00:00").unwrap();
+        assert_eq!(moment.to_iso(), "2026-01-02T03:04:05.123456+00:00");
+        assert_eq!(
+            serde_json::to_string(&moment).unwrap(),
+            "\"2026-01-02T03:04:05.123456Z\""
+        );
+        let whole = from_iso("2026-01-02T03:04:05+00:00").unwrap();
+        assert_eq!(
+            serde_json::to_string(&whole).unwrap(),
+            "\"2026-01-02T03:04:05Z\""
         );
         let item = WorkItem {
             id: "wrk_0001".to_string(),
@@ -1179,7 +1202,7 @@ mod tests {
         let json = serde_json::to_value(&item).unwrap();
         assert_eq!(json["ref"], "WI-1");
         assert!(json.get("reference").is_none());
-        assert_eq!(json["created_at"], "2026-01-02T03:04:05+00:00");
+        assert_eq!(json["created_at"], "2026-01-02T03:04:05Z");
         let back: WorkItem = serde_json::from_value(json).unwrap();
         assert_eq!(back, item);
     }
