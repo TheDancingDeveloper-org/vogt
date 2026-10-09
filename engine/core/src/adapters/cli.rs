@@ -11,7 +11,7 @@
 //! `--<name>-stdin` instead.
 
 use std::collections::BTreeMap;
-use std::io::{self, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 use serde_json::{Map, Value};
@@ -134,15 +134,14 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
         if !command_complete && flag == "--version" && positional.is_empty() {
             return ParseOutcome::Result(ok_out(format!("vogt {version}\n")));
         }
-        // Global flags only before the command is complete. Once every token of
-        // the command has been seen, a later `--data-dir` belongs to the
-        // operation and is a usage error, matching argparse.
-        if flag == "--json" && !command_complete {
+        // A global flag only before the first command word. After `work`,
+        // `--json` is that command's flag and a usage error, matching argparse.
+        if flag == "--json" && positional.is_empty() {
             json = true;
             index += 1;
             continue;
         }
-        if flag == "--data-dir" && !command_complete {
+        if flag == "--data-dir" && positional.is_empty() {
             let Some(value) = argv_rest.get(index + 1) else {
                 return ParseOutcome::Result(usage(
                     "error: --data-dir requires a value\n".to_string(),
@@ -150,6 +149,11 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             };
             data_dir = Some(value.clone());
             index += 2;
+            continue;
+        }
+        if flag == "--help" || flag == "-h" {
+            flags.push(flag.clone());
+            index += 1;
             continue;
         }
         if !command_complete && flag.starts_with('-') && positional.is_empty() {
@@ -173,6 +177,12 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
     }
     let operations = cli_operations(registry);
     let (operation, consumed) = match resolve_command(&positional, &operations) {
+        CommandMatch::Operation { name, depth } => {
+            let Some(operation) = registry.iter().find(|operation| operation.name == name) else {
+                return ParseOutcome::Result(usage(format!("error: unknown operation {name}\n")));
+            };
+            (operation, depth)
+        }
         CommandMatch::None => {
             return ParseOutcome::Result(usage(format!(
                 "error: unknown command '{}'\n{}",
@@ -186,22 +196,19 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
                 || flags
                     .first()
                     .is_some_and(|token| token == "--help" || token == "-h");
-            if show {
-                // A bare group is a usage error in argparse (exit 2), even
-                // though it prints the group's help.
-                return ParseOutcome::Result(usage(format_group(registry, &path)));
+            if show && flags.is_empty() {
+                // A bare group is a usage error (exit 2) and prints the root
+                // help, which is what argparse does for an incomplete command.
+                return ParseOutcome::Result(usage(format_top(registry)));
             }
+            let unknown = positional
+                .get(path.len())
+                .map(String::as_str)
+                .unwrap_or(flags.first().map(String::as_str).unwrap_or(""));
             return ParseOutcome::Result(usage(format!(
-                "error: unknown command '{}'\n{}",
-                positional[path.len()],
+                "error: unknown command '{unknown}'\n{}",
                 format_group(registry, &path)
             )));
-        }
-        CommandMatch::Operation { name, depth } => {
-            let Some(operation) = registry.iter().find(|operation| operation.name == name) else {
-                return ParseOutcome::Result(usage(format!("error: unknown operation {name}\n")));
-            };
-            (operation, depth)
         }
     };
 
@@ -227,6 +234,11 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             json,
             data_dir,
         }),
+        Err(message) if message.starts_with("domain: ") => ParseOutcome::Result(CliResult {
+            exit_code: EXIT_ERROR,
+            stdout: String::new(),
+            stderr: format!("error: {}\n", message.trim_start_matches("domain: ")),
+        }),
         Err(message) => ParseOutcome::Result(usage(format!(
             "error: {message}\n{}",
             format_operation(operation)
@@ -234,9 +246,9 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
     }
 }
 
-/// True once `words` is itself an operation, so a following flag is that
-/// operation's and not a global. A strict prefix (`work`) is not complete:
-/// `--json` may still sit between the group and the subcommand.
+/// True once `words` is itself an operation. A group word (`work`) is not
+/// finished: the subcommand still follows, and a flag after it is a usage
+/// error only once the whole command has been seen.
 fn command_is_complete(words: &[String], registry: &OperationRegistry) -> bool {
     cli_operations(registry).iter().any(|op| op.path == words)
 }
@@ -280,21 +292,17 @@ fn resolve_command(argv: &[String], operations: &[CliOp]) -> CommandMatch {
     let mut best_depth = 0usize;
     let mut group: Option<Vec<String>> = None;
     for op in operations {
-        if argv.len() < op.path.len() {
-            if argv
+        if argv.len() < op.path.len()
+            && argv
                 .iter()
                 .zip(op.path.iter())
                 .all(|(got, want)| got == want)
-                && group.is_none()
-            {
-                group = Some(argv.to_vec());
-            }
-            continue;
+            && group.is_none()
+        {
+            group = Some(argv.to_vec());
         }
-        if argv
-            .iter()
-            .zip(op.path.iter())
-            .all(|(got, want)| got == want)
+        if argv.len() >= op.path.len()
+            && argv[..op.path.len()] == op.path[..]
             && op.path.len() > best_depth
         {
             best = Some(op);
@@ -376,16 +384,11 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
                     return Err(format!("--{name} takes no value"));
                 }
                 index += 1;
-                if values.contains_key(secret) {
-                    return Err(format!("--{name} conflicts with another {secret} source"));
-                }
+                // A repeated secret flag is the last one, matching argparse.
                 values.insert(secret.to_string(), Value::String(read_secret_stdin()?));
                 continue;
             }
             let value = take_value(argv, &mut index, inline)?;
-            if values.contains_key(secret) {
-                return Err(format!("--{name} conflicts with another {secret} source"));
-            }
             values.insert(secret.to_string(), Value::String(read_secret_file(&value)?));
             continue;
         }
@@ -435,11 +438,15 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
     for name in &required {
         if is_secret(name) {
             if !values.contains_key(name) {
-                return Err(format!(
-                    "--{}-file or --{}-stdin is required",
-                    name.replace('_', "-"),
-                    name.replace('_', "-")
-                ));
+                let dashed = name.replace('_', "-");
+                // Off a terminal there is no prompt, so a missing secret is a
+                // domain error (exit 1), not a usage error.
+                if !io::stdin().is_terminal() {
+                    return Err(format!(
+                        "domain: --{dashed}-file or --{dashed}-stdin is required when not on a terminal"
+                    ));
+                }
+                return Err(format!("--{dashed}-file or --{dashed}-stdin is required"));
             }
             continue;
         }
@@ -711,6 +718,10 @@ fn format_operation(operation: &Operation) -> String {
         for (flag, help) in flag_help(schema) {
             if help.is_empty() {
                 out.push_str(&format!("  {flag}\n"));
+            } else if flag.len() >= 22 {
+                // argparse wraps a flag whose column is already full onto the
+                // next line rather than running the text into the description.
+                out.push_str(&format!("  {flag}\n                        {help}\n"));
             } else {
                 out.push_str(&format!("  {flag:<22}{help}\n"));
             }
@@ -775,10 +786,55 @@ fn to_text(value: &Value) -> String {
 }
 
 fn to_json(value: &Value) -> String {
-    // Python `json.dumps`: `", "` / `": "` and `ensure_ascii`. The parity
-    // harness compares `--json` bytes, so serde_json's compact form would not
-    // match.
-    crate::decisions::python_json_dumps(value, false)
+    // Python `json.dumps(..., indent=2)`: two-space indent, `": "` and
+    // `ensure_ascii`. Kept here rather than in `decisions` so the digest
+    // renderer and this layout can change independently.
+    python_json_indent(value)
+}
+
+fn python_json_indent(value: &Value) -> String {
+    let mut out = String::new();
+    write_indent(&mut out, value, 0);
+    out
+}
+
+fn write_indent(out: &mut String, value: &Value, indent: usize) {
+    let pad = "  ".repeat(indent);
+    let inner = "  ".repeat(indent + 1);
+    match value {
+        Value::Array(items) if !items.is_empty() => {
+            out.push_str("[\n");
+            for (index, item) in items.iter().enumerate() {
+                out.push_str(&inner);
+                write_indent(out, item, indent + 1);
+                if index + 1 != items.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push(']');
+        }
+        Value::Object(map) if !map.is_empty() => {
+            out.push_str("{\n");
+            for (index, (key, item)) in map.iter().enumerate() {
+                out.push_str(&inner);
+                out.push_str(&crate::decisions::python_json_dumps(
+                    &Value::String(key.clone()),
+                    false,
+                ));
+                out.push_str(": ");
+                write_indent(out, item, indent + 1);
+                if index + 1 != map.len() {
+                    out.push(',');
+                }
+                out.push('\n');
+            }
+            out.push_str(&pad);
+            out.push('}');
+        }
+        other => out.push_str(&crate::decisions::python_json_dumps(other, false)),
+    }
 }
 
 /// Console entry used by `main`. Writes the result and returns the exit code.
@@ -886,8 +942,17 @@ mod tests {
     fn missing_required_flag_is_usage() {
         let registry = default_registry();
         let result = run(&argv(&["work", "get"]), &registry, "test", &mut no_dispatch);
-        assert_eq!(result.exit_code, EXIT_USAGE);
-        assert!(result.stderr.contains("required"));
+        assert_eq!(
+            result.exit_code, EXIT_USAGE,
+            "STDERR={:?} STDOUT={}",
+            result.stderr, result.stdout
+        );
+        assert!(
+            result.stderr.contains("required"),
+            "STDERR={:?} STDOUT={}",
+            result.stderr,
+            result.stdout
+        );
     }
 
     #[test]
@@ -914,6 +979,11 @@ mod tests {
         );
         assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
         assert!(result.stdout.contains("\"ok\": true"), "{}", result.stdout);
+        assert!(
+            result.stdout.contains('\n'),
+            "indent=2, got {}",
+            result.stdout
+        );
         let params = seen.expect("dispatched");
         assert_eq!(params["ref"], "WI-7");
         assert_eq!(params["comment_limit"], 3);
@@ -1073,6 +1143,70 @@ mod tests {
     }
 
     #[test]
+    fn a_global_flag_after_a_group_word_is_usage() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["work", "--json", "get", "--ref", "WI-7"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+    }
+
+    #[test]
+    fn a_missing_secret_off_a_terminal_exits_one() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["user", "create", "--username", "ada", "--reason", "because"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_ERROR, "{}", result.stderr);
+        assert!(
+            result.stderr.contains("when not on a terminal"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn a_repeated_secret_file_keeps_the_last_value() {
+        let registry = default_registry();
+        let first = std::env::temp_dir().join("vogt-cli-secret-a");
+        let second = std::env::temp_dir().join("vogt-cli-secret-b");
+        std::fs::write(&first, "one\n").unwrap();
+        std::fs::write(&second, "two\n").unwrap();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = run(
+            &argv(&[
+                "user",
+                "create",
+                "--username",
+                "ada",
+                "--password-file",
+                first.to_str().unwrap(),
+                "--password-file",
+                second.to_str().unwrap(),
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        let _ = std::fs::remove_file(&first);
+        let _ = std::fs::remove_file(&second);
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert_eq!(seen.expect("dispatched")["password"], "two");
+    }
+
+    #[test]
     fn a_global_flag_after_the_command_is_usage() {
         let registry = default_registry();
         let result = run(
@@ -1089,7 +1223,7 @@ mod tests {
         let registry = default_registry();
         let result = run(&argv(&["work"]), &registry, "test", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
-        assert!(result.stderr.contains("work"), "{}", result.stderr);
+        assert!(result.stderr.contains("usage: vogt"), "{}", result.stderr);
     }
 
     #[test]

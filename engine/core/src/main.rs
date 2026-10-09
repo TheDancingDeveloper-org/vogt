@@ -155,6 +155,10 @@ fn main() -> ExitCode {
     // not-ported stub breaks instance bootstrap. Every other registry command
     // goes through the generated adapter.
     if !matches!(command_word(&argv), Some("serve" | "init")) {
+        if let Err(error) = validate_hooks(None) {
+            eprintln!("{error}");
+            return ExitCode::from(1);
+        }
         let code = adapters::cli::main_cli(
             &argv,
             &registry::default_registry(),
