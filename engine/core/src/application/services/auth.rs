@@ -13,10 +13,12 @@ use crate::application::writes::{audited_write, WriteContext, WriteOutcome};
 use crate::auth::{self, TOKEN_ENTROPY_BYTES};
 use crate::core::{Actor, Clock, IdFactory, Moment, Token};
 use crate::errors::VogtError;
-use crate::storage::interface::WriteTxn;
+use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
 const TOKEN_ISSUE: &str = "token.issue";
+const TOKEN_REVOKE: &str = "token.revoke";
 const TOKEN_ISSUED_EVENT: &str = "token.issued";
+const TOKEN_REVOKED_EVENT: &str = "token.revoked";
 
 /// `token.issue`, as the registry calls it.
 pub fn issue_token_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
@@ -132,4 +134,76 @@ fn rand_bytes() -> [u8; TOKEN_ENTROPY_BYTES] {
         let _ = std::io::Read::read_exact(&mut source, &mut entropy);
     }
     entropy
+}
+
+/// `token.list`, as the registry calls it. A read: no audit row, no reason.
+pub fn list_tokens_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| list_tokens(ctx, &params))
+}
+
+fn list_tokens<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let include_revoked = params["include_revoked"].as_bool().unwrap_or(false);
+    let limit = params["limit"].as_i64().unwrap_or(100);
+    let view = ctx.declared.read()?;
+    let tokens = view.list_tokens(include_revoked, limit)?;
+    Ok(serde_json::json!({ "tokens": tokens }))
+}
+
+/// `token.revoke`, as the registry calls it.
+pub fn revoke_token_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::with_ctx!(ctx, |ctx| revoke_token(ctx, &params))
+}
+
+fn revoke_token<C: Clock + 'static, I: IdFactory + 'static>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let reason = params["reason"].as_str().unwrap_or("");
+    let id = params["id"].as_str().unwrap_or("").to_string();
+    let mut writing = write_of(ctx);
+    let revoked = revoke_recorded(&mut writing, reason, &id)?;
+    Ok(serde_json::json!({ "token": revoked }))
+}
+
+/// The audited half of a revocation, split out for the same reason
+/// `issue_recorded` is: the closure must be built against the concrete store.
+fn revoke_recorded<C: Clock + 'static, I: IdFactory + 'static>(
+    write: &mut WriteContext<'_, C, I, crate::storage::sqlite::declared::SqliteDeclaredStore<C, I>>,
+    reason: &str,
+    id: &str,
+) -> Result<Value, VogtError> {
+    let id = id.to_string();
+    let clock = std::sync::Arc::clone(write.clock());
+    audited_write(
+        write,
+        TOKEN_REVOKE,
+        reason,
+        move |txn: &mut _, _actor: &Actor| {
+            let existing = txn.token_by_id(&id)?;
+            if existing.is_none() {
+                return Err(VogtError::NotFound(format!("no token '{id}'")));
+            }
+            let now = clock.lock().expect("the clock lock").now();
+            if !txn.revoke_token(&id, reason, now)? {
+                return Err(VogtError::Conflict(format!(
+                    "token '{id}' is already revoked"
+                )));
+            }
+            let updated = txn
+                .token_by_id(&id)?
+                .expect("the token was just written in this transaction");
+            let payload = serde_json::to_value(&updated).expect("a token serialises");
+            Ok(WriteOutcome::new(
+                payload.clone(),
+                "token",
+                &id,
+                payload,
+                TOKEN_REVOKED_EVENT,
+                serde_json::json!({ "actor": updated.actor_identity_ref }),
+            ))
+        },
+    )
 }
