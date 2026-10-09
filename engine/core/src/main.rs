@@ -256,12 +256,15 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
             return ExitCode::from(1);
         }
     };
-    let router = adapters::http::health::router(adapters::http::health::HealthState {
+    let health = adapters::http::health::router(adapters::http::health::HealthState {
         data_dir: data_dir.clone(),
         version: VERSION.to_string(),
         auth_enabled: !no_auth,
         writes_enabled: true,
     });
+    let router = health.merge(adapters::http::app::router(
+        adapters::http::app::AppState::from_default(),
+    ));
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(err) => {
