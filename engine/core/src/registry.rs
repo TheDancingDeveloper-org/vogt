@@ -158,7 +158,6 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "project.scaffold" => Some(crate::application::projects::scaffold_op),
         "project.get" => Some(crate::application::projects::get_op),
         "project.list" => Some(crate::application::projects::list_op),
-        "project.brief" => Some(crate::application::projects::brief_op),
         "project.update" => Some(crate::application::projects::update_op),
         "project.transition" => Some(crate::application::projects::transition_op),
         "label.create" => Some(crate::application::taxonomy::create_label_op),
@@ -166,7 +165,6 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "actor.create" => Some(crate::application::taxonomy::create_actor_op),
         "actor.list" => Some(crate::application::taxonomy::list_actors_op),
         "workflow.list" => Some(crate::application::taxonomy::list_workflows_op),
-        "place.metrics" => Some(crate::application::place::place_metrics_op),
         "deployed.versions" => Some(crate::application::deployed::deployed_versions_op),
         other => crate::application::services::service_for(other),
     }

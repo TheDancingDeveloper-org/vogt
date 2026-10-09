@@ -907,75 +907,6 @@
   },
   {
     "body": {
-      "by_kind": {},
-      "by_state": {},
-      "ci_status": {
-        "checks": 0,
-        "detail": "swept, but no CI checks were observed \u2014 either this project has none, or the optional forge adapter is not configured",
-        "earlier_failures": 0,
-        "failing": [],
-        "revision": null,
-        "revisions_observed": 0,
-        "status": "no_checks"
-      },
-      "compliance_checked_at": null,
-      "compliance_status": "not_checked",
-      "current_version": null,
-      "declared_version": null,
-      "declared_work": 0,
-      "dependencies": {
-        "detail": "`dep-refs` has not walked this project; its references are not collected, which is not the same as none",
-        "referenced_by": 0,
-        "references_out": 0,
-        "status": "not_collected",
-        "unresolved": 0
-      },
-      "freshness": {
-        "age_seconds": null,
-        "collectors": "<volatile>",
-        "detail": "no collector has completed a sweep yet",
-        "oldest_relevant_sweep": null,
-        "status": "never_swept"
-      },
-      "observed_version": null,
-      "observed_work": 0,
-      "open_bugs": 0,
-      "open_work": 0,
-      "project": {
-        "compliance_checked_at": null,
-        "compliance_status": "not_checked",
-        "contract_adopted_at": "2026-01-02T03:04:05Z",
-        "contract_version": null,
-        "created_at": "2026-01-02T03:04:05Z",
-        "current_version": null,
-        "exclusions": [
-          ".venv/",
-          "node_modules/",
-          "target/",
-          "dist/",
-          "build/",
-          ".git/",
-          ".claude/"
-        ],
-        "id": "prj_0001",
-        "lifecycle_state": "active",
-        "link_state": "unlinked",
-        "name": "Parity",
-        "repo_url": "https://example.invalid/parity.git",
-        "root_path": "<root>/proj",
-        "slug": "parity",
-        "trust_state": "unverified",
-        "updated_at": "2026-01-02T03:04:05Z",
-        "write_back": "none"
-      },
-      "top_backlog": [],
-      "version_matches": null
-    },
-    "exit": 0,
-    "operation": "project.brief"
-  },
-  {
-    "body": {
       "project": {
         "compliance_checked_at": null,
         "compliance_status": "not_checked",
@@ -1006,21 +937,6 @@
     },
     "exit": 0,
     "operation": "project.register"
-  },
-  {
-    "body": {
-      "backlog_total_considered": 0,
-      "drift_present": false,
-      "generated_at": "2026-01-02T03:04:08Z",
-      "inbox_active": 0,
-      "inbox_active_unfiltered": 0,
-      "inbox_filter": null,
-      "projects_total": 2,
-      "revision": 7,
-      "work_total": 0
-    },
-    "exit": 0,
-    "operation": "place.metrics"
   },
   {
     "body": {

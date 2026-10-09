@@ -165,28 +165,12 @@
    }
   },
   {
-   "operation": "project.brief",
-   "params": {
-    "slug": "parity"
-   },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
    "operation": "project.register",
    "params": {
     "name": "Second",
     "root_path": "{root}/second",
     "reason": "parity harness"
    },
-   "expect": {
-    "exit": 0
-   }
-  },
-  {
-   "operation": "place.metrics",
-   "params": {},
    "expect": {
     "exit": 0
    }
