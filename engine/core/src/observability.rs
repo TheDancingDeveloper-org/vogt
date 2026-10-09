@@ -138,12 +138,19 @@ pub fn capturing_problems() -> bool {
     RECENT.lock().expect("recent problems lock").capturing
 }
 
-pub fn configure_logging() {
+pub fn configure_logging(level: &str, format: &str) {
     RECENT.lock().expect("recent problems lock").capturing = true;
-    let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry().with(VogtLayer));
+    let _ =
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(VogtLayer {
+            level: level.to_string(),
+            json: format == "json",
+        }));
 }
 
-struct VogtLayer;
+struct VogtLayer {
+    level: String,
+    json: bool,
+}
 
 struct FieldVisitor {
     message: String,
@@ -169,7 +176,7 @@ where
 {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
         let meta = event.metadata();
-        if !meta.target().starts_with(LOGGER_NAMESPACE) {
+        if !meta.target().starts_with(LOGGER_NAMESPACE) || !self.emits(meta.level()) {
             return;
         }
         let mut visitor = FieldVisitor {
@@ -177,18 +184,14 @@ where
             fields: Vec::new(),
         };
         event.record(&mut visitor);
-        let mut parts = Vec::new();
-        if let Some(id) = current_request_id() {
-            parts.push(format!("request_id={id}"));
-        }
-        parts.push(visitor.message);
-        for (key, value) in &visitor.fields {
-            parts.push(format!("{key}={value}"));
-        }
-        if let Some(actor) = current_actor() {
-            parts.push(format!("actor={actor}"));
-        }
-        let redacted = redact(&parts.join(" "));
+        let request_id = current_request_id();
+        let actor = current_actor();
+        let line = if self.json {
+            render_json(meta, &visitor, request_id.as_deref(), actor.as_deref())
+        } else {
+            render_text(meta, &visitor, request_id.as_deref(), actor.as_deref())
+        };
+        let redacted = redact(&line);
         if *meta.level() <= Level::WARN {
             let mut recent = RECENT.lock().expect("recent problems lock");
             if recent.lines.len() == RECENT_PROBLEMS_CAPACITY {
@@ -199,6 +202,97 @@ where
                 .push_back(redacted.chars().take(RECENT_LINE_LIMIT).collect());
         }
         let _ = writeln!(std::io::stderr(), "{redacted}");
+    }
+}
+
+impl VogtLayer {
+    fn emits(&self, level: &Level) -> bool {
+        let floor = match self.level.to_ascii_lowercase().as_str() {
+            "debug" => Level::DEBUG,
+            "warning" => Level::WARN,
+            "error" => Level::ERROR,
+            _ => Level::INFO,
+        };
+        *level <= floor
+    }
+}
+
+/// Python's `TextFormatter`: `2026-08-19T11:02:03.123Z INFO    vogt.http message`,
+/// then `key=value` pairs quoted only when the value is empty or has a space.
+/// `request_id` leads the fields and `actor` trails them.
+fn render_text(
+    meta: &'static tracing::Metadata<'static>,
+    visitor: &FieldVisitor,
+    request_id: Option<&str>,
+    actor: Option<&str>,
+) -> String {
+    let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    let level = format!("{:<7}", level_name(meta.level()));
+    let mut line = format!("{stamp} {level} {} {}", meta.target(), visitor.message);
+    let mut fields: Vec<(&str, &str)> = Vec::new();
+    if let Some(id) = request_id {
+        fields.push(("request_id", id));
+    }
+    for (key, value) in &visitor.fields {
+        fields.push((key, value));
+    }
+    if let Some(actor) = actor {
+        fields.push(("actor", actor));
+    }
+    let rendered = fields
+        .iter()
+        .map(|(key, value)| format!("{key}={}", terse(value)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if !rendered.is_empty() {
+        line.push(' ');
+        line.push_str(&rendered);
+    }
+    line
+}
+
+fn terse(value: &str) -> String {
+    if value.is_empty() || value.contains(' ') {
+        format!("\"{value}\"")
+    } else {
+        value.to_string()
+    }
+}
+
+/// Python's `JsonFormatter`: one object per line, level lower-case, the same
+/// fields the text line carries.
+fn render_json(
+    meta: &'static tracing::Metadata<'static>,
+    visitor: &FieldVisitor,
+    request_id: Option<&str>,
+    actor: Option<&str>,
+) -> String {
+    let mut payload = serde_json::json!({
+        "ts": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        "level": level_name(meta.level()).to_ascii_lowercase(),
+        "logger": meta.target(),
+        "message": visitor.message,
+    });
+    let object = payload.as_object_mut().expect("object");
+    if let Some(id) = request_id {
+        object.insert("request_id".to_string(), id.into());
+    }
+    if let Some(actor) = actor {
+        object.insert("actor".to_string(), actor.into());
+    }
+    for (key, value) in &visitor.fields {
+        object.insert(key.clone(), value.clone().into());
+    }
+    payload.to_string()
+}
+
+fn level_name(level: &Level) -> &'static str {
+    match *level {
+        Level::ERROR => "ERROR",
+        Level::WARN => "WARNING",
+        Level::INFO => "INFO",
+        Level::DEBUG => "DEBUG",
+        Level::TRACE => "TRACE",
     }
 }
 
@@ -216,6 +310,24 @@ mod tests {
         assert_eq!(accepted_request_id(Some("has\nline")), None);
         assert_eq!(accepted_request_id(Some(&"a".repeat(65))), None);
         assert_eq!(accepted_request_id(None), None);
+    }
+
+    #[test]
+    fn the_text_line_quotes_only_when_it_must() {
+        assert_eq!(terse("GET"), "GET");
+        assert_eq!(terse("GET /health"), "\"GET /health\"");
+        assert_eq!(terse(""), "\"\"");
+        assert_eq!(level_name(&Level::WARN), "WARNING");
+    }
+
+    #[test]
+    fn the_configured_level_drops_quieter_events() {
+        let layer = VogtLayer {
+            level: "warning".to_string(),
+            json: false,
+        };
+        assert!(layer.emits(&Level::WARN));
+        assert!(!layer.emits(&Level::INFO));
     }
 
     #[test]
