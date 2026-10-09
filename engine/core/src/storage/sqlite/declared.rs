@@ -316,8 +316,12 @@ where
     ) -> Result<Event, VogtError> {
         // Not a declared write: no audit row and the revision stays put,
         // which is what lets a collector keep its promise never to write
-        // the declared store while the application publishes for it.
+        // the declared store while the application publishes for it. The
+        // transaction id is still drawn, though: Python builds a
+        // SqliteWriteTxn for the append, and under a sequential id factory
+        // every later audit's txn id counts the publishes that came first.
         let conn = self.open_initialized()?;
+        let _txn_id = self.ids.borrow_mut().next("txn");
         conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
         let outcome = (|| -> Result<Event, rusqlite::Error> {
             let rendered = crate::decisions::python_json_dumps(summary, false);
@@ -1056,7 +1060,9 @@ impl ReadView for SqliteReadView {
         outcome: Option<&str>,
         limit: i64,
     ) -> Result<Vec<WriteBackRecord>, VogtError> {
-        match outcome {
+        // Python's `if outcome` treats "" as absent, so an empty filter
+        // returns every row rather than matching the empty outcome.
+        match outcome.filter(|value| !value.is_empty()) {
             Some(value) => many(
                 &self.conn,
                 "SELECT * FROM writeback_actions WHERE outcome = ? ORDER BY at DESC, id DESC LIMIT ?",
@@ -2443,6 +2449,155 @@ fn vocab(state: &InitiativeState) -> String {
 }
 
 #[cfg(test)]
+mod overlay_tests {
+    use super::tests::{moment, project, store};
+    use super::*;
+
+    #[test]
+    fn an_overlay_keeps_its_first_created_at_and_a_link_resolves_the_item() {
+        let dir = std::env::temp_dir().join(format!("vogt-overlay-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = store(&dir);
+        let now = moment();
+        let later_at = Moment::from_unix(1_700_000_900, 0);
+        let project = project(&store, "linked");
+        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let mut txn = store.write().unwrap();
+        let reference = txn.next_work_ref().unwrap();
+        txn.insert_project(&project).unwrap();
+        txn.insert_work_item(&WorkItem {
+            id: "wrk_1".into(),
+            reference: reference.clone(),
+            kind: "bug".parse().unwrap(),
+            title: "leaks".into(),
+            body: String::new(),
+            state: "open".into(),
+            priority: "p2".parse().unwrap(),
+            effort: None,
+            project_id: Some(project.id.clone()),
+            project_slug: None,
+            initiative_id: None,
+            origin: "created".parse().unwrap(),
+            trust_state: "unverified".parse().unwrap(),
+            assignee_actor_id: None,
+            assignee_identity_ref: None,
+            labels: Vec::new(),
+            relations: Vec::new(),
+            superseded_by: None,
+            created_at: now,
+            updated_at: now,
+        })
+        .unwrap();
+        txn.insert_work_link(&WorkLink {
+            work_item_id: "wrk_1".into(),
+            subject_key: "gh:1".into(),
+            origin_kind: "issue".into(),
+            source_url: None,
+            relation: "completion".parse().unwrap(),
+            created_at: now,
+        })
+        .unwrap();
+        let overlay = WorkOverlay {
+            subject_key: "gh:1".into(),
+            project_id: project.id.clone(),
+            rank: Some(1.5),
+            workflow_state: Some("triage".into()),
+            priority: Some("p1".parse().unwrap()),
+            effort: None,
+            assignee_actor_id: Some(actor.id.clone()),
+            initiative_id: None,
+            branches: vec!["fix/leaks".into()],
+            created_at: now,
+            updated_at: now,
+        };
+        txn.upsert_work_overlay(&overlay).unwrap();
+        txn.upsert_work_overlay(&WorkOverlay {
+            updated_at: later_at,
+            rank: Some(2.0),
+            ..overlay.clone()
+        })
+        .unwrap();
+        txn.insert_writeback(&WriteBackRecord {
+            id: "wb_1".into(),
+            at: now,
+            project_id: Some(project.id.clone()),
+            work_item_id: Some("wrk_1".into()),
+            actor_id: actor.id.clone(),
+            action: "comment".parse().unwrap(),
+            subject_key: Some("gh:1".into()),
+            policy: "on-demand".into(),
+            outcome: "succeeded".parse().unwrap(),
+            reason: "posted".into(),
+            detail: None,
+            source_url: None,
+        })
+        .unwrap();
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        let kept = view.work_overlay("gh:1").unwrap().unwrap();
+        assert_eq!(kept.created_at, now);
+        assert_eq!(kept.updated_at, later_at);
+        assert_eq!(kept.rank, Some(2.0));
+        assert_eq!(kept.priority, Some("p1".parse().unwrap()));
+        assert_eq!(kept.branches, vec!["fix/leaks".to_string()]);
+        assert_eq!(view.bound_branch_overlays(10).unwrap(), vec![kept.clone()]);
+        let resolved = view.work_item_by_subject("gh:1").unwrap().unwrap();
+        assert_eq!(resolved.reference, reference);
+        assert_eq!(
+            view.work_links_for_subjects(&["gh:1".into()])
+                .unwrap()
+                .get("gh:1")
+                .map(String::as_str),
+            Some(reference.as_str())
+        );
+        assert_eq!(
+            view.work_links_for_subjects_by_item("wrk_1")
+                .unwrap()
+                .get("gh:1")
+                .map(String::as_str),
+            Some("issue")
+        );
+        let written = view.list_writeback_actions(Some("succeeded"), 10).unwrap();
+        assert_eq!(written.len(), 1);
+        assert!(view
+            .list_writeback_actions(Some("failed"), 10)
+            .unwrap()
+            .is_empty());
+
+        let event = store
+            .publish_event(
+                "observed",
+                "work_item",
+                "wrk_1",
+                &serde_json::json!({"note": "seen"}),
+                now,
+            )
+            .unwrap();
+        assert_eq!(event.summary["note"], "seen");
+        assert_eq!(event.actor_id, None);
+        // Publishing draws a transaction id even though it writes no audit
+        // row, so the next write's id counts it.
+        let mut again = store.write().unwrap();
+        let audit = again
+            .append_audit(
+                &actor,
+                "note",
+                "work_item",
+                "wrk_1",
+                "because",
+                &"sha256:ab".repeat(32),
+                now,
+            )
+            .unwrap();
+        assert_eq!(audit.txn_id, "txn_0004");
+        drop(again);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::{InitiativeState, Moment, SequentialIds, StepClock};
@@ -3631,35 +3786,20 @@ fn row_session(row: &Row<'_>) -> rusqlite::Result<CodingSession> {
 }
 
 fn row_session_grant(row: &Row<'_>) -> rusqlite::Result<SessionGrant> {
-    let kind: String = row.get("kind")?;
-    let uses: String = row.get("uses")?;
-    let state: String = row.get("state")?;
-    let kind: crate::core::GrantKind = serde_json::from_value(serde_json::Value::String(kind))
-        .map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?;
-    let uses: crate::core::GrantUses = serde_json::from_value(serde_json::Value::String(uses))
-        .map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?;
-    let state: crate::core::GrantState = serde_json::from_value(serde_json::Value::String(state))
-        .map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-    })?;
     Ok(SessionGrant {
         id: row.get("id")?,
         target_engine_session_id: row.get("target_engine_session_id")?,
-        kind,
+        kind: vocab_cell(row, "kind")?,
         var: row.get("var")?,
         project_id: row.get("project_id")?,
         secret_name: row.get("secret_name")?,
         capability: row.get("capability")?,
-        uses,
+        uses: vocab_cell(row, "uses")?,
         ttl_seconds: row.get("ttl_seconds")?,
         reason: row.get("reason")?,
         requested_by: row.get("requested_by")?,
         requested_at: moment(row, "requested_at")?,
-        state,
+        state: vocab_cell(row, "state")?,
         decided_by: row.get("decided_by")?,
         decided_at: opt_moment(row, "decided_at")?,
         decision_reason: row.get("decision_reason")?,
@@ -4272,137 +4412,4 @@ fn audit_where(query: &AuditQuery) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         },
         params_box,
     )
-}
-
-#[cfg(test)]
-mod overlay_tests {
-    use super::tests::{moment, project, store};
-    use super::*;
-
-    #[test]
-    fn an_overlay_keeps_its_first_created_at_and_a_link_resolves_the_item() {
-        let dir = std::env::temp_dir().join(format!("vogt-overlay-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let store = store(&dir);
-        let now = moment();
-        let later_at = Moment::from_unix(1_700_000_900, 0);
-        let project = project(&store, "linked");
-        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
-        let mut txn = store.write().unwrap();
-        let reference = txn.next_work_ref().unwrap();
-        txn.insert_project(&project).unwrap();
-        txn.insert_work_item(&WorkItem {
-            id: "wrk_1".into(),
-            reference: reference.clone(),
-            kind: "bug".parse().unwrap(),
-            title: "leaks".into(),
-            body: String::new(),
-            state: "open".into(),
-            priority: "p2".parse().unwrap(),
-            effort: None,
-            project_id: Some(project.id.clone()),
-            project_slug: None,
-            initiative_id: None,
-            origin: "created".parse().unwrap(),
-            trust_state: "unverified".parse().unwrap(),
-            assignee_actor_id: None,
-            assignee_identity_ref: None,
-            labels: Vec::new(),
-            relations: Vec::new(),
-            superseded_by: None,
-            created_at: now,
-            updated_at: now,
-        })
-        .unwrap();
-        txn.insert_work_link(&WorkLink {
-            work_item_id: "wrk_1".into(),
-            subject_key: "gh:1".into(),
-            origin_kind: "issue".into(),
-            source_url: None,
-            relation: "completion".parse().unwrap(),
-            created_at: now,
-        })
-        .unwrap();
-        let overlay = WorkOverlay {
-            subject_key: "gh:1".into(),
-            project_id: project.id.clone(),
-            rank: Some(1.5),
-            workflow_state: Some("triage".into()),
-            priority: Some("p1".parse().unwrap()),
-            effort: None,
-            assignee_actor_id: Some(actor.id.clone()),
-            initiative_id: None,
-            branches: vec!["fix/leaks".into()],
-            created_at: now,
-            updated_at: now,
-        };
-        txn.upsert_work_overlay(&overlay).unwrap();
-        txn.upsert_work_overlay(&WorkOverlay {
-            updated_at: later_at,
-            rank: Some(2.0),
-            ..overlay.clone()
-        })
-        .unwrap();
-        txn.insert_writeback(&WriteBackRecord {
-            id: "wb_1".into(),
-            at: now,
-            project_id: Some(project.id.clone()),
-            work_item_id: Some("wrk_1".into()),
-            actor_id: actor.id.clone(),
-            action: "comment".parse().unwrap(),
-            subject_key: Some("gh:1".into()),
-            policy: "on-demand".into(),
-            outcome: "succeeded".parse().unwrap(),
-            reason: "posted".into(),
-            detail: None,
-            source_url: None,
-        })
-        .unwrap();
-        txn.commit().unwrap();
-
-        let view = store.read().unwrap();
-        let kept = view.work_overlay("gh:1").unwrap().unwrap();
-        assert_eq!(kept.created_at, now);
-        assert_eq!(kept.updated_at, later_at);
-        assert_eq!(kept.rank, Some(2.0));
-        assert_eq!(kept.priority, Some("p1".parse().unwrap()));
-        assert_eq!(kept.branches, vec!["fix/leaks".to_string()]);
-        assert_eq!(view.bound_branch_overlays(10).unwrap(), vec![kept.clone()]);
-        let resolved = view.work_item_by_subject("gh:1").unwrap().unwrap();
-        assert_eq!(resolved.reference, reference);
-        assert_eq!(
-            view.work_links_for_subjects(&["gh:1".into()])
-                .unwrap()
-                .get("gh:1")
-                .map(String::as_str),
-            Some(reference.as_str())
-        );
-        assert_eq!(
-            view.work_links_for_subjects_by_item("wrk_1")
-                .unwrap()
-                .get("gh:1")
-                .map(String::as_str),
-            Some("issue")
-        );
-        let written = view.list_writeback_actions(Some("succeeded"), 10).unwrap();
-        assert_eq!(written.len(), 1);
-        assert!(view
-            .list_writeback_actions(Some("failed"), 10)
-            .unwrap()
-            .is_empty());
-
-        let event = store
-            .publish_event(
-                "observed",
-                "work_item",
-                "wrk_1",
-                &serde_json::json!({"note": "seen"}),
-                now,
-            )
-            .unwrap();
-        assert_eq!(event.summary["note"], "seen");
-        assert_eq!(event.actor_id, None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

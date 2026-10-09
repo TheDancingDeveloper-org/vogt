@@ -872,6 +872,18 @@ fn link_relation_default() -> LinkRelation {
     LinkRelation::Completion
 }
 
+fn grant_uses_default() -> GrantUses {
+    GrantUses::Once
+}
+
+fn grant_state_default() -> GrantState {
+    GrantState::Pending
+}
+
+fn empty_object() -> serde_json::Value {
+    serde_json::json!({})
+}
+
 fn token_kind_default() -> TokenKind {
     TokenKind::Api
 }
@@ -1324,7 +1336,8 @@ pub struct Observation {
     pub observed_at: Moment,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkOverlay {
     pub subject_key: String,
     pub project_id: String,
@@ -1334,6 +1347,7 @@ pub struct WorkOverlay {
     pub effort: Option<Effort>,
     pub assignee_actor_id: Option<String>,
     pub initiative_id: Option<String>,
+    #[serde(default)]
     pub branches: Vec<String>,
     pub created_at: Moment,
     pub updated_at: Moment,
@@ -1361,11 +1375,13 @@ pub struct SessionGrant {
     pub project_id: Option<String>,
     pub secret_name: Option<String>,
     pub capability: Option<String>,
+    #[serde(default = "grant_uses_default")]
     pub uses: GrantUses,
     pub ttl_seconds: i64,
     pub reason: String,
     pub requested_by: String,
     pub requested_at: Moment,
+    #[serde(default = "grant_state_default")]
     pub state: GrantState,
     pub decided_by: Option<String>,
     pub decided_at: Option<Moment>,
@@ -1637,6 +1653,7 @@ pub struct Event {
     pub entity_id: String,
     pub actor_id: Option<String>,
     pub audit_id: Option<String>,
+    #[serde(default = "empty_object")]
     pub summary: serde_json::Value,
     pub at: Moment,
 }
