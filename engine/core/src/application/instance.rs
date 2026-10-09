@@ -33,7 +33,15 @@ pub fn init(
     std::fs::create_dir_all(data_dir)?;
     let root = migrator::migrations_root();
     let declared_existed = declared_path(data_dir).exists();
-    let now = stamp(clock);
+    // A database that already exists was migrated by `init`, and re-checking it
+    // applies nothing. Stamping the hook clock for that check anyway moves every
+    // later row one tick past Python, whose `serve` never touches the clock.
+    // The wall clock is read instead, so a step clock stays where `init` left it.
+    let now = if declared_existed {
+        crate::core::to_iso(crate::core::utc_now())
+    } else {
+        stamp(clock)
+    };
     let declared = migrator::open_and_migrate(
         &declared_path(data_dir),
         "declared",
@@ -42,7 +50,11 @@ pub fn init(
         &now,
     )?;
     seed_workflows(data_dir, &now)?;
-    let observed_now = stamp(clock);
+    let observed_now = if declared_existed {
+        crate::core::to_iso(crate::core::utc_now())
+    } else {
+        stamp(clock)
+    };
     let observed = migrator::open_and_migrate(
         &observed_path(data_dir),
         "observed",

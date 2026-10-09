@@ -685,6 +685,7 @@ pub trait DeclaredStore {
     /// The store's clock, read once. A step clock ticks on every read, so a caller
     /// that already holds an instant must not call this for it.
     fn now(&self) -> crate::core::Moment;
+    /// A fresh id and nothing else. The caller has already read the clock for the
     /// decision's `at`, and a step clock ticks on every read, so drawing the id
     /// must not read it again.
     fn next_id(&self, prefix: &str) -> String;

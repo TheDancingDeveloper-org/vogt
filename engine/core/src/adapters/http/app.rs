@@ -21,6 +21,7 @@ use crate::errors::VogtError;
 use crate::registry::{
     default_registry, validate, HttpMethod, Operation, OperationRegistry, Transport,
 };
+use crate::storage::interface::DeclaredStore;
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 
 /// The prefix every registry route lives under. The engine's front door
@@ -489,31 +490,26 @@ async fn dispatch<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error),
     };
-    // The gate records its decision before the operation runs, so a request
-    // that will be refused never reaches a handler.
-    let (granted, request_store) = {
-        let request_store = request_store(&state, clock_for);
-        let now = request_store
-            .clock()
-            .lock()
-            .expect("the clock lock is not poisoned")
-            .now();
-        (
-            auth_gate::authorize(
-                &request_store,
-                AuthRequest {
-                    operation,
-                    transport: Transport::Http,
-                    presented: presented.as_deref(),
-                    no_auth: state.no_auth,
-                    writes_enabled: state.writes_enabled,
-                    now,
-                },
-                state.config.session_ttl_days,
-            ),
-            request_store,
-        )
-    };
+    // The gate and the operation read one clock, and they read it once. On the
+    // step routes that clock is fresh for this request and restarts at the hook's
+    // start (`step_clock_for`), so the decision, the entity and the audit land at
+    // the same three instants every request. Authorizing on the process clock
+    // instead spent the request's first tick on the touch, and every later stamp
+    // landed one past Python.
+    let request_store = request_store(&state, clock_for);
+    let now = request_store.now();
+    let granted = auth_gate::authorize(
+        &request_store,
+        AuthRequest {
+            operation,
+            transport: Transport::Http,
+            presented: presented.as_deref(),
+            no_auth: state.no_auth,
+            writes_enabled: state.writes_enabled,
+            now,
+        },
+        state.config.session_ttl_days,
+    );
     let grant = match granted {
         Ok(grant) => grant,
         Err(denial) => {
