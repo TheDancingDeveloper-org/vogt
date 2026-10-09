@@ -98,7 +98,7 @@ fn main() -> ExitCode {
         let env: std::collections::HashMap<String, String> = std::env::vars().collect();
         let Some(url) = adapters::mcp::bridge::configured_url(&env) else {
             eprintln!(
-                "vogt-mcp-remote: set VOGT_URL to the server's base URL (and VOGT_HTTP_TOKEN_FILE to a file holding a token)"
+                "vogt-mcp-remote: set VOGT_URL to the server's base URL (and VOGT_TOKEN_FILE to a file holding a token)"
             );
             return ExitCode::from(2);
         };
@@ -107,14 +107,29 @@ fn main() -> ExitCode {
         let mut bridge = adapters::mcp::bridge::Bridge::new(&url, token, &transport, VERSION);
         // A line at a time. A client sends `initialize` and waits for the
         // answer, so reading all of stdin first hangs the handshake.
-        let stdin = std::io::stdin();
+        // Bytes, not lines of text. A line that is not UTF-8 is still a line
+        // the client is waiting on, and Python answers it with -32700 rather
+        // than skipping it. Lossy decoding keeps the valid bytes so the error
+        // names where the line broke.
+        let mut stdin = std::io::BufReader::new(std::io::stdin());
         let mut warned = 0;
-        for line in stdin.lines() {
+        loop {
+            let mut bytes = Vec::new();
+            if std::io::BufRead::read_until(&mut stdin, b'\n', &mut bytes).is_err()
+                || bytes.is_empty()
+            {
+                break;
+            }
+            let line = String::from_utf8_lossy(&bytes);
             let mut output = String::new();
-            bridge.serve_line(line.as_deref().unwrap_or(""), &mut output);
+            bridge.serve_line(&line, &mut output);
             if !output.is_empty() {
-                print!("{output}");
-                let _ = std::io::Write::flush(&mut std::io::stdout());
+                use std::io::Write;
+                let mut stdout = std::io::stdout().lock();
+                // A client that closed its pipe is a stop, not a panic.
+                if stdout.write_all(output.as_bytes()).is_err() {
+                    return ExitCode::SUCCESS;
+                }
             }
             for warning in bridge.report.warned.iter().skip(warned) {
                 eprintln!("vogt-mcp-remote: {warning}");

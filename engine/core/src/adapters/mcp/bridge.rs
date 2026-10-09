@@ -118,7 +118,9 @@ impl<'a, T: BridgeTransport> Bridge<'a, T> {
             ));
             return;
         };
-        let remote_version = info.get("version").and_then(Value::as_str).unwrap_or("");
+        // Python's `str()` renders a number, a bool and a string alike, so a
+        // server that advertises `7` still triggers the skew warning.
+        let remote_version = info.get("version").map(python_str).unwrap_or_default();
         if !remote_version.is_empty() {
             self.report.remote_version = Some(remote_version.to_owned());
             if remote_version != self.version {
@@ -330,6 +332,18 @@ pub fn resolve_token(env: &HashMap<String, String>) -> Option<String> {
 /// What `main` needs and cannot have: the URL. `None` is the exit-2 case.
 pub fn configured_url(env: &HashMap<String, String>) -> Option<String> {
     env.get(URL_ENV).filter(|url| !url.is_empty()).cloned()
+}
+
+/// Python's `str()` for the JSON values a server might put in `version`.
+fn python_str(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(true) => "True".to_owned(),
+        Value::Bool(false) => "False".to_owned(),
+        Value::Null => "None".to_owned(),
+        other => other.to_string(),
+    }
 }
 
 /// The live transport. An empty body is a GET, because discovery sends one and
