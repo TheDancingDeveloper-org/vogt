@@ -2448,6 +2448,719 @@ fn vocab(state: &InitiativeState) -> String {
         .to_string()
 }
 
+/// Close first-run install mode once a person holds a credential. The latch
+/// only ever gets set, so removing the credential later does not reopen the
+/// door. An agent-only token leaves it open.
+fn attach_label(conn: &Connection, work_item_id: &str, name: &str) -> Result<(), VogtError> {
+    let id: String = conn
+        .query_row("SELECT id FROM labels WHERE name = ?", [name], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(sql_err)?
+        .ok_or_else(|| VogtError::NotFound(format!("no label named {name:?}")))?;
+    conn.execute("INSERT INTO work_item_labels (work_item_id, label_id) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM work_item_labels WHERE work_item_id = ? AND label_id = ?)", params![work_item_id, id, work_item_id, id]).map_err(sql_err)?;
+    Ok(())
+}
+fn vocab_of<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn latch_install_if_operator(conn: &Connection, at: Moment) -> Result<(), VogtError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO install_latch (id, closed_at, reason) SELECT 1, ?, 'a person holds a credential' WHERE EXISTS (SELECT 1 FROM tokens t JOIN actors a ON a.id = t.actor_id WHERE a.kind <> 'agent') OR EXISTS (SELECT 1 FROM password_credentials)",
+        [to_iso(at)],
+    ).map(|_| ()).map_err(sql_err)
+}
+
+fn vocab_text<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .expect("a vocab value is a string")
+        .as_str()
+        .expect("snake_case")
+        .to_string()
+}
+
+/// Commit an immediate transaction, or roll it back and surface the error.
+fn finish_immediate(conn: &Connection, outcome: rusqlite::Result<usize>) -> Result<(), VogtError> {
+    match outcome {
+        Ok(_) => conn.execute("COMMIT", []).map(|_| ()).map_err(sql_err),
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(sql_err(err))
+        }
+    }
+}
+
+fn row_auth_decision(row: &Row<'_>) -> rusqlite::Result<AuthDecision> {
+    let decision: String = row.get("decision")?;
+    Ok(AuthDecision {
+        id: row.get("id")?,
+        at: moment(row, "at")?,
+        decision: serde_json::from_value(serde_json::Value::String(decision)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        reason_code: row.get("reason_code")?,
+        operation: row.get("operation")?,
+        scope: row.get("scope")?,
+        actor_id: row.get("actor_id")?,
+        token_id: row.get("token_id")?,
+        identity_ref: row.get("identity_ref")?,
+        transport: row.get("transport")?,
+        detail: row.get("detail")?,
+    })
+}
+
+fn row_session(row: &Row<'_>) -> rusqlite::Result<CodingSession> {
+    Ok(CodingSession {
+        id: row.get("id")?,
+        engine_session_id: row.get("engine_session_id")?,
+        project_id: row.get("project_id")?,
+        work_item_id: row.get("work_item_id")?,
+        actor_id: row.get("actor_id")?,
+        cwd: row.get("cwd")?,
+        template: row.get("template")?,
+        model: row.get("model")?,
+        effort: row.get("effort")?,
+        reason: row.get("reason")?,
+        started_at: moment(row, "started_at")?,
+        stopped_at: opt_moment(row, "stopped_at")?,
+    })
+}
+
+fn row_session_grant(row: &Row<'_>) -> rusqlite::Result<SessionGrant> {
+    Ok(SessionGrant {
+        id: row.get("id")?,
+        target_engine_session_id: row.get("target_engine_session_id")?,
+        kind: vocab_cell(row, "kind")?,
+        var: row.get("var")?,
+        project_id: row.get("project_id")?,
+        secret_name: row.get("secret_name")?,
+        capability: row.get("capability")?,
+        uses: vocab_cell(row, "uses")?,
+        ttl_seconds: row.get("ttl_seconds")?,
+        reason: row.get("reason")?,
+        requested_by: row.get("requested_by")?,
+        requested_at: moment(row, "requested_at")?,
+        state: vocab_cell(row, "state")?,
+        decided_by: row.get("decided_by")?,
+        decided_at: opt_moment(row, "decided_at")?,
+        decision_reason: row.get("decision_reason")?,
+        expires_at: opt_moment(row, "expires_at")?,
+        revoked_by: row.get("revoked_by")?,
+        revoked_at: opt_moment(row, "revoked_at")?,
+    })
+}
+
+const DRIFT_SELECT: &str = "SELECT d.*, p.slug AS project_slug, a.identity_ref AS resolved_by FROM drift_proposals d LEFT JOIN projects p ON p.id = d.project_id LEFT JOIN actors a ON a.id = d.resolved_by_actor_id";
+
+fn row_drift(row: &Row<'_>) -> rusqlite::Result<DriftProposal> {
+    let status: String = row.get("status")?;
+    Ok(DriftProposal {
+        id: row.get("id")?,
+        kind: row.get("kind")?,
+        subject_kind: row.get("subject_kind")?,
+        subject_id: row.get("subject_id")?,
+        project_id: row.get("project_id")?,
+        project_slug: row.get("project_slug")?,
+        summary: row.get("summary")?,
+        evidence_observation_id: row.get("evidence_observation_id")?,
+        evidence_snapshot: json_cell(row, "evidence_snapshot")?,
+        proposed_change: json_cell(row, "proposed_change")?,
+        status: serde_json::from_value(serde_json::Value::String(status)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        opened_at: moment(row, "opened_at")?,
+        superseded_at: opt_moment(row, "superseded_at")?,
+        superseded_detail: row.get("superseded_detail")?,
+        resolved_by_actor_id: row.get("resolved_by_actor_id")?,
+        resolved_by_identity_ref: row.get("resolved_by")?,
+        resolved_at: opt_moment(row, "resolved_at")?,
+        resolution_reason: row.get("resolution_reason")?,
+    })
+}
+
+const INBOX_SELECT: &str = "SELECT t.*, a.identity_ref AS actor_identity_ref FROM inbox_triage t JOIN actors a ON a.id = t.actor_id";
+
+fn row_inbox_triage(row: &Row<'_>) -> rusqlite::Result<InboxTriage> {
+    let state: String = row.get("state")?;
+    Ok(InboxTriage {
+        entry_key: row.get("entry_key")?,
+        state: serde_json::from_value(serde_json::Value::String(state)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        snooze_until: opt_moment(row, "snooze_until")?,
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        decided_at: moment(row, "decided_at")?,
+        occurrence_snapshot: json_cell(row, "occurrence_snapshot")?,
+    })
+}
+
+fn row_actor_preference(row: &Row<'_>) -> rusqlite::Result<ActorPreference> {
+    // A preference value is an object. Anything else stored there reads back
+    // as an empty one, which is what Python's row mapper does.
+    let value = json_cell(row, "value")?;
+    Ok(ActorPreference {
+        actor_id: row.get("actor_id")?,
+        key: row.get("key")?,
+        value: if value.is_object() {
+            value
+        } else {
+            serde_json::json!({})
+        },
+        version: row.get("version")?,
+        updated_at: moment(row, "updated_at")?,
+    })
+}
+
+/// One JSON column, parsed. A corrupt value is a conversion failure, not null.
+fn json_cell(row: &Row<'_>, column: &str) -> rusqlite::Result<serde_json::Value> {
+    let text: String = row.get(column)?;
+    serde_json::from_str(&text).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })
+}
+
+const TOKEN_CARRY_COLUMNS: &[&str] = &[
+    "id",
+    "actor_id",
+    "name",
+    "token_hash",
+    "scopes",
+    "kind",
+    "created_at",
+    "expires_at",
+    "last_used_at",
+    "revoked_at",
+    "revoked_reason",
+];
+const PASSWORD_CARRY_COLUMNS: &[&str] = &[
+    "actor_id",
+    "username",
+    "password_hash",
+    "scopes",
+    "created_at",
+    "updated_at",
+];
+const FORGE_ACCOUNT_CARRY_COLUMNS: &[&str] = &[
+    "actor_id",
+    "host",
+    "login",
+    "scopes",
+    "encrypted_token",
+    "created_at",
+    "updated_at",
+];
+
+fn json_str(row: &serde_json::Value, column: &str) -> String {
+    row.get(column)
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// One carried cell, bound as text. JSON null and a missing column both become
+/// SQL NULL, which is what the source row held.
+fn json_param(row: &serde_json::Value, column: &str) -> Box<dyn rusqlite::ToSql> {
+    match row.get(column) {
+        Some(serde_json::Value::Null) | None => Box::new(None::<String>),
+        Some(serde_json::Value::String(text)) => Box::new(text.clone()),
+        Some(other) => Box::new(other.to_string()),
+    }
+}
+
+fn insert_carry_row(
+    conn: &Connection,
+    table: &str,
+    columns: &[&str],
+    row: &serde_json::Value,
+) -> Result<(), VogtError> {
+    let names = columns.join(", ");
+    let placeholders = vec!["?"; columns.len()].join(", ");
+    let params: Vec<Box<dyn rusqlite::ToSql>> = columns
+        .iter()
+        .map(|column| json_param(row, column))
+        .collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|value| value.as_ref()).collect();
+    conn.execute(
+        &format!("INSERT INTO {table} ({names}) VALUES ({placeholders})"),
+        refs.as_slice(),
+    )
+    .map(|_| ())
+    .map_err(sql_err)
+}
+
+fn select_columns(
+    conn: &Connection,
+    table: &str,
+    columns: &[&str],
+) -> Result<Vec<serde_json::Value>, VogtError> {
+    let names = columns.join(", ");
+    many(conn, &format!("SELECT {names} FROM {table}"), [], |row| {
+        let mut object = serde_json::Map::new();
+        for (index, column) in columns.iter().enumerate() {
+            let value: Option<String> = row.get(index)?;
+            object.insert(
+                (*column).to_string(),
+                match value {
+                    Some(text) => serde_json::Value::String(text),
+                    None => serde_json::Value::Null,
+                },
+            );
+        }
+        Ok(serde_json::Value::Object(object))
+    })
+}
+
+const TOKEN_SELECT: &str = "SELECT t.*, a.identity_ref AS actor_identity_ref FROM tokens t JOIN actors a ON a.id = t.actor_id";
+
+fn row_token(row: &Row<'_>) -> rusqlite::Result<Token> {
+    let scopes: String = row.get("scopes")?;
+    let kind: String = row.get("kind")?;
+    Ok(Token {
+        id: row.get("id")?,
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        name: row.get("name")?,
+        scopes: serde_json::from_str(&scopes).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        kind: serde_json::from_value(serde_json::Value::String(kind))
+            .unwrap_or(crate::core::TokenKind::Api),
+        created_at: moment(row, "created_at")?,
+        expires_at: opt_moment(row, "expires_at")?,
+        last_used_at: opt_moment(row, "last_used_at")?,
+        revoked_at: opt_moment(row, "revoked_at")?,
+        revoked_reason: row.get("revoked_reason")?,
+    })
+}
+
+const PASSWORD_SELECT: &str = "SELECT p.actor_id, p.username, p.scopes, p.created_at, p.updated_at, a.identity_ref AS actor_identity_ref FROM password_credentials p JOIN actors a ON a.id = p.actor_id";
+
+fn row_password(row: &Row<'_>) -> rusqlite::Result<PasswordCredential> {
+    let scopes: String = row.get("scopes")?;
+    Ok(PasswordCredential {
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        username: row.get("username")?,
+        scopes: serde_json::from_str(&scopes).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        created_at: moment(row, "created_at")?,
+        updated_at: moment(row, "updated_at")?,
+    })
+}
+
+fn row_forge_account(row: &Row<'_>) -> rusqlite::Result<ForgeAccount> {
+    Ok(ForgeAccount {
+        actor_id: row.get("actor_id")?,
+        host: row.get("host")?,
+        login: row.get("login")?,
+        scopes: row.get("scopes")?,
+        created_at: moment(row, "created_at")?,
+        updated_at: moment(row, "updated_at")?,
+    })
+}
+
+const SUPPRESSION_SELECT: &str = "SELECT s.*, a.identity_ref AS actor_identity_ref, p.slug AS scope_project_slug FROM suppressions s JOIN actors a ON a.id = s.actor_id LEFT JOIN projects p ON p.id = s.scope_project_id";
+
+fn row_suppression(row: &Row<'_>) -> rusqlite::Result<Suppression> {
+    let match_kind: String = row.get("match_kind")?;
+    Ok(Suppression {
+        id: row.get("id")?,
+        match_kind: serde_json::from_value(serde_json::Value::String(match_kind)).map_err(
+            |err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            },
+        )?,
+        subject_key_or_pattern: row.get("subject_key_or_pattern")?,
+        scope_project_id: row.get("scope_project_id")?,
+        scope_project_slug: row.get("scope_project_slug")?,
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        reason: row.get("reason")?,
+        created_at: moment(row, "created_at")?,
+        revoked_at: opt_moment(row, "revoked_at")?,
+        revoked_reason: row.get("revoked_reason")?,
+    })
+}
+
+const WORK_SELECT: &str = "SELECT w.*, p.slug AS project_slug, ac.identity_ref AS assignee_identity_ref FROM work_items w LEFT JOIN projects p ON p.id = w.project_id LEFT JOIN actors ac ON ac.id = w.assignee_actor_id";
+
+const TERMINAL_STATES: [&str; 2] = ["done", "wont_do"];
+
+/// The WHERE clause every work view filters through, so a count and the page
+/// beside it describe the same set.
+fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if !filter.include_superseded {
+        // A native row that migrated upstream is retired. The row stays
+        // reachable by ref or id; only the lists leave it out.
+        clauses.push("w.superseded_by IS NULL".into());
+    }
+    if filter.exclude_unlinked_native {
+        // A native row on an unlinked project leaves the curated surfaces. A
+        // project-less item stays: there is no project to be linked.
+        clauses.push(
+            "(w.project_id IS NULL OR EXISTS (SELECT 1 FROM projects lp WHERE lp.id = w.project_id AND lp.link_state = 'linked'))".into(),
+        );
+    }
+    if let Some(project) = &filter.project_id {
+        clauses.push("w.project_id = ?".into());
+        params.push(Box::new(project.clone()));
+    }
+    if let Some(assignee) = &filter.assignee_actor_id {
+        clauses.push("w.assignee_actor_id = ?".into());
+        params.push(Box::new(assignee.clone()));
+    }
+    if let Some(initiative) = &filter.initiative_id {
+        clauses.push("w.initiative_id = ?".into());
+        params.push(Box::new(initiative.clone()));
+    }
+    for (column, values) in [
+        ("w.kind", &filter.kinds),
+        ("w.state", &filter.states),
+        ("w.priority", &filter.priorities),
+        ("w.trust_state", &filter.trust_states),
+    ] {
+        if !values.is_empty() {
+            let placeholders = vec!["?"; values.len()].join(", ");
+            clauses.push(format!("{column} IN ({placeholders})"));
+            for value in values {
+                params.push(Box::new(value.clone()));
+            }
+        }
+    }
+    if filter.exclude_terminal {
+        let placeholders = vec!["?"; TERMINAL_STATES.len()].join(", ");
+        clauses.push(format!("w.state NOT IN ({placeholders})"));
+        for state in TERMINAL_STATES {
+            params.push(Box::new(state.to_string()));
+        }
+    }
+    if let Some(text) = &filter.text {
+        // instr over lower rather than LIKE: the needle is caller text, and
+        // LIKE would read its % and _ as wildcards.
+        if !text.is_empty() {
+            let needle = text.to_lowercase();
+            clauses.push(
+                "(instr(lower(w.title), ?) > 0 OR instr(lower(w.body), ?) > 0 OR instr(lower(w.ref), ?) > 0)".into(),
+            );
+            params.push(Box::new(needle.clone()));
+            params.push(Box::new(needle.clone()));
+            params.push(Box::new(needle));
+        }
+    }
+    if let Some(label) = &filter.label {
+        clauses.push(
+            "EXISTS (SELECT 1 FROM work_item_labels wl JOIN labels l ON l.id = wl.label_id WHERE wl.work_item_id = w.id AND l.name = ?)".into(),
+        );
+        params.push(Box::new(label.clone()));
+    }
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+    (where_sql, params)
+}
+
+fn append_where(where_sql: &str, clause: &str) -> String {
+    if where_sql.is_empty() {
+        format!("WHERE {clause}")
+    } else {
+        format!("{where_sql} AND {clause}")
+    }
+}
+
+fn with_board_high_water(
+    filter: &WorkFilter,
+    high_water: &(Moment, String),
+) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), VogtError> {
+    let (where_sql, mut params) = work_where(filter);
+    let moment = to_iso(high_water.0);
+    params.push(Box::new(moment.clone()));
+    params.push(Box::new(moment));
+    params.push(Box::new(high_water.1.clone()));
+    Ok((
+        append_where(
+            &where_sql,
+            "(w.created_at < ? OR (w.created_at = ? AND w.ref <= ?))",
+        ),
+        params,
+    ))
+}
+
+/// The lane expression, drawn only from the closed set the application names.
+fn board_lane(lane_mode: &str) -> Result<&'static str, VogtError> {
+    match lane_mode {
+        "none" => Ok("''"),
+        "project" => Ok("COALESCE(p.slug, '')"),
+        "initiative" => Ok("COALESCE(w.initiative_id, '')"),
+        other => Err(VogtError::InvalidRequest(format!(
+            "unknown Board lane mode: {other}"
+        ))),
+    }
+}
+
+fn load_work_item(
+    conn: &Connection,
+    predicate: &str,
+    key: &str,
+) -> Result<Option<WorkItem>, VogtError> {
+    let row = conn
+        .query_row(
+            &format!("{WORK_SELECT} WHERE {predicate}"),
+            [key],
+            row_work_base,
+        )
+        .optional()
+        .map_err(sql_err)?;
+    row.map(|base| finish_work_item(conn, base)).transpose()
+}
+
+struct WorkBase {
+    item: WorkItem,
+}
+
+fn row_work_base(row: &Row<'_>) -> rusqlite::Result<WorkBase> {
+    Ok(WorkBase {
+        item: WorkItem {
+            id: row.get("id")?,
+            reference: row.get("ref")?,
+            kind: row.get("kind")?,
+            title: row.get("title")?,
+            body: row.get("body")?,
+            state: row.get("state")?,
+            priority: row.get("priority")?,
+            effort: row.get("effort")?,
+            project_id: row.get("project_id")?,
+            project_slug: row.get("project_slug")?,
+            initiative_id: row.get("initiative_id")?,
+            origin: row.get("origin")?,
+            trust_state: row.get("trust_state")?,
+            assignee_actor_id: row.get("assignee_actor_id")?,
+            assignee_identity_ref: row.get("assignee_identity_ref")?,
+            labels: Vec::new(),
+            relations: Vec::new(),
+            superseded_by: row.get("superseded_by")?,
+            created_at: moment(row, "created_at")?,
+            updated_at: moment(row, "updated_at")?,
+        },
+    })
+}
+
+fn finish_work_item(conn: &Connection, base: WorkBase) -> Result<WorkItem, VogtError> {
+    let mut item = base.item;
+    item.labels = many(conn, "SELECT l.name FROM labels l JOIN work_item_labels wl ON wl.label_id = l.id WHERE wl.work_item_id = ? ORDER BY l.name", params![item.id], |row| row.get(0))?;
+    item.relations = many(conn, "SELECT r.kind, o.id AS related_id, o.ref AS related_ref, o.title AS related_title, o.state AS related_state FROM work_relations r JOIN work_items o ON o.id = r.related_id WHERE r.work_item_id = ? ORDER BY r.kind, o.ref", params![item.id], row_relation)?;
+    Ok(item)
+}
+
+fn row_relation(row: &Row<'_>) -> rusqlite::Result<crate::core::Relation> {
+    let kind: String = row.get("kind")?;
+    Ok(crate::core::Relation {
+        kind: serde_json::from_value(serde_json::Value::String(kind))
+            .map_err(|e| rusqlite::Error::InvalidColumnName(e.to_string()))?,
+        related_id: row.get("related_id")?,
+        related_ref: row.get("related_ref")?,
+        related_title: row.get("related_title")?,
+        related_state: row.get("related_state")?,
+    })
+}
+
+fn row_comment(row: &Row<'_>) -> rusqlite::Result<Comment> {
+    Ok(Comment {
+        id: row.get("id")?,
+        work_item_id: row.get("work_item_id")?,
+        actor_id: row.get("actor_id")?,
+        actor_display_name: row.get("actor_display_name")?,
+        body: row.get("body")?,
+        created_at: moment(row, "created_at")?,
+    })
+}
+
+fn row_event(row: &Row<'_>) -> rusqlite::Result<Event> {
+    let summary: String = row.get("summary")?;
+    Ok(Event {
+        seq: row.get("seq")?,
+        kind: row.get("kind")?,
+        entity_kind: row.get("entity_kind")?,
+        entity_id: row.get("entity_id")?,
+        actor_id: row.get("actor_id")?,
+        audit_id: row.get("audit_id")?,
+        summary: serde_json::from_str(&summary).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        at: moment(row, "at")?,
+    })
+}
+
+fn vocab_cell<T: serde::de::DeserializeOwned>(row: &Row<'_>, column: &str) -> rusqlite::Result<T> {
+    let text: String = row.get(column)?;
+    serde_json::from_value(serde_json::Value::String(text)).map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })
+}
+
+fn opt_vocab_cell<T: serde::de::DeserializeOwned>(
+    row: &Row<'_>,
+    column: &str,
+) -> rusqlite::Result<Option<T>> {
+    let text: Option<String> = row.get(column)?;
+    text.map(|value| {
+        serde_json::from_value(serde_json::Value::String(value)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })
+    })
+    .transpose()
+}
+
+fn row_overlay(row: &Row<'_>) -> rusqlite::Result<WorkOverlay> {
+    let branches: Option<String> = row.get("branches")?;
+    Ok(WorkOverlay {
+        subject_key: row.get("subject_key")?,
+        project_id: row.get("project_id")?,
+        rank: row.get("rank")?,
+        workflow_state: row.get("workflow_state")?,
+        priority: opt_vocab_cell(row, "priority")?,
+        effort: opt_vocab_cell(row, "effort")?,
+        assignee_actor_id: row.get("assignee_actor_id")?,
+        initiative_id: row.get("initiative_id")?,
+        branches: branches
+            .filter(|text| !text.is_empty())
+            .map(|text| serde_json::from_str(&text))
+            .transpose()
+            .map_err(|err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            })?
+            .unwrap_or_default(),
+        created_at: moment(row, "created_at")?,
+        updated_at: moment(row, "updated_at")?,
+    })
+}
+
+fn row_writeback(row: &Row<'_>) -> rusqlite::Result<WriteBackRecord> {
+    Ok(WriteBackRecord {
+        id: row.get("id")?,
+        at: moment(row, "at")?,
+        project_id: row.get("project_id")?,
+        work_item_id: row.get("work_item_id")?,
+        actor_id: row.get("actor_id")?,
+        action: vocab_cell::<WriteBackAction>(row, "action")?,
+        subject_key: row.get("subject_key")?,
+        policy: row.get("policy")?,
+        outcome: vocab_cell::<WriteBackOutcome>(row, "outcome")?,
+        reason: row.get("reason")?,
+        detail: row.get("detail")?,
+        source_url: row.get("source_url")?,
+    })
+}
+
+fn row_audit(row: &Row<'_>) -> rusqlite::Result<AuditRecord> {
+    Ok(AuditRecord {
+        id: row.get("id")?,
+        txn_id: row.get("txn_id")?,
+        revision: row.get("revision")?,
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        operation: row.get("operation")?,
+        entity_kind: row.get("entity_kind")?,
+        entity_id: row.get("entity_id")?,
+        reason: row.get("reason")?,
+        payload_digest: row.get("payload_digest")?,
+        at: moment(row, "at")?,
+    })
+}
+
+fn audit_where(query: &AuditQuery) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params_box: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if let Some(actor) = &query.actor_id {
+        clauses.push("a.actor_id = ?".into());
+        params_box.push(Box::new(actor.clone()));
+    }
+    if let Some(operation) = &query.operation {
+        clauses.push("a.operation = ?".into());
+        params_box.push(Box::new(operation.clone()));
+    }
+    if let Some(entity) = &query.entity_id {
+        // A comment is audited against the comment, so an exact match on a
+        // work item's id would omit everything said about it. The comment
+        // table carries the link, so the trail is a semi-join. The id is
+        // bound twice, once for the row and once for the semi-join.
+        clauses.push(
+            "(a.entity_id = ? OR (a.entity_kind = 'comment' AND a.entity_id IN (SELECT id FROM comments WHERE work_item_id = ?)))".into(),
+        );
+        params_box.push(Box::new(entity.clone()));
+        params_box.push(Box::new(entity.clone()));
+    }
+    if let Some(project) = &query.project_id {
+        // Nothing about a project is copied onto an audit row. Each kind that
+        // belongs to a project is resolved through its own table, and a kind
+        // that belongs to the instance (actor, label, token) is absent on
+        // purpose. The project id is bound once per kind.
+        let scoped = [
+            ("project", "SELECT id FROM projects WHERE id = ?"),
+            ("work_item", "SELECT id FROM work_items WHERE project_id = ?"),
+            (
+                "comment",
+                "SELECT c.id FROM comments c JOIN work_items w ON w.id = c.work_item_id WHERE w.project_id = ?",
+            ),
+            ("session", "SELECT id FROM coding_sessions WHERE project_id = ?"),
+            (
+                "drift_proposal",
+                "SELECT id FROM drift_proposals WHERE project_id = ?",
+            ),
+            (
+                "suppression",
+                "SELECT id FROM suppressions WHERE scope_project_id = ?",
+            ),
+        ];
+        let joined = scoped
+            .iter()
+            .map(|(kind, resolver)| {
+                format!("(a.entity_kind = '{kind}' AND a.entity_id IN ({resolver}))")
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        clauses.push(format!("({joined})"));
+        for _ in scoped {
+            params_box.push(Box::new(project.clone()));
+        }
+    }
+    if let Some(since) = query.since {
+        clauses.push("a.at >= ?".into());
+        params_box.push(Box::new(to_iso(since)));
+    }
+    if let Some(until) = query.until {
+        clauses.push("a.at < ?".into());
+        params_box.push(Box::new(to_iso(until)));
+    }
+    (
+        if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", clauses.join(" AND "))
+        },
+        params_box,
+    )
+}
+
 #[cfg(test)]
 mod overlay_tests {
     use super::tests::{moment, project, store};
@@ -2823,26 +3536,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
-fn attach_label(conn: &Connection, work_item_id: &str, name: &str) -> Result<(), VogtError> {
-    let id: String = conn
-        .query_row("SELECT id FROM labels WHERE name = ?", [name], |row| {
-            row.get(0)
-        })
-        .optional()
-        .map_err(sql_err)?
-        .ok_or_else(|| VogtError::NotFound(format!("no label named {name:?}")))?;
-    conn.execute("INSERT INTO work_item_labels (work_item_id, label_id) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM work_item_labels WHERE work_item_id = ? AND label_id = ?)", params![work_item_id, id, work_item_id, id]).map_err(sql_err)?;
-    Ok(())
-}
-fn vocab_of<T: serde::Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .unwrap()
-        .as_str()
-        .unwrap()
-        .to_string()
-}
-
 #[cfg(test)]
 mod more {
     use super::tests::{moment, project, store};
@@ -3718,698 +4411,4 @@ mod more {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Close first-run install mode once a person holds a credential. The latch
-/// only ever gets set, so removing the credential later does not reopen the
-/// door. An agent-only token leaves it open.
-fn latch_install_if_operator(conn: &Connection, at: Moment) -> Result<(), VogtError> {
-    conn.execute(
-        "INSERT OR IGNORE INTO install_latch (id, closed_at, reason) SELECT 1, ?, 'a person holds a credential' WHERE EXISTS (SELECT 1 FROM tokens t JOIN actors a ON a.id = t.actor_id WHERE a.kind <> 'agent') OR EXISTS (SELECT 1 FROM password_credentials)",
-        [to_iso(at)],
-    ).map(|_| ()).map_err(sql_err)
-}
-
-fn vocab_text<T: serde::Serialize>(value: T) -> String {
-    serde_json::to_value(value)
-        .expect("a vocab value is a string")
-        .as_str()
-        .expect("snake_case")
-        .to_string()
-}
-
-/// Commit an immediate transaction, or roll it back and surface the error.
-fn finish_immediate(conn: &Connection, outcome: rusqlite::Result<usize>) -> Result<(), VogtError> {
-    match outcome {
-        Ok(_) => conn.execute("COMMIT", []).map(|_| ()).map_err(sql_err),
-        Err(err) => {
-            let _ = conn.execute("ROLLBACK", []);
-            Err(sql_err(err))
-        }
-    }
-}
-
-fn row_auth_decision(row: &Row<'_>) -> rusqlite::Result<AuthDecision> {
-    let decision: String = row.get("decision")?;
-    Ok(AuthDecision {
-        id: row.get("id")?,
-        at: moment(row, "at")?,
-        decision: serde_json::from_value(serde_json::Value::String(decision)).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?,
-        reason_code: row.get("reason_code")?,
-        operation: row.get("operation")?,
-        scope: row.get("scope")?,
-        actor_id: row.get("actor_id")?,
-        token_id: row.get("token_id")?,
-        identity_ref: row.get("identity_ref")?,
-        transport: row.get("transport")?,
-        detail: row.get("detail")?,
-    })
-}
-
-fn row_session(row: &Row<'_>) -> rusqlite::Result<CodingSession> {
-    Ok(CodingSession {
-        id: row.get("id")?,
-        engine_session_id: row.get("engine_session_id")?,
-        project_id: row.get("project_id")?,
-        work_item_id: row.get("work_item_id")?,
-        actor_id: row.get("actor_id")?,
-        cwd: row.get("cwd")?,
-        template: row.get("template")?,
-        model: row.get("model")?,
-        effort: row.get("effort")?,
-        reason: row.get("reason")?,
-        started_at: moment(row, "started_at")?,
-        stopped_at: opt_moment(row, "stopped_at")?,
-    })
-}
-
-fn row_session_grant(row: &Row<'_>) -> rusqlite::Result<SessionGrant> {
-    Ok(SessionGrant {
-        id: row.get("id")?,
-        target_engine_session_id: row.get("target_engine_session_id")?,
-        kind: vocab_cell(row, "kind")?,
-        var: row.get("var")?,
-        project_id: row.get("project_id")?,
-        secret_name: row.get("secret_name")?,
-        capability: row.get("capability")?,
-        uses: vocab_cell(row, "uses")?,
-        ttl_seconds: row.get("ttl_seconds")?,
-        reason: row.get("reason")?,
-        requested_by: row.get("requested_by")?,
-        requested_at: moment(row, "requested_at")?,
-        state: vocab_cell(row, "state")?,
-        decided_by: row.get("decided_by")?,
-        decided_at: opt_moment(row, "decided_at")?,
-        decision_reason: row.get("decision_reason")?,
-        expires_at: opt_moment(row, "expires_at")?,
-        revoked_by: row.get("revoked_by")?,
-        revoked_at: opt_moment(row, "revoked_at")?,
-    })
-}
-
-const DRIFT_SELECT: &str = "SELECT d.*, p.slug AS project_slug, a.identity_ref AS resolved_by FROM drift_proposals d LEFT JOIN projects p ON p.id = d.project_id LEFT JOIN actors a ON a.id = d.resolved_by_actor_id";
-
-fn row_drift(row: &Row<'_>) -> rusqlite::Result<DriftProposal> {
-    let status: String = row.get("status")?;
-    Ok(DriftProposal {
-        id: row.get("id")?,
-        kind: row.get("kind")?,
-        subject_kind: row.get("subject_kind")?,
-        subject_id: row.get("subject_id")?,
-        project_id: row.get("project_id")?,
-        project_slug: row.get("project_slug")?,
-        summary: row.get("summary")?,
-        evidence_observation_id: row.get("evidence_observation_id")?,
-        evidence_snapshot: json_cell(row, "evidence_snapshot")?,
-        proposed_change: json_cell(row, "proposed_change")?,
-        status: serde_json::from_value(serde_json::Value::String(status)).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?,
-        opened_at: moment(row, "opened_at")?,
-        superseded_at: opt_moment(row, "superseded_at")?,
-        superseded_detail: row.get("superseded_detail")?,
-        resolved_by_actor_id: row.get("resolved_by_actor_id")?,
-        resolved_by_identity_ref: row.get("resolved_by")?,
-        resolved_at: opt_moment(row, "resolved_at")?,
-        resolution_reason: row.get("resolution_reason")?,
-    })
-}
-
-const INBOX_SELECT: &str = "SELECT t.*, a.identity_ref AS actor_identity_ref FROM inbox_triage t JOIN actors a ON a.id = t.actor_id";
-
-fn row_inbox_triage(row: &Row<'_>) -> rusqlite::Result<InboxTriage> {
-    let state: String = row.get("state")?;
-    Ok(InboxTriage {
-        entry_key: row.get("entry_key")?,
-        state: serde_json::from_value(serde_json::Value::String(state)).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?,
-        snooze_until: opt_moment(row, "snooze_until")?,
-        actor_id: row.get("actor_id")?,
-        actor_identity_ref: row.get("actor_identity_ref")?,
-        decided_at: moment(row, "decided_at")?,
-        occurrence_snapshot: json_cell(row, "occurrence_snapshot")?,
-    })
-}
-
-fn row_actor_preference(row: &Row<'_>) -> rusqlite::Result<ActorPreference> {
-    // A preference value is an object. Anything else stored there reads back
-    // as an empty one, which is what Python's row mapper does.
-    let value = json_cell(row, "value")?;
-    Ok(ActorPreference {
-        actor_id: row.get("actor_id")?,
-        key: row.get("key")?,
-        value: if value.is_object() {
-            value
-        } else {
-            serde_json::json!({})
-        },
-        version: row.get("version")?,
-        updated_at: moment(row, "updated_at")?,
-    })
-}
-
-/// One JSON column, parsed. A corrupt value is a conversion failure, not null.
-fn json_cell(row: &Row<'_>, column: &str) -> rusqlite::Result<serde_json::Value> {
-    let text: String = row.get(column)?;
-    serde_json::from_str(&text).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-    })
-}
-
-const TOKEN_CARRY_COLUMNS: &[&str] = &[
-    "id",
-    "actor_id",
-    "name",
-    "token_hash",
-    "scopes",
-    "kind",
-    "created_at",
-    "expires_at",
-    "last_used_at",
-    "revoked_at",
-    "revoked_reason",
-];
-const PASSWORD_CARRY_COLUMNS: &[&str] = &[
-    "actor_id",
-    "username",
-    "password_hash",
-    "scopes",
-    "created_at",
-    "updated_at",
-];
-const FORGE_ACCOUNT_CARRY_COLUMNS: &[&str] = &[
-    "actor_id",
-    "host",
-    "login",
-    "scopes",
-    "encrypted_token",
-    "created_at",
-    "updated_at",
-];
-
-fn json_str(row: &serde_json::Value, column: &str) -> String {
-    row.get(column)
-        .and_then(|value| value.as_str())
-        .unwrap_or("")
-        .to_string()
-}
-
-/// One carried cell, bound as text. JSON null and a missing column both become
-/// SQL NULL, which is what the source row held.
-fn json_param(row: &serde_json::Value, column: &str) -> Box<dyn rusqlite::ToSql> {
-    match row.get(column) {
-        Some(serde_json::Value::Null) | None => Box::new(None::<String>),
-        Some(serde_json::Value::String(text)) => Box::new(text.clone()),
-        Some(other) => Box::new(other.to_string()),
-    }
-}
-
-fn insert_carry_row(
-    conn: &Connection,
-    table: &str,
-    columns: &[&str],
-    row: &serde_json::Value,
-) -> Result<(), VogtError> {
-    let names = columns.join(", ");
-    let placeholders = vec!["?"; columns.len()].join(", ");
-    let params: Vec<Box<dyn rusqlite::ToSql>> = columns
-        .iter()
-        .map(|column| json_param(row, column))
-        .collect();
-    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|value| value.as_ref()).collect();
-    conn.execute(
-        &format!("INSERT INTO {table} ({names}) VALUES ({placeholders})"),
-        refs.as_slice(),
-    )
-    .map(|_| ())
-    .map_err(sql_err)
-}
-
-fn select_columns(
-    conn: &Connection,
-    table: &str,
-    columns: &[&str],
-) -> Result<Vec<serde_json::Value>, VogtError> {
-    let names = columns.join(", ");
-    many(conn, &format!("SELECT {names} FROM {table}"), [], |row| {
-        let mut object = serde_json::Map::new();
-        for (index, column) in columns.iter().enumerate() {
-            let value: Option<String> = row.get(index)?;
-            object.insert(
-                (*column).to_string(),
-                match value {
-                    Some(text) => serde_json::Value::String(text),
-                    None => serde_json::Value::Null,
-                },
-            );
-        }
-        Ok(serde_json::Value::Object(object))
-    })
-}
-
-const TOKEN_SELECT: &str = "SELECT t.*, a.identity_ref AS actor_identity_ref FROM tokens t JOIN actors a ON a.id = t.actor_id";
-
-fn row_token(row: &Row<'_>) -> rusqlite::Result<Token> {
-    let scopes: String = row.get("scopes")?;
-    let kind: String = row.get("kind")?;
-    Ok(Token {
-        id: row.get("id")?,
-        actor_id: row.get("actor_id")?,
-        actor_identity_ref: row.get("actor_identity_ref")?,
-        name: row.get("name")?,
-        scopes: serde_json::from_str(&scopes).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?,
-        kind: serde_json::from_value(serde_json::Value::String(kind))
-            .unwrap_or(crate::core::TokenKind::Api),
-        created_at: moment(row, "created_at")?,
-        expires_at: opt_moment(row, "expires_at")?,
-        last_used_at: opt_moment(row, "last_used_at")?,
-        revoked_at: opt_moment(row, "revoked_at")?,
-        revoked_reason: row.get("revoked_reason")?,
-    })
-}
-
-const PASSWORD_SELECT: &str = "SELECT p.actor_id, p.username, p.scopes, p.created_at, p.updated_at, a.identity_ref AS actor_identity_ref FROM password_credentials p JOIN actors a ON a.id = p.actor_id";
-
-fn row_password(row: &Row<'_>) -> rusqlite::Result<PasswordCredential> {
-    let scopes: String = row.get("scopes")?;
-    Ok(PasswordCredential {
-        actor_id: row.get("actor_id")?,
-        actor_identity_ref: row.get("actor_identity_ref")?,
-        username: row.get("username")?,
-        scopes: serde_json::from_str(&scopes).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?,
-        created_at: moment(row, "created_at")?,
-        updated_at: moment(row, "updated_at")?,
-    })
-}
-
-fn row_forge_account(row: &Row<'_>) -> rusqlite::Result<ForgeAccount> {
-    Ok(ForgeAccount {
-        actor_id: row.get("actor_id")?,
-        host: row.get("host")?,
-        login: row.get("login")?,
-        scopes: row.get("scopes")?,
-        created_at: moment(row, "created_at")?,
-        updated_at: moment(row, "updated_at")?,
-    })
-}
-
-const SUPPRESSION_SELECT: &str = "SELECT s.*, a.identity_ref AS actor_identity_ref, p.slug AS scope_project_slug FROM suppressions s JOIN actors a ON a.id = s.actor_id LEFT JOIN projects p ON p.id = s.scope_project_id";
-
-fn row_suppression(row: &Row<'_>) -> rusqlite::Result<Suppression> {
-    let match_kind: String = row.get("match_kind")?;
-    Ok(Suppression {
-        id: row.get("id")?,
-        match_kind: serde_json::from_value(serde_json::Value::String(match_kind)).map_err(
-            |err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            },
-        )?,
-        subject_key_or_pattern: row.get("subject_key_or_pattern")?,
-        scope_project_id: row.get("scope_project_id")?,
-        scope_project_slug: row.get("scope_project_slug")?,
-        actor_id: row.get("actor_id")?,
-        actor_identity_ref: row.get("actor_identity_ref")?,
-        reason: row.get("reason")?,
-        created_at: moment(row, "created_at")?,
-        revoked_at: opt_moment(row, "revoked_at")?,
-        revoked_reason: row.get("revoked_reason")?,
-    })
-}
-
-const WORK_SELECT: &str = "SELECT w.*, p.slug AS project_slug, ac.identity_ref AS assignee_identity_ref FROM work_items w LEFT JOIN projects p ON p.id = w.project_id LEFT JOIN actors ac ON ac.id = w.assignee_actor_id";
-
-const TERMINAL_STATES: [&str; 2] = ["done", "wont_do"];
-
-/// The WHERE clause every work view filters through, so a count and the page
-/// beside it describe the same set.
-fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let mut clauses: Vec<String> = Vec::new();
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if !filter.include_superseded {
-        // A native row that migrated upstream is retired. The row stays
-        // reachable by ref or id; only the lists leave it out.
-        clauses.push("w.superseded_by IS NULL".into());
-    }
-    if filter.exclude_unlinked_native {
-        // A native row on an unlinked project leaves the curated surfaces. A
-        // project-less item stays: there is no project to be linked.
-        clauses.push(
-            "(w.project_id IS NULL OR EXISTS (SELECT 1 FROM projects lp WHERE lp.id = w.project_id AND lp.link_state = 'linked'))".into(),
-        );
-    }
-    if let Some(project) = &filter.project_id {
-        clauses.push("w.project_id = ?".into());
-        params.push(Box::new(project.clone()));
-    }
-    if let Some(assignee) = &filter.assignee_actor_id {
-        clauses.push("w.assignee_actor_id = ?".into());
-        params.push(Box::new(assignee.clone()));
-    }
-    if let Some(initiative) = &filter.initiative_id {
-        clauses.push("w.initiative_id = ?".into());
-        params.push(Box::new(initiative.clone()));
-    }
-    for (column, values) in [
-        ("w.kind", &filter.kinds),
-        ("w.state", &filter.states),
-        ("w.priority", &filter.priorities),
-        ("w.trust_state", &filter.trust_states),
-    ] {
-        if !values.is_empty() {
-            let placeholders = vec!["?"; values.len()].join(", ");
-            clauses.push(format!("{column} IN ({placeholders})"));
-            for value in values {
-                params.push(Box::new(value.clone()));
-            }
-        }
-    }
-    if filter.exclude_terminal {
-        let placeholders = vec!["?"; TERMINAL_STATES.len()].join(", ");
-        clauses.push(format!("w.state NOT IN ({placeholders})"));
-        for state in TERMINAL_STATES {
-            params.push(Box::new(state.to_string()));
-        }
-    }
-    if let Some(text) = &filter.text {
-        // instr over lower rather than LIKE: the needle is caller text, and
-        // LIKE would read its % and _ as wildcards.
-        if !text.is_empty() {
-            let needle = text.to_lowercase();
-            clauses.push(
-                "(instr(lower(w.title), ?) > 0 OR instr(lower(w.body), ?) > 0 OR instr(lower(w.ref), ?) > 0)".into(),
-            );
-            params.push(Box::new(needle.clone()));
-            params.push(Box::new(needle.clone()));
-            params.push(Box::new(needle));
-        }
-    }
-    if let Some(label) = &filter.label {
-        clauses.push(
-            "EXISTS (SELECT 1 FROM work_item_labels wl JOIN labels l ON l.id = wl.label_id WHERE wl.work_item_id = w.id AND l.name = ?)".into(),
-        );
-        params.push(Box::new(label.clone()));
-    }
-    let where_sql = if clauses.is_empty() {
-        String::new()
-    } else {
-        format!("WHERE {}", clauses.join(" AND "))
-    };
-    (where_sql, params)
-}
-
-fn append_where(where_sql: &str, clause: &str) -> String {
-    if where_sql.is_empty() {
-        format!("WHERE {clause}")
-    } else {
-        format!("{where_sql} AND {clause}")
-    }
-}
-
-fn with_board_high_water(
-    filter: &WorkFilter,
-    high_water: &(Moment, String),
-) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), VogtError> {
-    let (where_sql, mut params) = work_where(filter);
-    let moment = to_iso(high_water.0);
-    params.push(Box::new(moment.clone()));
-    params.push(Box::new(moment));
-    params.push(Box::new(high_water.1.clone()));
-    Ok((
-        append_where(
-            &where_sql,
-            "(w.created_at < ? OR (w.created_at = ? AND w.ref <= ?))",
-        ),
-        params,
-    ))
-}
-
-/// The lane expression, drawn only from the closed set the application names.
-fn board_lane(lane_mode: &str) -> Result<&'static str, VogtError> {
-    match lane_mode {
-        "none" => Ok("''"),
-        "project" => Ok("COALESCE(p.slug, '')"),
-        "initiative" => Ok("COALESCE(w.initiative_id, '')"),
-        other => Err(VogtError::InvalidRequest(format!(
-            "unknown Board lane mode: {other}"
-        ))),
-    }
-}
-
-fn load_work_item(
-    conn: &Connection,
-    predicate: &str,
-    key: &str,
-) -> Result<Option<WorkItem>, VogtError> {
-    let row = conn
-        .query_row(
-            &format!("{WORK_SELECT} WHERE {predicate}"),
-            [key],
-            row_work_base,
-        )
-        .optional()
-        .map_err(sql_err)?;
-    row.map(|base| finish_work_item(conn, base)).transpose()
-}
-
-struct WorkBase {
-    item: WorkItem,
-}
-
-fn row_work_base(row: &Row<'_>) -> rusqlite::Result<WorkBase> {
-    Ok(WorkBase {
-        item: WorkItem {
-            id: row.get("id")?,
-            reference: row.get("ref")?,
-            kind: row.get("kind")?,
-            title: row.get("title")?,
-            body: row.get("body")?,
-            state: row.get("state")?,
-            priority: row.get("priority")?,
-            effort: row.get("effort")?,
-            project_id: row.get("project_id")?,
-            project_slug: row.get("project_slug")?,
-            initiative_id: row.get("initiative_id")?,
-            origin: row.get("origin")?,
-            trust_state: row.get("trust_state")?,
-            assignee_actor_id: row.get("assignee_actor_id")?,
-            assignee_identity_ref: row.get("assignee_identity_ref")?,
-            labels: Vec::new(),
-            relations: Vec::new(),
-            superseded_by: row.get("superseded_by")?,
-            created_at: moment(row, "created_at")?,
-            updated_at: moment(row, "updated_at")?,
-        },
-    })
-}
-
-fn finish_work_item(conn: &Connection, base: WorkBase) -> Result<WorkItem, VogtError> {
-    let mut item = base.item;
-    item.labels = many(conn, "SELECT l.name FROM labels l JOIN work_item_labels wl ON wl.label_id = l.id WHERE wl.work_item_id = ? ORDER BY l.name", params![item.id], |row| row.get(0))?;
-    item.relations = many(conn, "SELECT r.kind, o.id AS related_id, o.ref AS related_ref, o.title AS related_title, o.state AS related_state FROM work_relations r JOIN work_items o ON o.id = r.related_id WHERE r.work_item_id = ? ORDER BY r.kind, o.ref", params![item.id], row_relation)?;
-    Ok(item)
-}
-
-fn row_relation(row: &Row<'_>) -> rusqlite::Result<crate::core::Relation> {
-    let kind: String = row.get("kind")?;
-    Ok(crate::core::Relation {
-        kind: serde_json::from_value(serde_json::Value::String(kind))
-            .map_err(|e| rusqlite::Error::InvalidColumnName(e.to_string()))?,
-        related_id: row.get("related_id")?,
-        related_ref: row.get("related_ref")?,
-        related_title: row.get("related_title")?,
-        related_state: row.get("related_state")?,
-    })
-}
-
-fn row_comment(row: &Row<'_>) -> rusqlite::Result<Comment> {
-    Ok(Comment {
-        id: row.get("id")?,
-        work_item_id: row.get("work_item_id")?,
-        actor_id: row.get("actor_id")?,
-        actor_display_name: row.get("actor_display_name")?,
-        body: row.get("body")?,
-        created_at: moment(row, "created_at")?,
-    })
-}
-
-fn row_event(row: &Row<'_>) -> rusqlite::Result<Event> {
-    let summary: String = row.get("summary")?;
-    Ok(Event {
-        seq: row.get("seq")?,
-        kind: row.get("kind")?,
-        entity_kind: row.get("entity_kind")?,
-        entity_id: row.get("entity_id")?,
-        actor_id: row.get("actor_id")?,
-        audit_id: row.get("audit_id")?,
-        summary: serde_json::from_str(&summary).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })?,
-        at: moment(row, "at")?,
-    })
-}
-
-fn vocab_cell<T: serde::de::DeserializeOwned>(row: &Row<'_>, column: &str) -> rusqlite::Result<T> {
-    let text: String = row.get(column)?;
-    serde_json::from_value(serde_json::Value::String(text)).map_err(|err| {
-        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-    })
-}
-
-fn opt_vocab_cell<T: serde::de::DeserializeOwned>(
-    row: &Row<'_>,
-    column: &str,
-) -> rusqlite::Result<Option<T>> {
-    let text: Option<String> = row.get(column)?;
-    text.map(|value| {
-        serde_json::from_value(serde_json::Value::String(value)).map_err(|err| {
-            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
-        })
-    })
-    .transpose()
-}
-
-fn row_overlay(row: &Row<'_>) -> rusqlite::Result<WorkOverlay> {
-    let branches: Option<String> = row.get("branches")?;
-    Ok(WorkOverlay {
-        subject_key: row.get("subject_key")?,
-        project_id: row.get("project_id")?,
-        rank: row.get("rank")?,
-        workflow_state: row.get("workflow_state")?,
-        priority: opt_vocab_cell(row, "priority")?,
-        effort: opt_vocab_cell(row, "effort")?,
-        assignee_actor_id: row.get("assignee_actor_id")?,
-        initiative_id: row.get("initiative_id")?,
-        branches: branches
-            .filter(|text| !text.is_empty())
-            .map(|text| serde_json::from_str(&text))
-            .transpose()
-            .map_err(|err| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Text,
-                    Box::new(err),
-                )
-            })?
-            .unwrap_or_default(),
-        created_at: moment(row, "created_at")?,
-        updated_at: moment(row, "updated_at")?,
-    })
-}
-
-fn row_writeback(row: &Row<'_>) -> rusqlite::Result<WriteBackRecord> {
-    Ok(WriteBackRecord {
-        id: row.get("id")?,
-        at: moment(row, "at")?,
-        project_id: row.get("project_id")?,
-        work_item_id: row.get("work_item_id")?,
-        actor_id: row.get("actor_id")?,
-        action: vocab_cell::<WriteBackAction>(row, "action")?,
-        subject_key: row.get("subject_key")?,
-        policy: row.get("policy")?,
-        outcome: vocab_cell::<WriteBackOutcome>(row, "outcome")?,
-        reason: row.get("reason")?,
-        detail: row.get("detail")?,
-        source_url: row.get("source_url")?,
-    })
-}
-
-fn row_audit(row: &Row<'_>) -> rusqlite::Result<AuditRecord> {
-    Ok(AuditRecord {
-        id: row.get("id")?,
-        txn_id: row.get("txn_id")?,
-        revision: row.get("revision")?,
-        actor_id: row.get("actor_id")?,
-        actor_identity_ref: row.get("actor_identity_ref")?,
-        operation: row.get("operation")?,
-        entity_kind: row.get("entity_kind")?,
-        entity_id: row.get("entity_id")?,
-        reason: row.get("reason")?,
-        payload_digest: row.get("payload_digest")?,
-        at: moment(row, "at")?,
-    })
-}
-
-fn audit_where(query: &AuditQuery) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
-    let mut clauses: Vec<String> = Vec::new();
-    let mut params_box: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-    if let Some(actor) = &query.actor_id {
-        clauses.push("a.actor_id = ?".into());
-        params_box.push(Box::new(actor.clone()));
-    }
-    if let Some(operation) = &query.operation {
-        clauses.push("a.operation = ?".into());
-        params_box.push(Box::new(operation.clone()));
-    }
-    if let Some(entity) = &query.entity_id {
-        // A comment is audited against the comment, so an exact match on a
-        // work item's id would omit everything said about it. The comment
-        // table carries the link, so the trail is a semi-join. The id is
-        // bound twice, once for the row and once for the semi-join.
-        clauses.push(
-            "(a.entity_id = ? OR (a.entity_kind = 'comment' AND a.entity_id IN (SELECT id FROM comments WHERE work_item_id = ?)))".into(),
-        );
-        params_box.push(Box::new(entity.clone()));
-        params_box.push(Box::new(entity.clone()));
-    }
-    if let Some(project) = &query.project_id {
-        // Nothing about a project is copied onto an audit row. Each kind that
-        // belongs to a project is resolved through its own table, and a kind
-        // that belongs to the instance (actor, label, token) is absent on
-        // purpose. The project id is bound once per kind.
-        let scoped = [
-            ("project", "SELECT id FROM projects WHERE id = ?"),
-            ("work_item", "SELECT id FROM work_items WHERE project_id = ?"),
-            (
-                "comment",
-                "SELECT c.id FROM comments c JOIN work_items w ON w.id = c.work_item_id WHERE w.project_id = ?",
-            ),
-            ("session", "SELECT id FROM coding_sessions WHERE project_id = ?"),
-            (
-                "drift_proposal",
-                "SELECT id FROM drift_proposals WHERE project_id = ?",
-            ),
-            (
-                "suppression",
-                "SELECT id FROM suppressions WHERE scope_project_id = ?",
-            ),
-        ];
-        let joined = scoped
-            .iter()
-            .map(|(kind, resolver)| {
-                format!("(a.entity_kind = '{kind}' AND a.entity_id IN ({resolver}))")
-            })
-            .collect::<Vec<_>>()
-            .join(" OR ");
-        clauses.push(format!("({joined})"));
-        for _ in scoped {
-            params_box.push(Box::new(project.clone()));
-        }
-    }
-    if let Some(since) = query.since {
-        clauses.push("a.at >= ?".into());
-        params_box.push(Box::new(to_iso(since)));
-    }
-    if let Some(until) = query.until {
-        clauses.push("a.at < ?".into());
-        params_box.push(Box::new(to_iso(until)));
-    }
-    (
-        if clauses.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {}", clauses.join(" AND "))
-        },
-        params_box,
-    )
 }
