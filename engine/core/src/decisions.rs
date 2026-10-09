@@ -3525,11 +3525,28 @@ fn python_pattern(pattern: &str) -> String {
             out.push(ch);
             let mut flag = String::new();
             let mut closed = false;
+            let mut named = false;
             while let Some(next) = chars.next() {
                 out.push(next);
-                if next == ':' || next == '<' {
-                    // A `:` opens a grouping body and a `<` a lookaround. Either
-                    // way the body is translated by the loop, not copied.
+                if next == ':' || next == '=' || next == '!' {
+                    // A group body or a lookahead. The body is translated by the
+                    // loop, not copied, and it is not a flag string.
+                    break;
+                }
+                if next == '<' {
+                    // A lookbehind, or a named group. The name must be copied
+                    // unchanged: folding it makes `(?P<kk>x)` fail to compile.
+                    let name = matches!(flag.chars().last(), Some('P'))
+                        || chars.peek() != Some(&'=') && chars.peek() != Some(&'!');
+                    if name {
+                        named = true;
+                        while let Some(in_name) = chars.next() {
+                            out.push(in_name);
+                            if in_name == '>' {
+                                break;
+                            }
+                        }
+                    }
                     break;
                 }
                 if next == ')' {
@@ -3539,7 +3556,7 @@ fn python_pattern(pattern: &str) -> String {
                 flag.push(next);
             }
             let flags = flag.trim_start_matches('?');
-            if !flags.starts_with('P') && !flags.contains('<') {
+            if !named && !flags.starts_with('P') {
                 if let Some(rest) = flags.strip_prefix('-') {
                     if rest.contains('i') {
                         ignore_case = false;
@@ -4280,6 +4297,21 @@ mod activity_tests {
             lookbehind.contains(PY_WORD_CLASS),
             "the lookbehind was copied raw: {lookbehind}"
         );
+        // A lookahead is translated too, and its text is not read as flags.
+        let lookahead = python_pattern(r"(?!\w)\S");
+        assert!(
+            lookahead.contains(PY_WORD_CLASS),
+            "the lookahead was copied raw: {lookahead}"
+        );
+        let not_flags = python_pattern(r"(?!xi)k");
+        assert_eq!(
+            not_flags, r"(?!xi)k",
+            "the lookahead set flags: {not_flags}"
+        );
+        // A named group's name is copied unchanged, so it still compiles.
+        let named = python_pattern(r"(?i)(?P<kk>x)");
+        fancy_regex::Regex::new(&named)
+            .unwrap_or_else(|err| panic!("the group name was folded: {named}: {err}"));
     }
 
     #[test]
