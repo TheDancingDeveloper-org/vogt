@@ -1051,32 +1051,96 @@ impl ReadView for SqliteReadView {
             row_actor_preference,
         )
     }
-    fn session_by_id(&self, _: &str) -> Result<Option<CodingSession>, VogtError> {
-        later("session_by_id")
+    fn session_by_id(&self, session_id: &str) -> Result<Option<CodingSession>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM coding_sessions WHERE id = ?",
+            [session_id],
+            row_session,
+        )
     }
-    fn session_grant(&self, _: &str) -> Result<Option<SessionGrant>, VogtError> {
-        later("session_grant")
+    fn session_grant(&self, grant_id: &str) -> Result<Option<SessionGrant>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM session_grants WHERE id = ?",
+            [grant_id],
+            row_session_grant,
+        )
     }
-    fn session_by_engine_id(&self, _: &str) -> Result<Option<CodingSession>, VogtError> {
-        later("session_by_engine_id")
+    fn session_by_engine_id(
+        &self,
+        engine_session_id: &str,
+    ) -> Result<Option<CodingSession>, VogtError> {
+        one(
+            &self.conn,
+            "SELECT * FROM coding_sessions WHERE engine_session_id = ?",
+            [engine_session_id],
+            row_session,
+        )
     }
     fn list_session_grants(
         &self,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: i64,
+        state: Option<&str>,
+        target_engine_session_id: Option<&str>,
+        limit: i64,
     ) -> Result<Vec<SessionGrant>, VogtError> {
-        later("list_session_grants")
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(state) = state {
+            clauses.push("state = ?".into());
+            params.push(Box::new(state.to_string()));
+        }
+        if let Some(target) = target_engine_session_id {
+            clauses.push("target_engine_session_id = ?".into());
+            params.push(Box::new(target.to_string()));
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {} ", clauses.join(" AND "))
+        };
+        params.push(Box::new(limit));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        many(
+            &self.conn,
+            &format!("SELECT * FROM session_grants {where_sql}ORDER BY requested_at DESC, id DESC LIMIT ?"),
+            refs.as_slice(),
+            row_session_grant,
+        )
     }
     fn list_sessions(
         &self,
-        _: Option<&str>,
-        _: Option<&str>,
-        _: bool,
-        _: i64,
-        _: i64,
+        project_id: Option<&str>,
+        work_item_id: Option<&str>,
+        include_stopped: bool,
+        limit: i64,
+        offset: i64,
     ) -> Result<Vec<CodingSession>, VogtError> {
-        later("list_sessions")
+        let mut clauses: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        for (column, value) in [("project_id", project_id), ("work_item_id", work_item_id)] {
+            if let Some(value) = value {
+                clauses.push(format!("{column} = ?"));
+                params.push(Box::new(value.to_string()));
+            }
+        }
+        if !include_stopped {
+            clauses.push("stopped_at IS NULL".into());
+        }
+        let where_sql = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", clauses.join(" AND "))
+        };
+        params.push(Box::new(limit));
+        params.push(Box::new(offset));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        many(
+            &self.conn,
+            &format!("SELECT * FROM coding_sessions {where_sql} ORDER BY started_at DESC, id DESC LIMIT ? OFFSET ?"),
+            refs.as_slice(),
+            row_session,
+        )
     }
     fn list_events(
         &self,
@@ -1893,20 +1957,67 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
     fn insert_writeback(&mut self, _: &WriteBackRecord) -> Result<(), VogtError> {
         later("insert_writeback")
     }
-    fn insert_session(&mut self, _: &CodingSession) -> Result<(), VogtError> {
-        later("insert_session")
+    fn insert_session(&mut self, session: &CodingSession) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO coding_sessions (id, engine_session_id, project_id, work_item_id, actor_id, cwd, template, model, effort, reason, started_at, stopped_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                session.id, session.engine_session_id, session.project_id, session.work_item_id,
+                session.actor_id, session.cwd, session.template, session.model, session.effort,
+                session.reason, to_iso(session.started_at), session.stopped_at.map(to_iso),
+            ],
+        ).map(|_| ()).map_err(sql_err)
     }
-    fn insert_session_grant(&mut self, _: &SessionGrant) -> Result<(), VogtError> {
-        later("insert_session_grant")
+    fn insert_session_grant(&mut self, grant: &SessionGrant) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "INSERT INTO session_grants (id, target_engine_session_id, kind, var, project_id, secret_name, capability, uses, ttl_seconds, reason, requested_by, requested_at, state, decided_by, decided_at, decision_reason, expires_at, revoked_by, revoked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                grant.id, grant.target_engine_session_id, vocab_text(grant.kind), grant.var,
+                grant.project_id, grant.secret_name, grant.capability, vocab_text(grant.uses),
+                grant.ttl_seconds, grant.reason, grant.requested_by, to_iso(grant.requested_at),
+                vocab_text(grant.state), grant.decided_by, grant.decided_at.map(to_iso),
+                grant.decision_reason, grant.expires_at.map(to_iso), grant.revoked_by,
+                grant.revoked_at.map(to_iso),
+            ],
+        ).map(|_| ()).map_err(sql_err)
     }
-    fn update_session_grant(&mut self, _: &SessionGrant) -> Result<(), VogtError> {
-        later("update_session_grant")
+    fn update_session_grant(&mut self, grant: &SessionGrant) -> Result<(), VogtError> {
+        self.view.conn.execute(
+            "UPDATE session_grants SET state = ?, decided_by = ?, decided_at = ?, decision_reason = ?, expires_at = ?, revoked_by = ?, revoked_at = ? WHERE id = ?",
+            params![
+                vocab_text(grant.state), grant.decided_by, grant.decided_at.map(to_iso),
+                grant.decision_reason, grant.expires_at.map(to_iso), grant.revoked_by,
+                grant.revoked_at.map(to_iso), grant.id,
+            ],
+        ).map(|_| ()).map_err(sql_err)
     }
-    fn set_session_work_item(&mut self, _: &str, _: Option<&str>) -> Result<(), VogtError> {
-        later("set_session_work_item")
+    fn set_session_work_item(
+        &mut self,
+        session_id: &str,
+        work_item_id: Option<&str>,
+    ) -> Result<(), VogtError> {
+        self.view
+            .conn
+            .execute(
+                "UPDATE coding_sessions SET work_item_id = ? WHERE id = ?",
+                params![work_item_id, session_id],
+            )
+            .map(|_| ())
+            .map_err(sql_err)
     }
-    fn mark_session_stopped(&mut self, _: &str, _: Moment) -> Result<(), VogtError> {
-        later("mark_session_stopped")
+    fn mark_session_stopped(
+        &mut self,
+        session_id: &str,
+        stopped_at: Moment,
+    ) -> Result<(), VogtError> {
+        // A second stop changes nothing: the first one is the time it ended.
+        self.view
+            .conn
+            .execute(
+                "UPDATE coding_sessions SET stopped_at = ? WHERE id = ? AND stopped_at IS NULL",
+                params![to_iso(stopped_at), session_id],
+            )
+            .map(|_| ())
+            .map_err(sql_err)
     }
     fn insert_drift(&mut self, proposal: &DriftProposal) -> Result<(), VogtError> {
         self.view.conn.execute(
@@ -3231,6 +3342,111 @@ mod more {
         assert_eq!(value, serde_json::json!({}));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn sessions_stop_once_and_a_grant_round_trips() {
+        let dir = std::env::temp_dir().join(format!("vogt-decl-sess-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = store(&dir);
+        let now = Moment::from_unix(1_700_000_000, 0);
+        let later_at = Moment::from_unix(1_700_086_400, 0);
+        let project = project(&store, "governed");
+        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let mut txn = store.write().unwrap();
+        txn.insert_project(&project).unwrap();
+        txn.insert_session(&CodingSession {
+            id: "ses_1".into(),
+            engine_session_id: "eng_1".into(),
+            project_id: project.id.clone(),
+            work_item_id: None,
+            actor_id: actor.id.clone(),
+            cwd: "/srv/governed".into(),
+            template: None,
+            model: Some("sonnet".into()),
+            effort: None,
+            reason: "look".into(),
+            started_at: now,
+            stopped_at: None,
+        })
+        .unwrap();
+        txn.insert_session_grant(&SessionGrant {
+            id: "grt_1".into(),
+            target_engine_session_id: "eng_1".into(),
+            kind: crate::core::GrantKind::Credential,
+            var: Some("GITHUB_TOKEN".into()),
+            project_id: Some(project.id.clone()),
+            secret_name: Some("github".into()),
+            capability: None,
+            uses: crate::core::GrantUses::Once,
+            ttl_seconds: 600,
+            reason: "push".into(),
+            requested_by: actor.id.clone(),
+            requested_at: now,
+            state: crate::core::GrantState::Pending,
+            decided_by: None,
+            decided_at: None,
+            decision_reason: None,
+            expires_at: None,
+            revoked_by: None,
+            revoked_at: None,
+        })
+        .unwrap();
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        assert_eq!(
+            view.list_sessions(None, None, false, 100, 0).unwrap().len(),
+            1
+        );
+        assert_eq!(
+            view.session_by_engine_id("eng_1")
+                .unwrap()
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("sonnet")
+        );
+        assert_eq!(
+            view.list_session_grants(Some("pending"), None, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        drop(view);
+
+        let mut txn = store.write().unwrap();
+        txn.mark_session_stopped("ses_1", later_at).unwrap();
+        // A second stop keeps the first time.
+        txn.mark_session_stopped("ses_1", Moment::from_unix(1_800_000_000, 0))
+            .unwrap();
+        let mut grant = store
+            .read()
+            .unwrap()
+            .session_grant("grt_1")
+            .unwrap()
+            .unwrap();
+        grant.state = crate::core::GrantState::Approved;
+        grant.decided_by = Some(actor.id.clone());
+        grant.decided_at = Some(later_at);
+        grant.expires_at = Some(Moment::from_unix(1_700_000_600, 0));
+        txn.update_session_grant(&grant).unwrap();
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        assert!(view
+            .list_sessions(None, None, false, 100, 0)
+            .unwrap()
+            .is_empty());
+        let stopped = view.session_by_id("ses_1").unwrap().unwrap();
+        assert_eq!(stopped.stopped_at, Some(later_at));
+        let grant = view.session_grant("grt_1").unwrap().unwrap();
+        assert_eq!(grant.state, crate::core::GrantState::Approved);
+        assert_eq!(
+            grant.effective_state(Moment::from_unix(1_700_000_700, 0)),
+            "expired"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Close first-run install mode once a person holds a credential. The latch
@@ -3278,6 +3494,62 @@ fn row_auth_decision(row: &Row<'_>) -> rusqlite::Result<AuthDecision> {
         identity_ref: row.get("identity_ref")?,
         transport: row.get("transport")?,
         detail: row.get("detail")?,
+    })
+}
+
+fn row_session(row: &Row<'_>) -> rusqlite::Result<CodingSession> {
+    Ok(CodingSession {
+        id: row.get("id")?,
+        engine_session_id: row.get("engine_session_id")?,
+        project_id: row.get("project_id")?,
+        work_item_id: row.get("work_item_id")?,
+        actor_id: row.get("actor_id")?,
+        cwd: row.get("cwd")?,
+        template: row.get("template")?,
+        model: row.get("model")?,
+        effort: row.get("effort")?,
+        reason: row.get("reason")?,
+        started_at: moment(row, "started_at")?,
+        stopped_at: opt_moment(row, "stopped_at")?,
+    })
+}
+
+fn row_session_grant(row: &Row<'_>) -> rusqlite::Result<SessionGrant> {
+    let kind: String = row.get("kind")?;
+    let uses: String = row.get("uses")?;
+    let state: String = row.get("state")?;
+    let kind: crate::core::GrantKind = serde_json::from_value(serde_json::Value::String(kind))
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+    let uses: crate::core::GrantUses = serde_json::from_value(serde_json::Value::String(uses))
+        .map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?;
+    let state: crate::core::GrantState = serde_json::from_value(serde_json::Value::String(state))
+        .map_err(|err| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+    })?;
+    Ok(SessionGrant {
+        id: row.get("id")?,
+        target_engine_session_id: row.get("target_engine_session_id")?,
+        kind,
+        var: row.get("var")?,
+        project_id: row.get("project_id")?,
+        secret_name: row.get("secret_name")?,
+        capability: row.get("capability")?,
+        uses,
+        ttl_seconds: row.get("ttl_seconds")?,
+        reason: row.get("reason")?,
+        requested_by: row.get("requested_by")?,
+        requested_at: moment(row, "requested_at")?,
+        state,
+        decided_by: row.get("decided_by")?,
+        decided_at: opt_moment(row, "decided_at")?,
+        decision_reason: row.get("decision_reason")?,
+        expires_at: opt_moment(row, "expires_at")?,
+        revoked_by: row.get("revoked_by")?,
+        revoked_at: opt_moment(row, "revoked_at")?,
     })
 }
 

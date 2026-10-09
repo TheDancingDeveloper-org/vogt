@@ -1336,25 +1336,54 @@ pub struct WorkOverlay {
     pub updated_at: Moment,
 }
 
+vocab!(GrantKind {
+    Credential,
+    Capability
+});
+vocab!(GrantUses { Once, Ttl });
+vocab!(GrantState {
+    Pending,
+    Approved,
+    Denied,
+    Revoked
+});
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionGrant {
     pub id: String,
-    pub state: String,
+    pub target_engine_session_id: String,
+    pub kind: GrantKind,
+    pub var: Option<String>,
+    pub project_id: Option<String>,
+    pub secret_name: Option<String>,
+    pub capability: Option<String>,
+    pub uses: GrantUses,
+    pub ttl_seconds: i64,
+    pub reason: String,
+    pub requested_by: String,
+    pub requested_at: Moment,
+    pub state: GrantState,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<Moment>,
+    pub decision_reason: Option<String>,
     pub expires_at: Option<Moment>,
+    pub revoked_by: Option<String>,
+    pub revoked_at: Option<Moment>,
 }
 
 impl SessionGrant {
     /// `expired` for an approved grant past its expiry, else the stored state.
-    pub fn effective_state(&self, now: Moment) -> &str {
-        if self.state == "approved" {
+    /// `expired` is not itself a state, so it comes back as text.
+    pub fn effective_state(&self, now: Moment) -> String {
+        if self.state == GrantState::Approved {
             if let Some(expires) = self.expires_at {
                 if expires <= now {
-                    return "expired";
+                    return "expired".to_string();
                 }
             }
         }
-        &self.state
+        self.state.to_string()
     }
 }
 
@@ -2179,8 +2208,24 @@ mod tests {
 
         let grant = SessionGrant {
             id: "g".into(),
-            state: "approved".into(),
+            target_engine_session_id: "eng".into(),
+            kind: GrantKind::Credential,
+            var: None,
+            project_id: None,
+            secret_name: None,
+            capability: None,
+            uses: GrantUses::Once,
+            ttl_seconds: 60,
+            reason: "push".into(),
+            requested_by: "act".into(),
+            requested_at: now,
+            state: GrantState::Approved,
+            decided_by: None,
+            decided_at: None,
+            decision_reason: None,
             expires_at: Some(now),
+            revoked_by: None,
+            revoked_at: None,
         };
         assert_eq!(grant.effective_state(now), "expired");
         assert_eq!(
@@ -2188,7 +2233,7 @@ mod tests {
             "approved"
         );
         let pending = SessionGrant {
-            state: "pending".into(),
+            state: GrantState::Pending,
             expires_at: Some(now),
             ..grant
         };
