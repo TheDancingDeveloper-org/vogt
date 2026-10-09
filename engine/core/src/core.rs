@@ -634,10 +634,69 @@ pub fn local_principal(os_user: &str) -> Principal {
 }
 
 macro_rules! vocab {
-    ($name:ident { $($variant:ident),+ $(,)? }) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-        #[serde(rename_all = "snake_case")]
-        pub enum $name { $($variant),+ }
+    ($name:ident { $first:ident $(, $variant:ident)* $(,)? }) => {
+        vocab!($name, serde, { $first $(, $variant)* });
+    };
+    ($name:ident, bare, { $first:ident $(, $variant:ident)* }) => {
+        vocab!(@emit $name, , { $first $(, $variant)* });
+    };
+    ($name:ident, serde, { $first:ident $(, $variant:ident)* }) => {
+        vocab!(@emit $name, #[derive(serde::Serialize, serde::Deserialize)] #[serde(rename_all = "snake_case")], { $first $(, $variant)* });
+        vocab!(@text $name);
+    };
+    (@emit $name:ident, $(#[$serde:meta])* , { $first:ident $(, $variant:ident)* }) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        $(#[$serde])*
+        pub enum $name { $first, $($variant),* }
+
+        impl $name {
+            fn first() -> Self {
+                Self::$first
+            }
+        }
+
+        impl Default for $name {
+            /// The first variant. Only the vocabularies whose pydantic default
+            /// is that variant rely on it (`Origin`, `TrustState`).
+            fn default() -> Self {
+                Self::first()
+            }
+        }
+    };
+    (@text $name:ident) => {
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                let text = serde_json::to_value(self).expect("an enum is a string");
+                f.write_str(text.as_str().expect("an enum is a string"))
+            }
+        }
+
+        /// The stored column is text. An unrecognised value is a data error,
+        /// reported rather than mapped onto a default.
+        impl std::str::FromStr for $name {
+            type Err = String;
+
+            fn from_str(text: &str) -> Result<Self, Self::Err> {
+                serde_json::from_value(serde_json::Value::String(text.to_string()))
+                    .map_err(|_| format!("unknown {}: {text:?}", stringify!($name)))
+            }
+        }
+
+        impl rusqlite::types::ToSql for $name {
+            fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+                Ok(self.to_string().into())
+            }
+        }
+
+        impl rusqlite::types::FromSql for $name {
+            fn column_result(
+                value: rusqlite::types::ValueRef<'_>,
+            ) -> rusqlite::types::FromSqlResult<Self> {
+                value.as_str()?.parse().map_err(|err: String| {
+                    rusqlite::types::FromSqlError::Other(err.into())
+                })
+            }
+        }
     };
 }
 
@@ -647,6 +706,110 @@ vocab!(WorkKind {
     Chore,
     Question
 });
+vocab!(ProjectLifecycle {
+    Incubating,
+    Active,
+    Maintenance,
+    Archived
+});
+// `not_applicable` is what a reader is told, not a stored value, but the
+// column type is the same literal so a row can carry it.
+vocab!(ComplianceStatus {
+    Compliant,
+    NonCompliant,
+    NotChecked,
+    NotApplicable
+});
+vocab!(LinkState { Unlinked, Linked });
+vocab!(WriteBack, bare, { Disabled, CommentOnly, Full });
+
+impl WriteBack {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Disabled => "none",
+            Self::CommentOnly => "comment_only",
+            Self::Full => "full",
+        }
+    }
+}
+
+impl std::fmt::Display for WriteBack {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.text())
+    }
+}
+
+impl std::str::FromStr for WriteBack {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "none" => Ok(Self::Disabled),
+            "comment_only" => Ok(Self::CommentOnly),
+            "full" => Ok(Self::Full),
+            other => Err(format!("unknown WriteBack: {other:?}")),
+        }
+    }
+}
+
+impl rusqlite::types::ToSql for WriteBack {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+impl rusqlite::types::FromSql for WriteBack {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|err: String| rusqlite::types::FromSqlError::Other(err.into()))
+    }
+}
+
+impl serde::Serialize for WriteBack {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(match self {
+            Self::Disabled => "none",
+            Self::CommentOnly => "comment_only",
+            Self::Full => "full",
+        })
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for WriteBack {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        match <&str>::deserialize(deserializer)? {
+            "none" => Ok(Self::Disabled),
+            "comment_only" => Ok(Self::CommentOnly),
+            "full" => Ok(Self::Full),
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["none", "comment_only", "full"],
+            )),
+        }
+    }
+}
+
+fn lifecycle_default() -> ProjectLifecycle {
+    ProjectLifecycle::Active
+}
+
+fn compliance_default() -> ComplianceStatus {
+    ComplianceStatus::NotChecked
+}
+
+fn write_back_default() -> WriteBack {
+    WriteBack::Disabled
+}
+
+fn link_state_default() -> LinkState {
+    LinkState::Unlinked
+}
+
+fn priority_default() -> Priority {
+    Priority::P2
+}
 vocab!(Priority { P0, P1, P2, P3, P4 });
 vocab!(Effort { Xs, S, M, L, Xl });
 vocab!(Origin {
@@ -1016,16 +1179,22 @@ pub struct Project {
     pub name: String,
     pub root_path: String,
     pub repo_url: Option<String>,
-    pub lifecycle_state: String,
+    #[serde(default = "lifecycle_default")]
+    pub lifecycle_state: ProjectLifecycle,
     pub current_version: Option<String>,
     pub contract_version: Option<String>,
-    pub compliance_status: String,
+    #[serde(default = "compliance_default")]
+    pub compliance_status: ComplianceStatus,
     pub compliance_checked_at: Option<Moment>,
     pub contract_adopted_at: Option<Moment>,
-    pub write_back: String,
-    pub link_state: String,
+    #[serde(default = "write_back_default")]
+    pub write_back: WriteBack,
+    #[serde(default = "link_state_default")]
+    pub link_state: LinkState,
+    #[serde(default)]
     pub exclusions: Vec<String>,
-    pub trust_state: String,
+    #[serde(default)]
+    pub trust_state: TrustState,
     pub created_at: Moment,
     pub updated_at: Moment,
 }
@@ -1038,16 +1207,16 @@ impl Project {
             name: name.to_string(),
             root_path: root_path.to_string(),
             repo_url: None,
-            lifecycle_state: "active".to_string(),
+            lifecycle_state: ProjectLifecycle::Active,
             current_version: None,
             contract_version: None,
-            compliance_status: "not_checked".to_string(),
+            compliance_status: ComplianceStatus::NotChecked,
             compliance_checked_at: None,
             contract_adopted_at: None,
-            write_back: "none".to_string(),
-            link_state: "unlinked".to_string(),
+            write_back: WriteBack::Disabled,
+            link_state: LinkState::Unlinked,
             exclusions: Vec::new(),
-            trust_state: "unverified".to_string(),
+            trust_state: TrustState::Unverified,
             created_at: now,
             updated_at: now,
         }
@@ -1060,17 +1229,21 @@ pub struct WorkItem {
     pub id: String,
     #[serde(rename = "ref")]
     pub reference: String,
-    pub kind: String,
+    pub kind: WorkKind,
     pub title: String,
+    #[serde(default)]
     pub body: String,
     pub state: String,
-    pub priority: String,
-    pub effort: Option<String>,
+    #[serde(default = "priority_default")]
+    pub priority: Priority,
+    pub effort: Option<Effort>,
     pub project_id: Option<String>,
     pub project_slug: Option<String>,
     pub initiative_id: Option<String>,
-    pub origin: String,
-    pub trust_state: String,
+    #[serde(default)]
+    pub origin: Origin,
+    #[serde(default)]
+    pub trust_state: TrustState,
     pub assignee_actor_id: Option<String>,
     pub assignee_identity_ref: Option<String>,
     pub labels: Vec<String>,
@@ -1470,7 +1643,7 @@ mod tests {
     #[test]
     fn a_non_ascii_state_survives_its_own_definition() {
         let workflow = Workflow {
-            kind: "bug".into(),
+            kind: "bug".parse().unwrap(),
             initial_state: "open".into(),
             transitions: vec![
                 ("open".into(), vec!["été".into()]),
@@ -1824,17 +1997,17 @@ mod tests {
         let item = WorkItem {
             id: "wrk_0001".to_string(),
             reference: "WI-1".to_string(),
-            kind: "bug".to_string(),
+            kind: "bug".parse().unwrap(),
             title: "a title".to_string(),
             body: String::new(),
             state: "open".to_string(),
-            priority: "p2".to_string(),
+            priority: "p2".parse().unwrap(),
             effort: None,
             project_id: None,
             project_slug: None,
             initiative_id: None,
-            origin: "created".to_string(),
-            trust_state: "unverified".to_string(),
+            origin: "created".parse().unwrap(),
+            trust_state: "unverified".parse().unwrap(),
             assignee_actor_id: None,
             assignee_identity_ref: None,
             labels: Vec::new(),
@@ -1910,10 +2083,10 @@ mod tests {
     fn entities_carry_the_python_defaults() {
         let now = Moment::from_unix(1_700_000_000, 0);
         let project = Project::new("prj_1", "vogt", "Vogt", "/src", now);
-        assert_eq!(project.lifecycle_state, "active");
-        assert_eq!(project.compliance_status, "not_checked");
-        assert_eq!(project.link_state, "unlinked");
-        assert_eq!(project.write_back, "none");
+        assert_eq!(project.lifecycle_state, ProjectLifecycle::Active);
+        assert_eq!(project.compliance_status, ComplianceStatus::NotChecked);
+        assert_eq!(project.link_state, LinkState::Unlinked);
+        assert_eq!(project.write_back.to_string(), "none");
         assert!(require_text("  ").is_err());
         assert_eq!(require_text("  because  ").unwrap(), "because");
         assert!(!DECLARABLE_RELATION_KINDS.contains(&"implemented_by"));

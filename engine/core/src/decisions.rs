@@ -354,9 +354,9 @@ impl Rankable {
         Self {
             id: item.id.clone(),
             reference: item.reference.clone(),
-            priority: item.priority.clone(),
+            priority: item.priority.to_string(),
             updated_at: item.updated_at,
-            trust_state: item.trust_state.clone(),
+            trust_state: item.trust_state.to_string(),
             state: item.state.clone(),
             has_initiative: item.initiative_id.is_some(),
         }
@@ -820,7 +820,7 @@ mod tests {
             reference: "WI-1".into(),
             priority: priority.into(),
             updated_at: updated,
-            trust_state: "verified".into(),
+            trust_state: "verified".parse().unwrap(),
             state: "open".into(),
             has_initiative: false,
         }
