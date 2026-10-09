@@ -160,26 +160,57 @@ struct VogtLayer {
 
 struct FieldVisitor {
     message: String,
-    fields: Vec<(String, String)>,
+    fields: Vec<(String, serde_json::Value)>,
 }
 
 impl Visit for FieldVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-        self.store(field, value.to_string());
+        self.store(field, value.into());
+    }
+
+    fn record_i64(&mut self, field: &Field, value: i64) {
+        self.store(field, value.into());
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        self.store(field, value.into());
+    }
+
+    fn record_bool(&mut self, field: &Field, value: bool) {
+        self.store(field, value.into());
+    }
+
+    fn record_f64(&mut self, field: &Field, value: f64) {
+        self.store(
+            field,
+            serde_json::Number::from_f64(value).map_or(serde_json::Value::Null, Into::into),
+        );
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         let rendered = format!("{value:?}");
-        self.store(field, rendered.trim_matches('"').to_string());
+        // The message is a string whose Debug form is a quoted JSON string.
+        // Parsing it back keeps an embedded quote intact; trimming the ends
+        // would turn `"quoted" message` into `quoted" message`.
+        let value = if field.name() == "message" {
+            serde_json::from_str::<String>(&rendered)
+                .map_or(serde_json::Value::String(rendered), Into::into)
+        } else {
+            serde_json::Value::String(rendered)
+        };
+        self.store(field, value);
     }
 }
 
 impl FieldVisitor {
-    fn store(&mut self, field: &Field, text: String) {
+    fn store(&mut self, field: &Field, value: serde_json::Value) {
         if field.name() == "message" {
-            self.message = text;
+            self.message = match &value {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
         } else {
-            self.fields.push((field.name().to_string(), text));
+            self.fields.push((field.name().to_string(), value));
         }
     }
 }
@@ -210,10 +241,9 @@ where
         if *meta.level() <= Level::WARN {
             // Python always keeps the text line, even when stderr is JSON.
             let kept = redact(&text);
-            let mut recent = match RECENT.lock() {
-                Ok(guard) => guard,
-                Err(_) => return,
-            };
+            let mut recent = RECENT
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             if recent.lines.len() == RECENT_PROBLEMS_CAPACITY {
                 recent.lines.pop_front();
             }
@@ -237,9 +267,10 @@ impl VogtLayer {
     }
 }
 
-/// Python's `TextFormatter`: `2026-08-19T11:02:03.123Z INFO    vogt.http message`,
+/// Python's `TextFormatter`: `2026-08-19T11:02:03.123+00:00 INFO    vogt.http message`,
 /// then `key=value` pairs quoted only when the value is empty or has a space.
-/// `request_id` leads the fields and `actor` trails them.
+/// A bool renders `True`/`False`, the way `str(True)` does. `request_id` leads
+/// the fields and `actor` trails them.
 fn render_text(
     meta: &'static tracing::Metadata<'static>,
     visitor: &FieldVisitor,
@@ -249,15 +280,15 @@ fn render_text(
     let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3f+00:00");
     let level = format!("{:<7}", level_name(meta.level()));
     let mut line = format!("{stamp} {level} {} {}", meta.target(), visitor.message);
-    let mut fields: Vec<(&str, &str)> = Vec::new();
+    let mut fields: Vec<(&str, String)> = Vec::new();
     if let Some(id) = request_id {
-        fields.push(("request_id", id));
+        fields.push(("request_id", id.to_string()));
     }
     for (key, value) in &visitor.fields {
-        fields.push((key, value));
+        fields.push((key, text_value(value)));
     }
     if let Some(actor) = actor {
-        fields.push(("actor", actor));
+        fields.push(("actor", actor.to_string()));
     }
     let rendered = fields
         .iter()
@@ -269,6 +300,17 @@ fn render_text(
         line.push_str(&rendered);
     }
     line
+}
+
+/// `str(value)` for the text line. Python spells a bool `True`/`False` and
+/// drops the quotes around everything else.
+fn text_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Bool(true) => "True".to_string(),
+        serde_json::Value::Bool(false) => "False".to_string(),
+        serde_json::Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
 }
 
 fn terse(value: &str) -> String {
@@ -288,7 +330,7 @@ fn render_json(
     actor: Option<&str>,
 ) -> String {
     let mut payload = serde_json::json!({
-        "ts": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+        "ts": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3f+00:00").to_string(),
         "level": level_name(meta.level()).to_ascii_lowercase(),
         "logger": meta.target(),
         "message": visitor.message,
@@ -301,9 +343,38 @@ fn render_json(
         object.insert("actor".to_string(), actor.into());
     }
     for (key, value) in &visitor.fields {
-        object.insert(key.clone(), value.clone().into());
+        object.insert(key.clone(), value.clone());
     }
-    payload.to_string()
+    // Python's json.dumps defaults: a space after ':' and ',', non-ASCII kept.
+    py_dumps(&payload)
+}
+
+/// `json.dumps` with its default separators, so the line is `{"a": 1, "b": 2}`.
+fn py_dumps(value: &serde_json::Value) -> String {
+    let compact = serde_json::to_string(value).expect("log payload is json");
+    let mut out = String::with_capacity(compact.len() + 8);
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in compact.chars() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        out.push(ch);
+        if ch == '"' {
+            in_string = true;
+        } else if ch == ':' || ch == ',' {
+            out.push(' ');
+        }
+    }
+    out
 }
 
 fn level_name(level: &Level) -> &'static str {

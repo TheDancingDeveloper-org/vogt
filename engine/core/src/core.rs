@@ -211,15 +211,43 @@ impl IdFactory for SequentialIds {
 pub const CLOCK_ENV: &str = "VOGT_TEST_CLOCK_START";
 pub const IDS_ENV: &str = "VOGT_TEST_IDS";
 
+/// Python's `repr` for a string. It prefers single quotes and switches to
+/// double quotes when the value holds an apostrophe and no double quote, so
+/// ` x ` reads `' x '` and `it's` reads `"it's"`.
+fn py_repr(raw: &str) -> String {
+    let quote = if raw.contains('\'') && !raw.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::from(quote);
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
+}
+
 /// `VOGT_TEST_CLOCK_START`. Empty is unset. Anything that is not a timestamp is
 /// an `InvalidRequest`, naming the value.
 pub fn clock_from_env(value: Option<&str>) -> Result<Option<StepClock>, VogtError> {
-    let Some(raw) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+    let Some(raw) = value.filter(|text| !text.trim().is_empty()) else {
         return Ok(None);
     };
-    let start = from_iso(raw).map_err(|_| {
+    let start = from_iso(raw.trim()).map_err(|_| {
         VogtError::InvalidRequest(format!(
-            "{CLOCK_ENV} must be an RFC3339 timestamp, not '{raw}'"
+            "{CLOCK_ENV} must be an RFC3339 timestamp, not {}",
+            py_repr(raw)
         ))
     })?;
     Ok(Some(StepClock::new(start)))
@@ -230,12 +258,13 @@ pub fn ids_from_env(
     value: Option<&str>,
     path: Option<std::path::PathBuf>,
 ) -> Result<Option<SequentialIds>, VogtError> {
-    let Some(raw) = value.map(str::trim).filter(|text| !text.is_empty()) else {
+    let Some(raw) = value.filter(|text| !text.trim().is_empty()) else {
         return Ok(None);
     };
-    if raw != "sequential" {
+    if raw.trim() != "sequential" {
         return Err(VogtError::InvalidRequest(format!(
-            "{IDS_ENV} must be 'sequential', not '{raw}'"
+            "{IDS_ENV} must be 'sequential' when set, not {}",
+            py_repr(raw)
         )));
     }
     SequentialIds::new(path)
@@ -969,6 +998,7 @@ pub fn require_text(value: &str) -> Result<String, String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Actor {
     pub id: String,
     pub kind: ActorKind,
@@ -979,6 +1009,7 @@ pub struct Actor {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Project {
     pub id: String,
     pub slug: String,
@@ -1024,6 +1055,7 @@ impl Project {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkItem {
     pub id: String,
     #[serde(rename = "ref")]
@@ -1049,6 +1081,7 @@ pub struct WorkItem {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Observation {
     pub id: String,
     pub sweep_id: String,
@@ -1076,6 +1109,7 @@ pub struct WorkOverlay {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionGrant {
     pub id: String,
     pub state: String,
@@ -1097,6 +1131,7 @@ impl SessionGrant {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Label {
     pub id: String,
     pub name: String,
@@ -1105,6 +1140,7 @@ pub struct Label {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Initiative {
     pub id: String,
     pub slug: String,
@@ -1120,6 +1156,7 @@ pub struct Initiative {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Relation {
     pub kind: RelationKind,
     pub related_id: String,
@@ -1129,6 +1166,7 @@ pub struct Relation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Comment {
     pub id: String,
     pub work_item_id: String,
@@ -1139,6 +1177,7 @@ pub struct Comment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Suppression {
     pub id: String,
     pub match_kind: MatchKind,
@@ -1161,6 +1200,7 @@ impl Suppression {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContractExemption {
     pub id: String,
     pub project_id: String,
@@ -1173,6 +1213,7 @@ pub struct ContractExemption {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkLink {
     pub work_item_id: String,
     pub subject_key: String,
@@ -1184,6 +1225,7 @@ pub struct WorkLink {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CodingSession {
     pub id: String,
     pub engine_session_id: String,
@@ -1202,6 +1244,7 @@ pub struct CodingSession {
 /// The hash only. A model that could round-trip the secret is one that leaks
 /// it into logs and API responses.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Token {
     pub id: String,
     pub actor_id: String,
@@ -1226,6 +1269,7 @@ impl Token {
 /// The hash is deliberately absent: the storage layer writes and reads it, so
 /// no listing, result or audit payload can carry it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PasswordCredential {
     pub actor_id: String,
     pub actor_identity_ref: Option<String>,
@@ -1236,6 +1280,7 @@ pub struct PasswordCredential {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AuthDecision {
     pub id: String,
     pub at: Moment,
@@ -1251,6 +1296,7 @@ pub struct AuthDecision {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WriteBackRecord {
     pub id: String,
     pub at: Moment,
@@ -1269,6 +1315,7 @@ pub struct WriteBackRecord {
 /// No token field. The encrypted PAT lives in its own column and is read
 /// through a dedicated accessor, so this entity can never carry it out.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ForgeAccount {
     pub actor_id: String,
     pub host: String,
@@ -1629,7 +1676,7 @@ mod tests {
 
         let bad = ids_from_env(Some("random"), None).unwrap_err().to_string();
         assert!(
-            bad.contains("VOGT_TEST_IDS must be 'sequential', not 'random'"),
+            bad.contains("VOGT_TEST_IDS must be 'sequential' when set, not 'random'"),
             "{bad}"
         );
 
@@ -1742,6 +1789,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(token.kind, TokenKind::Api);
+    }
+
+    /// pydantic's `extra="forbid"`: a key the model does not declare is an error.
+    #[test]
+    fn an_unknown_field_is_refused() {
+        let err = serde_json::from_str::<Label>(
+            r#"{"id":"l","name":"bug","color":null,"created_at":"2026-01-01T00:00:00Z","extra":1}"#,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field"), "{err}");
     }
 
     #[test]
