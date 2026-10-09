@@ -523,11 +523,57 @@ impl ReadView for SqliteReadView {
         }
         Ok(result)
     }
-    fn blocking_fan_out(&self, _: &[String]) -> Result<BTreeMap<String, i64>, VogtError> {
-        later("blocking_fan_out")
+    fn blocking_fan_out(
+        &self,
+        work_item_ids: &[String],
+    ) -> Result<BTreeMap<String, i64>, VogtError> {
+        if work_item_ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let placeholders = vec!["?"; work_item_ids.len()].join(", ");
+        let params: Vec<Box<dyn rusqlite::ToSql>> = work_item_ids
+            .iter()
+            .map(|id| Box::new(id.clone()) as Box<dyn rusqlite::ToSql>)
+            .collect();
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        let rows = many(
+            &self.conn,
+            &format!(
+                "SELECT related_id, COUNT(*) AS n FROM work_relations WHERE kind = 'depends_on' AND related_id IN ({placeholders}) GROUP BY related_id"
+            ),
+            refs.as_slice(),
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
+        Ok(rows.into_iter().collect())
     }
-    fn unfinished_blockers(&self, _: &str, _: &[&str]) -> Result<Vec<Blocker>, VogtError> {
-        later("unfinished_blockers")
+    fn unfinished_blockers(
+        &self,
+        work_item_id: &str,
+        terminal_states: &[&str],
+    ) -> Result<Vec<Blocker>, VogtError> {
+        let placeholders = if terminal_states.is_empty() {
+            "''".to_string()
+        } else {
+            vec!["?"; terminal_states.len()].join(", ")
+        };
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(work_item_id.to_string())];
+        for state in terminal_states {
+            params.push(Box::new((*state).to_string()));
+        }
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        many(
+            &self.conn,
+            &format!(
+                "SELECT t.ref AS ref, t.state AS state FROM work_relations r JOIN work_items t ON t.id = r.related_id WHERE r.work_item_id = ? AND r.kind = 'depends_on' AND t.state NOT IN ({placeholders}) ORDER BY t.ref"
+            ),
+            refs.as_slice(),
+            |row| {
+                Ok(Blocker {
+                    r#ref: row.get("ref")?,
+                    state: row.get("state")?,
+                })
+            },
+        )
     }
     fn comments_for(&self, id: &str, limit: i64) -> Result<Vec<Comment>, VogtError> {
         many(&self.conn, "SELECT c.*, a.display_name AS actor_display_name FROM comments c JOIN actors a ON a.id = c.actor_id WHERE c.work_item_id = ? ORDER BY c.created_at, c.id LIMIT ?", params![id, limit], row_comment)
@@ -596,11 +642,30 @@ impl ReadView for SqliteReadView {
             .insert(kind.to_string(), workflow.clone());
         Ok(workflow)
     }
-    fn list_suppressions(&self, _: bool, _: i64) -> Result<Vec<Suppression>, VogtError> {
-        later("list_suppressions")
+    fn list_suppressions(
+        &self,
+        include_revoked: bool,
+        limit: i64,
+    ) -> Result<Vec<Suppression>, VogtError> {
+        let clause = if include_revoked {
+            ""
+        } else {
+            "WHERE s.revoked_at IS NULL"
+        };
+        many(
+            &self.conn,
+            &format!("{SUPPRESSION_SELECT} {clause} ORDER BY s.created_at DESC, s.id DESC LIMIT ?"),
+            params![limit],
+            row_suppression,
+        )
     }
-    fn suppression_by_id(&self, _: &str) -> Result<Option<Suppression>, VogtError> {
-        later("suppression_by_id")
+    fn suppression_by_id(&self, suppression_id: &str) -> Result<Option<Suppression>, VogtError> {
+        one(
+            &self.conn,
+            &format!("{SUPPRESSION_SELECT} WHERE s.id = ?"),
+            [suppression_id],
+            row_suppression,
+        )
     }
     fn contract_exemptions(&self, project_id: &str) -> Result<Vec<ContractExemption>, VogtError> {
         many(&self.conn, "SELECT e.*, p.slug AS project_slug FROM contract_exemptions e JOIN projects p ON p.id = e.project_id WHERE e.project_id = ? ORDER BY e.rule, e.target", params![project_id], row_exemption)
@@ -2048,6 +2113,45 @@ mod more {
         make("wrk_1", "open", now);
         make("wrk_2", "open", later_at);
         make("wrk_3", "done", now);
+        // wrk_1 depends on wrk_2 (still open) and on wrk_3 (done), so exactly
+        // one of the two targets is an unfinished blocker.
+        txn.insert_relation("wrk_1", "wrk_2", crate::core::RelationKind::DependsOn, now)
+            .unwrap();
+        txn.insert_relation("wrk_1", "wrk_3", crate::core::RelationKind::DependsOn, now)
+            .unwrap();
+        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let actor_id = actor.id.clone();
+        txn.insert_suppression(&Suppression {
+            id: "sup_1".into(),
+            match_kind: crate::core::MatchKind::Exact,
+            subject_key_or_pattern: "subj".into(),
+            scope_project_id: None,
+            scope_project_slug: None,
+            actor_id: actor.id.clone(),
+            actor_identity_ref: None,
+            reason: "noise".into(),
+            created_at: now,
+            revoked_at: None,
+            revoked_reason: None,
+        })
+        .unwrap();
+        txn.insert_suppression(&Suppression {
+            id: "sup_2".into(),
+            match_kind: crate::core::MatchKind::Pattern,
+            subject_key_or_pattern: "subj-*".into(),
+            scope_project_id: None,
+            scope_project_slug: None,
+            actor_id: actor_id.clone(),
+            actor_identity_ref: None,
+            reason: "more noise".into(),
+            created_at: later_at,
+            revoked_at: None,
+            revoked_reason: None,
+        })
+        .unwrap();
+        assert!(txn
+            .revoke_suppression("sup_2", &actor_id, "settled", later_at)
+            .unwrap());
         txn.commit().unwrap();
 
         let view = store.read().unwrap();
@@ -2091,8 +2195,57 @@ mod more {
         let open = &page[&("".into(), "open".into())];
         assert_eq!(open.len(), 1, "the cursor skips the first open item");
         assert_eq!(open[0].id, "wrk_2");
+
+        let fan = view
+            .blocking_fan_out(&["wrk_2".into(), "wrk_3".into()])
+            .unwrap();
+        assert_eq!(fan.get("wrk_2"), Some(&1));
+        let blockers = view
+            .unfinished_blockers("wrk_1", &["done", "wont_do"])
+            .unwrap();
+        assert_eq!(blockers.len(), 1);
+        assert_eq!(blockers[0].r#ref, "WI-2");
+
+        let live = view.list_suppressions(false, 100).unwrap();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].id, "sup_1");
+        assert_eq!(view.list_suppressions(true, 100).unwrap().len(), 2);
+        assert!(view
+            .suppression_by_id("sup_2")
+            .unwrap()
+            .unwrap()
+            .revoked_at
+            .is_some());
+        assert!(view.suppression_by_id("sup_missing").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+const SUPPRESSION_SELECT: &str = "SELECT s.*, a.identity_ref AS actor_identity_ref, p.slug AS scope_project_slug FROM suppressions s JOIN actors a ON a.id = s.actor_id LEFT JOIN projects p ON p.id = s.scope_project_id";
+
+fn row_suppression(row: &Row<'_>) -> rusqlite::Result<Suppression> {
+    let match_kind: String = row.get("match_kind")?;
+    Ok(Suppression {
+        id: row.get("id")?,
+        match_kind: serde_json::from_value(serde_json::Value::String(match_kind)).map_err(
+            |err| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(err),
+                )
+            },
+        )?,
+        subject_key_or_pattern: row.get("subject_key_or_pattern")?,
+        scope_project_id: row.get("scope_project_id")?,
+        scope_project_slug: row.get("scope_project_slug")?,
+        actor_id: row.get("actor_id")?,
+        actor_identity_ref: row.get("actor_identity_ref")?,
+        reason: row.get("reason")?,
+        created_at: moment(row, "created_at")?,
+        revoked_at: opt_moment(row, "revoked_at")?,
+        revoked_reason: row.get("revoked_reason")?,
+    })
 }
 
 const WORK_SELECT: &str = "SELECT w.*, p.slug AS project_slug, ac.identity_ref AS assignee_identity_ref FROM work_items w LEFT JOIN projects p ON p.id = w.project_id LEFT JOIN actors ac ON ac.id = w.assignee_actor_id";
