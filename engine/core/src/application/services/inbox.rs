@@ -567,8 +567,10 @@ where
         Some(engine) => engine.list_sessions().unwrap_or_default(),
         None => Vec::new(),
     };
-    let live_by_id: BTreeMap<&str, &crate::adapters::engine::EngineSession> =
-        live.iter().map(|session| (session.id.as_str(), session)).collect();
+    let live_by_id: BTreeMap<&str, &crate::adapters::engine::EngineSession> = live
+        .iter()
+        .map(|session| (session.id.as_str(), session))
+        .collect();
 
     let mut checks_by_branch: BTreeMap<(String, String), Vec<Observation>> = BTreeMap::new();
     for observation in &checks_all {
@@ -635,7 +637,12 @@ where
         if let Some(blocked) = &session.blocked {
             if session.alive {
                 entries.push(blocked_entry(
-                    ctx, session, blocked, declared.as_ref(), &projects, view,
+                    ctx,
+                    session,
+                    blocked,
+                    declared.as_ref(),
+                    &projects,
+                    view,
                 )?);
             }
         }
@@ -643,7 +650,13 @@ where
             session.activity.as_str(),
             "waiting-for-input" | "awaiting-approval" | "errored"
         ) {
-            entries.push(session_entry(ctx, session, declared.as_ref(), &projects, view)?);
+            entries.push(session_entry(
+                ctx,
+                session,
+                declared.as_ref(),
+                &projects,
+                view,
+            )?);
         }
     }
 
@@ -1069,9 +1082,9 @@ fn grant_entry(
         .map(|actor| actor.identity_ref.clone())
         .unwrap_or_else(|| grant.requested_by.clone());
     let itself = requested_by == format!("agent:engine:{}", grant.target_engine_session_id)
-        || declared.as_ref().is_some_and(|session| {
-            requested_by == format!("agent:session:{}", session.id)
-        });
+        || declared
+            .as_ref()
+            .is_some_and(|session| requested_by == format!("agent:session:{}", session.id));
     let who = if itself {
         "itself".to_string()
     } else {
@@ -1173,11 +1186,19 @@ fn blocked_entry<C: Clock, I: IdFactory>(
         &format!(
             "{}{}",
             blocked.reason,
-            if todo.is_empty() { String::new() } else { format!(" — to do: {todo}") }
+            if todo.is_empty() {
+                String::new()
+            } else {
+                format!(" — to do: {todo}")
+            }
         ),
         1000,
     );
-    let name = if session.name.is_empty() { session.id.as_str() } else { session.name.as_str() };
+    let name = if session.name.is_empty() {
+        session.id.as_str()
+    } else {
+        session.name.as_str()
+    };
     let title = match &reference {
         Some(reference) => format!("{reference} session {name} is blocked on you"),
         None => format!("Session {name} is blocked on you"),
@@ -1191,7 +1212,8 @@ fn blocked_entry<C: Clock, I: IdFactory>(
         source: "agent",
         kind: "session.blocked",
         occurred_at: Some(
-            when(blocked.since.as_deref().map(Value::from).as_ref()).unwrap_or_else(|| now_of(&ctx.clock)),
+            when(blocked.since.as_deref().map(Value::from).as_ref())
+                .unwrap_or_else(|| now_of(&ctx.clock)),
         ),
         observed_at: None,
         title: &title,
@@ -1218,7 +1240,11 @@ fn session_entry<C: Clock, I: IdFactory>(
 ) -> Result<Value, VogtError> {
     let project = declared.and_then(|session| projects.get(&session.project_id));
     let reference = bound_ref(view, declared, session.work_item.as_deref())?;
-    let name = if session.name.is_empty() { session.id.as_str() } else { session.name.as_str() };
+    let name = if session.name.is_empty() {
+        session.id.as_str()
+    } else {
+        session.name.as_str()
+    };
     let label = match &reference {
         Some(reference) => format!("{reference} {name}"),
         None => name.to_string(),
@@ -1227,7 +1253,13 @@ fn session_entry<C: Clock, I: IdFactory>(
         let what = session
             .approval
             .as_ref()
-            .map(|approval| approval.command_excerpt.split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|approval| {
+                approval
+                    .command_excerpt
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
             .unwrap_or_default();
         let left = session
             .approval
@@ -1260,8 +1292,14 @@ fn session_entry<C: Clock, I: IdFactory>(
         source: "agent",
         kind: "session.attention",
         occurred_at: Some(
-            when(session.activity_changed_at.as_deref().map(Value::from).as_ref())
-                .unwrap_or_else(|| now_of(&ctx.clock)),
+            when(
+                session
+                    .activity_changed_at
+                    .as_deref()
+                    .map(Value::from)
+                    .as_ref(),
+            )
+            .unwrap_or_else(|| now_of(&ctx.clock)),
         ),
         observed_at: None,
         title: &title,
@@ -1289,7 +1327,9 @@ fn bound_ref(
         let Some(work_item_id) = &declared.work_item_id else {
             return Ok(None);
         };
-        return Ok(view.work_item_by_id(work_item_id)?.map(|item| item.reference));
+        return Ok(view
+            .work_item_by_id(work_item_id)?
+            .map(|item| item.reference));
     }
     Ok(label.map(str::to_string))
 }

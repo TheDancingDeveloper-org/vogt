@@ -34,6 +34,11 @@ pub struct AppState<C, I> {
     pub registry: Arc<OperationRegistry>,
     store: Mutex<SqliteDeclaredStore<C, I>>,
     data_dir: std::path::PathBuf,
+    /// Loaded once, at startup. A request must not call `load_config` itself:
+    /// the file and the environment are process-wide, and reading them per
+    /// request is where `VOGT_CONTRACT_VERSION` and `VOGT_SESSION_TTL_DAYS` got
+    /// lost behind `VogtConfig::default()`.
+    config: crate::config::VogtConfig,
     pub no_auth: bool,
     pub writes_enabled: bool,
 }
@@ -54,6 +59,7 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
                 ids,
             )),
             data_dir: data_dir.to_path_buf(),
+            config: loaded_config(data_dir),
             no_auth,
             writes_enabled,
         }
@@ -70,16 +76,27 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
             registry: Arc::new(default_registry()),
             store: Mutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
             data_dir: data_dir.to_path_buf(),
+            config: loaded_config(data_dir),
             no_auth,
             writes_enabled,
         }
     }
 }
 
+/// The process config, with this route's data directory. Read once, when the
+/// state is built. A config that cannot be read falls back to the defaults
+/// rather than refusing to serve, because the route's own store is already open
+/// and the defaults are what every request used to get silently.
+fn loaded_config(data_dir: &std::path::Path) -> crate::config::VogtConfig {
+    let mut config = crate::config::load_config(&serde_json::Map::new())
+        .unwrap_or_else(|_| crate::config::VogtConfig::default());
+    config.data_dir = data_dir.to_path_buf();
+    config
+}
+
 /// The router for the registry surface. Health routes stay on their own router
 /// and are merged in by `serve`. Login is mounted by hand, ahead of the
 /// fallback: the caller holds no credential yet, so it never enters the gate.
-///
 /// One function per hook pair, the way the MCP route is split. A request's
 /// context has to be a `Built`, which only exists for these four pairs, so each
 /// router names its pair and builds the context on the store's own clock and id
@@ -102,6 +119,14 @@ macro_rules! api_route {
                 .route(
                     "/api/auth/login",
                     axum::routing::post(login::<$clock, $ids>),
+                )
+                .route(
+                    "/api/install/status",
+                    axum::routing::get(install_status::<$clock, $ids>),
+                )
+                .route(
+                    "/api/install/bootstrap",
+                    axum::routing::post(install_bootstrap::<$clock, $ids>),
                 )
                 .fallback(dispatch::<$clock, $ids>)
                 .with_state((Arc::new(state), build as ContextBuild<$clock, $ids>))
@@ -260,6 +285,134 @@ fn json_content_type(header: Option<&axum::http::HeaderValue>) -> bool {
         })
 }
 
+/// `GET /api/install/status`. Public, like Python's hand-mounted route: it
+/// answers a browser that holds no credential, and states one boolean that
+/// caller could infer by trying to bootstrap anyway.
+async fn install_status<C: Clock, I: IdFactory>(
+    State((state, build)): State<Routed<C, I>>,
+) -> Response {
+    let Some(built) = context_for_login(&state, build) else {
+        return error_response(&VogtError::InvalidRequest(
+            "the request context could not be built".to_string(),
+        ));
+    };
+    match crate::application::services::install::install_status_op(&built, serde_json::Value::Null)
+    {
+        Ok(value) => json_response(StatusCode::OK, value),
+        Err(error) => error_response(&error),
+    }
+}
+
+/// `POST /api/install/bootstrap`. Public, and validated before the service. A
+/// body that is not JSON, or that fails `InstallBootstrapParams`, answers 422
+/// and the store is never opened, so a bad request cannot race the one-shot
+/// bootstrap or write a row.
+async fn install_bootstrap<C: Clock, I: IdFactory>(
+    State((state, build)): State<Routed<C, I>>,
+    request: Request<Body>,
+) -> Response {
+    if !json_content_type(request.headers().get("content-type")) {
+        return invalid_arguments(&VogtError::InvalidRequest(
+            "invalid arguments for install.bootstrap:\n1 validation error for request body\nbody\n  \
+             Input should be a valid JSON object"
+                .to_string(),
+        ));
+    }
+    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024 + 1).await;
+    let body = match body {
+        Ok(bytes) if bytes.len() > 1024 * 1024 => return payload_too_large(),
+        Ok(bytes) => bytes,
+        Err(_) => return payload_too_large(),
+    };
+    let params = match bootstrap_params(&body) {
+        Ok(params) => params,
+        Err(error) => return invalid_arguments(&error),
+    };
+    let Some(built) = context_for_login(&state, build) else {
+        return error_response(&VogtError::InvalidRequest(
+            "the request context could not be built".to_string(),
+        ));
+    };
+    match crate::application::services::install::install_bootstrap_op(&built, params) {
+        Ok(value) => json_response(StatusCode::OK, value),
+        Err(error) => error_response(&error),
+    }
+}
+
+/// `InstallBootstrapParams` (`models.py`). `display_name` is required and every
+/// field present must be a string; `Name` fields are stripped and at least one
+/// character. Not a registry operation, so the shared validator has no schema.
+fn bootstrap_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
+    let object = match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(object)) => object,
+        _ => {
+            return Err(VogtError::InvalidRequest(
+                "invalid arguments for install.bootstrap:\n1 validation error for request body\nbody\n  \
+                 Input should be a valid JSON object"
+                    .to_string(),
+            ))
+        }
+    };
+    for key in object.keys() {
+        if ![
+            "display_name",
+            "identity_ref",
+            "token_name",
+            "username",
+            "password",
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(VogtError::InvalidRequest(format!(
+                "invalid arguments for install.bootstrap:\n1 validation error for \
+                 InstallBootstrapParams\n{key}\n  Extra inputs are not permitted"
+            )));
+        }
+    }
+    let mut out = serde_json::Map::new();
+    for field in ["display_name", "identity_ref", "token_name", "username"] {
+        match object.get(field) {
+            None => {}
+            Some(serde_json::Value::String(text)) if !text.trim().is_empty() => {
+                out.insert(
+                    field.to_string(),
+                    serde_json::Value::String(text.trim().to_string()),
+                );
+            }
+            Some(_) => {
+                return Err(VogtError::InvalidRequest(format!(
+                    "invalid arguments for install.bootstrap:\n1 validation error for \
+                     InstallBootstrapParams\n{field}\n  Input should be a valid string"
+                )))
+            }
+        }
+    }
+    if !out.contains_key("display_name") {
+        return Err(VogtError::InvalidRequest(
+            "invalid arguments for install.bootstrap:\n1 validation error for \
+             InstallBootstrapParams\ndisplay_name\n  Field required"
+                .to_string(),
+        ));
+    }
+    match object.get("password") {
+        None => {}
+        Some(serde_json::Value::String(password)) => {
+            out.insert(
+                "password".to_string(),
+                serde_json::Value::String(password.clone()),
+            );
+        }
+        Some(_) => {
+            return Err(VogtError::InvalidRequest(
+                "invalid arguments for install.bootstrap:\n1 validation error for \
+                 InstallBootstrapParams\npassword\n  Input should be a valid string"
+                    .to_string(),
+            ))
+        }
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
 async fn dispatch<C: Clock, I: IdFactory>(
     State((state, build)): State<Routed<C, I>>,
     request: Request<Body>,
@@ -268,9 +421,17 @@ async fn dispatch<C: Clock, I: IdFactory>(
     let path = request.uri().path().to_string();
     let query = request.uri().query().map(str::to_string);
     let presented = bearer(request.headers().get("authorization"));
-    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
-        .await
-        .unwrap_or_default();
+    let content_type = request.headers().get("content-type").cloned();
+    // Read one byte past the limit so an oversized body is distinguishable from
+    // one that fits. `unwrap_or_default` used to turn a too-large body into an
+    // empty one, and the caller was told their parameters were wrong.
+    let read = axum::body::to_bytes(request.into_body(), 1024 * 1024 + 1).await;
+    let body = match read {
+        Ok(bytes) if bytes.len() > 1024 * 1024 => return payload_too_large(),
+        Ok(bytes) => bytes,
+        Err(err) if err.to_string().contains("length limit") => return payload_too_large(),
+        Err(_) => return payload_too_large(),
+    };
     let Some(operation_path) = path.strip_prefix(API_PREFIX) else {
         return not_found();
     };
@@ -290,7 +451,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
     // Parse, then validate, and only then the gate. Both are the caller's
     // mistake, so both answer 422 and write no auth row. The check is the shared
     // one `Operation::run` applies, not one of this adapter's own.
-    let params = match parse_params(operation, query.as_deref(), &body) {
+    let params = match parse_params(operation, query.as_deref(), &content_type, &body) {
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error),
     };
@@ -356,13 +517,24 @@ async fn dispatch<C: Clock, I: IdFactory>(
 fn parse_params(
     operation: &Operation,
     query: Option<&str>,
+    content_type: &Option<axum::http::HeaderValue>,
     body: &[u8],
 ) -> Result<serde_json::Value, VogtError> {
     if operation.route.method == HttpMethod::Get {
-        return Ok(query_object(query));
+        return Ok(query_object(operation.name, query));
     }
+    // A write with no body is the empty object the validator fills defaults into.
+    // A write that carries a body must say it is JSON: `text/plain` is a CORS
+    // simple request, and accepting it lets any web page write to a `--no-auth`
+    // server.
     if body.is_empty() {
         return Ok(serde_json::Value::Null);
+    }
+    if !json_content_type(content_type.as_ref()) {
+        return Err(VogtError::InvalidRequest(format!(
+            "invalid arguments for {}:\n1 validation error for request body\nbody\n  Input should be a valid JSON object",
+            operation.name
+        )));
     }
     match serde_json::from_slice::<serde_json::Value>(body) {
         Ok(serde_json::Value::Object(object)) => Ok(serde_json::Value::Object(object)),
@@ -373,11 +545,14 @@ fn parse_params(
     }
 }
 
-/// Query parameters as one flat object. A repeated key becomes a list, which is
-/// how a caller passes an array field; everything else is a string and the
-/// validator decides whether that string is acceptable. Percent-encoding is
-/// decoded because that is what the query string is.
-fn query_object(query: Option<&str>) -> serde_json::Value {
+/// Query parameters as one flat object. A repeated key becomes a list. Each
+/// value is coerced to the type the operation's schema declares, because a query
+/// string only ever carries text and the validator does not coerce: `limit=5`
+/// has to arrive as a number, not the string `"5"`. Percent-encoding is decoded
+/// on bytes, never by slicing the string, so a `%` followed by a non-boundary
+/// byte is a bad query rather than a panic.
+fn query_object(operation: &str, query: Option<&str>) -> serde_json::Value {
+    let schema = crate::registry::params_schema_for(operation);
     let mut object = serde_json::Map::new();
     for pair in query
         .unwrap_or("")
@@ -386,7 +561,8 @@ fn query_object(query: Option<&str>) -> serde_json::Value {
     {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key);
-        let value = serde_json::Value::String(percent_decode(value));
+        let decoded = percent_decode(value);
+        let value = coerce_query(&schema, &key, &decoded);
         match object.get_mut(&key) {
             Some(serde_json::Value::Array(items)) => items.push(value),
             Some(existing) => {
@@ -401,6 +577,48 @@ fn query_object(query: Option<&str>) -> serde_json::Value {
     serde_json::Value::Object(object)
 }
 
+/// The schema's declared type for one field, unwrapping a nullable union. The
+/// query string has no way to say which type it meant, so a value that parses as
+/// that type is sent as that type and anything else stays a string for the
+/// validator to reject.
+fn coerce_query(schema: &Option<&serde_json::Value>, field: &str, text: &str) -> serde_json::Value {
+    let kind = schema
+        .and_then(|schema| schema.pointer(&format!("/properties/{field}/type")))
+        .or_else(|| schema.and_then(|schema| schema.pointer(&format!("/properties/{field}/anyOf"))))
+        .and_then(json_type);
+    match kind {
+        Some("integer") => text
+            .parse::<i64>()
+            .map_or(serde_json::Value::String(text.to_string()), |n| {
+                serde_json::json!(n)
+            }),
+        Some("number") => text
+            .parse::<f64>()
+            .map_or(serde_json::Value::String(text.to_string()), |n| {
+                serde_json::json!(n)
+            }),
+        Some("boolean") => match text {
+            "true" | "True" | "1" => serde_json::Value::Bool(true),
+            "false" | "False" | "0" => serde_json::Value::Bool(false),
+            _ => serde_json::Value::String(text.to_string()),
+        },
+        _ => serde_json::Value::String(text.to_string()),
+    }
+}
+
+fn json_type(value: &serde_json::Value) -> Option<&str> {
+    value.as_str().or_else(|| {
+        value.as_array().and_then(|options| {
+            options.iter().find_map(|option| {
+                option
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|kind| *kind != "null")
+            })
+        })
+    })
+}
+
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -409,10 +627,13 @@ fn percent_decode(text: &str) -> String {
         match bytes[index] {
             b'+' => out.push(b' '),
             b'%' if index + 2 < bytes.len() => {
-                let hex = &text[index + 1..index + 3];
-                match u8::from_str_radix(hex, 16) {
-                    Ok(byte) => out.push(byte),
-                    Err(_) => out.extend_from_slice(&bytes[index..index + 3]),
+                let hex = [bytes[index + 1], bytes[index + 2]];
+                match std::str::from_utf8(&hex)
+                    .ok()
+                    .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+                {
+                    Some(byte) => out.push(byte),
+                    None => out.extend_from_slice(&bytes[index..=index + 2]),
                 }
                 index += 2;
             }
@@ -432,10 +653,6 @@ fn context_for<C: Clock, I: IdFactory>(
     grant: &Grant,
     build: ContextBuild<C, I>,
 ) -> Option<crate::application::context::Built> {
-    let config = crate::config::VogtConfig {
-        data_dir: state.data_dir.clone(),
-        ..crate::config::VogtConfig::default()
-    };
     let principal = match &grant.identity_ref {
         Some(identity_ref) if !identity_ref.is_empty() => {
             Principal::new(identity_ref, grant.kind, &grant.display_name).ok()
@@ -444,7 +661,7 @@ fn context_for<C: Clock, I: IdFactory>(
     };
     let store = state.store.lock().expect("the store lock is not poisoned");
     Some(build(
-        config,
+        state.config.clone(),
         principal,
         Arc::clone(store.clock()),
         Arc::clone(store.id_factory()),
@@ -460,20 +677,21 @@ fn context_for_login<C: Clock, I: IdFactory>(
     state: &AppState<C, I>,
     build: ContextBuild<C, I>,
 ) -> Option<crate::application::context::Built> {
-    // The loaded config, not `VogtConfig::default()`. The default fixes
-    // `session_ttl_days` at 30, so an operator who set `VOGT_SESSION_TTL_DAYS`
-    // would silently get 30-day bearers. Only the data directory is the route's
-    // own, because the store was opened on it.
-    let mut config = crate::config::load_config(&serde_json::Map::new()).ok()?;
-    config.data_dir = state.data_dir.clone();
     let store = state.store.lock().expect("the store lock is not poisoned");
     Some(build(
-        config,
+        state.config.clone(),
         None,
         Arc::clone(store.clock()),
         Arc::clone(store.id_factory()),
         None,
     ))
+}
+
+fn payload_too_large() -> Response {
+    json_response(
+        StatusCode::PAYLOAD_TOO_LARGE,
+        serde_json::json!({"error": {"code": "payload_too_large", "message": "the request body exceeds 1 MiB"}}),
+    )
 }
 
 /// Python's 422 envelope. The validator reports one error as a single
@@ -636,9 +854,90 @@ mod tests {
     }
 
     #[test]
+    fn a_numeric_query_reaches_the_operation() {
+        let running = serve(true);
+        let (status, body) = request(running.addr, "GET", "/api/labels?limit=5", None);
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[test]
+    fn a_non_json_body_is_rejected_before_it_writes() {
+        let running = serve(true);
+        let (status, _) = post_body(
+            running.addr,
+            "/api/labels",
+            r#"{"name":"bug","reason":"r"}"#,
+        );
+        assert_eq!(status, 422);
+    }
+
+    #[test]
+    fn a_malformed_percent_escape_is_a_bad_query_not_a_panic() {
+        let running = serve(true);
+        let (status, _) = request(running.addr, "GET", "/api/labels?bogus=%a%C3%A9", None);
+        assert!(status != 500, "a bad escape must not drop the connection");
+    }
+
+    #[test]
+    fn install_status_is_public_and_open_on_an_empty_store() {
+        let running = serve(false);
+        let (status, body) = request(running.addr, "GET", "/api/install/status", None);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(json["install_mode"], true);
+    }
+
+    #[test]
+    fn a_bad_bootstrap_body_is_rejected_with_no_side_effects() {
+        let running = serve(false);
+        let (status, _) = post_body(
+            running.addr,
+            "/api/install/bootstrap",
+            r#"{"display_name":"Ada"}"#,
+        );
+        assert_eq!(
+            status, 422,
+            "a body without a content type never reaches the service"
+        );
+        let (status, _) = post_json(running.addr, "/api/install/bootstrap", "{}");
+        assert_eq!(status, 422);
+        let (status, body) = request(running.addr, "GET", "/api/install/status", None);
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            json["install_mode"], true,
+            "a rejected body must not close install mode"
+        );
+        let _ = status;
+    }
+
+    #[test]
+    fn bootstrap_names_the_first_operator_exactly_once() {
+        let running = serve(false);
+        let (status, body) = post_json(
+            running.addr,
+            "/api/install/bootstrap",
+            r#"{"display_name":"Ada Lovelace"}"#,
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 200, "{body}");
+        assert!(
+            json["secret"].as_str().is_some_and(|s| !s.is_empty()),
+            "{body}"
+        );
+        let (status, body) = post_json(
+            running.addr,
+            "/api/install/bootstrap",
+            r#"{"display_name":"Grace Hopper"}"#,
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_ne!(status, 200, "{body}");
+        assert_eq!(json["error"]["code"], "install_closed");
+    }
+
+    #[test]
     fn a_body_missing_required_fields_is_rejected_before_auth() {
         let running = serve(false);
-        let (status, body) = post_body(running.addr, "/api/work", "{}");
+        let (status, body) = post_json(running.addr, "/api/work", "{}");
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(status, 422, "{body}");
         assert_eq!(json["error"]["code"], "invalid_arguments");
