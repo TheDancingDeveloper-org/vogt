@@ -66,7 +66,8 @@ fn install_bootstrap<C: Clock + 'static, I: IdFactory + 'static>(
     if !ctx.config.install_bootstrap_enabled {
         return Err(VogtError::InstallClosed(
             "install mode is disabled on this instance (install_bootstrap_enabled=false): \
-             the first credential is provisioned by configuration, not over this endpoint."
+             create the first operator in the container with `vogt user create --scopes admin`, \
+             not over this endpoint."
                 .to_string(),
         ));
     }
@@ -116,7 +117,10 @@ fn bootstrap_request<C: Clock + 'static, I: IdFactory + 'static>(
     Ok(BootstrapRequest {
         display_name: display_name.to_string(),
         identity_ref: identity_ref.to_string(),
-        token_name: params["token_name"].as_str().unwrap_or("").to_string(),
+        token_name: params["token_name"]
+            .as_str()
+            .unwrap_or("first-run browser token")
+            .to_string(),
         username,
         password_hash,
         now,
@@ -150,8 +154,8 @@ fn bootstrap_recorded<C: Clock + 'static, I: IdFactory + 'static>(
         move |txn: &mut _, actor: &Actor| {
             if txn.install_closed()? {
                 return Err(VogtError::InstallClosed(
-                    "install mode is closed: this instance already has a token. Sign in with it, \
-                     or mint another over the loopback surface with `vogt token issue`."
+                    "install mode is closed: this instance already has an operator. Sign in, \
+                     or create another login over the loopback surface with `vogt user create`."
                         .to_string(),
                 ));
             }

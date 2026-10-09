@@ -45,7 +45,10 @@ fn apply_object(
             .cloned()
             .collect();
         if let Some(name) = extra.first() {
-            return Err(invalid(operation, &format!("unexpected parameter {name}")));
+            return Err(invalid(
+                operation,
+                &pydantic(name, "Extra inputs are not permitted"),
+            ));
         }
     }
     let mut resolved = Map::new();
@@ -66,7 +69,7 @@ fn apply_object(
                         resolved.insert(name.clone(), default.clone());
                     }
                 } else if required_of(schema).iter().any(|item| item == name) {
-                    return Err(invalid(operation, &format!("{name} is required")));
+                    return Err(invalid(operation, &pydantic(name, "Field required")));
                 }
             }
         }
@@ -99,11 +102,11 @@ fn check_value(
         Some(schema) => (schema, true),
         None => (property, false),
     };
-    if value.is_null() {
+    if value.is_null() && schema.get("enum").is_none() {
         return if nullable {
             Ok(value)
         } else {
-            Err(invalid(operation, &format!("{name} may not be null")))
+            Err(invalid(operation, &pydantic(name, &expected_input(schema))))
         };
     }
     if let Some(nested) = schema.get("properties") {
@@ -130,6 +133,14 @@ fn check_value(
             if schema.get("format").and_then(Value::as_str) == Some("date-time") {
                 if let Some(coerced) = coerce_datetime(&value) {
                     return check_string(operation, name, schema, coerced);
+                }
+                // A bool or null is the wrong type. A string that fails to parse
+                // is a different complaint, made inside `check_string`.
+                if !value.is_string() {
+                    return Err(invalid(
+                        operation,
+                        &pydantic(name, "Input should be a valid datetime"),
+                    ));
                 }
             }
             check_string(operation, name, schema, value)
@@ -166,18 +177,36 @@ fn check_string(
     value: Value,
 ) -> Result<Value, VogtError> {
     // `Name` and `Reason` strip whitespace before anything else, so a value of
-    // " " fails the length check and " padded " is stored trimmed. Pydantic
-    // records the field's own title rather than the type's, and the recorded
-    // schema drops the strip constraint, so the fields are named here. They are
-    // exactly the fields typed `Name` or `Reason` in `application/models.py`.
+    // " " fails the length check and " padded " is stored trimmed. Which fields
+    // those are is recorded from the models (`strips.rs`), because pydantic's
+    // schema drops the constraint and the same field name is a plain `str` on
+    // other operations.
     let stripped = match &value {
         Value::String(text) if strips_whitespace(operation, name) => {
             Value::String(text.trim().to_string())
         }
         _ => value,
     };
+    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
+        let text = stripped.as_str();
+        if !allowed.iter().any(|item| item.as_str() == text) {
+            let values = allowed.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+            let listed = match values.as_slice() {
+                [] => String::new(),
+                [one] => (*one).to_string(),
+                [rest @ .., last] => format!("{}' or '{last}", rest.join("', '")),
+            };
+            return Err(invalid(
+                operation,
+                &pydantic(name, &format!("Input should be '{listed}'")),
+            ));
+        }
+    }
     let Value::String(text) = &stripped else {
-        return Err(invalid(operation, &format!("{name} takes a string")));
+        return Err(invalid(
+            operation,
+            &pydantic(name, "Input should be a valid string"),
+        ));
     };
     if let Some(min) = bound(schema, "minLength") {
         if (text.chars().count() as i64) < min {
@@ -197,14 +226,6 @@ fn check_string(
             ));
         }
     }
-    if let Some(allowed) = schema.get("enum").and_then(Value::as_array) {
-        if !allowed.iter().any(|item| item.as_str() == Some(text)) {
-            return Err(invalid(
-                operation,
-                &pydantic(name, "Input should be one of the allowed values"),
-            ));
-        }
-    }
     if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
         if let Ok(expression) = regex::Regex::new(pattern) {
             if !expression.is_match(text) {
@@ -216,6 +237,8 @@ fn check_string(
         }
     }
     if schema.get("format").and_then(Value::as_str) == Some("date-time") && !is_datetime(text) {
+        // A bool or null never got past the string check above. A string that is
+        // not a datetime is the parse failure, and the corpus's are all too short.
         return Err(invalid(
             operation,
             &pydantic(
@@ -254,7 +277,10 @@ fn check_preference_value(operation: &str, name: &str, value: Value) -> Result<V
     };
     match serde_json::from_str::<Value>(text) {
         Ok(parsed @ Value::Object(_)) => Ok(parsed),
-        Ok(_) => Err(invalid(operation, &format!("{name} takes an object"))),
+        Ok(_) => Err(invalid(
+            operation,
+            &pydantic(name, "Input should be a valid dictionary"),
+        )),
         Err(_) => Err(invalid(
             operation,
             &pydantic(
@@ -266,32 +292,7 @@ fn check_preference_value(operation: &str, name: &str, value: Value) -> Result<V
 }
 
 fn strips_whitespace(operation: &str, name: &str) -> bool {
-    // The fields typed `Name` or `Reason` in `application/models.py`. `name` is
-    // only one of those on the three operations that say so; elsewhere it is a
-    // plain string and a blank one is legal.
-    if name == "name" {
-        return matches!(
-            operation,
-            "project.create"
-                | "project.import"
-                | "project.register"
-                | "label.create"
-                | "token.issue"
-        );
-    }
-    matches!(
-        name,
-        "title"
-            | "body"
-            | "reason"
-            | "identity_ref"
-            | "display_name"
-            | "actor"
-            | "scopes"
-            | "username"
-            | "session_name"
-            | "token_name"
-    )
+    super::strips::STRIPS.contains(&(operation, name))
 }
 
 fn check_integer(
@@ -319,14 +320,24 @@ fn check_integer(
                     // keeps. The digits survive as JSON sent them.
                     return Ok(value);
                 } else {
+                    let bound = bound(schema, "maximum").unwrap_or(i64::MAX);
                     return Err(invalid(
                         operation,
-                        &format!("{name} is outside the range of an integer"),
+                        &pydantic(
+                            name,
+                            &format!("Input should be less than or equal to {bound}"),
+                        ),
                     ));
                 }
             }
             None => {
-                return Err(invalid(operation, &format!("{name} takes an integer")));
+                return Err(invalid(
+                    operation,
+                    &pydantic(
+                        name,
+                        "Input should be a valid integer, got a number with a fractional part",
+                    ),
+                ));
             }
         },
         Value::Bool(flag) => Some(i64::from(*flag)),
@@ -341,7 +352,13 @@ fn check_integer(
                 return Ok(value);
             }
         }
-        return Err(invalid(operation, &format!("{name} takes an integer")));
+        return Err(invalid(
+            operation,
+            &pydantic(
+                name,
+                "Input should be a valid integer, unable to parse string as an integer",
+            ),
+        ));
     };
     check_bounds(operation, name, schema, number)?;
     Ok(Value::from(number))
@@ -369,7 +386,13 @@ fn check_boolean(operation: &str, name: &str, value: Value) -> Result<Value, Vog
     };
     match flag {
         Some(flag) => Ok(Value::from(flag)),
-        None => Err(invalid(operation, &format!("{name} takes a boolean"))),
+        None => Err(invalid(
+            operation,
+            &pydantic(
+                name,
+                "Input should be a valid boolean, unable to interpret input",
+            ),
+        )),
     }
 }
 
@@ -456,13 +479,22 @@ fn check_array(
                 return check_array(operation, name, schema, Value::Array(split), root);
             }
         }
-        return Err(invalid(operation, &format!("{name} takes a list")));
+        return Err(invalid(
+            operation,
+            &pydantic(name, "Input should be a valid list"),
+        ));
     };
     if let Some(min) = bound(schema, "minItems") {
         if (items.len() as i64) < min {
             return Err(invalid(
                 operation,
-                &pydantic(name, &format!("List should have at least {min} item")),
+                &pydantic(
+                    name,
+                    &format!(
+                        "List should have at least {min} item after validation, not {}",
+                        items.len()
+                    ),
+                ),
             ));
         }
     }
@@ -486,6 +518,18 @@ fn check_array(
 
 fn bound(schema: &Value, name: &str) -> Option<i64> {
     schema.get(name).and_then(Value::as_i64)
+}
+
+fn expected_input(schema: &Value) -> String {
+    let kind = match schema.get("type").and_then(Value::as_str) {
+        Some("integer") => "integer",
+        Some("number") => "number",
+        Some("boolean") => "boolean",
+        Some("array") => "list",
+        Some("object") => "object",
+        _ => "string",
+    };
+    format!("Input should be a valid {kind}")
 }
 
 /// The field and the complaint, in the shape pydantic prints: the field on its
@@ -568,7 +612,10 @@ mod tests {
     #[test]
     fn a_missing_required_field_names_itself() {
         let error = prepare_issue(serde_json::json!({"name": "laptop"})).unwrap_err();
-        assert!(error.message().contains("actor is required"), "{error}");
+        assert!(
+            error.message().contains("actor\n  Field required"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -581,7 +628,9 @@ mod tests {
         }))
         .unwrap_err();
         assert!(
-            error.message().contains("unexpected parameter extra"),
+            error
+                .message()
+                .contains("extra\n  Extra inputs are not permitted"),
             "{error}"
         );
     }

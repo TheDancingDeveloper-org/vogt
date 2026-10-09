@@ -8,6 +8,7 @@
 
 pub mod operations;
 mod schemas;
+mod strips;
 pub mod validate;
 
 use std::collections::{HashMap, HashSet};
