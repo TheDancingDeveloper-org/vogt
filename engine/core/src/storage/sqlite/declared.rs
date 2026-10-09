@@ -225,7 +225,38 @@ where
     }
 
     fn credentials(&self) -> Result<CarriedCredentials, VogtError> {
-        later("credentials")
+        let conn = self.open_initialized()?;
+        conn.execute("BEGIN", []).map_err(sql_err)?;
+        let outcome = (|| {
+            let tokens = select_columns(&conn, "tokens", TOKEN_CARRY_COLUMNS)?;
+            let passwords = select_columns(&conn, "password_credentials", PASSWORD_CARRY_COLUMNS)?;
+            let forge = select_columns(&conn, "forge_accounts", FORGE_ACCOUNT_CARRY_COLUMNS)?;
+            let mut actor_ids: BTreeSet<String> = BTreeSet::new();
+            for row in tokens.iter().chain(passwords.iter()).chain(forge.iter()) {
+                if let Some(actor_id) = row.get("actor_id").and_then(|v| v.as_str()) {
+                    actor_ids.insert(actor_id.to_string());
+                }
+            }
+            let mut actors = Vec::new();
+            for actor_id in actor_ids {
+                if let Some(actor) = one(
+                    &conn,
+                    "SELECT * FROM actors WHERE id = ?",
+                    [&actor_id],
+                    row_actor,
+                )? {
+                    actors.push(actor);
+                }
+            }
+            Ok(CarriedCredentials {
+                actors,
+                tokens,
+                password_credentials: passwords,
+                forge_accounts: forge,
+            })
+        })();
+        let _ = conn.execute("ROLLBACK", []);
+        outcome
     }
     fn record_auth_decision(&self, _: &AuthDecision) -> Result<(), VogtError> {
         later("record_auth_decision")
@@ -1424,14 +1455,191 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
     }
     fn carry_credentials(
         &mut self,
-        _: &CarriedCredentials,
-        _: &str,
-        _: Moment,
+        carried: &CarriedCredentials,
+        reason: &str,
+        at: Moment,
     ) -> Result<CarryReport, VogtError> {
-        later("carry_credentials")
+        // Actors match by identity rather than by id: the two instances minted
+        // their actor ids independently, and the same person is the same
+        // identity_ref on both.
+        let mut actor_map: BTreeMap<String, String> = BTreeMap::new();
+        let mut added = 0i64;
+        for actor in &carried.actors {
+            if let Some(existing) = self.view.actor_by_identity(&actor.identity_ref)? {
+                actor_map.insert(actor.id.clone(), existing.id.clone());
+                // The carried credentials must keep working, so their actor
+                // keeps the enabled state it had where they were issued.
+                self.view
+                    .conn
+                    .execute(
+                        "UPDATE actors SET disabled = ? WHERE id = ?",
+                        params![i64::from(actor.disabled), existing.id],
+                    )
+                    .map_err(sql_err)?;
+                continue;
+            }
+            let mut inserted = actor.clone();
+            if self.view.actor_by_id(&actor.id)?.is_some() {
+                // The id belongs to a different person here. The carried actor
+                // takes a fresh id rather than merging the two.
+                inserted.id = self.ids.borrow_mut().next("act");
+            }
+            insert_actor(&self.view.conn, &inserted)?;
+            actor_map.insert(actor.id.clone(), inserted.id);
+            added += 1;
+        }
+        let mapped = |row: &serde_json::Value| -> Result<serde_json::Value, VogtError> {
+            let actor_id = row.get("actor_id").and_then(|v| v.as_str()).unwrap_or("");
+            let Some(mapped_id) = actor_map.get(actor_id) else {
+                return Err(VogtError::Conflict(format!(
+                    "carried credential names actor {actor_id}, not carried"
+                )));
+            };
+            let mut copy = row.clone();
+            copy["actor_id"] = serde_json::Value::String(mapped_id.clone());
+            Ok(copy)
+        };
+
+        // Every live token the copy already holds is revoked unless it is one
+        // of the carried secrets.
+        let carried_hashes: BTreeSet<String> = carried
+            .tokens
+            .iter()
+            .filter_map(|row| {
+                row.get("token_hash")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        let live = many(
+            &self.view.conn,
+            "SELECT id, token_hash FROM tokens WHERE revoked_at IS NULL",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        let mut revoked = 0i64;
+        for (id, hash) in &live {
+            if carried_hashes.contains(hash) {
+                continue;
+            }
+            self.view
+                .conn
+                .execute(
+                    "UPDATE tokens SET revoked_at = ?, revoked_reason = ? WHERE id = ?",
+                    params![to_iso(at), reason, id],
+                )
+                .map_err(sql_err)?;
+            revoked += 1;
+        }
+        for raw in &carried.tokens {
+            let mut row = mapped(raw)?;
+            let hash = json_str(&row, "token_hash");
+            let same_secret: Option<String> = self
+                .view
+                .conn
+                .query_row(
+                    "SELECT id FROM tokens WHERE token_hash = ?",
+                    [&hash],
+                    |found| found.get(0),
+                )
+                .optional()
+                .map_err(sql_err)?;
+            if let Some(existing_id) = same_secret {
+                // Both instances hold this secret. Keep the existing row's id,
+                // which the history refers to, and make it say what the
+                // carried row said.
+                let sets = TOKEN_CARRY_COLUMNS
+                    .iter()
+                    .filter(|column| **column != "id")
+                    .map(|column| format!("{column} = ?"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut params: Vec<Box<dyn rusqlite::ToSql>> = TOKEN_CARRY_COLUMNS
+                    .iter()
+                    .filter(|column| **column != "id")
+                    .map(|column| json_param(&row, column))
+                    .collect();
+                params.push(Box::new(existing_id));
+                let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+                self.view
+                    .conn
+                    .execute(
+                        &format!("UPDATE tokens SET {sets} WHERE id = ?"),
+                        refs.as_slice(),
+                    )
+                    .map_err(sql_err)?;
+                continue;
+            }
+            let carried_id = json_str(&row, "id");
+            let clash: Option<String> = self
+                .view
+                .conn
+                .query_row(
+                    "SELECT id FROM tokens WHERE id = ?",
+                    [&carried_id],
+                    |found| found.get(0),
+                )
+                .optional()
+                .map_err(sql_err)?;
+            if clash.is_some() {
+                // Another secret already holds this id. The carried token keeps
+                // its secret and takes a fresh id.
+                row["id"] = serde_json::Value::String(self.ids.borrow_mut().next("tok"));
+            }
+            insert_carry_row(&self.view.conn, "tokens", TOKEN_CARRY_COLUMNS, &row)?;
+        }
+
+        // Password logins and forge accounts are replaced wholesale: nothing
+        // refers to either by id, so there is no history to keep.
+        let dropped_passwords = self
+            .view
+            .conn
+            .execute("DELETE FROM password_credentials", [])
+            .map_err(sql_err)? as i64;
+        for raw in &carried.password_credentials {
+            insert_carry_row(
+                &self.view.conn,
+                "password_credentials",
+                PASSWORD_CARRY_COLUMNS,
+                &mapped(raw)?,
+            )?;
+        }
+        let dropped_forge = self
+            .view
+            .conn
+            .execute("DELETE FROM forge_accounts", [])
+            .map_err(sql_err)? as i64;
+        for raw in &carried.forge_accounts {
+            insert_carry_row(
+                &self.view.conn,
+                "forge_accounts",
+                FORGE_ACCOUNT_CARRY_COLUMNS,
+                &mapped(raw)?,
+            )?;
+        }
+        Ok(CarryReport {
+            tokens_kept: carried.tokens.len() as i64,
+            source_tokens_revoked: revoked,
+            password_logins_kept: carried.password_credentials.len() as i64,
+            source_password_logins_dropped: dropped_passwords,
+            forge_accounts_kept: carried.forge_accounts.len() as i64,
+            source_forge_accounts_dropped: dropped_forge,
+            actors_added: added,
+        })
     }
-    fn set_instance_identity(&mut self, _: &str, _: &CloneStamp) -> Result<(), VogtError> {
-        later("set_instance_identity")
+    fn set_instance_identity(
+        &mut self,
+        instance_id: &str,
+        stamp: &CloneStamp,
+    ) -> Result<(), VogtError> {
+        meta_set(&self.view.conn, META_INSTANCE_ID, instance_id)?;
+        meta_set(&self.view.conn, META_CLONED_FROM, &stamp.source_instance_id)?;
+        meta_set(&self.view.conn, META_CLONED_AT, &to_iso(stamp.cloned_at))?;
+        meta_set(
+            &self.view.conn,
+            META_CLONED_BACKUP_TAKEN_AT,
+            &to_iso(stamp.backup_taken_at),
+        )
     }
     fn revoke_token(
         &mut self,
@@ -2466,6 +2674,178 @@ mod more {
         assert!(view.forge_accounts_for_actor(&actor.id).unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn carrying_credentials_keeps_the_secret_and_revokes_the_rest() {
+        let now = Moment::from_unix(1_700_000_000, 0);
+        let source_dir = std::env::temp_dir().join(format!("vogt-decl-src-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&source_dir);
+        let source = store(&source_dir);
+        let source_actor = source.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let mut txn = source.write().unwrap();
+        txn.insert_token(
+            &Token {
+                id: "tok_src".into(),
+                actor_id: source_actor.id.clone(),
+                actor_identity_ref: None,
+                name: "laptop".into(),
+                scopes: vec!["read".into()],
+                kind: crate::core::TokenKind::Api,
+                created_at: now,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            },
+            "shared-secret",
+        )
+        .unwrap();
+        txn.upsert_password_credential(&source_actor.id, "ada", "pw-hash", &["admin".into()], now)
+            .unwrap();
+        txn.commit().unwrap();
+        let carried = source.credentials().unwrap();
+        assert_eq!(carried.tokens.len(), 1);
+        assert_eq!(carried.actors.len(), 1);
+
+        let copy_dir = std::env::temp_dir().join(format!("vogt-decl-copy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&copy_dir);
+        let copy = store(&copy_dir);
+        let copy_actor = copy.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let mut txn = copy.write().unwrap();
+        // A token the copy minted itself, which the carried set does not hold.
+        txn.insert_token(
+            &Token {
+                id: "tok_local".into(),
+                actor_id: copy_actor.id.clone(),
+                actor_identity_ref: None,
+                name: "stray".into(),
+                scopes: vec!["read".into()],
+                kind: crate::core::TokenKind::Api,
+                created_at: now,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            },
+            "local-secret",
+        )
+        .unwrap();
+        let report = txn.carry_credentials(&carried, "cloned", now).unwrap();
+        txn.commit().unwrap();
+        assert_eq!(report.tokens_kept, 1);
+        assert_eq!(report.source_tokens_revoked, 1);
+        assert_eq!(report.password_logins_kept, 1);
+
+        let view = copy.read().unwrap();
+        // The shared secret survives, under the copy's own actor.
+        let kept = view.token_by_hash("shared-secret").unwrap().unwrap();
+        assert!(kept.revoked_at.is_none());
+        assert_eq!(kept.actor_id, copy_actor.id);
+        // The copy's own token is revoked.
+        assert!(view
+            .token_by_id("tok_local")
+            .unwrap()
+            .unwrap()
+            .revoked_at
+            .is_some());
+        assert_eq!(
+            view.password_hash(&copy_actor.id).unwrap().as_deref(),
+            Some("pw-hash")
+        );
+        let _ = std::fs::remove_dir_all(&source_dir);
+        let _ = std::fs::remove_dir_all(&copy_dir);
+    }
+}
+
+const TOKEN_CARRY_COLUMNS: &[&str] = &[
+    "id",
+    "actor_id",
+    "name",
+    "token_hash",
+    "scopes",
+    "kind",
+    "created_at",
+    "expires_at",
+    "last_used_at",
+    "revoked_at",
+    "revoked_reason",
+];
+const PASSWORD_CARRY_COLUMNS: &[&str] = &[
+    "actor_id",
+    "username",
+    "password_hash",
+    "scopes",
+    "created_at",
+    "updated_at",
+];
+const FORGE_ACCOUNT_CARRY_COLUMNS: &[&str] = &[
+    "actor_id",
+    "host",
+    "login",
+    "scopes",
+    "encrypted_token",
+    "created_at",
+    "updated_at",
+];
+
+fn json_str(row: &serde_json::Value, column: &str) -> String {
+    row.get(column)
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// One carried cell, bound as text. JSON null and a missing column both become
+/// SQL NULL, which is what the source row held.
+fn json_param(row: &serde_json::Value, column: &str) -> Box<dyn rusqlite::ToSql> {
+    match row.get(column) {
+        Some(serde_json::Value::Null) | None => Box::new(None::<String>),
+        Some(serde_json::Value::String(text)) => Box::new(text.clone()),
+        Some(other) => Box::new(other.to_string()),
+    }
+}
+
+fn insert_carry_row(
+    conn: &Connection,
+    table: &str,
+    columns: &[&str],
+    row: &serde_json::Value,
+) -> Result<(), VogtError> {
+    let names = columns.join(", ");
+    let placeholders = vec!["?"; columns.len()].join(", ");
+    let params: Vec<Box<dyn rusqlite::ToSql>> = columns
+        .iter()
+        .map(|column| json_param(row, column))
+        .collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|value| value.as_ref()).collect();
+    conn.execute(
+        &format!("INSERT INTO {table} ({names}) VALUES ({placeholders})"),
+        refs.as_slice(),
+    )
+    .map(|_| ())
+    .map_err(sql_err)
+}
+
+fn select_columns(
+    conn: &Connection,
+    table: &str,
+    columns: &[&str],
+) -> Result<Vec<serde_json::Value>, VogtError> {
+    let names = columns.join(", ");
+    many(conn, &format!("SELECT {names} FROM {table}"), [], |row| {
+        let mut object = serde_json::Map::new();
+        for (index, column) in columns.iter().enumerate() {
+            let value: Option<String> = row.get(index)?;
+            object.insert(
+                (*column).to_string(),
+                match value {
+                    Some(text) => serde_json::Value::String(text),
+                    None => serde_json::Value::Null,
+                },
+            );
+        }
+        Ok(serde_json::Value::Object(object))
+    })
 }
 
 const TOKEN_SELECT: &str = "SELECT t.*, a.identity_ref AS actor_identity_ref FROM tokens t JOIN actors a ON a.id = t.actor_id";
