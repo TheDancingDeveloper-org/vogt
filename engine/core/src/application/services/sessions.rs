@@ -16,7 +16,7 @@
 //! share a transaction, so the ordering is: start the terminal, then record it;
 //! if the write fails, kill what was started and raise the original failure.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -37,7 +37,7 @@ use crate::application::writes::{self, audited_action, audited_write, WriteOutco
 use crate::auth::{self, TOKEN_ENTROPY_BYTES};
 use crate::core::{py_repr, Actor, ActorKind, CodingSession, Moment, Token, TokenKind, WorkItem};
 use crate::core::{Clock, IdFactory};
-use crate::decisions::{self, Attention};
+use crate::decisions;
 use crate::delivery::{self};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
@@ -522,37 +522,40 @@ pub struct SessionRuntime {
 pub struct SessionSummary {
     pub id: String,
     pub engine_session_id: String,
-    pub name: String,
+    #[serde(default = "linked_default")]
+    pub linked: bool,
     pub project: Option<String>,
     pub work_item: Option<String>,
-    pub state: String,
+    pub work_item_title: Option<String>,
+    pub work_item_state: Option<String>,
+    pub actor: Option<String>,
+    pub cwd: String,
+    pub template: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub reason: Option<String>,
+    pub started_at: Option<Moment>,
+    pub stopped_at: Option<Moment>,
     pub activity: Option<String>,
     pub alive: Option<bool>,
-    pub exit_code: Option<i64>,
-    pub cwd: String,
-    pub started_at: Moment,
-    pub stopped_at: Option<Moment>,
-    pub stop_reason: Option<String>,
-    pub activity_changed_at: Option<String>,
-    pub created_at: Option<String>,
     pub turn_started_at: Option<String>,
     pub last_output_at: Option<String>,
     pub approval: Option<SessionApproval>,
-    pub command: Option<String>,
     pub blocked: Option<SessionBlocked>,
-    pub conversation_agent: Option<String>,
     pub hibernation: Option<SessionHibernation>,
     pub keep_awake: bool,
     pub autopilot: bool,
     pub autopilot_nudges: i64,
     pub role: String,
+    pub conversation_id: Option<String>,
     pub resources: Option<SessionResources>,
-    pub template: Option<String>,
     pub permission_mode: Option<String>,
     pub stopped_by: Option<String>,
-    pub runtime: SessionRuntime,
-    pub conversation_id: Option<String>,
-    pub last_reply_excerpt: Option<String>,
+    pub stop_reason: Option<String>,
+}
+
+fn linked_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -563,27 +566,25 @@ pub struct SessionResult {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionListResult {
     pub sessions: Vec<SessionSummary>,
-    pub total: i64,
-    pub limit: i64,
-    pub offset: i64,
-    pub next_offset: Option<i64>,
+    /// Why the engine could not be asked, or null when it answered.
+    pub engine: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionSweepRow {
-    pub session: SessionSummary,
     pub attention: String,
-    pub reason: String,
-    pub needs_you: bool,
+    pub attention_reason: String,
+    pub session: SessionSummary,
     pub screen_tail: Vec<String>,
+    pub ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionSweepResult {
     pub rows: Vec<SessionSweepRow>,
-    pub total: i64,
-    pub needs_you: i64,
-    pub engine_available: bool,
+    pub counts: serde_json::Map<String, Value>,
+    pub swept_at: Moment,
+    pub engine: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -677,14 +678,17 @@ where
         actor_identity_ref: Some(actor_ref.clone()),
         name: format!("session {session_id}"),
         scopes: scopes.clone(),
-        kind: TokenKind::Agent,
+        kind: TokenKind::Api,
         created_at: now,
         expires_at: None,
         last_used_at: None,
         revoked_at: None,
         revoked_reason: None,
     };
-    let spec = build_spec(ctx, params, &subject, &secret, &actor_ref, &session_id)?;
+    let spec = build_spec(ctx, params, &subject, &secret)?;
+    let declared_branch = subject.work_item_ref.as_ref().map(|work_ref| {
+        crate::branches::default_branch_name(work_ref, &ctx.config.branch_binding_template)
+    });
     let started = engine.create_session(&spec)?;
     let recorded = CodingSession {
         id: session_id.clone(),
@@ -705,10 +709,30 @@ where
         let token = token.clone();
         let token_hash = token_hash.clone();
         let recorded = recorded.clone();
+        let started_summary = json!({
+            "work_item": subject.work_item_ref,
+            "branch": declared_branch,
+            "project": subject.project_slug,
+            "cwd": subject.cwd,
+            "scratch": subject.is_scratch,
+            "model": params.model,
+            "effort": params.effort,
+            "resume": params.resume,
+            "autopilot": spec.autopilot,
+            "role": params.role,
+            "permission_mode": params.permission_mode,
+            "engine_session_id": recorded.engine_session_id,
+        });
+        let overlay_ref = subject.work_item_ref.clone();
+        let overlay_project = subject.project_id.clone();
+        let overlay_template = ctx.config.branch_binding_template.clone();
         audited_write(&mut writing, SESSION_START, &reason, move |txn, _actor| {
             txn.insert_actor(&actor)?;
             txn.insert_token(&token, &token_hash)?;
             txn.insert_session(&recorded)?;
+            if let Some(work_ref) = &overlay_ref {
+                record_declared_branch(txn, work_ref, &overlay_project, &overlay_template, now)?;
+            }
             let payload = serde_json::to_value(&recorded).unwrap_or(Value::Null);
             Ok(WriteOutcome::new(
                 recorded.id.clone(),
@@ -716,7 +740,7 @@ where
                 &recorded.id,
                 payload,
                 "session.started",
-                json!({"engine_session_id": recorded.engine_session_id}),
+                started_summary,
             ))
         })
     };
@@ -756,16 +780,19 @@ where
             py_repr(&session.id)
         )));
     }
-    let _ = engine.kill_session(
-        &session.engine_session_id,
-        Some(&reason),
-        Some(&ctx.principal.identity_ref),
-    );
+    let engine_killed = engine
+        .kill_session(
+            &session.engine_session_id,
+            Some(&reason),
+            Some(&ctx.principal.identity_ref),
+        )
+        .unwrap_or(false);
     let mut writing = write_of(ctx);
     let stopped_at = now(&writing);
     let actor_id = session.actor_id.clone();
     let session_id = session.id.clone();
     let stop_reason = reason.clone();
+    let stopped_engine_id = session.engine_session_id.clone();
     audited_write(&mut writing, SESSION_STOP, &reason, move |txn, _actor| {
         txn.mark_session_stopped(&session_id, stopped_at)?;
         for token in txn.tokens_for_actor(&actor_id, false)? {
@@ -779,7 +806,7 @@ where
             &session_id,
             json!({"stopped_at": stopped_at.to_iso()}),
             "session.stopped",
-            json!({}),
+            json!({"engine_killed": engine_killed, "engine_session_id": stopped_engine_id}),
         ))
     })?;
     let stopped = ctx
@@ -802,63 +829,100 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let project = match &params.project {
-        Some(slug) => Some(resolve::project(&ctx.declared.read()?, slug)?),
+    let (live, detail) = match ctx.engine.as_ref() {
+        None => (
+            std::collections::HashMap::new(),
+            Some("no session engine is configured (VOGT_ENGINE_URL is unset)".to_string()),
+        ),
+        Some(engine) => match engine.list_sessions() {
+            Ok(rows) => (
+                rows.into_iter().map(|row| (row.id.clone(), row)).collect(),
+                None,
+            ),
+            Err(VogtError::EngineUnavailable(text)) => {
+                (std::collections::HashMap::new(), Some(text))
+            }
+            Err(error) => return Err(error),
+        },
+    };
+    let sessions = rows_of(ctx, params, &live, detail.as_deref())?;
+    Ok(SessionListResult {
+        sessions,
+        engine: detail,
+    })
+}
+
+/// The rows `session.list` and `session.sweep` share.
+fn rows_of<C, I>(
+    ctx: &AppContext<C, I>,
+    params: &ListSessionsParams,
+    live: &std::collections::HashMap<String, EngineSession>,
+    detail: Option<&str>,
+) -> Result<Vec<SessionSummary>, VogtError>
+where
+    C: Clock + 'static,
+    I: IdFactory + 'static,
+{
+    let view = ctx.declared.read()?;
+    let project_id = match &params.project {
+        Some(slug) => Some(resolve::project(&view, slug)?.id),
         None => None,
     };
-    let work_item = match &params.work_item {
-        Some(reference) => Some(resolve::work_item(&ctx.declared.read()?, reference)?),
+    let work_item_id = match &params.work_item {
+        Some(reference) => Some(resolve::work_item(&view, reference)?.id),
         None => None,
     };
-    let live = live_sessions(ctx.engine.as_ref());
-    let recorded = ctx.declared.read()?.list_sessions(
-        project.as_ref().map(|project| project.id.as_str()),
-        work_item.as_ref().map(|item| item.id.as_str()),
+    let recorded = view.list_sessions(
+        project_id.as_deref(),
+        work_item_id.as_deref(),
         params.include_stopped,
-        i64::MAX,
-        0,
+        params.limit,
+        params.offset,
     )?;
-    let mut rows = recorded;
-    if params.order == "rss" {
-        rows.sort_by(|left, right| {
-            rss_of(live.get(&left.engine_session_id))
-                .cmp(&rss_of(live.get(&right.engine_session_id)))
-                .reverse()
-                .then_with(|| right.started_at.cmp(&left.started_at))
-        });
-    }
-    let total = rows.len() as i64;
-    let offset = params.offset.max(0) as usize;
-    let page: Vec<CodingSession> = rows
-        .into_iter()
-        .skip(offset)
-        .take(params.limit.max(0) as usize)
-        .collect();
-    let mut sessions = Vec::with_capacity(page.len());
-    for session in &page {
-        sessions.push(summarize(
+    drop(view);
+    let mut summaries = Vec::with_capacity(recorded.len());
+    for session in &recorded {
+        let engine_session = live.get(&session.engine_session_id);
+        // An exited session the engine still lists is its leftover, not a
+        // running terminal, unless stopped sessions were asked for.
+        if detail.is_none()
+            && !params.include_stopped
+            && engine_session.is_some_and(|live| !live.alive && !live.hibernated())
+        {
+            continue;
+        }
+        summaries.push(summarize_asked(
             ctx,
             session,
-            live.get(&session.engine_session_id),
+            engine_session,
+            detail.is_none(),
         )?);
     }
-    let all_recorded = ctx
-        .declared
-        .read()?
-        .list_sessions(None, None, true, i64::MAX, 0)?;
-    let unlinked = unlinked_rows(&live, &all_recorded, params);
-    let unlinked_total = unlinked.len() as i64;
-    let room = (params.limit - sessions.len() as i64).max(0) as usize;
-    sessions.extend(unlinked.into_iter().take(room));
-    Ok(SessionListResult {
-        total: total + unlinked_total,
-        limit: params.limit,
-        offset: params.offset,
-        next_offset: (params.offset + page_len(sessions.len(), unlinked_total)
-            < total + unlinked_total)
-            .then_some(params.offset + params.limit),
-        sessions,
-    })
+    let unfiltered = project_id.is_none() && work_item_id.is_none();
+    if unfiltered && params.offset == 0 {
+        let view = ctx.declared.read()?;
+        for engine_session in live.values() {
+            if !engine_session.alive && !engine_session.hibernated() && !params.include_stopped {
+                continue;
+            }
+            if view.session_by_engine_id(&engine_session.id)?.is_none() {
+                summaries.push(unlinked_summary(engine_session));
+            }
+        }
+        summaries.truncate(params.limit.max(0) as usize);
+    }
+    if params.order == "rss" {
+        summaries.sort_by(|left, right| {
+            let rss =
+                |row: &SessionSummary| row.resources.as_ref().map(|r| r.rss_bytes).unwrap_or(0);
+            match (left.resources.is_none(), right.resources.is_none()) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => rss(right).cmp(&rss(left)),
+            }
+        });
+    }
+    Ok(summaries)
 }
 
 fn page_len(shown: usize, _unlinked: i64) -> i64 {
@@ -874,75 +938,124 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let project = match &params.project {
-        Some(slug) => Some(resolve::project(&ctx.declared.read()?, slug)?),
-        None => None,
+    let swept_at = crate::application::services::now_of(&ctx.clock);
+    let empty = |engine: Option<String>| SessionSweepResult {
+        rows: Vec::new(),
+        counts: serde_json::Map::from_iter([
+            ("total".to_string(), json!(0)),
+            ("needs_you".to_string(), json!(0)),
+        ]),
+        swept_at,
+        engine,
     };
-    let engine = match engine_of(ctx) {
-        Ok(engine) => engine,
-        Err(VogtError::EngineUnavailable(_)) => {
-            return Ok(SessionSweepResult {
-                rows: Vec::new(),
-                total: 0,
-                needs_you: 0,
-                engine_available: false,
-            });
+    let engine = match ctx.engine.as_ref() {
+        None => {
+            return Ok(empty(Some(
+                "no session engine is configured (VOGT_ENGINE_URL is unset)".to_string(),
+            )))
         }
-        Err(error) => return Err(error),
+        Some(engine) => engine,
     };
-    let swept = match engine.sweep_sessions(params.screen_lines) {
+    let entries = match engine.sweep_sessions(params.screen_lines) {
         Ok(Some(rows)) => rows,
-        Ok(None) | Err(VogtError::EngineUnavailable(_)) => {
-            return Ok(SessionSweepResult {
-                rows: Vec::new(),
-                total: 0,
-                needs_you: 0,
-                engine_available: false,
-            });
-        }
+        Ok(None) => engine
+            .list_sessions()?
+            .into_iter()
+            .filter(|row| row.alive || row.hibernated())
+            .map(|session| EngineSweepEntry {
+                session,
+                screen_tail: Vec::new(),
+                ready: false,
+            })
+            .collect(),
+        Err(VogtError::EngineUnavailable(text)) => return Ok(empty(Some(text))),
         Err(error) => return Err(error),
     };
-    let recorded = ctx
-        .declared
-        .read()?
-        .list_sessions(None, None, true, i64::MAX, 0)?;
-    let now = crate::application::services::now_of(&ctx.clock);
+    let live = entries
+        .iter()
+        .map(|entry| (entry.session.id.clone(), entry.session.clone()))
+        .collect();
+    let listed = rows_of(
+        ctx,
+        &ListSessionsParams {
+            project: params.project.clone(),
+            work_item: None,
+            include_stopped: false,
+            limit: 500,
+            offset: 0,
+            order: "started".to_string(),
+        },
+        &live,
+        None,
+    )?;
     let stall = params.stall_after_minutes.saturating_mul(60);
     let mut rows = Vec::new();
-    for entry in &swept {
-        let declared = recorded
+    for summary in listed {
+        let Some(entry) = entries
             .iter()
-            .find(|session| session.engine_session_id == entry.session.id);
-        if let Some(project) = &project {
-            if declared.map(|session| session.project_id.as_str()) != Some(project.id.as_str()) {
-                continue;
-            }
-        }
-        let summary = match declared {
-            Some(session) => summarize(ctx, session, Some(&entry.session))?,
-            None => unlinked_summary(&entry.session),
+            .find(|entry| entry.session.id == summary.engine_session_id)
+        else {
+            continue;
         };
-        let (attention, reason) = attention_of(&entry.session, entry.ready, now, stall);
+        let verdict = decisions::classify(
+            summary.activity.as_deref(),
+            summary.alive,
+            Some(entry.ready),
+            summary
+                .approval
+                .as_ref()
+                .map(|approval| approval.question.as_str()),
+            summary
+                .blocked
+                .as_ref()
+                .map(|blocked| blocked.reason.as_str()),
+            summary
+                .approval
+                .as_ref()
+                .map(|approval| approval.kind.as_str()),
+            summary
+                .last_output_at
+                .as_deref()
+                .and_then(|text| crate::core::from_iso(text).ok()),
+            swept_at,
+            stall,
+        );
         rows.push(SessionSweepRow {
-            needs_you: attention.needs_you(),
-            attention: attention_name(attention).to_string(),
-            reason,
+            attention: verdict.attention.as_str().to_string(),
+            attention_reason: verdict.reason.clone(),
             screen_tail: entry.screen_tail.clone(),
+            ready: Some(entry.ready),
             session: summary,
         });
     }
     rows.sort_by(|left, right| {
-        attention_rank(&left.attention)
-            .cmp(&attention_rank(&right.attention))
-            .then_with(|| right.session.started_at.cmp(&left.session.started_at))
+        decisions::Attention::order_of(&left.attention)
+            .cmp(&decisions::Attention::order_of(&right.attention))
+            .then_with(|| {
+                right
+                    .session
+                    .last_output_at
+                    .cmp(&left.session.last_output_at)
+            })
     });
-    let needs_you = rows.iter().filter(|row| row.needs_you).count() as i64;
-    let total = rows.len() as i64;
+    let mut counts = serde_json::Map::from_iter([
+        ("total".to_string(), json!(rows.len() as i64)),
+        ("needs_you".to_string(), json!(0)),
+    ]);
+    let mut needs_you = 0;
+    for row in &rows {
+        let entry = counts.entry(row.attention.clone()).or_insert(json!(0));
+        *entry = json!(entry.as_i64().unwrap_or(0) + 1);
+        if decisions::Attention::needs_you_name(&row.attention) {
+            needs_you += 1;
+        }
+    }
+    counts.insert("needs_you".to_string(), json!(needs_you));
     Ok(SessionSweepResult {
         rows,
-        total,
-        needs_you,
-        engine_available: true,
+        counts,
+        swept_at,
+        engine: None,
     })
 }
 
@@ -1198,9 +1311,13 @@ where
         .session
         .as_ref()
         .map(|session| session.id.clone())
-        .unwrap_or(engine_id);
+        .unwrap_or_else(|| engine_id.clone());
     let mut writing = write_of(ctx);
-    let detail = json!({"keep_awake": params.keep_awake});
+    let detail = json!({
+        "keep_awake": params.keep_awake,
+        "engine_session_id": engine_id.clone(),
+        "linked": recorded.session.is_some(),
+    });
     audited_action(
         &mut writing,
         SESSION_KEEP_AWAKE,
@@ -1244,9 +1361,13 @@ where
         .session
         .as_ref()
         .map(|session| session.id.clone())
-        .unwrap_or(engine_id);
+        .unwrap_or_else(|| engine_id.clone());
     let mut writing = write_of(ctx);
-    let detail = json!({"role": params.role});
+    let detail = json!({
+        "role": params.role,
+        "engine_session_id": engine_id.clone(),
+        "linked": recorded.session.is_some(),
+    });
     audited_action(
         &mut writing,
         SESSION_SET_ROLE,
@@ -1327,6 +1448,7 @@ where
         "option": number,
         "label": chosen_label.chars().take(200).collect::<String>(),
         "dismissed": dismissed,
+        "person": person,
     });
     let mut writing = write_of(ctx);
     audited_action(
@@ -1448,10 +1570,15 @@ where
 // -- shared helpers -----------------------------------------------------------
 
 struct Subject {
+    session_id: String,
     project_id: String,
+    project_slug: String,
     work_item_id: Option<String>,
+    work_item_ref: Option<String>,
     cwd: String,
     name: String,
+    brief: String,
+    is_scratch: bool,
 }
 
 /// The project and work item a session opens on, and the directory it runs in.
@@ -1474,6 +1601,11 @@ where
         Some(slug) => Some(resolve::project(&ctx.declared.read()?, slug)?),
         None => None,
     };
+    if work_item.is_some() && named.is_some() {
+        return Err(VogtError::InvalidRequest(
+            "give at most one of --work-item or --project".to_string(),
+        ));
+    }
     if let (Some(item), Some(project)) = (&work_item, &named) {
         if item.project_id.as_deref() != Some(project.id.as_str()) {
             return Err(VogtError::InvalidRequest(format!(
@@ -1530,12 +1662,25 @@ where
             Some(item) => item.title.clone(),
             None => project.slug.clone(),
         });
-    let _ = session_id;
+    let brief = match &work_item {
+        Some(item) => crate::application::brief::brief_for_work_item(
+            &ctx.declared.read()?,
+            item,
+            session_id,
+            None,
+        )?,
+        None => crate::application::brief::brief_for_project(&project.slug, session_id),
+    };
     Ok(Subject {
+        session_id: session_id.to_string(),
         project_id: project.id,
-        work_item_id: work_item.map(|item| item.id),
+        project_slug: project.slug,
+        work_item_id: work_item.as_ref().map(|item| item.id.clone()),
+        work_item_ref: work_item.map(|item| item.reference),
         cwd,
         name,
+        brief,
+        is_scratch: false,
     })
 }
 
@@ -1659,13 +1804,18 @@ fn build_spec<C, I>(
     params: &StartSessionParams,
     subject: &Subject,
     token: &str,
-    actor_ref: &str,
-    session_id: &str,
 ) -> Result<CreateSession, VogtError>
 where
     C: Clock,
     I: IdFactory,
 {
+    let autopilot = params.autopilot.unwrap_or_else(|| {
+        params.template.is_some()
+            && params
+                .task
+                .as_deref()
+                .is_some_and(|task| !task.trim().is_empty())
+    });
     let mut spec = CreateSession::new(subject.name.clone(), subject.cwd.clone());
     spec.template = params.template.clone();
     spec.model = params.model.clone();
@@ -1673,33 +1823,79 @@ where
     spec.resume = params.resume.clone();
     spec.permission_mode = Some(params.permission_mode.clone());
     spec.role = params.role.clone();
-    spec.work_item = params.work_item.clone();
-    spec.autopilot = params.autopilot.unwrap_or(false);
-    let mut env = vec![
-        ("VOGT_TOKEN".to_string(), token.to_string()),
-        ("VOGT_ACTOR".to_string(), actor_ref.to_string()),
-        ("VOGT_ENGINE_SESSION_ID".to_string(), session_id.to_string()),
-    ];
-    if let Some(task) = params
-        .task
-        .as_deref()
-        .filter(|task| !task.trim().is_empty())
-    {
-        env.push((
-            "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE".to_string(),
-            task.to_string(),
-        ));
-    }
-    if let Some(url) = ctx
-        .config
-        .public_url
-        .as_deref()
-        .filter(|url| !url.is_empty())
-    {
-        env.push(("VOGT_URL".to_string(), url.to_string()));
-    }
-    spec.env = Some(env);
+    spec.work_item = subject.work_item_ref.clone();
+    spec.autopilot = autopilot;
+    spec.prompt = Some(brief_with_task(
+        &subject.brief,
+        params.task.as_deref(),
+        autopilot,
+    ));
+    spec.env = Some(session_env(
+        ctx,
+        &subject.session_id,
+        token,
+        subject.work_item_ref.as_deref(),
+    ));
     Ok(spec)
+}
+
+/// The brief plus the task and the autopilot note, matching `_brief_with_task`.
+fn brief_with_task(brief: &str, task: Option<&str>, autopilot: bool) -> String {
+    let mut text = brief.to_string();
+    if autopilot {
+        text = format!(
+            "{}\n\n{}",
+            text.trim_end(),
+            crate::application::brief::AUTOPILOT
+        );
+    }
+    let task = task.unwrap_or("").trim();
+    if task.is_empty() {
+        return text;
+    }
+    format!("{}\n\n## Task\n\n{task}\n", text.trim_end())
+}
+
+/// Add the branch a session will use to the item's overlay, idempotently.
+fn record_declared_branch(
+    txn: &mut impl crate::storage::interface::WriteTxn,
+    work_ref: &str,
+    project_id: &str,
+    template: &str,
+    at: crate::core::Moment,
+) -> Result<String, VogtError> {
+    let branch = crate::branches::default_branch_name(work_ref, template);
+    let existing = txn.work_overlay(work_ref)?;
+    let mut branches = existing
+        .as_ref()
+        .map(|row| row.branches.clone())
+        .unwrap_or_default();
+    if branches.iter().any(|have| have == &branch) {
+        return Ok(branch);
+    }
+    branches.push(branch.clone());
+    let overlay = match existing {
+        Some(mut row) => {
+            row.branches = branches;
+            row.updated_at = at;
+            row
+        }
+        None => crate::core::WorkOverlay {
+            subject_key: work_ref.to_string(),
+            project_id: project_id.to_string(),
+            rank: None,
+            workflow_state: None,
+            priority: None,
+            effort: None,
+            assignee_actor_id: None,
+            initiative_id: None,
+            branches,
+            created_at: at,
+            updated_at: at,
+        },
+    };
+    txn.upsert_work_overlay(&overlay)?;
+    Ok(branch)
 }
 
 /// One session as the list shows it, live fields merged over the declared row.
@@ -1712,67 +1908,87 @@ where
     C: Clock,
     I: IdFactory,
 {
+    summarize_asked(ctx, session, live, true)
+}
+
+/// `asked` is whether the engine was reached: `alive` is its answer then, and
+/// null when it could not be asked, which is a different fact from "not running".
+fn summarize_asked<C, I>(
+    ctx: &AppContext<C, I>,
+    session: &CodingSession,
+    live: Option<&EngineSession>,
+    asked: bool,
+) -> Result<SessionSummary, VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
     let project = ctx.declared.read()?.project_by_id(&session.project_id)?;
     let work_item = match session.work_item_id.as_deref() {
         Some(id) => ctx.declared.read()?.work_item_by_id(id)?,
         None => None,
     };
-    let transcript = transcript_of(ctx, session, live);
-    let resolved = runtime_of(session, live, transcript.as_ref());
+    let actor = ctx.declared.read()?.actor_by_id(&session.actor_id)?;
     let mut summary = SessionSummary {
         id: session.id.clone(),
         engine_session_id: session.engine_session_id.clone(),
-        name: live
-            .map(|live| live.name.clone())
-            .unwrap_or_else(|| session.id.clone()),
+        linked: true,
         project: project.map(|project| project.slug),
-        work_item: work_item.map(|item| item.reference),
-        state: if session.stopped_at.is_some() {
-            "stopped"
-        } else {
-            "running"
-        }
-        .to_string(),
-        activity: None,
-        alive: None,
-        exit_code: None,
+        work_item: work_item.as_ref().map(|item| item.reference.clone()),
+        work_item_title: work_item.as_ref().map(|item| item.title.clone()),
+        work_item_state: work_item.map(|item| item.state.to_string()),
+        actor: Some(
+            actor
+                .map(|actor| actor.identity_ref)
+                .unwrap_or(session.actor_id.clone()),
+        ),
         cwd: session.cwd.clone(),
-        started_at: session.started_at,
+        template: session.template.clone(),
+        model: session.model.clone(),
+        effort: session.effort.clone(),
+        reason: Some(session.reason.clone()),
+        started_at: Some(session.started_at),
         stopped_at: session.stopped_at,
-        stop_reason: None,
-        activity_changed_at: None,
-        created_at: None,
+        activity: None,
+        alive: asked.then(|| live.is_some_and(|live| live.alive)),
         turn_started_at: None,
         last_output_at: None,
         approval: None,
-        command: None,
         blocked: None,
-        conversation_agent: None,
         hibernation: None,
         keep_awake: false,
         autopilot: false,
         autopilot_nudges: 0,
         role: "worker".to_string(),
+        conversation_id: None,
         resources: None,
-        template: session.template.clone(),
         permission_mode: None,
         stopped_by: None,
-        runtime: SessionRuntime {
-            agent: resolved.agent.clone(),
-            model: resolved.model.clone(),
-            model_basis: resolved.model_basis.map(str::to_string),
-            effort: resolved.effort.clone(),
-            effort_basis: resolved.effort_basis.map(str::to_string),
-        },
-        conversation_id: None,
-        last_reply_excerpt: transcript
-            .as_ref()
-            .and_then(transcripts::last_reply_excerpt),
+        stop_reason: None,
     };
     if let Some(live) = live {
-        apply_live(&mut summary, live, &resolved);
+        apply_live(&mut summary, live);
     }
     Ok(summary)
+}
+
+/// Copy the engine's live fields onto a summary.
+fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
+    summary.activity = Some(live.activity.clone());
+    summary.turn_started_at = live.turn_started_at.clone();
+    summary.last_output_at = live.last_output_at.clone();
+    summary.approval = live.approval.as_ref().map(approval_of);
+    summary.blocked = live.blocked.as_ref().map(blocked_of);
+    summary.hibernation = live.hibernation.as_ref().map(hibernation_of);
+    summary.keep_awake = live.keep_awake;
+    summary.autopilot = live.autopilot;
+    summary.autopilot_nudges = live.autopilot_nudges;
+    summary.role = live.role.clone();
+    summary.conversation_id = live.conversation_id.clone();
+    summary.resources = live.resources.as_ref().map(resources_of);
+    summary.permission_mode = live.permission_mode.clone();
+    summary.stopped_by = live.stopped_by.clone();
+    summary.stop_reason = live.stop_reason.clone();
 }
 
 fn transcript_of<C, I>(
@@ -1816,42 +2032,6 @@ fn runtime_of(
         session.model.as_deref(),
         session.effort.as_deref(),
     )
-}
-
-/// Copy the engine's live fields onto a summary.
-fn apply_live(
-    summary: &mut SessionSummary,
-    live: &EngineSession,
-    resolved: &decisions::ResolvedRuntime,
-) {
-    summary.name = live.name.clone();
-    summary.activity = Some(live.activity.clone());
-    summary.alive = Some(live.alive);
-    summary.exit_code = live.exit_code;
-    summary.cwd = live.cwd.clone();
-    summary.activity_changed_at = live.activity_changed_at.clone();
-    summary.created_at = live.created_at.clone();
-    summary.turn_started_at = live.turn_started_at.clone();
-    summary.last_output_at = live.last_output_at.clone();
-    summary.approval = live.approval.as_ref().map(approval_of);
-    summary.command = live.command.clone();
-    summary.blocked = live.blocked.as_ref().map(blocked_of);
-    summary.conversation_agent = live.conversation_agent.clone();
-    summary.hibernation = live.hibernation.as_ref().map(hibernation_of);
-    summary.keep_awake = live.keep_awake;
-    summary.autopilot = live.autopilot;
-    summary.autopilot_nudges = live.autopilot_nudges;
-    summary.role = live.role.clone();
-    summary.resources = live.resources.as_ref().map(resources_of);
-    summary.template = live.template.clone().or_else(|| summary.template.clone());
-    summary.permission_mode = live.permission_mode.clone();
-    summary.stopped_by = live.stopped_by.clone();
-    summary.stop_reason = live.stop_reason.clone();
-    summary.conversation_id = live.conversation_id.clone();
-    summary.runtime.agent = resolved
-        .agent
-        .clone()
-        .or_else(|| summary.runtime.agent.clone());
 }
 
 fn approval_of(approval: &EngineApproval) -> SessionApproval {
@@ -1902,175 +2082,46 @@ fn hibernation_of(hibernation: &EngineHibernation) -> SessionHibernation {
 }
 
 /// A session the engine has and Vogt never recorded, carrying the engine's id
-/// in both id fields.
+/// in both id fields and null for every declared field.
 fn unlinked_summary(session: &EngineSession) -> SessionSummary {
-    let resolved = decisions::resolve_runtime(
-        session.command.as_deref(),
-        session.conversation_agent.as_deref(),
-        None,
-        None,
-        None,
-        None,
-    );
     let mut summary = SessionSummary {
         id: session.id.clone(),
         engine_session_id: session.id.clone(),
-        name: session.name.clone(),
+        linked: false,
         project: None,
-        work_item: None,
-        state: if session.activity == "stopped" {
-            "stopped"
-        } else {
-            "running"
-        }
-        .to_string(),
-        activity: None,
-        alive: None,
-        exit_code: None,
+        work_item: session.work_item.clone(),
+        work_item_title: None,
+        work_item_state: None,
+        actor: None,
         cwd: session.cwd.clone(),
+        template: None,
+        model: None,
+        effort: None,
+        reason: None,
         started_at: session
             .created_at
             .as_deref()
-            .and_then(|text| crate::core::from_iso(text).ok())
-            .unwrap_or_else(|| Moment::from_unix(0, 0)),
+            .and_then(|text| crate::core::from_iso(text).ok()),
         stopped_at: None,
-        stop_reason: None,
-        activity_changed_at: None,
-        created_at: None,
+        activity: None,
+        alive: Some(session.alive),
         turn_started_at: None,
         last_output_at: None,
         approval: None,
-        command: None,
         blocked: None,
-        conversation_agent: None,
         hibernation: None,
         keep_awake: false,
         autopilot: false,
         autopilot_nudges: 0,
         role: "worker".to_string(),
+        conversation_id: None,
         resources: None,
-        template: None,
         permission_mode: None,
         stopped_by: None,
-        runtime: SessionRuntime {
-            agent: resolved.agent.clone(),
-            model: resolved.model.clone(),
-            model_basis: resolved.model_basis.map(str::to_string),
-            effort: resolved.effort.clone(),
-            effort_basis: resolved.effort_basis.map(str::to_string),
-        },
-        conversation_id: None,
-        last_reply_excerpt: None,
+        stop_reason: None,
     };
-    apply_live(&mut summary, session, &resolved);
+    apply_live(&mut summary, session);
     summary
-}
-
-fn unlinked_rows(
-    live: &HashMap<String, EngineSession>,
-    recorded: &[CodingSession],
-    params: &ListSessionsParams,
-) -> Vec<SessionSummary> {
-    if params.project.is_some() || params.work_item.is_some() || params.offset != 0 {
-        return Vec::new();
-    }
-    let known: HashSet<&str> = recorded
-        .iter()
-        .map(|session| session.engine_session_id.as_str())
-        .collect();
-    let mut rows: Vec<&EngineSession> = live
-        .values()
-        .filter(|session| !known.contains(session.id.as_str()))
-        .filter(|session| params.include_stopped || session.activity != "stopped")
-        .collect();
-    rows.sort_by(|left, right| {
-        right
-            .created_at
-            .cmp(&left.created_at)
-            .then_with(|| right.id.cmp(&left.id))
-    });
-    rows.into_iter().map(unlinked_summary).collect()
-}
-
-fn live_sessions(engine: Option<&EngineClient>) -> HashMap<String, EngineSession> {
-    let Some(engine) = engine else {
-        return HashMap::new();
-    };
-    match engine.list_sessions() {
-        Ok(sessions) => sessions
-            .into_iter()
-            .map(|session| (session.id.clone(), session))
-            .collect(),
-        Err(VogtError::EngineUnavailable(_)) => HashMap::new(),
-        Err(_) => HashMap::new(),
-    }
-}
-
-fn rss_of(live: Option<&EngineSession>) -> i64 {
-    live.and_then(|session| session.resources.as_ref())
-        .map(|resources| resources.rss_bytes)
-        .unwrap_or(0)
-}
-
-fn attention_of(
-    session: &EngineSession,
-    ready: bool,
-    now: Moment,
-    stall_after_seconds: i64,
-) -> (Attention, String) {
-    let last_output = session
-        .last_output_at
-        .as_deref()
-        .and_then(|text| crate::core::from_iso(text).ok());
-    let verdict = decisions::classify(
-        Some(&session.activity),
-        Some(session.alive),
-        Some(ready),
-        session
-            .approval
-            .as_ref()
-            .map(|approval| approval.question.as_str()),
-        session
-            .blocked
-            .as_ref()
-            .map(|blocked| blocked.reason.as_str()),
-        session
-            .approval
-            .as_ref()
-            .map(|approval| approval.kind.as_str()),
-        last_output,
-        now,
-        stall_after_seconds,
-    );
-    (verdict.attention, verdict.reason)
-}
-
-fn attention_name(attention: Attention) -> &'static str {
-    match attention {
-        Attention::Approval => "approval",
-        Attention::Blocked => "blocked",
-        Attention::Waiting => "waiting",
-        Attention::Stalled => "stalled",
-        Attention::Running => "running",
-        Attention::Idle => "idle",
-        Attention::Hibernated => "hibernated",
-        Attention::Exited => "exited",
-        Attention::Unknown => "unknown",
-    }
-}
-
-fn attention_rank(name: &str) -> u8 {
-    match name {
-        "approval" => Attention::Approval.order(),
-        "blocked" => Attention::Blocked.order(),
-        "waiting" => Attention::Waiting.order(),
-        "stalled" => Attention::Stalled.order(),
-        "running" => Attention::Running.order(),
-        "idle" => Attention::Idle.order(),
-        "hibernated" => Attention::Hibernated.order(),
-        "exited" => Attention::Exited.order(),
-        _ => Attention::Unknown.order(),
-    }
 }
 
 fn screen_result(screen: &EngineScreen) -> SessionScreenResult {
@@ -2229,7 +2280,7 @@ where
     }
     let scopes = session_scopes(ctx)?;
     let (secret, token_hash) = minted_token()?;
-    let env = session_env(ctx, &session.id, &secret);
+    let env = session_env(ctx, &session.id, &secret, None);
     let woken = engine.wake_session(engine_id, Some(&env))?.ok_or_else(|| {
         VogtError::NotFound(format!("the engine has no session {}", py_repr(engine_id)))
     })?;
@@ -2336,6 +2387,7 @@ fn session_env<C, I>(
     ctx: &AppContext<C, I>,
     session_id: &str,
     secret: &str,
+    work_item: Option<&str>,
 ) -> Vec<(String, String)>
 where
     C: Clock,
@@ -2345,6 +2397,9 @@ where
         ("VOGT_HTTP_TOKEN".to_string(), secret.to_string()),
         ("VOGT_SESSION_ID".to_string(), session_id.to_string()),
     ];
+    if let Some(work_item) = work_item.filter(|item| !item.is_empty()) {
+        env.push(("VOGT_WORK_ITEM".to_string(), work_item.to_string()));
+    }
     if let Some(url) = ctx.config.public_url.as_ref().filter(|url| !url.is_empty()) {
         env.push(("VOGT_URL".to_string(), url.clone()));
     }

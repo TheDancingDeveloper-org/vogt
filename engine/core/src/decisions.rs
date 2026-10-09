@@ -2196,6 +2196,41 @@ impl Attention {
     pub fn needs_you(self) -> bool {
         matches!(self, Self::Approval | Self::Blocked | Self::Waiting)
     }
+
+    /// The wire value, matching `oversight.py`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approval => "approval",
+            Self::Blocked => "blocked",
+            Self::Waiting => "waiting",
+            Self::Stalled => "stalled",
+            Self::Running => "running",
+            Self::Idle => "idle",
+            Self::Hibernated => "hibernated",
+            Self::Exited => "exited",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// `order` looked up by wire value, for sorting rows that only kept the name.
+    pub fn order_of(name: &str) -> u8 {
+        match name {
+            "approval" => 0,
+            "blocked" => 1,
+            "waiting" => 2,
+            "stalled" => 3,
+            "running" => 4,
+            "idle" => 5,
+            "hibernated" => 6,
+            "exited" => 7,
+            _ => 8,
+        }
+    }
+
+    /// Whether a wire value is one of the classes a person must act on.
+    pub fn needs_you_name(name: &str) -> bool {
+        matches!(name, "approval" | "blocked" | "waiting")
+    }
 }
 
 /// Startup gates an agent CLI stops at before any work, as words.
