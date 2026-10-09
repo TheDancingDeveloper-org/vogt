@@ -159,6 +159,148 @@ impl ContractTree for Filesystem {
     }
 }
 
+/// The last recorded result, always with its age.
+///
+/// `not_checked` is a first-class answer, and so is "compliant, checked 23 days
+/// ago": this never refreshes implicitly, because a value that refreshes when
+/// you look at it cannot be reasoned about. A project that declined the
+/// contract has no compliance to report, and reporting its last recorded status
+/// would be a verdict on a question it never agreed to be asked.
+pub fn compliance_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    let slug = params
+        .get("project")
+        .and_then(Value::as_str)
+        .ok_or_else(|| VogtError::InvalidRequest("compliance needs a project".to_string()))?;
+    crate::with_ctx!(ctx, |ctx| compliance(ctx, slug))
+}
+
+fn compliance<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    slug: &str,
+) -> Result<Value, VogtError> {
+    let (project, exemptions) = {
+        let view = ctx.declared.read()?;
+        let project = resolve::project(&view, slug)?;
+        let exemptions = view.contract_exemptions(&project.id)?;
+        (project, exemptions)
+    };
+    let version = configured_contract(&ctx.config).version;
+    if project.contract_adopted_at.is_none() {
+        return Ok(json!({
+            "project": project.slug,
+            "status": "not_applicable",
+            "contract_version": version,
+            "checked_at": Value::Null,
+            "age_seconds": Value::Null,
+            "failing": [],
+            "adopted": false,
+            "adopted_at": Value::Null,
+            "inapplicable": [],
+            "detail": NOT_ADOPTED_DETAIL,
+        }));
+    }
+
+    let exempt: BTreeSet<(String, String)> = exemptions
+        .iter()
+        .map(|exemption| (exemption.rule.clone(), exemption.target.clone()))
+        .collect();
+    let now = clock_now(&ctx.clock);
+    let age = project
+        .compliance_checked_at
+        .map(|checked| now.seconds_since(checked) as i64);
+    let failing = recorded_failing(&ctx.observed, &project.id)?
+        .into_iter()
+        .filter(|criterion| {
+            !exempt.contains(&(
+                criterion["rule"].as_str().unwrap_or("").to_string(),
+                criterion["target"].as_str().unwrap_or("").to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    let inapplicable = exemptions
+        .iter()
+        .map(|exemption| {
+            json!({
+                "rule": exemption.rule,
+                "target": exemption.target,
+                "satisfied": false,
+                "detail": format!(
+                    "declared inapplicable to this project: {}",
+                    exemption.reason
+                ),
+                "applicable": false,
+                "tracked": Value::Null,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "project": project.slug,
+        "status": project.compliance_status.to_string(),
+        "contract_version": version,
+        "checked_at": project.compliance_checked_at.map(|moment| moment.to_json()),
+        "age_seconds": age,
+        "failing": failing,
+        "adopted": true,
+        "adopted_at": project.contract_adopted_at.map(|moment| moment.to_json()),
+        "inapplicable": inapplicable,
+        "detail": compliance_detail(&project.compliance_status.to_string(), project.compliance_checked_at.is_some()),
+    }))
+}
+
+/// The failing criteria the last check recorded, or nothing when the store has
+/// no evidence tables.
+fn recorded_failing<O: ObservedStore>(
+    observed: &O,
+    project_id: &str,
+) -> Result<Vec<Value>, VogtError> {
+    if !observed.has_evidence_tables()? {
+        return Ok(Vec::new());
+    }
+    let recorded = observed.latest(
+        &["contract.check".to_string()],
+        Some(project_id),
+        false,
+        false,
+        1,
+    )?;
+    let Some(observation) = recorded.first() else {
+        return Ok(Vec::new());
+    };
+    let Some(entries) = observation.payload.get("failing").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    Ok(entries
+        .iter()
+        .filter_map(|entry| entry.as_object())
+        .map(|entry| {
+            json!({
+                "rule": entry.get("rule").and_then(Value::as_str).unwrap_or(""),
+                "target": entry.get("target").and_then(Value::as_str).unwrap_or(""),
+                "satisfied": false,
+                "detail": entry.get("detail").and_then(Value::as_str).unwrap_or(""),
+                // CriterionView defaults both, and the compliance view never
+                // sets them, so a recorded failure reads as applicable and
+                // untracked.
+                "applicable": true,
+                "tracked": Value::Null,
+            })
+        })
+        .collect())
+}
+
+/// Which `not_checked` this is: nobody has run the check, or the last run could
+/// not read the root path. Only one of them is fixed by running it.
+fn compliance_detail(status: &str, was_checked: bool) -> Option<String> {
+    if status != "not_checked" {
+        return None;
+    }
+    Some(if was_checked {
+        "the last check could not read this project's root path, so no criterion was evaluated — check the registered path".to_string()
+    } else {
+        "nobody has checked this project's contract; run `contract check`".to_string()
+    })
+}
+
 /// Evaluate the contract against any path, storing nothing.
 pub fn contract_evaluate_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     let path = params
