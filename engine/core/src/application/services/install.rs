@@ -66,7 +66,8 @@ fn install_bootstrap<C: Clock + 'static, I: IdFactory + 'static>(
     if !ctx.config.install_bootstrap_enabled {
         return Err(VogtError::InstallClosed(
             "install mode is disabled on this instance (install_bootstrap_enabled=false): \
-             the first credential is provisioned by configuration, not over this endpoint."
+             create the first operator in the container with `vogt user create --scopes admin`, \
+             not over this endpoint."
                 .to_string(),
         ));
     }
@@ -153,8 +154,8 @@ fn bootstrap_recorded<C: Clock + 'static, I: IdFactory + 'static>(
         move |txn: &mut _, actor: &Actor| {
             if txn.install_closed()? {
                 return Err(VogtError::InstallClosed(
-                    "install mode is closed: this instance already has a token. Sign in with it, \
-                     or mint another over the loopback surface with `vogt token issue`."
+                    "install mode is closed: this instance already has an operator. Sign in, \
+                     or create another login over the loopback surface with `vogt user create`."
                         .to_string(),
                 ));
             }
@@ -344,7 +345,57 @@ mod tests {
         let refused =
             install_bootstrap_op(&built, json!({"display_name": "Ada", "token_name": "x"}))
                 .unwrap_err();
-        assert!(matches!(refused, VogtError::InstallClosed(_)), "{refused}");
+        assert!(
+            matches!(
+                &refused,
+                VogtError::InstallClosed(message)
+                    if message == "install mode is closed: this instance already has an operator. \
+                        Sign in, or create another login over the loopback surface with \
+                        `vogt user create`."
+            ),
+            "{refused}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An operator who has turned the bootstrap off gets the configured-off
+    /// answer, not the already-has-an-operator one.
+    #[test]
+    fn a_disabled_bootstrap_says_it_is_disabled() {
+        let dir = std::env::temp_dir().join(format!("vogt-install-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let built = crate::application::context::build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                install_bootstrap_enabled: false,
+                ..crate::config::VogtConfig::default()
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let refused =
+            install_bootstrap_op(&built, json!({"display_name": "Ada", "token_name": "x"}))
+                .unwrap_err();
+        assert!(
+            matches!(
+                &refused,
+                VogtError::InstallClosed(message)
+                    if message == "install mode is disabled on this instance \
+                        (install_bootstrap_enabled=false): create the first operator in the \
+                        container with `vogt user create --scopes admin`, not over this endpoint."
+            ),
+            "{refused}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
