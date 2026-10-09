@@ -398,32 +398,130 @@ impl ReadView for SqliteReadView {
     fn work_item_by_ref(&self, reference: &str) -> Result<Option<WorkItem>, VogtError> {
         load_work_item(&self.conn, "w.ref = ?", reference)
     }
-    fn list_work_items(&self, _: &WorkFilter) -> Result<Vec<WorkItem>, VogtError> {
-        later("list_work_items")
+    fn list_work_items(&self, filter: &WorkFilter) -> Result<Vec<WorkItem>, VogtError> {
+        let (where_sql, params) = work_where(filter);
+        let mut sql_params = params;
+        sql_params.push(Box::new(filter.limit));
+        sql_params.push(Box::new(filter.offset));
+        let refs: Vec<&dyn rusqlite::ToSql> = sql_params.iter().map(|v| v.as_ref()).collect();
+        let bases = many(
+            &self.conn,
+            &format!("{WORK_SELECT} {where_sql} ORDER BY w.created_at, w.ref LIMIT ? OFFSET ?"),
+            refs.as_slice(),
+            row_work_base,
+        )?;
+        bases
+            .into_iter()
+            .map(|base| finish_work_item(&self.conn, base))
+            .collect()
     }
-    fn count_work_items(&self, _: &WorkFilter) -> Result<i64, VogtError> {
-        later("count_work_items")
+    fn count_work_items(&self, filter: &WorkFilter) -> Result<i64, VogtError> {
+        let (where_sql, params) = work_where(filter);
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        self.conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM work_items w {where_sql}"),
+                refs.as_slice(),
+                |row| row.get(0),
+            )
+            .map_err(sql_err)
     }
-    fn board_high_water(&self, _: &WorkFilter) -> Result<Option<(Moment, String)>, VogtError> {
-        later("board_high_water")
+    fn board_high_water(&self, filter: &WorkFilter) -> Result<Option<(Moment, String)>, VogtError> {
+        let (where_sql, params) = work_where(filter);
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        self.conn
+            .query_row(
+                &format!(
+                    "SELECT w.created_at, w.ref FROM work_items w LEFT JOIN projects p ON p.id = w.project_id {where_sql} ORDER BY w.created_at DESC, w.ref DESC LIMIT 1"
+                ),
+                refs.as_slice(),
+                |row| Ok((moment(row, "created_at")?, row.get("ref")?)),
+            )
+            .optional()
+            .map_err(sql_err)
     }
     fn board_counts(
         &self,
-        _: &WorkFilter,
-        _: &str,
-        _: Option<&(Moment, String)>,
+        filter: &WorkFilter,
+        lane_mode: &str,
+        high_water: Option<&(Moment, String)>,
     ) -> Result<BTreeMap<(String, String), i64>, VogtError> {
-        later("board_counts")
+        let Some(high_water) = high_water else {
+            return Ok(BTreeMap::new());
+        };
+        let (where_sql, params) = with_board_high_water(filter, high_water)?;
+        let lane = board_lane(lane_mode)?;
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        let rows = many(
+            &self.conn,
+            &format!(
+                "SELECT {lane} AS board_lane, w.state AS state, COUNT(*) AS n FROM work_items w LEFT JOIN projects p ON p.id = w.project_id {where_sql} GROUP BY {lane}, w.state"
+            ),
+            refs.as_slice(),
+            |row| {
+                Ok((
+                    row.get::<_, String>("board_lane")?,
+                    row.get::<_, String>("state")?,
+                    row.get::<_, i64>("n")?,
+                ))
+            },
+        )?;
+        Ok(rows
+            .into_iter()
+            .map(|(lane, state, n)| ((lane, state), n))
+            .collect())
     }
     fn board_work_items(
         &self,
-        _: &WorkFilter,
-        _: &str,
-        _: &[BoardCellQuery],
-        _: Option<&(Moment, String)>,
-        _: i64,
+        filter: &WorkFilter,
+        lane_mode: &str,
+        cells: &[BoardCellQuery],
+        high_water: Option<&(Moment, String)>,
+        limit: i64,
     ) -> Result<BTreeMap<(String, String), Vec<WorkItem>>, VogtError> {
-        later("board_work_items")
+        let mut result: BTreeMap<(String, String), Vec<WorkItem>> = cells
+            .iter()
+            .map(|cell| ((cell.lane_key.clone(), cell.state.clone()), Vec::new()))
+            .collect();
+        let Some(high_water) = high_water else {
+            return Ok(result);
+        };
+        if cells.is_empty() {
+            return Ok(result);
+        }
+        let (mut where_sql, mut params) = with_board_high_water(filter, high_water)?;
+        let lane = board_lane(lane_mode)?;
+        let mut requested: Vec<String> = Vec::new();
+        for cell in cells {
+            let mut clause = vec![format!("{lane} = ?"), "w.state = ?".to_string()];
+            params.push(Box::new(cell.lane_key.clone()));
+            params.push(Box::new(cell.state.clone()));
+            if let (Some(after), Some(after_ref)) = (&cell.after_created_at, &cell.after_ref) {
+                clause.push("(w.created_at > ? OR (w.created_at = ? AND w.ref > ?))".to_string());
+                let moment = to_iso(*after);
+                params.push(Box::new(moment.clone()));
+                params.push(Box::new(moment));
+                params.push(Box::new(after_ref.clone()));
+            }
+            requested.push(format!("({})", clause.join(" AND ")));
+        }
+        where_sql = append_where(&where_sql, &format!("({})", requested.join(" OR ")));
+        params.push(Box::new(limit));
+        let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|v| v.as_ref()).collect();
+        let rows = many(
+            &self.conn,
+            &format!(
+                "WITH requested AS (SELECT w.*, p.slug AS project_slug, ac.identity_ref AS assignee_identity_ref, {lane} AS board_lane, ROW_NUMBER() OVER (PARTITION BY {lane}, w.state ORDER BY w.created_at, w.ref) AS board_row FROM work_items w LEFT JOIN projects p ON p.id = w.project_id LEFT JOIN actors ac ON ac.id = w.assignee_actor_id {where_sql}) SELECT * FROM requested WHERE board_row <= ? ORDER BY board_lane, state, created_at, ref"
+            ),
+            refs.as_slice(),
+            |row| Ok((row.get::<_, String>("board_lane")?, row_work_base(row)?)),
+        )?;
+        for (lane_key, base) in rows {
+            let state = base.item.state.clone();
+            let item = finish_work_item(&self.conn, base)?;
+            result.entry((lane_key, state)).or_default().push(item);
+        }
+        Ok(result)
     }
     fn blocking_fan_out(&self, _: &[String]) -> Result<BTreeMap<String, i64>, VogtError> {
         later("blocking_fan_out")
@@ -1910,9 +2008,211 @@ mod more {
         txn.commit().unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn work_lists_share_a_filter_and_the_board_pages_one_cell() {
+        let dir = std::env::temp_dir().join(format!("vogt-decl-board-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = store(&dir);
+        let now = Moment::from_unix(1_700_000_000, 0);
+        let later_at = Moment::from_unix(1_700_086_400, 0);
+        let project = project(&store, "governed");
+        let mut txn = store.write().unwrap();
+        txn.insert_project(&project).unwrap();
+        let mut make = |id: &str, state: &str, at: Moment| {
+            let reference = txn.next_work_ref().unwrap();
+            txn.insert_work_item(&WorkItem {
+                id: id.into(),
+                reference,
+                kind: "bug".into(),
+                title: "leaks".into(),
+                body: String::new(),
+                state: state.into(),
+                priority: "p2".into(),
+                effort: None,
+                project_id: Some(project.id.clone()),
+                project_slug: None,
+                initiative_id: None,
+                origin: "created".into(),
+                trust_state: "unverified".into(),
+                assignee_actor_id: None,
+                assignee_identity_ref: None,
+                labels: Vec::new(),
+                relations: Vec::new(),
+                superseded_by: None,
+                created_at: at,
+                updated_at: at,
+            })
+            .unwrap();
+        };
+        make("wrk_1", "open", now);
+        make("wrk_2", "open", later_at);
+        make("wrk_3", "done", now);
+        txn.commit().unwrap();
+
+        let view = store.read().unwrap();
+        let open_only = WorkFilter {
+            states: vec!["open".into()],
+            ..WorkFilter::default()
+        };
+        let listed = view.list_work_items(&open_only).unwrap();
+        // Oldest first, so the earlier item leads even though it was inserted
+        // in the same order.
+        assert_eq!(
+            listed
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["wrk_1", "wrk_2"]
+        );
+        assert_eq!(view.count_work_items(&open_only).unwrap(), 2);
+        assert_eq!(view.count_work_items(&WorkFilter::default()).unwrap(), 3);
+
+        let high_water = view.board_high_water(&WorkFilter::default()).unwrap();
+        let counts = view
+            .board_counts(&WorkFilter::default(), "none", high_water.as_ref())
+            .unwrap();
+        assert_eq!(counts.get(&("".into(), "open".into())), Some(&2));
+        let cells = [BoardCellQuery {
+            lane_key: String::new(),
+            state: "open".into(),
+            after_created_at: Some(now),
+            after_ref: Some("WI-1".into()),
+        }];
+        let page = view
+            .board_work_items(
+                &WorkFilter::default(),
+                "none",
+                &cells,
+                high_water.as_ref(),
+                10,
+            )
+            .unwrap();
+        let open = &page[&("".into(), "open".into())];
+        assert_eq!(open.len(), 1, "the cursor skips the first open item");
+        assert_eq!(open[0].id, "wrk_2");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 const WORK_SELECT: &str = "SELECT w.*, p.slug AS project_slug, ac.identity_ref AS assignee_identity_ref FROM work_items w LEFT JOIN projects p ON p.id = w.project_id LEFT JOIN actors ac ON ac.id = w.assignee_actor_id";
+
+const TERMINAL_STATES: [&str; 2] = ["done", "wont_do"];
+
+/// The WHERE clause every work view filters through, so a count and the page
+/// beside it describe the same set.
+fn work_where(filter: &WorkFilter) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
+    let mut clauses: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    if !filter.include_superseded {
+        // A native row that migrated upstream is retired. The row stays
+        // reachable by ref or id; only the lists leave it out.
+        clauses.push("w.superseded_by IS NULL".into());
+    }
+    if filter.exclude_unlinked_native {
+        // A native row on an unlinked project leaves the curated surfaces. A
+        // project-less item stays: there is no project to be linked.
+        clauses.push(
+            "(w.project_id IS NULL OR EXISTS (SELECT 1 FROM projects lp WHERE lp.id = w.project_id AND lp.link_state = 'linked'))".into(),
+        );
+    }
+    if let Some(project) = &filter.project_id {
+        clauses.push("w.project_id = ?".into());
+        params.push(Box::new(project.clone()));
+    }
+    if let Some(assignee) = &filter.assignee_actor_id {
+        clauses.push("w.assignee_actor_id = ?".into());
+        params.push(Box::new(assignee.clone()));
+    }
+    if let Some(initiative) = &filter.initiative_id {
+        clauses.push("w.initiative_id = ?".into());
+        params.push(Box::new(initiative.clone()));
+    }
+    for (column, values) in [
+        ("w.kind", &filter.kinds),
+        ("w.state", &filter.states),
+        ("w.priority", &filter.priorities),
+        ("w.trust_state", &filter.trust_states),
+    ] {
+        if !values.is_empty() {
+            let placeholders = vec!["?"; values.len()].join(", ");
+            clauses.push(format!("{column} IN ({placeholders})"));
+            for value in values {
+                params.push(Box::new(value.clone()));
+            }
+        }
+    }
+    if filter.exclude_terminal {
+        let placeholders = vec!["?"; TERMINAL_STATES.len()].join(", ");
+        clauses.push(format!("w.state NOT IN ({placeholders})"));
+        for state in TERMINAL_STATES {
+            params.push(Box::new(state.to_string()));
+        }
+    }
+    if let Some(text) = &filter.text {
+        // instr over lower rather than LIKE: the needle is caller text, and
+        // LIKE would read its % and _ as wildcards.
+        if !text.is_empty() {
+            let needle = text.to_lowercase();
+            clauses.push(
+                "(instr(lower(w.title), ?) > 0 OR instr(lower(w.body), ?) > 0 OR instr(lower(w.ref), ?) > 0)".into(),
+            );
+            params.push(Box::new(needle.clone()));
+            params.push(Box::new(needle.clone()));
+            params.push(Box::new(needle));
+        }
+    }
+    if let Some(label) = &filter.label {
+        clauses.push(
+            "EXISTS (SELECT 1 FROM work_item_labels wl JOIN labels l ON l.id = wl.label_id WHERE wl.work_item_id = w.id AND l.name = ?)".into(),
+        );
+        params.push(Box::new(label.clone()));
+    }
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+    (where_sql, params)
+}
+
+fn append_where(where_sql: &str, clause: &str) -> String {
+    if where_sql.is_empty() {
+        format!("WHERE {clause}")
+    } else {
+        format!("{where_sql} AND {clause}")
+    }
+}
+
+fn with_board_high_water(
+    filter: &WorkFilter,
+    high_water: &(Moment, String),
+) -> Result<(String, Vec<Box<dyn rusqlite::ToSql>>), VogtError> {
+    let (where_sql, mut params) = work_where(filter);
+    let moment = to_iso(high_water.0);
+    params.push(Box::new(moment.clone()));
+    params.push(Box::new(moment));
+    params.push(Box::new(high_water.1.clone()));
+    Ok((
+        append_where(
+            &where_sql,
+            "(w.created_at < ? OR (w.created_at = ? AND w.ref <= ?))",
+        ),
+        params,
+    ))
+}
+
+/// The lane expression, drawn only from the closed set the application names.
+fn board_lane(lane_mode: &str) -> Result<&'static str, VogtError> {
+    match lane_mode {
+        "none" => Ok("''"),
+        "project" => Ok("COALESCE(p.slug, '')"),
+        "initiative" => Ok("COALESCE(w.initiative_id, '')"),
+        other => Err(VogtError::InvalidRequest(format!(
+            "unknown Board lane mode: {other}"
+        ))),
+    }
+}
 
 fn load_work_item(
     conn: &Connection,
