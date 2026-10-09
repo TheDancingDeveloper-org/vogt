@@ -6,7 +6,6 @@
 
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::process::Command;
 
 use serde_json::{json, Value};
 
@@ -14,7 +13,7 @@ use crate::application::context::{write_of, AppContext, Built};
 use crate::application::resolve;
 use crate::application::writes::{audited_write, WriteOutcome};
 use crate::config::VogtConfig;
-use crate::core::{Clock, IdFactory, Moment, Project};
+use crate::core::{Clock, IdFactory, Project};
 use crate::decisions::{
     contract_from_settings, default_scaffold, digest_of, evaluate, recommendations, Contract,
     ContractResult, ContractTree, CriterionResult, Recommendation, Scaffold,
@@ -60,6 +59,15 @@ pub fn configured_contract(config: &VogtConfig) -> Contract {
     contract_from_settings(&config.contract_version, &files, &dirs, &meta)
 }
 
+/// The current moment. A poisoned lock keeps the clock's last value rather than
+/// panicking: one panicked holder should not take down every later request.
+fn clock_now<C: Clock>(clock: &std::sync::Arc<std::sync::Mutex<C>>) -> crate::core::Moment {
+    clock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .now()
+}
+
 /// The top-level names this repository carries, or `None` when the question
 /// could not be asked. `None` is not "it carries nothing": it lets the
 /// contract fall back to reading the filesystem.
@@ -67,23 +75,69 @@ pub fn tracked_names(root: &Path) -> Option<BTreeSet<String>> {
     if !root.join(".git").exists() {
         return None;
     }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["ls-files", "-z"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let listing = String::from_utf8(output.stdout).ok()?;
+    // Bounded, the way the git adapter runs git: a hung `ls-files` must not hang
+    // the request. Python strips the listing before splitting it.
+    let output = bounded_git(&["-C", &root.to_string_lossy(), "ls-files", "-z"])?;
     Some(
-        listing
+        output
+            .trim()
             .split('\0')
             .filter(|entry| !entry.is_empty())
             .map(|entry| entry.split('/').next().unwrap_or(entry).to_string())
             .collect(),
     )
+}
+
+/// Run git and return its stdout, or `None` when it cannot be asked — missing,
+/// failing, or still running after the timeout. The timeout kills the process
+/// group, so a helper git spawned does not keep the pipe open.
+fn bounded_git(args: &[&str]) -> Option<String> {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            let _ = libc::setsid();
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().ok()?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                let mut stdout = String::new();
+                stdout_of(&mut child, &mut stdout)?;
+                return Some(stdout);
+            }
+            Ok(None) if started.elapsed() > crate::adapters::git::GIT_TIMEOUT => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::killpg(child.id() as i32, libc::SIGKILL);
+                }
+                let _ = child.wait();
+                return None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(_) => return None,
+        }
+    }
+}
+
+fn stdout_of(child: &mut std::process::Child, into: &mut String) -> Option<()> {
+    use std::io::Read;
+    child.stdout.take()?.read_to_string(into).ok().map(|_| ())
 }
 
 /// A filesystem the evaluator can ask about. Paths arrive already normalised.
@@ -105,12 +159,7 @@ pub fn contract_evaluate_op(ctx: &Built, params: Value) -> Result<Value, VogtErr
         .get("path")
         .and_then(Value::as_str)
         .ok_or_else(|| VogtError::InvalidRequest("contract.evaluate needs a path".to_string()))?;
-    let config = match ctx {
-        Built::SystemRandom(ctx) => &ctx.config,
-        Built::SystemSequential(ctx) => &ctx.config,
-        Built::StepRandom(ctx) => &ctx.config,
-        Built::StepSequential(ctx) => &ctx.config,
-    };
+    let config = crate::with_ctx!(ctx, |ctx| &ctx.config);
     Ok(contract_evaluate(config, path))
 }
 
@@ -154,12 +203,7 @@ pub fn contract_check_op(ctx: &Built, params: Value) -> Result<Value, VogtError>
         .get("reason")
         .and_then(Value::as_str)
         .ok_or_else(|| VogtError::InvalidRequest("contract.check needs a reason".to_string()))?;
-    match ctx {
-        Built::SystemRandom(ctx) => contract_check(ctx, slug, reason),
-        Built::SystemSequential(ctx) => contract_check(ctx, slug, reason),
-        Built::StepRandom(ctx) => contract_check(ctx, slug, reason),
-        Built::StepSequential(ctx) => contract_check(ctx, slug, reason),
-    }
+    crate::with_ctx!(ctx, |ctx| contract_check(ctx, slug, reason))
 }
 
 fn contract_check<C, I>(
@@ -194,10 +238,24 @@ where
         }));
     }
 
-    let now = ctx.clock.lock().expect("clock").now();
+    let now = clock_now(&ctx.clock);
     let root = Path::new(&project.root_path);
     let contract = configured_contract(&ctx.config);
     let tracked = tracked_names(root);
+    // The evidence is evaluated without the exemptions. Python's collector
+    // records what the contract says of the tree as it stands, and only the
+    // answer the caller reads applies the exemptions. One evaluation for both
+    // would drop an exempted criterion from the recorded failing list and
+    // change the evidence digest.
+    let evidence = evaluate(
+        &project.root_path,
+        &contract,
+        &Filesystem,
+        tracked.as_ref(),
+        &[],
+    );
+    record_findings(&ctx.observed, &project, &evidence, &ctx.clock)?;
+
     let exempt_refs: Vec<(&str, &str, &str)> = exempt
         .iter()
         .map(|(rule, target, reason)| (rule.as_str(), target.as_str(), reason.as_str()))
@@ -209,7 +267,6 @@ where
         tracked.as_ref(),
         &exempt_refs,
     );
-    record_findings(&ctx.observed, &project, &result, now)?;
     let advice = advice(&result, &project.name, &project.lifecycle_state.to_string());
 
     // Everything the audit body needs, taken out of the generic context before
@@ -248,7 +305,7 @@ where
 /// What a recorded check writes back onto the project, gathered so the audit
 /// closure takes one argument rather than one per field.
 struct CheckRecord {
-    now: Moment,
+    now: crate::core::Moment,
     project_id: String,
     project_slug: String,
     status: String,
@@ -318,15 +375,16 @@ fn exemptions(
 /// one finding carrying the result just computed, then the latest view rebuilt.
 /// A store without evidence tables records nothing and says so by omission
 /// rather than by failing the check.
-fn record_findings<O: ObservedStore>(
+fn record_findings<O: ObservedStore, C: Clock>(
     observed: &O,
     project: &Project,
     result: &ContractResult,
-    now: Moment,
+    clock: &std::sync::Arc<std::sync::Mutex<C>>,
 ) -> Result<(), VogtError> {
     if !observed.has_evidence_tables()? {
         return Ok(());
     }
+    let now = clock_now(clock);
     let payload = json!({
         "contract_version": result.contract_version,
         "status": result.status,
@@ -358,7 +416,9 @@ fn record_findings<O: ObservedStore>(
         &sweep.id,
         crate::core::SweepOutcome::Ok,
         &recorded,
-        now,
+        // Python reads the clock again for the finish, so a step clock stamps
+        // finished_at one second after started_at.
+        clock_now(clock),
         None,
     )?;
     observed.rebuild_latest()?;
