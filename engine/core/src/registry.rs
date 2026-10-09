@@ -6,7 +6,7 @@
 //! manifest is complete before the behaviour is. `registry.dump` is the one
 //! operation this module implements itself.
 
-mod operations;
+pub mod operations;
 
 use std::collections::{HashMap, HashSet};
 
