@@ -85,17 +85,23 @@ pub fn build_item<C: Clock, I: IdFactory>(
     WorkItem {
         id: observation.subject_key.clone(),
         reference: observation.subject_key.clone(),
-        kind: work_kind(crate::decisions::work_kind_of(observation)),
+        kind: parse_wire(
+            crate::decisions::work_kind_of(observation),
+            WorkKind::Feature,
+        ),
         title,
         body: String::new(),
         state: crate::decisions::upstream_state(observation, overlay, &workflow.initial_state),
-        priority: priority_of(&priority),
+        priority: parse_wire(&priority, Priority::P2),
         effort: overlay.and_then(|overlay| overlay.effort),
         project_id: Some(project.id.clone()),
         project_slug: Some(project.slug.clone()),
         initiative_id: overlay.and_then(|overlay| overlay.initiative_id.clone()),
         origin: Origin::Observed,
-        trust_state: trust_state_of(&trust_for(ctx, observation.observed_at, confirmed_at)),
+        trust_state: parse_wire(
+            &trust_for(ctx, observation.observed_at, confirmed_at),
+            crate::core::TrustState::Unverified,
+        ),
         assignee_actor_id: overlay.and_then(|overlay| overlay.assignee_actor_id.clone()),
         assignee_identity_ref: None,
         labels,
@@ -307,16 +313,14 @@ pub fn resolve_upstream<C: Clock, I: IdFactory>(
     )))
 }
 
-/// `work_kind_of` returns the wire text; the item stores the enum.
-fn work_kind(text: &str) -> WorkKind {
-    serde_json::from_value(serde_json::Value::String(text.to_string())).unwrap_or(WorkKind::Feature)
-}
-
-fn priority_of(text: &str) -> Priority {
-    serde_json::from_value(serde_json::Value::String(text.to_string())).unwrap_or(Priority::P2)
-}
-
-fn trust_state_of(text: &str) -> crate::core::TrustState {
-    serde_json::from_value(serde_json::Value::String(text.to_string()))
-        .unwrap_or(crate::core::TrustState::Unverified)
+/// Parse a wire string into its enum, falling back to the vocabulary's own
+/// default. `work_kind_of`, `priority_of` and `trust_for` return the text the
+/// wire carries; the item stores the enum. `Default` is not that default —
+/// `Priority` falls back to `p2` and `TrustState` to `unverified`, not their
+/// first variant.
+fn parse_wire<T>(text: &str, fallback: T) -> T
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value(serde_json::Value::String(text.to_string())).unwrap_or(fallback)
 }
