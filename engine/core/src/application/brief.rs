@@ -279,59 +279,62 @@ fn comment_body(comment: &Comment) -> String {
     comment.body.trim().to_string()
 }
 
-/// Python's `+g`: a positive number keeps its sign.
+/// Python's `+g`: the sign is kept, including on zero and on `nan`.
 fn signed(number: f64) -> String {
     let text = g(number);
-    if number > 0.0 {
-        format!("+{text}")
-    } else {
+    if text.starts_with('-') {
         text
+    } else {
+        format!("+{text}")
     }
 }
 
-/// Python's `format(n, "g")`: six significant digits, and the shorter of the
-/// fixed and the exponent form. The exponent form is two digits with its sign,
-/// and a trailing `.0` is dropped, so `1.0` reads `1`.
+/// Python's `format(n, "g")`. Rust's `e` format already rounds the way Python
+/// does (half to even, on the exact binary value), so this only applies the
+/// `%g` presentation rules on top of it: six significant digits, the fixed
+/// form when the exponent is between -4 and 5, a two-digit signed exponent
+/// otherwise, and trailing zeros dropped.
 fn g(number: f64) -> String {
-    if number == 0.0 {
-        // Python keeps the sign of a negative zero.
+    if number.is_nan() {
+        return "nan".to_string();
+    }
+    if number.is_infinite() {
         return if number.is_sign_negative() {
-            "-0".to_string()
+            "-inf".to_string()
         } else {
-            "0".to_string()
+            "inf".to_string()
         };
     }
     let negative = number.is_sign_negative();
-    let mut magnitude = number.abs();
-    let mut exponent = magnitude.log10().floor() as i32;
-    let precision = 6i32;
-    // Round to six significant digits before choosing the form, so a value
-    // that rounds up to the next power of ten crosses the threshold.
-    let unit = 10f64.powi(exponent - (precision - 1));
-    magnitude = (magnitude / unit).round() * unit;
-    if magnitude == 0.0 {
-        return "0".to_string();
-    }
-    exponent = magnitude.log10().floor() as i32;
-    let exponent_form = exponent < -4 || exponent >= precision;
-    let mut text = if exponent_form {
-        let mantissa = magnitude / 10f64.powi(exponent);
-        format!(
-            "{mantissa:.prec$}e{exponent:+03}",
-            prec = (precision - 1) as usize
-        )
-    } else {
-        let places = (precision - 1 - exponent).max(0) as usize;
-        format!("{magnitude:.places$}")
-    };
-    if exponent_form {
-        if let Some((mantissa, exp)) = text.split_once('e') {
-            let mantissa = mantissa.trim_end_matches('0').trim_end_matches('.');
-            text = format!("{mantissa}e{exp}");
+    let magnitude = number.abs();
+    // Precision 5 is the digits after the leading one, so six in all. The
+    // exponent here is decimal and already accounts for a carry from rounding.
+    let rendered = format!("{magnitude:.5e}");
+    let (mantissa, exponent) = rendered.split_once('e').expect("e format has an exponent");
+    let exponent: i32 = exponent.parse().expect("the exponent is a number");
+    let digits: String = mantissa.chars().filter(|char| *char != '.').collect();
+    let trimmed = digits.trim_end_matches('0');
+    let body = if trimmed.is_empty() { "0" } else { trimmed };
+    let text = if (-4..6).contains(&exponent) {
+        if exponent >= 0 {
+            let whole = body.len() as i32 - 1;
+            if whole <= exponent {
+                format!("{body}{}", "0".repeat((exponent - whole) as usize))
+            } else {
+                let at = exponent as usize + 1;
+                format!("{}.{}", &body[..at], &body[at..])
+            }
+        } else {
+            format!("0.{}{body}", "0".repeat((-exponent - 1) as usize))
         }
     } else {
-        text = text.trim_end_matches('0').trim_end_matches('.').to_string();
-    }
+        let rest = if body.len() > 1 {
+            format!(".{}", &body[1..])
+        } else {
+            String::new()
+        };
+        format!("{}{rest}e{exponent:+03}", &body[..1])
+    };
     if negative {
         format!("-{text}")
     } else {
