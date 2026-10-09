@@ -612,3 +612,73 @@ fn password_hash_of(password: &str) -> Result<String, VogtError> {
     let salt = random_array::<PASSWORD_SALT_BYTES>()?;
     auth::hash_password(password, &salt).map_err(VogtError::InvalidRequest)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refused login leaves the denial behind even though the write rolls
+    /// back, and the next correct password still signs in. Both are easy to get
+    /// wrong because the denial and the session live on different connections.
+    #[test]
+    fn a_wrong_password_is_recorded_and_the_right_one_signs_in() {
+        let dir = std::env::temp_dir().join(format!("vogt-login-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let mut config = crate::config::VogtConfig::default();
+        config = crate::config::VogtConfig {
+            data_dir: dir.clone(),
+            ..config
+        };
+        let built = crate::application::context::build_context(
+            config, None, None, None, None, None, None, None,
+        )
+        .unwrap();
+        let created = create_user_op(
+            &built,
+            serde_json::json!({
+                "username": "ada",
+                "password": "correct horse battery",
+                "scopes": "read",
+                "reason": "first user",
+            }),
+        )
+        .unwrap();
+        assert_eq!(created["user"]["username"], "ada");
+        assert_eq!(created["user"]["actor_identity_ref"], "human:ada");
+
+        let wrong = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": "nope"}),
+        )
+        .unwrap_err();
+        assert!(
+            wrong
+                .message()
+                .contains("unknown username or wrong password"),
+            "{wrong}"
+        );
+
+        let session = login_op(
+            &built,
+            serde_json::json!({"username": "ada", "password": "correct horse battery"}),
+        )
+        .unwrap();
+        assert_eq!(session["actor"]["identity_ref"], "human:ada");
+        assert_eq!(session["token"]["kind"], "session");
+        assert_eq!(session["token"]["scopes"], serde_json::json!(["read"]));
+        assert!(session["secret"].as_str().unwrap().starts_with("vogt_"));
+
+        let view = crate::with_ctx!(&built, |ctx| ctx.declared.read()).unwrap();
+        let decisions = view.list_auth_decisions(None, 10).unwrap();
+        let kinds: Vec<&str> = decisions
+            .iter()
+            .map(|decision| decision.reason_code.as_str())
+            .collect();
+        assert_eq!(kinds, vec!["login", "bad_password"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

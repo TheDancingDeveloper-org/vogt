@@ -1496,6 +1496,9 @@ mod tests {
         );
     }
 
+    /// `-5` is the value of the flag, not a new flag. The schema then rejects it
+    /// for being below the bound, which is what proves it was read as an integer
+    /// rather than refused as an unknown option.
     #[test]
     fn a_negative_number_is_a_value_not_a_flag() {
         let registry = default_registry();
