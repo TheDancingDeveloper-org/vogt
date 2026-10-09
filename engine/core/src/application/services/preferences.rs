@@ -176,12 +176,72 @@ fn validate_value(key: &str, value: &Value) -> Result<Value, VogtError> {
     if key == INBOX_FILTER_KEY {
         // An empty object is always valid: it is how a filter is cleared.
         if value.as_object().is_some_and(|object| !object.is_empty()) {
-            serde_json::from_value::<InboxSavedFilter>(value.clone()).map_err(|error| {
-                VogtError::InvalidPreference(format!("invalid {key} value — {error}"))
+            filter_problems(value).map_err(|problems| {
+                VogtError::InvalidPreference(format!("invalid {key} value — {problems}"))
             })?;
         }
     }
     Ok(value.clone())
+}
+
+/// Pydantic's wording for `InboxSavedFilter`, every problem joined by `; `.
+/// The model forbids unknown fields and takes `sources` from the inbox
+/// sources, `actor` from the actor filter.
+fn filter_problems(value: &Value) -> Result<(), String> {
+    const SOURCES: [&str; 4] = ["github", "drift", "ci", "agent"];
+    const ACTORS: [&str; 4] = ["any", "external", "org", "bot"];
+    const TRIAGE: [&str; 3] = ["active", "snoozed", "archived"];
+    let mut problems: Vec<String> = Vec::new();
+    let Some(object) = value.as_object() else {
+        return Ok(());
+    };
+    for (key, field) in object {
+        match key.as_str() {
+            "sources" => problems.extend(enum_list(
+                "sources",
+                field,
+                &SOURCES,
+                "'github', 'drift', 'ci' or 'agent'",
+            )),
+            "actor" => {
+                if !field.as_str().is_some_and(|text| ACTORS.contains(&text)) {
+                    problems.push(
+                        "actor: Input should be 'any', 'external', 'org' or 'bot'".to_string(),
+                    );
+                }
+            }
+            "triage_states" => problems.extend(enum_list(
+                "triage_states",
+                field,
+                &TRIAGE,
+                "'active', 'snoozed' or 'archived'",
+            )),
+            other => problems.push(format!("{other}: Extra inputs are not permitted")),
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("; "))
+    }
+}
+
+/// One list field constrained to an enum, in pydantic's words: a non-list is
+/// one problem, an empty list is "at least 1 item" only for `triage_states`,
+/// and each bad item is named by its index.
+fn enum_list(field: &str, value: &Value, allowed: &[&str], quoted: &str) -> Vec<String> {
+    let Some(items) = value.as_array() else {
+        return vec![format!("{field}: Input should be {quoted}")];
+    };
+    if items.is_empty() && field == "triage_states" {
+        return vec!["triage_states: List should have at least 1 item".to_string()];
+    }
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !item.as_str().is_some_and(|text| allowed.contains(&text)))
+        .map(|(index, _)| format!("{field}.{index}: Input should be {quoted}"))
+        .collect()
 }
 
 fn validate_key(key: &str) -> Result<(), VogtError> {
@@ -224,9 +284,10 @@ fn canonical_value(key: &str, value: &Value) -> Result<Value, VogtError> {
     if key != INBOX_FILTER_KEY || value.as_object().is_some_and(|object| object.is_empty()) {
         return Ok(value.clone());
     }
-    let parsed: InboxSavedFilter = serde_json::from_value(value.clone()).map_err(|error| {
-        VogtError::InvalidPreference(format!("invalid {INBOX_FILTER_KEY} value — {error}"))
+    filter_problems(value).map_err(|problems| {
+        VogtError::InvalidPreference(format!("invalid {INBOX_FILTER_KEY} value — {problems}"))
     })?;
+    let parsed: InboxSavedFilter = serde_json::from_value(value.clone()).expect("just validated");
     Ok(serde_json::to_value(parsed).expect("a parsed filter serialises"))
 }
 

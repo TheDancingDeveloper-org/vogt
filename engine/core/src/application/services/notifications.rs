@@ -44,14 +44,14 @@ where
         return Ok(json!({
             "notifications": [],
             "total": 0,
-            "unread": 0,
             "by_reason": {},
+            "unread": 0,
+            "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
             "freshness": crate::application::services::freshness::freshness_of(
                 observed,
                 now_of(&clock),
             )?,
             "detail": "no sweep has run; notifications are not collected",
-            "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
         }));
     }
     let project_id = match project.as_deref() {
@@ -120,11 +120,11 @@ where
     Ok(json!({
         "notifications": window,
         "total": total,
-        "unread": unread,
         "by_reason": by_reason,
+        "unread": unread,
+        "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
         "freshness": crate::application::services::freshness::freshness_of(observed, now_of(&clock))?,
         "detail": detail,
-        "scope": "the GitHub account whose token this instance is configured with; notifications are instance-scoped, not per-actor",
     }))
 }
 

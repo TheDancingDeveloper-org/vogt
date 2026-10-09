@@ -282,7 +282,7 @@ where
         let linked = view
             .list_projects(10_000, 0)?
             .into_iter()
-            .any(|project| project.repo_url.is_some());
+            .any(|project| project.link_state == crate::core::LinkState::Linked);
         (initiative, linked)
     };
     if linked {

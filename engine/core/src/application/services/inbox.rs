@@ -28,6 +28,8 @@ use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 
 const MAX_SCAN: i64 = 10_000;
+/// Bound overlays considered per read. Python's `ci_watch.MAX_BOUND`.
+const MAX_BOUND: i64 = 500;
 const KIND_TASK_RUN: &str = "agent_task.run";
 const REF_FAILURE_KIND: &str = "ci.ref_failure";
 const BRANCH_CONCLUDED_KIND: &str = "ci.branch_concluded";
@@ -406,6 +408,7 @@ where
             },
         };
         entries.push(observation_entry(
+            ctx,
             observation,
             &projects,
             &links,
@@ -447,7 +450,7 @@ where
             "status": observation.payload.get("status"),
             "outcome": observation.payload.get("state"),
         });
-        let (trust, freshness) = freshness(observation.observed_at, now_of(&ctx.clock));
+        let (trust, freshness) = freshness(observation.observed_at, ctx);
         entries.push(entry(EntrySpec {
             entry_key: format!("agent:{}:{}", observation.subject_key, digest_of(&material)),
             source: "agent",
@@ -509,12 +512,7 @@ where
             continue;
         }
         alerted.insert(failure.observation.id.clone());
-        entries.push(ref_failure_entry(
-            &failure,
-            &projects,
-            &links,
-            now_of(&ctx.clock),
-        ));
+        entries.push(ref_failure_entry(ctx, &failure, &projects, &links));
     }
 
     for observation in &repo_checks {
@@ -549,6 +547,7 @@ where
         let check = text(observation.payload.get("check")).unwrap_or("CI check");
         let revision = text(observation.payload.get("revision")).unwrap_or("unknown revision");
         entries.push(observation_entry(
+            ctx,
             observation,
             &projects,
             &links,
@@ -560,10 +559,65 @@ where
         ));
     }
 
-    // Bound branches (WI-855) and the live engine session list (blocked sessions,
-    // approval dialogs) are not ported. A pending grant is: it lives in the
-    // declared store, and a target that is not in the live list is exactly the
+    // The live engine session list (blocked sessions, approval dialogs) is not
+    // ported. Bound branches are: their verdict comes from the checks already
+    // read and the declared overlays, so no live engine is involved. A pending
+    // grant is too, and a target that is not in the live list is exactly the
     // entry Python builds for a session that is not running now.
+    let mut checks_by_branch: BTreeMap<(String, String), Vec<Observation>> = BTreeMap::new();
+    for observation in &checks_all {
+        let Some(project_id) = observation.project_id.clone() else {
+            continue;
+        };
+        let Some(branch) = text(observation.payload.get("branch")) else {
+            continue;
+        };
+        if branch.is_empty() {
+            continue;
+        }
+        checks_by_branch
+            .entry((project_id, branch.to_string()))
+            .or_default()
+            .push((*observation).clone());
+    }
+    for overlay in view.bound_branch_overlays(MAX_BOUND)? {
+        let mut settled: Vec<(String, decisions::BranchCi)> = Vec::new();
+        for branch in &overlay.branches {
+            let Some(runs) = checks_by_branch.get(&(overlay.project_id.clone(), branch.clone()))
+            else {
+                continue;
+            };
+            if let Some(ci) = decisions::branch_ci(runs, branch) {
+                settled.push((branch.clone(), ci));
+            }
+        }
+        if settled.is_empty() {
+            continue;
+        }
+        let item = view.work_item_by_ref(&overlay.subject_key)?;
+        let state = item
+            .as_ref()
+            .map(|item| item.state.to_string())
+            .or(overlay.workflow_state.clone());
+        if state
+            .as_deref()
+            .is_some_and(|state| crate::core::TERMINAL_STATES.contains(&state))
+        {
+            continue;
+        }
+        for (branch, ci) in settled {
+            if matches!(
+                ci.state,
+                decisions::BranchState::Passed
+                    | decisions::BranchState::Failed
+                    | decisions::BranchState::Cancelled
+            ) && projects.contains_key(&overlay.project_id)
+            {
+                entries.push(bound_branch_entry(ctx, &overlay, &branch, &ci, &projects));
+            }
+        }
+    }
+
     for grant in view.list_session_grants(Some("pending"), None, MAX_SCAN)? {
         if grant.effective_state(now_of(&ctx.clock)) == "pending" {
             entries.push(grant_entry(view, &grant, &projects)?);
@@ -579,7 +633,7 @@ where
             MAX_SCAN,
         )?;
         for lane in &lanes {
-            if let Some(entry) = deploy_lane_entry(lane, &projects, now_of(&ctx.clock)) {
+            if let Some(entry) = deploy_lane_entry(ctx, lane, &projects) {
                 entries.push(entry);
             }
         }
@@ -614,7 +668,7 @@ struct EntrySpec<'a> {
     work_item_ref: Option<&'a str>,
     source_subject_key: &'a str,
     source_url: Option<&'a str>,
-    trust_state: &'a str,
+    trust_state: String,
     freshness: &'a str,
     action: Value,
     actor: &'a ActorClass,
@@ -663,7 +717,8 @@ fn entry(spec: EntrySpec<'_>) -> Value {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn observation_entry(
+fn observation_entry<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
     observation: &Observation,
     projects: &BTreeMap<String, Project>,
     links: &BTreeMap<String, String>,
@@ -688,6 +743,7 @@ fn observation_entry(
         "source_url": observation.source_url,
         "payload": payload,
     });
+    let (trust, freshness) = freshness(observation.observed_at, ctx);
     entry(EntrySpec {
         entry_key: format!(
             "{source}:{}:{}",
@@ -704,8 +760,8 @@ fn observation_entry(
         work_item_ref: links.get(&observation.subject_key).map(String::as_str),
         source_subject_key: &observation.subject_key,
         source_url: observation.source_url.as_deref(),
-        trust_state: "unverified",
-        freshness: "unknown",
+        trust_state: trust,
+        freshness,
         action: action_of(
             "observation",
             json!({"subject_key": observation.subject_key}),
@@ -715,11 +771,11 @@ fn observation_entry(
     })
 }
 
-fn ref_failure_entry(
+fn ref_failure_entry<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
     failure: &decisions::RefFailure,
     projects: &BTreeMap<String, Project>,
     links: &BTreeMap<String, String>,
-    now: Moment,
 ) -> Value {
     let observation = &failure.observation;
     let payload = &observation.payload;
@@ -779,7 +835,7 @@ fn ref_failure_entry(
         "run_number": payload.get("run_number"),
         "conclusion": failure.conclusion,
     });
-    let (trust, freshness) = freshness(observation.observed_at, now);
+    let (trust, freshness) = freshness(observation.observed_at, ctx);
     entry(EntrySpec {
         entry_key: format!(
             "ci:ref:{}:{}",
@@ -807,10 +863,10 @@ fn ref_failure_entry(
     })
 }
 
-fn deploy_lane_entry(
+fn deploy_lane_entry<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
     observation: &Observation,
     projects: &BTreeMap<String, Project>,
-    now: Moment,
 ) -> Option<Value> {
     let receipt = observation.payload.get("receipt")?.as_object()?;
     if receipt.get("status").and_then(Value::as_str) != Some("failed") {
@@ -824,7 +880,7 @@ fn deploy_lane_entry(
     let sha = text(receipt.get("source_sha")).unwrap_or("unknown revision");
     let tag = text(receipt.get("source_tag"));
     let material = json!({"subject_key": observation.subject_key, "receipt": receipt});
-    let (trust, freshness) = freshness(observation.observed_at, now);
+    let (trust, freshness) = freshness(observation.observed_at, ctx);
     Some(entry(EntrySpec {
         entry_key: format!("ci:deploy:{}:{}", observation.subject_key, digest_of(&material)),
         source: "ci",
@@ -867,6 +923,83 @@ fn action_of(kind: &str, fields: Value) -> Value {
     action
 }
 
+/// CI settled on a branch a work item is bound to — pass or fail.
+fn bound_branch_entry<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    overlay: &crate::core::WorkOverlay,
+    branch: &str,
+    ci: &decisions::BranchCi,
+    projects: &BTreeMap<String, Project>,
+) -> Value {
+    let project = projects.get(&overlay.project_id);
+    let newest = ci
+        .runs
+        .iter()
+        .max_by_key(|run| run.observation.observed_at)
+        .expect("a settled branch has runs");
+    let failing_url = ci.runs.iter().find_map(|run| {
+        (ci.failing.contains(&run.workflow))
+            .then(|| run.observation.source_url.clone())
+            .flatten()
+    });
+    let state = match ci.state {
+        decisions::BranchState::Failed => "failed",
+        decisions::BranchState::Passed => "passed",
+        decisions::BranchState::Cancelled => "cancelled",
+        decisions::BranchState::Running => "running",
+    };
+    let head = match ci.state {
+        decisions::BranchState::Failed => format!("Failing: {}.", ci.failing.join(", ")),
+        decisions::BranchState::Passed => format!("All {} workflow(s) passed.", ci.runs.len()),
+        _ => "Every run on the revision was cancelled.".to_string(),
+    };
+    let short = if ci.revision.len() > 12 {
+        &ci.revision[..12]
+    } else {
+        &ci.revision
+    };
+    let summary = truncate(
+        &format!("{head} {branch} @ {short} for {}.", overlay.subject_key),
+        1000,
+    );
+    let material = json!({
+        "branch": branch,
+        "revision": ci.revision,
+        "state": state,
+        "runs": ci.runs.iter().map(|run| json!([run.workflow, run.conclusion])).collect::<Vec<_>>(),
+    });
+    let (trust, freshness) = freshness(newest.observation.observed_at, ctx);
+    let subject = format!("ci-branch:{}:{branch}", overlay.subject_key);
+    let occurred = ci
+        .concluded_at
+        .as_deref()
+        .and_then(|text| crate::core::from_iso(text).ok())
+        .unwrap_or(newest.observation.observed_at);
+    entry(EntrySpec {
+        entry_key: format!("ci:branch:{subject}:{}", digest_of(&material)),
+        source: "ci",
+        kind: "ci.branch_concluded",
+        occurred_at: Some(occurred),
+        observed_at: Some(newest.observation.observed_at),
+        title: &format!("CI {state} on {branch}"),
+        summary: &summary,
+        project_slug: project.map(|project| project.slug.as_str()),
+        work_item_ref: Some(&overlay.subject_key),
+        source_subject_key: &newest.observation.subject_key,
+        source_url: failing_url
+            .as_deref()
+            .or(newest.observation.source_url.as_deref()),
+        trust_state: trust,
+        freshness,
+        action: action_of(
+            "observation",
+            json!({"subject_key": newest.observation.subject_key}),
+        ),
+        actor: &actors::system_actor(),
+        extra: json!({}),
+    })
+}
+
 /// A grant a session asked for and a person has yet to decide. The target's
 /// live detail is absent here — `Built` carries no session list — which is the
 /// same entry Python builds when the session is not running now.
@@ -898,9 +1031,9 @@ fn grant_entry(
     };
     let item = format!(
         "{} (project {}) as {}",
-        grant.secret_name.as_deref().unwrap_or(""),
-        grant.project_id.as_deref().unwrap_or(""),
-        grant.var.as_deref().unwrap_or("")
+        py_none(grant.secret_name.as_deref()),
+        py_none(grant.project_id.as_deref()),
+        py_none(grant.var.as_deref())
     );
     let uses = if grant.uses.to_string() == "once" {
         "one fetch"
@@ -918,7 +1051,12 @@ fn grant_entry(
     );
     let requester = view.actor_by_identity(&grant.requested_by)?;
     let actor = ActorClass {
-        login: Some(grant.requested_by.clone()),
+        login: Some(
+            requester
+                .as_ref()
+                .map(|actor| actor.identity_ref.clone())
+                .unwrap_or_else(|| grant.requested_by.clone()),
+        ),
         kind: Some(match &requester {
             Some(actor) if actor.kind == crate::core::ActorKind::Human => actors::ActorKind::Human,
             _ => actors::ActorKind::Bot,
@@ -933,14 +1071,14 @@ fn grant_entry(
         observed_at: None,
         title: &format!(
             "Grant request: {} for session {label}",
-            grant.secret_name.as_deref().unwrap_or("")
+            py_none(grant.secret_name.as_deref())
         ),
         summary: &summary,
         project_slug: project.map(|project| project.slug.as_str()),
         work_item_ref: None,
         source_subject_key: &grant.id,
         source_url: None,
-        trust_state: "unverified",
+        trust_state: "unverified".to_string(),
         freshness: "live",
         action: action_of(
             "grant",
@@ -972,6 +1110,11 @@ fn grant_entry(
     }))
 }
 
+/// Python renders a missing optional as the literal `None`.
+fn py_none(value: Option<&str>) -> &str {
+    value.unwrap_or("None")
+}
+
 fn drift_entry(
     view: &impl ReadView,
     proposal: &DriftProposal,
@@ -1000,7 +1143,7 @@ fn drift_entry(
         work_item_ref: reference.as_deref(),
         source_subject_key: &proposal.id,
         source_url: None,
-        trust_state: "disputed",
+        trust_state: "disputed".to_string(),
         freshness: "current",
         action: action_of("drift", json!({"drift_id": proposal.id})),
         actor: &actors::system_actor(),
@@ -1011,12 +1154,24 @@ fn drift_entry(
     }))
 }
 
-/// `views.trust_for` is not ported. An observation's trust is therefore reported
-/// as unknown rather than guessed; drift proposals carry their own disputed
-/// state, which does not depend on it.
-fn freshness(observed_at: Moment, now: Moment) -> (&'static str, &'static str) {
-    let _ = (observed_at, now);
-    ("unverified", "unknown")
+/// `views.trust_for`: verified while the observation is inside the verify
+/// horizon, stale past it. Freshness is current only when verified.
+fn freshness<C: Clock, I: IdFactory>(
+    observed_at: Moment,
+    ctx: &AppContext<C, I>,
+) -> (String, &'static str) {
+    let horizon = ctx.config.verify_horizon_hours * 3600;
+    let trust = if now_of(&ctx.clock).unix_seconds() - observed_at.unix_seconds() <= horizon {
+        "verified"
+    } else {
+        "stale"
+    };
+    let freshness = if trust == "verified" {
+        "current"
+    } else {
+        "stale"
+    };
+    (trust.to_string(), freshness)
 }
 
 fn apply_triage(decisions: &BTreeMap<String, InboxTriage>, mut entry: Value, now: Moment) -> Value {
@@ -1313,8 +1468,8 @@ where
             "status": "current",
             "count": entries.iter().filter(|entry| text_of(entry, "source") == "drift").count(),
             "observed_at": Value::Null,
+            "projects": 0,
             "registered": registered,
-        "projects": registered,
             "detail": "open proposals in the declared store",
         }),
     );
@@ -1325,8 +1480,8 @@ where
             "status": if engine_configured { "current" } else { "unconfigured" },
             "count": entries.iter().filter(|entry| text_of(entry, "source") == "agent").count(),
             "observed_at": Value::Null,
+            "projects": 0,
             "registered": registered,
-        "projects": registered,
             "detail": if engine_configured { Value::Null } else { json!("no session engine is configured") },
         }),
     );
@@ -1339,8 +1494,8 @@ fn coverage_row(source: &str, sweep: Option<&Sweep>, entries: &[Value], register
         "status": sweep.map(|sweep| sweep.outcome.to_string()).unwrap_or_else(|| "unswept".to_string()),
         "count": entries.iter().filter(|entry| text_of(entry, "source") == source).count(),
         "observed_at": sweep.and_then(|sweep| sweep.finished_at).map(|moment| moment.to_json()),
+        "projects": 0,
         "registered": registered,
-        "projects": registered,
         "detail": match sweep {
             Some(_) => Value::Null,
             None => json!("this collector has not completed a sweep"),
