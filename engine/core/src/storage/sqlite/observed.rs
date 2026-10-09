@@ -7,7 +7,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 
@@ -33,8 +33,8 @@ pub struct SqliteObservedStore<C, I> {
     path: PathBuf,
     /// Shared with the context and the declared store, so one tick or one draw
     /// advances the count everyone else sees.
-    clock: Rc<std::cell::RefCell<C>>,
-    ids: Rc<std::cell::RefCell<I>>,
+    clock: Arc<std::sync::Mutex<C>>,
+    ids: Arc<std::sync::Mutex<I>>,
     synchronous: String,
     has_evidence_cached: Cell<bool>,
 }
@@ -48,8 +48,8 @@ where
     pub fn new(path: PathBuf, clock: C, ids: I) -> Self {
         Self::shared(
             path,
-            Rc::new(std::cell::RefCell::new(clock)),
-            Rc::new(std::cell::RefCell::new(ids)),
+            Arc::new(std::sync::Mutex::new(clock)),
+            Arc::new(std::sync::Mutex::new(ids)),
             crate::storage::sqlite::connection::DEFAULT_SYNCHRONOUS,
         )
     }
@@ -57,8 +57,8 @@ where
     /// A store over a clock and an id factory something else also holds.
     pub fn shared(
         path: PathBuf,
-        clock: Rc<std::cell::RefCell<C>>,
-        ids: Rc<std::cell::RefCell<I>>,
+        clock: Arc<std::sync::Mutex<C>>,
+        ids: Arc<std::sync::Mutex<I>>,
         synchronous: &str,
     ) -> Self {
         Self {
@@ -75,7 +75,10 @@ where
     }
 
     fn next_id(&self, prefix: &str) -> String {
-        self.ids.borrow_mut().next(prefix)
+        self.ids
+            .lock()
+            .expect("the shared clock and ids are not poisoned")
+            .next(prefix)
     }
 }
 
@@ -85,7 +88,11 @@ where
     I: IdFactory,
 {
     fn migrate(&self) -> Result<MigrationReport, VogtError> {
-        let now = self.clock.borrow_mut().now();
+        let now = self
+            .clock
+            .lock()
+            .expect("the shared clock and ids are not poisoned")
+            .now();
         let mut conn = self.open(true)?;
         let holder = format!("{}/{}", hostname(), std::process::id());
         migrator::migrate(
@@ -141,7 +148,12 @@ where
                 "INSERT INTO meta (key, value) VALUES (?, ?)",
                 params![
                     META_CREATED_AT,
-                    crate::core::to_iso(self.clock.borrow_mut().now())
+                    crate::core::to_iso(
+                        self.clock
+                            .lock()
+                            .expect("the shared clock and ids are not poisoned")
+                            .now()
+                    )
                 ],
             )?;
             Ok(())

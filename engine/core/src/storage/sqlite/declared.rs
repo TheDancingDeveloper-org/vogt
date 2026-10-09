@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -58,8 +58,8 @@ pub struct SqliteDeclaredStore<C, I> {
     /// hands one clock and one id factory to both stores, and each draw or tick
     /// must be visible to the others — a clone rewrites `test-ids.json` from its
     /// own counts and loses theirs.
-    clock: Rc<std::cell::RefCell<C>>,
-    ids: Rc<std::cell::RefCell<I>>,
+    clock: Arc<std::sync::Mutex<C>>,
+    ids: Arc<std::sync::Mutex<I>>,
     synchronous: String,
 }
 
@@ -72,8 +72,8 @@ where
     pub fn new(path: PathBuf, clock: C, ids: I) -> Self {
         Self::shared(
             path,
-            Rc::new(std::cell::RefCell::new(clock)),
-            Rc::new(std::cell::RefCell::new(ids)),
+            Arc::new(std::sync::Mutex::new(clock)),
+            Arc::new(std::sync::Mutex::new(ids)),
             crate::storage::sqlite::connection::DEFAULT_SYNCHRONOUS,
         )
     }
@@ -81,8 +81,8 @@ where
     /// A store over a clock and an id factory something else also holds.
     pub fn shared(
         path: PathBuf,
-        clock: Rc<std::cell::RefCell<C>>,
-        ids: Rc<std::cell::RefCell<I>>,
+        clock: Arc<std::sync::Mutex<C>>,
+        ids: Arc<std::sync::Mutex<I>>,
         synchronous: &str,
     ) -> Self {
         Self {
@@ -94,13 +94,13 @@ where
     }
 
     /// The clock this store ticks. The context holds the same one.
-    pub fn clock(&self) -> &Rc<std::cell::RefCell<C>> {
+    pub fn clock(&self) -> &Arc<std::sync::Mutex<C>> {
         &self.clock
     }
 
     /// The id factory this store counts with. The context holds the same one,
     /// because a second factory starts again at one and the two collide.
-    pub fn id_factory(&self) -> &Rc<std::cell::RefCell<I>> {
+    pub fn id_factory(&self) -> &Arc<std::sync::Mutex<I>> {
         &self.ids
     }
 
@@ -151,7 +151,11 @@ where
         // calls the clock once and stamps both the migration rows and the
         // seeded workflows with it. A wall clock here puts every later
         // bootstrap timestamp one second early under a stepped test clock.
-        let now = self.clock.borrow_mut().now();
+        let now = self
+            .clock
+            .lock()
+            .expect("the shared clock and ids are not poisoned")
+            .now();
         let mut conn = self.open(true)?;
         let holder = format!(
             "{}/{}",
@@ -201,11 +205,31 @@ where
             }
             // Allocated after the check: a refused re-init must not burn ids,
             // and the clock tick belongs to the instance that was created.
-            let now = self.clock.borrow_mut().now();
-            let instance_id = self.ids.borrow_mut().next("ins");
-            let actor_id = self.ids.borrow_mut().next("act");
-            let audit_id = self.ids.borrow_mut().next("aud");
-            let txn_id = self.ids.borrow_mut().next("txn");
+            let now = self
+                .clock
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .now();
+            let instance_id = self
+                .ids
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .next("ins");
+            let actor_id = self
+                .ids
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .next("act");
+            let audit_id = self
+                .ids
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .next("aud");
+            let txn_id = self
+                .ids
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .next("txn");
             meta_set(&conn, META_INSTANCE_ID, &instance_id)?;
             meta_set(&conn, META_REVISION, "0")?;
             meta_set(&conn, META_WORK_REF_SEQ, "0")?;
@@ -352,7 +376,11 @@ where
         // SqliteWriteTxn for the append, and under a sequential id factory
         // every later audit's txn id counts the publishes that came first.
         let conn = self.open_initialized()?;
-        let _txn_id = self.ids.borrow_mut().next("txn");
+        let _txn_id = self
+            .ids
+            .lock()
+            .expect("the shared clock and ids are not poisoned")
+            .next("txn");
         conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
         let outcome = (|| -> Result<Event, rusqlite::Error> {
             let rendered = crate::decisions::python_json_dumps(summary, false);
@@ -400,13 +428,17 @@ where
         let revision = meta_counter(&conn, META_REVISION)? + 1;
         meta_set(&conn, META_REVISION, &revision.to_string())?;
         // The id comes after the instance check, so a refused write burns none.
-        let txn_id = self.ids.borrow_mut().next("txn");
+        let txn_id = self
+            .ids
+            .lock()
+            .expect("the shared clock and ids are not poisoned")
+            .next("txn");
         Ok(SqliteWrite {
             view: SqliteReadView {
                 conn,
                 workflow_cache: std::cell::RefCell::new(BTreeMap::new()),
             },
-            ids: Rc::clone(&self.ids),
+            ids: Arc::clone(&self.ids),
             txn_id,
             revision,
             open: true,
@@ -420,7 +452,7 @@ pub struct SqliteReadView {
 }
 pub struct SqliteWrite<I: IdFactory> {
     view: SqliteReadView,
-    ids: Rc<std::cell::RefCell<I>>,
+    ids: Arc<std::sync::Mutex<I>>,
     txn_id: String,
     revision: i64,
     open: bool,
@@ -1859,7 +1891,11 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             if self.view.actor_by_id(&actor.id)?.is_some() {
                 // The id belongs to a different person here. The carried actor
                 // takes a fresh id rather than merging the two.
-                inserted.id = self.ids.borrow_mut().next("act");
+                inserted.id = self
+                    .ids
+                    .lock()
+                    .expect("the shared clock and ids are not poisoned")
+                    .next("act");
             }
             insert_actor(&self.view.conn, &inserted)?;
             actor_map.insert(actor.id.clone(), inserted.id);
@@ -1961,7 +1997,12 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
             if clash.is_some() {
                 // Another secret already holds this id. The carried token keeps
                 // its secret and takes a fresh id.
-                row["id"] = serde_json::Value::String(self.ids.borrow_mut().next("tok"));
+                row["id"] = serde_json::Value::String(
+                    self.ids
+                        .lock()
+                        .expect("the shared clock and ids are not poisoned")
+                        .next("tok"),
+                );
             }
             insert_carry_row(&self.view.conn, "tokens", TOKEN_CARRY_COLUMNS, &row)?;
         }
@@ -2274,7 +2315,11 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
         // The store owns the record's identity: the caller supplies who did
         // what and why, and the transaction supplies the id, txn and revision.
         let stored = AuditRecord {
-            id: self.ids.borrow_mut().next("aud"),
+            id: self
+                .ids
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .next("aud"),
             txn_id: self.txn_id.clone(),
             revision: self.revision,
             actor_id: actor.id.clone(),
@@ -3369,7 +3414,11 @@ mod tests {
     ) -> Project {
         let now = moment();
         Project::new(
-            &store.ids.borrow_mut().next("prj"),
+            &store
+                .ids
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .next("prj"),
             slug,
             slug,
             &format!("/srv/{slug}"),
@@ -3433,13 +3482,21 @@ mod tests {
         let store = store(&dir);
         let now = moment();
         let label = Label {
-            id: store.ids.borrow_mut().next("lbl"),
+            id: store
+                .ids
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .next("lbl"),
             name: "backend".into(),
             color: Some("blue".into()),
             created_at: now,
         };
         let initiative = Initiative {
-            id: store.ids.borrow_mut().next("ini"),
+            id: store
+                .ids
+                .lock()
+                .expect("the shared clock and ids are not poisoned")
+                .next("ini"),
             slug: "north".into(),
             title: "North".into(),
             body: "the plan".into(),

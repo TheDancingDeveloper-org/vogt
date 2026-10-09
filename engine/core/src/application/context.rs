@@ -9,8 +9,8 @@
 //! with the same concrete types, so a context states which it holds.
 
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::adapters::engine::EngineClient;
 use crate::adapters::git::{
@@ -55,10 +55,10 @@ pub struct AppContext<C, I> {
     /// principal is still the identity.
     pub token: Option<Token>,
     /// The one clock, shared with both stores. A clone would tick on its own.
-    pub clock: Rc<std::cell::RefCell<C>>,
+    pub clock: Arc<std::sync::Mutex<C>>,
     /// The one id factory, shared with both stores. `SequentialIds` persists its
     /// counts, and a copy rewrites the file from what it alone has drawn.
-    pub id_factory: Rc<std::cell::RefCell<I>>,
+    pub id_factory: Arc<std::sync::Mutex<I>>,
     pub cloner: Cloner,
     pub pusher: Pusher,
     /// The session engine, or `None` when none is configured. `None` is not an
@@ -282,20 +282,20 @@ where
             None,
         )
     });
-    let clock = Rc::new(std::cell::RefCell::new(clock));
-    let ids = Rc::new(std::cell::RefCell::new(ids));
+    let clock = Arc::new(std::sync::Mutex::new(clock));
+    let ids = Arc::new(std::sync::Mutex::new(ids));
     let synchronous = config.sqlite_synchronous.as_str();
     AppContext {
         declared: SqliteDeclaredStore::shared(
             config.declared_db_path(),
-            Rc::clone(&clock),
-            Rc::clone(&ids),
+            Arc::clone(&clock),
+            Arc::clone(&ids),
             synchronous,
         ),
         observed: SqliteObservedStore::shared(
             config.observed_db_path(),
-            Rc::clone(&clock),
-            Rc::clone(&ids),
+            Arc::clone(&clock),
+            Arc::clone(&ids),
             synchronous,
         ),
         principal: resolved,
@@ -336,21 +336,21 @@ where
     AppContext {
         declared: SqliteDeclaredStore::shared(
             data_dir.join(crate::storage::sqlite::DECLARED_DB_NAME),
-            Rc::clone(&ctx.clock),
-            Rc::clone(&ctx.id_factory),
+            Arc::clone(&ctx.clock),
+            Arc::clone(&ctx.id_factory),
             synchronous,
         ),
         observed: SqliteObservedStore::shared(
             data_dir.join(crate::storage::sqlite::OBSERVED_DB_NAME),
-            Rc::clone(&ctx.clock),
-            Rc::clone(&ctx.id_factory),
+            Arc::clone(&ctx.clock),
+            Arc::clone(&ctx.id_factory),
             synchronous,
         ),
         config,
         principal: ctx.principal.clone(),
         token: ctx.token.clone(),
-        clock: Rc::clone(&ctx.clock),
-        id_factory: Rc::clone(&ctx.id_factory),
+        clock: Arc::clone(&ctx.clock),
+        id_factory: Arc::clone(&ctx.id_factory),
         cloner: ctx.cloner,
         pusher: ctx.pusher,
         engine: None,
@@ -370,7 +370,7 @@ pub fn write_of<C, I>(
     crate::application::writes::WriteContext::new(
         &ctx.declared,
         &ctx.principal,
-        Rc::clone(&ctx.clock),
-        Rc::clone(&ctx.id_factory),
+        Arc::clone(&ctx.clock),
+        Arc::clone(&ctx.id_factory),
     )
 }

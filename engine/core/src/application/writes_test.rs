@@ -4,7 +4,7 @@
 //! alone — a service layer does not exist yet — and the messages
 //! `_resolve.py` produces for a name that is not there.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::json;
 
@@ -58,8 +58,8 @@ fn writing<'a>(
         // The principal has to outlive the context, so it is leaked for the
         // test. Each test builds one.
         Box::leak(Box::new(principal)),
-        Rc::clone(store.clock()),
-        Rc::clone(store.id_factory()),
+        Arc::clone(store.clock()),
+        Arc::clone(store.id_factory()),
     )
 }
 

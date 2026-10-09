@@ -13,7 +13,7 @@
 
 use serde_json::{json, Value};
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::core::{Actor, Clock, IdFactory};
 use crate::decisions::digest_of;
@@ -82,16 +82,16 @@ pub struct WriteContext<'a, C, I, D> {
     principal_display_name: &'a str,
     /// Shared with the stores, so a body that draws an id continues the count
     /// the store itself has already advanced.
-    clock: Rc<std::cell::RefCell<C>>,
-    ids: Rc<std::cell::RefCell<I>>,
+    clock: Arc<std::sync::Mutex<C>>,
+    ids: Arc<std::sync::Mutex<I>>,
 }
 
 impl<'a, C, I, D> WriteContext<'a, C, I, D> {
     pub(crate) fn new(
         declared: &'a D,
         principal: &'a crate::core::Principal,
-        clock: Rc<std::cell::RefCell<C>>,
-        ids: Rc<std::cell::RefCell<I>>,
+        clock: Arc<std::sync::Mutex<C>>,
+        ids: Arc<std::sync::Mutex<I>>,
     ) -> Self {
         Self {
             declared,
@@ -114,8 +114,8 @@ pub fn ensure_actor<C, I, T>(
     identity_ref: &str,
     kind: crate::core::ActorKind,
     display_name: &str,
-    clock: &Rc<std::cell::RefCell<C>>,
-    ids: &Rc<std::cell::RefCell<I>>,
+    clock: &Arc<std::sync::Mutex<C>>,
+    ids: &Arc<std::sync::Mutex<I>>,
 ) -> Result<Actor, VogtError>
 where
     C: Clock,
@@ -125,9 +125,15 @@ where
     if let Some(existing) = txn.actor_by_identity(identity_ref)? {
         return Ok(existing);
     }
-    let now = clock.borrow_mut().now();
+    let now = clock
+        .lock()
+        .expect("the shared clock and ids are not poisoned")
+        .now();
     let actor = Actor {
-        id: ids.borrow_mut().next("act"),
+        id: ids
+            .lock()
+            .expect("the shared clock and ids are not poisoned")
+            .next("act"),
         kind,
         display_name: display_name.to_string(),
         identity_ref: identity_ref.to_string(),
@@ -194,8 +200,8 @@ where
     F: FnOnce(
         &mut D::Write<'_>,
         &Actor,
-        &Rc<std::cell::RefCell<C>>,
-        &Rc<std::cell::RefCell<I>>,
+        &Arc<std::sync::Mutex<C>>,
+        &Arc<std::sync::Mutex<I>>,
     ) -> Result<WriteOutcome<T>, VogtError>,
 {
     let cleaned = validate_reason(reason)?;
@@ -209,7 +215,11 @@ where
         &ctx.ids,
     )?;
     let outcome = body(&mut txn, &actor, &ctx.clock, &ctx.ids)?;
-    let now = ctx.clock.borrow_mut().now();
+    let now = ctx
+        .clock
+        .lock()
+        .expect("the shared clock and ids are not poisoned")
+        .now();
     let record = txn.append_audit(
         &actor,
         operation,
@@ -264,7 +274,11 @@ where
         &ctx.clock,
         &ctx.ids,
     )?;
-    let now = ctx.clock.borrow_mut().now();
+    let now = ctx
+        .clock
+        .lock()
+        .expect("the shared clock and ids are not poisoned")
+        .now();
     let record = txn.append_audit(
         &actor,
         operation,
