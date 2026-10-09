@@ -106,6 +106,92 @@
    }
   },
   {
+   "operation": "project.create",
+   "params": {
+    "name": "Parity",
+    "root_path": "{root}/proj",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "project.get",
+   "params": {
+    "slug": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "project.list",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "project.update",
+   "params": {
+    "slug": "parity",
+    "repo_url": "https://example.invalid/parity.git",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "project.transition",
+   "params": {
+    "slug": "parity",
+    "to_state": "active",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "project.scaffold",
+   "params": {
+    "project": "parity",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "project.brief",
+   "params": {
+    "slug": "parity"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "project.register",
+   "params": {
+    "name": "Second",
+    "root_path": "{root}/second",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "place.metrics",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
    "operation": "initiative.create",
    "params": {
     "title": "Platform",

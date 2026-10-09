@@ -718,8 +718,15 @@ fn ci_summary<C: Clock, I: IdFactory>(
     project_id: &str,
 ) -> Result<Value, VogtError> {
     if !ctx.observed.has_evidence_tables()? {
+        // `status` keeps its model default and is omitted: Python's
+        // `exclude_defaults` drops it, so emitting it here would be a key the
+        // other side never returns.
         return Ok(json!({
-            "status": "not_collected",
+            "checks": 0,
+            "failing": [],
+            "revision": Value::Null,
+            "revisions_observed": 0,
+            "earlier_failures": 0,
             "detail": "no sweep has run; CI status is not collected",
         }));
     }
@@ -733,6 +740,11 @@ fn ci_summary<C: Clock, I: IdFactory>(
     let Some(rollup) = roll_up(&checks) else {
         return Ok(json!({
             "status": "no_checks",
+            "checks": 0,
+            "failing": [],
+            "revision": Value::Null,
+            "revisions_observed": 0,
+            "earlier_failures": 0,
             "detail": "swept, but no CI checks were observed — either this project has none, or the optional forge adapter is not configured",
         }));
     };
@@ -763,6 +775,9 @@ fn dependency_summary<C: Clock, I: IdFactory>(
     if !ctx.observed.has_evidence_tables()? {
         return Ok(json!({
             "status": "not_collected",
+            "references_out": 0,
+            "referenced_by": 0,
+            "unresolved": 0,
             "detail": "no sweep has run; dependency references are not collected",
         }));
     }
@@ -776,6 +791,9 @@ fn dependency_summary<C: Clock, I: IdFactory>(
     if walked.is_empty() {
         return Ok(json!({
             "status": "not_collected",
+            "references_out": 0,
+            "referenced_by": 0,
+            "unresolved": 0,
             "detail": "`dep-refs` has not walked this project; its references are not collected, which is not the same as none",
         }));
     }
