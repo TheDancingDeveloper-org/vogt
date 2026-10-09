@@ -123,6 +123,7 @@ pub type ServiceFn = fn(
 /// landing adds one arm and touches none of the four transports that call it.
 pub fn service_for(name: &str) -> Option<ServiceFn> {
     match name {
+        "migrate" => Some(crate::application::instance::migrate_op),
         "status" => Some(crate::application::instance::status_op),
         _ => None,
     }

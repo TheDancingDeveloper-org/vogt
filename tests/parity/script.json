@@ -9,6 +9,13 @@
       }
     },
     {
+      "operation": "migrate",
+      "params": {},
+      "expect": {
+        "exit": 0
+      }
+    },
+    {
       "operation": "workflow.list",
       "params": {},
       "expect": {

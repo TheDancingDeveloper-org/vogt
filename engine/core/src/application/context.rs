@@ -9,7 +9,6 @@
 //! with the same concrete types, so a context states which it holds.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::adapters::engine::EngineClient;
@@ -114,16 +113,18 @@ pub enum Built {
 /// per request would bury the one fact that matters: this process is not using
 /// wall-clock time.
 fn announce_hooks(clock: Option<&str>, ids: Option<&str>) {
-    static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
     let active = hooks_active(clock, ids);
-    if active.is_empty() || ANNOUNCED.swap(true, Ordering::Relaxed) {
+    if active.is_empty() {
         return;
     }
-    tracing::warn!(
-        target: "vogt.context",
-        "deterministic test hooks are active: {}",
-        active.join(", "),
-    );
+    ANNOUNCED.call_once(|| {
+        tracing::warn!(
+            target: "vogt.context",
+            "deterministic test hooks are active: {}",
+            active.join(", "),
+        );
+    });
 }
 
 /// The step clock the environment asks for, unless the caller brought its own.

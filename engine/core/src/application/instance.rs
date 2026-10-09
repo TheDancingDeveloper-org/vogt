@@ -283,6 +283,51 @@ fn bind_instance(
 
 /// The next instant. A step clock walks one second per read, the way Python's
 /// does; without one the wall clock is read once.
+/// `migrate`, as the registry calls it. Ports `migrate_instance`.
+pub fn migrate_op(ctx: &Built, _params: serde_json::Value) -> Result<serde_json::Value, VogtError> {
+    match ctx {
+        Built::SystemRandom(ctx) => migrate(ctx),
+        Built::SystemSequential(ctx) => migrate(ctx),
+        Built::StepRandom(ctx) => migrate(ctx),
+        Built::StepSequential(ctx) => migrate(ctx),
+    }
+}
+
+/// Bring both stores forward. It refuses an empty data directory rather than
+/// quietly creating an instance, because `init` is the operation that does that.
+fn migrate<C: Clock, I: IdFactory>(
+    ctx: &crate::application::context::AppContext<C, I>,
+) -> Result<serde_json::Value, VogtError> {
+    if !ctx.declared.is_initialized() {
+        return Err(VogtError::InvalidRequest(
+            "no instance in this data directory to migrate — `vogt init` \
+             creates one, and is idempotent against an existing instance"
+                .to_string(),
+        ));
+    }
+    let declared_report = ctx.declared.migrate()?;
+    let observed_report = ctx.observed.migrate()?;
+    let mut applied: Vec<String> = declared_report
+        .applied
+        .iter()
+        .map(|name| format!("declared:{name}"))
+        .collect();
+    applied.extend(
+        observed_report
+            .applied
+            .iter()
+            .map(|name| format!("observed:{name}")),
+    );
+    Ok(serde_json::json!({
+        "data_dir": ctx.config.resolved_data_dir().display().to_string(),
+        "declared_schema_version": declared_report.version,
+        "observed_schema_version": observed_report.version,
+        "declared_schema_expected": ctx.declared.bundled_schema_version(),
+        "observed_schema_expected": ctx.observed.bundled_schema_version(),
+        "migrations_applied": applied,
+    }))
+}
+
 /// `status`, as the registry calls it. Ports `status` in
 /// `services/instance.py`.
 pub fn status_op(ctx: &Built, _params: serde_json::Value) -> Result<serde_json::Value, VogtError> {
