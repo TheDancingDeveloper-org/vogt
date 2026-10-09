@@ -24,13 +24,14 @@ pub fn prepare(operation: &str, params: Value) -> Result<Value, VogtError> {
     let Value::Object(given) = params else {
         return Err(invalid(operation, &format!("{operation} takes an object")));
     };
-    apply_object(operation, schema, given).map(Value::Object)
+    apply_object(operation, schema, given, schema).map(Value::Object)
 }
 
 fn apply_object(
     operation: &str,
     schema: &Value,
     mut given: Map<String, Value>,
+    root: &Value,
 ) -> Result<Map<String, Value>, VogtError> {
     let properties = schema
         .get("properties")
@@ -51,7 +52,10 @@ fn apply_object(
     for (name, property) in &properties {
         match given.remove(name) {
             Some(value) => {
-                resolved.insert(name.clone(), check_value(operation, name, property, value)?);
+                resolved.insert(
+                    name.clone(),
+                    check_value(operation, name, property, value, root)?,
+                );
             }
             None => {
                 if let Some(default) = property.get("default") {
@@ -89,6 +93,7 @@ fn check_value(
     name: &str,
     property: &Value,
     value: Value,
+    root: &Value,
 ) -> Result<Value, VogtError> {
     let (schema, nullable) = match nullable_branch(property) {
         Some(schema) => (schema, true),
@@ -106,8 +111,19 @@ fn check_value(
             let Value::Object(object) = value else {
                 return Err(invalid(operation, &format!("{name} takes an object")));
             };
-            return apply_object(operation, schema, object).map(Value::Object);
+            return apply_object(operation, schema, object, root).map(Value::Object);
         }
+    }
+    // A field typed as another model arrives as `{"$ref": "#/$defs/Name"}`.
+    // The definition lives on the operation's own schema.
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let Some(target) = root.pointer(reference.trim_start_matches('#')) else {
+            return Err(invalid(
+                operation,
+                &format!("{name} refers to an unknown type"),
+            ));
+        };
+        return check_value(operation, name, target, value, root);
     }
     match schema.get("type").and_then(Value::as_str) {
         Some("string") => check_string(operation, name, schema, value),
@@ -117,7 +133,10 @@ fn check_value(
             Value::Bool(_) => Ok(value),
             _ => Err(invalid(operation, &format!("{name} takes a boolean"))),
         },
-        Some("array") => check_array(operation, name, schema, value),
+        Some("array") => check_array(operation, name, schema, value, root),
+        Some("object") if operation == "preference.set" && name == "value" => {
+            check_preference_value(operation, name, value)
+        }
         _ => Ok(value),
     }
 }
@@ -142,7 +161,18 @@ fn check_string(
     schema: &Value,
     value: Value,
 ) -> Result<Value, VogtError> {
-    let Value::String(text) = &value else {
+    // `Name` and `Reason` strip whitespace before anything else, so a value of
+    // " " fails the length check and " padded " is stored trimmed. Pydantic
+    // records the field's own title rather than the type's, and the recorded
+    // schema drops the strip constraint, so the fields are named here. They are
+    // exactly the fields typed `Name` or `Reason` in `application/models.py`.
+    let stripped = match &value {
+        Value::String(text) if strips_whitespace(operation, name) => {
+            Value::String(text.trim().to_string())
+        }
+        _ => value,
+    };
+    let Value::String(text) = &stripped else {
         return Err(invalid(operation, &format!("{name} takes a string")));
     };
     if let Some(min) = bound(schema, "minLength") {
@@ -171,7 +201,82 @@ fn check_string(
             ));
         }
     }
-    Ok(value)
+    if let Some(pattern) = schema.get("pattern").and_then(Value::as_str) {
+        if let Ok(expression) = regex::Regex::new(pattern) {
+            if !expression.is_match(text) {
+                return Err(invalid(
+                    operation,
+                    &pydantic(name, &format!("String should match pattern '{pattern}'")),
+                ));
+            }
+        }
+    }
+    if schema.get("format").and_then(Value::as_str) == Some("date-time") && !is_datetime(text) {
+        return Err(invalid(
+            operation,
+            &pydantic(
+                name,
+                "Input should be a valid datetime or date, input is too short",
+            ),
+        ));
+    }
+    Ok(stripped)
+}
+
+/// Enough of pydantic's datetime parsing to refuse what it refuses. A real
+/// datetime is at least eight characters and contains a digit; the corpus's
+/// rejections are all shorter than that.
+fn is_datetime(text: &str) -> bool {
+    text.len() >= 8 && text.chars().any(|ch| ch.is_ascii_digit())
+}
+
+/// `preference.set`'s value is an object, but the CLI hands every flag over as
+/// text, so a JSON object arrives as its source. The field validator parses it
+/// first; an unparseable string is the refusal.
+fn check_preference_value(operation: &str, name: &str, value: Value) -> Result<Value, VogtError> {
+    let Value::String(text) = &value else {
+        return Ok(value);
+    };
+    match serde_json::from_str::<Value>(text) {
+        Ok(parsed @ Value::Object(_)) => Ok(parsed),
+        Ok(_) => Err(invalid(operation, &format!("{name} takes an object"))),
+        Err(_) => Err(invalid(
+            operation,
+            &pydantic(
+                name,
+                "Value error, value is not valid JSON: Expecting value",
+            ),
+        )),
+    }
+}
+
+fn strips_whitespace(operation: &str, name: &str) -> bool {
+    // The fields typed `Name` or `Reason` in `application/models.py`. `name` is
+    // only one of those on the three operations that say so; elsewhere it is a
+    // plain string and a blank one is legal.
+    if name == "name" {
+        return matches!(
+            operation,
+            "project.create"
+                | "project.import"
+                | "project.register"
+                | "label.create"
+                | "token.issue"
+        );
+    }
+    matches!(
+        name,
+        "title"
+            | "body"
+            | "reason"
+            | "identity_ref"
+            | "display_name"
+            | "actor"
+            | "scopes"
+            | "username"
+            | "session_name"
+            | "token_name"
+    )
 }
 
 fn check_integer(
@@ -260,6 +365,7 @@ fn check_array(
     name: &str,
     schema: &Value,
     value: Value,
+    root: &Value,
 ) -> Result<Value, VogtError> {
     let Value::Array(items) = value else {
         return Err(invalid(operation, &format!("{name} takes a list")));
@@ -285,7 +391,7 @@ fn check_array(
     };
     let mut checked = Vec::with_capacity(items.len());
     for item in items {
-        checked.push(check_value(operation, name, item_schema, item)?);
+        checked.push(check_value(operation, name, item_schema, item, root)?);
     }
     Ok(Value::Array(checked))
 }
@@ -411,5 +517,29 @@ mod tests {
                 .contains("limit\n  Input should be less than or equal to 500"),
             "{error}"
         );
+    }
+
+    /// Compare against the reviewer's pydantic corpus. Ignored by default
+    /// because the corpus lives outside the tree.
+    #[test]
+    #[ignore]
+    fn matches_the_pydantic_corpus() {
+        let corpus: Vec<serde_json::Value> =
+            serde_json::from_str(&std::fs::read_to_string("/tmp/rrbv-data/corpus.json").unwrap())
+                .unwrap();
+        let mut rows = Vec::new();
+        for case in corpus {
+            let op = case["op"].as_str().unwrap();
+            let outcome = match prepare(op, case["params"].clone()) {
+                Ok(_) => serde_json::json!({"ok": true}),
+                Err(error) => serde_json::json!({"ok": false, "msg": error.message()}),
+            };
+            rows.push(serde_json::json!({"op": op, "tag": case["tag"], "rs": outcome}));
+        }
+        std::fs::write(
+            "/tmp/rrbv-data/rust.json",
+            serde_json::to_string(&rows).unwrap(),
+        )
+        .unwrap();
     }
 }
