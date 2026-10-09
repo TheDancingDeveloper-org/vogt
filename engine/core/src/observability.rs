@@ -164,14 +164,22 @@ struct FieldVisitor {
 }
 
 impl Visit for FieldVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.store(field, value.to_string());
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         let rendered = format!("{value:?}");
-        let text = rendered.trim_matches('"');
+        self.store(field, rendered.trim_matches('"').to_string());
+    }
+}
+
+impl FieldVisitor {
+    fn store(&mut self, field: &Field, text: String) {
         if field.name() == "message" {
-            self.message = text.to_string();
+            self.message = text;
         } else {
-            self.fields
-                .push((field.name().to_string(), text.to_string()));
+            self.fields.push((field.name().to_string(), text));
         }
     }
 }
@@ -192,20 +200,26 @@ where
         event.record(&mut visitor);
         let request_id = current_request_id();
         let actor = current_actor();
+        let text = render_text(meta, &visitor, request_id.as_deref(), actor.as_deref());
         let line = if self.json {
             render_json(meta, &visitor, request_id.as_deref(), actor.as_deref())
         } else {
-            render_text(meta, &visitor, request_id.as_deref(), actor.as_deref())
+            text.clone()
         };
         let redacted = redact(&line);
         if *meta.level() <= Level::WARN {
-            let mut recent = RECENT.lock().expect("recent problems lock");
+            // Python always keeps the text line, even when stderr is JSON.
+            let kept = redact(&text);
+            let mut recent = match RECENT.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
             if recent.lines.len() == RECENT_PROBLEMS_CAPACITY {
                 recent.lines.pop_front();
             }
             recent
                 .lines
-                .push_back(redacted.chars().take(RECENT_LINE_LIMIT).collect());
+                .push_back(kept.chars().take(RECENT_LINE_LIMIT).collect());
         }
         let _ = writeln!(std::io::stderr(), "{redacted}");
     }
@@ -232,7 +246,7 @@ fn render_text(
     request_id: Option<&str>,
     actor: Option<&str>,
 ) -> String {
-    let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ");
+    let stamp = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3f+00:00");
     let level = format!("{:<7}", level_name(meta.level()));
     let mut line = format!("{stamp} {level} {} {}", meta.target(), visitor.message);
     let mut fields: Vec<(&str, &str)> = Vec::new();
