@@ -18,7 +18,7 @@ use axum::Router;
 use crate::adapters::auth_gate::{self, Request as AuthRequest};
 use crate::core::{Clock, IdFactory};
 use crate::errors::VogtError;
-use crate::registry::{default_registry, HttpMethod, OperationRegistry, Transport};
+use crate::registry::{default_registry, HttpMethod, Operation, OperationRegistry, Transport};
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 
 /// The prefix every registry route lives under. The engine's front door
@@ -86,6 +86,9 @@ async fn dispatch<C: Clock, I: IdFactory>(
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let presented = bearer(request.headers().get("authorization"));
+    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .unwrap_or_default();
     let Some(operation_path) = path.strip_prefix(API_PREFIX) else {
         return not_found();
     };
@@ -102,6 +105,11 @@ async fn dispatch<C: Clock, I: IdFactory>(
     }) else {
         return not_found();
     };
+    // The body is checked before the gate. A malformed request is the caller's
+    // mistake and answers 422 with no auth row, rather than a 401 or a 403.
+    if let Err(rejection) = validate_body(operation, &body) {
+        return invalid_arguments(&rejection);
+    }
     // The gate records its decision before the operation runs, so a request
     // that will be refused never reaches a handler.
     let granted = {
@@ -150,6 +158,68 @@ async fn dispatch<C: Clock, I: IdFactory>(
         }
         Err(error) => error_response(&error),
     }
+}
+
+/// Why a body was rejected, in the shape Python's 422 detail carries.
+struct InvalidField {
+    loc: &'static str,
+    message: String,
+}
+
+/// Check the body against the operation's parameter schema before the gate runs.
+///
+/// A read takes its parameters from the query string, so its body is not
+/// checked. A write must be a JSON object carrying every field the schema marks
+/// required. This is the part of validation that decides whether the request is
+/// well-formed at all; the finer type checks land with the service.
+fn validate_body(operation: &Operation, body: &[u8]) -> Result<(), InvalidField> {
+    if !operation.mutating {
+        return Ok(());
+    }
+    if body.is_empty() {
+        return Err(InvalidField {
+            loc: "body",
+            message: "a request body is required".to_string(),
+        });
+    }
+    let parsed: serde_json::Value = serde_json::from_slice(body).map_err(|_| InvalidField {
+        loc: "body",
+        message: "the request body is not valid JSON".to_string(),
+    })?;
+    let Some(object) = parsed.as_object() else {
+        return Err(InvalidField {
+            loc: "body",
+            message: "the request body must be a JSON object".to_string(),
+        });
+    };
+    let required = crate::registry::params_schema_for(operation.name)
+        .and_then(|schema| schema.get("required"))
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for field in required {
+        let Some(name) = field.as_str() else { continue };
+        if !object.contains_key(name) {
+            return Err(InvalidField {
+                loc: "body",
+                message: format!("missing required field '{name}'"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn invalid_arguments(rejection: &InvalidField) -> Response {
+    json_response(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        serde_json::json!({
+            "error": {
+                "code": "invalid_arguments",
+                "message": "request does not match the operation's parameters",
+                "detail": [{"loc": [rejection.loc], "msg": rejection.message, "type": "missing"}],
+            }
+        }),
+    )
 }
 
 fn bearer(header: Option<&axum::http::HeaderValue>) -> Option<String> {
@@ -260,6 +330,30 @@ mod tests {
         let (head, body) = buf.split_once("\r\n\r\n").unwrap();
         let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
         (status, body.to_string())
+    }
+
+    fn post_body(addr: std::net::SocketAddr, path: &str, body: &str) -> (u16, String) {
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        write!(
+            stream,
+            "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut buf = String::new();
+        stream.read_to_string(&mut buf).unwrap();
+        let (head, response) = buf.split_once("\r\n\r\n").unwrap();
+        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, response.to_string())
+    }
+
+    #[test]
+    fn a_body_missing_required_fields_is_rejected_before_auth() {
+        let running = serve(false);
+        let (status, body) = post_body(running.addr, "/api/work", "{}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(json["error"]["code"], "invalid_arguments");
     }
 
     #[test]
