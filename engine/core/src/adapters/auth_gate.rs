@@ -130,14 +130,6 @@ fn resolve<S: DeclaredStore>(
         writes_enabled,
         now,
     } = request;
-    // A read-only server refuses a write whoever the caller is, including the
-    // `--no-auth` local user. Checked before the grant so the refusal does not
-    // depend on which branch authenticates the request.
-    if operation.mutating && !writes_enabled {
-        return Err(Denial::WritesDisabled {
-            operation: operation.name.to_string(),
-        });
-    }
     if no_auth {
         // Python's loopback caller is `local:<os-user>`, a human principal, not
         // a bare "local". The actor id stays empty because no actor row exists.

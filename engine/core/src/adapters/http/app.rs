@@ -904,19 +904,16 @@ mod tests {
     }
 
     #[test]
-    fn a_write_on_a_read_only_server_names_the_operation() {
+    fn a_local_caller_may_write_on_a_read_only_server() {
+        // `--no-auth` is the operator at the console. Python lets that caller
+        // write even when the server refuses tokens, and records nothing.
         let running = serve_with(true, false);
         let (status, body) = post_json(
             running.addr,
             "/api/labels",
             r#"{"name":"bug","reason":"r"}"#,
         );
-        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(status, 403, "{body}");
-        assert_eq!(
-            json["error"]["message"],
-            "label.create is a write, and this server was started read-only"
-        );
+        assert_eq!(status, 200, "{body}");
     }
 
     #[test]
