@@ -24,8 +24,12 @@ fn serve_help_names_the_flags() {
         .expect("run help");
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains("--data-dir"), "{stdout}");
+    // Generated from the registry schema, not clap: the flags the schema
+    // records are the ones the page must name.
+    assert!(stdout.contains("--host"), "{stdout}");
     assert!(stdout.contains("--port"), "{stdout}");
+    assert!(stdout.contains("--tls-cert"), "{stdout}");
+    assert!(stdout.contains("--read-only"), "{stdout}");
 }
 
 #[test]

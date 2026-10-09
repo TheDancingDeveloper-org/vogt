@@ -154,7 +154,12 @@ fn main() -> ExitCode {
     // (`--data-dir DIR init`) is still that command, and replacing it with the
     // not-ported stub breaks instance bootstrap. Every other registry command
     // goes through the generated adapter.
-    if !matches!(command_word(&argv), Some("serve" | "init")) {
+    // `--help` on serve and init is the generated page, so it lists the schema
+    // flags clap does not know (--tls-cert, --read-only, --no-schedule).
+    // Running them stays on this binary's own path.
+    let help = argv.iter().any(|arg| arg == "--help" || arg == "-h");
+    let command = command_word(&argv);
+    if !matches!(command, Some("serve" | "init")) || help {
         if let Err(error) = validate_hooks(None) {
             eprintln!("{error}");
             return ExitCode::from(1);

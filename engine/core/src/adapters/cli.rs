@@ -142,6 +142,11 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             continue;
         }
         if flag == "--data-dir" && positional.is_empty() {
+            json = true;
+            index += 1;
+            continue;
+        }
+        if flag == "--data-dir" && positional.is_empty() {
             let Some(value) = argv_rest.get(index + 1) else {
                 return ParseOutcome::Result(usage(
                     "error: --data-dir requires a value\n".to_string(),
@@ -156,7 +161,7 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             index += 1;
             continue;
         }
-        if !command_complete && flag.starts_with('-') && positional.is_empty() {
+        if positional.is_empty() && flag.starts_with('-') {
             return ParseOutcome::Result(usage(format!(
                 "error: unrecognised argument {flag}\n{}",
                 format_top(registry)
@@ -173,6 +178,8 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
     }
 
     if positional.is_empty() {
+        // A bare invocation prints the root help and exits 2, on stdout, as
+        // argparse does.
         return ParseOutcome::Result(usage(format_top(registry)));
     }
     let operations = cli_operations(registry);
@@ -234,10 +241,15 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             json,
             data_dir,
         }),
+        Err(message) if message.starts_with("root: ") => ParseOutcome::Result(usage(format!(
+            "{}\nvogt: error: {}\n",
+            format_top(registry).trim_end(),
+            message.trim_start_matches("root: ")
+        ))),
         Err(message) if message.starts_with("domain: ") => ParseOutcome::Result(CliResult {
             exit_code: EXIT_ERROR,
             stdout: String::new(),
-            stderr: format!("error: {}\n", message.trim_start_matches("domain: ")),
+            stderr: format!("{}\n", message.trim_start_matches("domain: ")),
         }),
         Err(message) => ParseOutcome::Result(usage(format!(
             "error: {message}\n{}",
@@ -355,6 +367,8 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         .unwrap_or_default();
 
     let mut values: Map<String, Value> = Map::new();
+    let mut secret_files: BTreeMap<String, String> = BTreeMap::new();
+    let mut secret_sources: BTreeMap<String, String> = BTreeMap::new();
     let mut index = 0usize;
     while index < argv.len() {
         let token = &argv[index];
@@ -362,7 +376,7 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
             return Err("unexpected argument".to_string());
         }
         if !token.starts_with("--") {
-            return Err(format!("unrecognised argument {token}"));
+            return Err(format!("root: unrecognized arguments: {token}"));
         }
         let (name, inline) = match token.split_once('=') {
             Some((flag, value)) => (flag.trim_start_matches("--"), Some(value.to_string())),
@@ -377,8 +391,26 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         }
         if let Some(secret) = secret_name(&field) {
             if !properties.contains_key(secret) {
-                return Err(format!("unrecognised argument --{name}"));
+                return Err(format!("root: unrecognized arguments: --{name}"));
             }
+            let source = if field.ends_with("_stdin") {
+                "stdin"
+            } else {
+                "file"
+            };
+            if let Some(previous) = secret_sources.get(secret) {
+                if previous != source {
+                    let (first, second) = if source == "stdin" {
+                        (format!("--{secret}-stdin"), format!("--{secret}-file"))
+                    } else {
+                        (format!("--{secret}-file"), format!("--{secret}-stdin"))
+                    };
+                    return Err(format!(
+                        "root: argument {first}: not allowed with argument {second}"
+                    ));
+                }
+            }
+            secret_sources.insert(secret.to_string(), source.to_string());
             if field.ends_with("_stdin") {
                 if inline.is_some() {
                     return Err(format!("--{name} takes no value"));
@@ -389,7 +421,9 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
                 continue;
             }
             let value = take_value(argv, &mut index, inline)?;
-            values.insert(secret.to_string(), Value::String(read_secret_file(&value)?));
+            // Only the last file is read. An earlier missing file is ignored,
+            // matching argparse, which keeps the final value.
+            secret_files.insert(secret.to_string(), value);
             continue;
         }
 
@@ -433,6 +467,9 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         } else {
             values.insert(field, parsed);
         }
+    }
+    for (secret, path) in &secret_files {
+        values.insert(secret.clone(), Value::String(read_secret_file(path)?));
     }
 
     for name in &required {
@@ -630,7 +667,7 @@ fn format_top(registry: &OperationRegistry) -> String {
     let mut out = String::new();
     out.push_str("usage: vogt [-h] [--version] [--data-dir DATA_DIR] [--json] <command> ...\n\n");
     out.push_str(DESCRIPTION);
-    out.push_str("\n\ncommands:\n");
+    out.push_str("\n\npositional arguments:\n");
     for (name, summary) in top_commands(registry) {
         out.push_str(&format!("  {name:<22}{summary}\n"));
     }
@@ -770,18 +807,72 @@ fn flag_help(schema: &Value) -> Vec<(String, String)> {
             }
             continue;
         }
-        lines.push((format!("--{dashed}"), help));
+        let metavar = flag_metavar(name, property);
+        lines.push((format!("--{dashed} {metavar}"), help));
     }
     lines
 }
 
-/// Human rendering. JSON objects and arrays render as JSON; a bare string is
-/// the string; anything else is its JSON form. This is the text fallback until
-/// the per-type renderers of `render.py` are ported with the services.
+/// The metavar argparse prints: `{a,b}` for a choice, the uppercased field
+/// name otherwise. A choice is what pushes `--order {started,rss}` past the
+/// help column.
+fn flag_metavar(name: &str, property: &Value) -> String {
+    if let Some(choices) = enum_choices(property) {
+        return format!("{{{}}}", choices.join(","));
+    }
+    name.replace('_', "-").to_uppercase()
+}
+/// Human rendering, porting `render.py`: a mapping is `key: value` lines, an
+/// empty list is `(none)`, a boolean is `yes`/`no`, and `null` is `-`.
 fn to_text(value: &Value) -> String {
+    let mut lines = Vec::new();
+    render_value(value, &mut lines, 0);
+    lines.join("\n")
+}
+
+fn render_value(value: &Value, lines: &mut Vec<String>, indent: usize) {
+    let pad = "  ".repeat(indent);
     match value {
+        Value::Object(map) => {
+            for (key, item) in map {
+                match item {
+                    Value::Object(_) => {
+                        lines.push(format!("{pad}{key}:"));
+                        render_value(item, lines, indent + 1);
+                    }
+                    Value::Array(items) if items.is_empty() => {
+                        lines.push(format!("{pad}{key}: (none)"));
+                    }
+                    Value::Array(_) => {
+                        lines.push(format!("{pad}{key}:"));
+                        render_value(item, lines, indent + 1);
+                    }
+                    other => lines.push(format!("{pad}{key}: {}", scalar(other))),
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                if item.is_object() {
+                    lines.push(format!("{pad}-"));
+                    render_value(item, lines, indent + 1);
+                } else {
+                    lines.push(format!("{pad}- {}", scalar(item)));
+                }
+            }
+        }
+        other => lines.push(format!("{pad}{}", scalar(other))),
+    }
+}
+
+fn scalar(value: &Value) -> String {
+    match value {
+        Value::Null => "-".to_string(),
+        Value::Bool(true) => "yes".to_string(),
+        Value::Bool(false) => "no".to_string(),
         Value::String(text) => text.clone(),
-        other => to_json(other),
+        Value::Number(number) => number.to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -904,7 +995,7 @@ mod tests {
         let result = run(&argv(&["--help"]), &registry, "test", &mut no_dispatch);
         assert_eq!(result.exit_code, EXIT_OK);
         assert!(result.stdout.contains("usage: vogt"));
-        assert!(result.stdout.contains("work"));
+        assert!(result.stdout.contains("positional arguments"));
         assert!(result.stdout.contains("--json"));
         assert!(result.stdout.contains("--data-dir"));
     }
@@ -1143,18 +1234,6 @@ mod tests {
     }
 
     #[test]
-    fn a_global_flag_after_a_group_word_is_usage() {
-        let registry = default_registry();
-        let result = run(
-            &argv(&["work", "--json", "get", "--ref", "WI-7"]),
-            &registry,
-            "test",
-            &mut no_dispatch,
-        );
-        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
-    }
-
-    #[test]
     fn a_missing_secret_off_a_terminal_exits_one() {
         let registry = default_registry();
         let result = run(
@@ -1169,6 +1248,19 @@ mod tests {
             "{}",
             result.stderr
         );
+        assert!(!result.stderr.starts_with("error:"), "{}", result.stderr);
+    }
+
+    #[test]
+    fn a_global_flag_after_a_group_word_is_usage() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&["work", "--json", "get", "--ref", "WI-7"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
     }
 
     #[test]
@@ -1204,6 +1296,83 @@ mod tests {
         let _ = std::fs::remove_file(&second);
         assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
         assert_eq!(seen.expect("dispatched")["password"], "two");
+    }
+
+    #[test]
+    fn an_earlier_missing_secret_file_is_ignored_when_a_later_one_exists() {
+        let registry = default_registry();
+        let second = std::env::temp_dir().join("vogt-cli-secret-last");
+        std::fs::write(&second, "kept\n").unwrap();
+        let mut seen: Option<Value> = None;
+        let mut dispatch = |_operation: &Operation, params: Value| {
+            seen = Some(params);
+            Ok(Value::Null)
+        };
+        let result = run(
+            &argv(&[
+                "user",
+                "create",
+                "--username",
+                "ada",
+                "--password-file",
+                "/nonexistent/secret",
+                "--password-file",
+                second.to_str().unwrap(),
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        let _ = std::fs::remove_file(&second);
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert_eq!(seen.expect("dispatched")["password"], "kept");
+    }
+
+    #[test]
+    fn a_secret_file_and_stdin_together_are_usage() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&[
+                "user",
+                "create",
+                "--username",
+                "ada",
+                "--password-file",
+                "/tmp/x",
+                "--password-stdin",
+                "--reason",
+                "because",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            result.stderr.contains("not allowed with"),
+            "{}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn text_mode_renders_like_python() {
+        let registry = default_registry();
+        let mut dispatch = |_operation: &Operation, _params: Value| {
+            Ok(serde_json::json!({"name": "ada", "active": true, "items": []}))
+        };
+        let result = run(
+            &argv(&["registry", "dump"]),
+            &registry,
+            "test",
+            &mut dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_OK, "{}", result.stderr);
+        assert!(result.stdout.contains("name: ada"), "{}", result.stdout);
+        assert!(result.stdout.contains("active: yes"), "{}", result.stdout);
+        assert!(result.stdout.contains("items: (none)"), "{}", result.stdout);
     }
 
     #[test]
