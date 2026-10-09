@@ -610,7 +610,11 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         }
         let missing: Vec<String> = required
             .iter()
-            .filter(|name| !is_secret(name) && !values.contains_key(*name))
+            .filter(|name| {
+                !is_secret(name)
+                    && !is_nullable(properties.get(*name))
+                    && !values.contains_key(*name)
+            })
             .map(|name| format!("--{}", name.replace('_', "-")))
             .collect();
         if !missing.is_empty() {
@@ -1050,8 +1054,12 @@ fn format_top(registry: &OperationRegistry) -> String {
     let mut out = String::new();
     out.push_str(&usage_synopsis());
     out.push('\n');
-    out.push_str(DESCRIPTION);
-    out.push_str("\n\npositional arguments:\n  <command>\n");
+    // argparse wraps the description at the terminal width, which is 80 here.
+    for line in wrap_text(DESCRIPTION, 64) {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out.push_str("\npositional arguments:\n  <command>\n");
     let rows = top_commands(registry);
     let width = wrap_width() + 2;
     let cap = 24.min(width.saturating_sub(20).max(4));
@@ -1444,7 +1452,12 @@ fn usage_parts(flags: &[String]) -> Vec<String> {
     parts
 }
 
+/// Fields argparse treats as required flags: listed in `required`, and not
+/// nullable. A field that is `T | None` with no default is required by pydantic
+/// but optional on the CLI, because the generator asks `is_required() and not
+/// optional`. `session bind`'s `work_item` is the one such field.
 fn required_fields(schema: &Value) -> Vec<String> {
+    let properties = schema.get("properties");
     schema
         .get("required")
         .and_then(Value::as_array)
@@ -1452,10 +1465,17 @@ fn required_fields(schema: &Value) -> Vec<String> {
             items
                 .iter()
                 .filter_map(Value::as_str)
+                .filter(|name| !is_nullable(properties.and_then(|props| props.get(*name))))
                 .map(str::to_string)
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A property whose schema allows null: `anyOf` with a `{"type": "null"}` arm,
+/// or a `type` array that names `null`.
+fn is_nullable(property: Option<&Value>) -> bool {
+    property.is_some_and(|property| schema_types(property).iter().any(|kind| kind == "null"))
 }
 
 fn flag_help(schema: &Value) -> Vec<(String, String)> {
@@ -2119,7 +2139,7 @@ mod tests {
         assert!(root.stdout.contains("usage: vogt"), "{}", root.stdout);
         assert!(
             root.stdout
-                .contains("provenance and freshness on every answer.\n"),
+                .contains("state, with\nprovenance and freshness"),
             "{}",
             root.stdout
         );
@@ -2184,6 +2204,45 @@ mod tests {
                 .contains("  -h, --help    show this help message and exit\n"),
             "{}",
             label.stdout
+        );
+    }
+
+    #[test]
+    fn a_nullable_required_field_is_an_optional_flag() {
+        let registry = default_registry();
+        let help = run(
+            &argv(&["session", "bind", "--help"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(help.exit_code, EXIT_OK, "{}", help.stderr);
+        assert!(
+            help.stdout.contains("[--work-item WORK_ITEM]"),
+            "{}",
+            help.stdout
+        );
+        assert!(
+            !help.stdout.contains(" --work-item WORK_ITEM]"),
+            "work-item must be optional, got:\n{}",
+            help.stdout
+        );
+
+        let result = run(
+            &argv(&["session", "bind", "--id", "x", "--reason", "r"]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(
+            result.exit_code, EXIT_USAGE,
+            "pydantic's Field required is a usage error: {}",
+            result.stderr
+        );
+        assert!(
+            result.stderr.contains("Field required"),
+            "{}",
+            result.stderr
         );
     }
 
