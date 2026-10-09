@@ -1682,6 +1682,19 @@ pub fn marker_for(slug: &str) -> String {
     format!("<!-- vogt:initiative:{slug} -->")
 }
 
+/// Python's `str.isspace`: Unicode whitespace plus the C0 controls `\x1c`–`\x1f`.
+fn py_space(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{1f}')
+}
+
+fn py_strip(text: &str) -> String {
+    text.trim_matches(py_space).to_string()
+}
+
+fn py_rstrip(text: &str) -> String {
+    text.trim_end_matches(py_space).to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskLine {
     pub number: i64,
@@ -1702,9 +1715,7 @@ impl TaskLine {
 
 pub fn render_task_line(line: &TaskLine) -> String {
     let mark = if line.checked { "x" } else { " " };
-    format!("- [{mark}] #{} {}", line.number, line.title)
-        .trim_end()
-        .to_string()
+    py_rstrip(&format!("- [{mark}] #{} {}", line.number, line.title))
 }
 
 pub fn render_task_list(lines: &[TaskLine]) -> String {
@@ -1725,7 +1736,7 @@ pub fn render_managed_region(
     siblings: &[(&str, &str)],
 ) -> String {
     let mut parts = vec![MANAGED_START.to_string(), marker_for(slug), String::new()];
-    let trimmed = body.trim();
+    let trimmed = py_strip(body);
     if !trimmed.is_empty() {
         parts.push(trimmed.to_string());
         parts.push(String::new());
@@ -1752,7 +1763,7 @@ pub fn splice_managed_region(existing: Option<&str>, region: &str) -> String {
     let Some(existing) =
         existing.filter(|text| text.contains(MANAGED_START) && text.contains(MANAGED_END))
     else {
-        let base = existing.unwrap_or("").trim_end();
+        let base = py_rstrip(existing.unwrap_or(""));
         return if base.is_empty() {
             region.to_string()
         } else {
@@ -1775,33 +1786,37 @@ fn managed_span(body: &str) -> &str {
     let Some(end) = body.find(MANAGED_END) else {
         return "";
     };
-    &body[start + MANAGED_START.len()..end]
+    // A body anyone can edit may put the end marker above the start. Python's
+    // slice is empty then; slicing here would panic and take the sweep with it.
+    let inner = start + MANAGED_START.len();
+    if end < inner {
+        return "";
+    }
+    &body[inner..end]
 }
 
 /// The `#<n> -> checked?` map inside the managed region only, so a checkbox a
-/// person wrote in their own prose is never read as a member's state.
+/// person wrote in their own prose is never read as a member's state. A number
+/// repeated in the region keeps its last reading, in the order first seen.
 pub fn parse_checkbox_states(body: &str) -> Vec<(i64, bool)> {
     let span = managed_span(body);
     if span.is_empty() {
         return Vec::new();
     }
-    span.lines()
-        .filter_map(|line| {
-            let rest = line.trim_start().strip_prefix("- [")?;
-            let (mark, rest) = rest.split_once(']')?;
-            let rest = rest.trim_start().strip_prefix('#')?;
-            let number: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-            if number.is_empty() {
-                return None;
-            }
-            // `\b` after the number: a digit run that continues into a word is
-            // not a member reference.
-            let boundary = rest.len() == number.len()
-                || !rest[number.len()..]
-                    .starts_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
-            boundary.then(|| (number.parse().unwrap_or(0), mark.eq_ignore_ascii_case("x")))
-        })
-        .collect()
+    let pattern = regex::Regex::new(r"(?m)^\s*- \[([ xX])\]\s+#(\d+)\b").expect("pattern");
+    let mut order: Vec<(i64, bool)> = Vec::new();
+    for found in pattern.captures_iter(span) {
+        let Ok(number) = found[2].parse::<i64>() else {
+            continue;
+        };
+        let checked = found[1].eq_ignore_ascii_case("x");
+        if let Some(slot) = order.iter_mut().find(|(seen, _)| *seen == number) {
+            slot.1 = checked;
+        } else {
+            order.push((number, checked));
+        }
+    }
+    order
 }
 
 #[cfg(test)]
@@ -1834,6 +1849,33 @@ mod projection_tests {
         );
         assert!(body_has_marker(Some(&spliced), "alpha"));
         assert!(!body_has_marker(Some(&spliced), "beta"));
+    }
+
+    #[test]
+    fn an_end_marker_above_the_start_is_empty_not_a_crash() {
+        let swapped = "<!-- vogt:initiative:end -->x<!-- vogt:initiative:start -->";
+        assert!(parse_checkbox_states(swapped).is_empty());
+        // The span is still empty when the only end marker sits above the start.
+        let body = format!("{swapped}\n- [x] #5 outside\n");
+        assert!(parse_checkbox_states(&body).is_empty());
+        // A repeated number keeps its last tick, in the order first seen.
+        let repeated =
+            format!("{MANAGED_START}\n- [ ] #5 a\n- [x] #5 b\n- [ ] #3 c\n{MANAGED_END}");
+        assert_eq!(
+            parse_checkbox_states(&repeated),
+            vec![(5, true), (3, false)]
+        );
+        // Only a space or an x ticks a box, and the number needs its boundary.
+        let noise = format!("{MANAGED_START}\n- [y] #5\n- [] #5\n- [x]#5\n{MANAGED_END}");
+        assert!(parse_checkbox_states(&noise).is_empty());
+    }
+
+    #[test]
+    fn a_control_character_is_whitespace_the_way_python_strips_it() {
+        let line = TaskLine::from_state(1, "\u{1f}", "open");
+        assert_eq!(render_task_line(&line), "- [ ] #1");
+        let region = render_managed_region("alpha", "\u{1f}", &[], &[]);
+        assert!(!region.contains('\u{1f}'));
     }
 
     #[test]
@@ -1886,8 +1928,10 @@ pub fn github_managed(payload: &serde_json::Value) -> bool {
     payload_str(payload, "check").is_some_and(dependabot_update_name)
 }
 
-/// ` - Update #<digits>` at the end of a run name.
+/// ` - Update #<digits>` at the end of a run name, where the end is Python's
+/// `$`: a trailing newline still matches.
 fn dependabot_update_name(name: &str) -> bool {
+    let name = name.strip_suffix('\n').unwrap_or(name);
     let Some(marker) = name.rfind(" - Update #") else {
         return false;
     };
@@ -1925,7 +1969,7 @@ pub fn watched_ref(
         return None;
     }
     for pattern in branches {
-        if shell_match(branch, pattern) {
+        if crate::adapters::forge::glob_match(pattern, branch) {
             return Some(WatchedRef {
                 kind: LaneKind::Branch,
                 lane: branch.to_string(),
@@ -1934,7 +1978,7 @@ pub fn watched_ref(
         }
     }
     for pattern in tags {
-        if shell_match(branch, pattern) {
+        if crate::adapters::forge::glob_match(pattern, branch) {
             return Some(WatchedRef {
                 kind: LaneKind::Tag,
                 lane: (*pattern).to_string(),
@@ -1943,16 +1987,6 @@ pub fn watched_ref(
         }
     }
     None
-}
-
-/// `fnmatch.fnmatchcase` for the patterns a watch list holds: a literal, or a
-/// trailing `*` that matches the rest. Case sensitive, `*` and `?` elsewhere
-/// are literal, which is what the shipped patterns need.
-fn shell_match(text: &str, pattern: &str) -> bool {
-    match pattern.strip_suffix('*') {
-        Some(prefix) if !prefix.contains(['*', '?']) => text.starts_with(prefix),
-        _ => text == pattern,
-    }
 }
 
 fn ci_workflow_of(check: &crate::core::Observation) -> String {
@@ -1972,23 +2006,40 @@ fn ci_conclusion_of(check: &crate::core::Observation) -> Option<String> {
 }
 
 /// When a run ran, for ordering: its own `updated_at`, then its run number,
-/// then when Vogt observed it.
-fn ci_ran_at(check: &crate::core::Observation) -> (String, i64, crate::core::Moment) {
+/// then when Vogt observed it. A boolean run number counts as Python's `int`
+/// of it, and a number past `i64` still orders above every smaller one.
+fn ci_ran_at(check: &crate::core::Observation) -> (String, RunNumber, crate::core::Moment) {
     (
         payload_str(&check.payload, "updated_at")
             .unwrap_or("")
             .to_string(),
-        check
-            .payload
-            .get("run_number")
-            .and_then(serde_json::Value::as_i64)
-            .unwrap_or(0),
+        run_number_of(&check.payload),
         check.observed_at,
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RunNumber {
+    Missing,
+    Counted(i64),
+    Beyond,
+}
+
+fn run_number_of(payload: &serde_json::Value) -> RunNumber {
+    match payload.get("run_number") {
+        Some(serde_json::Value::Bool(true)) => RunNumber::Counted(1),
+        Some(serde_json::Value::Number(number)) => match number.as_i64() {
+            Some(value) => RunNumber::Counted(value),
+            None if number.as_u64().is_some() => RunNumber::Beyond,
+            None => RunNumber::Missing,
+        },
+        _ => RunNumber::Missing,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefFailure {
+    pub observation: crate::core::Observation,
     pub workflow: String,
     pub lane: WatchedRef,
     pub conclusion: String,
@@ -2001,10 +2052,8 @@ pub fn watched_failures(
     branches: &[&str],
     tags: &[&str],
 ) -> Vec<RefFailure> {
-    let mut newest: std::collections::BTreeMap<(String, String, u8, String), (usize, String)> =
-        std::collections::BTreeMap::new();
-    let mut places: std::collections::BTreeMap<(String, String, u8, String), WatchedRef> =
-        std::collections::BTreeMap::new();
+    let mut newest: Vec<(LaneKey, usize, String)> = Vec::new();
+    let mut places: Vec<(LaneKey, WatchedRef)> = Vec::new();
     for (index, check) in checks.iter().enumerate() {
         let Some(conclusion) = ci_conclusion_of(check) else {
             continue;
@@ -2023,29 +2072,49 @@ pub fn watched_failures(
         if github_managed(&check.payload) {
             continue;
         }
-        let key = (
-            check.project_id.clone().unwrap_or_default(),
-            ci_workflow_of(check),
-            lane.kind as u8,
-            lane.lane.clone(),
-        );
+        let key = LaneKey {
+            project_id: check.project_id.clone(),
+            workflow: ci_workflow_of(check),
+            kind: lane.kind as u8,
+            lane: lane.lane.clone(),
+        };
         let replace = newest
-            .get(&key)
-            .is_none_or(|held| ci_ran_at(check) > ci_ran_at(&checks[held.0]));
+            .iter()
+            .find(|(held, _, _)| held == &key)
+            .is_none_or(|(_, held, _)| ci_ran_at(check) > ci_ran_at(&checks[*held]));
         if replace {
-            newest.insert(key.clone(), (index, conclusion));
-            places.insert(key, lane);
+            if let Some(slot) = newest.iter_mut().find(|(held, _, _)| held == &key) {
+                slot.1 = index;
+                slot.2 = conclusion;
+            } else {
+                newest.push((key.clone(), index, conclusion));
+                places.push((key, lane));
+            }
         }
     }
     newest
         .into_iter()
-        .filter(|(_, (_, conclusion))| FAILING.contains(&conclusion.as_str()))
-        .map(|(key, (_, conclusion))| RefFailure {
-            workflow: key.1.clone(),
-            lane: places.remove(&key).expect("a lane was stored with the run"),
+        .filter(|(_, _, conclusion)| FAILING.contains(&conclusion.as_str()))
+        .map(|(key, index, conclusion)| RefFailure {
+            observation: checks[index].clone(),
+            workflow: key.workflow.clone(),
+            lane: places
+                .iter()
+                .find(|(held, _)| held == &key)
+                .expect("a lane was stored with the run")
+                .1
+                .clone(),
             conclusion,
         })
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LaneKey {
+    project_id: Option<String>,
+    workflow: String,
+    kind: u8,
+    lane: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2058,6 +2127,7 @@ pub enum BranchState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchRun {
+    pub observation: crate::core::Observation,
     pub workflow: String,
     pub conclusion: Option<String>,
 }
@@ -2088,26 +2158,32 @@ pub fn branch_ci(checks: &[crate::core::Observation], branch: &str) -> Option<Br
     let revision = ci_revision_of(
         on_branch
             .iter()
+            .rev()
             .max_by_key(|check| ci_ran_at(check))
             .expect("non-empty"),
     );
-    let mut latest: std::collections::BTreeMap<String, &crate::core::Observation> =
-        std::collections::BTreeMap::new();
+    let mut latest: Vec<(String, &crate::core::Observation)> = Vec::new();
     for check in &on_branch {
         if ci_revision_of(check) != revision {
             continue;
         }
         let workflow = ci_workflow_of(check);
         let replace = latest
-            .get(&workflow)
-            .is_none_or(|held| ci_ran_at(check) > ci_ran_at(held));
+            .iter()
+            .find(|(held, _)| held == &workflow)
+            .is_none_or(|(_, held)| ci_ran_at(check) > ci_ran_at(held));
         if replace {
-            latest.insert(workflow, check);
+            if let Some(slot) = latest.iter_mut().find(|(held, _)| held == &workflow) {
+                slot.1 = check;
+            } else {
+                latest.push((workflow, check));
+            }
         }
     }
     let runs: Vec<BranchRun> = latest
         .into_iter()
         .map(|(workflow, check)| BranchRun {
+            observation: (*check).clone(),
             workflow,
             conclusion: ci_conclusion_of(check),
         })
@@ -2136,15 +2212,26 @@ pub fn branch_ci(checks: &[crate::core::Observation], branch: &str) -> Option<Br
     let concluded_at = if state == BranchState::Running {
         None
     } else {
-        checks
+        let stamps: Vec<&str> = checks
             .iter()
             .filter(|check| {
                 payload_str(&check.payload, "branch") == Some(branch)
                     && ci_revision_of(check) == revision
             })
-            .filter_map(|check| payload_str(&check.payload, "updated_at"))
-            .max()
-            .map(str::to_string)
+            .filter_map(|check| {
+                check
+                    .payload
+                    .get("updated_at")
+                    .and_then(serde_json::Value::as_str)
+            })
+            .collect();
+        if stamps.is_empty() {
+            None
+        } else if stamps.iter().all(|stamp| stamp.is_empty()) {
+            Some(String::new())
+        } else {
+            stamps.iter().copied().max().map(str::to_string)
+        }
     };
     Some(BranchCi {
         branch: branch.to_string(),
@@ -2237,6 +2324,23 @@ mod ci_alert_tests {
         assert_eq!(found.state, BranchState::Passed);
         assert!(branch_ci(&[], "feature").is_none());
     }
+
+    #[test]
+    fn a_character_class_matches_and_the_first_maximum_wins() {
+        let tags = ["v[0-9]*"];
+        let matched = watched_ref(Some("v1.2.3"), Some("push"), &[], &tags).unwrap();
+        assert_eq!(matched.kind, LaneKind::Tag);
+        assert!(watched_ref(Some("vA"), Some("push"), &[], &tags).is_none());
+        assert!(watched_ref(Some("]x"), Some("push"), &[], &["[]]x"]).is_some());
+
+        let first = check("main", "push", "build", "failure", "2026-10-09T01:00:00Z");
+        let mut second = check("main", "push", "build", "failure", "2026-10-09T01:00:00Z");
+        second.project_id = None;
+        let found = watched_failures(&[first.clone(), second], &["main"], &[]);
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].observation.project_id.as_deref(), Some("p"));
+        assert!(found[1].observation.project_id.is_none());
+    }
 }
 
 // Which agent, model and effort a session is running, and how we know.
@@ -2286,7 +2390,10 @@ pub fn runtime_from_command(command: Option<&str>) -> CommandRuntime {
         } else if let Some(value) = word.strip_prefix("--effort=") {
             effort = Some(value.to_string());
         } else if word == "-c" {
-            if let Some(value) = following.and_then(effort_override) {
+            if let Some(value) = following
+                .filter(|text| !text.is_empty())
+                .and_then(effort_override)
+            {
                 effort = Some(value);
             }
         }
@@ -2304,46 +2411,62 @@ fn effort_override(value: &str) -> Option<String> {
     Some(rest.trim_matches(|c| c == '\'' || c == '"').to_string())
 }
 
-/// `shlex.split`, falling back to whitespace when the line is unbalanced.
+/// `shlex.split` in POSIX mode, falling back to a split on space, tab and
+/// newline when the line is unbalanced. An empty quoted token is kept, and a
+/// backslash before a character shlex does not escape stays a backslash.
 fn split_command(command: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut chars = command.chars().peekable();
     let mut quote: Option<char> = None;
+    let mut started = false;
     let mut ok = true;
     while let Some(ch) = chars.next() {
         match (quote, ch) {
-            (None, '"' | '\'') => quote = Some(ch),
+            (None, '"' | '\'') => {
+                quote = Some(ch);
+                started = true;
+            }
             (Some(open), c) if c == open => quote = None,
             (None, '\\') => match chars.next() {
+                Some('\n') => {}
                 Some(c) => current.push(c),
                 None => ok = false,
             },
-            (Some('"'), '\\') => match chars.peek() {
-                Some(&c) if matches!(c, '"' | '\\' | '$' | '`' | '\n') => {
+            (Some('"'), '\\') => match chars.peek().copied() {
+                Some(c @ ('"' | '\\' | '\n')) => {
                     chars.next();
                     current.push(c);
                 }
-                _ => current.push('\\'),
+                Some(_) => current.push('\\'),
+                None => ok = false,
             },
-            (None, c) if c.is_whitespace() => {
-                if !current.is_empty() {
+            (None, ' ' | '\t' | '\r' | '\n') => {
+                if started {
                     words.push(std::mem::take(&mut current));
+                    started = false;
                 }
             }
-            (_, c) => current.push(c),
+            (_, c) => {
+                current.push(c);
+                started = true;
+            }
         }
     }
     if quote.is_some() {
         ok = false;
     }
-    if !current.is_empty() {
+    if started {
         words.push(current);
     }
     if ok {
         words
     } else {
-        command.split_whitespace().map(str::to_string).collect()
+        command
+            .split([' ', '\t', '\r', '\n'])
+            .filter(|word| !word.is_empty())
+            .map(str::to_string)
+            .collect()
     }
 }
 
@@ -2391,11 +2514,9 @@ pub fn resolve_runtime(
         (&asked_effort, "asked"),
     ]);
     ResolvedRuntime {
-        agent: flags.agent.or_else(|| {
-            conversation_agent
-                .filter(|text| !text.is_empty())
-                .map(str::to_string)
-        }),
+        agent: flags
+            .agent
+            .or_else(|| conversation_agent.map(str::to_string)),
         model,
         model_basis,
         effort,
@@ -2423,6 +2544,14 @@ mod runtime_tests {
 
         assert!(runtime_from_command(None).agent.is_none());
         assert!(runtime_from_command(Some("")).model.is_none());
+
+        // An empty quoted token is a word of its own, so the flag takes it
+        // rather than the word after it.
+        let quoted = runtime_from_command(Some("--effort '' claude"));
+        assert_eq!(quoted.effort.as_deref(), Some(""));
+        assert_eq!(quoted.agent.as_deref(), Some("claude"));
+        let kept = runtime_from_command(Some(r#""a\$b" claude"#));
+        assert_eq!(kept.agent.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -2452,6 +2581,9 @@ mod runtime_tests {
         assert_eq!(asked.model.as_deref(), Some("sonnet"));
         assert_eq!(asked.model_basis, Some("asked"));
         assert_eq!(asked.effort, None);
+
+        let blank = resolve_runtime(None, Some(""), None, None, None, None);
+        assert_eq!(blank.agent.as_deref(), Some(""));
     }
 }
 

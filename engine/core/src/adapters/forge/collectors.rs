@@ -130,9 +130,14 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 }
 
 /// The body of a `[...]` class and what follows it, or `None` when the bracket
-/// never closes — which is a literal `[`, the way `fnmatch` reads it.
+/// never closes — which is a literal `[`, the way `fnmatch` reads it. A `]`
+/// straight after the `[` is part of the class, not its end, so `[]]` matches
+/// a `]` and `[]]x` matches `]x`.
 fn character_class(pattern: &[char]) -> Option<(Vec<char>, &[char])> {
-    let end = pattern.iter().position(|char| *char == ']')?;
+    let mut end = pattern.iter().position(|char| *char == ']')?;
+    if end == 0 {
+        end = pattern[1..].iter().position(|char| *char == ']')? + 1;
+    }
     Some((pattern[..end].to_vec(), &pattern[end + 1..]))
 }
 

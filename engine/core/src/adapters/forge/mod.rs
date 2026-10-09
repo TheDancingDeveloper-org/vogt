@@ -13,6 +13,7 @@
 mod accounts;
 mod actors;
 mod collectors;
+pub use collectors::glob_match;
 mod edges;
 mod forgejo;
 mod github;
