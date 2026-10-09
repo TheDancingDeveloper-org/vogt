@@ -24,7 +24,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, createMemoryHistory } from "@solidjs/router";
-import { fireEvent, render, waitFor } from "@solidjs/testing-library";
+import { fireEvent, getConfig, render, waitFor } from "@solidjs/testing-library";
 
 import App from "../App";
 import { APP_ROUTES } from "../routes";
@@ -132,13 +132,16 @@ function shown(container: HTMLElement): HTMLElement | null {
 /** The surface on screen, waited for by the class it renders itself under. */
 async function surface(container: HTMLElement, selector: string): Promise<HTMLElement> {
   // The panes are lazy in the shipped bundle, so the first look at one
-  // waits for its chunk as well as for its render.
+  // waits for its chunk as well as for its render: at least 5 s, and never
+  // less than setup.ts's default, which is 10 s on CI. A fixed 5 s here once
+  // undercut that default, and a runner slow enough to take 22 s over this
+  // file (it usually takes 7-9 s) failed the first terminal it opened.
   return await waitFor(() => {
     const pane = shown(container);
     const found = pane?.querySelector<HTMLElement>(selector);
     expect(found, `no ${selector} is on screen`).toBeTruthy();
     return found!;
-  }, { timeout: 5_000 });
+  }, { timeout: Math.max(5_000, getConfig().asyncUtilTimeout) });
 }
 
 /** Stable places deliberately have no top-level tab strip. */

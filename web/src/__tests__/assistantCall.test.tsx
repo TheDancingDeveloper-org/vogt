@@ -119,6 +119,7 @@ describe("the Assistant's live call", () => {
     expect(JSON.parse(socket.sent[0] as string)).toMatchObject({ type: "auth" });
     socket.server({
       type: "session.created",
+      protocol: 1,
       call_id: "c",
       sample_rate: 16000,
       end_of_turn_ms: 700,
@@ -129,8 +130,8 @@ describe("the Assistant's live call", () => {
     expect(panel.dataset.phase).toBe("listening");
 
     socket.server({
-      type: "assistant.pending_action",
-      action: {
+      type: "approval.pending",
+      card: {
         kind: "send_input",
         id: "a1",
         session_id: "s1",

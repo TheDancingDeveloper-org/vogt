@@ -69,8 +69,6 @@ jobs:
           copy engine/Cargo.lock Cargo.lock
           copy engine/contract/Cargo.toml contract/Cargo.toml
           copy engine/contract/src contract/src
-          copy engine/voxcall/Cargo.toml voxcall/Cargo.toml
-          copy engine/voxcall/src voxcall/src
           copy engine/server/Cargo.toml server/Cargo.toml
           copy engine/server/build.rs server/build.rs
           copy engine/server/src server/src

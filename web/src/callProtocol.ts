@@ -33,6 +33,8 @@ export interface CallMetrics {
 export type CallServerEvent =
   | {
       type: "session.created";
+      /** voicepipe's wire-protocol version. */
+      protocol: number;
       call_id: string;
       sample_rate: number;
       end_of_turn_ms: number;
@@ -62,8 +64,8 @@ export type CallServerEvent =
     }
   | { type: "output_audio.clear"; response_id: string }
   | { type: "conversation.item.truncated"; response_id: string; text: string }
-  | { type: "assistant.pending_action"; action: AssistantPendingAction }
-  | { type: "assistant.action_resolved"; id: string; approved: boolean }
+  | { type: "approval.pending"; card: AssistantPendingAction }
+  | { type: "approval.resolved"; id: string; approved: boolean }
   | { type: "error"; message: string }
   | { type: "pong" };
 
@@ -144,9 +146,9 @@ export function reduceCall(view: CallView, event: CallServerEvent): CallView {
     case "conversation.item.truncated":
       if (event.response_id !== view.responseId) return view;
       return { ...view, reply: event.text };
-    case "assistant.pending_action":
-      return { ...view, pending: event.action };
-    case "assistant.action_resolved":
+    case "approval.pending":
+      return { ...view, pending: event.card };
+    case "approval.resolved":
       return view.pending?.id === event.id ? { ...view, pending: null } : view;
     case "error":
       return { ...view, error: event.message };

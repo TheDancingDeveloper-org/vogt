@@ -17,7 +17,7 @@ function fold(events: CallServerEvent[], from: CallView = initialCallView()): Ca
 describe("the call view", () => {
   it("captions a turn while it is spoken, then shows what was heard", () => {
     const view = fold([
-      { type: "session.created", call_id: "c", sample_rate: 16000, end_of_turn_ms: 700, barge_in_ms: 500 },
+      { type: "session.created", protocol: 1, call_id: "c", sample_rate: 16000, end_of_turn_ms: 700, barge_in_ms: 500 },
       { type: "input_audio_buffer.speech_started" },
       { type: "conversation.item.input_audio_transcription.partial", text: "what is" },
     ]);
@@ -64,10 +64,10 @@ describe("the call view", () => {
       text: "ls",
       submit: true,
     };
-    const view = fold([{ type: "assistant.pending_action", action }]);
+    const view = fold([{ type: "approval.pending", card: action }]);
     expect(view.pending?.id).toBe("a1");
-    expect(reduceCall(view, { type: "assistant.action_resolved", id: "zz", approved: true }).pending).not.toBeNull();
-    expect(reduceCall(view, { type: "assistant.action_resolved", id: "a1", approved: true }).pending).toBeNull();
+    expect(reduceCall(view, { type: "approval.resolved", id: "zz", approved: true }).pending).not.toBeNull();
+    expect(reduceCall(view, { type: "approval.resolved", id: "a1", approved: true }).pending).toBeNull();
   });
 
   it("parses only frames that are events", () => {
