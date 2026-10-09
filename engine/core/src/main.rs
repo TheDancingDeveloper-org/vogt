@@ -234,11 +234,17 @@ fn render_text(body: &serde_json::Value) -> String {
 fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: bool) -> ExitCode {
     // Logging is a server concern. Python configures it in `serve` from the
     // resolved config and leaves the CLI and the stdio transport quiet, so a
-    // JSON-log deployment and a `debug` level only apply here. The Rust config
-    // schema is not ported, so the two environment variables stand in for it.
-    let level = std::env::var("VOGT_LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-    let format = std::env::var("VOGT_LOG_FORMAT").unwrap_or_else(|_| "text".to_string());
-    observability::configure_logging(&level, &format);
+    // JSON-log deployment and a `debug` level only apply here. `load_config`
+    // applies the file, the environment and validation, so an invalid level
+    // refuses to start rather than being silently accepted.
+    let config = match config::load_config(&serde_json::Map::new()) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("vogt-core serve: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    observability::configure_logging(config.log_level.as_str(), config.log_format.as_str());
     if let Err(error) = validate_hooks(Some(host)) {
         eprintln!("error: invalid_request: {error}");
         return ExitCode::from(1);

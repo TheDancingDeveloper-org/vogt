@@ -59,6 +59,15 @@ pub enum LogLevel {
 }
 
 impl LogLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "debug" => Ok(Self::Debug),
@@ -79,6 +88,13 @@ pub enum LogFormat {
 }
 
 impl LogFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Json => "json",
+        }
+    }
+
     fn parse(raw: &str) -> Result<Self, String> {
         match raw {
             "text" => Ok(Self::Text),
