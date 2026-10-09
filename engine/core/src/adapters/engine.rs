@@ -1633,35 +1633,22 @@ pub mod http1 {
         Ok((status, buf))
     }
 
-    /// Trust the platform certificate store, plus anything `SSL_CERT_FILE` names.
-    /// Built once: loading the store reads and parses a few hundred kilobytes,
-    /// which is wasted on every request.
+    /// Trust the platform certificate store. Built once: loading the store reads
+    /// and parses a few hundred kilobytes, which is wasted on every request.
     ///
-    /// `rustls-native-certs` returns *only* the file when `SSL_CERT_FILE` is
-    /// set, where Python keeps the system store and adds the file. The
-    /// variable is cleared for the platform load and the file is added after,
-    /// so a private CA does not replace the store that verifies GitHub.
+    /// `SSL_CERT_FILE` is not merged in. `rustls-native-certs` honours it by
+    /// returning *only* that file, and clearing the variable around the load
+    /// would race with every other thread's `getenv` and with a git child
+    /// spawned in between. A private CA therefore has to be in the platform
+    /// store, not named by the variable.
     fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
         use std::sync::OnceLock;
         static CONFIG: OnceLock<std::sync::Arc<rustls::ClientConfig>> = OnceLock::new();
         CONFIG
             .get_or_init(|| {
-                let saved = std::env::var_os("SSL_CERT_FILE");
-                std::env::remove_var("SSL_CERT_FILE");
                 let mut store = rustls::RootCertStore::empty();
                 for cert in rustls_native_certs::load_native_certs().unwrap_or_default() {
                     let _ = store.add(cert);
-                }
-                if let Some(path) = &saved {
-                    std::env::set_var("SSL_CERT_FILE", path);
-                    if let Ok(bytes) = std::fs::read(path) {
-                        for cert in
-                            rustls_pemfile::certs(&mut std::io::BufReader::new(bytes.as_slice()))
-                                .flatten()
-                        {
-                            let _ = store.add(cert);
-                        }
-                    }
                 }
                 std::sync::Arc::new(
                     rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(

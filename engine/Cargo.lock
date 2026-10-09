@@ -4253,7 +4253,6 @@ dependencies = [
  "rusqlite",
  "rustls",
  "rustls-native-certs",
- "rustls-pemfile",
  "scrypt",
  "serde",
  "serde_json",

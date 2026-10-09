@@ -856,19 +856,33 @@ pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
         .filter(|ch| !matches!(ch, '\t' | '\r' | '\n'))
         .collect();
     let candidate = raw.strip_prefix("git+").unwrap_or(&raw);
-    // Python strips only https, http and ssh, and also accepts the bare
-    // `github.com/owner/repo` form. Any other scheme, and an scp host whose
-    // case isn't exactly `github.com`, is not a GitHub repo.
-    let has_scheme = candidate.contains("://");
-    let allowed = ["https://", "http://", "ssh://"]
-        .iter()
-        .any(|scheme| candidate.starts_with(scheme))
-        || candidate.starts_with("git@github.com:")
-        || !has_scheme;
+    // Python strips the https, http and ssh schemes, repeatedly, and accepts
+    // the bare form. The scheme is whatever precedes the first `://` with no
+    // whitespace in it, so a tab in the middle of one is a different scheme.
+    let scheme = candidate
+        .split_once("://")
+        .map(|(scheme, _)| scheme)
+        .filter(|scheme| !scheme.contains(char::is_whitespace));
+    let allowed = match scheme {
+        Some(scheme) => matches!(scheme, "https" | "http" | "ssh"),
+        // An scp URL's host is case-sensitive, unlike a scheme URL's.
+        None => !candidate.starts_with("git@") || candidate.starts_with("git@github.com:"),
+    };
     if !allowed {
         return None;
     }
-    let (host, path, has_query) = super::urls::split_repo_url(candidate)?;
+    // Python strips those schemes repeatedly, and turns an scp URL written
+    // after a scheme (`https://git@github.com:o/r`) into an https URL.
+    let mut candidate = candidate.to_string();
+    for scheme in ["https://", "http://", "ssh://"] {
+        while let Some(rest) = candidate.strip_prefix(scheme) {
+            candidate = rest.to_string();
+        }
+    }
+    if let Some(rest) = candidate.strip_prefix("git@github.com:") {
+        candidate = format!("github.com/{rest}");
+    }
+    let (host, path, has_query) = super::urls::split_repo_url(&candidate)?;
     // A trailing `?` or `#` with nothing after it is an empty query and an
     // empty fragment, so it doesn't disqualify the URL. Anything after either
     // one does, which is what urlsplit reports.

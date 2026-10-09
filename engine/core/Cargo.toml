@@ -40,7 +40,6 @@ ureq = { version = "2", features = ["tls"], default-features = false }
 # replaces the store with the env file rather than merging the two.
 rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.7"
-rustls-pemfile = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
