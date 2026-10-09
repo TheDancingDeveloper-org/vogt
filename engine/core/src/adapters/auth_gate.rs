@@ -31,7 +31,7 @@ pub enum Denial {
         needed: String,
     },
     /// The instance refuses writes and the operation mutates.
-    WritesDisabled,
+    WritesDisabled { operation: String },
     /// The decision could not be recorded, so nothing may proceed.
     Unrecorded { failure: String },
 }
@@ -59,9 +59,9 @@ impl Denial {
                     "{operation} requires the '{needed}' scope; this token holds {listed}"
                 ))
             }
-            Denial::WritesDisabled => {
-                VogtError::Forbidden("writes are disabled on this instance".to_string())
-            }
+            Denial::WritesDisabled { operation } => VogtError::Forbidden(format!(
+                "{operation} is a write, and this server was started read-only"
+            )),
             Denial::Unrecorded { failure } => VogtError::MigrationError(format!(
                 "the authorization decision could not be recorded: {failure}"
             )),
@@ -130,6 +130,14 @@ fn resolve<S: DeclaredStore>(
         writes_enabled,
         now,
     } = request;
+    // A read-only server refuses a write whoever the caller is, including the
+    // `--no-auth` local user. Checked before the grant so the refusal does not
+    // depend on which branch authenticates the request.
+    if operation.mutating && !writes_enabled {
+        return Err(Denial::WritesDisabled {
+            operation: operation.name.to_string(),
+        });
+    }
     if no_auth {
         // Python's loopback caller is `local:<os-user>`, a human principal, not
         // a bare "local". The actor id stays empty because no actor row exists.
@@ -198,7 +206,9 @@ fn resolve<S: DeclaredStore>(
             }),
         )?;
         return Err(if reason == WRITES_DISABLED {
-            Denial::WritesDisabled
+            Denial::WritesDisabled {
+                operation: operation.name.to_string(),
+            }
         } else {
             Denial::Forbidden {
                 operation: operation.name.to_string(),
@@ -349,12 +359,10 @@ fn transport_name(transport: Transport) -> &'static str {
 }
 
 fn record<S: DeclaredStore>(store: &S, decision: &mut AuthDecision) -> Result<(), Denial> {
-    // The id is minted here and nowhere earlier. A request that writes no row
-    // — a missing bearer, a switched-off check — must not consume one, or the
-    // next real row skips a number and the hooks-on sequence drifts from Python.
-    let (at, id) = store.stamp_and_id("aut");
-    decision.at = at;
-    decision.id = id;
+    // The id only. `decision.at` is the instant the gate already read, and drawing
+    // the id must not read the clock again: a step clock ticks on every read, so
+    // a second one lands the row a tick later than Python's.
+    decision.id = store.next_id("aut");
     store
         .record_auth_decision(decision)
         .map_err(|error| Denial::Unrecorded {

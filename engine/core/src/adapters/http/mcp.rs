@@ -367,7 +367,9 @@ fn record_call<C: Clock, I: IdFactory>(
     if permitted {
         Ok(())
     } else if reason == crate::auth::WRITES_DISABLED {
-        Err(Denial::WritesDisabled)
+        Err(Denial::WritesDisabled {
+            operation: operation.name.to_string(),
+        })
     } else {
         Err(Denial::Forbidden {
             operation: operation.name.to_string(),
@@ -472,7 +474,7 @@ fn refusal(
     if matches!(denial, Denial::Unrecorded { .. }) {
         return unauthenticated(denial);
     }
-    let text = if matches!(denial, Denial::WritesDisabled) {
+    let text = if matches!(denial, Denial::WritesDisabled { .. }) {
         format!(
             "forbidden: {} is a write, and this server was started read-only",
             operation.name

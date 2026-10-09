@@ -815,6 +815,10 @@ mod tests {
     }
 
     fn serve(no_auth: bool) -> Running {
+        serve_with(no_auth, true)
+    }
+
+    fn serve_with(no_auth: bool, writes_enabled: bool) -> Running {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("vogt-http-{}-{n}", std::process::id()));
@@ -828,7 +832,7 @@ mod tests {
         let state = AppState::new(
             &dir,
             no_auth,
-            true,
+            writes_enabled,
             crate::application::context::SystemClock,
             crate::core::SequentialIds::new(None).unwrap(),
         );
@@ -897,6 +901,22 @@ mod tests {
         let (head, response) = buf.split_once("\r\n\r\n").unwrap();
         let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
         (status, response.to_string())
+    }
+
+    #[test]
+    fn a_write_on_a_read_only_server_names_the_operation() {
+        let running = serve_with(true, false);
+        let (status, body) = post_json(
+            running.addr,
+            "/api/labels",
+            r#"{"name":"bug","reason":"r"}"#,
+        );
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(status, 403, "{body}");
+        assert_eq!(
+            json["error"]["message"],
+            "label.create is a write, and this server was started read-only"
+        );
     }
 
     #[test]

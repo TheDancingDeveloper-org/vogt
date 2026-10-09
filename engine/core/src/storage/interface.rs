@@ -685,6 +685,10 @@ pub trait DeclaredStore {
     /// The current time and a fresh id, drawn together so a recorded row carries
     /// both from the store's own clock and factory.
     fn stamp_and_id(&self, prefix: &str) -> (crate::core::Moment, String);
+    /// A fresh id and nothing else. The gate has already read the clock once for
+    /// the decision's `at`, and a step clock ticks on every read, so drawing the
+    /// id must not read it again.
+    fn next_id(&self, prefix: &str) -> String;
     fn touch_token(
         &self,
         token_id: &str,

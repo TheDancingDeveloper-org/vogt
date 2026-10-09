@@ -177,6 +177,13 @@ where
     fn stamp_and_id(&self, prefix: &str) -> (Moment, String) {
         self.mint(prefix)
     }
+
+    fn next_id(&self, prefix: &str) -> String {
+        self.ids
+            .lock()
+            .expect("the id lock is not poisoned")
+            .next(prefix)
+    }
     type Read<'a>
         = SqliteReadView
     where
