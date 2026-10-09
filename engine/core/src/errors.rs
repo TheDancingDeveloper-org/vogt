@@ -78,6 +78,12 @@ pub enum VogtError {
         rule: String,
         message: String,
     },
+    /// No usable credential was presented (`services/auth.py`).
+    Unauthenticated(String),
+    /// A valid principal that does not hold the required scope.
+    Forbidden(String),
+    /// A collector raised rather than returning findings (`collectors/base.py`).
+    CollectorFailed(String),
 }
 
 impl VogtError {
@@ -123,9 +129,11 @@ impl VogtError {
             | Self::GitCommandFailed(m)
             | Self::GitHubUnavailable(m)
             | Self::ForgejoUnavailable(m) => m,
-            Self::PeerUnavailable { message, .. } | Self::TransitionRejected { message, .. } => {
-                message
-            }
+            Self::PeerUnavailable { message, .. }
+            | Self::TransitionRejected { message, .. }
+            | Self::Unauthenticated(message)
+            | Self::Forbidden(message)
+            | Self::CollectorFailed(message) => message,
         }
     }
 
@@ -173,6 +181,9 @@ impl VogtError {
             Self::PeerUnavailable { .. } => "peer_unavailable",
             Self::ForgejoUnavailable(_) => "forgejo_unavailable",
             Self::TransitionRejected { .. } => "transition_rejected",
+            Self::Unauthenticated(_) => "unauthenticated",
+            Self::Forbidden(_) => "forbidden",
+            Self::CollectorFailed(_) => "collector_failed",
         }
     }
 
@@ -220,6 +231,9 @@ impl VogtError {
             Self::MigrationError(_) => 500,
             Self::MigrationLocked(_) => 503,
             Self::TransitionRejected { .. } => 409,
+            Self::Unauthenticated(_) => 401,
+            Self::Forbidden(_) => 403,
+            Self::CollectorFailed(_) => 500,
         }
     }
 
@@ -285,6 +299,9 @@ pub fn error_table() -> &'static [(&'static str, u16)] {
         ("peer_unavailable", 502),
         ("forgejo_unavailable", 502),
         ("transition_rejected", 409),
+        ("unauthenticated", 401),
+        ("forbidden", 403),
+        ("collector_failed", 500),
     ]
 }
 
@@ -342,6 +359,9 @@ mod tests {
                 rule: "transition.not_allowed".to_string(),
                 message,
             },
+            "unauthenticated" => VogtError::Unauthenticated(message),
+            "forbidden" => VogtError::Forbidden(message),
+            "collector_failed" => VogtError::CollectorFailed(message),
             other => panic!("unmapped code {other}"),
         }
     }
@@ -353,10 +373,6 @@ mod tests {
         let mut rust: Vec<(String, u16)> = error_table()
             .iter()
             .map(|(code, status)| ((*code).to_string(), *status))
-            // `transition_rejected` is a Rust-side workflow code with no Python
-            // class. Everything else, including the adapter 502s and
-            // `person_required`, is compared against the regenerated snapshot.
-            .filter(|(code, _)| code != "transition_rejected")
             .collect();
         rust.sort();
         assert_eq!(rust.len(), python.len());
@@ -367,7 +383,7 @@ mod tests {
 
     #[test]
     fn every_code_round_trips_with_its_status() {
-        assert_eq!(error_table().len(), 41);
+        assert_eq!(error_table().len(), 44);
         let mut seen = std::collections::BTreeSet::new();
         for (code, status) in error_table() {
             assert!(seen.insert(*code), "duplicate code {code}");

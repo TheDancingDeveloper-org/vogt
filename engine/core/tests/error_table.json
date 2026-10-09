@@ -8,6 +8,10 @@
   403
  ],
  [
+  "collector_failed",
+  500
+ ],
+ [
   "conflict",
   409
  ],
@@ -18,6 +22,10 @@
  [
   "engine_unavailable",
   502
+ ],
+ [
+  "forbidden",
+  403
  ],
  [
   "forge_accounts_not_configured",
@@ -150,6 +158,14 @@
  [
   "role_refused",
   403
+ ],
+ [
+  "transition_rejected",
+  409
+ ],
+ [
+  "unauthenticated",
+  401
  ],
  [
   "upstream_write_failed",
