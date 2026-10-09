@@ -73,7 +73,7 @@ ENV UV_COMPILE_BYTECODE=1 \
 WORKDIR /src
 
 # Dependencies first, so a source-only change does not re-resolve them.
-COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY pyproject.toml uv.lock README.md LICENSE NOTICE ./
 RUN uv sync --locked --no-install-project --no-dev
 
 COPY src/ ./src/
