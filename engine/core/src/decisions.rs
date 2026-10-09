@@ -677,26 +677,41 @@ fn py_or(value: Option<&Value>, fallback: &str) -> String {
     }
 }
 
-/// `str()` of a value used as a summary, where a list or dict is rendered the
-/// way Python prints one: single quotes, a space after each comma, `True` and
-/// `None`, keys in insertion order.
+/// `str()` of a JSON value: a string is its text, `true`/`false`/`null` become
+/// `True`/`False`/`None`, and a list or dict uses Python's quoting — single
+/// quotes, switching to double quotes when the text holds a `'` and no `"`.
 fn py_display(value: &Value) -> String {
     match value {
-        Value::String(text) => format!("'{text}'"),
+        Value::String(text) => text.clone(),
         Value::Bool(flag) => if *flag { "True" } else { "False" }.to_string(),
         Value::Null => "None".to_string(),
         Value::Number(number) => number.to_string(),
         Value::Array(items) => {
-            let parts: Vec<String> = items.iter().map(py_display).collect();
+            let parts: Vec<String> = items.iter().map(py_literal).collect();
             format!("[{}]", parts.join(", "))
         }
         Value::Object(map) => {
             let parts: Vec<String> = map
                 .iter()
-                .map(|(key, item)| format!("'{key}': {}", py_display(item)))
+                .map(|(key, item)| format!("{}: {}", py_quote(key), py_literal(item)))
                 .collect();
             format!("{{{}}}", parts.join(", "))
         }
+    }
+}
+
+fn py_literal(value: &Value) -> String {
+    match value {
+        Value::String(text) => py_quote(text),
+        other => py_display(other),
+    }
+}
+
+fn py_quote(text: &str) -> String {
+    if text.contains('\'') && !text.contains('"') {
+        format!("\"{text}\"")
+    } else {
+        format!("'{}'", text.replace('\'', "\\'"))
     }
 }
 
@@ -894,6 +909,8 @@ pub fn evaluate(
     tracked: Option<&std::collections::BTreeSet<String>>,
     inapplicable: &[(&str, &str, &str)],
 ) -> ContractResult {
+    let path = normalise_path(path);
+    let path = path.as_str();
     if !tree.is_dir(path) {
         return ContractResult {
             contract_version: contract.version.clone(),
@@ -951,10 +968,45 @@ pub fn evaluate(
 }
 
 fn child(root: &str, name: &str) -> String {
+    if name.starts_with('/') {
+        return name.to_string();
+    }
     if root.ends_with('/') {
         format!("{root}{name}")
     } else {
         format!("{root}/{name}")
+    }
+}
+
+/// `str(Path(path).expanduser())`: `~` is the home directory, a trailing slash
+/// and a redundant `.` or doubled separator collapse, and an empty path is `.`.
+/// `..` is kept, because this is not a resolve.
+fn normalise_path(path: &str) -> String {
+    let expanded = if path == "~" || path.starts_with("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if path == "~" {
+            home
+        } else {
+            format!("{home}{}", &path[1..])
+        }
+    } else {
+        path.to_string()
+    };
+    if expanded.is_empty() {
+        return ".".to_string();
+    }
+    let absolute = expanded.starts_with('/');
+    let parts: Vec<&str> = expanded
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    let joined = parts.join("/");
+    if absolute {
+        format!("/{joined}")
+    } else if joined.is_empty() {
+        ".".into()
+    } else {
+        joined
     }
 }
 
@@ -997,9 +1049,12 @@ fn criterion(
 /// A declaration does not make the criterion satisfied — the file is still
 /// absent. It makes it not-counted, and only when it would otherwise fail.
 fn exempted(mut result: CriterionResult, inapplicable: &[(&str, &str, &str)]) -> CriterionResult {
-    let reason = inapplicable.iter().find_map(|(rule, target, reason)| {
-        (*rule == result.rule && *target == result.target).then_some(*reason)
-    });
+    let reason = inapplicable
+        .iter()
+        .rev()
+        .find_map(|(rule, target, reason)| {
+            (*rule == result.rule && *target == result.target).then_some(*reason)
+        });
     if let Some(reason) = reason.filter(|_| !result.satisfied) {
         result.applicable = false;
         result.detail = format!("declared inapplicable to this project: {reason}");
@@ -2948,46 +3003,85 @@ mod runtime_tests {
 
 use std::sync::LazyLock;
 
-/// Python's `\w`, one character wide so a look-behind stays fixed length: a
-/// letter or digit in any script, or an underscore, but never a combining mark.
-const PY_WORD: &str = r"\p{Alphabetic}|\d|_";
+/// Python's `\w` is `str.isalnum()` or `_`: a letter or number in any script,
+/// never a combining mark. One character wide so a look-behind stays fixed.
+const PY_WORD: &str = r"[\p{L}\p{N}_]";
 /// Python's `\s`: Unicode whitespace plus the C0 controls U+001C to U+001F.
-const PY_SPACE: &str = r"[\s\x1c-\x1f]";
+const PY_SPACE_CLASS: &str = r"\s\x1c-\x1f";
 
 /// Rewrite a Python pattern so the `regex` crate reads its classes the way
-/// Python does. Covers `\b`, `\w`, `\s`, `\S` and `\d`, which is everything the
-/// activity patterns use.
+/// Python does. Inside `[...]` a class stays a class: `\s` grows the C0
+/// controls, `\w` becomes letters, numbers and underscore, and `\S`/`\W`/`\D`
+/// become the complementary set. Outside, `\b` is a boundary and `\S` is a
+/// negated space. `[\b]` is a backspace, not a boundary.
 fn python_pattern(pattern: &str) -> String {
     let mut out = String::new();
-    let mut chars = pattern.chars();
+    let mut chars = pattern.chars().peekable();
     let mut escaped = false;
+    let mut class = false;
     #[allow(clippy::while_let_on_iterator)]
     while let Some(ch) = chars.next() {
         if escaped {
-            match ch {
-                'b' => out.push_str(&format!(
-                    r"(?:(?<!{PY_WORD})(?={PY_WORD})|(?<={PY_WORD})(?!{PY_WORD}))"
-                )),
-                'B' => out.push_str(&format!(
-                    r"(?:(?<!{PY_WORD})(?!{PY_WORD})|(?<={PY_WORD})(?={PY_WORD}))"
-                )),
-                'w' => out.push_str(&format!("(?:{PY_WORD})")),
-                's' => out.push_str(PY_SPACE),
-                'S' => out.push_str(&format!("(?:(?!{PY_SPACE}).)")),
-                'd' => out.push_str(r"\d"),
-                other => {
-                    out.push('\\');
-                    out.push(other);
+            if class {
+                match ch {
+                    'w' => out.push_str(r"\p{L}\p{N}_"),
+                    's' => out.push_str(PY_SPACE_CLASS),
+                    'd' => out.push_str(r"\d"),
+                    'D' => out.push_str(r"\D"),
+                    'S' => out.push_str(r"\S"),
+                    'b' => out.push('\u{0008}'),
+                    other => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                }
+            } else {
+                match ch {
+                    'b' => out.push_str(&format!(
+                        r"(?:(?<!{PY_WORD})(?={PY_WORD})|(?<={PY_WORD})(?!{PY_WORD}))"
+                    )),
+                    'B' => out.push_str(&format!(
+                        r"(?:(?<!{PY_WORD})(?!{PY_WORD})|(?<={PY_WORD})(?={PY_WORD}))"
+                    )),
+                    'w' => out.push_str(PY_WORD),
+                    's' => out.push_str(&format!("[{PY_SPACE_CLASS}]")),
+                    'S' => out.push_str(&format!("(?:(?![{PY_SPACE_CLASS}]).)")),
+                    'd' => out.push_str(r"\d"),
+                    other => {
+                        out.push('\\');
+                        out.push(other);
+                    }
                 }
             }
             escaped = false;
         } else if ch == '\\' {
             escaped = true;
+        } else if ch == '[' && !class && starts_any_class(&mut chars) {
+            out.push_str("(?s:.)");
         } else {
+            if ch == '[' && !class {
+                class = true;
+            } else if ch == ']' && class {
+                class = false;
+            }
             out.push(ch);
         }
     }
     out
+}
+
+/// `[\s\S]` and its swaps mean "any character, including a newline". Consumes
+/// the class when the iterator starts with one.
+fn starts_any_class(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+    for pair in [r"\s\S", r"\S\s", r"\w\W", r"\W\w", r"\d\D", r"\D\d"] {
+        let class = format!("{pair}]");
+        let ahead: String = chars.clone().take(class.chars().count()).collect();
+        if ahead == class {
+            chars.nth(class.chars().count() - 1);
+            return true;
+        }
+    }
+    false
 }
 
 /// `re.sub` over a translated pattern: a `$1` in the replacement is the first
@@ -3173,7 +3267,10 @@ pub fn looks_like_dump(output: &str) -> bool {
 }
 
 fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    text.split(|ch: char| ch.is_whitespace() || matches!(ch, '\u{1c}'..='\u{1f}'))
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn cut(text: &str, limit: usize) -> String {
@@ -3513,6 +3610,13 @@ mod activity_tests {
             summarize_input(&serde_json::json!({"pattern": true})),
             "True"
         );
+
+        // A kubeconfig is withheld even with a newline between its markers, and
+        // a word boundary holds next to a combining mark.
+        assert!(looks_like_dump("kind: Config\nclusters:\n- x\nusers:\n"));
+        let marked = format!("\t\u{345}sk-{}", "ab".repeat(9));
+        assert!(activity_redact(&marked).contains("[REDACTED:token]"));
+        assert_eq!(summarize_input(&serde_json::json!(["it's", 1])), "it's 1");
     }
 }
 
@@ -3544,6 +3648,10 @@ mod contract_tests {
         assert_eq!(result.status, NOT_CHECKED);
         assert_eq!(result.criteria.len(), 1);
         assert_eq!(result.criteria[0].rule, "path.exists");
+        let collapsed = evaluate("/work//app/", &Contract::stock(), &tree, None, &[]);
+        assert_eq!(collapsed.path, "/work/app");
+        let empty = evaluate("", &Contract::stock(), &tree, None, &[]);
+        assert_eq!(empty.path, ".");
     }
 
     #[test]
