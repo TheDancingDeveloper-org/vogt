@@ -144,6 +144,12 @@ impl Moment {
 /// A clock answers "now" in UTC. The domain takes one; it never reads the wall.
 pub trait Clock {
     fn now(&mut self) -> Moment;
+    /// Whether a read moves the clock. A step clock does, one second at a time,
+    /// and a wall clock does not. A caller that needs the next instant without
+    /// spending this one asks here instead of reading.
+    fn steps(&self) -> bool {
+        false
+    }
 }
 
 pub struct SystemClock;
@@ -171,6 +177,10 @@ impl Clock for StepClock {
         let current = self.next;
         self.next = Moment::from_unix(current.unix_seconds + 1, current.nanos);
         current
+    }
+
+    fn steps(&self) -> bool {
+        true
     }
 }
 

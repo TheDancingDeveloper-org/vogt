@@ -167,6 +167,13 @@ where
             .now()
     }
 
+    fn clock_steps(&self) -> bool {
+        self.clock
+            .lock()
+            .expect("the clock lock is not poisoned")
+            .steps()
+    }
+
     fn next_id(&self, prefix: &str) -> String {
         self.ids
             .lock()

@@ -376,15 +376,9 @@ const TOUCH_DEBOUNCE_SECONDS: i64 = 5 * 60;
 /// and the second read is one step after the first, on a clock the operation
 /// never sees. A step clock moves one second per read, so the touch is one
 /// second after the decision. A wall clock does not move between two reads in
-/// the same instant, and the touch stays where the decision is. The kind comes
-/// from the store's clock, not from reading the environment again.
-fn touch_instant<S: DeclaredStore>(_store: &S, decision: Moment) -> Moment {
-    // The store's type carries its clock, `SqliteDeclaredStore<StepClock, _>`.
-    // Asking the clock itself would need a method the trait does not have, and
-    // reading the environment would answer for the process rather than for this
-    // store.
-    let stepped = std::any::type_name::<S>().contains("StepClock");
-    if stepped {
+/// the same instant, and the touch stays where the decision is.
+fn touch_instant<S: DeclaredStore>(store: &S, decision: Moment) -> Moment {
+    if store.clock_steps() {
         Moment::from_unix(decision.unix_seconds() + 1, decision.nanos())
     } else {
         decision

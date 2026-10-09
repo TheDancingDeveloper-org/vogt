@@ -685,6 +685,12 @@ pub trait DeclaredStore {
     /// The store's clock, read once. A step clock ticks on every read, so a caller
     /// that already holds an instant must not call this for it.
     fn now(&self) -> crate::core::Moment;
+    /// Whether the clock moves on every read. A step clock does, and a wall clock
+    /// does not. The touch lands one step after the decision only on a clock that
+    /// moves, and asking is cheaper than guessing from the type's name.
+    fn clock_steps(&self) -> bool {
+        false
+    }
     /// A fresh id and nothing else. The caller has already read the clock for the
     /// decision's `at`, and a step clock ticks on every read, so drawing the id
     /// must not read it again.

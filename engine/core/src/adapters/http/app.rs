@@ -610,24 +610,22 @@ fn query_object(operation: &str, query: Option<&str>) -> serde_json::Value {
         let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
         let key = percent_decode(key);
         let decoded = percent_decode(value);
-        let coerced = coerce_query(&schema, &key, &decoded);
-        // A repeated key on a list field is the list. FastAPI collects
-        // `?sources=a&sources=b` into `["a", "b"]`; keeping only the last value
-        // hands the validator a string and it reports `list_type`. The list may be
-        // wrapped in `anyOf`, the way an `Optional[list]` is, so the type is read
-        // the same way `coerce_query` reads it. A scalar keeps the last value,
-        // because a list of one is not that scalar.
-        let repeats = field_type(&schema, &key) == Some("array");
+        // A list field is a list however many times the key appears. FastAPI wraps
+        // even one value, so `?sources=github` arrives as `["github"]`; a bare
+        // string is what the validator refuses as `list_type`. Each item is coerced
+        // to the array's item type. A scalar keeps its last value.
+        let value = if field_type(&schema, &key) == Some("array") {
+            serde_json::Value::Array(vec![coerce_item(&schema, &key, &decoded)])
+        } else {
+            coerce_query(&schema, &key, &decoded)
+        };
         match object.get_mut(&key) {
-            Some(existing) if repeats => match existing {
-                serde_json::Value::Array(items) => items.push(coerced),
-                single => {
-                    let first = single.take();
-                    *single = serde_json::Value::Array(vec![first, coerced]);
-                }
+            Some(serde_json::Value::Array(items)) => match &value {
+                serde_json::Value::Array(more) => items.extend(more.clone()),
+                one => items.push(one.clone()),
             },
             _ => {
-                object.insert(key, coerced);
+                object.insert(key, value);
             }
         }
     }
@@ -639,7 +637,27 @@ fn query_object(operation: &str, query: Option<&str>) -> serde_json::Value {
 /// that type is sent as that type and anything else stays a string for the
 /// validator to reject.
 fn coerce_query(schema: &Option<&serde_json::Value>, field: &str, text: &str) -> serde_json::Value {
-    let kind = field_type(schema, field);
+    coerce_scalar(field_type(schema, field), text)
+}
+
+/// One item of a list field, coerced to the array's declared item type. An item
+/// with no declared type, or one that will not parse as it, stays a string for
+/// the validator to refuse.
+fn coerce_item(schema: &Option<&serde_json::Value>, field: &str, text: &str) -> serde_json::Value {
+    let item = schema
+        .and_then(|schema| schema.pointer(&format!("/properties/{field}/items/type")))
+        .or_else(|| schema.and_then(|schema| schema.pointer(&format!("/properties/{field}/anyOf"))))
+        .and_then(|value| match value.as_array() {
+            Some(options) => options
+                .iter()
+                .find_map(|option| option.pointer("/items/type")),
+            None => Some(value),
+        })
+        .and_then(serde_json::Value::as_str);
+    coerce_scalar(item, text)
+}
+
+fn coerce_scalar(kind: Option<&str>, text: &str) -> serde_json::Value {
     match kind {
         Some("integer") => text
             .parse::<i64>()
@@ -974,6 +992,15 @@ mod tests {
             "/api/labels",
             r#"{"name":"bug","reason":"r"}"#,
         );
+        assert_eq!(status, 200, "{body}");
+    }
+
+    #[test]
+    fn a_list_field_given_once_is_still_a_list() {
+        // FastAPI wraps one value, so `?sources=github` is `["github"]`. A bare
+        // string is what the validator refuses as `list_type`.
+        let running = serve(true);
+        let (status, body) = request(running.addr, "GET", "/api/inbox?sources=github", None);
         assert_eq!(status, 200, "{body}");
     }
 
