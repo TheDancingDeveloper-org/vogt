@@ -215,9 +215,11 @@ fn decide<C: Clock + 'static, I: IdFactory + 'static>(
     }
 
     let decided_at = clock_now(&ctx.clock);
+    // `decided_at + ttl`, keeping the microseconds. Dropping them made the
+    // stored row and the engine payload differ from Python's timedelta sum.
     let expires_at = Moment::from_unix(
         decided_at.unix_seconds().saturating_add(grant.ttl_seconds),
-        0,
+        decided_at.nanos(),
     );
     let engine = engine_of(ctx)?;
     // The engine first: the row says approved only once the grant is held.
@@ -446,7 +448,11 @@ fn record_decision<C: Clock + 'static, I: IdFactory + 'static>(
                 "grant {grant_id} is {state}, not pending"
             )));
         }
-        let current = current.unwrap();
+        let Some(current) = current else {
+            return Err(VogtError::Conflict(format!(
+                "grant {grant_id} is gone, not pending"
+            )));
+        };
         let decided = SessionGrant {
             state: if approved {
                 GrantState::Approved
@@ -472,16 +478,29 @@ fn record_decision<C: Clock + 'static, I: IdFactory + 'static>(
 }
 
 /// A session reference is either a Vogt session id or an engine session id.
-/// W9 owns the session lookup module, so the resolution is inlined here from
-/// the same store reads it uses.
+///
+/// Inlined from `sessions.py`'s `_target` until W9 lands the sessions module,
+/// which should own this once and replace the copy. A `ses_…` id must be one
+/// Vogt recorded — an unknown one is a wrong id, not an engine id. Anything
+/// else is the engine's own id, passed through as given.
 fn resolve_target<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     target: &str,
 ) -> Result<String, VogtError> {
-    if let Some(session) = ctx.declared.read()?.session_by_id(target)? {
+    let wanted = target.trim();
+    if wanted.is_empty() {
+        return Err(VogtError::InvalidRequest(
+            "a session id is required (ses_… or the engine's session UUID)".to_string(),
+        ));
+    }
+    let view = ctx.declared.read()?;
+    if wanted.starts_with("ses_") {
+        let session = view.session_by_id(wanted)?.ok_or_else(|| {
+            VogtError::NotFound(format!("no session {}", crate::core::py_repr(wanted)))
+        })?;
         return Ok(session.engine_session_id);
     }
-    Ok(target.to_string())
+    Ok(wanted.to_string())
 }
 
 fn view_of(view: &impl ReadView, grant: &SessionGrant, now: Moment) -> Result<Value, VogtError> {
@@ -578,9 +597,13 @@ fn parse_uses(uses: &str) -> Result<crate::core::GrantUses, VogtError> {
 fn engine_of<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
 ) -> Result<&crate::adapters::engine::EngineClient, VogtError> {
-    ctx.engine
-        .as_ref()
-        .ok_or_else(|| VogtError::EngineUnavailable("no session engine is configured".to_string()))
+    ctx.engine.as_ref().ok_or_else(|| {
+        VogtError::EngineUnavailable(
+            "no session engine is configured, so there is nothing to open a \
+                 terminal on (set VOGT_ENGINE_URL)"
+                .to_string(),
+        )
+    })
 }
 
 fn field(params: &Value, operation: &str, name: &str) -> Result<String, VogtError> {
@@ -600,4 +623,250 @@ fn clock_now<C: Clock>(clock: &std::sync::Arc<std::sync::Mutex<C>>) -> Moment {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .now()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::json;
+
+    use crate::adapters::engine::EngineClient;
+    use crate::application::context::build_context;
+    use crate::application::writes::audited_write;
+    use crate::core::{ActorKind, CodingSession, Moment, Principal, Project, StepClock};
+    use crate::errors::VogtError;
+    use crate::storage::interface::WriteTxn;
+
+    /// A context whose engine answers every session lookup as alive and records
+    /// every request it was sent.
+    fn fresh(
+        name: &str,
+        principal: Principal,
+    ) -> (
+        std::path::PathBuf,
+        crate::application::context::Built,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        let dir = std::env::temp_dir().join(format!("vogt-grant-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        let engine = EngineClient::new(
+            "http://engine",
+            None,
+            Some(Box::new(move |path, _, body, method| {
+                log.lock().unwrap().push(format!("{method} {path}"));
+                let answer = if method == "GET" {
+                    br#"{"id":"eng","alive":true,"role":"worker"}"#.to_vec()
+                } else {
+                    body.to_vec()
+                };
+                (200, answer)
+            })),
+        );
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.clone(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(principal),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 123_000))),
+            None,
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .unwrap();
+        (dir, built, seen)
+    }
+
+    /// A second context over a context `fresh` already initialised, so two
+    /// principals can act on the same store.
+    fn fresh_over(
+        dir: &std::path::Path,
+        principal: Principal,
+    ) -> (
+        std::path::PathBuf,
+        crate::application::context::Built,
+        Arc<Mutex<Vec<String>>>,
+    ) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&seen);
+        let engine = EngineClient::new(
+            "http://engine",
+            None,
+            Some(Box::new(move |path, _, body, method| {
+                log.lock().unwrap().push(format!("{method} {path}"));
+                let answer = if method == "GET" {
+                    br#"{"id":"eng","alive":true,"role":"worker"}"#.to_vec()
+                } else {
+                    body.to_vec()
+                };
+                (200, answer)
+            })),
+        );
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir.to_path_buf(),
+                ..crate::config::VogtConfig::default()
+            },
+            Some(principal),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 123_000))),
+            None,
+            None,
+            Some(engine),
+            None,
+            None,
+        )
+        .unwrap();
+        (dir.to_path_buf(), built, seen)
+    }
+
+    fn person() -> Principal {
+        Principal::new("local:ada", ActorKind::Human, "Ada").unwrap()
+    }
+
+    fn agent(identity: &str) -> Principal {
+        Principal::new(identity, ActorKind::Agent, "agent").unwrap()
+    }
+
+    fn request(target: &str) -> serde_json::Value {
+        json!({
+            "reason": "needed",
+            "target": target,
+            "kind": "credential",
+            "uses": "once",
+            "ttl_seconds": 60,
+            "secret_name": "token",
+            "project_id": "proj",
+        })
+    }
+
+    /// Record a Vogt session so a `ses_…` reference has something to resolve to.
+    fn record_session(built: &crate::application::context::Built, id: &str, engine_id: &str) {
+        crate::with_ctx!(built, |ctx| {
+            let mut write = crate::application::context::write_of(ctx);
+            let id = id.to_string();
+            let engine_id = engine_id.to_string();
+            audited_write(&mut write, "session.start", "test", |txn, actor| {
+                txn.insert_project(&Project::new(
+                    "prj_1",
+                    "proj",
+                    "Proj",
+                    "/work",
+                    Moment::from_unix(1_700_000_000, 0),
+                ))?;
+                txn.insert_session(&CodingSession {
+                    id,
+                    engine_session_id: engine_id,
+                    project_id: "prj_1".to_string(),
+                    work_item_id: None,
+                    actor_id: actor.id.clone(),
+                    cwd: "/work".to_string(),
+                    template: None,
+                    model: None,
+                    effort: None,
+                    reason: "test".to_string(),
+                    started_at: Moment::from_unix(1_700_000_000, 0),
+                    stopped_at: None,
+                })?;
+                Ok(crate::application::writes::WriteOutcome {
+                    result: json!({}),
+                    entity_kind: "session".to_string(),
+                    entity_id: "ses".to_string(),
+                    payload: json!({}),
+                    event_kind: "session.started".to_string(),
+                    summary: json!({}),
+                })
+            })
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn an_agent_cannot_decide_a_grant() {
+        let (dir, built, _) = fresh("decide", person());
+        let asked = super::grant_request_op(&built, request("eng-1")).unwrap();
+        let (_, agent_ctx, _) = fresh_over(&dir, agent("agent:engine:eng-1"));
+        let error = super::grant_decide_op(
+            &agent_ctx,
+            json!({"id": asked["grant"]["id"], "decision": "approve", "reason": "no"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::GrantRefused(ref message) if message.contains("only a person")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn approving_keeps_the_microseconds_and_a_person_sees_the_grant() {
+        let (_, built, seen) = fresh("approve", person());
+        let asked = super::grant_request_op(&built, request("eng-1")).unwrap();
+        let id = asked["grant"]["id"].as_str().unwrap().to_string();
+        let decided = super::grant_decide_op(
+            &built,
+            json!({"id": id, "decision": "approve", "reason": "yes"}),
+        )
+        .unwrap();
+        // The step clock advances one second per read. The request takes four
+        // reads, so the decision is the fifth: 1_700_000_004 plus the 60s ttl,
+        // and the 123µs must survive the sum.
+        assert_eq!(
+            decided["grant"]["expires_at"],
+            "2023-11-14T22:14:24.000123Z"
+        );
+        let listed =
+            super::grant_list_op(&built, json!({"state": "approved", "limit": 10})).unwrap();
+        assert_eq!(listed["grants"][0]["id"], id);
+        let sent = seen.lock().unwrap().clone();
+        assert!(
+            sent.iter().any(
+                |call| call.starts_with("POST ") && call.contains("/api/sessions/eng-1/grants")
+            ),
+            "the engine was never asked to apply: {sent:?}"
+        );
+    }
+
+    #[test]
+    fn an_agent_sees_only_its_own_sessions_grants() {
+        let (_, built, _) = fresh("scope", agent("agent:engine:eng-1"));
+        super::grant_request_op(&built, request("eng-1")).unwrap();
+        let own = super::grant_list_op(&built, json!({"limit": 10})).unwrap();
+        assert_eq!(own["grants"].as_array().unwrap().len(), 1);
+        let other = super::grant_list_op(&built, json!({"target": "eng-2", "limit": 10})).unwrap();
+        assert_eq!(other["grants"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn an_unknown_session_id_is_not_found_and_a_blank_one_is_refused() {
+        let (_, built, seen) = fresh("target", person());
+        let unknown = super::grant_request_op(&built, request("  ses_nope  ")).unwrap_err();
+        assert!(
+            matches!(unknown, VogtError::NotFound(ref message) if message.contains("no session 'ses_nope'")),
+            "{unknown:?}"
+        );
+        let blank = super::grant_request_op(&built, request("   ")).unwrap_err();
+        assert!(matches!(blank, VogtError::InvalidRequest(_)), "{blank:?}");
+        // Neither reaches the engine: a wrong id is refused before any lookup.
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "{:?}",
+            seen.lock().unwrap()
+        );
+    }
+
+    #[test]
+    fn a_recorded_session_resolves_to_its_engine_id() {
+        let (_, built, _) = fresh("resolve", person());
+        record_session(&built, "ses_0001", "eng-9");
+        let asked = super::grant_request_op(&built, request("ses_0001")).unwrap();
+        assert_eq!(asked["grant"]["target"], "eng-9");
+    }
 }
