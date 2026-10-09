@@ -106,6 +106,7 @@ impl Moment {
         seconds + nanos / 1_000_000_000.0
     }
 
+    /// Always `+00:00`. A moment is UTC, so there is no other offset to print.
     pub fn to_iso(self) -> String {
         self.render("+00:00")
     }
@@ -214,7 +215,7 @@ pub const IDS_ENV: &str = "VOGT_TEST_IDS";
 /// Python's `repr` for a string. It prefers single quotes and switches to
 /// double quotes when the value holds an apostrophe and no double quote, so
 /// ` x ` reads `' x '` and `it's` reads `"it's"`.
-fn py_repr(raw: &str) -> String {
+pub fn py_repr(raw: &str) -> String {
     let quote = if raw.contains('\'') && !raw.contains('"') {
         '"'
     } else {

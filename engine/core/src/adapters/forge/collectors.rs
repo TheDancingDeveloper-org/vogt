@@ -135,9 +135,7 @@ pub fn glob_match(pattern: &str, text: &str) -> bool {
 /// a `]` and `[]]x` matches `]x`.
 fn character_class(pattern: &[char]) -> Option<(Vec<char>, &[char])> {
     let mut end = pattern.iter().position(|char| *char == ']')?;
-    let lead = pattern
-        .first()
-        .is_some_and(|char| matches!(char, '!' | '^'));
+    let lead = pattern.first().is_some_and(|char| *char == '!');
     if end == 0 || (lead && end == 1) {
         end = pattern[end + 1..].iter().position(|char| *char == ']')? + end + 1;
     }
@@ -146,13 +144,13 @@ fn character_class(pattern: &[char]) -> Option<(Vec<char>, &[char])> {
 
 fn class_matches(class: &[char], candidate: char) -> bool {
     let (negated, class) = match class.first() {
-        Some('!') | Some('^') => (true, &class[1..]),
+        Some('!') => (true, &class[1..]),
         _ => (false, class),
     };
     let mut matched = false;
     let mut chars = class.iter().peekable();
     while let Some(start) = chars.next() {
-        if chars.peek() == Some(&&'-') {
+        if chars.peek() == Some(&&'-') && chars.clone().nth(1).is_some() {
             chars.next();
             if let Some(end) = chars.next() {
                 matched |= (*start..=*end).contains(&candidate);
@@ -810,5 +808,8 @@ mod tests {
         assert!(glob_match("v[!0-9]", "va"));
         assert!(glob_match("relé-?", "relé-β"));
         assert!(!glob_match("[unterminated", "x"));
+        assert!(glob_match("[^b]", "b"));
+        assert!(glob_match("[^b]", "^"));
+        assert!(!glob_match("[!a-]", "-"));
     }
 }

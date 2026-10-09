@@ -1161,7 +1161,9 @@ pub const HUMAN_GATED_REASON: &[(&str, &str)] = &[
 ];
 
 pub fn normalise_version(value: &str) -> String {
-    let stripped = value.trim();
+    let stripped = value.trim_matches(|ch: char| {
+        ch.is_whitespace() || matches!(ch, '\u{1c}' | '\u{1d}' | '\u{1e}' | '\u{1f}')
+    });
     stripped.trim_start_matches(['v', 'V']).to_string()
 }
 
@@ -1213,11 +1215,6 @@ fn finding(
     }
 }
 
-/// `repr()` of a string: quotes, with a backslash before an embedded quote.
-fn py_repr(text: &str) -> String {
-    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
-}
-
 /// Declared version against the newest release actually seen. A leading `v` is
 /// not a difference.
 #[allow(clippy::too_many_arguments)]
@@ -1232,7 +1229,9 @@ pub fn version_mismatch(
     if declared.is_some_and(|declared| normalise_version(declared) == normalise_version(observed)) {
         return None;
     }
-    let stated = declared.map(py_repr).unwrap_or_else(|| "nothing".into());
+    let stated = declared
+        .map(crate::core::py_repr)
+        .unwrap_or_else(|| "nothing".into());
     Some(finding(
         VERSION_MISMATCH,
         "project",
@@ -1240,7 +1239,7 @@ pub fn version_mismatch(
         Some(project_id),
         format!(
             "{project_slug} declares {stated} but the newest observed release is {}",
-            py_repr(observed)
+            crate::core::py_repr(observed)
         ),
         serde_json::json!({
             "entity": "project", "field": "current_version",
@@ -1253,6 +1252,7 @@ pub fn version_mismatch(
 
 fn where_in(manifest: Option<&str>) -> String {
     manifest
+        .filter(|name| !name.is_empty())
         .map(|name| format!(" in {name}"))
         .unwrap_or_default()
 }
@@ -1275,7 +1275,7 @@ pub fn broken_path_dependency(
         Some(project_id),
         format!(
             "{project_slug} references {}{}, which is inside this project and does not exist",
-            py_repr(raw_target),
+            crate::core::py_repr(raw_target),
             where_in(manifest)
         ),
         serde_json::json!({
@@ -1305,7 +1305,7 @@ pub fn unresolved_dependency(
         Some(project_id),
         format!(
             "{project_slug} references {}{}, which is not a registered project",
-            py_repr(raw_target),
+            crate::core::py_repr(raw_target),
             where_in(manifest)
         ),
         serde_json::json!({
@@ -1325,7 +1325,7 @@ fn last_observed_open(
     format!(
         "{subject_key} was open when last observed ({}), but {work_ref} is {} here — the incremental sync reads all states, so this is an observed reopen, not a close it failed to see",
         evidence.observed_at.to_iso(),
-        py_repr(declared_state)
+        crate::core::py_repr(declared_state)
     )
 }
 
@@ -1344,7 +1344,7 @@ pub fn forge_state_mismatch(
     let summary = if upstream_state == "closed" {
         format!(
             "{subject_key} is closed upstream, but {work_ref} is {} here",
-            py_repr(declared_state)
+            crate::core::py_repr(declared_state)
         )
     } else {
         last_observed_open(subject_key, work_ref, declared_state, &evidence)
@@ -1398,7 +1398,7 @@ pub fn initiative_checkbox_drift(
         project_id,
         format!(
             "initiative {}: {work_ref} (#{number}) is {ticked} on the tracking issue but is {ought} here",
-            py_repr(initiative_slug)
+            crate::core::py_repr(initiative_slug)
         ),
         serde_json::json!({
             "entity": "work_item", "initiative": initiative_slug, "work_ref": work_ref,
@@ -1463,7 +1463,7 @@ pub fn ci_red_vs_healthy(
         Some(project_id),
         format!(
             "{project_slug} is {} but {} check(s) failed on {head}: {}",
-            py_repr(lifecycle_state),
+            crate::core::py_repr(lifecycle_state),
             failing.len(),
             failing.join(", ")
         ),
@@ -1502,7 +1502,7 @@ pub fn referenced_issue_state_mismatch(
         format!(
             "{work_ref} references {subject_key}, which was {upstream_state} when last observed ({}), while {work_ref} is {} — {finished_here} here, {upstream_state} there",
             evidence.observed_at.to_iso(),
-            py_repr(declared_state)
+            crate::core::py_repr(declared_state)
         ),
         serde_json::json!({
             "entity": "work_item", "action": "review", "subject_key": subject_key,
@@ -1548,32 +1548,40 @@ pub fn update_automation_gap(
 /// pull request.
 pub fn issue_references(text: &str) -> Vec<String> {
     let mut keys = Vec::new();
-    for (owner, repo, number) in find_references(text) {
+    let push = |keys: &mut Vec<String>, owner: &str, repo: &str, number: &str| {
         let repo = repo.strip_suffix(".git").unwrap_or(repo);
         let key = format!("gh:{owner}/{repo}#{number}");
         if !keys.contains(&key) {
             keys.push(key);
         }
+    };
+    for (_, parts) in scan(text, true) {
+        push(&mut keys, parts.0, parts.1, parts.2);
+    }
+    for (_, parts) in scan(text, false) {
+        push(&mut keys, parts.0, parts.1, parts.2);
     }
     keys
 }
 
-fn find_references(text: &str) -> Vec<(&str, &str, &str)> {
+fn scan(text: &str, urls: bool) -> Vec<(usize, (&str, &str, &str))> {
     let mut found = Vec::new();
-    let bytes = text.as_bytes();
     let mut index = 0;
-    while index < bytes.len() {
-        if let Some((end, parts)) = match_url(&text[index..]) {
-            found.push(parts);
+    while index < text.len() {
+        let rest = &text[index..];
+        let hit = if urls {
+            match_url(rest)
+        } else if index == 0 || !py_word(text[..index].chars().next_back().unwrap()) {
+            match_qualified(rest)
+        } else {
+            None
+        };
+        if let Some((end, parts)) = hit {
+            found.push((index, parts));
             index += end;
             continue;
         }
-        if let Some((end, parts)) = match_qualified(&text[index..]) {
-            found.push(parts);
-            index += end;
-            continue;
-        }
-        index += text[index..].chars().next().unwrap().len_utf8();
+        index += rest.chars().next().unwrap().len_utf8();
     }
     found
 }
@@ -1609,7 +1617,7 @@ fn match_qualified(text: &str) -> Option<(usize, (&str, &str, &str))> {
         return None;
     }
     let boundary = rest.chars().next();
-    if boundary.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+    if boundary.is_some_and(py_word) {
         return None;
     }
     Some((text.len() - rest.len(), (owner, repo, number)))
@@ -1634,6 +1642,11 @@ fn take_digits(text: &str) -> Option<(&str, &str)> {
         .map(char::len_utf8)
         .sum();
     (end > 0).then(|| (&text[..end], &text[end..]))
+}
+
+/// Python's `\w`: a letter or number, or `_`.
+fn py_word(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
 }
 
 #[cfg(test)]
@@ -4209,6 +4222,15 @@ mod drift_tests {
             issue_references("https://github.com/acme/app.git/issues/2"),
             vec!["gh:acme/app#2".to_string()]
         );
+        assert!(issue_references("_a/b#3").is_empty());
+        assert_eq!(
+            issue_references("a/b#1 https://github.com/c/d/issues/2"),
+            vec!["gh:c/d#2".to_string(), "gh:a/b#1".to_string()]
+        );
+        assert!(version_mismatch("p", "app", Some("1.4\u{1f}"), "1.4", evidence(), None).is_none());
+        let broken =
+            broken_path_dependency("dep", "p", "app", "../missing", Some(""), evidence(), None);
+        assert!(!broken.summary.contains(" in ,"));
     }
 
     #[test]
