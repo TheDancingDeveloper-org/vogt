@@ -35,9 +35,9 @@ base64 = "0.23.1"
 # No OpenSSL.
 ureq = { version = "2", features = ["tls"], default-features = false }
 # The same rustls ureq speaks, so the client can hand it a trust store built
-# from the platform certificates plus SSL_CERT_FILE, instead of only the
-# bundled Mozilla roots. ureq's own native-certs feature is not used: it
-# replaces the store with the env file rather than merging the two.
+# from the platform certificates instead of only the bundled Mozilla roots.
+# ureq's own native-certs feature is not used. Note that rustls-native-certs
+# returns only SSL_CERT_FILE's bundle when that variable is set.
 rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.7"
 

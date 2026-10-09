@@ -1636,11 +1636,12 @@ pub mod http1 {
     /// Trust the platform certificate store. Built once: loading the store reads
     /// and parses a few hundred kilobytes, which is wasted on every request.
     ///
-    /// `SSL_CERT_FILE` is not merged in. `rustls-native-certs` honours it by
-    /// returning *only* that file, and clearing the variable around the load
-    /// would race with every other thread's `getenv` and with a git child
-    /// spawned in between. A private CA therefore has to be in the platform
-    /// store, not named by the variable.
+    /// When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, `rustls-native-certs`
+    /// returns only that bundle and ignores the platform store. Python's
+    /// urllib keeps both. The variable is not unset around the load, because
+    /// changing the process environment races with every other thread and with
+    /// a git child spawned in between, so a deployment that points the variable
+    /// at a private CA must also include the public roots in that bundle.
     fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
         use std::sync::OnceLock;
         static CONFIG: OnceLock<std::sync::Arc<rustls::ClientConfig>> = OnceLock::new();

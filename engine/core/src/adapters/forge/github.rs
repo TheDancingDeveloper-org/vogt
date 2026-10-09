@@ -857,32 +857,17 @@ pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
         .chars()
         .filter(|ch| !matches!(ch, '\t' | '\r' | '\n'))
         .collect();
-    let candidate = raw.strip_prefix("git+").unwrap_or(&raw);
-    // Python strips the https, http and ssh schemes, repeatedly, and accepts
-    // the bare form. The scheme is whatever precedes the first `://` with no
-    // whitespace in it, so a tab in the middle of one is a different scheme.
-    let scheme = candidate
-        .split_once("://")
-        .map(|(scheme, _)| scheme)
-        .filter(|scheme| !scheme.contains(char::is_whitespace));
-    let allowed = match scheme {
-        Some(scheme) => matches!(scheme, "https" | "http" | "ssh"),
-        // An scp URL's host is case-sensitive, unlike a scheme URL's.
-        None => !candidate.starts_with("git@") || candidate.starts_with("git@github.com:"),
-    };
-    if !allowed {
-        return None;
-    }
-    // Python strips those schemes repeatedly, and turns an scp URL written
-    // after a scheme (`https://git@github.com:o/r`) into an https URL.
-    let mut candidate = candidate.to_string();
-    for scheme in ["https://", "http://", "ssh://"] {
-        while let Some(rest) = candidate.strip_prefix(scheme) {
+    let candidate = raw.strip_prefix("git+").unwrap_or(&raw).to_string();
+    // Python's sequence, in its order: fold the scp form, then strip each of
+    // https, http and ssh exactly once. There is no scheme gate, so a doubled
+    // scheme survives as a host and is rejected below, and a `://` later in
+    // the path is just part of the path.
+    let candidate = candidate.replace("git@github.com:", "github.com/");
+    let mut candidate = candidate;
+    for prefix in ["https://", "http://", "ssh://"] {
+        if let Some(rest) = candidate.strip_prefix(prefix) {
             candidate = rest.to_string();
         }
-    }
-    if let Some(rest) = candidate.strip_prefix("git@github.com:") {
-        candidate = format!("github.com/{rest}");
     }
     let (host, path, has_query) = super::urls::split_repo_url(&candidate)?;
     // A trailing `?` or `#` with nothing after it is an empty query and an
