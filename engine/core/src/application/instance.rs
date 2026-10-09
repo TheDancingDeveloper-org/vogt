@@ -179,7 +179,7 @@ fn bootstrap(
     if let Some(instance_id) = existing {
         return Ok(instance_id);
     }
-    let user = os_user();
+    let user = crate::core::os_user();
     let next = |ids: &mut Option<SequentialIds>, prefix: &str| -> String {
         match ids {
             Some(factory) => factory.next(prefix),
@@ -280,12 +280,6 @@ fn bind_instance(
 }
 
 /// `LOGNAME`, then `USER`, then a fallback. `getpass.getuser` reads `LOGNAME`.
-fn os_user() -> String {
-    std::env::var("LOGNAME")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "unknown".to_string())
-}
-
 /// The next instant. A step clock walks one second per read, the way Python's
 /// does; without one the wall clock is read once.
 fn stamp(clock: &mut Option<crate::core::StepClock>) -> String {

@@ -9,6 +9,7 @@
 //! with the same concrete types, so a context states which it holds.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::adapters::engine::EngineClient;
@@ -53,8 +54,11 @@ pub struct AppContext<C, I> {
     /// local surface. Only `auth.logout` and `auth.whoami` read it: the
     /// principal is still the identity.
     pub token: Option<Token>,
-    pub clock: C,
-    pub id_factory: I,
+    /// The one clock, shared with both stores. A clone would tick on its own.
+    pub clock: Rc<std::cell::RefCell<C>>,
+    /// The one id factory, shared with both stores. `SequentialIds` persists its
+    /// counts, and a copy rewrites the file from what it alone has drawn.
+    pub id_factory: Rc<std::cell::RefCell<I>>,
     pub cloner: Cloner,
     pub pusher: Pusher,
     /// The session engine, or `None` when none is configured. `None` is not an
@@ -256,10 +260,10 @@ fn context_with<C, I>(
     public_identity: Option<PublicIdentity>,
 ) -> AppContext<C, I>
 where
-    C: Clock + Clone,
-    I: IdFactory + Clone,
+    C: Clock,
+    I: IdFactory,
 {
-    let resolved = principal.unwrap_or_else(|| local_principal(&whoami()));
+    let resolved = principal.unwrap_or_else(|| local_principal(&crate::core::os_user()));
     let engine = engine.or_else(|| {
         EngineClient::from_config(
             config.engine_url.as_deref(),
@@ -278,9 +282,22 @@ where
             None,
         )
     });
+    let clock = Rc::new(std::cell::RefCell::new(clock));
+    let ids = Rc::new(std::cell::RefCell::new(ids));
+    let synchronous = config.sqlite_synchronous.as_str();
     AppContext {
-        declared: SqliteDeclaredStore::new(config.declared_db_path(), clock.clone(), ids.clone()),
-        observed: SqliteObservedStore::new(config.observed_db_path(), clock.clone(), ids.clone()),
+        declared: SqliteDeclaredStore::shared(
+            config.declared_db_path(),
+            Rc::clone(&clock),
+            Rc::clone(&ids),
+            synchronous,
+        ),
+        observed: SqliteObservedStore::shared(
+            config.observed_db_path(),
+            Rc::clone(&clock),
+            Rc::clone(&ids),
+            synchronous,
+        ),
         principal: resolved,
         token,
         clock,
@@ -303,20 +320,6 @@ fn identity_of(config: &VogtConfig) -> PublicIdentity {
     }
 }
 
-/// The OS user this process runs as. Python's `local_principal` asks
-/// `getpass.getuser()`, which reads `LOGNAME` before `USER` before `USERNAME`,
-/// and falls back to `unknown` rather than raising.
-fn whoami() -> String {
-    for name in ["LOGNAME", "USER", "USERNAME"] {
-        if let Ok(value) = std::env::var(name) {
-            if !value.is_empty() {
-                return value;
-            }
-        }
-    }
-    "unknown".to_string()
-}
-
 /// The same context over the two store files in another directory.
 ///
 /// For `clone`, which migrates and sanitises a staged copy of a backup before
@@ -324,27 +327,30 @@ fn whoami() -> String {
 /// exactly as they were.
 pub fn with_stores_at<C, I>(ctx: &AppContext<C, I>, data_dir: &Path) -> AppContext<C, I>
 where
-    C: Clock + Clone,
-    I: IdFactory + Clone,
+    C: Clock,
+    I: IdFactory,
 {
     let mut config = ctx.config.clone();
     config.data_dir = data_dir.to_path_buf();
+    let synchronous = config.sqlite_synchronous.as_str();
     AppContext {
-        declared: SqliteDeclaredStore::new(
+        declared: SqliteDeclaredStore::shared(
             data_dir.join(crate::storage::sqlite::DECLARED_DB_NAME),
-            ctx.clock.clone(),
-            ctx.id_factory.clone(),
+            Rc::clone(&ctx.clock),
+            Rc::clone(&ctx.id_factory),
+            synchronous,
         ),
-        observed: SqliteObservedStore::new(
+        observed: SqliteObservedStore::shared(
             data_dir.join(crate::storage::sqlite::OBSERVED_DB_NAME),
-            ctx.clock.clone(),
-            ctx.id_factory.clone(),
+            Rc::clone(&ctx.clock),
+            Rc::clone(&ctx.id_factory),
+            synchronous,
         ),
         config,
         principal: ctx.principal.clone(),
         token: ctx.token.clone(),
-        clock: ctx.clock.clone(),
-        id_factory: ctx.id_factory.clone(),
+        clock: Rc::clone(&ctx.clock),
+        id_factory: Rc::clone(&ctx.id_factory),
         cloner: ctx.cloner,
         pusher: ctx.pusher,
         engine: None,
@@ -355,21 +361,16 @@ where
 
 /// The `WriteContext` an audited write takes.
 ///
-/// The clock and the id factory are passed in rather than borrowed off `ctx`,
-/// because the write also borrows the store and Rust will not hand out both
-/// from one mutable borrow. A caller passes `&mut ctx.clock` — the same clock
-/// the use-case holds, which is the one the write must tick.
-pub fn write_of<'a, C, I>(
-    ctx: &'a AppContext<C, I>,
-    clock: &'a mut C,
-    ids: &'a mut I,
-) -> crate::application::writes::WriteContext<'a, C, I, SqliteDeclaredStore<C, I>> {
-    crate::application::writes::WriteContext {
-        declared: &ctx.declared,
-        principal_identity_ref: &ctx.principal.identity_ref,
-        principal_kind: ctx.principal.kind,
-        principal_display_name: &ctx.principal.display_name,
-        clock,
-        ids,
-    }
+/// The clock and the id factory come off the context, and they are the same
+/// ones the stores hold, so a draw inside the write continues the sequence the
+/// store has already counted.
+pub fn write_of<C, I>(
+    ctx: &AppContext<C, I>,
+) -> crate::application::writes::WriteContext<'_, C, I, SqliteDeclaredStore<C, I>> {
+    crate::application::writes::WriteContext::new(
+        &ctx.declared,
+        &ctx.principal,
+        Rc::clone(&ctx.clock),
+        Rc::clone(&ctx.id_factory),
+    )
 }

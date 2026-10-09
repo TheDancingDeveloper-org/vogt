@@ -13,6 +13,8 @@
 
 use serde_json::{json, Value};
 
+use std::rc::Rc;
+
 use crate::core::{Actor, Clock, IdFactory};
 use crate::decisions::digest_of;
 use crate::errors::VogtError;
@@ -69,13 +71,37 @@ pub fn validate_reason(reason: &str) -> Result<String, VogtError> {
 
 /// The slice of a context an audited write needs. The full `AppContext` holds
 /// stores and optional clients; this is what the write path reads.
+///
+/// The principal fields are private. They come from the context's principal,
+/// through [`WriteContext::new`], and a service must not be able to set them
+/// from request data.
 pub struct WriteContext<'a, C, I, D> {
-    pub declared: &'a D,
-    pub principal_identity_ref: &'a str,
-    pub principal_kind: crate::core::ActorKind,
-    pub principal_display_name: &'a str,
-    pub clock: &'a mut C,
-    pub ids: &'a mut I,
+    declared: &'a D,
+    principal_identity_ref: &'a str,
+    principal_kind: crate::core::ActorKind,
+    principal_display_name: &'a str,
+    /// Shared with the stores, so a body that draws an id continues the count
+    /// the store itself has already advanced.
+    clock: Rc<std::cell::RefCell<C>>,
+    ids: Rc<std::cell::RefCell<I>>,
+}
+
+impl<'a, C, I, D> WriteContext<'a, C, I, D> {
+    pub(crate) fn new(
+        declared: &'a D,
+        principal: &'a crate::core::Principal,
+        clock: Rc<std::cell::RefCell<C>>,
+        ids: Rc<std::cell::RefCell<I>>,
+    ) -> Self {
+        Self {
+            declared,
+            principal_identity_ref: &principal.identity_ref,
+            principal_kind: principal.kind,
+            principal_display_name: &principal.display_name,
+            clock,
+            ids,
+        }
+    }
 }
 
 /// Resolve the acting principal to an Actor row, creating it if new.
@@ -88,8 +114,8 @@ pub fn ensure_actor<C, I, T>(
     identity_ref: &str,
     kind: crate::core::ActorKind,
     display_name: &str,
-    clock: &mut C,
-    ids: &mut I,
+    clock: &Rc<std::cell::RefCell<C>>,
+    ids: &Rc<std::cell::RefCell<I>>,
 ) -> Result<Actor, VogtError>
 where
     C: Clock,
@@ -99,9 +125,9 @@ where
     if let Some(existing) = txn.actor_by_identity(identity_ref)? {
         return Ok(existing);
     }
-    let now = clock.now();
+    let now = clock.borrow_mut().now();
     let actor = Actor {
-        id: ids.next("act"),
+        id: ids.borrow_mut().next("act"),
         kind,
         display_name: display_name.to_string(),
         identity_ref: identity_ref.to_string(),
@@ -151,9 +177,10 @@ fn actor_payload(actor: &Actor) -> Value {
 
 /// Run one declared write atomically, audited and evented.
 ///
-/// `body` receives the transaction and the resolved actor. The audit and event
-/// rows are appended after it returns and committed with it; a `Err` from the
-/// body drops the transaction, which rolls it back.
+/// `body` receives the transaction, the resolved actor, and the shared clock
+/// and id factory, so it draws after `ensure_actor` exactly as a Python body
+/// does. The audit and event rows are appended after it returns and committed
+/// with it; a `Err` from the body drops the transaction, which rolls it back.
 pub fn audited_write<C, I, D, T, F>(
     ctx: &mut WriteContext<'_, C, I, D>,
     operation: &str,
@@ -164,7 +191,12 @@ where
     C: Clock,
     I: IdFactory,
     D: DeclaredStore,
-    F: FnOnce(&mut D::Write<'_>, &Actor) -> Result<WriteOutcome<T>, VogtError>,
+    F: FnOnce(
+        &mut D::Write<'_>,
+        &Actor,
+        &Rc<std::cell::RefCell<C>>,
+        &Rc<std::cell::RefCell<I>>,
+    ) -> Result<WriteOutcome<T>, VogtError>,
 {
     let cleaned = validate_reason(reason)?;
     let mut txn = ctx.declared.write()?;
@@ -173,11 +205,11 @@ where
         ctx.principal_identity_ref,
         ctx.principal_kind,
         ctx.principal_display_name,
-        ctx.clock,
-        ctx.ids,
+        &ctx.clock,
+        &ctx.ids,
     )?;
-    let outcome = body(&mut txn, &actor)?;
-    let now = ctx.clock.now();
+    let outcome = body(&mut txn, &actor, &ctx.clock, &ctx.ids)?;
+    let now = ctx.clock.borrow_mut().now();
     let record = txn.append_audit(
         &actor,
         operation,
@@ -229,10 +261,10 @@ where
         ctx.principal_identity_ref,
         ctx.principal_kind,
         ctx.principal_display_name,
-        ctx.clock,
-        ctx.ids,
+        &ctx.clock,
+        &ctx.ids,
     )?;
-    let now = ctx.clock.now();
+    let now = ctx.clock.borrow_mut().now();
     let record = txn.append_audit(
         &actor,
         operation,

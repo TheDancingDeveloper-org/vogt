@@ -4,6 +4,8 @@
 //! alone — a service layer does not exist yet — and the messages
 //! `_resolve.py` produces for a name that is not there.
 
+use std::rc::Rc;
+
 use serde_json::json;
 
 use super::resolve;
@@ -47,28 +49,18 @@ fn writing<'a>(
     identity: &'a str,
     kind: ActorKind,
     display: &'a str,
-    clock: &'a mut StepClock,
-    ids: &'a mut SequentialIds,
 ) -> WriteContext<'a, StepClock, SequentialIds, SqliteDeclaredStore<StepClock, SequentialIds>> {
-    WriteContext {
-        declared: store,
-        principal_identity_ref: identity,
-        principal_kind: kind,
-        principal_display_name: display,
-        clock,
-        ids,
-    }
-}
-
-/// The store mints its own transaction and audit ids from the factory it holds,
-/// so a write borrows that factory. The caller's factory has to be a copy taken
-/// out before the write and put back after, or the two borrows overlap.
-fn take_ids(store: &SqliteDeclaredStore<StepClock, SequentialIds>) -> SequentialIds {
-    store.id_factory().borrow().clone()
-}
-
-fn put_ids(store: &SqliteDeclaredStore<StepClock, SequentialIds>, ids: SequentialIds) {
-    *store.id_factory().borrow_mut() = ids;
+    // The store already holds the one clock and the one id factory; the write
+    // uses those, so a draw inside the body continues the store's count.
+    let principal = Principal::new(identity, kind, display).unwrap();
+    WriteContext::new(
+        store,
+        // The principal has to outlive the context, so it is leaked for the
+        // test. Each test builds one.
+        Box::leak(Box::new(principal)),
+        Rc::clone(store.clock()),
+        Rc::clone(store.id_factory()),
+    )
 }
 
 fn project(id: &str, slug: &str) -> Project {
@@ -89,20 +81,11 @@ fn a_blank_reason_is_refused() {
 #[test]
 fn a_reason_is_stored_stripped() {
     let store = opened();
-    let mut clock = StepClock::new(moment());
-    let mut ids = take_ids(&store);
     audited_write(
-        &mut writing(
-            &store,
-            "local:test-user",
-            ActorKind::Human,
-            "Test",
-            &mut clock,
-            &mut ids,
-        ),
+        &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
         "test.op",
         "  padded reason  ",
-        |txn, _actor| {
+        |txn, _actor, _clock, _ids| {
             let made = project("prj_spaced", "spaced");
             txn.insert_project(&made)?;
             Ok(WriteOutcome::new(
@@ -131,27 +114,17 @@ fn a_reason_is_stored_stripped() {
         })
         .unwrap();
     assert_eq!(audit[0].reason, "padded reason");
-    put_ids(&store, ids);
 }
 
 #[test]
 fn a_failing_body_rolls_the_transaction_back() {
     let store = opened();
     let before = store.read().unwrap().counts().unwrap();
-    let mut clock = StepClock::new(moment());
-    let mut ids = take_ids(&store);
     let error = audited_write(
-        &mut writing(
-            &store,
-            "local:test-user",
-            ActorKind::Human,
-            "Test",
-            &mut clock,
-            &mut ids,
-        ),
+        &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
         "test.op",
         "a reason",
-        |txn, _actor| {
+        |txn, _actor, _clock, _ids| {
             txn.insert_project(&project("prj_doomed", "doomed"))?;
             Err::<WriteOutcome<()>, _>(VogtError::Conflict("body failed".to_string()))
         },
@@ -163,26 +136,16 @@ fn a_failing_body_rolls_the_transaction_back() {
     assert_eq!(after.projects, before.projects);
     assert_eq!(after.events, before.events);
     assert_eq!(after.audit, before.audit, "only the bootstrap row");
-    put_ids(&store, ids);
 }
 
 #[test]
 fn an_unseen_principal_is_auto_registered_and_explained() {
     let store = opened();
-    let mut clock = StepClock::new(moment());
-    let mut ids = take_ids(&store);
     audited_write(
-        &mut writing(
-            &store,
-            "agent:claude-code",
-            ActorKind::Agent,
-            "Claude Code",
-            &mut clock,
-            &mut ids,
-        ),
+        &mut writing(&store, "agent:claude-code", ActorKind::Agent, "Claude Code"),
         "test.op",
         "the write that introduces the actor",
-        |txn, actor| {
+        |txn, actor, _clock, _ids| {
             let made = project("prj_agent", "agent-project");
             txn.insert_project(&made)?;
             Ok(WriteOutcome::new(
@@ -228,27 +191,17 @@ fn an_unseen_principal_is_auto_registered_and_explained() {
         events[0].audit_id.as_deref(),
         Some(registrations[0].id.as_str())
     );
-    put_ids(&store, ids);
 }
 
 #[test]
 fn a_known_principal_is_not_registered_again() {
     let store = opened();
-    let mut clock = StepClock::new(moment());
-    let mut ids = take_ids(&store);
     for _ in 0..2 {
         audited_write(
-            &mut writing(
-                &store,
-                "local:test-user",
-                ActorKind::Human,
-                "Test",
-                &mut clock,
-                &mut ids,
-            ),
+            &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
             "test.op",
             "again",
-            |txn, actor| {
+            |txn, actor, _clock, _ids| {
                 let _ = txn;
                 Ok(WriteOutcome::new(
                     actor.id.clone(),
@@ -279,24 +232,14 @@ fn a_known_principal_is_not_registered_again() {
         registrations.is_empty(),
         "bootstrap already created the actor"
     );
-    put_ids(&store, ids);
 }
 
 #[test]
 fn an_action_records_what_happened_outside_the_store() {
     let store = opened();
-    let mut clock = StepClock::new(moment());
-    let mut ids = take_ids(&store);
     let outcome = json!({"cloned": 3});
     audited_action(
-        &mut writing(
-            &store,
-            "local:test-user",
-            ActorKind::Human,
-            "Test",
-            &mut clock,
-            &mut ids,
-        ),
+        &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
         "instance.clone",
         "restoring a backup",
         "instance",
@@ -325,23 +268,13 @@ fn an_action_records_what_happened_outside_the_store() {
     let events = view.list_events(0, 10, None).unwrap();
     assert_eq!(events.last().unwrap().summary, outcome);
     assert_eq!(events.last().unwrap().kind, "instance.cloned");
-    put_ids(&store, ids);
 }
 
 #[test]
 fn an_action_refuses_a_blank_reason_too() {
     let store = opened();
-    let mut clock = StepClock::new(moment());
-    let mut ids = take_ids(&store);
     let error = audited_action(
-        &mut writing(
-            &store,
-            "local:test-user",
-            ActorKind::Human,
-            "Test",
-            &mut clock,
-            &mut ids,
-        ),
+        &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
         "instance.clone",
         "   ",
         "instance",
@@ -353,7 +286,6 @@ fn an_action_refuses_a_blank_reason_too() {
     .unwrap_err();
     assert!(matches!(error, VogtError::MissingReason(_)));
     assert_eq!(store.read().unwrap().counts().unwrap().events, 0);
-    put_ids(&store, ids);
 }
 
 #[test]
@@ -390,20 +322,11 @@ fn a_missing_name_says_what_was_missing() {
 #[test]
 fn a_name_that_exists_resolves() {
     let store = opened();
-    let mut clock = StepClock::new(moment());
-    let mut ids = take_ids(&store);
     audited_write(
-        &mut writing(
-            &store,
-            "local:test-user",
-            ActorKind::Human,
-            "Test",
-            &mut clock,
-            &mut ids,
-        ),
+        &mut writing(&store, "local:test-user", ActorKind::Human, "Test"),
         "test.op",
         "seeding",
-        |txn, _actor| {
+        |txn, _actor, _clock, _ids| {
             txn.insert_project(&project("prj_alpha", "alpha"))?;
             txn.insert_work_item(&WorkItem {
                 id: "wrk_1".to_string(),
@@ -472,7 +395,6 @@ fn a_name_that_exists_resolves() {
         "The push"
     );
     resolve::label_exists(&view, "red").unwrap();
-    put_ids(&store, ids);
 }
 
 #[test]

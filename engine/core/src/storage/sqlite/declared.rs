@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use rusqlite::{params, Connection, OptionalExtension, Row};
 
@@ -20,7 +21,7 @@ use crate::storage::interface::{
     CloneStamp, Counts, DeclaredStore, MigrationReport, ProjectUpdate, ReadView, WorkFilter,
     WorkItemUpdate, WriteTxn,
 };
-use crate::storage::sqlite::connection::{connect_with, DEFAULT_SYNCHRONOUS};
+use crate::storage::sqlite::connection::connect_with;
 use crate::storage::sqlite::migrator::{self, migrations_root};
 
 const META_INSTANCE_ID: &str = "instance_id";
@@ -53,8 +54,12 @@ fn meta_counter(conn: &Connection, key: &str) -> Result<i64, VogtError> {
 
 pub struct SqliteDeclaredStore<C, I> {
     path: PathBuf,
-    clock: std::cell::RefCell<C>,
-    ids: std::cell::RefCell<I>,
+    /// Shared with the context and the observed store. Python's `build_context`
+    /// hands one clock and one id factory to both stores, and each draw or tick
+    /// must be visible to the others — a clone rewrites `test-ids.json` from its
+    /// own counts and loses theirs.
+    clock: Rc<std::cell::RefCell<C>>,
+    ids: Rc<std::cell::RefCell<I>>,
     synchronous: String,
 }
 
@@ -65,18 +70,37 @@ where
     I: IdFactory,
 {
     pub fn new(path: PathBuf, clock: C, ids: I) -> Self {
+        Self::shared(
+            path,
+            Rc::new(std::cell::RefCell::new(clock)),
+            Rc::new(std::cell::RefCell::new(ids)),
+            crate::storage::sqlite::connection::DEFAULT_SYNCHRONOUS,
+        )
+    }
+
+    /// A store over a clock and an id factory something else also holds.
+    pub fn shared(
+        path: PathBuf,
+        clock: Rc<std::cell::RefCell<C>>,
+        ids: Rc<std::cell::RefCell<I>>,
+        synchronous: &str,
+    ) -> Self {
         Self {
             path,
-            clock: std::cell::RefCell::new(clock),
-            ids: std::cell::RefCell::new(ids),
-            synchronous: DEFAULT_SYNCHRONOUS.to_string(),
+            clock,
+            ids,
+            synchronous: synchronous.to_string(),
         }
     }
 
-    /// The id factory this store counts with. A caller that mints ids for a
-    /// write the store will record uses this one, because a second factory
-    /// starts again at one and the two collide.
-    pub fn id_factory(&self) -> &std::cell::RefCell<I> {
+    /// The clock this store ticks. The context holds the same one.
+    pub fn clock(&self) -> &Rc<std::cell::RefCell<C>> {
+        &self.clock
+    }
+
+    /// The id factory this store counts with. The context holds the same one,
+    /// because a second factory starts again at one and the two collide.
+    pub fn id_factory(&self) -> &Rc<std::cell::RefCell<I>> {
         &self.ids
     }
 
@@ -118,7 +142,7 @@ where
     where
         Self: 'a;
     type Write<'a>
-        = SqliteWrite<'a, I>
+        = SqliteWrite<I>
     where
         Self: 'a;
 
@@ -382,7 +406,7 @@ where
                 conn,
                 workflow_cache: std::cell::RefCell::new(BTreeMap::new()),
             },
-            ids: &self.ids,
+            ids: Rc::clone(&self.ids),
             txn_id,
             revision,
             open: true,
@@ -394,22 +418,22 @@ pub struct SqliteReadView {
     conn: Connection,
     workflow_cache: std::cell::RefCell<BTreeMap<String, Workflow>>,
 }
-pub struct SqliteWrite<'a, I: IdFactory> {
+pub struct SqliteWrite<I: IdFactory> {
     view: SqliteReadView,
-    ids: &'a std::cell::RefCell<I>,
+    ids: Rc<std::cell::RefCell<I>>,
     txn_id: String,
     revision: i64,
     open: bool,
 }
 
-impl<I: IdFactory> SqliteWrite<'_, I> {
+impl<I: IdFactory> SqliteWrite<I> {
     pub fn commit(mut self) -> Result<(), VogtError> {
         self.view.conn.execute_batch("COMMIT").map_err(sql_err)?;
         self.open = false;
         Ok(())
     }
 }
-impl<I: IdFactory> Drop for SqliteWrite<'_, I> {
+impl<I: IdFactory> Drop for SqliteWrite<I> {
     fn drop(&mut self) {
         if self.open {
             let _ = self.view.conn.execute_batch("ROLLBACK");
@@ -1286,7 +1310,7 @@ impl ReadView for SqliteReadView {
     }
 }
 
-impl<I: IdFactory> ReadView for SqliteWrite<'_, I> {
+impl<I: IdFactory> ReadView for SqliteWrite<I> {
     fn instance_id(&self) -> Result<String, VogtError> {
         self.view.instance_id()
     }
@@ -1536,7 +1560,7 @@ impl<I: IdFactory> ReadView for SqliteWrite<'_, I> {
     }
 }
 
-impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
+impl<I: IdFactory> WriteTxn for SqliteWrite<I> {
     fn commit(self) -> Result<(), VogtError> {
         SqliteWrite::commit(self)
     }

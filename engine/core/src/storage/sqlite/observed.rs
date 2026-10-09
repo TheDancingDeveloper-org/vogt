@@ -7,6 +7,7 @@
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 
@@ -17,7 +18,7 @@ use crate::storage::observed_types::{
     ActivityBatch, ActivityEventRow, ActivityIndexStats, ActivityQuery, ActivitySessionRow,
     AppendStats, DepRefRow, PendingObservation, PruneReport, TranscriptCursor,
 };
-use crate::storage::sqlite::connection::{connect_with, DEFAULT_SYNCHRONOUS};
+use crate::storage::sqlite::connection::connect_with;
 use crate::storage::sqlite::migrator::{self, migrations_root, table_exists};
 
 const META_INSTANCE_ID: &str = "instance_id";
@@ -30,8 +31,10 @@ const CLOSED_STATE_SQL: &str =
 
 pub struct SqliteObservedStore<C, I> {
     path: PathBuf,
-    clock: std::cell::RefCell<C>,
-    ids: std::cell::RefCell<I>,
+    /// Shared with the context and the declared store, so one tick or one draw
+    /// advances the count everyone else sees.
+    clock: Rc<std::cell::RefCell<C>>,
+    ids: Rc<std::cell::RefCell<I>>,
     synchronous: String,
     has_evidence_cached: Cell<bool>,
 }
@@ -43,11 +46,26 @@ where
 {
     #[allow(dead_code)]
     pub fn new(path: PathBuf, clock: C, ids: I) -> Self {
+        Self::shared(
+            path,
+            Rc::new(std::cell::RefCell::new(clock)),
+            Rc::new(std::cell::RefCell::new(ids)),
+            crate::storage::sqlite::connection::DEFAULT_SYNCHRONOUS,
+        )
+    }
+
+    /// A store over a clock and an id factory something else also holds.
+    pub fn shared(
+        path: PathBuf,
+        clock: Rc<std::cell::RefCell<C>>,
+        ids: Rc<std::cell::RefCell<I>>,
+        synchronous: &str,
+    ) -> Self {
         Self {
             path,
-            clock: std::cell::RefCell::new(clock),
-            ids: std::cell::RefCell::new(ids),
-            synchronous: DEFAULT_SYNCHRONOUS.to_string(),
+            clock,
+            ids,
+            synchronous: synchronous.to_string(),
             has_evidence_cached: Cell::new(false),
         }
     }

@@ -126,6 +126,16 @@ impl SqliteSynchronous {
             )),
         }
     }
+
+    /// The pragma value, which is what SQLite is given.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Normal => "normal",
+            Self::Full => "full",
+            Self::Extra => "extra",
+        }
+    }
 }
 
 /// One deployment lane whose deployed revision Vogt reads (`deploy_lanes`).
