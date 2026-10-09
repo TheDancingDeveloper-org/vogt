@@ -1163,6 +1163,380 @@ pub fn auto_acceptable(kind: &str) -> bool {
     AUTO_ACCEPTABLE_KINDS.contains(&kind)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvidenceSnapshot {
+    pub subject_key: String,
+    pub content_digest: String,
+    pub observed_at: crate::core::Moment,
+    pub collector: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriftFinding {
+    pub kind: String,
+    pub subject_kind: String,
+    pub subject_id: String,
+    pub summary: String,
+    pub proposed_change: serde_json::Value,
+    pub project_id: Option<String>,
+    pub evidence_observation_id: Option<String>,
+    pub evidence: Option<EvidenceSnapshot>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finding(
+    kind: &str,
+    subject_kind: &str,
+    subject_id: &str,
+    project_id: Option<&str>,
+    summary: String,
+    proposed_change: serde_json::Value,
+    evidence: Option<EvidenceSnapshot>,
+    evidence_observation_id: Option<&str>,
+) -> DriftFinding {
+    DriftFinding {
+        kind: kind.to_string(),
+        subject_kind: subject_kind.to_string(),
+        subject_id: subject_id.to_string(),
+        summary,
+        proposed_change,
+        project_id: project_id.map(str::to_string),
+        evidence_observation_id: evidence_observation_id.map(str::to_string),
+        evidence,
+    }
+}
+
+/// `repr()` of a string: quotes, with a backslash before an embedded quote.
+fn py_repr(text: &str) -> String {
+    format!("'{}'", text.replace('\\', "\\\\").replace('\'', "\\'"))
+}
+
+/// Declared version against the newest release actually seen. A leading `v` is
+/// not a difference.
+#[allow(clippy::too_many_arguments)]
+pub fn version_mismatch(
+    project_id: &str,
+    project_slug: &str,
+    declared: Option<&str>,
+    observed: &str,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: Option<&str>,
+) -> Option<DriftFinding> {
+    if declared.is_some_and(|declared| normalise_version(declared) == normalise_version(observed)) {
+        return None;
+    }
+    let stated = declared.map(py_repr).unwrap_or_else(|| "nothing".into());
+    Some(finding(
+        VERSION_MISMATCH,
+        "project",
+        project_id,
+        Some(project_id),
+        format!(
+            "{project_slug} declares {stated} but the newest observed release is {}",
+            py_repr(observed)
+        ),
+        serde_json::json!({
+            "entity": "project", "field": "current_version",
+            "from": declared, "to": observed,
+        }),
+        Some(evidence),
+        evidence_observation_id,
+    ))
+}
+
+fn where_in(manifest: Option<&str>) -> String {
+    manifest
+        .map(|name| format!(" in {name}"))
+        .unwrap_or_default()
+}
+
+/// A path reference inside the project's own tree that resolves to nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn broken_path_dependency(
+    subject_key: &str,
+    project_id: &str,
+    project_slug: &str,
+    raw_target: &str,
+    manifest: Option<&str>,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: Option<&str>,
+) -> DriftFinding {
+    finding(
+        "broken_path_dependency",
+        "dependency",
+        subject_key,
+        Some(project_id),
+        format!(
+            "{project_slug} references {}{}, which is inside this project and does not exist",
+            py_repr(raw_target),
+            where_in(manifest)
+        ),
+        serde_json::json!({
+            "action": "fix_manifest_or_restore_path",
+            "raw_target": raw_target, "manifest": manifest,
+        }),
+        Some(evidence),
+        evidence_observation_id,
+    )
+}
+
+/// An internal-looking reference whose target is not a registered project.
+#[allow(clippy::too_many_arguments)]
+pub fn unresolved_dependency(
+    subject_key: &str,
+    project_id: &str,
+    project_slug: &str,
+    raw_target: &str,
+    manifest: Option<&str>,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: Option<&str>,
+) -> DriftFinding {
+    finding(
+        "unresolved_dependency",
+        "dependency",
+        subject_key,
+        Some(project_id),
+        format!(
+            "{project_slug} references {}{}, which is not a registered project",
+            py_repr(raw_target),
+            where_in(manifest)
+        ),
+        serde_json::json!({
+            "action": "register_or_ignore", "raw_target": raw_target, "manifest": manifest,
+        }),
+        Some(evidence),
+        evidence_observation_id,
+    )
+}
+
+fn last_observed_open(
+    subject_key: &str,
+    work_ref: &str,
+    declared_state: &str,
+    evidence: &EvidenceSnapshot,
+) -> String {
+    format!(
+        "{subject_key} was open when last observed ({}), but {work_ref} is {} here — the incremental sync reads all states, so this is an observed reopen, not a close it failed to see",
+        evidence.observed_at.to_iso(),
+        py_repr(declared_state)
+    )
+}
+
+/// A linked issue's state disagrees with the item's.
+#[allow(clippy::too_many_arguments)]
+pub fn forge_state_mismatch(
+    work_item_id: &str,
+    work_ref: &str,
+    declared_state: &str,
+    upstream_state: &str,
+    subject_key: &str,
+    project_id: Option<&str>,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: Option<&str>,
+) -> DriftFinding {
+    let summary = if upstream_state == "closed" {
+        format!(
+            "{subject_key} is closed upstream, but {work_ref} is {} here",
+            py_repr(declared_state)
+        )
+    } else {
+        last_observed_open(subject_key, work_ref, declared_state, &evidence)
+    };
+    finding(
+        "forge_state_mismatch",
+        "work_item",
+        work_item_id,
+        project_id,
+        summary,
+        serde_json::json!({
+            "entity": "work_item", "field": "state",
+            "from": declared_state,
+            "to": if upstream_state == "closed" { "done" } else { "open" },
+            "work_ref": work_ref,
+        }),
+        Some(evidence),
+        evidence_observation_id,
+    )
+}
+
+/// A tracking-issue checkbox disagrees with the member's state. One proposal
+/// per member, so two boxes out of step stay two questions.
+#[allow(clippy::too_many_arguments)]
+pub fn initiative_checkbox_drift(
+    initiative_id: &str,
+    initiative_slug: &str,
+    project_id: Option<&str>,
+    subject_key: &str,
+    number: i64,
+    work_ref: &str,
+    upstream_checked: bool,
+    expected_checked: bool,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: Option<&str>,
+) -> DriftFinding {
+    let ticked = if upstream_checked {
+        "ticked"
+    } else {
+        "unticked"
+    };
+    let ought = if expected_checked {
+        "done/terminal"
+    } else {
+        "still open"
+    };
+    finding(
+        "initiative_checkbox_drift",
+        "initiative",
+        &format!("{initiative_id}:{number}"),
+        project_id,
+        format!(
+            "initiative {}: {work_ref} (#{number}) is {ticked} on the tracking issue but is {ought} here",
+            py_repr(initiative_slug)
+        ),
+        serde_json::json!({
+            "entity": "work_item", "initiative": initiative_slug, "work_ref": work_ref,
+            "subject_key": subject_key, "number": number,
+            "upstream_checked": upstream_checked, "expected_checked": expected_checked,
+        }),
+        Some(evidence),
+        evidence_observation_id,
+    )
+}
+
+/// A linked forge object is absent within a sweep that provably covered it.
+pub fn vanished_upstream(
+    work_item_id: &str,
+    work_ref: &str,
+    subject_key: &str,
+    project_id: Option<&str>,
+    swept_at: crate::core::Moment,
+) -> DriftFinding {
+    finding(
+        "vanished_upstream",
+        "work_item",
+        work_item_id,
+        project_id,
+        format!(
+            "{work_ref} links {subject_key}, which a completed sweep at {} did not find",
+            swept_at.to_iso(),
+        ),
+        serde_json::json!({
+            "entity": "work_link", "action": "review",
+            "subject_key": subject_key, "work_ref": work_ref,
+        }),
+        Some(EvidenceSnapshot {
+            subject_key: subject_key.to_string(),
+            content_digest: String::new(),
+            observed_at: swept_at,
+            collector: "forge-issues".into(),
+            payload: serde_json::json!({"absent_in_completed_sweep": true}),
+        }),
+        None,
+    )
+}
+
+/// CI is red on the default branch while the project claims to be fine.
+#[allow(clippy::too_many_arguments)]
+pub fn ci_red_vs_healthy(
+    project_id: &str,
+    project_slug: &str,
+    lifecycle_state: &str,
+    failing: &[&str],
+    revision: &str,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: Option<&str>,
+) -> DriftFinding {
+    let mut failing: Vec<&str> = failing.to_vec();
+    failing.sort_unstable();
+    let head: String = revision.chars().take(12).collect();
+    finding(
+        "ci_red_vs_healthy",
+        "project",
+        project_id,
+        Some(project_id),
+        format!(
+            "{project_slug} is {} but {} check(s) failed on {head}: {}",
+            py_repr(lifecycle_state),
+            failing.len(),
+            failing.join(", ")
+        ),
+        serde_json::json!({
+            "entity": "project", "action": "review",
+            "failing": failing, "revision": revision,
+        }),
+        Some(evidence),
+        evidence_observation_id,
+    )
+}
+
+/// A work item and the issue its own text names disagree. It proposes nothing
+/// and applies nothing.
+#[allow(clippy::too_many_arguments)]
+pub fn referenced_issue_state_mismatch(
+    work_item_id: &str,
+    work_ref: &str,
+    declared_state: &str,
+    upstream_state: &str,
+    subject_key: &str,
+    project_id: Option<&str>,
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: Option<&str>,
+) -> DriftFinding {
+    let finished_here = if matches!(declared_state, "done" | "wont_do") {
+        "finished"
+    } else {
+        "open"
+    };
+    finding(
+        "referenced_issue_state_mismatch",
+        "work_item",
+        work_item_id,
+        project_id,
+        format!(
+            "{work_ref} references {subject_key}, which was {upstream_state} when last observed ({}), while {work_ref} is {} — {finished_here} here, {upstream_state} there",
+            evidence.observed_at.to_iso(),
+            py_repr(declared_state)
+        ),
+        serde_json::json!({
+            "entity": "work_item", "action": "review", "subject_key": subject_key,
+            "work_ref": work_ref, "declared_state": declared_state,
+            "upstream_state": upstream_state,
+        }),
+        Some(evidence),
+        evidence_observation_id,
+    )
+}
+
+/// One of the three automation facts is off, named so the reader knows which.
+#[allow(clippy::too_many_arguments)]
+pub fn update_automation_gap(
+    project_id: &str,
+    project_slug: &str,
+    missing: &[&str],
+    evidence: EvidenceSnapshot,
+    evidence_observation_id: Option<&str>,
+) -> DriftFinding {
+    let mut missing: Vec<&str> = missing.to_vec();
+    missing.sort_unstable();
+    finding(
+        "update_automation_gap",
+        "project",
+        project_id,
+        Some(project_id),
+        format!(
+            "{project_slug} is missing {} of the three update automation facts: {}",
+            missing.len(),
+            missing.join(", ")
+        ),
+        serde_json::json!({
+            "entity": "repository_settings", "action": "enable", "missing": missing,
+        }),
+        Some(evidence),
+        evidence_observation_id,
+    )
+}
+
 /// Subject keys a text names, as `gh:owner/repo#number`. Bare `#44` is not a
 /// reference: it is the least decidable form, and WI-16's title uses it for a
 /// pull request.
@@ -3766,5 +4140,71 @@ mod r49 {
         );
         let split = split_command("--effort\\\n\u{1c}\rclaude");
         assert_eq!(split, vec!["--effort\n\u{1c}", "claude"]);
+    }
+}
+
+#[cfg(test)]
+mod drift_tests {
+    use super::*;
+
+    fn evidence() -> EvidenceSnapshot {
+        EvidenceSnapshot {
+            subject_key: "gh:acme/app#1".into(),
+            content_digest: "d".into(),
+            observed_at: crate::core::Moment::from_unix(1_760_000_000, 0),
+            collector: "forge-issues".into(),
+            payload: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn a_leading_v_is_not_a_version_difference() {
+        assert!(version_mismatch("p", "app", Some("v1.4"), "1.4", evidence(), None).is_none());
+        let found = version_mismatch("p", "app", None, "1.5", evidence(), None).unwrap();
+        assert!(found.summary.contains("declares nothing"));
+        assert_eq!(found.proposed_change["to"], "1.5");
+        assert!(auto_acceptable(&found.kind));
+        assert!(!auto_acceptable("unresolved_dependency"));
+    }
+
+    #[test]
+    fn a_bare_number_is_not_an_issue_reference() {
+        let text =
+            "see Regression from #43 and https://github.com/acme/app/issues/44 plus acme/app#7";
+        assert_eq!(
+            issue_references(text),
+            vec!["gh:acme/app#44".to_string(), "gh:acme/app#7".to_string()]
+        );
+        assert_eq!(
+            issue_references("https://github.com/acme/app.git/issues/2"),
+            vec!["gh:acme/app#2".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_closed_upstream_proposes_done_and_an_open_one_says_so() {
+        let closed = forge_state_mismatch(
+            "wi",
+            "WI-1",
+            "open",
+            "closed",
+            "gh:acme/app#1",
+            None,
+            evidence(),
+            None,
+        );
+        assert_eq!(closed.proposed_change["to"], "done");
+        let open = forge_state_mismatch(
+            "wi",
+            "WI-1",
+            "done",
+            "open",
+            "gh:acme/app#1",
+            None,
+            evidence(),
+            None,
+        );
+        assert!(open.summary.contains("observed reopen"));
+        assert_eq!(open.proposed_change["to"], "open");
     }
 }
