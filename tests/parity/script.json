@@ -393,6 +393,26 @@
    }
   },
   {
+   "operation": "export",
+   "params": {
+    "destination": "{root}/export.json",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
+   "operation": "import",
+   "params": {
+    "source": "{root}/export.json",
+    "reason": "parity harness"
+   },
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
    "operation": "install.bootstrap",
    "http": {
     "method": "POST",

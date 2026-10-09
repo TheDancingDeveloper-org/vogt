@@ -1342,5 +1342,76 @@
     "body": null,
     "exit": 1,
     "operation": "deps"
+  },
+  {
+    "body": {
+      "comments": 0,
+      "export_format_version": 2,
+      "path": "<root>/export.json",
+      "project": null,
+      "projects": 2,
+      "work_items": 1
+    },
+    "exit": 0,
+    "operation": "export"
+  },
+  {
+    "body": {
+      "applied": false,
+      "base": "2026-01-02T03:04:05Z",
+      "base_source": "an export of this same instance: its exported_at",
+      "by_entity": {
+        "actor": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 2,
+          "updated": 0
+        },
+        "initiative": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 1,
+          "updated": 0
+        },
+        "label": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 1,
+          "updated": 0
+        },
+        "project": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 2,
+          "updated": 0
+        },
+        "work_item": {
+          "conflict": 0,
+          "created": 0,
+          "skipped": 0,
+          "unchanged": 1,
+          "updated": 0
+        }
+      },
+      "changes": [],
+      "conflicted": 0,
+      "created": 0,
+      "detail": "Dry run: nothing was written. Pass --apply --confirm to merge.",
+      "export_format_version": 2,
+      "instance_id": "ins_0001",
+      "project": null,
+      "projects": 2,
+      "skipped": 0,
+      "source": "<root>/export.json",
+      "unchanged": 7,
+      "updated": 0,
+      "work_items": 1
+    },
+    "exit": 0,
+    "operation": "import"
   }
 ]
