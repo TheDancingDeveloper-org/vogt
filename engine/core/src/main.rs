@@ -301,35 +301,8 @@ fn iso_now() -> String {
             return core::to_iso(moment);
         }
     }
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
-    format_unix(secs)
-}
-
-fn format_unix(secs: u64) -> String {
-    let days = secs / 86_400;
-    let time = secs % 86_400;
-    let (year, month, day) = civil_from_days(days);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}+00:00",
-        time / 3600,
-        (time % 3600) / 60,
-        time % 60
-    )
-}
-
-fn civil_from_days(days: u64) -> (i64, u32, u32) {
-    let z = days as i64 + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = if month <= 2 { y + 1 } else { y };
-    (year, month as u32, day as u32)
+    // Microseconds included. Python's isoformat keeps them, and a stamp that
+    // drops them makes two instances that started in the same second look
+    // identical.
+    core::utc_now().to_iso()
 }
