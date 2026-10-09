@@ -43,9 +43,6 @@ pub fn python_json_dumps_indent(payload: &Value, indent: usize) -> String {
 fn render_python_json(value: &Value, spaced: bool, sort_keys: bool, indent: usize) -> String {
     let mut out = String::new();
     write_python_json(&mut out, value, spaced, sort_keys, indent, 0);
-    if indent > 0 {
-        out.push('\n');
-    }
     out
 }
 
