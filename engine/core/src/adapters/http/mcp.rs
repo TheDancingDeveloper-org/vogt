@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! The `/mcp` route. Ports the mounting half of `adapters/mcp/http.py`.
 //!
 //! The behaviour lives in `adapters::mcp::http`; this only carries it over
