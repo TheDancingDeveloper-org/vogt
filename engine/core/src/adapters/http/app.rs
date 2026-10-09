@@ -15,10 +15,12 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::Response;
 use axum::Router;
 
-use crate::adapters::auth_gate::{self, Request as AuthRequest};
-use crate::core::{Clock, IdFactory};
+use crate::adapters::auth_gate::{self, Grant, Request as AuthRequest};
+use crate::core::{local_principal, os_user, ActorKind, Clock, IdFactory, Principal};
 use crate::errors::VogtError;
-use crate::registry::{default_registry, HttpMethod, Operation, OperationRegistry, Transport};
+use crate::registry::{
+    default_registry, validate, HttpMethod, Operation, OperationRegistry, Transport,
+};
 use crate::storage::sqlite::declared::SqliteDeclaredStore;
 
 /// The prefix every registry route lives under. The engine's front door
@@ -31,6 +33,7 @@ pub const API_PREFIX: &str = "/api";
 pub struct AppState<C, I> {
     pub registry: Arc<OperationRegistry>,
     store: Mutex<SqliteDeclaredStore<C, I>>,
+    data_dir: std::path::PathBuf,
     pub no_auth: bool,
     pub writes_enabled: bool,
 }
@@ -50,6 +53,7 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
                 clock,
                 ids,
             )),
+            data_dir: data_dir.to_path_buf(),
             no_auth,
             writes_enabled,
         }
@@ -65,6 +69,7 @@ impl<C: Clock, I: IdFactory> AppState<C, I> {
         Self {
             registry: Arc::new(default_registry()),
             store: Mutex::new(source.joined(crate::storage::sqlite::declared_path(data_dir))),
+            data_dir: data_dir.to_path_buf(),
             no_auth,
             writes_enabled,
         }
@@ -85,6 +90,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
 ) -> Response {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    let query = request.uri().query().map(str::to_string);
     let presented = bearer(request.headers().get("authorization"));
     let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
@@ -105,11 +111,17 @@ async fn dispatch<C: Clock, I: IdFactory>(
     }) else {
         return not_found();
     };
-    // The body is checked before the gate. A malformed request is the caller's
-    // mistake and answers 422 with no auth row, rather than a 401 or a 403.
-    if let Err(rejection) = validate_body(operation, &body) {
-        return invalid_arguments(&rejection);
-    }
+    // Parse, then validate, and only then the gate. Both are the caller's
+    // mistake, so both answer 422 and write no auth row. The check is the shared
+    // one `Operation::run` applies, not one of this adapter's own.
+    let params = match parse_params(operation, query.as_deref(), &body) {
+        Ok(params) => params,
+        Err(error) => return invalid_arguments(&error),
+    };
+    let params = match validate::prepare(operation.name, params) {
+        Ok(params) => params,
+        Err(error) => return invalid_arguments(&error),
+    };
     // The gate records its decision before the operation runs, so a request
     // that will be refused never reaches a handler.
     let granted = {
@@ -131,23 +143,24 @@ async fn dispatch<C: Clock, I: IdFactory>(
             },
         )
     };
-    if let Err(denial) = granted {
-        if matches!(denial, auth_gate::Denial::Unrecorded { .. }) {
-            // A decision that could not be recorded must not describe the store
-            // failure. The client gets the same plain 500 `/mcp` gives.
-            return Response::builder()
-                .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .header("content-type", "text/plain; charset=utf-8")
-                .body(Body::from("Internal Server Error"))
-                .expect("a fixed response builds");
+    let grant = match granted {
+        Ok(grant) => grant,
+        Err(denial) => {
+            if matches!(denial, auth_gate::Denial::Unrecorded { .. }) {
+                // A decision that could not be recorded must not describe the store
+                // failure. The client gets the same plain 500 `/mcp` gives.
+                return Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .header("content-type", "text/plain; charset=utf-8")
+                    .body(Body::from("Internal Server Error"))
+                    .expect("a fixed response builds");
+            }
+            return error_response(&denial.error());
         }
-        return error_response(&denial.error());
-    }
-    match operation.run(None, serde_json::Value::Null) {
-        Ok(_value) => json_response(
-            StatusCode::OK,
-            serde_json::json!({"operation": operation.name}),
-        ),
+    };
+    let built = context_for(&state, &grant);
+    match operation.run(built.as_ref(), params) {
+        Ok(value) => json_response(StatusCode::OK, value),
         // Not ported is not the caller's fault, so it is not a 400. The shared
         // error taxonomy has no 501, and adding one would change every adapter.
         Err(VogtError::InvalidRequest(message)) if message.contains("has not been ported") => {
@@ -160,63 +173,113 @@ async fn dispatch<C: Clock, I: IdFactory>(
     }
 }
 
-/// Why a body was rejected, in the shape Python's 422 detail carries.
-struct InvalidField {
-    loc: &'static str,
-    message: String,
-}
-
-/// Check the body against the operation's parameter schema before the gate runs.
-///
-/// A read takes its parameters from the query string, so its body is not
-/// checked. A write must be a JSON object carrying every field the schema marks
-/// required. This is the part of validation that decides whether the request is
-/// well-formed at all; the finer type checks land with the service.
-fn validate_body(operation: &Operation, body: &[u8]) -> Result<(), InvalidField> {
-    if !operation.mutating {
-        return Ok(());
+/// Read the caller's parameters. A read takes them from the query string and a
+/// write from the JSON body; an absent body is the empty object the validator
+/// fills defaults into. Anything that is not JSON, or not an object, is the
+/// same failure the validator reports for a value of the wrong shape.
+fn parse_params(
+    operation: &Operation,
+    query: Option<&str>,
+    body: &[u8],
+) -> Result<serde_json::Value, VogtError> {
+    if operation.route.method == HttpMethod::Get {
+        return Ok(query_object(query));
     }
     if body.is_empty() {
-        return Err(InvalidField {
-            loc: "body",
-            message: "a request body is required".to_string(),
-        });
+        return Ok(serde_json::Value::Null);
     }
-    let parsed: serde_json::Value = serde_json::from_slice(body).map_err(|_| InvalidField {
-        loc: "body",
-        message: "the request body is not valid JSON".to_string(),
-    })?;
-    let Some(object) = parsed.as_object() else {
-        return Err(InvalidField {
-            loc: "body",
-            message: "the request body must be a JSON object".to_string(),
-        });
-    };
-    let required = crate::registry::params_schema_for(operation.name)
-        .and_then(|schema| schema.get("required"))
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-    for field in required {
-        let Some(name) = field.as_str() else { continue };
-        if !object.contains_key(name) {
-            return Err(InvalidField {
-                loc: "body",
-                message: format!("missing required field '{name}'"),
-            });
-        }
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(serde_json::Value::Object(object)) => Ok(serde_json::Value::Object(object)),
+        _ => Err(VogtError::InvalidRequest(format!(
+            "invalid arguments for {}:\n1 validation error for request body\nbody\n  Input should be a valid JSON object",
+            operation.name
+        ))),
     }
-    Ok(())
 }
 
-fn invalid_arguments(rejection: &InvalidField) -> Response {
+/// Query parameters as one flat object. A repeated key becomes a list, which is
+/// how a caller passes an array field; everything else is a string and the
+/// validator decides whether that string is acceptable. Percent-encoding is
+/// decoded because that is what the query string is.
+fn query_object(query: Option<&str>) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for pair in query
+        .unwrap_or("")
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+    {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = percent_decode(key);
+        let value = serde_json::Value::String(percent_decode(value));
+        match object.get_mut(&key) {
+            Some(serde_json::Value::Array(items)) => items.push(value),
+            Some(existing) => {
+                let first = existing.take();
+                *existing = serde_json::Value::Array(vec![first, value]);
+            }
+            None => {
+                object.insert(key, value);
+            }
+        }
+    }
+    serde_json::Value::Object(object)
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => out.push(b' '),
+            b'%' if index + 2 < bytes.len() => {
+                let hex = &text[index + 1..index + 3];
+                match u8::from_str_radix(hex, 16) {
+                    Ok(byte) => out.push(byte),
+                    Err(_) => out.extend_from_slice(&bytes[index..index + 3]),
+                }
+                index += 2;
+            }
+            byte => out.push(byte),
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The context a ported service runs in. The grant names the caller; the data
+/// directory is the one the route's own store was opened on.
+fn context_for<C: Clock, I: IdFactory>(
+    state: &AppState<C, I>,
+    grant: &Grant,
+) -> Option<crate::application::context::Built> {
+    let config = crate::config::VogtConfig {
+        data_dir: state.data_dir.clone(),
+        ..crate::config::VogtConfig::default()
+    };
+    let principal = match &grant.identity_ref {
+        Some(identity_ref) if !identity_ref.is_empty() => {
+            Principal::new(identity_ref, ActorKind::Human, identity_ref).ok()
+        }
+        _ => Some(local_principal(&os_user())),
+    };
+    crate::application::context::build_context(
+        config, principal, None, None, None, None, None, None,
+    )
+    .ok()
+}
+
+/// Python's 422 envelope. The validator reports one error as a single
+/// `InvalidRequest`, so the detail carries that whole message; the code and the
+/// fixed message are what `tests/test_http.py` asserts.
+fn invalid_arguments(error: &VogtError) -> Response {
     json_response(
         StatusCode::UNPROCESSABLE_ENTITY,
         serde_json::json!({
             "error": {
                 "code": "invalid_arguments",
                 "message": "request does not match the operation's parameters",
-                "detail": [{"loc": [rejection.loc], "msg": rejection.message, "type": "missing"}],
+                "detail": [{"loc": ["body"], "msg": error.message(), "type": "value_error"}],
             }
         }),
     )
@@ -378,7 +441,7 @@ mod tests {
     #[test]
     fn no_auth_reaches_the_operation_and_an_unported_one_says_so() {
         let running = serve(true);
-        let (status, body) = request(running.addr, "GET", "/api/work/get", None);
+        let (status, body) = request(running.addr, "GET", "/api/work/get?ref=WI-1", None);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(status, 501, "{body}");
         assert_eq!(json["error"]["code"], "not_implemented");
@@ -394,7 +457,9 @@ mod tests {
         let (status, body) = request(running.addr, "GET", "/api/registry", None);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(status, 200, "{body}");
-        assert_eq!(json["operation"], "registry.dump");
+        assert!(json["operations"]
+            .as_array()
+            .is_some_and(|ops| !ops.is_empty()));
     }
 
     #[test]
