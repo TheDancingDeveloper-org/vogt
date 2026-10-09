@@ -236,15 +236,7 @@ async fn login<C: Clock, I: IdFactory>(
 /// Anything else is a 422 that never reaches `login_op`, so it counts no
 /// throttle failure and writes no decision row.
 fn login_params(body: &[u8]) -> Result<serde_json::Value, VogtError> {
-    let object =
-        match serde_json::from_slice::<serde_json::Value>(body) {
-            Ok(serde_json::Value::Object(object)) => object,
-            _ => return Err(VogtError::InvalidRequest(
-                "invalid arguments for auth.login:\n1 validation error for request body\nbody\n  \
-                 Input should be a valid JSON object"
-                    .to_string(),
-            )),
-        };
+    let object = read_body(body)?;
     for key in object.keys() {
         if !["username", "password", "session_name"].contains(&key.as_str()) {
             return Err(VogtError::InvalidRequest(format!(
@@ -573,10 +565,9 @@ fn parse_params(
     // A write that carries a body must say it is JSON: `text/plain` is a CORS
     // simple request, and accepting it lets any web page write to a `--no-auth`
     // server.
-    // An empty body and a JSON null are the same thing to FastAPI: the body was
-    // not given, so the model reports one "Field required" rather than a missing
-    // field per property. Anything else that is not an object is
-    // `model_attributes_type`.
+    // An empty body and a JSON null both mean the body was not given. FastAPI
+    // reports one "Field required" for either, rather than a missing field per
+    // property.
     if body.is_empty() || body == b"null" {
         return Err(VogtError::InvalidRequest("missing\nbody".to_string()));
     }
@@ -586,15 +577,25 @@ fn parse_params(
             operation.name
         )));
     }
+    read_body(body).map(serde_json::Value::Object)
+}
+
+/// What the body decoded to, or why it did not. Login, bootstrap and the
+/// registry all read a body, and each used to refuse a non-object differently,
+/// so a boolean or a number fell through to the old whole-body text.
+fn read_body(body: &[u8]) -> Result<serde_json::Map<String, serde_json::Value>, VogtError> {
+    if body.is_empty() || body == b"null" {
+        return Err(VogtError::InvalidRequest("missing\nbody".to_string()));
+    }
     match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(serde_json::Value::Object(object)) => Ok(serde_json::Value::Object(object)),
+        Ok(serde_json::Value::Object(object)) => Ok(object),
         Ok(_) => Err(VogtError::InvalidRequest(
             "model_attributes_type\nInput should be a valid dictionary or object to extract fields from"
                 .to_string(),
         )),
         Err(error) => Err(VogtError::InvalidRequest(format!(
             "json_invalid\n{}",
-            json_error_pos(&error)
+            json_error_pos(body, &error)
         ))),
     }
 }
@@ -843,11 +844,69 @@ fn invalid_arguments(error: &VogtError, source: &str) -> Response {
     )
 }
 
-/// Where a JSON decode failed, counted from the start of the body. serde reports
-/// the column it could not read, which for a one-line body is Python's
-/// `json.JSONDecodeError.pos`.
-fn json_error_pos(error: &serde_json::Error) -> usize {
-    error.column()
+/// Where decoding failed, counted from the start of the body. Python's
+/// `json.JSONDecodeError.pos` is where the offending token starts, while serde
+/// reports the column it gave up at, so the two differ inside a token.
+/// `not json` stops at the second letter but the word started at 0, and an
+/// unterminated `"é` stops several bytes past its opening quote.
+fn json_error_pos(body: &[u8], error: &serde_json::Error) -> usize {
+    let column = error.column();
+    let line_start = line_start(body, error.line());
+    let gave_up = line_start + column.saturating_sub(1);
+    token_start(body, gave_up.min(body.len()))
+}
+
+fn line_start(body: &[u8], line: usize) -> usize {
+    let mut seen = 1;
+    if line <= 1 {
+        return 0;
+    }
+    for (index, byte) in body.iter().enumerate() {
+        if *byte == b'\n' {
+            seen += 1;
+            if seen == line {
+                return index + 1;
+            }
+        }
+    }
+    0
+}
+
+/// The start of the token serde gave up inside. A word, a number or a string
+/// runs back to its first byte; anything else failed where serde says.
+fn token_start(body: &[u8], gave_up: usize) -> usize {
+    let at = gave_up.min(body.len().saturating_sub(1));
+    let mut start = at;
+    if body.get(at).is_some_and(is_word_byte) {
+        while start > 0 && body.get(start - 1).is_some_and(is_word_byte) {
+            start -= 1;
+        }
+        return start;
+    }
+    let mut quote = None;
+    for index in 0..=at {
+        if body[index] == b'"' && !escaped(body, index) {
+            quote = match quote {
+                Some(_) => None,
+                None => Some(index),
+            };
+        }
+    }
+    quote.unwrap_or(gave_up)
+}
+
+fn is_word_byte(byte: &u8) -> bool {
+    byte.is_ascii_alphanumeric() || *byte == b'.' || *byte == b'-' || *byte == b'+'
+}
+
+fn escaped(body: &[u8], index: usize) -> bool {
+    let mut slashes = 0;
+    let mut cursor = index;
+    while cursor > 0 && body[cursor - 1] == b'\\' {
+        slashes += 1;
+        cursor -= 1;
+    }
+    slashes % 2 == 1
 }
 
 /// A body that never reached the validator. Python reports a body that is not
@@ -1158,14 +1217,28 @@ mod tests {
         assert_eq!(status, 422, "{body}");
         assert!(body.contains("\"type\":\"json_invalid\""), "{body}");
         assert!(body.contains("\"msg\":\"JSON decode error\""), "{body}");
+        assert!(body.contains("\"loc\":[\"body\",\"0\"]"), "{body}");
         let (status, body) = post_typed(
             running.addr,
             "/api/labels",
-            r#"{"name":"#,
+            "{\"name\":\"\u{00e9}",
             Some("application/json"),
         );
         assert!(body.contains("\"loc\":[\"body\",\"8\"]"), "{body}");
         let _ = status;
+        for scalar in ["true", "1.5"] {
+            let (status, body) = post_typed(
+                running.addr,
+                "/api/labels",
+                scalar,
+                Some("application/json"),
+            );
+            assert_eq!(status, 422, "{scalar}: {body}");
+            assert!(
+                body.contains("\"type\":\"model_attributes_type\""),
+                "{scalar}: {body}"
+            );
+        }
         let (status, body) =
             post_typed(running.addr, "/api/labels", "[1]", Some("application/json"));
         assert!(
