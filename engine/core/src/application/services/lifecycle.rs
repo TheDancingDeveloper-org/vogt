@@ -16,13 +16,14 @@ use serde_json::{json, Value};
 use crate::application::context::{AppContext, Built};
 use crate::core::{Clock, IdFactory, Moment};
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
+use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WorkFilter};
 use crate::VERSION;
 
 const MANIFEST_NAME: &str = "manifest.json";
 const MANIFEST_VERSION: i64 = 2;
 const ENGINE_STATE_DIR: &str = "engine-state";
 const BACKUP_EVENT: &str = "instance.backed_up";
+const EXPORT_FORMAT_VERSION: i64 = 2;
 
 /// What a backup says about itself. `engine_state` and `import_root` arrived
 /// with manifest version 2; a version-1 manifest covered the two stores and
@@ -430,6 +431,118 @@ pub fn restore_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::application::services::dispatch!(ctx, restore, &params)
 }
 
+/// Write the declared entities as JSON. Deliberately declared-only:
+/// observations are evidence a collector can reproduce. Never exported: tokens,
+/// password logins, forge accounts, auth decisions, sessions — nothing that
+/// would let the file act as the instance it came from.
+///
+/// With `project`, the export is one project: its work items and only the
+/// initiatives, labels and actors those reference.
+pub fn export_instance<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    params: &Value,
+) -> Result<Value, VogtError> {
+    let project_slug = params
+        .get("project")
+        .and_then(Value::as_str)
+        .filter(|slug| !slug.is_empty())
+        .map(str::to_string);
+    let view = ctx.declared.read()?;
+    let stamp = view.clone_stamp()?;
+    let mut projects = view.list_projects(10_000, 0)?;
+    let mut items = view.list_work_items(&WorkFilter {
+        limit: 10_000,
+        exclude_terminal: false,
+        include_superseded: true,
+        ..WorkFilter::default()
+    })?;
+    let mut initiatives = view.list_initiatives(10_000, 0)?;
+    let mut labels = view.list_labels(10_000, 0)?;
+    let mut actors = view.list_actors(10_000, 0)?;
+    if let Some(slug) = &project_slug {
+        let scoped = view
+            .project_by_slug(slug)?
+            .ok_or_else(|| VogtError::NotFound(format!("no project with slug {slug:?}")))?;
+        items.retain(|item| item.project_id.as_deref() == Some(scoped.id.as_str()));
+        projects = vec![scoped];
+    }
+    let mut comments = Vec::new();
+    for item in &items {
+        comments.extend(view.comments_for(&item.id, 100_000)?);
+    }
+    if project_slug.is_some() {
+        let initiative_ids: std::collections::BTreeSet<&str> = items
+            .iter()
+            .filter_map(|item| item.initiative_id.as_deref())
+            .collect();
+        initiatives.retain(|initiative| initiative_ids.contains(initiative.id.as_str()));
+        let label_names: std::collections::BTreeSet<&str> = items
+            .iter()
+            .flat_map(|item| item.labels.iter().map(String::as_str))
+            .collect();
+        labels.retain(|label| label_names.contains(label.name.as_str()));
+        let mut actor_ids: std::collections::BTreeSet<&str> = items
+            .iter()
+            .filter_map(|item| item.assignee_actor_id.as_deref())
+            .collect();
+        actor_ids.extend(comments.iter().map(|comment| comment.actor_id.as_str()));
+        actors.retain(|actor| actor_ids.contains(actor.id.as_str()));
+    }
+    let payload = json!({
+        "export_format_version": EXPORT_FORMAT_VERSION,
+        "instance_id": view.instance_id()?,
+        "exported_at": now(ctx).to_iso(),
+        "revision": view.current_revision()?,
+        "scope": {"project": project_slug},
+        "clone_stamp": stamp.map(|stamp| json!({
+            "source_instance_id": stamp.source_instance_id,
+            "cloned_at": stamp.cloned_at.to_iso(),
+            "backup_taken_at": stamp.backup_taken_at.to_iso(),
+        })),
+        "projects": projects,
+        "work_items": items,
+        "initiatives": initiatives,
+        "labels": labels,
+        "actors": actors,
+        "comments": comments,
+    });
+    drop(view);
+
+    let destination = expand_user(Path::new(
+        params
+            .get("destination")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    ));
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| {
+            VogtError::InvalidRequest(format!(
+                "creating {parent} failed: {err}",
+                parent = parent.display()
+            ))
+        })?;
+    }
+    let text = serde_json::to_string_pretty(&payload).expect("export is json") + "\n";
+    std::fs::write(&destination, text).map_err(|err| {
+        VogtError::InvalidRequest(format!(
+            "writing {destination} failed: {err}",
+            destination = destination.display()
+        ))
+    })?;
+    Ok(json!({
+        "path": destination.display().to_string(),
+        "export_format_version": EXPORT_FORMAT_VERSION,
+        "project": project_slug,
+        "projects": projects.len(),
+        "work_items": items.len(),
+        "comments": comments.len(),
+    }))
+}
+
+pub fn export_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
+    crate::application::services::dispatch!(ctx, export_instance, &params)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,6 +734,47 @@ mod tests {
         );
         let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
         assert_eq!(after, before, "the live store was not replaced");
+    }
+
+    #[test]
+    fn an_export_writes_the_declared_entities_and_nothing_else() {
+        let built = opened();
+        let destination = ctx(&built).config.resolved_data_dir().join("export.json");
+        let result = export_instance(
+            ctx(&built),
+            &json!({"destination": destination.display().to_string(), "reason": "why"}),
+        )
+        .unwrap();
+        let payload: Value =
+            serde_json::from_str(&std::fs::read_to_string(&destination).unwrap()).unwrap();
+        assert_eq!(result["export_format_version"], 2);
+        assert!(result["projects"].as_i64().unwrap() >= 0);
+        assert_eq!(payload["export_format_version"], 2);
+        assert!(payload["scope"]["project"].is_null());
+        assert!(payload["clone_stamp"].is_null());
+        for absent in ["observations", "tokens", "sessions", "auth_decisions"] {
+            assert!(
+                payload.get(absent).is_none(),
+                "{absent} is not part of an export"
+            );
+        }
+        assert!(payload["work_items"].is_array());
+        assert!(payload["comments"].is_array());
+    }
+
+    #[test]
+    fn exporting_one_project_that_does_not_exist_says_so() {
+        let built = opened();
+        let destination = ctx(&built).config.resolved_data_dir().join("export.json");
+        let error = export_instance(
+            ctx(&built),
+            &json!({"destination": destination.display().to_string(), "project": "missing", "reason": "why"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::NotFound(message) if message.contains("no project with slug"))
+        );
+        assert!(!destination.exists(), "nothing was written");
     }
 
     #[test]

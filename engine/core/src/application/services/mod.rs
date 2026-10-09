@@ -52,6 +52,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "inbox.restore" => inbox::inbox_restore_op,
         "backup" => lifecycle::backup_op,
         "restore" => lifecycle::restore_op,
+        "export" => lifecycle::export_op,
         _ => return None,
     })
 }
