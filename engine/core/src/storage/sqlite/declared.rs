@@ -121,6 +121,18 @@ where
         &self.clock
     }
 
+    /// The database file. A request builds its own store over a restarted clock
+    /// and needs the same file.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    /// The synchronous mode this store was opened with, so a request's store
+    /// writes the way the process store does.
+    pub fn synchronous(&self) -> &str {
+        &self.synchronous
+    }
+
     /// The id factory this store counts with. The context holds the same one,
     /// because a second factory starts again at one and the two collide.
     // Used by the write tests, which live outside this crate's binary target.

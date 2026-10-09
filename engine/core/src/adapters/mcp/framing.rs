@@ -333,7 +333,7 @@ impl<'a, G: ToolGrant> Dispatcher<'a, G> {
                 "structuredContent": value,
                 "isError": false,
             }),
-            Err(error) => tool_error(error.code(), error.message()),
+            Err(error) => tool_error(error.code(), &describe(operation, &error)),
         };
         result(Some(message_id), body)
     }
@@ -365,12 +365,75 @@ fn tool_error(code: &str, message: &str) -> Value {
     })
 }
 
-/// Python's `json.dumps(body, indent=2)`, which is what the tool result's text
-/// carries. `Value`'s own rendering is compact, so a model would read a
-/// different document than Python's server hands it.
-fn pretty(value: &Value) -> String {
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+/// A validation failure as an instruction, the way `describe_invalid` writes it:
+/// what is wrong, then what the tool accepts. The validator reports one problem
+/// at a time and names it in its own words, so the mapping is by that wording.
+/// Any other error keeps its own message.
+fn describe(operation: &Operation, error: &crate::errors::VogtError) -> String {
+    let crate::errors::VogtError::InvalidRequest(message) = error else {
+        return error.message().to_string();
+    };
+    let detail = message
+        .rsplit_once('\n')
+        .map(|(_, last)| last)
+        .unwrap_or(message);
+    let problem = if let Some(name) = detail.strip_suffix(" is required") {
+        format!("missing required parameter '{name}'")
+    } else if let Some(name) = detail.strip_prefix("unexpected parameter ") {
+        format!("unknown parameter '{name}'")
+    } else {
+        detail.to_string()
+    };
+    let schema = crate::registry::params_schema_for(operation.name);
+    let (required, optional) = schema
+        .map(accepted)
+        .unwrap_or_else(|| (Vec::new(), Vec::new()));
+    let mut accepted = format!(
+        "required: {}",
+        if required.is_empty() {
+            "none".to_string()
+        } else {
+            required.join(", ")
+        }
+    );
+    if !optional.is_empty() {
+        accepted.push_str(&format!("; optional: {}", optional.join(", ")));
+    }
+    format!("{problem}. {} takes {accepted}", operation.mcp_tool_name())
 }
+
+/// The parameter names a schema requires and the ones it leaves optional.
+fn accepted(schema: &Value) -> (Vec<String>, Vec<String>) {
+    let properties = schema.get("properties").and_then(Value::as_object);
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let optional = properties
+        .map(|fields| {
+            fields
+                .keys()
+                .filter(|name| !required.iter().any(|item| item == *name))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    (required, optional)
+}
+/// carries: two-space indentation and `ensure_ascii=True`, so a non-ASCII
+/// character leaves as `\u00e9` or a surrogate pair rather than raw UTF-8.
+fn pretty(value: &Value) -> String {
+    crate::decisions::python_json_dumps_indent(value, 2)
+}
+
+/// Python's truthiness for a JSON value: `None`, `[]`, `0`, `""` and `false`
 /// are all falsy, and both handlers write `params or {}`.
 pub(super) fn json_falsy(value: &Value) -> bool {
     match value {

@@ -88,7 +88,7 @@ impl<C: Clock, I: IdFactory> McpState<C, I> {
 /// routes therefore restart theirs; a wall clock has no start to restart from.
 macro_rules! mcp_route {
     ($name:ident, $clock:ty, $ids:ty, $variant:ident, shared) => {
-        mcp_route!(@build $name, $clock, $ids, $variant, clock_for::<$clock, false>);
+        mcp_route!(@build $name, $clock, $ids, $variant, clock_for::<$clock>);
     };
     ($name:ident, $clock:ty, $ids:ty, $variant:ident, restart) => {
         mcp_route!(@build $name, $clock, $ids, $variant, step_clock_for);
@@ -181,31 +181,34 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
     };
 
     let store = state.store.lock().expect("the store lock is not poisoned");
+    // The request's own store: the shared id factory, so the decision row and
+    // the service count from one sequence, and a clock restarted for this
+    // request, so both stamp from the same instant. The process store keeps its
+    // clock, which the CLI also ticks.
+    let request_store = SqliteDeclaredStore::shared(
+        store.path().to_path_buf(),
+        clock_for(store.clock()),
+        Arc::clone(store.id_factory()),
+        store.synchronous(),
+    );
     // Authenticate through the shared gate. It records a refusal and nothing
     // for a live credential, so a ping or a tools/list writes no row. The one
     // row a tool call writes is recorded below.
-    let grant = match authenticate(&store, &state, presented.as_deref()) {
+    let grant = match authenticate(&request_store, &state, presented.as_deref()) {
         Ok(grant) => grant,
         Err(denial) => return unauthenticated(denial),
     };
     if let Some(operation) = called_operation(&message, &registry) {
-        if let Err(denial) = record_call(&store, &state, &grant, operation) {
+        if let Err(denial) = record_call(&request_store, &state, &grant, operation) {
             return refusal(&message, operation, &grant, denial);
         }
     }
     drop(store);
-
-    // Both checks passed. The dispatcher still owns the protocol: a notification
-    // is a 202, a bad argument is `-32602`, an unknown tool is `-32601`. The
-    // grant narrows `tools/list` to what this caller may invoke.
     let permitted = Permitted {
         scopes: grant.scopes.clone(),
         writes_enabled: state.writes_enabled,
     };
-    // The context carries the authenticated principal, on the same clock and id
-    // factory the decision row was written with, so the service's writes
-    // continue that sequence instead of starting another one.
-    let built = context_for(&state, &grant, build, clock_for);
+    let built = context_for(&request_store, &state, &grant, build);
     let mut dispatcher = Dispatcher::new(&registry, &permitted, McpTransport::Http);
     if let Some(context) = built.as_ref() {
         dispatcher = dispatcher.with_context(context);
@@ -230,10 +233,10 @@ async fn handle<C: Clock + Clone, I: IdFactory>(
 /// the sequence the decision row started. The clock is the route's choice: a
 /// step clock restarts at the hook's start, a wall clock is the store's.
 fn context_for<C: Clock, I: IdFactory>(
+    store: &SqliteDeclaredStore<C, I>,
     state: &McpState<C, I>,
     grant: &auth_gate::Grant,
     build: ContextBuild<C, I>,
-    clock_for: ClockFor<C>,
 ) -> Option<crate::application::context::Built> {
     use crate::core::{local_principal, os_user, Principal};
     let config = state.config.clone();
@@ -243,40 +246,36 @@ fn context_for<C: Clock, I: IdFactory>(
         }
         _ => Some(local_principal(&os_user())),
     };
-    let store = state.store.lock().expect("the store lock is not poisoned");
     Some(build(
         config,
         principal,
-        clock_for(store.clock()),
+        Arc::clone(store.clock()),
         Arc::clone(store.id_factory()),
         grant.token.clone(),
     ))
 }
 
-/// Which clock a request's context ticks.
+/// Which clock a request ticks.
 ///
-/// `RESTART` is the step-clock routes. Python builds a fresh step clock per
-/// request, starting again at `VOGT_TEST_CLOCK_START`, so the decision row, the
-/// entity row and the audit row land at the same three instants every time. A
-/// wall clock has no start to restart from, and the request ticks the one the
-/// store holds. The two are separate functions because only `StepClock` has a
-/// start to restart from, and a generic one could not name it.
-pub(crate) fn clock_for<C: Clock + Clone, const RESTART: bool>(
-    shared: &Arc<Mutex<C>>,
-) -> Arc<Mutex<C>> {
-    let _ = RESTART;
+/// The step routes restart theirs at `VOGT_TEST_CLOCK_START`, so the decision
+/// row, the entity row and the audit row land at the same three instants every
+/// request. A wall clock has no start to restart from, and the request ticks
+/// the one the store holds. The two are separate functions because only
+/// `StepClock` has a start to restart from, and a generic one could not name it.
+pub(crate) fn clock_for<C: Clock + Clone>(shared: &Arc<Mutex<C>>) -> Arc<Mutex<C>> {
     Arc::clone(shared)
 }
 
 pub(crate) fn step_clock_for(
-    shared: &Arc<Mutex<crate::core::StepClock>>,
+    _shared: &Arc<Mutex<crate::core::StepClock>>,
 ) -> Arc<Mutex<crate::core::StepClock>> {
-    let _ = shared;
     use crate::core::{clock_from_env, CLOCK_ENV};
+    // A value that is not a timestamp was already refused at startup, so this
+    // failing means the environment changed under the process. Stamping from
+    // the epoch would write rows the operator cannot reconcile.
     let clock = clock_from_env(std::env::var(CLOCK_ENV).ok().as_deref())
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| crate::core::StepClock::new(crate::core::Moment::from_unix(0, 0)));
+        .expect("VOGT_TEST_CLOCK_START changed after startup")
+        .expect("VOGT_TEST_CLOCK_START was unset after startup");
     Arc::new(Mutex::new(clock))
 }
 

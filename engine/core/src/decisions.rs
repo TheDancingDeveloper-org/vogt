@@ -24,23 +24,39 @@ use crate::core::{Moment, Observation, WorkItem, WorkOverlay, DONE, TERMINAL_STA
 /// digit string, fixed notation for an exponent in `-4..=15`, otherwise
 /// `d.ddde±XX` with an exponent of at least two digits, and `.0` on an integer.
 pub fn canonical_json(payload: &Value) -> String {
-    render_python_json(payload, false, true)
+    render_python_json(payload, false, true, 0)
 }
 
 /// `json.dumps` as Python stores it: `", "` / `": "` separators and
 /// `ensure_ascii=True`. Keys are sorted only where the Python call sorts them
 /// (`sort_keys=True` for a workflow definition, not for an exclusions list).
 pub fn python_json_dumps(payload: &Value, sort_keys: bool) -> String {
-    render_python_json(payload, true, sort_keys)
+    render_python_json(payload, true, sort_keys, 0)
 }
 
-fn render_python_json(value: &Value, spaced: bool, sort_keys: bool) -> String {
+/// `json.dumps(payload, indent=n)`: the same escaping as `python_json_dumps`,
+/// with each nesting level indented by `n` spaces and no space before a colon.
+pub fn python_json_dumps_indent(payload: &Value, indent: usize) -> String {
+    render_python_json(payload, false, false, indent)
+}
+
+fn render_python_json(value: &Value, spaced: bool, sort_keys: bool, indent: usize) -> String {
     let mut out = String::new();
-    write_python_json(&mut out, value, spaced, sort_keys);
+    write_python_json(&mut out, value, spaced, sort_keys, indent, 0);
+    if indent > 0 {
+        out.push('\n');
+    }
     out
 }
 
-fn write_python_json(out: &mut String, value: &Value, spaced: bool, sort_keys: bool) {
+fn write_python_json(
+    out: &mut String,
+    value: &Value,
+    spaced: bool,
+    sort_keys: bool,
+    indent: usize,
+    depth: usize,
+) {
     let (item_gap, key_gap) = if spaced { (", ", ": ") } else { (",", ":") };
     match value {
         Value::Null => out.push_str("null"),
@@ -48,15 +64,28 @@ fn write_python_json(out: &mut String, value: &Value, spaced: bool, sort_keys: b
         Value::Bool(false) => out.push_str("false"),
         Value::Number(number) => out.push_str(&python_number(number)),
         Value::String(text) => write_python_string(out, text),
+        Value::Array(items) if indent > 0 && !items.is_empty() => write_indented(
+            out,
+            items.iter().map(|item| (None, item)).collect(),
+            indent,
+            depth,
+        ),
         Value::Array(items) => {
             out.push('[');
             for (index, item) in items.iter().enumerate() {
                 if index > 0 {
                     out.push_str(item_gap);
                 }
-                write_python_json(out, item, spaced, sort_keys);
+                write_python_json(out, item, spaced, sort_keys, indent, depth + 1);
             }
             out.push(']');
+        }
+        Value::Object(map) if indent > 0 && !map.is_empty() => {
+            let entries = map
+                .iter()
+                .map(|(key, value)| (Some(key.as_str()), value))
+                .collect();
+            write_indented(out, entries, indent, depth);
         }
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -70,11 +99,48 @@ fn write_python_json(out: &mut String, value: &Value, spaced: bool, sort_keys: b
                 }
                 write_python_string(out, key);
                 out.push_str(key_gap);
-                write_python_json(out, &map[*key], spaced, sort_keys);
+                write_python_json(out, &map[*key], spaced, sort_keys, indent, depth + 1);
             }
             out.push('}');
         }
     }
+}
+
+/// One indented array or object. Python breaks the line after the opener, pads
+/// `indent` spaces per nesting level, and puts the closer back at the parent's
+/// indent. An empty container stays on one line, which the caller handles.
+fn write_indented(
+    out: &mut String,
+    entries: Vec<(Option<&str>, &Value)>,
+    indent: usize,
+    depth: usize,
+) {
+    let open = if entries.first().is_some_and(|(key, _)| key.is_some()) {
+        '{'
+    } else {
+        '['
+    };
+    let close = if open == '{' { '}' } else { ']' };
+    out.push(open);
+    for (index, (key, value)) in entries.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('\n');
+        for _ in 0..indent * (depth + 1) {
+            out.push(' ');
+        }
+        if let Some(key) = key {
+            write_python_string(out, key);
+            out.push_str(": ");
+        }
+        write_python_json(out, value, false, false, indent, depth + 1);
+    }
+    out.push('\n');
+    for _ in 0..indent * depth {
+        out.push(' ');
+    }
+    out.push(close);
 }
 
 fn write_python_string(out: &mut String, text: &str) {

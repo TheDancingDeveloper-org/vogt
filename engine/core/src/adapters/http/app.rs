@@ -105,7 +105,7 @@ pub(crate) fn loaded_config(data_dir: &std::path::Path) -> crate::config::VogtCo
 /// factory rather than a fresh one.
 macro_rules! api_route {
     ($name:ident, $clock:ty, $ids:ty, $variant:ident, shared) => {
-        api_route!(@build $name, $clock, $ids, $variant, crate::adapters::http::mcp::clock_for::<$clock, false>);
+        api_route!(@build $name, $clock, $ids, $variant, crate::adapters::http::mcp::clock_for::<$clock>);
     };
     ($name:ident, $clock:ty, $ids:ty, $variant:ident, restart) => {
         api_route!(@build $name, $clock, $ids, $variant, crate::adapters::http::mcp::step_clock_for);
@@ -212,7 +212,8 @@ async fn login<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error),
     };
-    let built = context_for_login(&state, build, clock_for);
+    let request_store = request_store(&state, clock_for);
+    let built = context_for_login(&request_store, &state, build);
     let Some(built) = built else {
         return error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
@@ -309,7 +310,7 @@ fn json_content_type(header: Option<&axum::http::HeaderValue>) -> bool {
 async fn install_status<C: Clock, I: IdFactory>(
     State((state, build, clock_for)): State<Routed<C, I>>,
 ) -> Response {
-    let Some(built) = context_for_login(&state, build, clock_for) else {
+    let Some(built) = context_for_login(&request_store(&state, clock_for), &state, build) else {
         return error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
         ));
@@ -346,7 +347,7 @@ async fn install_bootstrap<C: Clock, I: IdFactory>(
         Ok(params) => params,
         Err(error) => return invalid_arguments(&error),
     };
-    let Some(built) = context_for_login(&state, build, clock_for) else {
+    let Some(built) = context_for_login(&request_store(&state, clock_for), &state, build) else {
         return error_response(&VogtError::InvalidRequest(
             "the request context could not be built".to_string(),
         ));
@@ -490,24 +491,27 @@ async fn dispatch<C: Clock, I: IdFactory>(
     };
     // The gate records its decision before the operation runs, so a request
     // that will be refused never reaches a handler.
-    let granted = {
-        let store = state.store.lock().expect("the store lock is not poisoned");
-        let now = store
+    let (granted, request_store) = {
+        let request_store = request_store(&state, clock_for);
+        let now = request_store
             .clock()
             .lock()
             .expect("the clock lock is not poisoned")
             .now();
-        auth_gate::authorize(
-            &*store,
-            AuthRequest {
-                operation,
-                transport: Transport::Http,
-                presented: presented.as_deref(),
-                no_auth: state.no_auth,
-                writes_enabled: state.writes_enabled,
-                now,
-            },
-            state.config.session_ttl_days,
+(
+            auth_gate::authorize(
+                &request_store,
+                AuthRequest {
+                    operation,
+                    transport: Transport::Http,
+                    presented: presented.as_deref(),
+                    no_auth: state.no_auth,
+                    writes_enabled: state.writes_enabled,
+                    now,
+                },
+                state.config.session_ttl_days,
+            ),
+            request_store,
         )
     };
     let grant = match granted {
@@ -525,7 +529,7 @@ async fn dispatch<C: Clock, I: IdFactory>(
             return error_response(&denial.error());
         }
     };
-    let built = context_for(&state, &grant, build, clock_for);
+    let built = context_for(&request_store, &state, &grant, build);
     match operation.run(built.as_ref(), params) {
         Ok(value) => json_response(StatusCode::OK, value),
         // Not ported is not the caller's fault, so it is not a 400. The shared
@@ -667,16 +671,34 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// A store for one request: the process store's id factory, so every route and
+/// the CLI count from one sequence, and a clock of the route's choosing. The
+/// gate stamps its decision row from the store it is given, so the decision and
+/// the service only share an instant when they share this store. The process
+/// store keeps its own clock, which the CLI also ticks.
+fn request_store<C: Clock, I: IdFactory>(
+    state: &AppState<C, I>,
+    clock_for: ClockFor<C>,
+) -> SqliteDeclaredStore<C, I> {
+    let store = state.store.lock().expect("the store lock is not poisoned");
+    SqliteDeclaredStore::shared(
+        store.path().to_path_buf(),
+        clock_for(store.clock()),
+        Arc::clone(store.id_factory()),
+        store.synchronous(),
+    )
+}
+
 /// The context a ported service runs in. The grant names the caller; the data
 /// directory is the one the route's own store was opened on. The id factory is
 /// that store's handle, so the service's writes continue the sequence the
 /// decision row started. The clock is the route's choice: a step clock restarts
 /// at the hook's start each request, a wall clock is the store's.
 fn context_for<C: Clock, I: IdFactory>(
+    store: &SqliteDeclaredStore<C, I>,
     state: &AppState<C, I>,
     grant: &Grant,
     build: ContextBuild<C, I>,
-    clock_for: ClockFor<C>,
 ) -> Option<crate::application::context::Built> {
     let principal = match &grant.identity_ref {
         Some(identity_ref) if !identity_ref.is_empty() => {
@@ -684,11 +706,10 @@ fn context_for<C: Clock, I: IdFactory>(
         }
         _ => Some(local_principal(&os_user())),
     };
-    let store = state.store.lock().expect("the store lock is not poisoned");
     Some(build(
         state.config.clone(),
         principal,
-        clock_for(store.clock()),
+        Arc::clone(store.clock()),
         Arc::clone(store.id_factory()),
         grant.token.clone(),
     ))
@@ -699,15 +720,14 @@ fn context_for<C: Clock, I: IdFactory>(
 /// matches. The data directory and the id factory are the route's own store;
 /// the clock restarts per request the way the other route's does.
 fn context_for_login<C: Clock, I: IdFactory>(
+    store: &SqliteDeclaredStore<C, I>,
     state: &AppState<C, I>,
     build: ContextBuild<C, I>,
-    clock_for: ClockFor<C>,
 ) -> Option<crate::application::context::Built> {
-    let store = state.store.lock().expect("the store lock is not poisoned");
     Some(build(
         state.config.clone(),
         None,
-        clock_for(store.clock()),
+        Arc::clone(store.clock()),
         Arc::clone(store.id_factory()),
         None,
     ))
