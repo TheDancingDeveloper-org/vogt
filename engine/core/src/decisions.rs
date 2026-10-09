@@ -1271,7 +1271,9 @@ pub fn classify(
             format!("its process ended ({})", activity.unwrap_or_default()),
         );
     }
-    if approval_question.is_some() || activity == Some("awaiting-approval") {
+    if approval_question.is_some_and(|text| !text.is_empty())
+        || activity == Some("awaiting-approval")
+    {
         if let (Some(gate), Some(question)) = (
             approval_kind.and_then(gate_words),
             approval_question.filter(|text| !text.is_empty()),
@@ -1303,9 +1305,12 @@ pub fn classify(
     }
     if activity == Some("running") {
         if let Some(last) = last_output_at {
-            let quiet = now.seconds_since(last) as i64;
-            if quiet >= stall_after_secs {
-                let minutes = quiet / 60;
+            // Compared in f64 so a fraction is kept. Truncating to i64 would
+            // call a turn stalled when its last output is half a second in the
+            // future and the stall threshold is zero.
+            let quiet = now.seconds_since(last);
+            if quiet >= stall_after_secs as f64 {
+                let minutes = (quiet / 60.0).floor() as i64;
                 return verdict(
                     Attention::Stalled,
                     format!("running, but nothing printed for {minutes} min"),
@@ -1344,6 +1349,120 @@ mod oversight_tests {
             moment,
             600,
         )
+    }
+
+    #[test]
+    fn each_session_lands_where_a_driver_should_look() {
+        // tests/test_oversight.py, the parametrised table plus the reason
+        // assertions that follow it.
+        let moment = now();
+        let ago = |minutes: i64| {
+            Some(crate::core::Moment::from_unix(
+                moment.unix_seconds() - minutes * 60,
+                0,
+            ))
+        };
+        type Row<'a> = (
+            &'a str,
+            Option<&'a str>,
+            bool,
+            bool,
+            Option<&'a str>,
+            Attention,
+        );
+        let cases: &[Row] = &[
+            (
+                "awaiting-approval",
+                Some("Run rm?"),
+                true,
+                false,
+                None,
+                Attention::Approval,
+            ),
+            (
+                "running",
+                None,
+                true,
+                false,
+                Some("needs a token"),
+                Attention::Blocked,
+            ),
+            (
+                "waiting-for-input",
+                None,
+                true,
+                false,
+                None,
+                Attention::Waiting,
+            ),
+            ("idle", None, true, true, None, Attention::Waiting),
+            ("idle", None, true, false, None, Attention::Idle),
+            ("running", None, true, false, None, Attention::Running),
+            (
+                "hibernated",
+                None,
+                false,
+                false,
+                None,
+                Attention::Hibernated,
+            ),
+            ("errored", None, false, false, None, Attention::Exited),
+        ];
+        for (activity, question, alive, ready, blocker, want) in cases {
+            let found = classify(
+                Some(activity),
+                Some(*alive),
+                Some(*ready),
+                question.as_deref(),
+                blocker.as_deref(),
+                None,
+                ago(0),
+                moment,
+                600,
+            );
+            assert_eq!(found.attention, *want, "{activity}");
+        }
+        let stalled = classify(
+            Some("running"),
+            Some(true),
+            Some(false),
+            None,
+            None,
+            None,
+            ago(25),
+            moment,
+            600,
+        );
+        assert_eq!(stalled.attention, Attention::Stalled);
+        assert_eq!(stalled.reason, "running, but nothing printed for 25 min");
+
+        let dialog = classify(
+            Some("awaiting-approval"),
+            Some(true),
+            Some(false),
+            Some("Run rm?"),
+            Some("x"),
+            None,
+            ago(0),
+            moment,
+            600,
+        );
+        assert_eq!(dialog.attention, Attention::Approval);
+        assert!(dialog.reason.contains("Run rm?"));
+
+        // An empty question is not a question. Python treats "" as false.
+        let empty = classify(
+            Some("running"),
+            Some(true),
+            Some(false),
+            Some(""),
+            None,
+            None,
+            ago(0),
+            moment,
+            600,
+        );
+        assert_eq!(empty.attention, Attention::Running);
     }
 
     #[test]
