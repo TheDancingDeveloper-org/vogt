@@ -730,7 +730,8 @@ where
     for key in &keys {
         payload.push_str(&key_bytes(key));
     }
-    let sent = engine.send_input(&engine_id, &payload, params.submit)?;
+    // W9 computes the real value (_answers_as_person), WI-983
+    let sent = engine.send_input(&engine_id, &payload, params.submit, false)?;
     if !sent {
         return Err(VogtError::NotFound(format!(
             "no session with id {}",
@@ -983,11 +984,13 @@ where
     }
     let engine = engine_of(ctx)?;
     let engine_id = engine_id_of(ctx, &params.id)?;
+    // W9 computes the real value (_answers_as_person), WI-983
     let answered = engine.answer_session(
         &engine_id,
         params.option,
         params.label.as_deref(),
         params.expect_question.as_deref(),
+        false,
     )?;
     let recorded = target(ctx, &params.id)?;
     let why = recorded
