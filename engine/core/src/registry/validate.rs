@@ -124,10 +124,19 @@ fn check_value(
         Some(schema) => (schema, true),
         None => (property, false),
     };
-    if value.is_null() && schema.get("enum").is_none() {
-        return if nullable {
-            Ok(value)
-        } else if schema.get("format").and_then(Value::as_str) == Some("date-time") {
+    if value.is_null() {
+        // A nullable field accepts null whatever else its other branch says,
+        // including an enum: the null was allowed by the anyOf, and the enum
+        // constrains only the value branch.
+        if nullable {
+            return Ok(value);
+        }
+        // A null where the value must be one of an enum fails the enum, which
+        // names the allowed values, rather than the underlying string check.
+        if schema.get("enum").is_some() {
+            return check_string(operation, name, schema, value);
+        }
+        return if schema.get("format").and_then(Value::as_str) == Some("date-time") {
             Err(vec![pydantic(name, "Input should be a valid datetime")])
         } else {
             Err(vec![pydantic(name, &expected_input(schema))])
@@ -573,6 +582,15 @@ mod tests {
         .unwrap();
         assert_eq!(resolved["scopes"], "read");
         assert!(resolved.get("expires_in_days").is_none());
+    }
+
+    #[test]
+    fn a_nullable_enum_accepts_null() {
+        // `decision` is `Literal["allow", "deny"] | None`. The null branch is
+        // what allows it; the enum constrains only the other branch, so a null
+        // passes and is kept rather than refused as an invalid choice.
+        let resolved = prepare("auth.decisions", serde_json::json!({"decision": null})).unwrap();
+        assert_eq!(resolved["decision"], serde_json::Value::Null);
     }
 
     #[test]
