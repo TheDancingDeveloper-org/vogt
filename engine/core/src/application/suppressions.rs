@@ -184,3 +184,104 @@ fn clock_now<C: Clock>(clock: &std::sync::Arc<std::sync::Mutex<C>>) -> crate::co
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .now()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{ActorKind, Principal, SequentialIds, StepClock};
+    use crate::errors::VogtError;
+
+    fn context() -> Built {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-suppressions-{}-{}",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = crate::config::VogtConfig {
+            data_dir: dir,
+            ..crate::config::VogtConfig::default()
+        };
+        let principal = Principal::new("local:test-user", ActorKind::Human, "Test").unwrap();
+        let built = crate::application::context::build_context(
+            config,
+            Some(principal.clone()),
+            Some(StepClock::new(crate::core::Moment::from_unix(
+                1_700_000_000,
+                0,
+            ))),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let Built::StepSequential(ctx) = &built else {
+            unreachable!()
+        };
+        ctx.declared.migrate().unwrap();
+        ctx.declared.bootstrap(&principal).unwrap();
+        built
+    }
+
+    #[test]
+    fn a_duplicate_subject_burns_no_suppression_id() {
+        let ctx = context();
+        suppress_op(&ctx, json!({"subject": "gh:acme/app#1", "reason": "noise"})).unwrap();
+        let error =
+            suppress_op(&ctx, json!({"subject": "gh:acme/app#1", "reason": "noise"})).unwrap_err();
+        assert!(
+            matches!(error, VogtError::Conflict(ref message) if message.contains("already suppressed")),
+            "{error}"
+        );
+        // The duplicate check runs before the id is drawn, so the next
+        // suppression keeps the id the duplicate would have taken.
+        let next =
+            suppress_op(&ctx, json!({"subject": "gh:acme/app#2", "reason": "noise"})).unwrap();
+        assert_eq!(next["suppression"]["id"], "sup_0002");
+    }
+
+    #[test]
+    fn an_unknown_project_burns_no_suppression_id() {
+        let ctx = context();
+        let error = suppress_op(
+            &ctx,
+            json!({"subject": "gh:acme/app#1", "project": "missing", "reason": "noise"}),
+        )
+        .unwrap_err();
+        assert!(matches!(error, VogtError::NotFound(_)), "{error}");
+        // Resolved inside the write, and only after the project resolves, so
+        // the failed attempt draws nothing.
+        let next =
+            suppress_op(&ctx, json!({"subject": "gh:acme/app#1", "reason": "noise"})).unwrap();
+        assert_eq!(next["suppression"]["id"], "sup_0001");
+    }
+
+    #[test]
+    fn the_conflict_message_uses_python_repr() {
+        let ctx = context();
+        suppress_op(&ctx, json!({"subject": "it's", "reason": "noise"})).unwrap();
+        let error = suppress_op(&ctx, json!({"subject": "it's", "reason": "noise"})).unwrap_err();
+        let VogtError::Conflict(message) = error else {
+            panic!("{error}")
+        };
+        assert!(
+            message.starts_with("\"it's\" is already suppressed"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn an_empty_subject_is_an_invalid_request() {
+        let ctx = context();
+        let error = suppress_op(&ctx, json!({"subject": "", "reason": "noise"})).unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(ref message) if message.contains("non-empty")),
+            "{error}"
+        );
+    }
+}
