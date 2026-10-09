@@ -170,6 +170,15 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             index += 1;
             continue;
         }
+        if !command_complete && flag.starts_with('-') {
+            // A flag between the group word and the subcommand is a root
+            // usage error, matching argparse: `work --json get` reports
+            // "unrecognized arguments" against the top-level usage.
+            return ParseOutcome::Result(usage(format!(
+                "{}\nvogt: error: unrecognized arguments: {flag}\n",
+                format_top(registry).trim_end()
+            )));
+        }
         flags.push(flag.clone());
         index += 1;
     }
@@ -204,6 +213,15 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
                 // A bare group is a usage error (exit 2) and prints the root
                 // help, which is what argparse does for an incomplete command.
                 return ParseOutcome::Result(usage(format_top(registry)));
+            }
+            // A flag right after the group word is a root-level usage error,
+            // not the operation's help: argparse reports "unrecognized
+            // arguments" against the top-level usage.
+            if let Some(flag) = flags.first().filter(|flag| flag.starts_with('-')) {
+                return ParseOutcome::Result(usage(format!(
+                    "{}\nvogt: error: unrecognized arguments: {flag}\n",
+                    format_top(registry).trim_end()
+                )));
             }
             let unknown = positional
                 .get(path.len())
@@ -1258,6 +1276,11 @@ mod tests {
             &mut no_dispatch,
         );
         assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stdout);
+        assert!(
+            result.stdout.contains("unrecognized arguments: --json"),
+            "{}",
+            result.stdout
+        );
     }
 
     #[test]
