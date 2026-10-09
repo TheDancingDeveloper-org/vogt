@@ -573,8 +573,12 @@ fn parse_params(
     // A write that carries a body must say it is JSON: `text/plain` is a CORS
     // simple request, and accepting it lets any web page write to a `--no-auth`
     // server.
-    if body.is_empty() {
-        return Ok(serde_json::Value::Null);
+    // An empty body and a JSON null are the same thing to FastAPI: the body was
+    // not given, so the model reports one "Field required" rather than a missing
+    // field per property. Anything else that is not an object is
+    // `model_attributes_type`.
+    if body.is_empty() || body == b"null" {
+        return Err(VogtError::InvalidRequest("missing\nbody".to_string()));
     }
     if !json_content_type(content_type.as_ref()) {
         return Err(VogtError::InvalidRequest(format!(
@@ -585,10 +589,13 @@ fn parse_params(
     match serde_json::from_slice::<serde_json::Value>(body) {
         Ok(serde_json::Value::Object(object)) => Ok(serde_json::Value::Object(object)),
         Ok(_) => Err(VogtError::InvalidRequest(
-            "model_attributes_type\nbody\n  Input should be a valid dictionary or object to extract fields from"
+            "model_attributes_type\nInput should be a valid dictionary or object to extract fields from"
                 .to_string(),
         )),
-        Err(error) => Err(VogtError::InvalidRequest(format!("json_invalid\n{error}"))),
+        Err(error) => Err(VogtError::InvalidRequest(format!(
+            "json_invalid\n{}",
+            json_error_pos(&error)
+        ))),
     }
 }
 
@@ -836,22 +843,41 @@ fn invalid_arguments(error: &VogtError, source: &str) -> Response {
     )
 }
 
+/// Where a JSON decode failed, counted from the start of the body. serde reports
+/// the column it could not read, which for a one-line body is Python's
+/// `json.JSONDecodeError.pos`.
+fn json_error_pos(error: &serde_json::Error) -> usize {
+    error.column()
+}
+
 /// A body that never reached the validator. Python reports a body that is not
-/// JSON as `json_invalid` at `["body", "0"]`, and JSON that is not an object as
-/// `model_attributes_type` at `["body"]`. Anything else keeps the whole-body
-/// `value_error`.
-fn body_parse_error(message: &str) -> (&'static str, String, Vec<&'static str>) {
-    if let Some(rest) = message.strip_prefix("json_invalid\n") {
+/// JSON as `json_invalid` at `["body", pos]`, the message exactly "JSON decode
+/// error", and JSON that is not an object as `model_attributes_type` at
+/// `["body"]` with the sentence alone. An empty body is one "Field required".
+/// Anything else keeps the whole-body `value_error`.
+fn body_parse_error(message: &str) -> (&'static str, String, Vec<String>) {
+    if let Some(pos) = message.strip_prefix("json_invalid\n") {
         return (
             "json_invalid",
-            format!("JSON decode error: {rest}"),
-            vec!["body", "0"],
+            "JSON decode error".to_string(),
+            vec!["body".to_string(), pos.to_string()],
         );
     }
-    if let Some(rest) = message.strip_prefix("model_attributes_type\n") {
-        return ("model_attributes_type", rest.to_string(), vec!["body"]);
+    if let Some(sentence) = message.strip_prefix("model_attributes_type\n") {
+        return (
+            "model_attributes_type",
+            sentence.to_string(),
+            vec!["body".to_string()],
+        );
     }
-    ("value_error", message.to_string(), vec!["body"])
+    if message == "missing\nbody" {
+        return (
+            "missing",
+            "Field required".to_string(),
+            vec!["body".to_string()],
+        );
+    }
+    ("value_error", message.to_string(), vec!["body".to_string()])
 }
 
 fn bearer(header: Option<&axum::http::HeaderValue>) -> Option<String> {
@@ -1117,10 +1143,11 @@ mod tests {
     }
 
     #[test]
-    fn a_body_that_is_not_json_names_the_decode_error() {
-        // Python reports a body that will not parse as `json_invalid` at
-        // `["body", "0"]`, and JSON that is not an object as
-        // `model_attributes_type` at `["body"]`.
+    fn a_body_that_is_not_an_object_matches_python() {
+        // Python's refusals for a body that never becomes the model. A decode
+        // error names the byte it stopped at and says only "JSON decode error". A
+        // value that is not an object is `model_attributes_type` with the sentence
+        // alone. An empty body and a JSON null are each one "Field required".
         let running = serve(true);
         let (status, body) = post_typed(
             running.addr,
@@ -1130,15 +1157,39 @@ mod tests {
         );
         assert_eq!(status, 422, "{body}");
         assert!(body.contains("\"type\":\"json_invalid\""), "{body}");
-        assert!(body.contains("\"loc\":[\"body\",\"0\"]"), "{body}");
+        assert!(body.contains("\"msg\":\"JSON decode error\""), "{body}");
+        let (status, body) = post_typed(
+            running.addr,
+            "/api/labels",
+            r#"{"name":"#,
+            Some("application/json"),
+        );
+        assert!(body.contains("\"loc\":[\"body\",\"8\"]"), "{body}");
+        let _ = status;
         let (status, body) =
             post_typed(running.addr, "/api/labels", "[1]", Some("application/json"));
-        assert_eq!(status, 422, "{body}");
         assert!(
             body.contains("\"type\":\"model_attributes_type\""),
             "{body}"
         );
-        assert!(body.contains("\"loc\":[\"body\"]"), "{body}");
+        assert!(
+            body.contains(
+                "\"msg\":\"Input should be a valid dictionary or object to extract fields from\""
+            ),
+            "{body}"
+        );
+        let _ = status;
+        for empty in ["", "null"] {
+            let (status, body) =
+                post_typed(running.addr, "/api/labels", empty, Some("application/json"));
+            assert_eq!(status, 422, "{empty}: {body}");
+            assert!(body.contains("\"type\":\"missing\""), "{empty}: {body}");
+            assert!(body.contains("\"loc\":[\"body\"]"), "{empty}: {body}");
+            assert!(
+                body.contains("\"msg\":\"Field required\""),
+                "{empty}: {body}"
+            );
+        }
     }
 
     #[test]
