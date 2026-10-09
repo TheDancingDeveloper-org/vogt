@@ -41,6 +41,24 @@ pub fn new_id(prefix: &str, timestamp_ms: u64, randomness: u128) -> String {
     format!("{prefix}_{}", new_ulid(timestamp_ms, randomness))
 }
 
+/// A fresh id from the process clock and randomness. This is what `init` uses
+/// when `VOGT_TEST_IDS` is unset, so two plain inits never share an instance
+/// id. The hook is the only path to a deterministic one.
+pub fn fresh_id(prefix: &str) -> String {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    let mut bytes = [0u8; 10];
+    let _ = std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| std::io::Read::read_exact(&mut source, &mut bytes));
+    let mut randomness = 0u128;
+    for byte in bytes {
+        randomness = (randomness << 8) | u128::from(byte);
+    }
+    new_id(prefix, millis, randomness)
+}
+
 pub fn slugify(name: &str) -> String {
     let mut out = String::new();
     let mut previous_was_sep = false;

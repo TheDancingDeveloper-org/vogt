@@ -10,7 +10,6 @@ use std::env;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use regex::Regex;
 use serde_json::{Map, Value};
 
 pub const ENV_PREFIX: &str = "VOGT_";
@@ -825,7 +824,7 @@ fn validate(config: &VogtConfig) -> Result<(), String> {
         ));
     }
     for (name, pattern) in &config.agent_activity_services {
-        if Regex::new(pattern).is_err() {
+        if fancy_regex::Regex::new(pattern).is_err() {
             return Err(format!(
                 "agent_activity_services[{name:?}] is not a valid regex"
             ));
@@ -1573,6 +1572,28 @@ mod tests {
         let config = load_config(&Map::new()).unwrap();
         assert_eq!(config.log_level, LogLevel::Debug);
         assert_eq!(config.retention_days, 9);
+    }
+
+    #[test]
+    fn a_lookahead_is_a_valid_service_pattern() {
+        let dir = std::env::temp_dir().join(format!("vogt-cfg-re-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("vogt.toml");
+        std::fs::write(
+            &file,
+            "[agent_activity_services]\nclaude = \"foo(?=bar)\"\n",
+        )
+        .unwrap();
+        let mut guard = clean();
+        guard.set(CONFIG_FILE_ENV, file.to_str().unwrap());
+        let config = load_config(&Map::new()).unwrap();
+        assert_eq!(
+            config
+                .agent_activity_services
+                .get("claude")
+                .map(String::as_str),
+            Some("foo(?=bar)")
+        );
     }
 
     #[test]

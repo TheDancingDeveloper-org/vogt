@@ -171,12 +171,20 @@ fn bootstrap(data_dir: &Path, now: &str) -> Result<String, migrator::MigrateErro
     if let Some(instance_id) = existing {
         return Ok(instance_id);
     }
+    let sequential = std::env::var("VOGT_TEST_IDS").ok().as_deref() == Some("sequential");
     let mut ids = SequentialIds::load(&data_dir.join("test-ids.json"));
     let user = os_user();
-    let instance_id = ids.next("ins");
-    let actor_id = ids.next("act");
-    let audit_id = ids.next("aud");
-    let txn_id = ids.next("txn");
+    let next = |ids: &mut SequentialIds, prefix: &str| -> String {
+        if sequential {
+            ids.next(prefix)
+        } else {
+            crate::core::fresh_id(prefix)
+        }
+    };
+    let instance_id = next(&mut ids, "ins");
+    let actor_id = next(&mut ids, "act");
+    let audit_id = next(&mut ids, "aud");
+    let txn_id = next(&mut ids, "txn");
     let at = clock_stamp(now, 2);
     conn.execute("BEGIN IMMEDIATE", [])?;
     let written = (|| -> rusqlite::Result<()> {
