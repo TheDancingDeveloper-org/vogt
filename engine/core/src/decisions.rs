@@ -621,6 +621,86 @@ fn labels_of(observation: &Observation) -> Vec<String> {
     }
 }
 
+/// Whether anything actually said what kind of work this is. `work_kind_of`
+/// has to return something, and for an unlabelled issue that something is a
+/// guess; recording the guess keeps the subject discoverable.
+pub fn is_classified(observation: &Observation) -> bool {
+    if observation.kind == "marker" || observation.kind == "forge.pull_request" {
+        return true;
+    }
+    !labels_of(observation).is_empty()
+}
+
+/// A one-line description, whatever kind of subject this is.
+pub fn title_of(observation: &Observation) -> String {
+    let payload = &observation.payload;
+    if observation.kind == "marker" {
+        let text = py_str(payload.get("text")).trim().to_string();
+        let path = py_or(payload.get("path"), "?");
+        let line = py_or(payload.get("line"), "?");
+        let tag = py_or(payload.get("tag"), "TODO");
+        let marker = format!("{tag} {path}:{line}");
+        return if text.is_empty() {
+            marker
+        } else {
+            format!("{marker} — {text}")
+        };
+    }
+    let title = py_str(payload.get("title")).trim().to_string();
+    match (title.is_empty(), payload.get("number")) {
+        (false, Some(number)) if !number.is_null() => format!("#{} {title}", py_str(Some(number))),
+        (false, _) => title,
+        (true, _) => observation.subject_key.clone(),
+    }
+}
+
+/// `str()` of a JSON value the way Python renders one out of a dict payload: a
+/// string is its text, a number its digits, `true`/`false`/`null` become
+/// `True`/`False`/`None`, and a missing key is `""`.
+fn py_str(value: Option<&Value>) -> String {
+    match value {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Bool(flag)) => if *flag { "True" } else { "False" }.to_string(),
+        Some(Value::Null) => "None".to_string(),
+        Some(Value::Number(number)) => number.to_string(),
+        Some(other) => other.to_string(),
+        None => String::new(),
+    }
+}
+
+/// `str(payload.get(key, fallback))`: a missing key takes the fallback, a
+/// present `null` renders as Python's `None`.
+fn py_or(value: Option<&Value>, fallback: &str) -> String {
+    match value {
+        None => fallback.to_string(),
+        some => py_str(some),
+    }
+}
+
+/// The work-item subject keys a PR observation says it implements. Empty for
+/// anything that is not a PR, or a PR that named no work — never a guess.
+pub fn implemented_targets(observation: &Observation) -> std::collections::BTreeSet<String> {
+    let mut targets = std::collections::BTreeSet::new();
+    if observation.kind != "forge.pull_request" {
+        return targets;
+    }
+    let Some(edges) = observation
+        .payload
+        .get("implements")
+        .and_then(Value::as_array)
+    else {
+        return targets;
+    };
+    for edge in edges {
+        if let Some(subject) = edge.get("subject").and_then(Value::as_str) {
+            if !subject.is_empty() {
+                targets.insert(subject.to_string());
+            }
+        }
+    }
+    targets
+}
+
 pub const DEFAULT_CONTRACT_VERSION: &str = "v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1164,16 +1244,61 @@ mod tests {
         assert!(!is_worklike(&marker));
         assert!(is_worklike(&Observation {
             promoted: true,
-            ..marker
+            ..marker.clone()
         }));
 
         let merged = Observation {
             kind: "forge.pull_request".into(),
             payload: serde_json::json!({"state": "merged"}),
-            ..base
+            ..base.clone()
         };
         assert_eq!(lifecycle_of(&merged), "closed");
         assert_eq!(upstream_state(&merged, None, "open"), "done");
+
+        assert!(is_classified(&base));
+        assert!(!is_classified(&Observation {
+            payload: serde_json::json!({}),
+            ..base.clone()
+        }));
+        assert!(is_classified(&marker));
+        assert!(is_classified(&merged));
+
+        let titled = Observation {
+            payload: serde_json::json!({"title": " Crash ", "number": 7}),
+            ..base.clone()
+        };
+        assert_eq!(title_of(&titled), "#7 Crash");
+        assert_eq!(
+            title_of(&Observation {
+                payload: serde_json::json!({"number": 7}),
+                ..base.clone()
+            }),
+            "gh:acme/app#1"
+        );
+        let noted = Observation {
+            payload: serde_json::json!({"text": " fix me ", "path": "a.rs", "line": 12, "tag": "FIXME"}),
+            ..marker.clone()
+        };
+        assert_eq!(title_of(&noted), "FIXME a.rs:12 — fix me");
+        assert_eq!(
+            title_of(&Observation {
+                payload: serde_json::json!({"line": null}),
+                ..marker
+            }),
+            "TODO ?:None"
+        );
+
+        let linked = Observation {
+            payload: serde_json::json!({"implements": [
+                {"subject": "wi:1"}, {"subject": ""}, "nope", {"other": 1}, {"subject": "wi:2"}
+            ]}),
+            ..merged
+        };
+        assert_eq!(
+            implemented_targets(&linked),
+            ["wi:1", "wi:2"].into_iter().map(str::to_string).collect()
+        );
+        assert!(implemented_targets(&base).is_empty());
     }
 }
 
