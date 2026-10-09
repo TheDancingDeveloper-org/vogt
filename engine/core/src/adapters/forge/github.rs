@@ -450,16 +450,16 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         number: i64,
         body: &str,
     ) -> Result<WriteBackResult, VogtError> {
-        let payload = serde_json::json!({"body": body});
-        let response = self.transport.send(
-            "POST",
+        self.write(
+            repo,
             &format!(
                 "/repos/{}/{}/issues/{number}/comments",
                 repo.owner, repo.repo
             ),
-            Some(&payload),
-        )?;
-        Ok(succeeded(&response))
+            &serde_json::json!({"body": body}),
+            Some(number),
+            "POST",
+        )
     }
 
     fn create_issue(
@@ -469,16 +469,19 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         body: &str,
         labels: Option<&[String]>,
     ) -> Result<WriteBackResult, VogtError> {
+        // An empty list is "no labels": the key is omitted, matching the client
+        // that only sends the field when there is something to attach.
         let mut payload = serde_json::json!({"title": title, "body": body});
-        if let Some(labels) = labels {
+        if let Some(labels) = labels.filter(|labels| !labels.is_empty()) {
             payload["labels"] = serde_json::json!(labels);
         }
-        let response = self.transport.send(
-            "POST",
+        self.write(
+            repo,
             &format!("/repos/{}/{}/issues", repo.owner, repo.repo),
-            Some(&payload),
-        )?;
-        Ok(succeeded(&response))
+            &payload,
+            None,
+            "POST",
+        )
     }
 
     fn add_labels(
@@ -488,13 +491,13 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         labels: &[String],
     ) -> Result<WriteBackResult, VogtError> {
         // Adds only: POST appends, it never replaces the set.
-        let payload = serde_json::json!({"labels": labels});
-        let response = self.transport.send(
-            "POST",
+        self.write(
+            repo,
             &format!("/repos/{}/{}/issues/{number}/labels", repo.owner, repo.repo),
-            Some(&payload),
-        )?;
-        Ok(succeeded(&response))
+            &serde_json::json!({"labels": labels}),
+            Some(number),
+            "POST",
+        )
     }
 
     fn set_state(
@@ -504,17 +507,17 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         state: &str,
     ) -> Result<WriteBackResult, VogtError> {
         if state != "closed" && state != "open" {
-            return Ok(WriteBackResult::failed(format!(
-                "unsupported state {state:?}"
+            return Err(VogtError::InvalidRequest(format!(
+                "{state:?} is not a state; use 'closed' or 'open'"
             )));
         }
-        let payload = serde_json::json!({"state": state});
-        let response = self.transport.send(
-            "PATCH",
+        self.write(
+            repo,
             &format!("/repos/{}/{}/issues/{number}", repo.owner, repo.repo),
-            Some(&payload),
-        )?;
-        Ok(succeeded(&response))
+            &serde_json::json!({"state": state}),
+            Some(number),
+            "PATCH",
+        )
     }
 
     fn update_issue_body(
@@ -523,13 +526,13 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         number: i64,
         body: &str,
     ) -> Result<WriteBackResult, VogtError> {
-        let payload = serde_json::json!({"body": body});
-        let response = self.transport.send(
-            "PATCH",
+        self.write(
+            repo,
             &format!("/repos/{}/{}/issues/{number}", repo.owner, repo.repo),
-            Some(&payload),
-        )?;
-        Ok(succeeded(&response))
+            &serde_json::json!({"body": body}),
+            Some(number),
+            "PATCH",
+        )
     }
 
     fn create_repo(
@@ -541,10 +544,12 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         // Under the acting actor's token the repository lands in their account.
         // A name that already exists is a 422, and that is a typed refusal, never
         // an adoption of the existing repository.
-        let mut payload = serde_json::json!({"name": name, "private": private});
-        if let Some(description) = description {
-            payload["description"] = serde_json::Value::String(description.to_owned());
-        }
+        let payload = serde_json::json!({
+            "name": name,
+            "private": private,
+            "description": description.unwrap_or(""),
+            "auto_init": false,
+        });
         let response = match self.transport.send("POST", "/user/repos", Some(&payload)) {
             Err(error) if error.message().contains("422") => {
                 return Err(VogtError::RemoteRepoExists(format!(
@@ -590,6 +595,43 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
 }
 
 impl<T: ForgeTransport> GitHubProvider<T> {
+    /// One append upstream. A transport failure or a 404 is a `failed` result,
+    /// never fatal to the declared write: the local change stands and the
+    /// ledger records that the upstream half did not land. A success carries
+    /// the subject key (`gh:{owner}/{repo}#{number}`) and the method and
+    /// endpoint that produced it, which is what a projection reads back.
+    fn write(
+        &self,
+        repo: &RepoRef,
+        endpoint: &str,
+        payload: &serde_json::Value,
+        number: Option<i64>,
+        method: &str,
+    ) -> Result<WriteBackResult, VogtError> {
+        let response = match self.transport.send(method, endpoint, Some(payload)) {
+            Err(error) => return Ok(WriteBackResult::failed(error.message().to_owned())),
+            Ok(serde_json::Value::Null) => {
+                return Ok(WriteBackResult::failed(format!(
+                    "{endpoint} returned nothing (404?)"
+                )));
+            }
+            Ok(response) => response,
+        };
+        let upstream_number = response
+            .get("number")
+            .and_then(serde_json::Value::as_i64)
+            .or(number);
+        Ok(WriteBackResult {
+            outcome: WriteBackOutcome::Succeeded,
+            source_url: response
+                .get("html_url")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            subject_key: upstream_number.map(|number| self.subject_key(repo, number)),
+            detail: Some(serde_json::json!({"method": method, "endpoint": endpoint}).to_string()),
+        })
+    }
+
     fn version_update_config(&self, repo: &RepoRef) -> Result<Option<String>, VogtError> {
         for path in VERSION_UPDATE_CONFIGS {
             match self.transport.get(
@@ -623,18 +665,6 @@ impl ForgeResponse {
             Self::Json(serde_json::Value::String(text)) => Some(text),
             _ => None,
         }
-    }
-}
-
-fn succeeded(response: &serde_json::Value) -> WriteBackResult {
-    WriteBackResult {
-        outcome: WriteBackOutcome::Succeeded,
-        detail: None,
-        source_url: response
-            .get("html_url")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
-        subject_key: None,
     }
 }
 
@@ -811,41 +841,41 @@ fn runs(repo: &RepoRef, response: &ForgeResponse) -> Vec<ForgeCheck> {
 
 /// `(owner, repo)` from a repository URL, or `None` when it is not GitHub.
 ///
-/// The host is checked structurally, so `github.com.evil.example` and
-/// `github.com@evil.example` are rejected, and a query or fragment disqualifies
-/// the URL outright.
+/// The host is `urlsplit().hostname`: lowercased, with userinfo and port
+/// stripped, so `https://GitHub.com/…`, `:443` and `user@github.com` all
+/// resolve. A query or fragment is tolerated; only the path decides the repo.
 fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
     let candidate = repo_url?
         .trim()
         .strip_prefix("git+")
         .unwrap_or(repo_url?.trim());
-    let candidate = candidate.replace("git@github.com:", "github.com/");
-    let candidate = ["https://", "http://", "ssh://"]
-        .iter()
-        .find_map(|prefix| candidate.strip_prefix(prefix))
-        .unwrap_or(&candidate);
-    let candidate = format!("https://{candidate}");
-    let url = url_host_and_path(&candidate)?;
-    let (owner, repo) = url?;
-    Some((owner, repo))
-}
-
-fn url_host_and_path(candidate: &str) -> Option<Option<(String, String)>> {
-    let without_scheme = candidate.strip_prefix("https://")?;
-    if without_scheme.contains(['?', '#']) {
-        return Some(None);
-    }
-    let (host, path) = without_scheme.split_once('/')?;
-    // A userinfo form (`github.com@evil.example`) and a look-alike host both
-    // fail the exact comparison.
-    if host != HOST {
-        return Some(None);
+    let (host, path) = split_host(candidate)?;
+    if !host.eq_ignore_ascii_case(HOST) {
+        return None;
     }
     let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
     let mut parts = path.split('/');
     let owner = parts.next().filter(|part| valid_name(part))?;
     let repo = parts.next().filter(|part| valid_name(part))?;
-    Some(Some((owner.to_owned(), repo.to_owned())))
+    Some((owner.to_owned(), repo.to_owned()))
+}
+
+/// Host and path, with the scheme, userinfo and port removed.
+fn split_host(candidate: &str) -> Option<(String, &str)> {
+    let scp = candidate.strip_prefix("git@");
+    let (raw_host, path) = if let Some(rest) = scp {
+        rest.split_once([':', '/'])?
+    } else if let Some(scheme_end) = candidate.find("://") {
+        candidate[scheme_end + 3..].split_once('/')?
+    } else {
+        candidate.split_once('/')?
+    };
+    let host = raw_host.rsplit('@').next().unwrap_or(raw_host);
+    let host = host.split_once(':').map_or(host, |(name, _)| name);
+    Some((
+        host.to_ascii_lowercase(),
+        path.split(['?', '#']).next().unwrap_or(path),
+    ))
 }
 
 fn valid_name(name: &str) -> bool {
@@ -908,7 +938,7 @@ mod tests {
             &self,
             _method: &str,
             path: &str,
-            body: Option<&serde_json::Value>,
+            _body: Option<&serde_json::Value>,
         ) -> Result<serde_json::Value, VogtError> {
             self.seen.borrow_mut().push(path.to_owned());
             if let Some(message) = &self.fail_with {
@@ -919,7 +949,7 @@ mod tests {
                 .iter()
                 .find(|(candidate, _)| candidate == path)
                 .map(|(_, value)| value.clone())
-                .unwrap_or_else(|| body.cloned().unwrap_or(serde_json::Value::Null)))
+                .unwrap_or(serde_json::Value::Null))
         }
     }
 
@@ -958,6 +988,10 @@ mod tests {
         let provider = provider();
         for url in [
             "https://github.com/acme/widget",
+            "https://GitHub.com/acme/widget",
+            "https://github.com:443/acme/widget",
+            "https://ada@github.com/acme/widget",
+            "https://github.com/acme/widget?inject=1",
             "git@github.com:acme/widget.git",
             "https://github.com/acme/widget.git",
             "git+https://github.com/acme/widget",
@@ -972,7 +1006,6 @@ mod tests {
             "https://github.com.evil.example/acme/widget",
             "https://github.com@evil.example/acme/widget",
             "https://gitlab.com/acme/widget",
-            "https://github.com/acme/widget?inject=1",
             "https://github.com/acme",
         ] {
             assert!(provider.parse(Some(url)).is_none(), "{url}");
@@ -1004,6 +1037,47 @@ mod tests {
             .is_none());
         let seen = provider.transport.seen.borrow().clone();
         assert_eq!(seen, vec!["/repos/acme/widget/issues/7".to_owned()]);
+    }
+
+    #[test]
+    fn a_write_reports_the_subject_key_and_the_endpoint() {
+        let mut fixture = Fixture::new(vec![]);
+        fixture.writes.push((
+            "/repos/acme/widget/issues".to_owned(),
+            serde_json::json!({"number": 4, "html_url": "https://github.com/acme/widget/issues/4"}),
+        ));
+        let result = GitHubProvider::new(fixture)
+            .create_issue(&repo(), "Title", "Body", Some(&[]))
+            .unwrap();
+        assert_eq!(result.outcome, WriteBackOutcome::Succeeded);
+        assert_eq!(result.subject_key.as_deref(), Some("gh:acme/widget#4"));
+        let detail = result.detail.unwrap();
+        assert!(detail.contains("\"method\":\"POST\""), "{detail}");
+        assert!(detail.contains("/repos/acme/widget/issues"), "{detail}");
+    }
+
+    #[test]
+    fn a_write_failure_is_a_failed_result_not_an_error() {
+        let mut fixture = Fixture::new(vec![]);
+        fixture.fail_with = Some("GitHub answered 500".to_owned());
+        let result = GitHubProvider::new(fixture)
+            .comment(&repo(), 4, "hello")
+            .unwrap();
+        assert_eq!(result.outcome, WriteBackOutcome::Failed);
+        assert!(result.detail.unwrap().contains("500"));
+    }
+
+    #[test]
+    fn a_404_on_a_write_is_a_failed_result() {
+        let result = provider().comment(&repo(), 4, "hello").unwrap();
+        assert_eq!(result.outcome, WriteBackOutcome::Failed);
+        assert!(result.detail.unwrap().contains("404?"));
+    }
+
+    #[test]
+    fn set_state_refuses_an_unknown_state() {
+        let error = provider().set_state(&repo(), 4, "merged").unwrap_err();
+        assert!(matches!(error, VogtError::InvalidRequest(_)), "{error:?}");
     }
 
     #[test]

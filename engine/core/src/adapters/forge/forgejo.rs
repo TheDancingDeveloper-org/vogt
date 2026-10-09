@@ -763,7 +763,7 @@ pub fn parse_repo_url(repo_url: Option<&str>, hosts: &[&str]) -> Option<RepoRef>
     let (host, path) = split_host(candidate)?;
     let canonical = hosts
         .iter()
-        .find(|configured| configured.eq_ignore_ascii_case(host))?;
+        .find(|configured| configured.eq_ignore_ascii_case(&host))?;
     let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
     let mut parts = path.split('/');
     let owner = parts.next().filter(|part| valid_name(part))?;
@@ -775,19 +775,23 @@ pub fn parse_repo_url(repo_url: Option<&str>, hosts: &[&str]) -> Option<RepoRef>
     })
 }
 
-fn split_host(candidate: &str) -> Option<(&str, &str)> {
-    if let Some(rest) = candidate.strip_prefix("git@") {
-        let (host, path) = rest.split_once([':', '/'])?;
-        return Some((host, path));
-    }
-    if let Some(scheme_end) = candidate.find("://") {
-        let rest = &candidate[scheme_end + 3..];
-        if rest.contains(['?', '#']) {
-            return None;
-        }
-        return rest.split_once('/');
-    }
-    candidate.split_once('/')
+/// Host and path, with the scheme, userinfo and port removed. `ssh://git@host`,
+/// `ssh://git@host:2222` and `https://host:3000` all parse; a query is kept out
+/// of the path but does not disqualify the URL.
+fn split_host(candidate: &str) -> Option<(String, &str)> {
+    let (raw_host, path) = if let Some(rest) = candidate.strip_prefix("git@") {
+        rest.split_once([':', '/'])?
+    } else if let Some(scheme_end) = candidate.find("://") {
+        candidate[scheme_end + 3..].split_once('/')?
+    } else {
+        candidate.split_once('/')?
+    };
+    let host = raw_host.rsplit('@').next().unwrap_or(raw_host);
+    let host = host.split_once(':').map_or(host, |(name, _)| name);
+    Some((
+        host.to_ascii_lowercase(),
+        path.split(['?', '#']).next().unwrap_or(path),
+    ))
 }
 
 fn valid_name(name: &str) -> bool {
@@ -915,10 +919,19 @@ mod tests {
             provider.subject_key(&repo(), 4),
             "forge:forge.example/acme/widget#4"
         );
-        let parsed = provider
-            .parse(Some("git@forge.example:acme/widget.git"))
-            .unwrap();
-        assert_eq!(parsed.host, "forge.example");
+        for url in [
+            "git@forge.example:acme/widget.git",
+            "ssh://git@forge.example/acme/widget.git",
+            "ssh://git@forge.example:2222/acme/widget.git",
+            "https://forge.example:3000/acme/widget",
+        ] {
+            let parsed = provider.parse(Some(url)).unwrap();
+            assert_eq!(parsed.host, "forge.example", "{url}");
+            assert_eq!(
+                (parsed.owner.as_str(), parsed.repo.as_str()),
+                ("acme", "widget")
+            );
+        }
         assert!(provider
             .parse(Some("https://github.com/acme/widget"))
             .is_none());
