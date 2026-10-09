@@ -2,6 +2,7 @@
 //!
 //! Only `http` has behaviour in this chunk: the health routes.
 
+pub mod cli;
 pub mod engine;
 pub mod forge;
 pub mod git;
