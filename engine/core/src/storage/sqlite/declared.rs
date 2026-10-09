@@ -258,14 +258,63 @@ where
         let _ = conn.execute("ROLLBACK", []);
         outcome
     }
-    fn record_auth_decision(&self, _: &AuthDecision) -> Result<(), VogtError> {
-        later("record_auth_decision")
+    fn record_auth_decision(&self, decision: &AuthDecision) -> Result<(), VogtError> {
+        // Not a declared write: nothing changed and nobody supplied a reason,
+        // and it happens on reads too. An audit row would make "every audit
+        // row is a change" false.
+        let conn = self.open_initialized()?;
+        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
+        let outcome = conn.execute(
+            "INSERT INTO auth_decisions (id, at, decision, reason_code, operation, scope, actor_id, token_id, identity_ref, transport, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            params![
+                decision.id, to_iso(decision.at), vocab_text(decision.decision), decision.reason_code,
+                decision.operation, decision.scope, decision.actor_id, decision.token_id,
+                decision.identity_ref, decision.transport, decision.detail,
+            ],
+        );
+        finish_immediate(&conn, outcome)
     }
-    fn touch_token(&self, _: &str, _: Moment, _: Option<Moment>) -> Result<(), VogtError> {
-        later("touch_token")
+    fn touch_token(
+        &self,
+        token_id: &str,
+        at: Moment,
+        expires_at: Option<Moment>,
+    ) -> Result<(), VogtError> {
+        let conn = self.open_initialized()?;
+        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
+        let outcome = match expires_at {
+            None => conn.execute(
+                "UPDATE tokens SET last_used_at = ? WHERE id = ?",
+                params![to_iso(at), token_id],
+            ),
+            Some(expires) => conn.execute(
+                "UPDATE tokens SET last_used_at = ?, expires_at = CASE WHEN revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at > ? AND expires_at < ? THEN ? ELSE expires_at END WHERE id = ?",
+                params![to_iso(at), to_iso(at), to_iso(expires), to_iso(expires), token_id],
+            ),
+        };
+        finish_immediate(&conn, outcome)
     }
-    fn prune_auth_decisions(&self, _: Moment, _: Moment) -> Result<i64, VogtError> {
-        later("prune_auth_decisions")
+    fn prune_auth_decisions(
+        &self,
+        allow_before: Moment,
+        deny_before: Moment,
+    ) -> Result<i64, VogtError> {
+        let conn = self.open_initialized()?;
+        conn.execute("BEGIN IMMEDIATE", []).map_err(sql_err)?;
+        let outcome = conn.execute(
+            "DELETE FROM auth_decisions WHERE (decision = 'allow' AND at < ?) OR (decision = 'deny' AND at < ?)",
+            params![to_iso(allow_before), to_iso(deny_before)],
+        );
+        match outcome {
+            Ok(removed) => {
+                conn.execute("COMMIT", []).map_err(sql_err)?;
+                Ok(removed as i64)
+            }
+            Err(err) => {
+                let _ = conn.execute("ROLLBACK", []);
+                Err(sql_err(err))
+            }
+        }
     }
     fn publish_event(
         &self,
@@ -768,8 +817,25 @@ impl ReadView for SqliteReadView {
             row_token,
         )
     }
-    fn list_auth_decisions(&self, _: Option<&str>, _: i64) -> Result<Vec<AuthDecision>, VogtError> {
-        later("list_auth_decisions")
+    fn list_auth_decisions(
+        &self,
+        decision: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AuthDecision>, VogtError> {
+        match decision {
+            Some(decision) => many(
+                &self.conn,
+                "SELECT * FROM auth_decisions WHERE decision = ? ORDER BY at DESC, id DESC LIMIT ?",
+                params![decision, limit],
+                row_auth_decision,
+            ),
+            None => many(
+                &self.conn,
+                "SELECT * FROM auth_decisions ORDER BY at DESC, id DESC LIMIT ?",
+                params![limit],
+                row_auth_decision,
+            ),
+        }
     }
     fn password_credential_by_username(
         &self,
@@ -1443,11 +1509,7 @@ impl<I: IdFactory> WriteTxn for SqliteWrite<'_, I> {
         let scopes = serde_json::to_string(&token.scopes).map_err(|err| {
             VogtError::InvalidRequest(format!("token scopes are not JSON: {err}"))
         })?;
-        let kind = serde_json::to_value(token.kind)
-            .expect("a token kind is a string")
-            .as_str()
-            .expect("snake_case")
-            .to_string();
+        let kind = vocab_text(token.kind);
         self.view.conn.execute(
             "INSERT INTO tokens (id, actor_id, name, token_hash, scopes, kind, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             params![token.id, token.actor_id, token.name, token_hash, scopes, kind, to_iso(token.created_at), token.expires_at.map(to_iso)],
@@ -2755,6 +2817,127 @@ mod more {
         let _ = std::fs::remove_dir_all(&source_dir);
         let _ = std::fs::remove_dir_all(&copy_dir);
     }
+
+    #[test]
+    fn auth_decisions_prune_by_outcome_and_a_touch_never_revives_a_token() {
+        let dir = std::env::temp_dir().join(format!("vogt-decl-auth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = store(&dir);
+        let early = Moment::from_unix(1_700_000_000, 0);
+        let later_at = Moment::from_unix(1_700_086_400, 0);
+        let actor = store.read().unwrap().list_actors(1, 0).unwrap().remove(0);
+        let decision = |id: &str, outcome: crate::core::AuthOutcome, at: Moment| AuthDecision {
+            id: id.into(),
+            at,
+            decision: outcome,
+            reason_code: "ok".into(),
+            operation: "work.list".into(),
+            scope: None,
+            actor_id: Some(actor.id.clone()),
+            token_id: None,
+            identity_ref: None,
+            transport: "http".into(),
+            detail: None,
+        };
+        store
+            .record_auth_decision(&decision("dec_1", crate::core::AuthOutcome::Allow, early))
+            .unwrap();
+        store
+            .record_auth_decision(&decision("dec_2", crate::core::AuthOutcome::Deny, early))
+            .unwrap();
+        store
+            .record_auth_decision(&decision(
+                "dec_3",
+                crate::core::AuthOutcome::Allow,
+                later_at,
+            ))
+            .unwrap();
+        let view = store.read().unwrap();
+        assert_eq!(view.list_auth_decisions(None, 100).unwrap().len(), 3);
+        assert_eq!(
+            view.list_auth_decisions(Some("deny"), 100).unwrap().len(),
+            1
+        );
+        drop(view);
+
+        // The horizon sits between the two stamps, so the early allow goes and
+        // the early deny stays.
+        let removed = store
+            .prune_auth_decisions(later_at, Moment::from_unix(1_600_000_000, 0))
+            .unwrap();
+        assert_eq!(removed, 1);
+        let view = store.read().unwrap();
+        let remaining = view.list_auth_decisions(None, 100).unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert!(remaining.iter().all(|row| row.id != "dec_1"));
+        drop(view);
+
+        let mut txn = store.write().unwrap();
+        txn.insert_token(
+            &Token {
+                id: "tok_1".into(),
+                actor_id: actor.id,
+                actor_identity_ref: None,
+                name: "session".into(),
+                scopes: vec!["read".into()],
+                kind: crate::core::TokenKind::Session,
+                created_at: early,
+                expires_at: Some(later_at),
+                last_used_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            },
+            "hash-1",
+        )
+        .unwrap();
+        assert!(txn.revoke_token("tok_1", "lost", early).unwrap());
+        txn.commit().unwrap();
+        // A renewal racing the revocation must not resurrect the token.
+        let renewed = Moment::from_unix(1_800_000_000, 0);
+        store.touch_token("tok_1", later_at, Some(renewed)).unwrap();
+        let token = store.read().unwrap().token_by_id("tok_1").unwrap().unwrap();
+        assert_eq!(token.expires_at, Some(later_at));
+        assert_eq!(token.last_used_at, Some(later_at));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+fn vocab_text<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .expect("a vocab value is a string")
+        .as_str()
+        .expect("snake_case")
+        .to_string()
+}
+
+/// Commit an immediate transaction, or roll it back and surface the error.
+fn finish_immediate(conn: &Connection, outcome: rusqlite::Result<usize>) -> Result<(), VogtError> {
+    match outcome {
+        Ok(_) => conn.execute("COMMIT", []).map(|_| ()).map_err(sql_err),
+        Err(err) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(sql_err(err))
+        }
+    }
+}
+
+fn row_auth_decision(row: &Row<'_>) -> rusqlite::Result<AuthDecision> {
+    let decision: String = row.get("decision")?;
+    Ok(AuthDecision {
+        id: row.get("id")?,
+        at: moment(row, "at")?,
+        decision: serde_json::from_value(serde_json::Value::String(decision)).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(err))
+        })?,
+        reason_code: row.get("reason_code")?,
+        operation: row.get("operation")?,
+        scope: row.get("scope")?,
+        actor_id: row.get("actor_id")?,
+        token_id: row.get("token_id")?,
+        identity_ref: row.get("identity_ref")?,
+        transport: row.get("transport")?,
+        detail: row.get("detail")?,
+    })
 }
 
 const TOKEN_CARRY_COLUMNS: &[&str] = &[
