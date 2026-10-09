@@ -665,6 +665,19 @@ fn py_str(value: Option<&Value>) -> String {
     }
 }
 
+/// Python's truthiness of a JSON value: `null`, `false`, `0`, `0.0`, `""`, `[]`
+/// and `{}` are falsy, and everything else is truthy.
+fn py_truthy(value: &Value) -> bool {
+    match value {
+        Value::Null | Value::Bool(false) => false,
+        Value::String(text) => !text.is_empty(),
+        Value::Number(number) => number.as_f64().is_none_or(|magnitude| magnitude != 0.0),
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(fields) => !fields.is_empty(),
+        Value::Bool(true) => true,
+    }
+}
+
 /// `str(payload.get(key, fallback))`: a missing key takes the fallback, a
 /// present `null` renders as Python's `None`.
 fn py_or(value: Option<&Value>, fallback: &str) -> String {
@@ -746,11 +759,11 @@ pub fn implemented_targets(observation: &Observation) -> std::collections::BTree
         return targets;
     };
     for edge in edges {
-        // Python's `str(edge["subject"])` for any truthy value, so a numeric
-        // `12` names the subject `"12"` and a boolean renders as `True`.
-        let subject = py_str(edge.get("subject"));
-        if !subject.is_empty() && subject != "None" && subject != "False" {
-            targets.insert(subject);
+        // Python's `str(edge["subject"])` for any truthy value. Truthiness is the
+        // value's, not the rendered text's: `0` is falsy, while a subject whose
+        // text is literally `"None"` is real and must be kept.
+        if let Some(value) = edge.get("subject").filter(|value| py_truthy(value)) {
+            targets.insert(py_str(Some(value)));
         }
     }
     targets
@@ -4660,6 +4673,21 @@ mod drift_tests {
         assert!(targets.contains("True"));
         assert!(!targets.contains("False"));
         assert!(!targets.contains("None"));
+
+        // Falsy subjects are skipped, including a zero and an empty collection,
+        // but a subject whose text is literally "None" is real.
+        let edges = observed(
+            "forge.pull_request",
+            serde_json::json!({"implements": [
+                {"subject": 0}, {"subject": 0.0}, {"subject": ""},
+                {"subject": []}, {"subject": {}}, {"subject": "None"}, {"subject": "False"}
+            ]}),
+        );
+        let kept = implemented_targets(&edges);
+        assert_eq!(
+            kept.into_iter().collect::<Vec<_>>(),
+            vec!["False".to_string(), "None".to_string()]
+        );
     }
 
     #[test]
