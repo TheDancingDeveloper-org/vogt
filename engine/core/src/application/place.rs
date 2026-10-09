@@ -4,8 +4,9 @@
 //! `place.metrics` answers every shell badge in one bounded response. A badge
 //! whose source is not ported yet is `null`, the same shape Python returns
 //! when a provider raises: one unavailable answer never hides the others or
-//! fails the route. The saved Inbox filter, the work, backlog and drift
-//! counts, and the inbox badge itself are those sources (S3–S5).
+//! fails the route. The saved Inbox filter, the backlog count and the inbox
+//! badge itself are those sources. `work.list` and `drift.list` are ported, so
+//! their badges are real answers.
 
 use serde_json::{json, Value};
 
@@ -29,9 +30,21 @@ fn metrics<C: crate::core::Clock, I: crate::core::IdFactory>(
     let projects_total = ctx.declared.read()?.counts()?.projects;
     let revision = ctx.declared.read()?.current_revision()?;
     let generated_at = crate::application::services::now_of(&ctx.clock);
-    // `list_drift` is ported, so this badge is a real answer. The inbox, work
-    // and backlog badges read services that are not, and a null there means
-    // "not available", which is distinct from a counted zero.
+    // `work.list` and `list_drift` are ported, so both badges are real answers.
+    // The inbox and backlog badges read services that are not, and a null there
+    // means "not available", which is distinct from a counted zero.
+    // The badge counts every open item, the same total `work.list` reports with
+    // no project scope and the default filter. The upstream join adds nothing
+    // when no project is linked, which is the only state the declared store can
+    // answer on its own.
+    let work_total =
+        ctx.declared
+            .read()?
+            .count_work_items(&crate::storage::interface::WorkFilter {
+                exclude_terminal: true,
+                limit: 1,
+                ..crate::storage::interface::WorkFilter::default()
+            })?;
     let drift_present = !ctx
         .declared
         .read()?
@@ -42,7 +55,7 @@ fn metrics<C: crate::core::Clock, I: crate::core::IdFactory>(
         "inbox_active_unfiltered": Value::Null,
         "inbox_filter": Value::Null,
         "projects_total": projects_total,
-        "work_total": Value::Null,
+        "work_total": work_total,
         "backlog_total_considered": Value::Null,
         "drift_present": drift_present,
         "revision": revision,
@@ -92,7 +105,8 @@ mod tests {
         let result = place_metrics_op(&built, Value::Null).unwrap();
         assert_eq!(result["projects_total"], 0);
         assert!(result["inbox_active"].is_null());
-        assert!(result["work_total"].is_null());
+        // No work items exist, so the ported work badge answers zero.
+        assert_eq!(result["work_total"], 0);
         // No proposals exist, so the ported drift badge answers false rather
         // than null.
         assert_eq!(result["drift_present"], false);

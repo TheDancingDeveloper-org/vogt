@@ -169,6 +169,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "actor.create" => Some(crate::application::taxonomy::create_actor_op),
         "actor.list" => Some(crate::application::taxonomy::list_actors_op),
         "workflow.list" => Some(crate::application::taxonomy::list_workflows_op),
+        "place.metrics" => Some(crate::application::place::place_metrics_op),
         "deployed.versions" => Some(crate::application::deployed::deployed_versions_op),
         other => crate::application::services::service_for(other),
     }

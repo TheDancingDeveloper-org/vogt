@@ -176,6 +176,13 @@
    }
   },
   {
+   "operation": "place.metrics",
+   "params": {},
+   "expect": {
+    "exit": 0
+   }
+  },
+  {
    "operation": "initiative.create",
    "params": {
     "title": "Platform",
