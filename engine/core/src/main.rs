@@ -32,7 +32,7 @@ mod storage;
 /// fallback equal to `pyproject.toml`. Health and MCP both report this.
 pub const VERSION: &str = match option_env!("VOGT_VERSION") {
     Some(value) if !value.is_empty() => value,
-    _ => "0.7.8",
+    _ => "0.7.9",
 };
 
 use std::net::SocketAddr;
