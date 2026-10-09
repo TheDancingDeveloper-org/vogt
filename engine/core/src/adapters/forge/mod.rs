@@ -11,6 +11,7 @@
 //! construction — there is no delete, force, or replace.
 
 mod accounts;
+mod actors;
 mod collectors;
 mod edges;
 mod forgejo;
