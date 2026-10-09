@@ -656,8 +656,9 @@ macro_rules! vocab {
         }
 
         impl Default for $name {
-            /// The first variant. Only the vocabularies whose pydantic default
-            /// is that variant rely on it (`Origin`, `TrustState`).
+            /// The first variant. The vocabularies whose pydantic default is
+            /// something else name their own function instead of relying on
+            /// this (`TrustState` defaults to `unverified`, `Priority` to `p2`).
             fn default() -> Self {
                 Self::first()
             }
@@ -812,6 +813,10 @@ fn priority_default() -> Priority {
 }
 vocab!(Priority { P0, P1, P2, P3, P4 });
 vocab!(Effort { Xs, S, M, L, Xl });
+fn trust_state_default() -> TrustState {
+    TrustState::Unverified
+}
+
 vocab!(Origin {
     Created,
     Adopted,
@@ -1243,7 +1248,7 @@ pub struct Project {
     pub link_state: LinkState,
     #[serde(default)]
     pub exclusions: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "trust_state_default")]
     pub trust_state: TrustState,
     pub created_at: Moment,
     pub updated_at: Moment,
@@ -1292,7 +1297,7 @@ pub struct WorkItem {
     pub initiative_id: Option<String>,
     #[serde(default)]
     pub origin: Origin,
-    #[serde(default)]
+    #[serde(default = "trust_state_default")]
     pub trust_state: TrustState,
     pub assignee_actor_id: Option<String>,
     pub assignee_identity_ref: Option<String>,
@@ -1689,6 +1694,18 @@ pub struct Sweep {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn a_missing_trust_state_reads_as_unverified() {
+        // Python's default is unverified. The first variant is verified, so a
+        // blanket Default would mark an imported item as checked.
+        let item: WorkItem = serde_json::from_str(
+            r#"{"id":"wrk_1","ref":"WI-1","kind":"bug","title":"t","state":"open","labels":[],"relations":[],"created_at":"2026-01-01T00:00:00+00:00","updated_at":"2026-01-01T00:00:00+00:00"}"#,
+        )
+        .unwrap();
+        assert_eq!(item.trust_state, TrustState::Unverified);
+        assert_eq!(item.origin, Origin::Created);
+    }
 
     #[test]
     fn a_non_ascii_state_survives_its_own_definition() {
