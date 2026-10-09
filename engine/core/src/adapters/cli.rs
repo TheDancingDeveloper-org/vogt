@@ -293,6 +293,19 @@ fn parse(argv: &[String], registry: &OperationRegistry, version: &str) -> ParseO
             stdout: String::new(),
             stderr: format!("{}\n", message.trim_start_matches("domain: ")),
         }),
+        Err(message) if message.starts_with("usage: ") => {
+            let missing = message.trim_start_matches("usage: ");
+            let path = operation.cli.path.join(" ");
+            let page = format_operation(operation);
+            let synopsis = page.split("\n\n").next().unwrap_or(&page);
+            ParseOutcome::Result(CliResult {
+                exit_code: EXIT_USAGE,
+                stdout: String::new(),
+                stderr: format!(
+                    "{synopsis}\nvogt {path}: error: the following arguments are required: {missing}\n"
+                ),
+            })
+        }
         Err(message) => ParseOutcome::Result(usage(format!(
             "error: {message}\n{}",
             format_operation(operation)
@@ -415,10 +428,23 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
     while index < argv.len() {
         let token = &argv[index];
         if token == "--" {
-            return Err("unexpected argument".to_string());
+            // Everything after the separator is an operand, so it is all
+            // unrecognized, separator included.
+            let rest = argv[index..].join(" ");
+            return Err(format!("root: unrecognized arguments: {rest}"));
         }
         if !token.starts_with("--") {
-            return Err(format!("root: unrecognized arguments: {token}"));
+            // A bare word is an unrecognized argument only when the command could
+            // still be valid without it: every required flag is present, or a
+            // later known flag supplies one that is missing. Otherwise argparse
+            // reports the missing argument and says nothing about the word. The
+            // report runs up to the next known flag.
+            if extras_are_unrecognized(&argv[index..], &properties, &required, &values) {
+                let rest = unrecognized_run(&argv[index..], &properties).join(" ");
+                return Err(format!("root: unrecognized arguments: {rest}"));
+            }
+            index += 1;
+            continue;
         }
         let (name, inline) = match token.split_once('=') {
             Some((flag, value)) => (flag.trim_start_matches("--"), Some(value.to_string())),
@@ -485,9 +511,9 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
         };
         let Some(property) = properties.get(&property_name) else {
             // An unknown flag on a finished command is a root usage error.
-            // argparse collects every leftover token, flag and value, and
-            // reports them together.
-            let rest = argv[index..].join(" ");
+            // argparse reports the unknown flag, its value, and any bare words
+            // after it, and stops at the next flag it does recognise.
+            let rest = unrecognized_run(&argv[index..], &properties).join(" ");
             return Err(format!("root: unrecognized arguments: {rest}"));
         };
         if is_bool(property) {
@@ -534,11 +560,82 @@ fn collect_params(argv: &[String], schema: &Value) -> Result<Value, String> {
             }
             continue;
         }
-        if !values.contains_key(name) {
-            return Err(format!("--{} is required", name.replace('_', "-")));
+        let missing: Vec<String> = required
+            .iter()
+            .filter(|name| !is_secret(name) && !values.contains_key(*name))
+            .map(|name| format!("--{}", name.replace('_', "-")))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!("usage: {}", missing.join(", ")));
         }
     }
     Ok(Value::Object(values))
+}
+
+/// Whether the bare words at the front of `tail` are unrecognized arguments.
+/// They are when every required flag is already present, or when a known flag
+/// later in the tail supplies one that is still missing: argparse only reports
+/// the words once the command would otherwise be complete.
+fn known_flag(token: &str, properties: &Map<String, Value>) -> bool {
+    let name = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
+    let field = name.trim_start_matches("--").replace('-', "_");
+    let known = properties.contains_key(&field)
+        || field
+            .strip_prefix("no_")
+            .is_some_and(|base| properties.contains_key(base))
+        || secret_name(&field).is_some_and(|secret| properties.contains_key(secret));
+    known
+}
+
+/// The unrecognized run: every token up to the first known flag that follows an
+/// unknown one. A bare word before that flag stays in the run, so
+/// `extra1 --zz 3 --reason r` reports `extra1 --zz 3`.
+fn unrecognized_run<'a>(tail: &'a [String], properties: &Map<String, Value>) -> &'a [String] {
+    let mut seen_unknown = false;
+    for (offset, token) in tail.iter().enumerate() {
+        let known = token.starts_with("--") && token != "--" && known_flag(token, properties);
+        if known && seen_unknown {
+            return &tail[..offset];
+        }
+        if !known {
+            seen_unknown = true;
+        }
+    }
+    tail
+}
+
+fn extras_are_unrecognized(
+    tail: &[String],
+    properties: &Map<String, Value>,
+    required: &[String],
+    values: &Map<String, Value>,
+) -> bool {
+    let mut satisfied: Vec<String> = values.keys().cloned().collect();
+    let mut index = 0usize;
+    while index < tail.len() {
+        let token = &tail[index];
+        if token == "--" || !token.starts_with("--") {
+            index += 1;
+            continue;
+        }
+        let name = token.split_once('=').map(|(flag, _)| flag).unwrap_or(token);
+        let field = name.trim_start_matches("--").replace('-', "_");
+        let known = properties.contains_key(&field)
+            || field
+                .strip_prefix("no_")
+                .is_some_and(|base| properties.contains_key(base));
+        if !known {
+            index += 1;
+            continue;
+        }
+        if required.iter().any(|item| item == &field) {
+            satisfied.push(field);
+        }
+        index += 1;
+    }
+    required
+        .iter()
+        .all(|name| satisfied.iter().any(|have| have == name))
 }
 
 fn take_value(
@@ -1408,11 +1505,13 @@ mod tests {
             "STDERR={:?} STDOUT={}",
             result.stderr, result.stdout
         );
+        assert!(result.stdout.is_empty(), "{}", result.stdout);
         assert!(
-            result.stdout.contains("required"),
-            "STDERR={:?} STDOUT={}",
-            result.stderr,
-            result.stdout
+            result
+                .stderr
+                .contains("the following arguments are required: --ref"),
+            "{}",
+            result.stderr
         );
     }
 
@@ -1672,6 +1771,53 @@ mod tests {
             result.stderr
         );
         assert!(!result.stderr.contains("unrecognised"), "{}", result.stderr);
+    }
+
+    #[test]
+    fn an_unknown_flag_stops_the_report_before_a_later_known_flag() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&[
+                "work", "update", "--ref", "WI-1", "--labels", "bug", "--reason", "r",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            result
+                .stderr
+                .contains("unrecognized arguments: --labels bug"),
+            "{}",
+            result.stderr
+        );
+        assert!(
+            !result.stderr.contains("--reason"),
+            "a known flag after the unknown one is not unrecognized: {}",
+            result.stderr
+        );
+    }
+
+    #[test]
+    fn bare_words_after_a_complete_command_are_all_unrecognized() {
+        let registry = default_registry();
+        let result = run(
+            &argv(&[
+                "work", "update", "--ref", "WI-1", "--reason", "r", "extra1", "--zz", "3",
+            ]),
+            &registry,
+            "test",
+            &mut no_dispatch,
+        );
+        assert_eq!(result.exit_code, EXIT_USAGE, "{}", result.stderr);
+        assert!(
+            result
+                .stderr
+                .contains("unrecognized arguments: extra1 --zz 3"),
+            "{}",
+            result.stderr
+        );
     }
 
     #[test]
