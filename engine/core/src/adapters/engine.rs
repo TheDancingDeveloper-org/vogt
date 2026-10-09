@@ -1633,22 +1633,24 @@ pub mod http1 {
         Ok((status, buf))
     }
 
-    /// Trust the platform certificate store. Built once: loading the store reads
-    /// and parses a few hundred kilobytes, which is wasted on every request.
+    /// Trust the platform certificate store plus, when `SSL_CERT_FILE` or
+    /// `SSL_CERT_DIR` is set, that bundle too. Built once: loading the store
+    /// reads and parses a few hundred kilobytes, which is wasted on every
+    /// request.
     ///
-    /// When `SSL_CERT_FILE` or `SSL_CERT_DIR` is set, `rustls-native-certs`
-    /// returns only that bundle and ignores the platform store. Python's
-    /// urllib keeps both. The variable is not unset around the load, because
-    /// changing the process environment races with every other thread and with
-    /// a git child spawned in between, so a deployment that points the variable
-    /// at a private CA must also include the public roots in that bundle.
+    /// `rustls-native-certs` returns only the environment bundle when either
+    /// variable is set, and an empty store when the file is missing, so every
+    /// HTTPS request would then fail with no explanation. Python's urllib
+    /// keeps the file *and* the platform roots. The variables are read, never
+    /// written: changing the process environment races with every other thread
+    /// and with a git child spawned in between.
     fn tls_config() -> std::sync::Arc<rustls::ClientConfig> {
         use std::sync::OnceLock;
         static CONFIG: OnceLock<std::sync::Arc<rustls::ClientConfig>> = OnceLock::new();
         CONFIG
             .get_or_init(|| {
                 let mut store = rustls::RootCertStore::empty();
-                for cert in rustls_native_certs::load_native_certs().unwrap_or_default() {
+                for cert in merged_root_certs() {
                     let _ = store.add(cert);
                 }
                 std::sync::Arc::new(
@@ -1662,6 +1664,127 @@ pub mod http1 {
                 )
             })
             .clone()
+    }
+
+    /// The environment bundle unioned with the platform roots.
+    ///
+    /// A missing `SSL_CERT_FILE` is reported rather than trusted as an empty
+    /// store. The platform roots come from a child process that does not
+    /// inherit the two variables, because `openssl_probe::probe` returns the
+    /// environment path when it is set and finding the platform bundle means
+    /// asking without it — which cannot be done by unsetting it here.
+    fn merged_root_certs() -> Vec<rustls::pki_types::CertificateDer<'static>> {
+        let mut certs = Vec::new();
+        for (variable, kind) in [("SSL_CERT_FILE", "file"), ("SSL_CERT_DIR", "dir")] {
+            let Some(path) = std::env::var_os(variable) else {
+                continue;
+            };
+            match load_pem_path(std::path::Path::new(&path), kind == "dir") {
+	                Ok(mut loaded) => certs.append(&mut loaded),
+	                Err(error) => eprintln!(
+	                    "vogt: {variable}={} could not be read ({error}); trusting the platform roots only",
+	                    std::path::Path::new(&path).display()
+	                ),
+	            }
+        }
+        match platform_root_certs() {
+            Ok(mut loaded) => certs.append(&mut loaded),
+            Err(error) => eprintln!("vogt: platform certificate store unavailable: {error}"),
+        }
+        certs
+    }
+
+    /// Certificates from a PEM file, or from every hash-named PEM in a directory.
+    fn load_pem_path(
+        path: &std::path::Path,
+        directory: bool,
+    ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+        if directory {
+            let mut certs = Vec::new();
+            for entry in std::fs::read_dir(path).map_err(|error| error.to_string())? {
+                let entry = entry.map_err(|error| error.to_string())?;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                // OpenSSL's c_rehash names: `<hex hash>.<digit>`.
+                let hashed = name.len() > 9
+                    && name.as_bytes().get(8) == Some(&b'.')
+                    && name.as_bytes()[..8].iter().all(u8::is_ascii_hexdigit)
+                    && name.as_bytes()[9..].iter().all(u8::is_ascii_digit);
+                if hashed {
+                    certs.append(&mut load_pem_file(&entry.path())?);
+                }
+            }
+            return Ok(certs);
+        }
+        load_pem_file(path)
+    }
+
+    fn load_pem_file(
+        path: &std::path::Path,
+    ) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        rustls_pemfile::certs(&mut std::io::BufReader::new(file))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+
+    /// The platform bundle, found without `SSL_CERT_FILE` or `SSL_CERT_DIR`.
+    ///
+    /// `openssl_probe::probe` returns the environment path and then stops, so
+    /// it never names the platform bundle while an override is set. The
+    /// variables are not touched here. The platform location is the first
+    /// bundle file and hashed `certs` directory inside the directories the
+    /// probe itself reports as candidates — its search, with the environment
+    /// step left out.
+    fn platform_root_certs() -> Result<Vec<rustls::pki_types::CertificateDer<'static>>, String> {
+        let (file, dir) = platform_cert_paths();
+        let mut certs = Vec::new();
+        if let Some(file) = file {
+            certs.append(&mut load_pem_file(&file)?);
+        }
+        if let Some(dir) = dir {
+            certs.append(&mut load_pem_path(&dir, true)?);
+        }
+        if certs.is_empty() {
+            return Err("no platform certificate bundle found".to_string());
+        }
+        Ok(certs)
+    }
+
+    /// `(bundle file, hashed directory)` from `openssl_probe`'s candidates.
+    fn platform_cert_paths() -> (Option<std::path::PathBuf>, Option<std::path::PathBuf>) {
+        const FILES: &[&str] = &[
+            "cert.pem",
+            "certs.pem",
+            "ca-bundle.pem",
+            "cacert.pem",
+            "ca-certificates.crt",
+            "certs/ca-certificates.crt",
+            "certs/ca-root-nss.crt",
+            "certs/ca-bundle.crt",
+            "CARootCertificates.pem",
+            "tls-ca-bundle.pem",
+        ];
+        let mut file = None;
+        let mut dir = None;
+        for root in openssl_probe::candidate_cert_dirs() {
+            if file.is_none() {
+                file = FILES
+                    .iter()
+                    .map(|name| root.join(name))
+                    .find(|path| path.is_file());
+            }
+            if dir.is_none() {
+                let certs = root.join("certs");
+                if certs.is_dir() {
+                    dir = Some(certs);
+                }
+            }
+            if file.is_some() && dir.is_some() {
+                break;
+            }
+        }
+        (file, dir)
     }
 
     fn exchange_plain(

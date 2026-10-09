@@ -843,48 +843,92 @@ fn runs(repo: &RepoRef, response: &ForgeResponse) -> Vec<ForgeCheck> {
 
 /// `(owner, repo)` from a repository URL, or `None` when it is not GitHub.
 ///
-/// The host is `urlsplit().hostname`: lowercased, with userinfo and port
-/// stripped, so `https://GitHub.com/…`, `:443` and `user@github.com` all
-/// resolve. A query or a fragment disqualifies the URL, matching the client
-/// that refuses to guess which repository a parameterised URL names.
+/// This is `client.py`'s sequence, in its order, and nothing else: `strip()`,
+/// drop one leading `git+`, fold the exact `git@github.com:` scp form, then
+/// drop one leading `https://`, `http://` and `ssh://`. The result is read as
+/// `urlparse("https://" + candidate)`. There is no scheme gate and no other
+/// scheme handling, so a doubled scheme survives as a host and is rejected,
+/// and a `://` later in the path is just part of the path. The host compare
+/// is case-sensitive, as `parsed.hostname != "github.com"` is.
 pub fn repo_of(repo_url: Option<&str>) -> Option<(String, String)> {
     let raw = repo_url?.trim();
-    // urlparse strips every character Python's str.strip() does, tabs and line
-    // breaks included, before it reads a URL. Rust's trim() only removes
-    // Unicode whitespace, so a leading unit separator would survive it.
-    let raw: String = raw
-        .trim_matches(|ch: char| ch.is_whitespace() || ch.is_control())
-        .chars()
-        .filter(|ch| !matches!(ch, '\t' | '\r' | '\n'))
-        .collect();
-    let candidate = raw.strip_prefix("git+").unwrap_or(&raw).to_string();
-    // Python's sequence, in its order: fold the scp form, then strip each of
-    // https, http and ssh exactly once. There is no scheme gate, so a doubled
-    // scheme survives as a host and is rejected below, and a `://` later in
-    // the path is just part of the path.
-    let candidate = candidate.replace("git@github.com:", "github.com/");
-    let mut candidate = candidate;
+    let mut candidate = raw.strip_prefix("git+").unwrap_or(raw).to_string();
+    candidate = candidate.replace("git@github.com:", "github.com/");
     for prefix in ["https://", "http://", "ssh://"] {
         if let Some(rest) = candidate.strip_prefix(prefix) {
             candidate = rest.to_string();
         }
     }
-    let (host, path, has_query) = super::urls::split_repo_url(&candidate)?;
-    // A trailing `?` or `#` with nothing after it is an empty query and an
-    // empty fragment, so it doesn't disqualify the URL. Anything after either
-    // one does, which is what urlsplit reports.
-    let query_and_fragment_empty = candidate
-        .split(['?', '#'])
-        .skip(1)
-        .all(|rest| rest.is_empty());
-    if (has_query && !query_and_fragment_empty) || !host.eq_ignore_ascii_case(HOST) {
+    let (host, path, query, fragment) = parse_prefixed(&candidate)?;
+    if host != HOST || !query.is_empty() || !fragment.is_empty() {
         return None;
     }
-    let path = path.strip_suffix(".git").unwrap_or(path).trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(&path).trim_matches('/');
     let mut parts = path.split('/');
     let owner = parts.next().filter(|part| valid_name(part))?;
     let repo = parts.next().filter(|part| valid_name(part))?;
     Some((owner.to_owned(), repo.to_owned()))
+}
+
+/// `(hostname, path, query, fragment)` of `urlparse("https://" + candidate)`.
+///
+/// `urlparse` drops tabs, carriage returns and line feeds, then takes a scheme
+/// only when the text before the first colon is all scheme characters. A
+/// doubled scheme (`https://https://…`) is therefore read as scheme `https`
+/// and host `https`, while a `://` after a slash is just part of the path. A
+/// port that is not an integer makes `urlparse` raise, which the caller
+/// treats as "not a repository". A path parameter (`;…`) is not part of the
+/// path. The hostname comes back lowercased.
+fn parse_prefixed(candidate: &str) -> Option<(String, String, String, String)> {
+    let cleaned: String = candidate
+        .chars()
+        .filter(|ch| !matches!(ch, '\t' | '\r' | '\n'))
+        .collect();
+    let whole = format!("https://{cleaned}");
+    let rest = match whole.find(':') {
+        Some(colon)
+            if !whole[..colon].is_empty()
+                && whole[..colon]
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')) =>
+        {
+            &whole[colon + 1..]
+        }
+        _ => whole.as_str(),
+    };
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    let (authority_and_path, fragment) = match rest.split_once('#') {
+        Some((before, after)) => (before, after.to_string()),
+        None => (rest, String::new()),
+    };
+    let (authority_and_path, query) = match authority_and_path.split_once('?') {
+        Some((before, after)) => (before, after.to_string()),
+        None => (authority_and_path, String::new()),
+    };
+    let (raw_host, path) = match authority_and_path.split_once('/') {
+        Some((host, path)) => (host, path.to_string()),
+        None => (authority_and_path, String::new()),
+    };
+    if raw_host.is_empty() {
+        return None;
+    }
+    let host = raw_host.rsplit('@').next().unwrap_or(raw_host);
+    let (host, port) = match host.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host, None),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    // urlparse().port raises ValueError on a non-numeric port, and the client
+    // turns that into "not a repository". An empty port is fine.
+    if let Some(port) = port {
+        if !port.is_empty() && port.parse::<u16>().is_err() {
+            return None;
+        }
+    }
+    let path = path.split(';').next().unwrap_or(&path).to_string();
+    Some((host.to_ascii_lowercase(), path, query, fragment))
 }
 
 fn valid_name(name: &str) -> bool {
@@ -897,6 +941,54 @@ fn valid_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+
+    #[test]
+    fn repo_of_follows_the_python_prefix_sequence() {
+        // A doubled or unrecognised scheme survives as the host, so none of
+        // these name a repository. Same for a control character the prefix
+        // steps do not remove, and for an uppercase scp host.
+        for case in [
+            "ssh://https://github.com/o/r",
+            "http://https://github.com/o/r",
+            "https://https://github.com/o/r",
+            "ssh://http://github.com/o/r",
+            "ssh://ssh://github.com/o/r",
+            "HTTPS://GITHUB.COM/o/r",
+            "HTTP://github.com/o/r",
+            "git://github.com/o/r",
+            "ftp://github.com/o/r",
+            "h ttps://github.com/o/r",
+            "git@GitHub.com:o/r",
+            "ht\ttps://github.com/o/r",
+            "gi\tt@github.com:o/r",
+            "https:\n//github.com/o/r",
+            "\u{80}https://github.com/o/r",
+            "https://github.com/o/r?x=1",
+            "https://github.com/o/r#f",
+        ] {
+            assert_eq!(repo_of(Some(case)), None, "{case:?}");
+        }
+        // A `://` after the repository is part of the path, and an empty
+        // query or fragment does not disqualify the URL.
+        for case in [
+            "github.com/o/r/x://y",
+            "git@github.com:o/r/x://y",
+            "https://github.com/o/r/x://y",
+            "https://github.com/o/r",
+            "https://GitHub.com/o/r",
+            "https://github.com/o/r?",
+            "https://github.com/o/r#",
+            "https://user:pw@github.com:443/o/r.git",
+            "git+https://github.com/o/r",
+            "git+ssh://git@github.com:o/r",
+        ] {
+            assert_eq!(
+                repo_of(Some(case)),
+                Some(("o".to_owned(), "r".to_owned())),
+                "{case:?}"
+            );
+        }
+    }
 
     /// A fixture transport: paths map to recorded answers, and every call is
     /// remembered so a test can assert which URL the token would have followed.

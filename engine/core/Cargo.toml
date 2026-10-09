@@ -34,12 +34,16 @@ base64 = "0.23.1"
 # the platform store, so a private CA that Python trusts is trusted here too.
 # No OpenSSL.
 ureq = { version = "2", features = ["tls"], default-features = false }
-# The same rustls ureq speaks, so the client can hand it a trust store built
-# from the platform certificates instead of only the bundled Mozilla roots.
-# ureq's own native-certs feature is not used. Note that rustls-native-certs
-# returns only SSL_CERT_FILE's bundle when that variable is set.
-rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-native-certs = "0.7"
+	# The same rustls ureq speaks, so the client can hand it a trust store built
+	# from the platform certificates instead of only the bundled Mozilla roots.
+	# ureq's own native-certs feature is not used. rustls-native-certs returns
+	# only the SSL_CERT_FILE bundle when that variable is set, so the store is
+	# assembled by hand: the env bundle, parsed with rustls-pemfile, plus the
+	# platform bundle openssl-probe finds.
+	rustls = { version = "0.23.19", default-features = false, features = ["ring", "std", "tls12"] }
+	rustls-native-certs = "0.7"
+	rustls-pemfile = "2"
+	openssl-probe = "0.1.6"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
