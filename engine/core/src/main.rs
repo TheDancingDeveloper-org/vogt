@@ -136,8 +136,15 @@ fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
             }
         };
     }
-    let now = iso_now();
-    match application::instance::init(&data_dir, &now, &clock_after(&now, 1)) {
+    // validate_hooks already refused a bad value, so these are the hook or none.
+    let mut clock = core::clock_from_env(std::env::var(core::CLOCK_ENV).ok().as_deref())
+        .expect("a bad clock value was refused at startup");
+    let mut ids = core::ids_from_env(
+        std::env::var(core::IDS_ENV).ok().as_deref(),
+        Some(data_dir.join("test-ids.json")),
+    )
+    .expect("a bad id mode was refused at startup");
+    match application::instance::init(&data_dir, &mut clock, &mut ids) {
         Ok(outcome) => {
             let applied = outcome
                 .declared
@@ -222,8 +229,15 @@ fn serve(host: &str, port: u16, data_dir: Option<PathBuf>, json: bool, no_auth: 
     let Some(data_dir) = resolve_data_dir(data_dir) else {
         return ExitCode::from(1);
     };
-    let now = iso_now();
-    if let Err(err) = application::instance::init(&data_dir, &now, &clock_after(&now, 1)) {
+    // validate_hooks already refused a bad value, so these are the hook or none.
+    let mut clock = core::clock_from_env(std::env::var(core::CLOCK_ENV).ok().as_deref())
+        .expect("a bad clock value was refused at startup");
+    let mut ids = core::ids_from_env(
+        std::env::var(core::IDS_ENV).ok().as_deref(),
+        Some(data_dir.join("test-ids.json")),
+    )
+    .expect("a bad id mode was refused at startup");
+    if let Err(err) = application::instance::init(&data_dir, &mut clock, &mut ids) {
         eprintln!("vogt-core serve: {err}");
         return ExitCode::from(1);
     }
@@ -296,24 +310,4 @@ fn resolve_data_dir(given: Option<PathBuf>) -> Option<PathBuf> {
 
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
-}
-
-fn clock_after(start: &str, steps: i64) -> String {
-    core::from_iso(start)
-        .map(|moment| core::to_iso(core::Moment::from_unix(moment.unix_seconds() + steps, 0)))
-        .unwrap_or_else(|_| start.to_string())
-}
-
-fn iso_now() -> String {
-    // The step clock, when the harness asks for one. Python reads it for the
-    // migration timestamp, so a recorded init and a live one agree on applied_at.
-    if let Ok(start) = std::env::var("VOGT_TEST_CLOCK_START") {
-        if let Ok(moment) = core::from_iso(&start) {
-            return core::to_iso(moment);
-        }
-    }
-    // Microseconds included. Python's isoformat keeps them, and a stamp that
-    // drops them makes two instances that started in the same second look
-    // identical.
-    core::utc_now().to_iso()
 }

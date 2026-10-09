@@ -9,6 +9,7 @@
 
 use std::path::Path;
 
+use crate::core::{Clock, IdFactory, SequentialIds};
 use crate::storage::interface::MigrationReport;
 use crate::storage::sqlite::migrator;
 use crate::storage::sqlite::{declared_path, observed_path};
@@ -20,28 +21,32 @@ pub struct InitOutcome {
     pub instance_id: String,
 }
 
+/// `clock` and `ids` are resolved once by the caller from the hook environment.
+/// `None` is the wall clock and a fresh ULID, which is what a plain init does.
 pub fn init(
     data_dir: &Path,
-    now: &str,
-    observed_now: &str,
+    clock: &mut Option<crate::core::StepClock>,
+    ids: &mut Option<SequentialIds>,
 ) -> Result<InitOutcome, migrator::MigrateError> {
     std::fs::create_dir_all(data_dir)?;
     let root = migrator::migrations_root();
     let declared_existed = declared_path(data_dir).exists();
+    let now = stamp(clock);
     let declared = migrator::open_and_migrate(
         &declared_path(data_dir),
         "declared",
         root.as_deref().map(|path| path.join("declared")).as_deref(),
         "vogt-core",
-        now,
+        &now,
     )?;
-    seed_workflows(data_dir, now)?;
+    seed_workflows(data_dir, &now)?;
+    let observed_now = stamp(clock);
     let observed = migrator::open_and_migrate(
         &observed_path(data_dir),
         "observed",
         root.as_deref().map(|path| path.join("observed")).as_deref(),
         "vogt-core",
-        observed_now,
+        &observed_now,
     )?;
     if let Some(token) = std::env::var_os("VOGT_BOOTSTRAP_TOKEN") {
         let path = data_dir.join("token");
@@ -50,8 +55,8 @@ pub fn init(
         }
     }
     let instance_id = if !declared_existed {
-        let instance_id = bootstrap(data_dir, now)?;
-        bind_instance(data_dir, &instance_id, now)?;
+        let instance_id = bootstrap(data_dir, clock, ids)?;
+        bind_instance(data_dir, &instance_id, clock)?;
         instance_id
     } else {
         instance_id_of(data_dir)?
@@ -93,11 +98,10 @@ const WORK_KINDS: [&str; 4] = ["feature", "bug", "chore", "question"];
 /// The machine every kind starts with. Python seeds it after every migrate, so
 /// a fresh instance and an upgraded one both carry the rows. An existing kind
 /// is left untouched.
-fn seed_workflows(data_dir: &Path, now: &str) -> Result<(), migrator::MigrateError> {
+fn seed_workflows(data_dir: &Path, at: &str) -> Result<(), migrator::MigrateError> {
     use rusqlite::params;
 
     let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
-    let at = clock_stamp(now, 0);
     conn.execute("BEGIN IMMEDIATE", [])?;
     let written = (|| -> rusqlite::Result<()> {
         for kind in WORK_KINDS {
@@ -157,7 +161,11 @@ fn instance_id_of(data_dir: &Path) -> Result<String, migrator::MigrateError> {
 
 /// The instance id, the initiating actor and one audit row. A database that
 /// already carries an instance id is left alone, so a second init is safe.
-fn bootstrap(data_dir: &Path, now: &str) -> Result<String, migrator::MigrateError> {
+fn bootstrap(
+    data_dir: &Path,
+    clock: &mut Option<crate::core::StepClock>,
+    ids: &mut Option<SequentialIds>,
+) -> Result<String, migrator::MigrateError> {
     use rusqlite::params;
 
     let conn = crate::storage::sqlite::connection::connect(&declared_path(data_dir))?;
@@ -171,21 +179,18 @@ fn bootstrap(data_dir: &Path, now: &str) -> Result<String, migrator::MigrateErro
     if let Some(instance_id) = existing {
         return Ok(instance_id);
     }
-    let sequential = std::env::var("VOGT_TEST_IDS").ok().as_deref() == Some("sequential");
-    let mut ids = SequentialIds::load(&data_dir.join("test-ids.json"));
     let user = os_user();
-    let next = |ids: &mut SequentialIds, prefix: &str| -> String {
-        if sequential {
-            ids.next(prefix)
-        } else {
-            crate::core::fresh_id(prefix)
+    let next = |ids: &mut Option<SequentialIds>, prefix: &str| -> String {
+        match ids {
+            Some(factory) => factory.next(prefix),
+            None => crate::core::fresh_id(prefix),
         }
     };
-    let instance_id = next(&mut ids, "ins");
-    let actor_id = next(&mut ids, "act");
-    let audit_id = next(&mut ids, "aud");
-    let txn_id = next(&mut ids, "txn");
-    let at = clock_stamp(now, 2);
+    let instance_id = next(ids, "ins");
+    let actor_id = next(ids, "act");
+    let audit_id = next(ids, "aud");
+    let txn_id = next(ids, "txn");
+    let at = stamp(clock);
     conn.execute("BEGIN IMMEDIATE", [])?;
     let written = (|| -> rusqlite::Result<()> {
         for (key, value) in [
@@ -228,7 +233,6 @@ fn bootstrap(data_dir: &Path, now: &str) -> Result<String, migrator::MigrateErro
             return Err(err.into());
         }
     }
-    ids.save()?;
     Ok(instance_id)
 }
 
@@ -240,7 +244,7 @@ fn bootstrap(data_dir: &Path, now: &str) -> Result<String, migrator::MigrateErro
 fn bind_instance(
     data_dir: &Path,
     instance_id: &str,
-    now: &str,
+    clock: &mut Option<crate::core::StepClock>,
 ) -> Result<(), migrator::MigrateError> {
     use rusqlite::params;
 
@@ -253,7 +257,7 @@ fn bind_instance(
     if exists {
         return Ok(());
     }
-    let at = clock_stamp(now, 3);
+    let at = stamp(clock);
     conn.execute("BEGIN IMMEDIATE", [])?;
     let written = (|| -> rusqlite::Result<()> {
         conn.execute(
@@ -282,84 +286,11 @@ fn os_user() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// The instant bootstrap stamps, two seconds after the clock start. `init`
-/// reads the clock twice before bootstrap does — once is the harness, once is
-/// the migration `now` — so the rows land where Python's step clock puts them.
-fn clock_stamp(fallback: &str, steps: i64) -> String {
-    // The step clock keeps the fraction. A start of …05.500000 must stamp
-    // …07.500000, not …07, or a hooked comparison disagrees with Python.
-    let start = std::env::var("VOGT_TEST_CLOCK_START")
-        .ok()
-        .and_then(|text| crate::core::from_iso(&text).ok());
-    match start {
-        Some(moment) => {
-            let mut clock = crate::core::StepClock::new(moment);
-            let mut stamped = crate::core::Clock::now(&mut clock);
-            for _ in 0..steps {
-                stamped = crate::core::Clock::now(&mut clock);
-            }
-            crate::core::to_iso(stamped)
-        }
-        None => fallback.to_string(),
-    }
-}
-
-/// Sequential ids persisted across processes when `VOGT_TEST_IDS=sequential`,
-/// so `init` and the `serve` that follows agree. Ports `SequentialIds`.
-struct SequentialIds {
-    path: std::path::PathBuf,
-    counts: std::collections::BTreeMap<String, u32>,
-    persist: bool,
-}
-
-impl SequentialIds {
-    fn load(path: &Path) -> Self {
-        let persist = std::env::var("VOGT_TEST_IDS").ok().as_deref() == Some("sequential");
-        let counts = if persist {
-            std::fs::read_to_string(path)
-                .ok()
-                .map(|text| {
-                    text.trim_matches(|c| c == '{' || c == '}')
-                        .split(',')
-                        .filter_map(|pair| {
-                            let (key, value) = pair.split_once(':')?;
-                            let key = key.trim().trim_matches('"').to_string();
-                            let value = value.trim().parse().ok()?;
-                            Some((key, value))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            std::collections::BTreeMap::new()
-        };
-        Self {
-            path: path.to_path_buf(),
-            counts,
-            persist,
-        }
-    }
-
-    fn next(&mut self, prefix: &str) -> String {
-        let count = self.counts.entry(prefix.to_string()).or_insert(0);
-        *count += 1;
-        format!("{prefix}_{count:04}")
-    }
-
-    fn save(&self) -> Result<(), migrator::MigrateError> {
-        if !self.persist {
-            return Ok(());
-        }
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let body = self
-            .counts
-            .iter()
-            .map(|(key, value)| format!("\"{key}\":{value}"))
-            .collect::<Vec<_>>()
-            .join(",");
-        std::fs::write(&self.path, format!("{{{body}}}"))?;
-        Ok(())
+/// The next instant. A step clock walks one second per read, the way Python's
+/// does; without one the wall clock is read once.
+fn stamp(clock: &mut Option<crate::core::StepClock>) -> String {
+    match clock {
+        Some(clock) => crate::core::to_iso(Clock::now(clock)),
+        None => crate::core::to_iso(crate::core::utc_now()),
     }
 }

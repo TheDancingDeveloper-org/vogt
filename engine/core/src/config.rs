@@ -581,9 +581,11 @@ fn as_int(value: &Value) -> Option<i64> {
 }
 
 fn int_from_str(raw: &str) -> Option<i64> {
-    // Pydantic accepts surrounding whitespace and a single underscore between
-    // digits (`1_000`), and rejects scientific notation, a leading underscore
-    // and a doubled one (`1e3`, `_1000`, `1__000`).
+    // Pydantic accepts surrounding whitespace, a single underscore between
+    // digits (`1_000`) and a fractional part that is all zeros (`5.0`,
+    // `1_000.0`). It rejects scientific notation, a leading or doubled
+    // underscore, a non-zero fraction and a trailing dot (`1e3`, `_1000`,
+    // `1__000`, `5.5`, `5.`).
     let trimmed = raw.trim();
     let mut cleaned = String::new();
     let chars: Vec<char> = trimmed.chars().collect();
@@ -597,6 +599,12 @@ fn int_from_str(raw: &str) -> Option<i64> {
             return None;
         }
         cleaned.push(*ch);
+    }
+    if let Some((whole, fraction)) = cleaned.split_once('.') {
+        if fraction.is_empty() || !fraction.chars().all(|c| c == '0') {
+            return None;
+        }
+        cleaned = whole.to_string();
     }
     cleaned.parse::<i64>().ok()
 }
@@ -1657,6 +1665,17 @@ mod tests {
         assert!(config.fronted);
         assert_eq!(config.retention_days, 1000);
         assert_eq!(config.log_slow_request_ms, 250);
+
+        // A fractional part of all zeros is the integer. A real fraction, a
+        // trailing dot and scientific notation are not.
+        for (raw, want) in [("5.0", Some(5)), (" 5.0 ", Some(5)), ("1_000.0", Some(1000))] {
+            guard.set("VOGT_RETENTION_DAYS", raw);
+            assert_eq!(load_config(&Map::new()).unwrap().retention_days, want.unwrap());
+        }
+        for raw in ["5.5", "5.", "1e3"] {
+            guard.set("VOGT_RETENTION_DAYS", raw);
+            assert!(load_config(&Map::new()).is_err(), "{raw} must be rejected");
+        }
     }
 
     #[test]
