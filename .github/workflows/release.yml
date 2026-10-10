@@ -468,7 +468,7 @@ jobs:
           verifier="$(find "${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools" -name apksigner | sort | tail -1)"
           "$verifier" verify --print-certs "$apk"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: vogt-android-release-${{ github.ref_name }}
           path: mobile/android/app/build/outputs/apk/release/*.apk

@@ -384,7 +384,7 @@ jobs:
       # rendering when the change is the intended one.
       - name: keep the demo browser evidence when a screenshot disagrees
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: demo-playwright-results
           path: web/test-results/
@@ -657,7 +657,7 @@ jobs:
           VOGT_ANDROID_APP_ID: "com.thedancingdeveloper.vogt.dev"
         run: ./gradlew assembleDebug --no-daemon
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: vogt-android-debug-${{ github.sha }}
           path: mobile/android/app/build/outputs/apk/debug/*.apk
