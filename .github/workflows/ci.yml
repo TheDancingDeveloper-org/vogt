@@ -268,10 +268,21 @@ jobs:
           components: rustfmt, clippy
 
       # Pilot (WI-1169): kache instead of Swatinem/rust-cache, on this job only.
-      # Pinned to current main of kunobi-ninja/kache-action (2026-10-03,
-      # "feat: strict input fails the step on any warning"). The moving `v1`
-      # tag has no release commit. The voice job stays on rust-cache.
+      # Pinned to current main of kunobi-ninja/kache-action (2026-10-03). The
+      # moving `v1` tag has no release commit to pin. The voice job stays on
+      # rust-cache as the control.
+      #
+      # Fork PRs cannot write the cache. This workflow grants only
+      # `contents: read`, so a fork's GITHUB_TOKEN lacks the `actions: write` a
+      # cache save needs, and the action refuses node-cache outright on a fork
+      # PR (src/setup.js, isForkPullRequest). Same-repo PRs are not read-only;
+      # `save-cache` defaults to true.
       - uses: kunobi-ninja/kache-action@1a33fb2ff51be23eb9e87abeae6edb65be78f71c # main @ 2026-10-03
+        with:
+          node-cache: true
+          cache-dir: /var/cache/kache
+          pr-comment: false
+          job-summary: true
 
       # First: it needs nothing built, so it is the cheapest failure to reach.
       - name: cargo fmt
