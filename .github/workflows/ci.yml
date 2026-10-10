@@ -268,16 +268,10 @@ jobs:
           components: rustfmt, clippy
 
       # Pilot (WI-1169): kache instead of Swatinem/rust-cache, on this job only.
-      # Pinned to the commit the moving `v1` tag pointed at on 2026-10-10
-      # (tag created 2026-06-15, no release commit exists to pin). The voice
-      # job stays on rust-cache as the control.
-      #
-      # Fork PRs cannot write the cache. This workflow grants `contents: read`
-      # and nothing else, so a fork's GITHUB_TOKEN lacks the `actions: write`
-      # a cache save needs; the action also refuses `node-cache` outright on a
-      # fork PR (src/setup.js, isForkPullRequest). It is not read-only on
-      # same-repo PRs; that is the default `save-cache: true`.
-      - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1 @ 2026-10-10
+      # Pinned to current main of kunobi-ninja/kache-action (2026-10-03,
+      # "feat: strict input fails the step on any warning"). The moving `v1`
+      # tag has no release commit. The voice job stays on rust-cache.
+      - uses: kunobi-ninja/kache-action@1a33fb2ff51be23eb9e87abeae6edb65be78f71c # main @ 2026-10-03
         with:
           node-cache: true
           cache-dir: /var/cache/kache
