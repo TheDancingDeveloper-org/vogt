@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@capacitor-community/speech-recognition": "^7.0.1",
-    "@capacitor/app": "^8.0.5",
+    "@capacitor/app": "^8.1.2",
     "@capacitor/core": "^8.5.2",
     "@capacitor/push-notifications": "^8.1.2",
     "@solidjs/router": "^1.0.0",
