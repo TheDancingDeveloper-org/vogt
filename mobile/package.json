@@ -19,7 +19,7 @@
     "@capacitor/push-notifications": "^8.1.2"
   },
   "devDependencies": {
-    "@capacitor/cli": "^8.5.2",
+    "@capacitor/cli": "^8.5.3",
     "typescript": "^7.0.2"
   }
 }
