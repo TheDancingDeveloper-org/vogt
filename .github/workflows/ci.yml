@@ -272,11 +272,6 @@ jobs:
       # "feat: strict input fails the step on any warning"). The moving `v1`
       # tag has no release commit. The voice job stays on rust-cache.
       - uses: kunobi-ninja/kache-action@1a33fb2ff51be23eb9e87abeae6edb65be78f71c # main @ 2026-10-03
-        with:
-          node-cache: true
-          cache-dir: /var/cache/kache
-          pr-comment: false
-          job-summary: true
 
       # First: it needs nothing built, so it is the cheapest failure to reach.
       - name: cargo fmt
