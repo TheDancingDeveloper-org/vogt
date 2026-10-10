@@ -276,7 +276,7 @@ jobs:
       # and nothing else, so a fork's GITHUB_TOKEN lacks the `actions: write`
       # a cache save needs; the action also refuses `node-cache` outright on a
       # fork PR (src/setup.js, isForkPullRequest). It is not read-only on
-      # same-repo PRs — that is the default `save-cache: true`.
+      # same-repo PRs; that is the default `save-cache: true`.
       - uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed # v1 @ 2026-10-10
         with:
           node-cache: true
