@@ -811,6 +811,40 @@ mod tests {
     }
 
     #[test]
+    fn deciding_the_same_grant_twice_conflicts_and_asks_the_engine_once() {
+        // The decision re-reads the row inside the write and proceeds only
+        // while it is still pending, so a second decider loses cleanly.
+        let (_, built, seen) = fresh("twice", person());
+        let asked = super::grant_request_op(&built, request("eng-1")).unwrap();
+        let id = asked["grant"]["id"].as_str().unwrap().to_string();
+        let params = json!({"id": id, "decision": "approve", "reason": "yes"});
+        super::grant_decide_op(&built, params.clone()).unwrap();
+
+        let again = super::grant_decide_op(&built, params).unwrap_err();
+        assert!(
+            matches!(again, VogtError::Conflict(ref message) if message == &format!("grant {id} is approved, not pending")),
+            "{again:?}"
+        );
+        // A denial of an already-decided grant is the same conflict.
+        let denied = super::grant_decide_op(
+            &built,
+            json!({"id": id, "decision": "deny", "reason": "no"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(denied, VogtError::Conflict(ref message) if message.contains("is approved, not pending")),
+            "{denied:?}"
+        );
+        // The engine heard the one approval and nothing for the losers.
+        let sent = seen.lock().unwrap().clone();
+        let applies = sent
+            .iter()
+            .filter(|call| call.starts_with("POST ") && call.contains("/grants"))
+            .count();
+        assert_eq!(applies, 1, "{sent:?}");
+    }
+
+    #[test]
     fn an_agent_sees_only_its_own_sessions_grants() {
         let (_, built, _) = fresh("scope", agent("agent:engine:eng-1"));
         super::grant_request_op(&built, request("eng-1")).unwrap();
