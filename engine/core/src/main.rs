@@ -189,39 +189,42 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     if !matches!(command, Some("serve" | "init")) || help {
-        if let Err(error) = validate_hooks(None) {
-            eprintln!("{error}");
-            return ExitCode::from(1);
-        }
         let data_dir = adapters::cli::data_dir_of(&argv);
         let code = adapters::cli::main_cli(
             &argv,
             &registry::default_registry(),
             VERSION,
-            &mut |operation, params| match operation.handler {
-                // The manifest takes no parameters and reads no store.
-                registry::Handler::RegistryDump => {
-                    let _ = (&params, &data_dir);
-                    operation.run(None, params)
-                }
-                registry::Handler::NotPorted => {
-                    // The same resolution `init` uses: the config file, then
-                    // VOGT_DATA_DIR, then `--data-dir` on top. A pod sets only
-                    // VOGT_DATA_DIR, so a default here would read the wrong
-                    // instance.
-                    let dir = resolve_data_dir(data_dir.as_deref().map(PathBuf::from))
-                        .map_err(crate::errors::VogtError::InvalidRequest)?;
-                    let mut overrides = serde_json::Map::new();
-                    overrides.insert(
-                        "data_dir".to_string(),
-                        serde_json::Value::String(dir.display().to_string()),
-                    );
-                    let config = config::load_config(&overrides)
-                        .map_err(crate::errors::VogtError::InvalidRequest)?;
-                    let built = application::context::build_context(
-                        config, None, None, None, None, None, None, None,
-                    )?;
-                    operation.run(Some(&built), params)
+            &mut |operation, params| {
+                // Parsing and pydantic validation have both succeeded, which is
+                // where Python builds the context and announces the hooks. A
+                // usage error returns before this closure runs, so it carries
+                // no banner. A bad hook value is an `InvalidRequest` here too.
+                validate_hooks(None)?;
+                match operation.handler {
+                    // The manifest takes no parameters and reads no store.
+                    registry::Handler::RegistryDump => {
+                        let _ = (&params, &data_dir);
+                        operation.run(None, params)
+                    }
+                    registry::Handler::NotPorted => {
+                        // The same resolution `init` uses: the config file, then
+                        // VOGT_DATA_DIR, then `--data-dir` on top. A pod sets only
+                        // VOGT_DATA_DIR, so a default here would read the wrong
+                        // instance.
+                        let dir = resolve_data_dir(data_dir.as_deref().map(PathBuf::from))
+                            .map_err(crate::errors::VogtError::InvalidRequest)?;
+                        let mut overrides = serde_json::Map::new();
+                        overrides.insert(
+                            "data_dir".to_string(),
+                            serde_json::Value::String(dir.display().to_string()),
+                        );
+                        let config = config::load_config(&overrides)
+                            .map_err(crate::errors::VogtError::InvalidRequest)?;
+                        let built = application::context::build_context(
+                            config, None, None, None, None, None, None, None,
+                        )?;
+                        operation.run(Some(&built), params)
+                    }
                 }
             },
             &mut std::io::stdout(),
@@ -413,9 +416,16 @@ fn validate_hooks(host: Option<&str>) -> Result<(), crate::errors::VogtError> {
     }
     let active = core::hooks_active(clock.as_deref(), ids.as_deref());
     if !active.is_empty() && host.is_none() {
-        eprintln!("deterministic test hooks are active: {}", active.join(", "));
+        announce_hooks(&active);
     }
     Ok(())
+}
+
+/// The banner Python prints once a context is built. Argument parsing happens
+/// first there, so a usage error comes out with no banner; this is called only
+/// after parsing has succeeded.
+fn announce_hooks(active: &[&str]) {
+    eprintln!("deterministic test hooks are active: {}", active.join(", "));
 }
 
 fn init(data_dir: Option<PathBuf>, check: bool, json: bool) -> ExitCode {
