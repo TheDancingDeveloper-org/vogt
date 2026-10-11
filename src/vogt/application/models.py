@@ -4323,7 +4323,10 @@ class CommitForSessionParams(Params):
         description=(
             "Commit in this linked worktree instead of the session's own "
             "directory. It must be a worktree of the repo that directory "
-            "belongs to; a stranger repo is refused."
+            "belongs to; a stranger repo is refused. A worker's commit never "
+            "lands in the repo's main checkout, where pool workers are "
+            "launched: name the worker's own worktree (absolute or "
+            "workspace-relative)."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")

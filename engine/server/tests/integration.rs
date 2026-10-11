@@ -13705,3 +13705,328 @@ async fn chat_processes_are_capped_and_an_idle_one_makes_room() {
         .await
         .unwrap();
 }
+
+const WI1255_STACK: &str = "stack-secret-for-wi1255-1234567890";
+const WI1255_WORKER: &str = "worker-token-wi1255-1234567890";
+const WI1255_OVERSEER: &str = "overseer-token-wi1255-1234567890";
+const WI1255_STRANGER: &str = "stranger-token-wi1255-1234567890";
+const WI1255_PERSON: &str = "person-token-wi1255-1234567890";
+
+/// A front door for the WI-1255 git-op tests: a repo whose main checkout two
+/// sessions were launched in (the pool-worker shape), a linked worktree the
+/// worker's work is staged in, and tokens for the worker, an oversight
+/// session, an agent with no session, a person and vogt-core.
+struct GitOpDoor {
+    base: String,
+    repo: std::path::PathBuf,
+    work: std::path::PathBuf,
+    worker: String,
+    overseer: String,
+    _tmp: tempfile::TempDir,
+    _guard: ServerGuard,
+}
+
+async fn wi1255_front_door() -> GitOpDoor {
+    let core = stand_in_core_knowing(vec![
+        (
+            WI1255_WORKER,
+            "agent:session:ses_worker",
+            vec!["work.write"],
+        ),
+        (
+            WI1255_OVERSEER,
+            "agent:session:ses_overseer",
+            vec!["work.write"],
+        ),
+        (WI1255_STRANGER, "agent:vogt-sessions", vec!["admin"]),
+        (WI1255_PERSON, "human:ada", vec!["work.write"]),
+    ])
+    .await;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let repo = root.join("repo");
+    let work = root.join("repo-work");
+    std::fs::create_dir(&repo).unwrap();
+    let sh = |cmd: &str| {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{cmd}: {out:?}");
+    };
+    sh("git init -q -b main");
+    sh("git config user.email t@t");
+    sh("git config user.name t");
+    std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+    sh("git add a.txt && git commit -q -m init");
+    sh(&format!("git worktree add -q -b work {}", work.display()));
+
+    let mut cfg = test_config();
+    cfg.workspace_root = root.clone();
+    cfg.default_cwd = repo.clone();
+    cfg.vogt_core_url = Some(core);
+    cfg.vogt_core_token = Some(WI1255_STACK.into());
+    let (base, guard) = boot_with_config(cfg).await;
+
+    let operator = client_for(TEST_TOKEN);
+    let mut ids = Vec::new();
+    for (name, vogt_id, role) in [
+        ("worker", "ses_worker", "worker"),
+        ("overseer", "ses_overseer", "oversight"),
+    ] {
+        let created: Value = operator
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({
+                "name": name,
+                "role": role,
+                "cwd": repo.to_string_lossy(),
+                "env": [["VOGT_SESSION_ID", vogt_id]],
+                "command": ["/bin/bash", "-c", "sleep 300"],
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+    // A commit for a session needs it quiet, never mid-turn.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while session_row(&operator, &base, &ids[0]).await["activity"] != "idle" {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the worker never idled"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let overseer = ids.pop().unwrap();
+    let worker = ids.pop().unwrap();
+    GitOpDoor {
+        base,
+        repo,
+        work,
+        worker,
+        overseer,
+        _tmp: tmp,
+        _guard: guard,
+    }
+}
+
+impl GitOpDoor {
+    /// Leave a change staged in the worker's linked worktree.
+    fn stage_work(&self, file: &str) {
+        std::fs::write(self.work.join(file), "work\n").unwrap();
+        let out = std::process::Command::new("git")
+            .args(["add", file])
+            .current_dir(&self.work)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+    }
+
+    fn commit_count(&self, dir: &std::path::Path) -> usize {
+        let out = std::process::Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
+    }
+
+    async fn git_op(&self, token: &str, body: Value) -> (StatusCode, Value) {
+        let res = client_for(token)
+            .post(format!("{}/api/git/op", self.base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        let status = res.status();
+        (status, res.json().await.unwrap_or(Value::Null))
+    }
+
+    fn commit_for_worker(&self, worktree: bool) -> Value {
+        let mut body = json!({
+            "op": "commit",
+            "session": self.worker,
+            "message": "worker change",
+        });
+        if worktree {
+            body["worktree"] = json!(self.work.to_string_lossy());
+        }
+        body
+    }
+}
+
+/// WI-1255: a worker's token, holding `git-write` like every `work.write`
+/// token, may not use the engine's git op at all — not the Git panel's
+/// stage/commit/checkout, not a commit on behalf of another session, not one
+/// for itself — and may not make itself an overseer to get round that. An
+/// agent token with no session behind it is refused the same way. Nothing
+/// lands in either checkout.
+#[tokio::test]
+async fn a_worker_token_is_refused_the_git_op() {
+    let door = wi1255_front_door().await;
+    door.stage_work("w.txt");
+    let repo_before = door.commit_count(&door.repo);
+    let work_before = door.commit_count(&door.work);
+
+    for body in [
+        json!({ "op": "stage", "repo": "repo", "path": "a.txt" }),
+        json!({ "op": "commit", "repo": "repo", "message": "direct" }),
+        json!({ "op": "checkout", "repo": "repo", "branch": "work2", "create": true }),
+        door.commit_for_worker(true),
+        json!({
+            "op": "commit",
+            "session": door.overseer,
+            "message": "for the overseer",
+            "worktree": door.work.to_string_lossy(),
+        }),
+    ] {
+        for token in [WI1255_WORKER, WI1255_STRANGER] {
+            let (status, said) = door.git_op(token, body.clone()).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{token} {body} {said}");
+            assert!(
+                said["error"].as_str().unwrap().starts_with("forbidden"),
+                "{said}"
+            );
+        }
+    }
+    let (_, said) = door
+        .git_op(WI1255_WORKER, door.commit_for_worker(true))
+        .await;
+    assert!(
+        said["error"]
+            .as_str()
+            .unwrap()
+            .contains("does not commit its own work"),
+        "{said}"
+    );
+    let (_, said) = door
+        .git_op(
+            WI1255_WORKER,
+            json!({ "op": "commit", "repo": "repo", "message": "direct" }),
+        )
+        .await;
+    assert!(
+        said["error"]
+            .as_str()
+            .unwrap()
+            .contains("session_commit_for"),
+        "{said}"
+    );
+
+    // Promoting itself is refused at the engine as it is in the core.
+    let promoted = client_for(WI1255_WORKER)
+        .post(format!("{}/api/sessions/{}/role", door.base, door.worker))
+        .json(&json!({ "role": "oversight" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted.status(), StatusCode::FORBIDDEN);
+    let row = session_row(&client_for(TEST_TOKEN), &door.base, &door.worker).await;
+    assert_ne!(row["role"], "oversight", "{row}");
+
+    assert_eq!(door.commit_count(&door.repo), repo_before);
+    assert_eq!(door.commit_count(&door.work), work_before);
+}
+
+/// WI-1255: an oversight session's token commits a worker's staged work in
+/// the worker's linked worktree, as `session.commit_for` would — and still
+/// may not use the Git panel's ops.
+#[tokio::test]
+async fn an_oversight_token_commits_for_a_worker() {
+    let door = wi1255_front_door().await;
+    door.stage_work("w.txt");
+    let work_before = door.commit_count(&door.work);
+
+    let (status, said) = door
+        .git_op(
+            WI1255_OVERSEER,
+            json!({ "op": "stage", "repo": "repo", "path": "a.txt" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{said}");
+
+    let (status, said) = door
+        .git_op(WI1255_OVERSEER, door.commit_for_worker(true))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+    assert!(said["commit"].as_str().unwrap().len() >= 7, "{said}");
+    assert_eq!(door.commit_count(&door.work), work_before + 1);
+}
+
+/// WI-1255: a person's token keeps the Git panel and may commit for a
+/// session; vogt-core's own credential (the stack secret, which
+/// `session.commit_for` presents after its own check) may commit for a
+/// session and nothing else. Neither commits a worker's work into the repo's
+/// main checkout: without `worktree` the commit for a pool worker launched
+/// there is refused, and nothing is committed.
+#[tokio::test]
+async fn a_person_and_the_core_commit_for_a_worker_but_never_in_the_main_checkout() {
+    let door = wi1255_front_door().await;
+    door.stage_work("w.txt");
+    let repo_before = door.commit_count(&door.repo);
+    let work_before = door.commit_count(&door.work);
+
+    for token in [WI1255_PERSON, WI1255_STACK, TEST_TOKEN] {
+        let (status, said) = door.git_op(token, door.commit_for_worker(false)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{token} {said}");
+        assert!(
+            said["error"].as_str().unwrap().contains("main checkout"),
+            "{said}"
+        );
+    }
+    assert_eq!(door.commit_count(&door.repo), repo_before);
+
+    let (status, said) = door
+        .git_op(WI1255_STACK, door.commit_for_worker(true))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+    assert_eq!(door.commit_count(&door.work), work_before + 1);
+
+    door.stage_work("p.txt");
+    let (status, said) = door
+        .git_op(WI1255_PERSON, door.commit_for_worker(true))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+    assert_eq!(door.commit_count(&door.work), work_before + 2);
+
+    // The core's credential is not a Git panel.
+    let (status, said) = door
+        .git_op(
+            WI1255_STACK,
+            json!({ "op": "stage", "repo": "repo", "path": "a.txt" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{said}");
+
+    // A person's Git panel works as before.
+    std::fs::write(door.repo.join("a.txt"), "one\ntwo\n").unwrap();
+    let (status, said) = door
+        .git_op(
+            WI1255_PERSON,
+            json!({ "op": "stage", "repo": "repo", "path": "a.txt" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+    let (status, said) = door
+        .git_op(
+            WI1255_PERSON,
+            json!({ "op": "commit", "repo": "repo", "message": "by hand" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{said}");
+    assert_eq!(door.commit_count(&door.repo), repo_before + 1);
+
+    // A person may still nominate an overseer.
+    let promoted = client_for(WI1255_PERSON)
+        .post(format!("{}/api/sessions/{}/role", door.base, door.worker))
+        .json(&json!({ "role": "oversight" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(promoted.status(), StatusCode::OK);
+}

@@ -9,10 +9,13 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
-use vogt_engine_contract::{BranchInfo, DiffResp, GitStatus, LogEntry, StatusEntry, StatusKind};
+use vogt_engine_contract::{
+    BranchInfo, DiffResp, GitStatus, LogEntry, SessionRole, StatusEntry, StatusKind,
+};
 
 use crate::{
     app::AppState,
+    auth::AuthorizedIdentity,
     error::{ApiError, Result},
     workspace_path,
 };
@@ -604,23 +607,44 @@ async fn commit_op(
 
 /// The directory an oversight commit lands in: the repo the session works in,
 /// or `worktree` when the caller named a linked worktree of that same repo.
+///
+/// A worker's commit never lands in the repo's main checkout (WI-1255): pool
+/// workers are launched in the shared main checkout, so a commit made for one
+/// without `worktree` would land on whatever branch that checkout — every
+/// other session's too — has out. The worker's own linked worktree is where
+/// its work is; name it.
 async fn session_commit_dir(
     state: &Arc<AppState>,
     id: &str,
     worktree: Option<&str>,
 ) -> Result<PathBuf> {
-    let repo = session_repo(state, id).await?;
-    let Some(worktree) = worktree.map(str::trim).filter(|s| !s.is_empty()) else {
-        return Ok(repo);
+    let (repo, role) = session_repo(state, id).await?;
+    let dir = match worktree.map(str::trim).filter(|s| !s.is_empty()) {
+        None => repo,
+        Some(worktree) => linked_worktree_of(state, &repo, worktree).await?,
     };
+    if role == SessionRole::Worker && is_main_checkout(&dir).await? {
+        return Err(ApiError::BadRequest(format!(
+            "refusing to commit for worker session {id} in the repo's main checkout \
+             ({}): pass `worktree` naming the worker's own linked worktree",
+            dir.display()
+        )));
+    }
+    Ok(dir)
+}
+
+/// `worktree`, resolved under the workspace, when it is a worktree of the same
+/// repo as `repo`. Workspace-relative or absolute (inside the workspace): an
+/// overseer names a worktree by the path it sees.
+async fn linked_worktree_of(state: &Arc<AppState>, repo: &Path, worktree: &str) -> Result<PathBuf> {
     let root = &state.config.workspace_root;
-    let candidate = workspace_path::resolve_existing(root, worktree)?;
+    let candidate = workspace_path::resolve_existing_allow_absolute(root, worktree)?;
     let worktree_repo = find_repo_root(&candidate, root).await.map_err(|_| {
         ApiError::BadRequest(format!(
             "worktree {worktree:?} is not inside a git repo under the workspace"
         ))
     })?;
-    let session_common = git_common_dir(&repo).await?;
+    let session_common = git_common_dir(repo).await?;
     let worktree_common = git_common_dir(&worktree_repo).await?;
     if session_common != worktree_common {
         return Err(ApiError::BadRequest(format!(
@@ -628,6 +652,18 @@ async fn session_commit_dir(
         )));
     }
     Ok(worktree_repo)
+}
+
+/// Whether `repo` is the repo's main checkout rather than a linked worktree:
+/// its own git dir is the common one.
+async fn is_main_checkout(repo: &Path) -> Result<bool> {
+    let own = PathBuf::from(
+        run_git(repo, &["rev-parse", "--absolute-git-dir"])
+            .await?
+            .trim(),
+    );
+    let own = own.canonicalize().unwrap_or(own);
+    Ok(own == git_common_dir(repo).await?)
 }
 
 /// `git rev-parse --git-common-dir`, absolute, so two worktrees of one repo
@@ -666,10 +702,11 @@ async fn default_branch_name(repo: &Path) -> String {
     }
 }
 
-/// The repo the session works in: its directory, walked up to a git root
-/// inside the workspace. A session the engine does not know is a 404; one
-/// whose directory is not a repo is a 400 naming the directory.
-async fn session_repo(state: &Arc<AppState>, id: &str) -> Result<PathBuf> {
+/// The repo the session works in, with the session's role: its directory,
+/// walked up to a git root inside the workspace. A session the engine does not
+/// know is a 404; one whose directory is not a repo is a 400 naming the
+/// directory.
+async fn session_repo(state: &Arc<AppState>, id: &str) -> Result<(PathBuf, SessionRole)> {
     let uuid: uuid::Uuid = id
         .parse()
         .map_err(|_| ApiError::BadRequest(format!("not a session id: {id}")))?;
@@ -689,14 +726,15 @@ async fn session_repo(state: &Arc<AppState>, id: &str) -> Result<PathBuf> {
         )));
     }
     let cwd = PathBuf::from(&summary.cwd);
-    find_repo_root(&cwd, &state.config.workspace_root)
+    let repo = find_repo_root(&cwd, &state.config.workspace_root)
         .await
         .map_err(|_| {
             ApiError::BadRequest(format!(
                 "session {id} works in {}, which is not inside a git repo",
                 summary.cwd
             ))
-        })
+        })?;
+    Ok((repo, summary.role))
 }
 
 /// Quiet enough to commit over: not running, and not sitting on an approval.
@@ -778,10 +816,141 @@ fn digest_line(stat: &str) -> String {
         .to_string()
 }
 
+impl GitOpReq {
+    /// The op as the wire names it, for audit lines and refusals.
+    fn name(&self) -> &'static str {
+        match self {
+            GitOpReq::Stage { .. } => "stage",
+            GitOpReq::Unstage { .. } => "unstage",
+            GitOpReq::Discard { .. } => "discard",
+            GitOpReq::Commit { .. } => "commit",
+            GitOpReq::Checkout { .. } => "checkout",
+        }
+    }
+
+    /// The session a commit is made on behalf of, when it is one (C14).
+    fn on_behalf_of(&self) -> Option<&str> {
+        match self {
+            GitOpReq::Commit {
+                session: Some(session),
+                ..
+            } => Some(session.trim()).filter(|s| !s.is_empty()),
+            _ => None,
+        }
+    }
+}
+
+/// Who may run a git op here (WI-1255).
+///
+/// `GitWrite` alone decided this, and every `work.write` token holds it — so
+/// every driven session could commit, check out or discard in any repo under
+/// the workspace, and commit for any other session without the oversight
+/// check `session.commit_for` makes in the core. Now:
+///
+/// - a person (a core actor of kind `human`) and the break-glass operator
+///   token run any op: they are who the GUI's Git panel serves;
+/// - vogt-core's own credential runs only a commit for a session — the core's
+///   `session.commit_for`, which has already decided its principal may;
+/// - any other caller is a session's token, and may only commit for another
+///   session, and only when its own engine role is `oversight` — the rule
+///   `session.commit_for` applies, so calling the engine directly gains
+///   nothing over calling the core.
+///
+/// Decided by the flags the authentication gate set, never by `name` alone
+/// (a core actor's `identity_ref` can be any string): `name` is only read to
+/// find which session an agent token belongs to, after the flags have ruled
+/// out a person.
+fn authorize_op(state: &AppState, identity: &AuthorizedIdentity, req: &GitOpReq) -> Result<()> {
+    if identity.person || identity.break_glass {
+        return Ok(());
+    }
+    let Some(target) = req.on_behalf_of() else {
+        return Err(ApiError::Forbidden(format!(
+            "{} may not run git {} through the engine; only a person \
+             uses the Git panel. A session commits a worker's staged work with \
+             session_commit_for, from an oversight session",
+            identity.name,
+            req.name()
+        )));
+    };
+    if identity.stack_secret {
+        return Ok(());
+    }
+    let Some(caller) = caller_session(state, &identity.name) else {
+        return Err(ApiError::Forbidden(format!(
+            "only a person, or an oversight session, commits for a \
+             session ({} is neither)",
+            identity.name
+        )));
+    };
+    if target.parse::<uuid::Uuid>().ok() == Some(caller) {
+        return Err(ApiError::Forbidden(format!(
+            "a session does not commit its own work; an oversight \
+             session, or a person, commits for it ({caller})"
+        )));
+    }
+    let role = state.sessions.summary_of(caller).map(|s| s.role);
+    if role != Some(SessionRole::Oversight) {
+        let role = role.map_or("unknown", |r| r.as_str());
+        return Err(ApiError::Forbidden(format!(
+            "only an oversight session commits for another session \
+             ({caller} is {role})"
+        )));
+    }
+    Ok(())
+}
+
+/// The engine session an agent token belongs to. A session vogt-core started
+/// is `agent:session:<ses_…>`, found through the `VOGT_SESSION_ID` its record
+/// carries, and only when exactly one session carries it; one the engine
+/// started is `agent:engine:<uuid>`, and that uuid is the engine's id.
+fn caller_session(state: &AppState, name: &str) -> Option<uuid::Uuid> {
+    if let Some(id) = name.strip_prefix("agent:engine:") {
+        return id.parse().ok().filter(|id| state.sessions.knows(*id));
+    }
+    let vogt_id = name.strip_prefix("agent:session:")?;
+    match state
+        .sessions
+        .engine_ids_for_vogt_session(vogt_id)
+        .as_slice()
+    {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
 pub async fn operate(
     State(state): State<Arc<AppState>>,
+    identity: Option<axum::Extension<AuthorizedIdentity>>,
     Json(req): Json<GitOpReq>,
 ) -> Result<Json<GitOpResp>> {
+    let Some(axum::Extension(identity)) = identity else {
+        return Err(ApiError::Unauthorized);
+    };
+    if let Err(refused) = authorize_op(&state, &identity, &req) {
+        tracing::warn!(
+            target: "vogt::audit",
+            event = "git.op",
+            outcome = "refused",
+            caller = %identity.name,
+            op = req.name(),
+            session = req.on_behalf_of().unwrap_or("-"),
+            reason = %refused,
+            "git op refused"
+        );
+        return Err(refused);
+    }
+    if let Some(target) = req.on_behalf_of() {
+        tracing::info!(
+            target: "vogt::audit",
+            event = "git.op",
+            outcome = "allowed",
+            caller = %identity.name,
+            op = req.name(),
+            session = target,
+            "commit for a session allowed"
+        );
+    }
     match req {
         GitOpReq::Stage { repo, path } => {
             let repo = resolve_repo(&state, &repo)
