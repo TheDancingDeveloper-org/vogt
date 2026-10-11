@@ -14030,3 +14030,73 @@ async fn a_person_and_the_core_commit_for_a_worker_but_never_in_the_main_checkou
         .unwrap();
     assert_eq!(promoted.status(), StatusCode::OK);
 }
+
+/// WI-1255: starting an overseer is nominating one. A worker's token — and an
+/// agent token with no session — may start a worker but not an oversight
+/// session, which would get its own credential and could then be driven to
+/// commit for anyone. A person, vogt-core (the stack secret, after the
+/// core's own check) and break-glass may.
+#[tokio::test]
+async fn only_a_person_or_the_core_starts_an_oversight_session() {
+    let door = wi1255_front_door().await;
+    let spec = |role: &str| {
+        json!({
+            "name": format!("started as {role}"),
+            "role": role,
+            "cwd": door.repo.to_string_lossy(),
+            "command": ["/bin/bash", "-c", "sleep 300"],
+        })
+    };
+    let operator = client_for(TEST_TOKEN);
+    let count = || async {
+        let listed: Vec<Value> = operator
+            .get(format!("{}/api/sessions", door.base))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        listed.len()
+    };
+    let before = count().await;
+
+    for token in [WI1255_WORKER, WI1255_STRANGER] {
+        let res = client_for(token)
+            .post(format!("{}/api/sessions", door.base))
+            .json(&spec("oversight"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{token}");
+        let said: Value = res.json().await.unwrap();
+        assert!(
+            said["error"]
+                .as_str()
+                .unwrap()
+                .contains("only a person nominates"),
+            "{said}"
+        );
+    }
+    assert_eq!(count().await, before, "a refused start created nothing");
+
+    let res = client_for(WI1255_WORKER)
+        .post(format!("{}/api/sessions", door.base))
+        .json(&spec("worker"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+
+    for token in [WI1255_PERSON, WI1255_STACK, TEST_TOKEN] {
+        let res = client_for(token)
+            .post(format!("{}/api/sessions", door.base))
+            .json(&spec("oversight"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "{token}");
+        let row: Value = res.json().await.unwrap();
+        assert_eq!(row["role"], "oversight", "{token} {row}");
+    }
+}
