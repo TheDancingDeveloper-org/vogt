@@ -673,6 +673,7 @@ impl SessionRegistry {
                         conversation: live.conversation(),
                         work_item: live.work_item(),
                     }),
+                    economics: None,
                 };
                 drop(live);
                 if let Err(e) = history.archive_session(record).await {
@@ -805,6 +806,15 @@ impl SessionRegistry {
             })
             .map(|r| *r.key())
             .collect()
+    }
+
+    /// Keep the latest economics snapshot on the session's record, so the
+    /// removal of a hibernated session can count it. A session with no record
+    /// yet has nothing to keep it on.
+    pub fn set_record_economics(&self, id: Uuid, economics: String) {
+        if let Some(mut record) = self.records.get_mut(&id) {
+            record.economics = Some(economics);
+        }
     }
 
     pub fn is_hibernated(&self, id: Uuid) -> bool {
@@ -1097,6 +1107,10 @@ impl SessionRegistry {
         if let Err(e) = joined {
             tracing::warn!(session = %id, error = %e, "the handoff write task failed");
         }
+        // Not observed here. A hibernation is not the end: a wake resumes the
+        // session, and counting it now would count it again at every later
+        // hibernation. The exit waiter skips a hibernating session, and the
+        // removal of the hibernated record is what counts it.
         session.mark_hibernating();
         self.records.insert(id, record);
 
@@ -1720,7 +1734,19 @@ impl SessionRegistry {
 
     pub fn remove(&self, id: Uuid) -> Result<()> {
         let live = self.sessions.remove(&id).map(|(_, v)| v);
-        let recorded = self.records.remove(&id).is_some();
+        let recorded = self.records.remove(&id);
+        // A live session was already counted by its exit. A hibernated one
+        // has no process left to exit, so removing its record is its end.
+        if live.is_none() {
+            if let Some((_, record)) = recorded.as_ref().filter(|(_, r)| r.hibernation.is_some()) {
+                crate::pty::observe_economics(
+                    record.template.clone(),
+                    record.model.clone(),
+                    record.economics.as_deref(),
+                );
+            }
+        }
+        let recorded = recorded.is_some();
         hibernation::remove(&self.cfg.state_dir, id);
         if live.is_none() && !recorded {
             return Err(ApiError::NotFound);

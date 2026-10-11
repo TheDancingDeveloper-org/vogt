@@ -46,7 +46,7 @@ pub fn conversation_cwd(agent: &str, id: &str, home: &Path) -> Option<PathBuf> {
 }
 
 /// `<root>/<cwd-key>/<id>.jsonl`, one directory level down.
-fn claude_transcript(root: &Path, id: &str) -> Option<PathBuf> {
+pub(crate) fn claude_transcript(root: &Path, id: &str) -> Option<PathBuf> {
     let file_name = format!("{id}.jsonl");
     std::fs::read_dir(root)
         .ok()?
@@ -58,7 +58,7 @@ fn claude_transcript(root: &Path, id: &str) -> Option<PathBuf> {
 
 /// `<root>/YYYY/MM/DD/rollout-<timestamp>-<id>.jsonl`, at most four levels
 /// down, newest dates first.
-fn codex_transcript(root: &Path, id: &str) -> Option<PathBuf> {
+pub(crate) fn codex_transcript(root: &Path, id: &str) -> Option<PathBuf> {
     let suffix = format!("-{id}.jsonl");
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     let mut seen = 0usize;

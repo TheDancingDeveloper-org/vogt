@@ -1046,9 +1046,10 @@ class SessionDigest(Result):
     """One line of session state (design C1).
 
     Target under 300 characters so fifty rows fit in one 15k tool result.
-    `budget` and `supervisor` are named for later changes (C7, WI-956) and
-    stay null until those exist. `brief_file` is null until the engine
-    reports a brief path; the launch argv stays on `mode=full`.
+    `budget` is the engine's economics line when its tailer has metered the
+    session, and null until then. `supervisor` is named for WI-956 and stays
+    null until that exists. `brief_file` is null until the engine reports a
+    brief path; the launch argv stays on `mode=full`.
     """
 
     id: str
@@ -1069,7 +1070,11 @@ class SessionDigest(Result):
     template: str | None = None
     brief_file: str | None = None
     budget: str | None = Field(
-        default=None, description="Reserved for C7; null until a budget exists."
+        default=None,
+        description=(
+            "The engine's economics line for the session, e.g. "
+            "`96 turns, 2 compactions`; null when the engine has not metered it."
+        ),
     )
     supervisor: str | None = Field(
         default=None, description="Reserved for WI-956; null until supervision exists."

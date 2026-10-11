@@ -83,6 +83,8 @@ fn test_config() -> Config {
         session_rss_warn_bytes: None,
         metrics_bind: None,
         chat: Default::default(),
+        economics_tick: std::time::Duration::ZERO,
+        economics_home: None,
     }
 }
 
@@ -2537,6 +2539,7 @@ async fn provisional_history_row_is_written_at_spawn_and_not_clobbered() {
             scrollback_bytes: 0,
             end_reason: None,
             identity: None,
+            economics: None,
         })
         .await
         .unwrap();
@@ -9069,6 +9072,7 @@ async fn startup_closes_out_history_rows_left_unfinished_by_a_restart() {
                 scrollback_bytes: 0,
                 end_reason: None,
                 identity: None,
+                economics: None,
             })
             .await
             .unwrap();
@@ -10163,6 +10167,107 @@ fn conversation_sandbox() -> (tempfile::TempDir, Config, std::path::PathBuf) {
         tags: vec!["claude".to_string()],
     });
     (tmp, cfg, stub)
+}
+
+/// The economics tailer follows a live session's transcript and the session
+/// row carries the reading; when the session ends, the in-process scrape
+/// shows it. The registry is process-wide, so the assertion is that this
+/// session's series appears, not an exact count.
+#[tokio::test]
+async fn the_economics_tailer_reports_a_live_transcript_and_the_scrape_records_the_exit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    cfg.economics_home = Some(tmp.path().to_path_buf());
+    cfg.economics_tick = Duration::from_secs(1);
+
+    let conversation = "6c1f0d2e-5b7a-4e1c-9f3d-2a8b7c6d5e4f";
+    let transcript = tmp
+        .path()
+        .join(".klaudia/sessions/cwd-key")
+        .join(format!("{conversation}.jsonl"));
+    std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+    std::fs::write(
+        &transcript,
+        include_str!("fixtures/economics/klaudia.jsonl"),
+    )
+    .unwrap();
+
+    let (base, _guard) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({ "name": "metered", "command": ["/bin/cat"] }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    client
+        .post(format!("{base}/api/sessions/{id}/conversation"))
+        .json(&json!({ "agent": "klaudia", "id": conversation }))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let row = loop {
+        let row = session_row(&client, &base, &id).await;
+        if row["economics"]["turns"] == 2 {
+            break row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the tailer never reported the transcript: {row}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    assert_eq!(row["economics"]["context_tokens"], 67);
+    assert_eq!(row["economics"]["peak_context_tokens"], 117);
+    assert_eq!(row["economics"]["compactions"], 1);
+    assert_eq!(row["economics"]["usage_measured"], false);
+
+    client
+        .post(format!("{base}/api/sessions/{id}/kill"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let ended = loop {
+        let row = session_row(&client, &base, &id).await;
+        if !row["exit_code"].is_null() {
+            break row;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the killed session never recorded an exit: {row}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(ended["exit_code"].is_number(), "{ended}");
+
+    let text = vogt_engine_server::metrics::metrics().render();
+    assert!(
+        text.contains("vogt_session_turns_count{template=\"unknown\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("vogt_session_peak_context_tokens_sum"),
+        "{text}"
+    );
+    assert!(text.contains("vogt_session_compactions_bucket"), "{text}");
+    drop(tmp);
 }
 
 /// Stand in for a SIGKILL of the engine: end the session (so this engine's

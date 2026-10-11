@@ -408,6 +408,286 @@ fn round_half_even(total: i64, count: i64) -> i64 {
     }
 }
 
+// --- live tailer (phase A2) ---------------------------------------------------
+
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use vogt_engine_contract::AgentConversation;
+
+use crate::app::AppState;
+
+/// One session's place in its transcript: the file being tailed, how far it
+/// has been read, the line a previous read left unfinished, and the meter
+/// those lines feed.
+pub(crate) struct Tail {
+    agent: String,
+    /// The transcript resolved for this conversation. Kept so a tick does not
+    /// scan the agent's directory again; cleared when a read fails, so the
+    /// next tick looks once more.
+    path: Option<PathBuf>,
+    offset: u64,
+    /// The bytes of a line a read ended in the middle of. Bytes, not text: a
+    /// character split across two reads must be decoded whole.
+    partial: Vec<u8>,
+    meter: Meter,
+    /// When the snapshot was last written to the archive row. The tailer
+    /// persists at most once a minute per session.
+    persisted: Option<Instant>,
+    /// The snapshot JSON last written. An unchanged snapshot is not written
+    /// again, and does not restart the timer.
+    persisted_json: Option<String>,
+}
+
+impl Tail {
+    pub(crate) fn start(agent: &str) -> Self {
+        Self {
+            agent: agent.to_string(),
+            path: None,
+            offset: 0,
+            partial: Vec::new(),
+            meter: Meter::new(agent),
+            persisted: None,
+            persisted_json: None,
+        }
+    }
+}
+
+/// Bytes one tick will read of one transcript. A transcript that races ahead
+/// of this is caught up over later ticks rather than read in one go.
+const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
+
+/// How often a session's snapshot is written back to its archive row.
+const PERSIST_EVERY: Duration = Duration::from_secs(60);
+
+/// How long one session's read may take before the tick moves on. An open
+/// that blocks despite the non-blocking flag costs the tick this much and no
+/// more, and only that session.
+const READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Read `path` from `offset`, at most [`MAX_READ_BYTES`]. `None` when the
+/// file shrank past the offset or can no longer be read: the caller resets
+/// and re-reads from the start.
+///
+/// The open refuses to follow a symlink (`O_NOFOLLOW`) and never blocks on a
+/// file an agent swapped for a FIFO (`O_NONBLOCK`). Both checks are repeated
+/// on the descriptor actually opened, so a swap between the check and the
+/// open is caught too.
+fn read_tail(path: &Path, offset: u64) -> Option<(u64, Vec<u8>)> {
+    let mut file = File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    if meta.len() < offset {
+        return None;
+    }
+    file.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = vec![0; (meta.len() - offset).min(MAX_READ_BYTES) as usize];
+    if buf.is_empty() {
+        return Some((offset, buf));
+    }
+    let read = file.read(&mut buf).ok()?;
+    buf.truncate(read);
+    Some((offset + read as u64, buf))
+}
+
+/// Where a reported conversation keeps its transcript, under `home`. A
+/// klaudia conversation is a session file under `~/.klaudia/sessions`, which
+/// the claude layout already names.
+pub(crate) fn transcript_path(home: &Path, conversation: &AgentConversation) -> Option<PathBuf> {
+    // The id is the only part of the path the agent chose. Anything that is
+    // not a conversation id could walk out of the transcript root.
+    if !crate::agent_cli::is_conversation_id(&conversation.id) {
+        return None;
+    }
+    let root = match conversation.agent.as_str() {
+        "claude" => home.join(".claude/projects"),
+        // Klaudia files Claude Code's layout under its own root (WI-950).
+        "klaudia" => home.join(".klaudia/sessions"),
+        "codex" => home.join(".codex/sessions"),
+        _ => return None,
+    };
+    let root = root.canonicalize().ok()?;
+    let found = if conversation.agent == "codex" {
+        crate::transcripts::codex_transcript(&root, &conversation.id)?
+    } else {
+        crate::transcripts::claude_transcript(&root, &conversation.id)?
+    };
+    // `is_file` follows links. A symlink planted in the transcript tree must
+    // not be opened, so the entry itself has to be a regular file, and its
+    // canonical path has to stay inside the canonical root.
+    if !found.symlink_metadata().ok()?.is_file() {
+        return None;
+    }
+    let canonical = found.canonicalize().ok()?;
+    if !canonical.starts_with(&root) {
+        return None;
+    }
+    Some(canonical)
+}
+
+/// Advance one tail by whatever the transcript grew, or start it over when
+/// the file moved or shrank. Returns the snapshot once the meter has seen a
+/// turn, whether it is due to be written to the archive row, and the `now`
+/// the caller passed so it can stamp the write it actually makes.
+pub(crate) fn advance(
+    tail: &mut Tail,
+    path: &Path,
+    now: Instant,
+) -> Option<(SessionEconomics, bool, Instant)> {
+    if tail.path.as_deref() != Some(path) {
+        let agent = tail.agent.clone();
+        let persisted_json = tail.persisted_json.clone();
+        let persisted = tail.persisted;
+        *tail = Tail::start(&agent);
+        tail.path = Some(path.to_path_buf());
+        tail.persisted_json = persisted_json;
+        tail.persisted = persisted;
+    }
+    let (offset, bytes) = match read_tail(path, tail.offset) {
+        Some(read) => read,
+        None => {
+            // The file moved, shrank, or was replaced. Forget it so the next
+            // tick resolves the conversation again instead of re-reading a
+            // path that no longer leads to the transcript.
+            tail.path = None;
+            tail.offset = 0;
+            tail.partial.clear();
+            tail.meter = Meter::new(&tail.agent);
+            return None;
+        }
+    };
+    tail.offset = offset;
+    feed_bytes(tail, &bytes);
+
+    let snapshot = tail.meter.snapshot();
+    if snapshot.turns == 0 {
+        return None;
+    }
+    let due = match tail.persisted {
+        Some(at) => now.duration_since(at) >= PERSIST_EVERY,
+        None => true,
+    };
+    Some((snapshot, due, now))
+}
+
+/// Fold transcript bytes into the meter, line by line. A line that runs past
+/// [`MAX_READ_BYTES`] without a newline is dropped rather than carried, so a
+/// transcript with no newline cannot grow the tail without bound. Bytes are
+/// decoded only once a line is complete, so a character split between two
+/// reads survives.
+fn feed_bytes(tail: &mut Tail, bytes: &[u8]) {
+    let mut rest = bytes;
+    while let Some(at) = rest.iter().position(|b| *b == b'\n') {
+        if tail.partial.len() + at > MAX_READ_BYTES as usize {
+            tail.partial.clear();
+        } else {
+            tail.partial.extend_from_slice(&rest[..at]);
+            let line = String::from_utf8_lossy(&tail.partial);
+            tail.meter.feed_line(line.trim_end_matches('\r'));
+            tail.partial.clear();
+        }
+        rest = &rest[at + 1..];
+    }
+    if tail.partial.len() + rest.len() > MAX_READ_BYTES as usize {
+        tail.partial.clear();
+    } else {
+        tail.partial.extend_from_slice(rest);
+    }
+}
+
+/// Tail every live session's reported transcript and keep its economics
+/// snapshot current. `tick` is `ENGINE_ECONOMICS_TICK_SECS`; the caller does
+/// not spawn this when that is zero.
+pub fn spawn_economics_tailer(state: Arc<AppState>, home: PathBuf, tick: Duration) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tick);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            for session in state.sessions.live_sessions() {
+                let Some(conversation) = session.conversation() else {
+                    continue;
+                };
+                let agent = conversation.agent.clone();
+                let mut tail = session
+                    .take_economics_tail()
+                    .unwrap_or_else(|| Tail::start(&agent));
+                let home = home.clone();
+                // One bad transcript must not stall the rest of the tick, so
+                // the blocking work is bounded and a timeout skips the session
+                // until the next tick.
+                let worked = tokio::time::timeout(
+                    READ_TIMEOUT,
+                    tokio::task::spawn_blocking(move || {
+                        let now = Instant::now();
+                        let path = match tail.path.clone() {
+                            Some(path) => path,
+                            None => match transcript_path(&home, &conversation) {
+                                Some(path) => path,
+                                None => return (tail, None),
+                            },
+                        };
+                        let outcome = advance(&mut tail, &path, now);
+                        (tail, outcome)
+                    }),
+                )
+                .await;
+                let Ok(Ok((mut tail, outcome))) = worked else {
+                    continue;
+                };
+                let (snapshot, mut persist, now) = match &outcome {
+                    Some((snapshot, due, now)) => (Some(snapshot.clone()), *due, Some(*now)),
+                    None => (None, false, None),
+                };
+                let json = snapshot
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok());
+                // A snapshot identical to the one last written is not written
+                // again, and its timer is not restarted.
+                if let (Some(json), Some(previous)) = (&json, &tail.persisted_json) {
+                    if json == previous {
+                        persist = false;
+                    }
+                }
+                if persist {
+                    tail.persisted = now;
+                    tail.persisted_json = json.clone();
+                }
+                session.store_economics_tail(tail, snapshot.clone());
+                // The hibernation record is what a later removal counts, so it
+                // has to carry the snapshot the session ends with.
+                if let Some(json) = json.clone() {
+                    state.sessions.set_record_economics(session.id, json);
+                }
+                if persist {
+                    if let Some(json) = json {
+                        persist_snapshot(&state, session.id, json).await;
+                    }
+                }
+            }
+        }
+    });
+}
+
+async fn persist_snapshot(state: &AppState, id: uuid::Uuid, json: String) {
+    let Some(history) = &state.history else {
+        return;
+    };
+    if let Err(e) = history.set_economics(id, &json).await {
+        tracing::warn!(session = %id, error = %e, "failed to persist session economics");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,6 +821,55 @@ mod tests {
         assert_eq!(reading.wall_clock.count, 2);
         assert_eq!(reading.wall_clock.max_ms, 3);
         assert_eq!(reading.wall_clock.mean_ms, 2);
+    }
+
+    /// A character cut at a chunk boundary must decode whole. Feeding every
+    /// fixture in chunks of these sizes has to give the same reading as
+    /// feeding it in one go, including the non-ASCII fixture.
+    #[test]
+    fn chunked_feed_matches_a_whole_feed() {
+        let fixtures = [
+            ("claude", "claude.jsonl"),
+            ("claude", "claude_gap.jsonl"),
+            ("codex", "codex.jsonl"),
+            ("klaudia", "klaudia.jsonl"),
+            ("klaudia", "klaudia_unicode.jsonl"),
+        ];
+        for (agent, name) in fixtures {
+            let bytes = std::fs::read(format!(
+                "{}/tests/fixtures/economics/{name}",
+                env!("CARGO_MANIFEST_DIR")
+            ))
+            .unwrap();
+            let whole = feed(agent, std::str::from_utf8(&bytes).unwrap());
+            for size in [1usize, 2, 3, 7, 64] {
+                let mut tail = Tail::start(agent);
+                for chunk in bytes.chunks(size) {
+                    feed_bytes(&mut tail, chunk);
+                }
+                assert_eq!(tail.meter.snapshot(), whole, "{name} in chunks of {size}");
+            }
+        }
+    }
+
+    /// A transcript with no newline must not grow the carried line without
+    /// bound: past the read cap it is dropped, and the next real line is read.
+    #[test]
+    fn a_line_past_the_cap_is_dropped() {
+        let mut tail = Tail::start("claude");
+        // Exactly the cap is still carried; one byte past it is dropped, and
+        // the newline that would have ended it starts nothing.
+        feed_bytes(&mut tail, &vec![b'x'; MAX_READ_BYTES as usize + 1]);
+        assert!(tail.partial.is_empty());
+        // The dropped run would have been a turn had it been kept. The line
+        // after the newline that ends it is one, and it is counted.
+        feed_bytes(&mut tail, b"\n");
+        feed_bytes(
+            &mut tail,
+            b"{\"type\":\"assistant\",\"message\":{\"id\":\"m1\",\"content\":[]}}\n",
+        );
+        assert_eq!(tail.meter.snapshot().turns, 1);
+        assert!(tail.partial.is_empty());
     }
 
     #[test]

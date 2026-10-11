@@ -171,6 +171,8 @@ fn test_config() -> Config {
         session_rss_warn_bytes: None,
         metrics_bind: None,
         chat: Default::default(),
+        economics_tick: std::time::Duration::ZERO,
+        economics_home: None,
     }
 }
 

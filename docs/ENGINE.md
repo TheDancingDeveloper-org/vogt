@@ -1664,6 +1664,39 @@ First output can come earlier than that (the wrapper prints as it goes), so
 The engine logs without colour when its stdout is not a terminal, so these
 `key=value` fields reach the log pipeline intact.
 
+#### Session economics
+
+A live session that has reported a conversation is metered from its own
+transcript (WI-1245). Every `ENGINE_ECONOMICS_TICK_SECS` (15 s; `0` turns it
+off) the engine reads the new bytes of that transcript — Claude under
+`~/.claude/projects`, Klaudia under `~/.klaudia/sessions`, Codex under
+`~/.codex/sessions` — and folds them into the meter from
+[`session economics`](ARCHITECTURE.md). The running totals ride on the session
+summary as `economics` (turns, context, peak context, compactions, and whether
+token usage was measured), and the core's `session.list` digest prints them as
+its `budget` line. A session with no reported conversation, or an agent whose
+transcript the engine cannot find, simply has no `economics`; the core then
+falls back to reading the transcript itself.
+
+The same snapshot is what the scrape records. The engine observes three
+histograms once, at the session's real end — when its process exits, or when
+a hibernated session's record is removed. A hibernation itself records
+nothing, so a session woken and hibernated again is not counted twice. They
+are labelled by the session's template (`unknown` when it was started without
+one) and by the model its launch command named; a command that names none
+carries no model label:
+
+| Metric | Type | What it counts |
+|---|---|---|
+| `vogt_session_turns` | histogram | turns the session had |
+| `vogt_session_peak_context_tokens` | histogram | the largest context window it reached, in tokens |
+| `vogt_session_compactions` | histogram | compactions it performed |
+
+Like the launch metrics they are served on `GET /metrics` and their labels are
+fixed by the code, never a session id. The latest snapshot is also written to
+the session's archive row while it runs. Nothing reads that column back yet,
+so an ended session does not show its cost.
+
 ### Attach protocol
 
 `GET /api/sessions/:id/attach` — WebSocket upgrade. It sits outside the bearer

@@ -132,8 +132,7 @@ from vogt.core.entities import (
     WorkItem,
     WorkOverlay,
 )
-from vogt.core.session_economics import SessionEconomics as _SessionEconomics
-from vogt.core.session_economics import meter
+from vogt.core.session_economics import SessionEconomics, meter
 from vogt.errors import (
     BypassRefused,
     Conflict,
@@ -480,12 +479,14 @@ def _digest_of(
     attention: str | None = None,
     ready: bool | None = None,
     fields: list[str] | None = None,
+    budget: str | None = None,
 ) -> SessionDigest:
     """One line of state from a full summary (design C1).
 
     `command` stays off the digest; `template` is the replacement, and
-    `brief_file` is null until the engine reports a path. `budget` and
-    `supervisor` stay null until C7 and WI-956 exist.
+    `brief_file` is null until the engine reports a path. `budget` is the
+    engine's economics line when the caller has one. `supervisor` stays null
+    until WI-956 exists.
     """
     extra: dict[str, Any] = {}
     for name in fields or []:
@@ -507,6 +508,7 @@ def _digest_of(
         turn_started_at=summary.turn_started_at,
         last_reply_excerpt=_clip(summary.last_reply_excerpt),
         template=summary.template,
+        budget=budget,
         extra=extra or None,
     )
 
@@ -611,6 +613,11 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
                 attention=verdict.attention,
                 ready=summary.activity == "waiting-for-input",
                 fields=params.fields,
+                budget=_budget_of(
+                    None
+                    if (row := live.get(summary.engine_session_id)) is None
+                    else row.economics
+                ),
             )
         )
     return SessionListResult(digests=digests, engine=detail)
@@ -719,6 +726,12 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                         attention=row.attention,
                         ready=row.ready,
                         fields=params.fields,
+                        budget=_budget_of(
+                            None
+                            if (live_row := live.get(row.session.engine_session_id))
+                            is None
+                            else live_row.economics
+                        ),
                     ),
                     screen_tail=row.screen_tail,
                     ready=row.ready,
@@ -970,6 +983,35 @@ def last_reply(
     )
 
 
+def _budget_of(payload: dict[str, Any] | None) -> str | None:
+    """The digest line from an engine economics reading, or None when the
+    engine has not measured the session."""
+    if not payload:
+        return None
+    tools = payload.get("tool_result_bytes")
+    reading = SessionEconomics(
+        turns=_int_of(payload.get("turns")),
+        context_tokens=_int_of(payload.get("context_tokens")),
+        peak_context_tokens=_int_of(payload.get("peak_context_tokens")),
+        compactions=_int_of(payload.get("compactions")),
+        tool_result_bytes={
+            str(name): _int_of(value)
+            for name, value in tools.items()
+            if isinstance(name, str)
+        }
+        if isinstance(tools, dict)
+        else {},
+        reads_repeated=_int_of(payload.get("reads_repeated")),
+        output_tokens=_int_of(payload.get("output_tokens")),
+        usage_measured=payload.get("usage_measured") is True,
+    )
+    return reading.budget_line(None, None)
+
+
+def _int_of(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def economics(
     ctx: AppContext, params: SessionEconomicsParams
 ) -> SessionEconomicsResult:
@@ -994,6 +1036,50 @@ def economics(
         msg = f"no session {params.id!r}"
         raise NotFound(msg)
     result = SessionEconomicsResult(id=params.id, engine_session_id=engine_id)
+    reported = None if engine_session is None else engine_session.economics
+    if reported:
+        # The engine's tailer already metered the transcript. Re-reading the
+        # file here would repeat its work and could disagree with the number
+        # the session list shows.
+        return result.model_copy(
+            update={
+                "agent": engine_session.conversation_agent if engine_session else None,
+                "conversation_id": engine_session.conversation_id
+                if engine_session
+                else None,
+                "basis": "engine",
+                "turns": _int_of(reported.get("turns")),
+                "context_tokens": _int_of(reported.get("context_tokens")),
+                "peak_context_tokens": _int_of(reported.get("peak_context_tokens")),
+                "compactions": _int_of(reported.get("compactions")),
+                "tool_result_bytes": {
+                    str(name): _int_of(value)
+                    for name, value in reported["tool_result_bytes"].items()
+                }
+                if isinstance(reported.get("tool_result_bytes"), dict)
+                else {},
+                "reads_repeated": _int_of(reported.get("reads_repeated")),
+                "wall_clock_count": (
+                    _int_of(reported["wall_clock"].get("count"))
+                    if isinstance(reported.get("wall_clock"), dict)
+                    else 0
+                ),
+                "wall_clock_max_ms": _int_of(
+                    (reported.get("wall_clock") or {}).get("max_ms")
+                )
+                if isinstance(reported.get("wall_clock"), dict)
+                else 0,
+                "wall_clock_mean_ms": _int_of(
+                    (reported.get("wall_clock") or {}).get("mean_ms")
+                )
+                if isinstance(reported.get("wall_clock"), dict)
+                else 0,
+                "output_tokens": _int_of(reported.get("output_tokens")),
+                "usage_measured": reported.get("usage_measured") is True,
+                "budget_line": _budget_of(reported) or "",
+                "detail": None,
+            }
+        )
     if engine_session is not None and engine_session.conversation_agent == "opencode":
         return result.model_copy(
             update={
@@ -1119,7 +1205,7 @@ def digest(ctx: AppContext, params: SessionDigestParams) -> SessionDigestResult:
         output = _int_or_none(numbers.get("output_tokens"))
         measured = numbers.get("usage_measured")
         usage_measured = measured if isinstance(measured, bool) else None
-        reading = _SessionEconomics(
+        reading = SessionEconomics(
             turns=turns or 0,
             context_tokens=context or 0,
             peak_context_tokens=peak or 0,
