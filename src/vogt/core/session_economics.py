@@ -39,11 +39,14 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import timedelta
 from itertools import pairwise
 
 #: Klaudia's own figure (docs/compaction.md in msp-klaudia): four characters
 #: of transcript per token when the agent records no usage.
 CHARS_PER_TOKEN = 4
+
+_MILLISECOND = timedelta(milliseconds=1)
 
 #: Tool names whose input names a file. A repeated value is a repeated read.
 _READ_TOOLS = frozenset({"Read", "read_file", "cat"})
@@ -330,7 +333,9 @@ def _timing(stamps: list[str]) -> TurnTiming:
             continue
     if len(times) < 2:
         return TurnTiming()
-    gaps = [max(0, int((b - a).total_seconds() * 1000)) for a, b in pairwise(times)]
+    # Integer division of timedeltas is exact; total_seconds() * 1000 is a
+    # float and comes out a millisecond low for some gaps (1.001 s -> 1000).
+    gaps = [max(0, (b - a) // _MILLISECOND) for a, b in pairwise(times)]
     return TurnTiming(
         count=len(gaps), max_ms=max(gaps), mean_ms=round(sum(gaps) / len(gaps))
     )
