@@ -34,6 +34,7 @@ from vogt.config import VogtConfig
 from vogt.core.clock import utc_now
 from vogt.core.ids import new_id
 from vogt.errors import InvalidRequest
+from vogt.storage.sqlite.observed import SqliteObservedStore
 
 WHY = "hook test"
 START = "2026-01-02T03:04:05+00:00"
@@ -106,6 +107,7 @@ def test_the_observed_store_mints_ids_from_the_context_factory(
     test ids reach the observed store too."""
     monkeypatch.setenv(IDS_ENV, "sequential")
     ctx = build_context(config=config)
+    assert isinstance(ctx.observed, SqliteObservedStore)
     assert ctx.observed._id_factory is ctx.id_factory
 
 
