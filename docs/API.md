@@ -310,14 +310,23 @@ session.
 `session.hibernate` (`work.write`, audited) stops a session's processes to
 free their memory and revokes its token. The session stays listed with
 `activity: "hibernated"`, a `hibernation` (`at`, `trigger`, `reason`,
-`resumable`) and its last screen. `session.wake` starts it again under the
-same id by resuming its agent conversation (`conversation_id`). It mints a
-new token for the same actor and revokes the old one. `session.input` on a
-hibernated session wakes it, waits until it is ready (`wake_timeout_s`,
-default 120) and then types; the result says `woke`. `session.screen` and
+`resumable`, and `superseded_by` when set) and its last screen. Passing
+`superseded_by` (a `ses_…` id or the engine UUID of the session taking over)
+records the handoff on the hibernation; hibernating an already-hibernated
+session with it records the successor without restarting anything. `session.wake`
+starts it again under the same id by resuming its agent conversation
+(`conversation_id`). It mints a new token for the same actor and revokes the
+old one. It is refused (`409`) while `superseded_by` is set, and while another
+live session holds the same work item in the same directory — two agents must
+not edit one tree. `force` wakes past both guards, and only a person or an oversight session may set it. `session.input` on a
+hibernated session wakes it the same way, never with `force`, waits until it
+is ready (`wake_timeout_s`, default 120) and then types; the result says
+`woke`. A refused wake leaves no token behind. `session.screen` and
 `session.wait` never wake: a wait answers at once with `outcome:
 "hibernated"` and the kept screen. `session.keep_awake` pins a session
-against the engine's idle policy. `session.set_role` (`work.write`, audited)
+against the engine's idle policy. A session hibernated by hand, or one whose
+work was handed on, is not brought back when the engine restarts; one the
+idle or shutdown policy hibernated still is. `session.set_role` (`work.write`, audited)
 nominates a session as `oversight` — the one supervising the others — or
 makes it a `worker` again; `session.start` takes the same `role`. **It is a
 person's nomination**: an agent principal gets `403 role_refused`, because

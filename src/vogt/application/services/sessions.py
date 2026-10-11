@@ -26,6 +26,7 @@ Three rules this module exists to keep:
 
 from __future__ import annotations
 
+import re
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1210,6 +1211,9 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         current = engine.get_session(engine_id)
         if current is None or not current.hibernated:
             raise
+        # Never forced. A session whose work was handed on, or whose work item
+        # is already live in the same directory, stays asleep and the engine's
+        # refusal (409) is the answer.
         _wake(ctx, engine, target, f"woken to deliver input: {reason}")
         woke = True
         waited = engine.wait_session(
@@ -1545,11 +1549,17 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     engine_id = target.engine_session_id
+    successor: str | None = None
+    if params.superseded_by:
+        successor = _target(ctx, params.superseded_by).engine_session_id
     if target.session is not None and target.session.stopped_at is not None:
         msg = f"session {params.id!r} was stopped; there is nothing to hibernate"
         raise Conflict(msg)
     hibernated = engine.hibernate_session(
-        engine_id, reason=reason, allow_shell=params.allow_shell
+        engine_id,
+        reason=reason,
+        allow_shell=params.allow_shell,
+        superseded_by=successor,
     )
     if hibernated is None:
         msg = (
@@ -1564,6 +1574,7 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
         "resumable": None
         if hibernated.hibernation is None
         else hibernated.hibernation.resumable,
+        "superseded_by": successor,
     }
     if target.session is None:
         audited_action(
@@ -1610,16 +1621,64 @@ def wake_session(ctx: AppContext, params: WakeSessionParams) -> SessionResult:
     """Start a hibernated session again: the same id, the same conversation.
 
     A live session is returned as it is — waking is idempotent, so a caller
-    that is not sure need not check first.
+    that is not sure need not check first. A session superseded by a successor,
+    or whose work item another live session holds in the same directory, is
+    refused unless `params.force`.
     """
     reason = writes.validate_reason(params.reason)
     engine = _engine(ctx)
+    if params.force and not _may_force_wake(ctx, engine):
+        raise RoleRefused("only a person or an oversight session may force a wake")
     target = _target(ctx, params.id)
-    return _wake(ctx, engine, target, reason)
+    return _wake(ctx, engine, target, reason, force=params.force)
+
+
+def _named_session(ctx: AppContext, engine_session_id: str) -> str:
+    """The ses_… id of the session linked to `engine_session_id`, or the uuid
+    itself when none is. One declared read."""
+    with ctx.declared.read() as view:
+        row = view.session_by_engine_id(engine_session_id)
+    return row.id if row is not None else engine_session_id
+
+
+_SUCCESSOR = re.compile(
+    r"(?P<head>session [0-9a-fA-F-]{36} was superseded by )(?P<uuid>[0-9a-fA-F-]{36})"
+)
+
+
+def _in_session_terms(ctx: AppContext, message: str) -> str:
+    """Say a refused wake in ses_… terms when the successor is a linked session.
+    An unlinked successor stays a uuid, and so does any other refusal."""
+    found = _SUCCESSOR.search(message)
+    if found is None:
+        return message
+    named = _named_session(ctx, found.group("uuid"))
+    if named == found.group("uuid"):
+        return message
+    return message.replace(found.group("uuid"), named, 1)
 
 
 def _wake(
-    ctx: AppContext, engine: EngineClient, target: _Target, reason: str
+    ctx: AppContext,
+    engine: EngineClient,
+    target: _Target,
+    reason: str,
+    *,
+    force: bool = False,
+) -> SessionResult:
+    try:
+        return _wake_inner(ctx, engine, target, reason, force=force)
+    except Conflict as refused:
+        raise Conflict(_in_session_terms(ctx, str(refused))) from None
+
+
+def _wake_inner(
+    ctx: AppContext,
+    engine: EngineClient,
+    target: _Target,
+    reason: str,
+    *,
+    force: bool = False,
 ) -> SessionResult:
     """Wake `target` if it is hibernated; its summary either way.
 
@@ -1651,7 +1710,7 @@ def _wake(
             )
 
     if session is None:
-        woken = engine.wake_session(engine_id)
+        woken = engine.wake_session(engine_id, force=force)
         if woken is None:
             msg = f"the engine has no session {engine_id!r}"
             raise NotFound(msg)
@@ -1661,7 +1720,11 @@ def _wake(
             reason=reason,
             entity_kind="session",
             entity_id=engine_id,
-            outcome={"engine_session_id": engine_id, "linked": False},
+            outcome={
+                "engine_session_id": engine_id,
+                "linked": False,
+                "forced": force,
+            },
             event_kind=SESSION_WOKEN_EVENT,
         )
         return _as_digest(SessionResult(session=_summarize_engine_only(woken)))
@@ -1672,7 +1735,7 @@ def _wake(
     scopes = _session_scopes(ctx)
     credential = issue(scopes)
     woken = engine.wake_session(
-        engine_id, env=_session_env(ctx, session.id, credential.secret)
+        engine_id, env=_session_env(ctx, session.id, credential.secret), force=force
     )
     if woken is None:
         msg = f"the engine has no session {engine_id!r}"
@@ -1715,6 +1778,7 @@ def _wake(
                 "engine_session_id": engine_id,
                 "conversation_id": current.conversation_id,
                 "tokens_revoked": len(revoked),
+                "forced": force,
             },
         )
 
@@ -2230,6 +2294,18 @@ SESSION_TOKEN = "session.token"
 #: template, an agent task), as opposed to `agent:session:<ses_…>` for one
 #: vogt-core started.
 ENGINE_SESSION_ACTOR_PREFIX = "agent:engine:"
+
+
+def _may_force_wake(ctx: AppContext, engine: EngineClient) -> bool:
+    """`force` overrides the handoff guard, so only a person, or a session the
+    engine has marked `oversight`, may use it. Any other agent is refused."""
+    if _answers_as_person(ctx):
+        return True
+    caller_id = _caller_engine_session_id(ctx)
+    if caller_id is None:
+        return False
+    caller = engine.get_session(caller_id)
+    return caller is not None and caller.role == "oversight"
 
 
 def _answers_as_person(ctx: AppContext) -> bool:
@@ -3146,6 +3222,7 @@ def _hibernation(hibernation: EngineHibernation | None) -> SessionHibernation | 
         trigger=hibernation.trigger,
         reason=hibernation.reason,
         resumable=hibernation.resumable,
+        superseded_by=hibernation.superseded_by,
     )
 
 

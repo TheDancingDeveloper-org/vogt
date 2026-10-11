@@ -289,7 +289,7 @@ pub async fn run_once(registry: &SessionRegistry, policy: &Policy) {
     };
     for (id, trigger, why) in choose(policy, &candidates, available) {
         match registry
-            .hibernate(id, Some(why.clone()), trigger, false)
+            .hibernate(id, Some(why.clone()), trigger, false, None)
             .await
         {
             Ok(_) => tracing::info!(session = %id, ?trigger, reason = %why, "hibernated by policy"),
@@ -321,15 +321,27 @@ pub fn spawn_boot_wake(state: Arc<AppState>) {
                     .wake(id, WakeRequest::default())
                     .await
                     .map(|_| ())
-                    .map_err(|e| e.to_string()),
-                Some(core) => wake_through_core(core, id).await,
+                    .map_err(|e| (e.to_string().starts_with("conflict:"), e.to_string())),
+                Some(core) => wake_through_core(core, id)
+                    .await
+                    .map_err(|e| (e.contains("409"), e)),
             };
             match woken {
                 Ok(()) => {
                     tracing::info!(session = %id, "woke a session pinned awake at boot");
                     prompt_resumed_overseer(&state, id);
                 }
-                Err(e) => {
+                // The handoff guard refused. Said as a refusal, not a failure,
+                // and not retried: the direct wake has no retry, and the core
+                // path stops inside wake_through_core.
+                Err((true, e)) => {
+                    tracing::info!(
+                        session = %id,
+                        error = %e,
+                        "boot wake refused; the session stays hibernated"
+                    );
+                }
+                Err((false, e)) => {
                     tracing::warn!(session = %id, error = %e, "could not wake a session pinned awake; it stays hibernated")
                 }
             }
@@ -420,6 +432,12 @@ async fn wake_through_core(core: &crate::vogt_core::VogtCore, id: Uuid) -> Resul
             .await
         {
             Ok(()) => return Ok(()),
+            // A 409 is the handoff guard refusing, and it will refuse the same
+            // way on every retry. Stop at once and say it was refused.
+            Err(e) if e.contains("409") => {
+                tracing::info!(session = %id, error = %e, "boot wake refused; not retrying");
+                return Err(e);
+            }
             Err(e) => last = e,
         }
         tokio::time::sleep(delay).await;
