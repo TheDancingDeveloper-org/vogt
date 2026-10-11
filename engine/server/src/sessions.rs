@@ -1566,6 +1566,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         template: record.template.clone(),
         permission_mode: record.permission_mode.clone(),
         stop: None,
+        economics: None,
     })
 }
 

@@ -22,6 +22,7 @@ pub mod claude_config;
 pub mod client_diag;
 pub mod config;
 pub mod core_auth;
+pub mod economics;
 pub mod error;
 pub mod events;
 pub mod files;

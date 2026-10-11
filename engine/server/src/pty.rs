@@ -378,6 +378,7 @@ impl Session {
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
             stop: self.stop.lock().clone(),
+            economics: None,
         }
     }
 

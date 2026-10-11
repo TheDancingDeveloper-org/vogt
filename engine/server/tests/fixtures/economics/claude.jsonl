@@ -1,0 +1,9 @@
+{"type":"user","message":{"role":"user","content":"go"}}
+{"type":"assistant","timestamp":"2026-10-11T01:00:00Z","message":{"id":"msg_1","usage":{"input_tokens":100,"cache_read_input_tokens":50,"cache_creation_input_tokens":25,"output_tokens":10},"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/a.py"}}]}}
+{"type":"assistant","timestamp":"2026-10-11T01:00:01Z","message":{"id":"msg_1","usage":{"input_tokens":175,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":10},"content":[{"type":"text","text":"reading"}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","content":"contents"}]}}
+{"type":"assistant","timestamp":"2026-10-11T01:00:10Z","message":{"id":"msg_1","usage":{"input_tokens":175,"output_tokens":11},"content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"/a.py"}}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"contents"}]}}
+{"type":"system","isCompactSummary":true}
+{"type":"assistant","timestamp":"2026-10-11T01:00:30Z","message":{"id":"msg_2","usage":{"input_tokens":80,"output_tokens":5},"content":[{"type":"tool_result","name":"Bash","content":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}]}}
+{"type":"not json-ish"}

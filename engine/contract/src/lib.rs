@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -242,6 +244,38 @@ pub struct SessionSummary {
     /// and off Linux.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<SessionResources>,
+    /// What the session's transcript has cost so far (WI-1245 / C16), as last
+    /// read by the economics tailer. Absent until the first reading, and for
+    /// a session whose conversation the engine does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economics: Option<SessionEconomics>,
+}
+
+/// Wall-clock gaps between consecutive assistant turns, in milliseconds.
+/// Empty (`count` 0) when fewer than two turns carried a timestamp.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnTiming {
+    pub count: i64,
+    pub max_ms: i64,
+    pub mean_ms: i64,
+}
+
+/// The economics of one session's transcript. The same numbers
+/// `vogt.core.session_economics.meter` returns: every field is present even
+/// when the transcript said nothing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionEconomics {
+    pub turns: i64,
+    pub context_tokens: i64,
+    pub peak_context_tokens: i64,
+    pub compactions: i64,
+    /// Tool name to the bytes of result the model was shown.
+    pub tool_result_bytes: BTreeMap<String, i64>,
+    pub reads_repeated: i64,
+    pub wall_clock: TurnTiming,
+    pub output_tokens: i64,
+    /// True when context came from recorded usage, false when it was estimated.
+    pub usage_measured: bool,
 }
 
 /// One sample of a session's process tree: the PTY child and every process
