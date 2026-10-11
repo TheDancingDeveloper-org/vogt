@@ -344,7 +344,7 @@ fn py_str_len(text: &str) -> usize {
         .chars()
         .map(|c| match c {
             '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
-            c if (c as u32) < 0x20 => 6,
+            c if (c as u32) < 0x20 || c == '\u{7f}' => 6,
             c if c.is_ascii() => 1,
             c if (c as u32) > 0xFFFF => 12,
             _ => 6,
@@ -549,5 +549,20 @@ mod tests {
         assert_eq!(round_half_even(7, 2), 4);
         assert_eq!(round_half_even(10, 4), 2);
         assert_eq!(round_half_even(11, 4), 3);
+    }
+    /// A 1.001 s gap and a DEL in a tool input (tests/test_session_economics.py
+    /// asserts the same numbers).
+    #[test]
+    fn gap_fixture_matches_python() {
+        let reading = feed(
+            "claude",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/fixtures/economics/claude_gap.jsonl"
+            )),
+        );
+        assert_eq!(reading.wall_clock.max_ms, 1001);
+        assert_eq!(reading.wall_clock.mean_ms, 1001);
+        assert_eq!(reading.tool_result_bytes.get("Grep"), Some(&71));
     }
 }
