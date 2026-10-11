@@ -552,6 +552,7 @@ COPY engine/deploy/readonly-mcp.sh /usr/local/bin/vogt-readonly-mcp
 COPY engine/deploy/klaudia-mcp.sh /usr/local/bin/vogt-klaudia-mcp
 COPY engine/deploy/git-forgejo.sh /usr/local/bin/git-forgejo
 COPY engine/deploy/claude-session-hook.sh /usr/local/bin/vogt-claude-session-hook
+COPY engine/deploy/cargo-cache.sh /usr/local/bin/vogt-cargo-cache
 RUN chmod +x \
     /usr/local/bin/vogt-lifecycle \
     /usr/local/bin/vogt-entrypoint \
@@ -565,6 +566,7 @@ RUN chmod +x \
     /usr/local/bin/vogt-readonly-mcp \
     /usr/local/bin/vogt-klaudia-mcp \
     /usr/local/bin/vogt-claude-session-hook \
+    /usr/local/bin/vogt-cargo-cache \
     /usr/local/bin/git-forgejo
 
 # One port. vogt-core listens on loopback inside this namespace and is not
