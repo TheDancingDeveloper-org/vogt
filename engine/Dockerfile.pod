@@ -238,10 +238,11 @@ RUN userdel -r ubuntu 2>/dev/null || true \
 # sccache) and every cross-compile target; only whatever rustup the home volume
 # happened to hold was actually reachable.
 #
-# Consequence to keep in mind: the crate registry cache lives at
-# /opt/rust/cargo/registry inside the image rather than on the persisted home
-# volume, so crates re-download after an image redeploy. An sccache backend,
-# where an operator configures one, still covers recompilation.
+# The crate registry and git caches are baked at /opt/rust/cargo/{registry,git}
+# here, but the runtime entrypoint moves them onto the persisted home volume
+# (engine/deploy/cargo-cache.sh, WI-1256), so a redeploy no longer resets them.
+# An sccache backend, where an operator configures one, still covers
+# recompilation.
 RUN mkdir -p /opt/rust && chown -R sprooty:sprooty /opt/rust
 
 USER sprooty
