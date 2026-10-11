@@ -10682,10 +10682,15 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
             printed.contains("arg=[--dangerously-skip-permissions]"),
             "{printed:?}"
         );
-        assert!(
-            printed.contains(&format!("arg=[--settings={}]", policy.display())),
-            "{printed:?}"
-        );
+        if id == &claude_id {
+            assert!(
+                printed.contains(&format!("arg=[--settings={}]", policy.display())),
+                "{printed:?}"
+            );
+        } else {
+            // Klaudia has no `--settings` flag and refuses to start with one.
+            assert!(!printed.contains("arg=[--settings="), "{printed:?}");
+        }
         assert!(
             printed.contains("arg=[--model]\r\narg=[test-model]"),
             "{printed:?}"
@@ -10752,10 +10757,17 @@ async fn a_woken_session_keeps_the_posture_it_was_started_with() {
             tail.contains("--dangerously-skip-permissions"),
             "bypass is neither dropped nor widened: {tail:?}"
         );
-        assert!(
-            tail.contains(&format!("arg=[--settings={}]", policy.display())),
-            "the recorded policy, not the deployment's current one: {tail:?}"
-        );
+        if role == "oversight" {
+            assert!(
+                tail.contains(&format!("arg=[--settings={}]", policy.display())),
+                "the recorded policy, not the deployment's current one: {tail:?}"
+            );
+        } else {
+            assert!(
+                !tail.contains("arg=[--settings="),
+                "klaudia never gets --settings: {tail:?}"
+            );
+        }
         assert!(
             !tail.contains(&format!("arg=[--settings={}]", replacement.display())),
             "the replacement policy must not be applied: {tail:?}"

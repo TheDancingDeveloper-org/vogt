@@ -374,10 +374,15 @@ impl SessionRegistry {
                 // deployment's settings may have changed since, and reading
                 // them again would silently move a bypass (or a default)
                 // session onto a different policy (WI-1250). A record from
-                // before the field existed has none, and falls back.
-                settings_file: recorded
-                    .and_then(|record| record.settings_file.as_deref())
-                    .or(self.cfg.agent_onboarding.settings_file.as_deref()),
+                // before the field existed has none, and falls back; so does
+                // one whose file has since been removed, because a missing
+                // `--settings` file stops the agent and no settings at all
+                // would be a silent downgrade.
+                settings_file: wake_settings_file(
+                    id,
+                    recorded.and_then(|record| record.settings_file.as_deref()),
+                    self.cfg.agent_onboarding.settings_file.as_deref(),
+                ),
                 add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
                 opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
             },
@@ -1623,9 +1628,51 @@ fn normalize_session_name(name: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// The settings file a launch hands the agent (WI-1250). A wake replays the
+/// one recorded at the first start, so a later change to the deployment's
+/// config does not quietly move the session onto another policy. A record
+/// with none, or whose file has since been removed, falls back to the
+/// deployment's: a missing `--settings` file stops the agent, and no settings
+/// at all would be a silent downgrade.
+fn wake_settings_file<'a>(
+    id: Uuid,
+    recorded: Option<&'a std::path::Path>,
+    deployment: Option<&'a std::path::Path>,
+) -> Option<&'a std::path::Path> {
+    match recorded {
+        Some(path) if path.is_file() => Some(path),
+        Some(path) => {
+            tracing::warn!(
+                session = %id,
+                path = %path.display(),
+                "recorded settings file is gone; waking with the deployment's"
+            );
+            deployment
+        }
+        None => deployment,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_session_name;
+
+    #[test]
+    fn a_wake_replays_the_recorded_settings_unless_the_file_is_gone() {
+        let dir = std::env::temp_dir().join(format!("vogt-wake-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let recorded = dir.join("recorded.json");
+        let deployment = dir.join("deployment.json");
+        std::fs::write(&recorded, "{}").unwrap();
+        std::fs::write(&deployment, "{}").unwrap();
+        let id = uuid::Uuid::nil();
+        let wake = |r| super::wake_settings_file(id, r, Some(deployment.as_path()));
+        assert_eq!(wake(Some(recorded.as_path())), Some(recorded.as_path()));
+        assert_eq!(wake(None), Some(deployment.as_path()));
+        std::fs::remove_file(&recorded).unwrap();
+        assert_eq!(wake(Some(recorded.as_path())), Some(deployment.as_path()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_engine_url_is_its_bind_address_with_wildcards_on_loopback() {
