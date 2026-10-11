@@ -2077,6 +2077,25 @@ textarea {
   color: var(--fg-muted);
   border-color: color-mix(in srgb, var(--fg-muted) 35%, transparent);
 }
+/* A non-default permission posture (WI-1250). Bypass is person-granted; the
+   chip is how a row shows it survived a wake, not only a tooltip. */
+.session-posture {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 500;
+  vertical-align: 1px;
+  color: var(--fg-muted);
+  border: 1px solid color-mix(in srgb, var(--fg-muted) 35%, transparent);
+  white-space: nowrap;
+}
+.session-posture--bypass {
+  color: var(--activity-errored);
+  border-color: color-mix(in srgb, var(--activity-errored) 50%, transparent);
+  font-weight: 600;
+}
 .wid-worked-by {
   margin: 4px 0 0;
   font-size: 12px;

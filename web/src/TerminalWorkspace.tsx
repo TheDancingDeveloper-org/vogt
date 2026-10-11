@@ -79,6 +79,7 @@ import { autoSplitName } from "./terminalNaming";
 import { terminalPaneParked } from "./tabLifecycle";
 import {
   activityLabel,
+  permissionPostureLabel,
   sessionStateWord,
   sortSessionsByAttention,
 } from "./sessionRowModel";
@@ -396,6 +397,16 @@ const PaneView: Component<Omit<LayoutNodeProps, "node"> & { node: PaneNode }> = 
               )}
             </For>
           </select>
+          <Show when={permissionPostureLabel(paneSession()?.permission_mode)}>
+            {(label) => (
+              <span
+                class={`session-posture${paneSession()?.permission_mode === "bypass" ? " session-posture--bypass" : ""}`}
+                title={paneSession()?.permission_mode === "bypass" ? "Started with no permission checks" : "Edits auto-accepted"}
+              >
+                {label()}
+              </span>
+            )}
+          </Show>
         </div>
       </Show>
       <Show when={props.node.sessionId} keyed>

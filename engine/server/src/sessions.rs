@@ -357,6 +357,10 @@ impl SessionRegistry {
         // to undo. An agent CLI started with a brief is also given its first
         // prompt here — a pointer to the file, so it begins the brief's task
         // instead of opening idle.
+        let recorded = match &creating {
+            Creating::Wake(record) => Some(record),
+            Creating::Fresh(_) => None,
+        };
         let launch = agent_cli::launch(
             spec.command.as_deref(),
             &agent_cli::LaunchRequest {
@@ -366,7 +370,15 @@ impl SessionRegistry {
                 brief_file: brief_path.as_deref(),
                 session_id: Some(id),
                 permission_mode: spec.permission_mode.as_deref(),
-                settings_file: self.cfg.agent_onboarding.settings_file.as_deref(),
+                // A wake replays the posture recorded at the first start. The
+                // deployment's settings may have changed since, and reading
+                // them again would silently move a bypass (or a default)
+                // session onto a different policy (WI-1250). A record from
+                // before the field existed has none, and falls back.
+                settings_file: recorded
+                    .and_then(|record| record.settings_file.as_deref())
+                    .or(self.cfg.agent_onboarding.settings_file.as_deref()),
+                add_dirs: recorded.map(|r| r.add_dirs.as_slice()).unwrap_or(&[]),
                 opencode_config: self.cfg.agent_onboarding.opencode_config.as_deref(),
             },
         )?;
@@ -570,6 +582,12 @@ impl SessionRegistry {
                 record.model = spec.model.clone();
                 record.effort = spec.effort.clone();
                 record.permission_mode = posture.clone();
+                record.settings_file = self.cfg.agent_onboarding.settings_file.clone();
+                record.add_dirs = prompt_file
+                    .as_ref()
+                    .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                    .into_iter()
+                    .collect();
                 record.autopilot = spec.autopilot;
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();

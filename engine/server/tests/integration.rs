@@ -10584,6 +10584,18 @@ async fn a_permission_posture_reaches_the_agent_and_survives_a_wake() {
         .send()
         .await
         .unwrap();
+    // The record keeps the settings file from the first start. A wake reads
+    // that, not whatever the deployment's config says now (WI-1250).
+    let record_path = tmp
+        .path()
+        .join("state")
+        .join("sessions")
+        .join(format!("{id}.json"));
+    let stored = std::fs::read_to_string(&record_path).unwrap();
+    assert!(
+        stored.contains(&format!("\"{}\"", policy.display())),
+        "the original policy is what the record keeps: {stored}"
+    );
     client
         .post(format!("{base}/api/sessions/{id}/wake"))
         .send()
@@ -10596,6 +10608,10 @@ async fn a_permission_posture_reaches_the_agent_and_survives_a_wake() {
         woken.contains("--dangerously-skip-permissions"),
         "kept on wake: {woken:?}"
     );
+    assert!(
+        woken.contains(&format!("arg=[--settings={}]", policy.display())),
+        "the settings file recorded at start: {woken:?}"
+    );
 
     let refused = client
         .post(format!("{base}/api/sessions"))
@@ -10604,6 +10620,202 @@ async fn a_permission_posture_reaches_the_agent_and_survives_a_wake() {
         .await
         .unwrap();
     assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+}
+
+/// WI-1250: hibernate then wake keeps the posture the session was started
+/// with, even when a later boot of the same state points the deployment at a
+/// different settings file. Covers Claude Code and Klaudia, a model, the
+/// brief's extra directory, and an oversight bypass that must neither escalate
+/// nor drop back to the default. A record written before the posture fields
+/// existed still wakes.
+#[tokio::test]
+async fn a_woken_session_keeps_the_posture_it_was_started_with() {
+    let (tmp, mut cfg, claude) = hibernation_sandbox();
+    let bin = tmp.path().join("bin");
+    let klaudia = bin.join("klaudia");
+    std::fs::copy(&claude, &klaudia).unwrap();
+    std::fs::set_permissions(&klaudia, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let policy = tmp.path().join("policy.json");
+    let replacement = tmp.path().join("replacement.json");
+    std::fs::write(&policy, br#"{"autoMode":{"allow":["$defaults"]}}"#).unwrap();
+    std::fs::write(&replacement, br#"{"autoMode":{"allow":["$defaults"]}}"#).unwrap();
+    cfg.agent_onboarding.settings_file = Some(policy.clone());
+    let state_dir = cfg.state_dir.clone();
+    let (base, _h) = boot_with_config(cfg.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let start = |name: &str, command: &std::path::Path, role: &str| {
+        let client = client.clone();
+        let base = base.clone();
+        let command = command.to_path_buf();
+        let name = name.to_string();
+        let role = role.to_string();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({
+                    "name": name,
+                    "command": [command.to_string_lossy()],
+                    "permission_mode": "bypass",
+                    "model": "test-model",
+                    "role": role,
+                    "prompt": "## Task\n\nKeep the posture.\n",
+                }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let claude_id = start("claude oversight", &claude, "oversight").await;
+    let klaudia_id = start("klaudia worker", &klaudia, "worker").await;
+
+    for id in [&claude_id, &klaudia_id] {
+        let printed = live_output_containing(&client, &base, id, &["helper=["]).await;
+        assert!(
+            printed.contains("arg=[--dangerously-skip-permissions]"),
+            "{printed:?}"
+        );
+        assert!(
+            printed.contains(&format!("arg=[--settings={}]", policy.display())),
+            "{printed:?}"
+        );
+        assert!(
+            printed.contains("arg=[--model]\r\narg=[test-model]"),
+            "{printed:?}"
+        );
+        assert!(
+            printed.contains("arg=[--add-dir="),
+            "the brief's directory is on the first launch: {printed:?}"
+        );
+        client
+            .post(format!("{base}/api/sessions/{id}/hibernate"))
+            .send()
+            .await
+            .unwrap();
+    }
+    drop(_h);
+
+    // A later boot of the same records, with the deployment now pointing at a
+    // different policy. The woken argv must still be the original one.
+    let mut later = cfg;
+    later.agent_onboarding.settings_file = Some(replacement.clone());
+    let (base, _h) = boot_with_config(later.clone()).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let brief_dir = state_dir.join("agent-task-prompts").join("sessions");
+    for (id, role) in [(&claude_id, "oversight"), (&klaudia_id, "worker")] {
+        let stored =
+            std::fs::read_to_string(state_dir.join("sessions").join(format!("{id}.json"))).unwrap();
+        assert!(
+            stored.contains(&format!("\"{}\"", policy.display())),
+            "the record keeps the original policy: {stored}"
+        );
+        assert!(
+            !stored.contains(&format!("\"{}\"", replacement.display())),
+            "the replacement never lands on the record: {stored}"
+        );
+        let woken = client
+            .post(format!("{base}/api/sessions/{id}/wake"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(woken.status(), StatusCode::OK);
+        let woken: Value = woken.json().await.unwrap();
+        assert_eq!(woken["permission_mode"], "bypass", "{woken}");
+        // A worker's role is omitted from the summary (`is_worker`); only an
+        // oversight role is present, and a wake must not drop it.
+        if role == "oversight" {
+            assert_eq!(woken["role"], role, "{woken}");
+        } else {
+            assert!(woken["role"].is_null(), "{woken}");
+        }
+        let printed =
+            live_output_containing(&client, &base, id, &["arg=[--resume]", "helper=["]).await;
+        // `--model` is written before `--resume` (agent_cli::launch), so it is
+        // not in the tail that starts at the resume flag. The posture flags
+        // that follow `--resume` are what a wake must not quietly change.
+        assert!(
+            printed.contains("arg=[--model]\r\narg=[test-model]"),
+            "the recorded model is re-applied on the wake: {printed:?}"
+        );
+        let tail = &printed[printed.rfind("arg=[--resume]").unwrap()..];
+        assert!(
+            tail.contains("--dangerously-skip-permissions"),
+            "bypass is neither dropped nor widened: {tail:?}"
+        );
+        assert!(
+            tail.contains(&format!("arg=[--settings={}]", policy.display())),
+            "the recorded policy, not the deployment's current one: {tail:?}"
+        );
+        assert!(
+            !tail.contains(&format!("arg=[--settings={}]", replacement.display())),
+            "the replacement policy must not be applied: {tail:?}"
+        );
+        assert!(
+            tail.contains(&format!("arg=[--add-dir={}]", brief_dir.display())),
+            "the recorded directory, even though a wake has no new brief: {tail:?}"
+        );
+    }
+
+    // A record from before the posture fields existed still wakes, and adds
+    // no directory of its own. Both sessions are hibernated first — the second
+    // engine is still running them — and the fields are stripped from the
+    // record before the next boot. A wake of a record that still has them
+    // would replay them, and hibernating afterwards would write those back.
+    client
+        .post(format!("{base}/api/sessions/{claude_id}/hibernate"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .post(format!("{base}/api/sessions/{klaudia_id}/hibernate"))
+        .send()
+        .await
+        .unwrap();
+    let legacy_id = claude_id.clone();
+    drop(_h);
+    let path = state_dir.join("sessions").join(format!("{legacy_id}.json"));
+    let mut record: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    record.as_object_mut().unwrap().remove("settings_file");
+    record.as_object_mut().unwrap().remove("add_dirs");
+    std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap()).unwrap();
+    let mut legacy_cfg = later;
+    legacy_cfg.agent_onboarding.settings_file = Some(replacement.clone());
+    let (base, _h) = boot_with_config(legacy_cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let woken = client
+        .post(format!("{base}/api/sessions/{legacy_id}/wake"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::OK, "{woken:?}");
+    let printed =
+        live_output_containing(&client, &base, &legacy_id, &["arg=[--resume]", "helper=["]).await;
+    let tail = &printed[printed.rfind("arg=[--resume]").unwrap()..];
+    assert!(
+        tail.contains(&format!("arg=[--settings={}]", replacement.display())),
+        "an old record falls back to the deployment's current settings: {tail:?}"
+    );
+    assert!(
+        !tail.contains("arg=[--add-dir="),
+        "an old record adds no directory: {tail:?}"
+    );
+    assert!(
+        tail.contains("--dangerously-skip-permissions"),
+        "the recorded bypass still holds: {tail:?}"
+    );
 }
 
 /// WI-913: a session stopped on request reads `stopped` with who and why;

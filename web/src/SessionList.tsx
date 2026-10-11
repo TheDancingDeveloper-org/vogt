@@ -16,6 +16,7 @@ import {
   activityLabel,
   isOversight,
   sessionStateWord,
+  permissionPostureLabel,
   sessionRuntimeHint,
   sortSessionsOversightFirst,
 } from "./sessionRowModel";
@@ -63,6 +64,16 @@ export const SessionList: Component<Props> = (props) => {
                     <Show when={session.work_item}>
                       {(ref) => (
                         <span class="session-work-chip">{ref()}</span>
+                      )}
+                    </Show>
+                    <Show when={permissionPostureLabel(session.permission_mode)}>
+                      {(label) => (
+                        <span
+                          class={`session-posture${session.permission_mode === "bypass" ? " session-posture--bypass" : ""}`}
+                          title={session.permission_mode === "bypass" ? "Started with no permission checks" : "Edits auto-accepted"}
+                        >
+                          {label()}
+                        </span>
                       )}
                     </Show>
                   </span>
