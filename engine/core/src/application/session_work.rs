@@ -13,10 +13,12 @@
 
 use serde_json::{json, Value};
 
+use crate::adapters::engine::EngineSession;
 use crate::application::context::{write_of, AppContext, Built};
+use crate::application::services::sessions::SessionSummary;
 use crate::application::services::{now_of, resolve_session};
 use crate::application::writes::{audited_action, audited_write, WriteOutcome};
-use crate::core::{Clock, IdFactory};
+use crate::core::{Clock, CodingSession, IdFactory};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
@@ -27,7 +29,10 @@ const UNBOUND: &str = "session.work_unbound";
 pub fn bind_work_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     let reason = text(&params, "reason")
         .ok_or_else(|| VogtError::InvalidRequest("session.bind_work needs a reason".to_string()))?;
-    let id = text(&params, "id");
+    // Do not trim `id` here. Python treats a whitespace-only id as given
+    // (`params.id or own_session`), and the shared resolver is what then
+    // refuses it; trimming first would fall through to the own-session path.
+    let id = params.get("id").and_then(Value::as_str).map(str::to_string);
     // `work_item` distinguishes absent from null only in that both unbind:
     // Python treats a missing value and an explicit null the same.
     let work_item = match params.get("work_item") {
@@ -54,7 +59,7 @@ fn bind<C: Clock + 'static, I: IdFactory + 'static>(
     reason: &str,
 ) -> Result<Value, VogtError> {
     let reason = crate::application::writes::validate_reason(reason)?;
-    let reference = match id.map(str::trim).filter(|id| !id.is_empty()) {
+    let reference = match id {
         Some(id) => id.to_string(),
         None => own_session(ctx)?,
     };
@@ -119,7 +124,22 @@ fn bind<C: Clock + 'static, I: IdFactory + 'static>(
             }),
             entity_kind: "session".to_string(),
             entity_id: updated.id.clone(),
-            payload: json!({ "previous_work_item_id": current.work_item_id }),
+            // The post-write row, plus the item it was bound to before this
+            // write. `work_item_id` inside the payload is the new one.
+            payload: {
+                let mut payload = audited_payload(&updated);
+                payload
+                    .as_object_mut()
+                    .expect("a payload is an object")
+                    .insert(
+                        "previous_work_item_id".to_string(),
+                        match &current.work_item_id {
+                            Some(id) => Value::String(id.clone()),
+                            None => Value::Null,
+                        },
+                    );
+                payload
+            },
             event_kind: if item_ref.is_none() { UNBOUND } else { BOUND }.to_string(),
             summary: json!({
                 "engine_session_id": updated.engine_session_id,
@@ -133,15 +153,26 @@ fn bind<C: Clock + 'static, I: IdFactory + 'static>(
 
     // After the declared write, never inside it: the row is the truth and the
     // engine's label copies it. A label the engine cannot take is reported.
-    let (label, detail) = match engine_label(ctx, &engine_id, item_ref.as_deref()) {
+    let (label, detail, live) = match engine_label(ctx, &engine_id, item_ref.as_deref()) {
         Ok(outcome) => outcome,
-        Err(error) => ("unavailable".to_string(), Some(error.to_string())),
+        Err(error) => ("unavailable".to_string(), Some(error.to_string()), None),
     };
-    let mut result = recorded;
-    result["engine_label"] = Value::String(label);
-    result["engine"] = detail.map_or(Value::Null, Value::String);
-    result["session"] = json!({ "id": session_id, "engine_session_id": engine_id });
-    Ok(result)
+    // Re-read after the commit: the summary shows the row as written, with the
+    // engine's live fields over it. `alive` stays null when the engine could
+    // not be asked, which is a different fact from "not running".
+    let updated = ctx
+        .declared
+        .read()?
+        .session_by_id(&session_id)?
+        .expect("written just now");
+    let summary = summarize_asked(ctx, &updated, live.as_ref(), label != "unavailable")?;
+    Ok(json!({
+        "session": summary,
+        "previous_work_item": recorded["previous_work_item"],
+        "project_mismatch": recorded["project_mismatch"],
+        "engine_label": label,
+        "engine": detail,
+    }))
 }
 
 /// A session the GUI started has no row, so the engine's label is the binding.
@@ -189,8 +220,12 @@ fn bind_unlinked<C: Clock + 'static, I: IdFactory + 'static>(
         if item.is_none() { UNBOUND } else { BOUND },
         Some(&summary),
     )?;
+    let mut session = unlinked_summary(ctx, &updated)?;
+    // The summary shows the label as it stands after the write, not the
+    // engine's copy of the item it was bound to before.
+    session.work_item = item_ref;
     Ok(json!({
-        "session": { "id": updated.id, "engine_session_id": engine_id, "linked": false },
+        "session": session,
         "previous_work_item": previous,
         "project_mismatch": false,
         "engine_label": "written",
@@ -198,21 +233,24 @@ fn bind_unlinked<C: Clock + 'static, I: IdFactory + 'static>(
     }))
 }
 
-/// Copy the binding onto the engine's label. `Ok` carries the label state and,
-/// when it was not written, what the engine said.
+/// Copy the binding onto the engine's label. `Ok` carries the label state,
+/// what the engine said when it was not written, and the live session the
+/// summary merges — falling back to a plain read when the label write itself
+/// found nothing, so the summary still has live fields.
 fn engine_label<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     engine_id: &str,
     item_ref: Option<&str>,
-) -> Result<(String, Option<String>), VogtError> {
+) -> Result<(String, Option<String>, Option<EngineSession>), VogtError> {
     let Some(engine) = ctx.engine.as_ref() else {
         return Ok((
             "unavailable".to_string(),
             Some("no session engine is configured (VOGT_ENGINE_URL is unset)".to_string()),
+            None,
         ));
     };
     match engine.set_work_item(engine_id, item_ref)? {
-        Some(_) => Ok(("written".to_string(), None)),
+        Some(live) => Ok(("written".to_string(), None, Some(live))),
         None => Ok((
             "not_found".to_string(),
             Some(
@@ -220,8 +258,193 @@ fn engine_label<C: Clock, I: IdFactory>(
                  recorded in Vogt"
                     .to_string(),
             ),
+            engine.get_session(engine_id)?,
         )),
     }
+}
+
+/// What the audit row records about a session, plus nothing about the
+/// credential. The same shape `sessions` writes, duplicated because that copy
+/// is private to its module.
+fn audited_payload(session: &CodingSession) -> Value {
+    json!({
+        "id": session.id,
+        "engine_session_id": session.engine_session_id,
+        "project_id": session.project_id,
+        "work_item_id": session.work_item_id,
+        "actor_id": session.actor_id,
+        "cwd": session.cwd,
+        "template": session.template,
+        "model": session.model,
+        "effort": session.effort,
+        "started_at": session.started_at.to_iso(),
+        "stopped_at": session.stopped_at.map(|moment| moment.to_iso()),
+    })
+}
+
+/// One linked session as the list shows it. `asked` is whether the engine was
+/// reached: `alive` is its answer then, and null when it could not be asked.
+fn summarize_asked<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    session: &CodingSession,
+    live: Option<&EngineSession>,
+    asked: bool,
+) -> Result<SessionSummary, VogtError> {
+    let view = ctx.declared.read()?;
+    let project = view.project_by_id(&session.project_id)?;
+    let work_item = match session.work_item_id.as_deref() {
+        Some(id) => view.work_item_by_id(id)?,
+        None => None,
+    };
+    let actor = view.actor_by_id(&session.actor_id)?;
+    let mut summary = SessionSummary {
+        id: session.id.clone(),
+        engine_session_id: session.engine_session_id.clone(),
+        linked: true,
+        project: project.map(|project| project.slug),
+        work_item: work_item.as_ref().map(|item| item.reference.clone()),
+        work_item_title: work_item.as_ref().map(|item| item.title.clone()),
+        work_item_state: work_item.map(|item| item.state.to_string()),
+        actor: Some(
+            actor
+                .map(|actor| actor.identity_ref)
+                .unwrap_or(session.actor_id.clone()),
+        ),
+        cwd: session.cwd.clone(),
+        template: session.template.clone(),
+        model: session.model.clone(),
+        effort: session.effort.clone(),
+        reason: Some(session.reason.clone()),
+        started_at: Some(session.started_at),
+        stopped_at: session.stopped_at,
+        activity: None,
+        alive: asked.then(|| live.is_some_and(|live| live.alive)),
+        turn_started_at: None,
+        last_output_at: None,
+        approval: None,
+        blocked: None,
+        hibernation: None,
+        keep_awake: false,
+        autopilot: false,
+        autopilot_nudges: 0,
+        role: "worker".to_string(),
+        conversation_id: None,
+        resources: None,
+        permission_mode: None,
+        stopped_by: None,
+        stop_reason: None,
+    };
+    if let Some(live) = live {
+        apply_live(&mut summary, live);
+    }
+    Ok(summary)
+}
+
+/// A session the engine has and Vogt never recorded: the engine's id in both
+/// id fields, and the item's title and state when its ref resolves.
+fn unlinked_summary<C: Clock, I: IdFactory>(
+    ctx: &AppContext<C, I>,
+    session: &EngineSession,
+) -> Result<SessionSummary, VogtError> {
+    let item = match session.work_item.as_deref() {
+        Some(reference) => ctx.declared.read()?.work_item_by_ref(reference)?,
+        None => None,
+    };
+    let mut summary = SessionSummary {
+        id: session.id.clone(),
+        engine_session_id: session.id.clone(),
+        linked: false,
+        project: None,
+        work_item: session.work_item.clone(),
+        work_item_title: item.as_ref().map(|item| item.title.clone()),
+        work_item_state: item.map(|item| item.state.to_string()),
+        actor: None,
+        cwd: session.cwd.clone(),
+        template: None,
+        model: None,
+        effort: None,
+        reason: None,
+        started_at: session
+            .created_at
+            .as_deref()
+            .and_then(|text| crate::core::from_iso(text).ok()),
+        stopped_at: None,
+        activity: None,
+        alive: Some(session.alive),
+        turn_started_at: None,
+        last_output_at: None,
+        approval: None,
+        blocked: None,
+        hibernation: None,
+        keep_awake: false,
+        autopilot: false,
+        autopilot_nudges: 0,
+        role: "worker".to_string(),
+        conversation_id: None,
+        resources: None,
+        permission_mode: None,
+        stopped_by: None,
+        stop_reason: None,
+    };
+    apply_live(&mut summary, session);
+    Ok(summary)
+}
+
+/// Copy the engine's live fields onto a summary.
+fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
+    use crate::application::services::sessions::{
+        SessionApproval, SessionApprovalOption, SessionBlocked, SessionHibernation,
+        SessionResources,
+    };
+    summary.activity = Some(live.activity.clone());
+    summary.turn_started_at = live.turn_started_at.clone();
+    summary.last_output_at = live.last_output_at.clone();
+    summary.approval = live.approval.as_ref().map(|approval| SessionApproval {
+        question: approval.question.clone(),
+        command_excerpt: approval.command_excerpt.clone(),
+        detected_at: approval.detected_at.clone(),
+        deadline_seconds: approval.deadline_seconds,
+        deadline_at: approval.deadline_at.clone(),
+        kind: approval.kind.clone(),
+        options: approval
+            .options
+            .iter()
+            .map(|(number, label, selected)| SessionApprovalOption {
+                number: *number,
+                label: label.clone(),
+                selected: *selected,
+            })
+            .collect(),
+    });
+    summary.blocked = live.blocked.as_ref().map(|blocked| SessionBlocked {
+        reason: blocked.reason.clone(),
+        items: blocked.items.clone(),
+        since: blocked.since.clone(),
+    });
+    summary.hibernation = live
+        .hibernation
+        .as_ref()
+        .map(|hibernation| SessionHibernation {
+            at: hibernation.at.clone(),
+            trigger: hibernation.trigger.clone(),
+            resumable: hibernation.resumable,
+            reason: hibernation.reason.clone(),
+        });
+    summary.keep_awake = live.keep_awake;
+    summary.autopilot = live.autopilot;
+    summary.autopilot_nudges = live.autopilot_nudges;
+    summary.role = live.role.clone();
+    summary.conversation_id = live.conversation_id.clone();
+    summary.resources = live.resources.as_ref().map(|resources| SessionResources {
+        rss_bytes: resources.rss_bytes,
+        cpu_pct: resources.cpu_pct,
+        processes: resources.processes,
+        sampled_at: resources.sampled_at.clone(),
+        over_threshold: resources.over_threshold,
+    });
+    summary.permission_mode = live.permission_mode.clone();
+    summary.stopped_by = live.stopped_by.clone();
+    summary.stop_reason = live.stop_reason.clone();
 }
 
 fn engine_of<C: Clock, I: IdFactory>(
@@ -315,7 +538,7 @@ mod tests {
         TrustState, WorkItem, WorkKind,
     };
     use crate::errors::VogtError;
-    use crate::storage::interface::WriteTxn;
+    use crate::storage::interface::{DeclaredStore, ReadView, WriteTxn};
 
     fn fresh(name: &str) -> crate::application::context::Built {
         let dir = std::env::temp_dir().join(format!("vogt-bind-{name}-{}", std::process::id()));
@@ -436,6 +659,53 @@ mod tests {
         assert_eq!(bound["previous_work_item"], json!(null));
         assert_eq!(bound["project_mismatch"], json!(false));
         assert_eq!(bound["engine_label"], "written");
+        assert_eq!(bound["session"]["id"], "ses_0001");
+        assert_eq!(bound["session"]["linked"], json!(true));
+        assert_eq!(bound["session"]["project"], "proj");
+        assert_eq!(bound["session"]["work_item"], "WI-7");
+        assert_eq!(bound["session"]["work_item_title"], "The thing");
+        assert_eq!(bound["session"]["actor"], "local:ada");
+        assert_eq!(bound["session"]["alive"], json!(true));
+        assert_eq!(
+            bound.as_object().unwrap().keys().next().unwrap(),
+            "session",
+            "the summary leads the answer"
+        );
+        let ledger = crate::with_ctx!(&built, |ctx| {
+            ctx.declared
+                .read()
+                .unwrap()
+                .list_audit(&crate::storage::interface::AuditQuery {
+                    limit: 20,
+                    offset: 0,
+                    actor_id: None,
+                    operation: Some("session.bind_work".to_string()),
+                    entity_id: None,
+                    project_id: None,
+                    since: None,
+                    until: None,
+                })
+        })
+        .unwrap();
+        let row = ledger
+            .iter()
+            .find(|row| row.reason == "working it")
+            .unwrap();
+        let digest = crate::decisions::digest_of(&json!({
+            "actor_id": row.actor_id,
+            "cwd": "/work",
+            "effort": null,
+            "engine_session_id": "eng-1",
+            "id": "ses_0001",
+            "model": null,
+            "previous_work_item_id": null,
+            "project_id": "prj_1",
+            "started_at": "2023-11-14T22:13:20+00:00",
+            "stopped_at": null,
+            "template": null,
+            "work_item_id": "wrk_1",
+        }));
+        assert_eq!(row.payload_digest, digest);
         let again = super::bind_work_op(
             &built,
             json!({"id": "ses_0001", "work_item": null, "reason": "done"}),
@@ -455,6 +725,20 @@ mod tests {
         .unwrap();
         assert_eq!(bound["project_mismatch"], json!(true));
         assert_eq!(bound["engine_label"], "written");
+    }
+
+    #[test]
+    fn a_blank_id_is_given_not_omitted() {
+        let built = fresh("blank");
+        let error = super::bind_work_op(
+            &built,
+            json!({"id": "   ", "work_item": "WI-7", "reason": "blank"}),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "a session id is required (ses_… or the engine's session UUID)"
+        );
     }
 
     #[test]
