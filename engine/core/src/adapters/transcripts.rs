@@ -195,7 +195,14 @@ pub fn last_replies(transcript: &Transcript, n: usize) -> Vec<Reply> {
     };
     picked
         .into_iter()
-        .map(|(text, at)| reply(&text, at))
+        .map(|(text, at)| Reply {
+            text: cut(&decisions::activity_redact(&text), MAX_MESSAGE_CHARS),
+            // A transcript's `_when` treats a naive value as UTC, so the JSON
+            // carries `Z`. A non-UTC offset is kept, not converted.
+            at: at
+                .as_deref()
+                .and_then(|value| render_timestamp(value, true)),
+        })
         .collect()
 }
 
@@ -204,20 +211,91 @@ pub fn last_replies(transcript: &Transcript, n: usize) -> Vec<Reply> {
 pub fn reply(text: &str, at: Option<String>) -> Reply {
     Reply {
         text: cut(&decisions::activity_redact(text), MAX_MESSAGE_CHARS),
-        // Both paths hand `at` over raw: the file path after a shape check, the
-        // opencode path straight from the engine. Python parses it and pydantic
-        // re-renders the JSON with a `Z` suffix, so normalise here once.
-        at: at.as_deref().and_then(json_timestamp),
+        // The opencode path uses `_parse_engine_timestamp`, which does not
+        // assume a timezone: a naive value stays naive and renders with no `Z`.
+        at: at
+            .as_deref()
+            .and_then(|value| render_timestamp(value, false)),
     }
 }
 
-/// An instant as pydantic writes it for `model_dump(mode="json")`, or `None`
-/// when it is not one. `datetime.fromisoformat` only accepts a trailing `Z`
-/// after it is rewritten to `+00:00`, and a missing offset is UTC.
-fn json_timestamp(value: &str) -> Option<String> {
-    crate::core::from_iso(&value.replace('Z', "+00:00"))
-        .ok()
-        .map(|moment| moment.to_json())
+/// A timestamp as pydantic writes it for `model_dump(mode="json")`, or `None`
+/// when it does not parse.
+///
+/// `datetime.fromisoformat` only accepts a trailing `Z` after it is rewritten
+/// to `+00:00`. A `+00:00` offset renders as `Z`; any other offset is kept as
+/// written, never converted to UTC. `naive_is_utc` is the transcript path
+/// (`_when`), which stamps a missing offset as UTC; the engine path leaves it
+/// naive, so it renders with no suffix.
+fn render_timestamp(value: &str, naive_is_utc: bool) -> Option<String> {
+    if value.is_empty() {
+        return None;
+    }
+    let rewritten = value.replace(['Z', 'z'], "+00:00");
+    // `from_iso` proves the value parses; it also folds every offset into UTC,
+    // so a non-UTC offset is printed from the original text, never from it.
+    crate::core::from_iso(&rewritten).ok()?;
+    let naive = !has_offset(&rewritten);
+    // A date with no time parses as midnight. The UTC stamp has to name that
+    // time; appending `Z` to the bare date would not.
+    let stamped = if naive && naive_is_utc && !rewritten.contains('T') && !rewritten.contains(' ') {
+        format!("{rewritten}T00:00:00+00:00")
+    } else if naive && naive_is_utc {
+        format!("{rewritten}+00:00")
+    } else {
+        rewritten
+    };
+    Some(format_offset(&stamped))
+}
+
+/// `+00:00` becomes `Z`; every other offset is printed exactly as given. The
+/// fraction is padded to the six digits pydantic keeps, except an all-zero
+/// fraction, which is dropped altogether: `.5` renders `.500000`, while
+/// `.000` renders no fraction at all.
+fn format_offset(rewritten: &str) -> String {
+    let (head, offset) = split_offset(rewritten).unwrap_or((rewritten, ""));
+    let body = match fraction_of(head) {
+        Some(digits) => {
+            let kept = &digits[..digits.len().min(6)];
+            if kept.chars().all(|ch| ch == '0') {
+                head[..head.len() - digits.len() - 1].to_string()
+            } else {
+                format!("{}{kept:0<6}", &head[..head.len() - digits.len()])
+            }
+        }
+        None => head.to_string(),
+    };
+    if offset == "+00:00" {
+        format!("{body}Z")
+    } else {
+        format!("{body}{offset}")
+    }
+}
+
+fn has_offset(value: &str) -> bool {
+    split_offset(value).is_some_and(|(_, offset)| !offset.is_empty())
+}
+
+/// The datetime and its trailing offset, split where the offset begins.
+fn split_offset(value: &str) -> Option<(&str, &str)> {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && bytes[index] != b'T' && bytes[index] != b' ' {
+        index += 1;
+    }
+    if index < bytes.len() {
+        index += 1;
+    }
+    while index < bytes.len() && !matches!(bytes[index], b'+' | b'-') {
+        index += 1;
+    }
+    Some((&value[..index], &value[index..]))
+}
+
+fn fraction_of(head: &str) -> Option<&str> {
+    let dot = head.rfind(['.', ','])?;
+    let digits = &head[dot + 1..];
+    (!digits.is_empty() && digits.chars().all(|ch| ch.is_ascii_digit())).then_some(digits)
 }
 
 /// The one-line list excerpt of a reply's (redacted) text.
@@ -589,25 +667,15 @@ fn when(value: Option<&Value>) -> Option<String> {
     let text = value
         .and_then(Value::as_str)
         .filter(|text| !text.is_empty())?;
-    // Accept the ISO-8601 instants the agents write; anything else is no time.
-    if chrono_like(text) {
+    // The real gate is `render_timestamp`, which parses with `fromisoformat`.
+    // This only drops text that cannot be one, so a date-only or naive value
+    // still reaches it and is stamped UTC the way `_when` stamps it.
+    let bytes = text.as_bytes();
+    if bytes.len() >= 10 && bytes[4] == b'-' && bytes[7] == b'-' {
         Some(text.to_string())
     } else {
         None
     }
-}
-
-fn chrono_like(text: &str) -> bool {
-    let bytes = text.as_bytes();
-    bytes.len() >= 20
-        && bytes[4] == b'-'
-        && bytes[7] == b'-'
-        && bytes[10] == b'T'
-        && bytes[13] == b':'
-        && bytes[16] == b':'
-        && bytes
-            .iter()
-            .all(|b| b.is_ascii_digit() || matches!(b, b'-' | b'T' | b':' | b'.' | b'Z' | b'+'))
 }
 
 fn cut(text: &str, limit: usize) -> String {
@@ -811,16 +879,46 @@ mod tests {
         // `+00:00` is what the engine stores; the answer's JSON carries `Z`.
         let offset = reply("done", Some("2026-10-05T00:01:00+00:00".to_string()));
         assert_eq!(offset.at.as_deref(), Some("2026-10-05T00:01:00Z"));
-        // A trailing `Z` parses the same and stays `Z`.
-        let zulu = reply("done", Some("2026-10-05T00:01:00.500000Z".to_string()));
+        // A trailing `Z` parses the same and stays `Z`. A short fraction is
+        // padded to the six digits pydantic writes, not trimmed.
+        let zulu = reply("done", Some("2026-10-05T00:01:00.5Z".to_string()));
         assert_eq!(zulu.at.as_deref(), Some("2026-10-05T00:01:00.500000Z"));
-        // A non-UTC offset is converted, not just rewritten.
-        let ahead = reply("done", Some("2026-10-05T02:01:00+02:00".to_string()));
-        assert_eq!(ahead.at.as_deref(), Some("2026-10-05T00:01:00Z"));
+        // A non-UTC offset is kept as written, never shifted into UTC.
+        let ahead = reply("done", Some("2026-10-05T02:01:00.000+02:00".to_string()));
+        assert_eq!(ahead.at.as_deref(), Some("2026-10-05T02:01:00+02:00"));
+        // Nine digits are cut to the microseconds pydantic keeps.
+        let fine = reply(
+            "done",
+            Some("2026-10-05T02:01:00.123456789+02:00".to_string()),
+        );
+        assert_eq!(fine.at.as_deref(), Some("2026-10-05T02:01:00.123456+02:00"));
+        // The engine path leaves a naive value naive: no `Z`.
+        let naive = reply("done", Some("2026-01-02T01:00:00".to_string()));
+        assert_eq!(naive.at.as_deref(), Some("2026-01-02T01:00:00"));
         // Anything that is not an instant is no time, in both paths.
         assert_eq!(reply("done", Some("yesterday".to_string())).at, None);
         assert_eq!(reply("done", Some(String::new())).at, None);
         assert_eq!(reply("done", None).at, None);
+    }
+
+    #[test]
+    fn a_transcript_timestamp_treats_a_naive_value_as_utc() {
+        let base = temp();
+        let root = base.join("claude");
+        let mut roots = HashMap::new();
+        roots.insert("claude", root.as_path());
+        let cases = [
+            ("2026-01-02T01:00:00", "2026-01-02T01:00:00Z"),
+            ("2026-01-02", "2026-01-02T00:00:00Z"),
+            ("2026-01-02T03:00:00.000+02:00", "2026-01-02T03:00:00+02:00"),
+        ];
+        for (written, expected) in cases {
+            write_claude(&root, ENGINE_ID, &[claude_line_at("m", "said", written)]);
+            let found = find(&roots, ENGINE_ID, Some("claude"), None, None, None, false).unwrap();
+            let replies = last_replies(&found, 1);
+            assert_eq!(replies[0].at.as_deref(), Some(expected), "{written}");
+        }
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -849,9 +947,13 @@ mod tests {
     }
 
     fn claude_line(message_id: &str, text: &str) -> String {
+        claude_line_at(message_id, text, "2026-10-05T00:01:00Z")
+    }
+
+    fn claude_line_at(message_id: &str, text: &str, timestamp: &str) -> String {
         serde_json::json!({
             "type": "assistant",
-            "timestamp": "2026-10-05T00:01:00Z",
+            "timestamp": timestamp,
             "cwd": ROOT_CWD,
             "message": {"id": message_id, "role": "assistant", "content": [{"type": "text", "text": text}]}
         })
