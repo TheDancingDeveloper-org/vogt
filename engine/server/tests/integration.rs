@@ -10577,6 +10577,29 @@ async fn the_claude_session_hook_links_and_unlinks_the_conversation_it_runs_in()
 }
 
 #[tokio::test]
+async fn a_policy_check_is_the_sessions_own_call() {
+    // The route sits outside the bearer gate, like the conversation report,
+    // because the caller is the session. What authenticates it is the broker
+    // token the engine issued that session; anything else is refused before
+    // the body is read.
+    let (_tmp, cfg, _stub) = hibernation_sandbox();
+    let (base, _h) = boot_with_config(cfg).await;
+    let anonymous = reqwest::Client::new();
+    for bearer in [None, Some("not-a-broker-token")] {
+        let mut request = anonymous
+            .post(format!("{base}/api/agent-auth/policy-check"))
+            .json(&json!({ "tool_name": "Bash", "tool_input": { "command": "git push" } }));
+        if let Some(bearer) = bearer {
+            request = request.bearer_auth(bearer);
+        }
+        assert_eq!(
+            request.send().await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readable() {
     let (tmp, mut cfg, stub) = hibernation_sandbox();
     let claude_home = tmp.path().join("claude-home");

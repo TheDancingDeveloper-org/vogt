@@ -25,6 +25,10 @@ ComplianceStatus = Literal[
 ]
 TrustState = Literal["verified", "stale", "unverified", "disputed"]
 
+#: Lookaround and backreferences compile in Python but not in the Rust regex
+#: crate the engine matches with, so a pattern carrying one is refused.
+_UNSUPPORTED_REGEX = re.compile(r"\(\?<=|\(\?<!|\(\?=|\(\?!|\(\?P=|\(\?\(|\\[1-9]")
+
 #: Whether a project's work model is the forge's (decision 1). Set by
 #: an explicit act — `project.import`'s clone+consolidate, `forge.link`, and
 #: `forge.publish` — never inferred per call from what tokens
@@ -87,7 +91,9 @@ class AgentPolicy(Entity):
     """
 
     #: Regexes matched against commit messages, authors, trailers, PR text and
-    #: branch names. They must compile, so a rule that could never match is
+    #: branch names. They must compile as a Python regex and stay inside the
+    #: dialect the engine's regex crate also implements, so a rule that could
+    #: never match — or would match differently where it is enforced — is
     #: refused at the write rather than silently doing nothing later.
     forbidden_text: list[str] = []
     #: This project's merges deploy production, so a hook refuses `gh pr merge`
@@ -113,6 +119,27 @@ class AgentPolicy(Entity):
                     f"forbidden_text pattern {pattern!r} does not compile: {exc}"
                 ) from exc
         return patterns
+
+    def check_engine_dialect(self) -> None:
+        """Refuse a pattern the engine's regex crate cannot match.
+
+        The engine matches with the Rust regex crate, which has no lookaround,
+        no backreferences and no conditional or named-group definitions. A
+        pattern Python accepts but the engine would skip is a rule that never
+        fires, so a write refuses it.
+
+        This is a write-time check and not a field validator on purpose: a
+        project stored before the rule existed must still load, and the engine
+        skips a pattern it cannot compile rather than refusing every command.
+        """
+        for pattern in self.forbidden_text:
+            unsupported = _UNSUPPORTED_REGEX.search(pattern)
+            if unsupported is not None:
+                raise ValueError(
+                    f"forbidden_text pattern {pattern!r} uses {unsupported.group(0)!r},"
+                    " which the engine's regex dialect does not support"
+                    " (no lookaround, no backreferences)"
+                )
 
 
 class Project(Entity):

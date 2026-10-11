@@ -146,9 +146,10 @@ _CHAT_GATE = (
 )
 _SESSION_SELF = (
     "A session's own calls with its per-session broker token (secret "
-    "fetch/store, launch report, its conversation, its grants), or the "
-    "engine-side record of the conversation a session runs. Made by the "
-    "session's launcher and hooks, not by a person or another agent."
+    "fetch/store, launch report, its conversation, its project-policy "
+    "check, its grants), or the engine-side record of the conversation a "
+    "session runs. Made by the session's launcher and hooks, not by a "
+    "person or another agent."
 )
 
 #: Engine route -> why it has no MCP counterpart.
@@ -228,6 +229,7 @@ ENGINE_ONLY: Mapping[str, str] = {
     "POST /api/agent-auth/store/{var}": _SESSION_SELF,
     "POST /api/agent-auth/launch-report": _SESSION_SELF,
     "POST /api/agent-auth/conversation": _SESSION_SELF,
+    "POST /api/agent-auth/policy-check": _SESSION_SELF,
     "GET /api/agent-auth/grants": _SESSION_SELF,
     "POST /api/chats/{id}/gate": _CHAT_GATE,
 }

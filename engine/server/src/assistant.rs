@@ -2656,6 +2656,7 @@ mod tests {
                 resume: None,
                 permission_mode: None,
                 autopilot: false,
+                policy: None,
                 role: Default::default(),
                 work_item: None,
                 cols: Some(80),
