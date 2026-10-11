@@ -273,13 +273,35 @@ def brief_for_work_item(
                 lines.append(f"- {name} — {note}")
         lines.append("")
 
-    comments = view.comments_for(item.id, limit=20)
-    if comments:
-        # Oldest first, which is all a comment is today. A hand-off is a
-        # comment of a kind this store does not record yet (C11); when it
-        # does, the newest one is rendered here, ahead of the rest.
+    comments = view.comments_for(item.id, limit=200, order="newest")
+    handoff = next((one for one in comments if one.kind == "handoff"), None)
+    if handoff is not None and handoff.handoff is not None:
+        # The latest hand-off is its own section, ahead of the remarks, so a
+        # fresh session reads where the last one stopped before the thread.
+        fields = handoff.handoff
+        lines += ["## Hand-off", ""]
+        for label, value in (
+            ("branch", fields.branch),
+            ("head", fields.head_sha),
+            ("base", fields.base),
+            ("session", fields.session),
+        ):
+            if value:
+                lines.append(f"- **{label}** {value}")
+        for label, values in (
+            ("done", fields.done),
+            ("remaining", fields.remaining),
+            ("touch points", fields.touch_points),
+            ("gates run", fields.gates_run),
+            ("blockers", fields.blockers),
+        ):
+            if values:
+                lines.append(f"- **{label}** {'; '.join(values)}")
+        lines += ["", handoff.body.strip(), ""]
+    notes = [one for one in comments if one.kind == "note"][:20]
+    if notes:
         lines += ["## Comments", ""]
-        for comment in comments:
+        for comment in notes:
             lines.append(f"- {comment.body.strip()}")
         lines.append("")
 

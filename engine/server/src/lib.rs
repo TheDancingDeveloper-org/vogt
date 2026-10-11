@@ -28,6 +28,7 @@ pub mod files;
 pub mod gates;
 pub mod git;
 pub mod gui;
+pub mod handoff;
 pub mod hibernate_policy;
 pub mod hibernation;
 pub mod history;

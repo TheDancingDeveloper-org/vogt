@@ -109,7 +109,12 @@ def _retitle(ctx: AppContext, ref: str, title: str) -> None:
 
 
 def _get(ctx: AppContext, ref: str) -> tuple[str, str, list[str]]:
-    got = get_work(ctx, GetWorkParams(ref=ref, comment_limit=500))
+    # These assertions are about which comments survived the merge, in the
+    # order they were written. `work.get` now defaults to newest-first (C11);
+    # ask for the old order explicitly so a default change cannot invert them.
+    got = get_work(
+        ctx, GetWorkParams(ref=ref, comment_limit=500, comment_order="oldest")
+    )
     return got.item.title, got.item.priority, [c.body for c in got.comments]
 
 

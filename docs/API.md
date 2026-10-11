@@ -11,6 +11,12 @@ is that map. Read it before reaching for a token — a request to the wrong
 surface, or with the wrong bearer, is a `401`/`404` that looks like a bug and
 is not.
 
+`work.comment` takes `kind` (`note`, the default, or `handoff`) and, for a
+hand-off, a `handoff` object (branch, head sha, base, done, remaining, touch
+points, gates run, blockers, session). `work.get` takes `comment_order`
+(`newest`, the default, or `oldest`) so `comment_limit` keeps one end of the
+thread. The field list itself is the generated OpenAPI, not this page.
+
 ## The two processes
 
 | Process | What it is | Port | Serves |

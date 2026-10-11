@@ -892,6 +892,37 @@ impl SessionRegistry {
             if session.is_hibernating() || shutting_down.load(Ordering::Acquire) {
                 return;
             }
+            // A session that just stops, rather than hibernating, still leaves
+            // the next one a hand-off (C12). Hibernation writes its own, and
+            // this hook returns above so the two never both write.
+            if let Some(conversation) = session.conversation() {
+                // `git` inside the hand-off must not run on a tokio worker.
+                // This hook is invoked from the session's exit waiter, which
+                // is a tokio task when one is current (the credential revoke
+                // just below already depends on `try_current`).
+                let state_dir = state_dir.clone();
+                let id = session.id;
+                let agent = conversation.agent.clone();
+                let conversation_id = conversation.id.clone();
+                let cwd = session.cwd.clone();
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                let write = move || {
+                    crate::handoff::write_for(
+                        &state_dir,
+                        id,
+                        &agent,
+                        &conversation_id,
+                        &cwd,
+                        home.as_deref(),
+                    );
+                };
+                match tokio::runtime::Handle::try_current() {
+                    Ok(runtime) => {
+                        runtime.spawn_blocking(write);
+                    }
+                    Err(_) => write(),
+                }
+            }
             records.remove(&session.id);
             hibernation::remove(&state_dir, session.id);
             // The session's own credential ends with it (WI-926).
@@ -995,6 +1026,20 @@ impl SessionRegistry {
         hibernation::write_screen(&self.cfg.state_dir, id, &screen)
             .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
             .map_err(|e| ApiError::Internal(format!("write the hibernation record: {e}")))?;
+        // Best-effort, and only for a Klaudia conversation: a missing summary
+        // or a directory that is not a checkout still leaves what it can, and
+        // a failure here must not stop the hibernation (C12). `git` runs off
+        // the runtime: at shutdown every session hibernates in turn.
+        let state_dir = self.cfg.state_dir.clone();
+        let handoff_record = record.clone();
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let joined = tokio::task::spawn_blocking(move || {
+            crate::handoff::write(&state_dir, &handoff_record, home.as_deref());
+        })
+        .await;
+        if let Err(e) = joined {
+            tracing::warn!(session = %id, error = %e, "the handoff write task failed");
+        }
         session.mark_hibernating();
         self.records.insert(id, record);
 
