@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from vogt.core.session_economics import CHARS_PER_TOKEN, meter
 
@@ -281,3 +282,79 @@ def test_claude_output_tokens_count_once_per_turn_across_its_blocks() -> None:
     reading = meter(lines, agent="claude")
     assert reading.turns == 1
     assert reading.output_tokens == 7
+
+
+_FIXTURES = (
+    Path(__file__).resolve().parents[1] / "engine/server/tests/fixtures/economics"
+)
+
+
+def test_shared_fixtures_match_the_engine_port() -> None:
+    """The numbers the Rust port asserts against the same files, literally."""
+
+    def reading(name: str) -> dict[str, object]:
+        lines = (_FIXTURES / f"{name}.jsonl").read_text().splitlines()
+        result = meter(lines, agent=name)
+        return {
+            "turns": result.turns,
+            "context_tokens": result.context_tokens,
+            "peak_context_tokens": result.peak_context_tokens,
+            "compactions": result.compactions,
+            "tool_result_bytes": dict(result.tool_result_bytes),
+            "reads_repeated": result.reads_repeated,
+            "wall_clock": {
+                "count": result.wall_clock.count,
+                "max_ms": result.wall_clock.max_ms,
+                "mean_ms": result.wall_clock.mean_ms,
+            },
+            "output_tokens": result.output_tokens,
+            "usage_measured": result.usage_measured,
+        }
+
+    assert reading("claude") == {
+        "turns": 2,
+        "context_tokens": 80,
+        "peak_context_tokens": 175,
+        "compactions": 1,
+        "tool_result_bytes": {"Bash": 40, "Read": 16},
+        "reads_repeated": 1,
+        "wall_clock": {"count": 1, "max_ms": 30_000, "mean_ms": 30_000},
+        "output_tokens": 16,
+        "usage_measured": True,
+    }
+    assert reading("klaudia") == {
+        "turns": 2,
+        "context_tokens": 67,
+        "peak_context_tokens": 117,
+        "compactions": 1,
+        "tool_result_bytes": {"Read": 16, "shell": 6},
+        "reads_repeated": 1,
+        "wall_clock": {"count": 1, "max_ms": 60_000, "mean_ms": 60_000},
+        "output_tokens": 0,
+        "usage_measured": False,
+    }
+    assert reading("codex") == {
+        "turns": 3,
+        "context_tokens": 191,
+        "peak_context_tokens": 191,
+        "compactions": 0,
+        "tool_result_bytes": {"cat": 10, "grep": 9, "shell": 11},
+        "reads_repeated": 1,
+        "wall_clock": {"count": 2, "max_ms": 45_000, "mean_ms": 22_500},
+        "output_tokens": 0,
+        "usage_measured": False,
+    }
+
+
+def test_shared_unicode_fixture_counts_characters_as_python_does() -> None:
+    """Non-ASCII text, a tool result with no content (the json.dumps length)
+    and a half-millisecond mean: the cases a byte count, compact JSON or
+    half-away-from-zero rounding in the engine port would get wrong."""
+    lines = (_FIXTURES / "klaudia_unicode.jsonl").read_text().splitlines()
+    result = meter(lines, agent="klaudia")
+    assert result.turns == 3
+    assert result.context_tokens == 127
+    assert dict(result.tool_result_bytes) == {"Grep": 90, "Read": 10}
+    assert result.wall_clock.count == 2
+    assert result.wall_clock.max_ms == 3
+    assert result.wall_clock.mean_ms == 2
