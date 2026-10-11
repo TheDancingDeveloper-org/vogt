@@ -150,6 +150,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "drift.detect" => Some(crate::application::drift::drift_detect_op),
         "drift.list" => Some(crate::application::drift::drift_list_op),
         "drift.resolve" => Some(crate::application::drift::drift_resolve_op),
+        "session.bind_work" => Some(crate::application::session_work::bind_work_op),
         "session.grant_request" => Some(crate::application::grants::grant_request_op),
         "session.grant_decide" => Some(crate::application::grants::grant_decide_op),
         "session.grant_revoke" => Some(crate::application::grants::grant_revoke_op),
