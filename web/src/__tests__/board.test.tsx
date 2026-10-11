@@ -1656,3 +1656,47 @@ describe("#216 — dropping into another lane of the same column", () => {
     expect(betaProgress.textContent).not.toContain("Lanes group cards");
   });
 });
+
+describe("free-text search asks work.list and keeps the query in the URL", () => {
+  function searchBox(container: HTMLElement): HTMLInputElement {
+    const found = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search work items"]',
+    );
+    if (!found) throw new Error("no search box");
+    return found;
+  }
+
+  it("debounces a typed query into the URL and a GET /work, then Esc clears both", async () => {
+    vi.useFakeTimers();
+    const vogt = fakeVogt({
+      "GET /work": {
+        body: {
+          items: [workItem({ ref: "WI-1241", title: "Search the board" })],
+          total: 1,
+          next_offset: null,
+        },
+      },
+    });
+    const { container, url } = board();
+    await vi.waitFor(() => expect(columnNames(container).length).toBeGreaterThan(0));
+
+    fireEvent.input(searchBox(container), { target: { value: "1241" } });
+    expect(url()).not.toContain("q=1241");
+
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.waitFor(() => expect(url()).toContain("q=1241"));
+    await vi.waitFor(() =>
+      expect(
+        vogt.calls.filter((call) => call.method === "GET" && call.path === "/work"),
+      ).not.toHaveLength(0),
+    );
+    const sent = vogt.calls.filter((call) => call.method === "GET" && call.path === "/work");
+    expect(sent.at(-1)?.query.get("query")).toBe("1241");
+    expect(container.textContent).toContain("WI-1241");
+
+    fireEvent.keyDown(searchBox(container), { key: "Escape" });
+    await vi.waitFor(() => expect(url()).not.toContain("q="));
+    expect(searchBox(container).value).toBe("");
+    vi.useRealTimers();
+  });
+});

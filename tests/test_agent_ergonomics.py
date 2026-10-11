@@ -102,6 +102,20 @@ def test_work_list_query_aliases_filter_title_body_and_ref(
     assert [row.ref for row in by_ref.items] == [wanted]
 
 
+def test_a_query_matches_a_ref_by_bare_number_or_either_case(
+    instance: AppContext,
+) -> None:
+    """WI-1249: the board and backlog search box send the reader's text as-is,
+    including a bare number or a lower-cased ref. Matching is substring
+    containment on the lower-cased ref, so all three find the same item."""
+    wanted = _item(instance, "The thing being searched for")
+    _item(instance, "Unrelated")
+    number = wanted.removeprefix("WI-")
+    for query in (number, wanted, wanted.lower()):
+        answer = list_work(instance, ListWorkParams(query=query))
+        assert [row.ref for row in answer.items] == [wanted]
+
+
 def test_the_query_is_literal_text_not_a_pattern(instance: AppContext) -> None:
     _item(instance, "plain words")
     _item(instance, "100% done")
