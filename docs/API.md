@@ -123,6 +123,7 @@ Reading a terminal and typing into one are deliberately different grants.
 | `session.list` (`session_list`) | `read` | every session, linked or not, with live activity |
 | `session.log_tail` (`session_log_tail`) | `read` | the tail of a session's output log |
 | `session.screen` (`session_screen`) | `read` | what the terminal shows now: lines, cursor, title, activity, readiness |
+| `session.digest` (`session_digest`) | `read` | one session's digest from the engine row: activity, blocked report, a last-reply excerpt, and economics the engine already computed (null when the row has none; does not read a transcript) |
 | `session.input` (`session_input`) | `work.write` | type text, press named keys (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`, `ctrl-d`, `backspace`), then Enter with `submit` |
 | `session.start` / `session.stop` | `work.write` | open or close a terminal |
 | `session.rename` (`session_rename`) | `work.write` | rename a session, as the GUI does; `session.list` returns the name as `name` |

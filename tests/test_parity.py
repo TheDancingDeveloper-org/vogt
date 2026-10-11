@@ -478,6 +478,13 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {"id": seen["session.start"]["session"]["id"]},
     ),
     (
+        "session.digest",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "context_window": 200_000,
+        },
+    ),
+    (
         "session.wait",
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
