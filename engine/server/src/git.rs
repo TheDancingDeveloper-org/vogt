@@ -1026,7 +1026,15 @@ mod tests {
 
         let origin = tempfile::tempdir().unwrap();
         git(origin.path(), &["init", "-b", "develop", "--bare"]);
-        git(repo, &["remote", "add", "origin", &origin.path().display().to_string()]);
+        git(
+            repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                &origin.path().display().to_string(),
+            ],
+        );
         git(repo, &["config", "user.email", "t@example"]);
         git(repo, &["config", "user.name", "t"]);
         std::fs::write(repo.join("f.txt"), "f\n").unwrap();
@@ -1059,7 +1067,16 @@ mod tests {
         git(&repo, &["commit", "-m", "base"]);
 
         let linked = tmp.path().join("linked");
-        git(&repo, &["worktree", "add", "-b", "side", &linked.display().to_string()]);
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "side",
+                &linked.display().to_string(),
+            ],
+        );
         let repo_common = git_common_dir(&repo).await.unwrap();
         let linked_common = git_common_dir(&linked).await.unwrap();
         assert_eq!(repo_common, linked_common);
