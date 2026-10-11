@@ -378,6 +378,79 @@ paths:
                         text: { type: string }
                         at: { type: string, format: date-time, nullable: true }
         "404": { $ref: "#/components/responses/NotFound" }
+  /api/sessions/changes:
+    get:
+      tags: [sessions]
+      summary: Session changes published after a cursor.
+      description: >-
+        Every session event on the bus carries a monotonic `seq`; the engine
+        keeps the last 4096. Returns the overseer-relevant ones after `since`
+        — kinds ready, approval, exited, errored, blocked, unblocked,
+        hibernated, woken — each with a summary of at most 120 characters,
+        and `next_cursor` to pass next time. `truncated` is true when the
+        cursor fell off the ring or is from a previous engine run (a cursor
+        past the head); read a sweep then.
+      operationId: sessionChanges
+      x-capability: sessions
+      parameters:
+        - name: since
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: ids
+          in: query
+          required: false
+          description: Engine session ids, comma separated. Absent means every session.
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 100 }
+      responses:
+        "200":
+          description: The page of changes and the cursor to read from next.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
+  /api/sessions/wait-any:
+    get:
+      tags: [sessions]
+      summary: Wait, server-side, until any named session changes in a way `until` names.
+      description: >-
+        Subscribes before checking the ring, so nothing published between
+        calls is missed: answers at once with the first matching change after
+        `cursor`, else blocks for the next one, else `outcome: timeout` with
+        the current head as `next_cursor`. A cursor past the head (an engine
+        restart) reads from the start of the ring.
+      operationId: sessionWaitAny
+      x-capability: sessions
+      parameters:
+        - name: ids
+          in: query
+          required: false
+          description: Engine session ids, comma separated. Absent means every session.
+          schema: { type: string }
+        - name: until
+          in: query
+          required: false
+          description: Kinds, comma separated. Default ready, blocked, approval, exited, errored.
+          schema: { type: string }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, default: 0 }
+        - name: timeout_s
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 600, default: 120 }
+      responses:
+        "200":
+          description: Why the wait ended, the change if any, and the next cursor.
+          content:
+            application/json:
+              schema: { type: object }
+        "400": { $ref: "#/components/responses/BadRequest" }
   /api/sessions/{id}/wait:
     parameters:
       - $ref: "#/components/parameters/SessionId"

@@ -486,6 +486,22 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     (
+        "session.changes",
+        lambda seen: {
+            "since": 0,
+            "ids": [seen["session.start"]["session"]["id"]],
+            "limit": 10,
+        },
+    ),
+    (
+        "session.wait_any",
+        lambda seen: {
+            "ids": [seen["session.start"]["session"]["id"]],
+            "until": ["ready"],
+            "timeout_s": 5,
+        },
+    ),
+    (
         "session.report_blocked",
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
@@ -1137,6 +1153,24 @@ def _stand_in_engine() -> EngineClient:
                     "blocked": blocked,
                 }
             ).encode()
+        if method == "GET" and path.endswith("/api/sessions/changes"):
+            return 200, json.dumps(
+                {
+                    "changes": [
+                        {
+                            "seq": 1,
+                            "at": "2026-10-11T00:00:00Z",
+                            "session": "eng-1",
+                            "kind": "ready",
+                            "summary": "ready",
+                        }
+                    ],
+                    "next_cursor": 1,
+                    "truncated": False,
+                }
+            ).encode()
+        if method == "GET" and path.endswith("/api/sessions/wait-any"):
+            return 200, json.dumps({"outcome": "timeout", "next_cursor": 1}).encode()
         if method == "GET" and path.endswith("/wait"):
             return 200, json.dumps(
                 {

@@ -53,6 +53,62 @@ pub async fn wait_session(
     ))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ChangesQuery {
+    /// Replay events published after this sequence. `0` reads the whole ring.
+    pub since: Option<u64>,
+    /// Engine session ids, comma separated. Absent means every session.
+    pub ids: Option<String>,
+    /// At most this many changes; default 100, at most 500.
+    pub limit: Option<usize>,
+}
+
+/// Changes published after a cursor, so an overseer reads a delta instead of
+/// sweeping (WI-1246).
+pub async fn session_changes(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ChangesQuery>,
+) -> Result<Json<vogt_engine_contract::SessionChanges>> {
+    Ok(Json(crate::changes::changes(
+        &state.bus,
+        q.since.unwrap_or(0),
+        q.ids.as_deref(),
+        q.limit,
+    )?))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WaitAnyQuery {
+    /// Engine session ids, comma separated. Absent means every session.
+    pub ids: Option<String>,
+    /// Kinds to wait for, comma separated. Defaults to the overseer set.
+    pub until: Option<String>,
+    /// Ignore changes at or before this sequence.
+    pub cursor: Option<u64>,
+    /// Seconds to wait at most; default 120, at most 600.
+    pub timeout_s: Option<u64>,
+}
+
+/// Block until one of the named sessions changes in a way `until` names, or
+/// the timeout passes (WI-1246).
+pub async fn session_wait_any(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<WaitAnyQuery>,
+) -> Result<Json<vogt_engine_contract::SessionWaitAny>> {
+    let until = crate::changes::parse_until(q.until.as_deref())?;
+    let timeout = Duration::from_secs(q.timeout_s.unwrap_or(120));
+    Ok(Json(
+        crate::changes::wait_any(
+            &state.bus,
+            q.ids.as_deref(),
+            &until,
+            q.cursor.unwrap_or(0),
+            timeout,
+        )
+        .await?,
+    ))
+}
+
 /// Mark the session's agent blocked on a person (with what it needs), or
 /// clear that. The core's `session.report_blocked` / `report_unblocked` call
 /// this; the report rides on the session summary, the screen and a
@@ -780,18 +836,49 @@ pub async fn session_input(
 
 pub async fn events_stream(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
 ) -> Sse<impl Stream<Item = std::result::Result<Event, Infallible>>> {
-    let rx = state.bus.subscribe();
+    let last_event_id = headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok());
+    // Subscribe before reading the ring, so an event published between the
+    // two is on the live stream and deduped by seq rather than lost.
+    let (replay, truncated, rx) = crate::changes::replay_then_live(&state.bus, last_event_id);
     let bus = state.bus.clone();
-    let stream = BroadcastStream::new(rx).filter_map(move |res| match res {
-        Ok(ev) => match serde_json::to_string(&ev) {
-            Ok(json) => Some(Ok(Event::default().data(json))),
-            Err(_) => None,
-        },
-        // A slow client fell behind and missed events. The stream goes on,
-        // but the client is told, in band, so it can re-read what it shows
-        // rather than trust state built from a stream with a hole in it
-        // (WI-920).
+    // One threshold dedupes the overlap between the replay and the live
+    // channel, which only delivers in seq order, without a set that grows
+    // for the life of the connection. It is the highest seq already handed to
+    // this stream: the last replayed seq. Not the client's cursor: after an
+    // engine restart the cursor is from the previous run's sequence and can
+    // be far above anything this run publishes, and every new event would be
+    // dropped. An event at or below a current cursor cannot arrive live
+    // anyway — it was published before the subscription.
+    let replay_max = replay.last().map(|ev| ev.seq).unwrap_or(0);
+    let mut prelude = Vec::new();
+    if truncated {
+        bus.note_lag("sse-events", 0);
+        prelude.push(Ok(Event::default().data(
+            serde_json::json!({ "type": "lagged", "skipped": 0 }).to_string(),
+        )));
+    }
+    for sequenced in replay {
+        prelude.push(Ok(Event::default()
+            .id(sequenced.seq.to_string())
+            .data(serde_json::to_string(&sequenced.event).unwrap_or_default())));
+    }
+    let live = BroadcastStream::new(rx).filter_map(move |res| match res {
+        Ok(sequenced) => {
+            if sequenced.seq <= replay_max {
+                return None;
+            }
+            match serde_json::to_string(&sequenced.event) {
+                Ok(json) => Some(Ok(Event::default()
+                    .id(sequenced.seq.to_string())
+                    .data(json))),
+                Err(_) => None,
+            }
+        }
         Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(skipped)) => {
             bus.note_lag("sse-events", skipped);
             Some(Ok(Event::default().data(
@@ -799,6 +886,7 @@ pub async fn events_stream(
             )))
         }
     });
+    let stream = futures_util::stream::iter(prelude).chain(live);
     Sse::new(stream).keep_alive(
         axum::response::sse::KeepAlive::new()
             .interval(Duration::from_secs(15))

@@ -8711,6 +8711,339 @@ async fn wait_returns_on_ready_exit_change_and_timeout() {
     }
 }
 
+/// WI-1246: every session event has a monotonic seq, `/changes` replays after
+/// a cursor, and `/wait-any` blocks on the next matching change instead of a
+/// sweep.
+#[tokio::test]
+async fn session_changes_are_sequenced_filtered_and_waited_on() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let prompt = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "changes-ready",
+            "command": ["/bin/sh", "-c", "sleep 0.3; printf 'Continue? [y/N]'; sleep 30"],
+        }),
+    )
+    .await;
+
+    // The prompt becomes a `ready` change, and the sequence only grows.
+    let mut changes = Value::Null;
+    for _ in 0..50 {
+        changes = client
+            .get(format!("{base}/api/sessions/changes?since=0"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if changes["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["session"] == prompt && c["kind"] == "ready")
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let rows = changes["changes"].as_array().unwrap();
+    let seqs: Vec<u64> = rows.iter().map(|c| c["seq"].as_u64().unwrap()).collect();
+    let mut ordered = seqs.clone();
+    ordered.sort();
+    assert_eq!(seqs, ordered, "changes come oldest first: {changes}");
+    assert!(seqs.windows(2).all(|w| w[1] > w[0]), "{seqs:?}");
+    let ready = rows
+        .iter()
+        .find(|c| c["session"] == prompt && c["kind"] == "ready")
+        .unwrap();
+    let ready_seq = ready["seq"].as_u64().unwrap();
+    assert!(!ready["at"].as_str().unwrap().is_empty());
+    assert!(ready["summary"].as_str().unwrap().len() <= 120);
+
+    // After the cursor, that change is gone.
+    let later: Value = client
+        .get(format!("{base}/api/sessions/changes?since={ready_seq}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(later["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["seq"].as_u64().unwrap() > ready_seq));
+    assert_eq!(later["truncated"], false);
+
+    // A cursor past the head is a restart, not the future: the sequence
+    // begins again at 1, so the whole ring comes back flagged truncated
+    // rather than an empty page the overseer would wait on forever.
+    let restarted: Value = client
+        .get(format!("{base}/api/sessions/changes?since=5000"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(restarted["truncated"], true, "{restarted}");
+    assert!(
+        restarted["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["session"] == prompt && c["kind"] == "ready"),
+        "{restarted}"
+    );
+    let from_the_start: Value = client
+        .get(format!(
+            "{base}/api/sessions/wait-any?ids={prompt}&until=ready&cursor=5000&timeout_s=5"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(from_the_start["outcome"], "changed", "{from_the_start}");
+    assert_eq!(from_the_start["change"]["kind"], "ready");
+
+    // Another session's change is not this one's.
+    let other = create_session_with(
+        &client,
+        &base,
+        json!({ "name": "changes-other", "command": ["/bin/sh", "-c", "sleep 30"] }),
+    )
+    .await;
+    let mine: Value = client
+        .get(format!("{base}/api/sessions/changes?since=0&ids={prompt}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(mine["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|c| c["session"] == prompt));
+
+    // A change already in the ring answers a wait at once.
+    let buffered: Value = client
+        .get(format!(
+            "{base}/api/sessions/wait-any?ids={prompt}&until=ready&cursor=0&timeout_s=5"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(buffered["outcome"], "changed", "{buffered}");
+    assert_eq!(buffered["change"]["kind"], "ready");
+
+    // Nothing pending: it blocks, then answers when the change lands.
+    let head = buffered["next_cursor"].as_u64().unwrap();
+    let waiting = tokio::spawn({
+        let client = client.clone();
+        let url = format!(
+            "{base}/api/sessions/wait-any?ids={prompt}&until=blocked&cursor={head}&timeout_s=20"
+        );
+        async move {
+            client
+                .get(url)
+                .send()
+                .await
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let blocked = client
+        .post(format!("{base}/api/sessions/{prompt}/blocked"))
+        .json(&json!({ "blocked": true, "reason": "needs a token" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::OK);
+    let got = waiting.await.unwrap();
+    assert_eq!(got["outcome"], "changed", "{got}");
+    assert_eq!(got["change"]["kind"], "blocked");
+
+    // And a wait with nothing coming says so.
+    let cursor = got["next_cursor"].as_u64().unwrap();
+    let timed: Value = client
+        .get(format!(
+            "{base}/api/sessions/wait-any?ids={other}&until=exited&cursor={cursor}&timeout_s=1"
+        ))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(timed["outcome"], "timeout", "{timed}");
+    assert!(timed.get("change").is_none(), "{timed}");
+
+    // Bad input is refused, the same ceiling as /wait.
+    let too_long = client
+        .get(format!("{base}/api/sessions/wait-any?timeout_s=601"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(too_long.status(), StatusCode::BAD_REQUEST);
+    let bad_until = client
+        .get(format!("{base}/api/sessions/wait-any?until=soon"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_until.status(), StatusCode::BAD_REQUEST);
+
+    for id in [prompt, other] {
+        client
+            .delete(format!("{base}/api/sessions/{id}"))
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
+/// WI-1246: `Last-Event-ID` replays what the ring still holds, and the live
+/// payload stays the raw event — the sequence rides on the SSE `id`.
+#[tokio::test]
+async fn the_event_stream_replays_after_a_last_event_id() {
+    let (base, _h) = boot().await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let id = create_session_with(
+        &client,
+        &base,
+        json!({
+            "name": "sse-replay",
+            "command": ["/bin/sh", "-c", "printf 'Continue? [y/N]'; sleep 30"],
+        }),
+    )
+    .await;
+
+    // Read the stream until the activity event, and keep its SSE id. From
+    // cursor 0, so an event published before this subscribed is replayed
+    // rather than missed.
+    let stream_res = client
+        .get(format!("{base}/api/events"))
+        .header("Last-Event-ID", "0")
+        .send()
+        .await
+        .unwrap();
+    let mut stream = stream_res.bytes_stream();
+    let want = id.clone();
+    let (event, sse_id) = sse_event(&mut stream, move |event| {
+        event["type"] == "activity"
+            && event["id"] == want.as_str()
+            && event["state"] == "waiting-for-input"
+    })
+    .await;
+    assert_eq!(event["state"], "waiting-for-input");
+    let sse_id: u64 = sse_id.expect("the event carried an id").parse().unwrap();
+
+    // A fresh stream that names the event before it gets this one replayed,
+    // still as the raw event.
+    let replay_res = client
+        .get(format!("{base}/api/events"))
+        .header("Last-Event-ID", (sse_id - 1).to_string())
+        .send()
+        .await
+        .unwrap();
+    let mut replay = replay_res.bytes_stream();
+    let want = id.clone();
+    let (replayed, replayed_id) = sse_event(&mut replay, move |event| {
+        event["type"] == "activity" && event["id"] == want.as_str()
+    })
+    .await;
+    assert_eq!(replayed["state"], "waiting-for-input");
+    assert_eq!(replayed_id.unwrap().parse::<u64>().unwrap(), sse_id);
+
+    // A cursor from a previous engine run, far above this run's sequence, is
+    // told about the gap and still gets every new event live.
+    let stale_res = client
+        .get(format!("{base}/api/events"))
+        .header("Last-Event-ID", "999999")
+        .send()
+        .await
+        .unwrap();
+    let mut stale = stale_res.bytes_stream();
+    let (lagged, _) = sse_event(&mut stale, |event| event["type"] == "lagged").await;
+    assert_eq!(lagged["type"], "lagged");
+
+    client
+        .delete(format!("{base}/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+    let want = id.clone();
+    let (killed, killed_id) = sse_event(&mut stale, move |event| {
+        event["type"] == "session-killed" && event["id"] == want.as_str()
+    })
+    .await;
+    assert_eq!(killed["type"], "session-killed");
+    assert!(killed_id.unwrap().parse::<u64>().unwrap() < 999_999);
+}
+
+/// Like `event_matching`, but also returns the SSE `id:` of the matching frame.
+async fn sse_event(
+    stream: &mut (impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin),
+    want: impl Fn(&Value) -> bool,
+) -> (Value, Option<String>) {
+    let mut partial = String::new();
+    let mut frame_id: Option<String> = None;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            let chunk = stream
+                .next()
+                .await
+                .expect("the event stream ended")
+                .expect("the event stream failed");
+            partial.push_str(&String::from_utf8_lossy(&chunk));
+            while let Some(idx) = partial.find('\n') {
+                let line: String = partial.drain(..=idx).collect();
+                let line = line.trim_end();
+                if let Some(id) = line.strip_prefix("id: ") {
+                    frame_id = Some(id.to_string());
+                    continue;
+                }
+                if line.is_empty() {
+                    frame_id = None;
+                    continue;
+                }
+                let Some(raw) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                let Ok(event) = serde_json::from_str::<Value>(raw) else {
+                    continue;
+                };
+                if want(&event) {
+                    return (event, frame_id.clone());
+                }
+            }
+        }
+    })
+    .await
+    .expect("no matching event arrived on /api/events")
+}
+
 /// WI-830: rows a previous engine process left unfinished (killed by a
 /// restart it never drained) are closed out when the next one boots.
 #[tokio::test]
