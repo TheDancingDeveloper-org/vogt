@@ -41,7 +41,9 @@ for sub in registry git; do
         continue
     fi
     if [[ -d "$live" && ! -e "$kept" ]]; then
-        # First boot on this volume: keep what the image shipped.
+        # First boot on this volume: keep what the image shipped. A copy cut
+        # short by an earlier boot is discarded, not copied into.
+        rm -rf "$kept.partial"
         cp -a "$live" "$kept.partial"
         mv "$kept.partial" "$kept"
     fi
