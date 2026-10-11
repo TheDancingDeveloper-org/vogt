@@ -20,11 +20,11 @@
 use std::path::{Component, Path, PathBuf};
 
 use regex::Regex;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::core::{Moment, Project};
 
-use super::base::{finding, walk_project, Collection, Collector, CollectorContext, Finding};
+use super::base::{finding, walk_project, Collection, Collector, CollectorContext};
 
 const KIND_DEP_REF: &str = "dep_ref";
 const KIND_DEP_SCAN: &str = "dep_scan";
@@ -425,6 +425,7 @@ fn array_of_json(value: Option<&Value>) -> &[Value] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collectors::base::Finding;
     use crate::config::VogtConfig;
 
     /// The exclusions a project records at registration. The worktree test is
@@ -453,10 +454,7 @@ mod tests {
 
     fn collect(root: &Path, exclusions: &[&str]) -> Vec<Finding> {
         let config = VogtConfig::default();
-        let mut context = CollectorContext {
-            config: &config,
-            options: Map::new(),
-        };
+        let mut context = CollectorContext { config: &config };
         let mut now = || Moment::from_unix(0, 0);
         DepRefCollector
             .collect(&mut context, &project(root, exclusions), &mut now)

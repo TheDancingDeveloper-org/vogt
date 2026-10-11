@@ -57,7 +57,7 @@ impl Registered {
 
     fn on_demand_only(&self) -> bool {
         match self {
-            Self::Collector(c) => c.on_demand_only(),
+            Self::Collector(c) => is_on_demand(c.as_ref()),
             Self::Indexer(c) => c.on_demand_only(),
         }
     }
@@ -105,24 +105,8 @@ impl CollectorRegistry {
         Ok(())
     }
 
-    pub fn len(&self) -> usize {
-        self.collectors.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.collectors.is_empty()
-    }
-
     pub fn names(&self) -> Vec<String> {
         self.collectors.keys().cloned().collect()
-    }
-
-    /// Only the collectors that touch nothing outside this machine.
-    pub fn offline(&self) -> Vec<&Registered> {
-        self.collectors
-            .values()
-            .filter(|collector| !collector.requires_network())
-            .collect()
     }
 
     pub fn get(&self, name: &str) -> Result<&Registered, VogtError> {

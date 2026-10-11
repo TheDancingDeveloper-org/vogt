@@ -13,7 +13,7 @@ use crate::config::VogtConfig;
 use crate::core::Project;
 use crate::decisions::{contract_from_settings, evaluate, Contract, ContractTree};
 
-use super::base::{finding, Collection, Collector, CollectorContext, Finding};
+use super::base::{finding, Collection, Collector, CollectorContext};
 use super::git_local::tracked_names;
 
 const KIND_CONTRACT: &str = "contract.check";
@@ -126,8 +126,8 @@ impl Collector for ContractCheckerCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collectors::base::Finding;
     use crate::core::Moment;
-    use serde_json::Map;
     use std::path::PathBuf;
     use std::process::Command;
 
@@ -143,10 +143,7 @@ mod tests {
 
     fn collect(root: &Path) -> Finding {
         let config = VogtConfig::default();
-        let mut context = CollectorContext {
-            config: &config,
-            options: Map::new(),
-        };
+        let mut context = CollectorContext { config: &config };
         let mut now = || Moment::from_unix(0, 0);
         let found = ContractCheckerCollector
             .collect(&mut context, &project(root), &mut now)

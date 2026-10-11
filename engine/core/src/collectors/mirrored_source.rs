@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 
 use crate::core::{Moment, Project};
 
-use super::base::{finding, walk_project, Collection, Collector, CollectorContext, Finding};
+use super::base::{finding, walk_project, Collection, Collector, CollectorContext};
 
 const KIND_MIRRORED_SOURCE: &str = "mirrored_source";
 
@@ -337,6 +337,7 @@ fn expanduser(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collectors::base::Finding;
     use crate::config::VogtConfig;
 
     fn project(root: &Path, slug: &str) -> Project {
@@ -358,10 +359,7 @@ mod tests {
 
     fn collect(projects: Vec<RegisteredProject>, root: &Path, slug: &str) -> Vec<Finding> {
         let config = VogtConfig::default();
-        let mut context = CollectorContext {
-            config: &config,
-            options: Map::new(),
-        };
+        let mut context = CollectorContext { config: &config };
         let mut now = || Moment::from_unix(0, 0);
         MirroredSourceCollector::new(projects)
             .collect(&mut context, &project(root, slug), &mut now)

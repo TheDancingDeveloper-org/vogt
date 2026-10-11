@@ -21,39 +21,6 @@ use super::registry::Registered;
 
 pub use super::base::ActivityIndexer as _;
 
-/// Every collector's report from one `sweep` invocation.
-pub struct SweepOutcomeSet {
-    pub reports: Vec<SweepReport>,
-    pub subjects: i64,
-    pub dep_refs: i64,
-}
-
-impl SweepOutcomeSet {
-    pub fn new_count(&self) -> i64 {
-        self.reports.iter().map(|report| report.new).sum()
-    }
-
-    pub fn unchanged(&self) -> i64 {
-        self.reports.iter().map(|report| report.unchanged).sum()
-    }
-
-    pub fn worst_outcome(&self) -> &str {
-        // Python: the first of ("failed", "partial", "ok") present in the
-        // set of report outcomes, else "ok".
-        let outcomes: std::collections::BTreeSet<&str> = self
-            .reports
-            .iter()
-            .map(|report| report.outcome.as_str())
-            .collect();
-        for outcome in ["failed", "partial", "ok"] {
-            if outcomes.contains(outcome) {
-                return outcome;
-            }
-        }
-        "ok"
-    }
-}
-
 /// Runs collectors over a scope and writes the coverage records.
 pub struct Sweeper<'a, S, C: Clock> {
     store: &'a S,
@@ -287,7 +254,13 @@ mod tests {
     use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
     use crate::storage::interface::{DeclaredStore, ObservedStore};
 
-    use super::super::base::{finding, typed_failure, Collection};
+    use super::super::base::{finding, Collection};
+
+    /// A failure whose display starts with a Python class name, the way
+    /// `f"{type(exc).__name__}: {exc}"` reads for `OSError`.
+    fn typed_failure(class_name: &str, message: impl Into<String>) -> crate::errors::VogtError {
+        crate::errors::VogtError::CollectorFailed(format!("{class_name}: {}", message.into()))
+    }
     use super::super::registry::Registered;
 
     fn moment() -> Moment {
@@ -431,7 +404,6 @@ mod tests {
             &ctx.observed,
             CollectorContext {
                 config: &ctx.config,
-                options: serde_json::Map::new(),
             },
             &mut *clock,
         );
@@ -456,7 +428,6 @@ mod tests {
             &ctx.observed,
             CollectorContext {
                 config: &ctx.config,
-                options: serde_json::Map::new(),
             },
             &mut *clock,
         );
@@ -480,7 +451,6 @@ mod tests {
             &ctx.observed,
             CollectorContext {
                 config: &ctx.config,
-                options: serde_json::Map::new(),
             },
             &mut *clock,
         );
@@ -521,7 +491,6 @@ mod tests {
             &ctx.observed,
             CollectorContext {
                 config: &ctx.config,
-                options: serde_json::Map::new(),
             },
             &mut *clock,
         );
@@ -571,7 +540,6 @@ mod tests {
             &ctx.observed,
             CollectorContext {
                 config: &ctx.config,
-                options: serde_json::Map::new(),
             },
             &mut *clock,
         );

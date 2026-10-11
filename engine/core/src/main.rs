@@ -10,10 +10,6 @@ mod adapters;
 mod application;
 mod auth;
 mod branches;
-// The collector crate's public surface is wider than `sweep` consumes: the
-// indexer registration, the outcome-set helpers and the failure constructors
-// are the API the collectors that land next call. `base` is not edited here.
-#[allow(dead_code, unused_imports)]
 mod collectors;
 #[allow(dead_code)]
 mod config;

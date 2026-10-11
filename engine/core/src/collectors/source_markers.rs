@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 
 use crate::core::{Moment, Project};
 
-use super::base::{finding, walk_project, Collection, Collector, CollectorContext, Finding};
+use super::base::{finding, walk_project, Collection, Collector, CollectorContext};
 
 const KIND_MARKER: &str = "marker";
 
@@ -118,6 +118,7 @@ impl Collector for SourceMarkerCollector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collectors::base::Finding;
     use crate::config::VogtConfig;
     use crate::core::Moment;
 
@@ -132,10 +133,7 @@ mod tests {
     }
 
     fn ctx(config: &VogtConfig) -> CollectorContext<'_> {
-        CollectorContext {
-            config,
-            options: serde_json::Map::new(),
-        }
+        CollectorContext { config }
     }
 
     fn write(path: &Path, bytes: &[u8]) {

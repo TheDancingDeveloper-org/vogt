@@ -13,7 +13,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 
 use crate::application::context::{AppContext, Built};
 use crate::application::resolve;
@@ -168,7 +168,6 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
     let reports = {
         let context = CollectorContext {
             config: &ctx.config,
-            options: Map::new(),
         };
         Sweeper::new(&ctx.observed, context, &mut *clock).run(collectors, &projects)?
     };

@@ -28,16 +28,6 @@ pub fn collector_error(message: impl Into<String>) -> VogtError {
     VogtError::CollectorFailed(format!("CollectorError: {}", message.into()))
 }
 
-/// The same failure carrying a Python class name other than `CollectorError`.
-///
-/// `OSError` and `FileNotFoundError` are the two the sweeper tests and the git
-/// collector record; both display as the bare message.
-pub fn typed_failure(class_name: &str, message: impl Into<String>) -> VogtError {
-    VogtError::CollectorFailed(format!("{class_name}: {}", message.into()))
-}
-
-pub type CollectorError = VogtError;
-
 /// Build a finding, digesting the payload for dedup.
 ///
 /// The digest covers the payload only — not the sweep, not the timestamp — so
@@ -69,9 +59,6 @@ pub fn finding(
 /// not a trait object. The sweeper passes the clock in as `now` instead.
 pub struct CollectorContext<'a> {
     pub config: &'a VogtConfig,
-    /// Extra per-collector settings, e.g. a forge token file. Absent means the
-    /// optional integration is not configured, never that it failed.
-    pub options: serde_json::Map<String, Value>,
 }
 
 /// One source of observations about a project.

@@ -13,7 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::branches::{compile_patterns, match_branch};
 use crate::core::{Moment, Project};
@@ -386,9 +386,8 @@ fn expanduser(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::*;
     use crate::config::VogtConfig;
-    use serde_json::Map;
+    use serde_json::Value;
 
     fn project(root: &Path) -> Project {
         Project::new(
@@ -402,10 +401,7 @@ mod tests {
 
     fn collect(root: &Path) -> Result<Vec<Finding>, VogtError> {
         let config = VogtConfig::default();
-        let mut context = CollectorContext {
-            config: &config,
-            options: Map::new(),
-        };
+        let mut context = CollectorContext { config: &config };
         let mut now = || Moment::from_unix(0, 0);
         let collected = GitLocalCollector.collect(&mut context, &project(root), &mut now);
         match collected.error {

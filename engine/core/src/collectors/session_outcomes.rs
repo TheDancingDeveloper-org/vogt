@@ -599,10 +599,7 @@ mod tests {
 
     fn collect(engine: EngineClient, records: Vec<SessionRecord>, root: &Path) -> Vec<Finding> {
         let config = crate::config::VogtConfig::default();
-        let mut context = CollectorContext {
-            config: &config,
-            options: Map::new(),
-        };
+        let mut context = CollectorContext { config: &config };
         let mut now = || Moment::from_unix(0, 0);
         let mut collector = SessionOutcomeCollector::new(
             engine,
@@ -932,10 +929,7 @@ mod tests {
     fn an_unbound_task_is_ignored_and_a_work_item_binding_is_kept() {
         let root = temp("tasks");
         let config = crate::config::VogtConfig::default();
-        let mut context = CollectorContext {
-            config: &config,
-            options: Map::new(),
-        };
+        let mut context = CollectorContext { config: &config };
         let mut now = || Moment::from_unix(0, 0);
         let engine = engine_with(|url| {
             if url.ends_with("/api/agent-tasks") {
@@ -970,10 +964,7 @@ mod tests {
     fn a_dead_engine_fails_the_collect() {
         let root = temp("dead");
         let config = crate::config::VogtConfig::default();
-        let mut context = CollectorContext {
-            config: &config,
-            options: Map::new(),
-        };
+        let mut context = CollectorContext { config: &config };
         let mut now = || Moment::from_unix(0, 0);
         let engine = EngineClient::new("http://127.0.0.1:1", None, None);
         let mut collector = SessionOutcomeCollector::new(
