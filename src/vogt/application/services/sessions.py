@@ -1669,12 +1669,18 @@ def commit_for_session(
         raise InvalidRequest(msg)
     engine = _engine(ctx)
     target = _target(ctx, params.id)
+    _require_commit_authority(ctx, engine, target.engine_session_id)
+    # TODO(C13, PR #939): read `project.agent_policy.forbidden_text` once that
+    # policy lands. Until then, and with no project to read, send nothing — a
+    # caller never chooses the patterns.
+    forbidden_text: list[str] = []
     committed = engine.git_commit(
         session_id=target.engine_session_id,
         message=message,
         paths=params.paths,
         full_diff=params.full_diff,
-        forbidden_text=params.forbidden_text,
+        forbidden_text=forbidden_text,
+        worktree=params.worktree,
     )
     sha = str(committed.get("commit") or "")
     if not sha:
@@ -2136,6 +2142,60 @@ def _answers_as_person(ctx: AppContext) -> bool:
     process that can read it.
     """
     return ctx.principal.kind == "human" and not _is_engine_credential(ctx)
+
+
+def _caller_engine_session_id(ctx: AppContext) -> str | None:
+    """The engine session id this caller is, when the caller is a session.
+
+    A session Vogt started is `agent:session:<ses_…>`, resolved through its
+    row. One the engine started is `agent:engine:<uuid>`, and that uuid is
+    the engine's id. Anyone else is not a session.
+    """
+    ref = ctx.principal.identity_ref
+    if ref.startswith("agent:session:"):
+        own = _own_session(ctx)
+        with ctx.declared.read() as view:
+            session = view.session_by_id(own)
+        if session is None:
+            return None
+        return session.engine_session_id
+    if ref.startswith(ENGINE_SESSION_ACTOR_PREFIX):
+        return ref.removeprefix(ENGINE_SESSION_ACTOR_PREFIX)
+    return None
+
+
+def _require_commit_authority(
+    ctx: AppContext, engine: EngineClient, target_engine_id: str
+) -> None:
+    """Who may commit for a session (C14).
+
+    A person always may. A session may commit only for another session, and
+    only when its own engine role is `oversight`: a worker committing its own
+    tree, or another worker's, is the thing this refuses.
+    """
+    if _answers_as_person(ctx):
+        return
+    caller_id = _caller_engine_session_id(ctx)
+    if caller_id is None:
+        msg = (
+            "only a person, or an oversight session, commits for a session "
+            f"({ctx.principal.identity_ref} is neither)"
+        )
+        raise RoleRefused(msg)
+    if caller_id == target_engine_id:
+        msg = (
+            "a session does not commit its own work; an oversight session, or "
+            f"a person, commits for it ({caller_id})"
+        )
+        raise RoleRefused(msg)
+    caller = engine.get_session(caller_id)
+    if caller is None or caller.role != "oversight":
+        role = "unknown" if caller is None else caller.role
+        msg = (
+            "only an oversight session commits for another session "
+            f"({caller_id} is {role})"
+        )
+        raise RoleRefused(msg)
 
 
 def _is_engine_credential(ctx: AppContext) -> bool:

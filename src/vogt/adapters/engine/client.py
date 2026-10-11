@@ -1109,23 +1109,23 @@ class EngineClient:
         paths: list[str],
         full_diff: bool,
         forbidden_text: list[str],
+        worktree: str | None = None,
     ) -> dict[str, Any]:
         """Commit on a session's behalf (C14). The engine runs the checklist
         and commits in the repo that session works in, under the repo's own
         identity. A refusal arrives as `InvalidRequest` (400: conflict marker,
         secret, intent-to-add, forbidden text) or `Conflict` (409: mid-turn)."""
-        payload = self._call(
-            "/api/git/op",
-            method="POST",
-            payload={
-                "op": "commit",
-                "session": session_id,
-                "message": message,
-                "paths": paths,
-                "full_diff": full_diff,
-                "forbidden_text": forbidden_text,
-            },
-        )
+        body: dict[str, Any] = {
+            "op": "commit",
+            "session": session_id,
+            "message": message,
+            "paths": paths,
+            "full_diff": full_diff,
+            "forbidden_text": forbidden_text,
+        }
+        if worktree:
+            body["worktree"] = worktree
+        payload = self._call("/api/git/op", method="POST", payload=body)
         if not isinstance(payload, dict):
             msg = f"the {self.label} returned no commit for session {session_id}"
             raise EngineUnavailable(msg)
