@@ -53,6 +53,7 @@ export const ROUTES = {
   "work.list": "/work",
   "board.list": "/board/list",
   "work.get": "/work/get",
+  "work.get_many": "/work/get-many",
   "work.create": "/work",
   "work.transition": "/work/transition",
   "work.comment": "/work/comment",
@@ -106,12 +107,87 @@ export class VogtUnavailable extends Error {
   }
 }
 
+/** The `error.code` the engine's front door puts on a request it shed
+ *  because it already had its cap of requests open against the core
+ *  (`BUSY_CODE` in `engine/server/src/vogt_core.rs`). */
+export const BUSY_CODE = "front_door_busy";
+
+/** The front door is busy, not gone (WI-1224): it shed this request without
+ *  forwarding it, and said when to ask again. `call()` has already asked
+ *  again (`BUSY_RETRIES` times) by the time a caller sees this, so it means
+ *  "still busy" — a transient state to show as such, never as an outage. */
+export class VogtBusy extends ApiError {
+  constructor(
+    message: string,
+    public readonly retryAfterMs: number,
+  ) {
+    super(503, message);
+    this.name = "VogtBusy";
+    this.message = "Vogt is busy right now. Try again in a moment.";
+  }
+}
+
+/** How many times `call()` asks again after a shed before surfacing
+ *  `VogtBusy`. Bounded, because a door that sheds is a door under load. */
+export const BUSY_RETRIES = 2;
+/** The wait used when a shed carries no usable `Retry-After`, and the bounds
+ *  on any it does carry — a header must not park a read for minutes. */
+const BUSY_DEFAULT_MS = 2_000;
+const BUSY_MIN_MS = 250;
+const BUSY_MAX_MS = 10_000;
+
+/** `Retry-After` in milliseconds: delta-seconds or an HTTP date. */
+export function retryAfterMs(header: string | null, now = Date.now()): number {
+  let ms = BUSY_DEFAULT_MS;
+  const value = header?.trim();
+  if (value) {
+    if (/^\d+$/.test(value)) ms = Number(value) * 1_000;
+    else {
+      const at = Date.parse(value);
+      if (!Number.isNaN(at)) ms = at - now;
+    }
+  }
+  return Math.min(BUSY_MAX_MS, Math.max(BUSY_MIN_MS, ms));
+}
+
+/** The wait before asking a busy door again: what it asked for, spread over
+ *  [wait, 2*wait) so every request it shed in one burst does not come back
+ *  in the same instant and get shed again. */
+function busyBackoffMs(waitMs: number): number {
+  return waitMs + Math.random() * waitMs;
+}
+
+function isShed(status: number, code: unknown): boolean {
+  return status === 503 && code === BUSY_CODE;
+}
+
 function isAbsent(status: number): boolean {
-  // 503: this front door has no core configured. 502: it has one and the
-  // core did not answer. Both mean "Vogt cannot be asked right now", which
-  // every Vogt surface renders as an outage with the server's own reason
-  // rather than as empty data.
-  return status === 502 || status === 503;
+  // 503: this front door has no core configured, or could not ask it. 502:
+  // it has one and the core did not answer; 504: a proxy in front gave up
+  // waiting for it. All mean "Vogt cannot be asked right now", which every
+  // Vogt surface renders as an outage with the server's own reason rather
+  // than as empty data. A shed 503 is checked first and is not one of these:
+  // see `isShed`.
+  return status === 502 || status === 503 || status === 504;
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const aborted = () => signal?.reason ?? new DOMException("Aborted", "AbortError");
+    if (signal?.aborted) {
+      reject(aborted());
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(aborted());
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 async function call<T>(
@@ -151,35 +227,48 @@ async function call<T>(
   ): Promise<CacheFetchResult<T> | "not-modified"> => {
     const requestHeaders = { ...headers };
     if (etag) requestHeaders["If-None-Match"] = etag;
-    const res = await fetchWithRetry(
-      url,
-      { method, headers: requestHeaders, body, signal: requestSignal },
-      { deadlineMs: DEADLINE_MS[method === "GET" ? "list" : "detail"] },
-    );
-    if (res.status === 304) return "not-modified";
-    const text = await res.text();
-    if (!res.ok) {
-      let message = text;
-      try {
-        const parsed = JSON.parse(text);
-        message = parsed?.error?.message ?? text;
-      } catch {
-        // A non-JSON body from a proxy hop; the status still carries meaning.
+    for (let shed = 0; ; shed += 1) {
+      const res = await fetchWithRetry(
+        url,
+        { method, headers: requestHeaders, body, signal: requestSignal },
+        { deadlineMs: DEADLINE_MS[method === "GET" ? "list" : "detail"] },
+      );
+      if (res.status === 304) return "not-modified";
+      const text = await res.text();
+      if (!res.ok) {
+        let message = text;
+        let code: unknown;
+        try {
+          const parsed = JSON.parse(text);
+          message = parsed?.error?.message ?? text;
+          code = parsed?.error?.code;
+        } catch {
+          // A non-JSON body from a proxy hop; the status still carries meaning.
+        }
+        if (isShed(res.status, code)) {
+          // The door refused before forwarding, so asking again cannot repeat
+          // a write — any method may. The wire answered, so the transport has
+          // already recorded a success: a shed never feeds the breaker.
+          const wait = retryAfterMs(res.headers.get("retry-after"));
+          if (shed >= BUSY_RETRIES) throw new VogtBusy(message, wait);
+          await sleep(busyBackoffMs(wait), requestSignal);
+          continue;
+        }
+        if (isAbsent(res.status)) throw new VogtUnavailable(res.status, message);
+        // A 401 from behind the front door is the same fact as a 401 from the
+        // engine's own API — the one credential the browser holds is dead — so it
+        // ends the session once for the whole shell rather than becoming one
+        // stranded panel per Vogt surface. Everything else, a 403 most of
+        // all, stays the caller's to render: the credential is fine, and it is
+        // the capability the reader needs told about.
+        reportAuthResponse(res.status, message);
+        throw new ApiError(res.status, message);
       }
-      if (isAbsent(res.status)) throw new VogtUnavailable(res.status, message);
-      // A 401 from behind the front door is the same fact as a 401 from the
-      // engine's own API — the one credential the browser holds is dead — so it
-      // ends the session once for the whole shell rather than becoming one
-      // stranded panel per Vogt surface. Everything else, a 403 most of
-      // all, stays the caller's to render: the credential is fine, and it is
-      // the capability the reader needs told about.
-      reportAuthResponse(res.status, message);
-      throw new ApiError(res.status, message);
+      return {
+        value: text ? (JSON.parse(text) as T) : (undefined as T),
+        etag: res.headers.get("etag"),
+      };
     }
-    return {
-      value: text ? (JSON.parse(text) as T) : (undefined as T),
-      etag: res.headers.get("etag"),
-    };
   };
 
   if (method === "GET" && options.cache !== false && STABLE_READ_OPERATIONS.has(operation)) {
@@ -785,6 +874,18 @@ export const listBoard = (params: Record<string, unknown>, signal?: AbortSignal)
   call<BoardListResult>("board.list", params, "POST", signal);
 
 export const getWork = (ref: string) => call<WorkDetail>("work.get", { ref });
+
+/** The most refs one `work.get_many` takes (`WORK_GET_MANY_LIMIT` in the
+ *  core's models); a caller with more asks in pages of this size. */
+export const WORK_GET_MANY_LIMIT = 200;
+
+/** Compact rows for a set of refs in one read (WI-1224): what the session
+ *  rail's chips ask, rather than one search per ref. */
+export const getWorkMany = (refs: string[], signal?: AbortSignal) =>
+  call<{
+    items: Pick<WorkItem, "ref" | "title" | "kind" | "state" | "priority" | "project_slug">[];
+    missing: string[];
+  }>("work.get_many", { refs }, "GET", signal);
 
 export const backlog = (params: Record<string, unknown> = {}) =>
   call<RankedView>("backlog", { mode: "full", ...params });

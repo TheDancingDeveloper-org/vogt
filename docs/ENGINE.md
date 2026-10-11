@@ -2650,6 +2650,18 @@ refused. Note that this refusal shape nests where the engine's own errors do
 not: a client that parses `error` as a string will not read these. The reason
 never names the loopback URL or port.
 
+**`/api/vogt/*` is capped, not queued.** Past the front door's in-flight cap
+(`PROXIED_READS_IN_FLIGHT` in `vogt_core.rs`), a request is refused
+before it is forwarded with `503`, `Retry-After: 2` and
+`{"error": {"code": "front_door_busy", "message": "<reason>"}}`. The code is
+the only reliable marker of a shed: the gate's "the core could not be asked
+about this bearer" `503` also carries `Retry-After`, and that one is an
+outage. The PWA retries a shed after the wait it names, spread over
+`[wait, 2×wait)` and at most twice, for any method (nothing was forwarded,
+so a write cannot be repeated). Only if the door is still busy does it show
+"busy" — never "Vogt is unavailable", and never into the connection breaker.
+`/mcp` is not capped.
+
 **Vogt's own operations are not documented here.** They are generated from
 Vogt's operation registry and described by its OpenAPI document, which the core
 serves at `/openapi.json`; the repository's `AGENTS.md` and [`ARCHITECTURE.md`](ARCHITECTURE.md)
@@ -3131,6 +3143,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `project.transition` | Confirmation-gated | Available after approval: Move a project through its lifecycle states. |
 | `work.create` | Confirmation-gated | Available after approval: Create a work item (feature / bug / chore / question). |
 | `work.get` | Voice-readable | Available: Fetch one work item with its relations, labels and comments. |
+| `work.get_many` | Operator-only | Unavailable: A batched lookup for the GUI's work-item chips; `work.get` and `work.list` already answer a spoken question. |
 | `work.list` | Voice-readable | Available: List work items with filters; compact summary rows by default. |
 | `board.list` | Voice-readable | Available: Read bounded, independently pageable Board cells in one snapshot. |
 | `work.update` | Confirmation-gated | Available after approval: Change a work item's fields, assignee, or labels. |

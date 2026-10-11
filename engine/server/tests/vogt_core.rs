@@ -21,7 +21,11 @@ use axum::{
 };
 use reqwest::StatusCode;
 use serde_json::{json, Value};
-use vogt_engine_server::{app::router, vogt_core::PROXIED_READS_IN_FLIGHT, Config};
+use vogt_engine_server::{
+    app::router,
+    vogt_core::{BUSY_CODE, PROXIED_READS_IN_FLIGHT},
+    Config,
+};
 
 /// The optional static break-glass token. Full capability here, no actor
 /// of its own at the core: its Vogt calls borrow the stack secret.
@@ -582,11 +586,15 @@ async fn a_core_outage_is_503_not_401() {
         .await
         .unwrap();
     assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
+    // Told to wait like a shed caller is, which is why a client cannot tell
+    // the two apart by `Retry-After`: only a shed carries `BUSY_CODE`.
+    assert!(res.headers().contains_key("retry-after"));
     let body: Value = res.json().await.unwrap();
     assert!(body["error"]
         .as_str()
         .unwrap_or_default()
         .contains("vogt-core is unavailable"));
+    assert_ne!(body["error"]["code"], BUSY_CODE);
     // The static credentials never depend on the core.
     let res = client()
         .get(format!("{base}/api/sessions"))
@@ -1760,6 +1768,8 @@ async fn a_burst_past_the_in_flight_cap_is_shed_with_a_retry_after() {
                     reason.contains("requests open against vogt-core"),
                     "{reason}"
                 );
+                // The marker the PWA tells a shed from an outage by.
+                assert_eq!(body["error"]["code"], BUSY_CODE);
             }
             other => panic!("unexpected status {other}"),
         }

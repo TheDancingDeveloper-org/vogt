@@ -204,6 +204,9 @@ export type ServerEvent =
       entity_kind: string;
       entity_id: string;
       seq: number;
+      /** The core event's own per-kind payload, verbatim — `{ref, ...}` on a
+       *  `work.updated` or `work.transitioned`. Absent when it carried none. */
+      summary?: unknown;
     };
 
 // The bearer token is persisted in localStorage on purpose. This is a PWA that

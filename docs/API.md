@@ -596,6 +596,12 @@ fits in context.
   the last page). `work.list --query` matches title, body and ref,
   case-insensitively; naming a finished state in `states` includes finished
   items without `include_finished`.
+- **Many refs at once.** `work.get_many` takes up to 200 `refs` (repeated
+  `refs=` on HTTP) and returns the same compact rows as `work.list`'s summary
+  mode, in the order asked, finished items included; refs that name nothing
+  come back in `missing` rather than failing the read. Each ref resolves as
+  `work.get` resolves it. The PWA's session rail reads its work-item chips
+  this way, one request per render.
 - **Can I create here?** Each `project.list` entry carries `writable` and
   `writable_reason`: whether a default `work.create` (no `local_only`) would
   land there now — forge-linked, write-back policy permits `create`, a forge

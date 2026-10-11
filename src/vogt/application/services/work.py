@@ -36,6 +36,7 @@ from vogt.application.models import (
     CommentParams,
     CommentResult,
     CreateWorkParams,
+    GetManyWorkParams,
     GetWorkParams,
     ListSessionsParams,
     ListWorkParams,
@@ -45,6 +46,7 @@ from vogt.application.models import (
     UpdateWorkParams,
     WorkItemRow,
     WorkListResult,
+    WorkManyResult,
     WorkResult,
 )
 from vogt.application.services import _resolve, upstream, writeback
@@ -581,6 +583,26 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
     return WorkResult(
         item=item, comments=comments, sessions=sessions, branches=branches, git=git
     )
+
+
+def get_many_work(ctx: AppContext, params: GetManyWorkParams) -> WorkManyResult:
+    """Compact rows for a set of refs, in one read.
+
+    What a surface asks when it already knows which items it names — the
+    session rail's work-item chips — so a render costs one request rather
+    than one `work.list` text search per ref (WI-1224). Each ref resolves
+    exactly as `work.get` resolves it, inside one read view; a ref that names
+    nothing is reported in `missing` rather than failing the rest.
+    """
+    items: list[WorkItemRow] = []
+    missing: list[str] = []
+    with ctx.declared.read() as view:
+        for ref in dict.fromkeys(params.refs):
+            try:
+                items.append(WorkItemRow.of(upstream.resolve_work_ref(ctx, view, ref)))
+            except NotFound:
+                missing.append(ref)
+    return WorkManyResult(items=items, missing=missing)
 
 
 def list_work(ctx: AppContext, params: ListWorkParams) -> WorkListResult:
