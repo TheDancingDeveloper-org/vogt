@@ -129,8 +129,9 @@ fn optional(value: &str) -> Option<&str> {
 /// Python's `FileNotFoundError` for a missing `git` is
 /// `[Errno 2] No such file or directory: 'git'`. Rust's `NotFound` Display is
 /// `No such file or directory (os error 2)`, which names neither the errno
-/// bracket nor the program. Only that spawn failure is rewritten; a timeout
-/// and every other OS error keep their own text.
+/// bracket nor the program. A timeout is worded as Python's
+/// `subprocess.TimeoutExpired`: the argv as a Python list, then
+/// " timed out after 20 seconds". Every other OS error keeps its own text.
 fn spawn_failure(exc: &std::io::Error) -> String {
     if exc.kind() == std::io::ErrorKind::NotFound {
         "[Errno 2] No such file or directory: 'git'".to_string()
@@ -154,7 +155,8 @@ fn spawn_failure(exc: &std::io::Error) -> String {
 pub fn git_output(root: &Path, args: &[&str], required: bool) -> Result<String, VogtError> {
     let mut command = Command::new("git");
     command.arg("-C").arg(root).args(args);
-    let output = run_bounded(&mut command, GIT_TIMEOUT).map_err(|exc| {
+    let argv = python_argv(root, args);
+    let output = run_bounded(&mut command, GIT_TIMEOUT, &argv).map_err(|exc| {
         collector_error(format!(
             "git could not be run against {}: {}",
             root.display(),
@@ -181,9 +183,16 @@ pub fn git_output(root: &Path, args: &[&str], required: bool) -> Result<String, 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn python_argv(root: &Path, args: &[&str]) -> String {
+    let mut parts = vec![crate::core::py_repr("git"), crate::core::py_repr("-C")];
+    parts.push(crate::core::py_repr(&root.display().to_string()));
+    parts.extend(args.iter().map(|arg| crate::core::py_repr(arg)));
+    format!("[{}]", parts.join(", "))
+}
+
 /// `subprocess.run(timeout=...)`. A command that overruns is killed and
 /// reported as the same class of failure as an unrunnable git.
-fn run_bounded(command: &mut Command, timeout: Duration) -> std::io::Result<Output> {
+fn run_bounded(command: &mut Command, timeout: Duration, argv: &str) -> std::io::Result<Output> {
     let mut child = command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -204,7 +213,7 @@ fn run_bounded(command: &mut Command, timeout: Duration) -> std::io::Result<Outp
             let _ = child.wait();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "git timed out",
+                format!("{argv} timed out after {} seconds", timeout.as_secs()),
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
