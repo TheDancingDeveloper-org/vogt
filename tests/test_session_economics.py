@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from vogt.core.session_economics import CHARS_PER_TOKEN, meter
 
 
@@ -288,7 +290,14 @@ _FIXTURES = (
     Path(__file__).resolve().parents[1] / "engine/server/tests/fixtures/economics"
 )
 
+# The fixtures live with the engine's tests. The core-alone CI job removes
+# engine/, so the parity tests skip there, as other engine-dependent tests do.
+_needs_fixtures = pytest.mark.skipif(
+    not _FIXTURES.is_dir(), reason="needs engine/ (absent in the core-alone job)"
+)
 
+
+@_needs_fixtures
 def test_shared_fixtures_match_the_engine_port() -> None:
     """The numbers the Rust port asserts against the same files, literally."""
 
@@ -346,6 +355,7 @@ def test_shared_fixtures_match_the_engine_port() -> None:
     }
 
 
+@_needs_fixtures
 def test_shared_unicode_fixture_counts_characters_as_python_does() -> None:
     """Non-ASCII text, a tool result with no content (the json.dumps length)
     and a half-millisecond mean: the cases a byte count, compact JSON or
@@ -360,6 +370,7 @@ def test_shared_unicode_fixture_counts_characters_as_python_does() -> None:
     assert result.wall_clock.mean_ms == 2
 
 
+@_needs_fixtures
 def test_shared_gap_fixture_counts_milliseconds_exactly() -> None:
     """A 1.001 s gap is 1001 ms (float seconds * 1000 said 1000), and a DEL
     in a tool input is a six-character escape in json.dumps."""
