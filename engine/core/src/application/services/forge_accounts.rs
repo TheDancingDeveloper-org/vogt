@@ -67,7 +67,7 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let host = crate::application::services::preferences::require_string(&params, "host")?;
+    let host = present_string(&params, "host")?;
     let reason = crate::application::services::preferences::require_string(&params, "reason")?;
     require_supported_host(ctx, &host)?;
     let (declared, _, principal, clock, ids, _) = context_parts(ctx);
@@ -111,6 +111,21 @@ where
         return Ok(());
     }
     Err(VogtError::InvalidRequest(format!(
-        "{host:?} has no provider to validate a token against; configure the host under forge_token_files first"
+        "{} has no provider to validate a token against; \
+         configure the host under forge_token_files first",
+        crate::core::py_repr(host)
     )))
+}
+
+/// A host that is present, even when blank. Python's `str` field treats only a
+/// missing value as absent; `""` reaches the host check and is refused there,
+/// so the shared `require_string` (which rejects blank text) would diverge.
+fn present_string(params: &Value, field: &str) -> Result<String, VogtError> {
+    match params.get(field) {
+        None | Some(Value::Null) => Err(VogtError::InvalidRequest(format!("{field} is required"))),
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(_) => Err(VogtError::InvalidRequest(format!(
+            "{field} must be a string"
+        ))),
+    }
 }

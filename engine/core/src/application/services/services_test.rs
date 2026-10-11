@@ -508,7 +508,28 @@ fn forge_account_unlink_removes_the_stored_account() {
         &built,
         json!({"host": "no.such.host", "reason": "tidying"}),
     );
-    assert!(matches!(refused, Err(VogtError::InvalidRequest(_))));
+    match refused {
+        Err(VogtError::InvalidRequest(message)) => assert_eq!(
+            message,
+            "'no.such.host' has no provider to validate a token against; \
+             configure the host under forge_token_files first"
+        ),
+        other => panic!("unexpected {other:?}"),
+    }
+    let blank = forge_accounts::account_unlink_op(&built, json!({"host": "", "reason": "tidying"}));
+    match blank {
+        Err(VogtError::InvalidRequest(message)) => assert_eq!(
+            message,
+            "'' has no provider to validate a token against; \
+             configure the host under forge_token_files first"
+        ),
+        other => panic!("unexpected {other:?}"),
+    }
+    let missing = forge_accounts::account_unlink_op(&built, json!({"reason": "tidying"}));
+    match missing {
+        Err(VogtError::InvalidRequest(message)) => assert_eq!(message, "host is required"),
+        other => panic!("unexpected {other:?}"),
+    }
 
     let unlinked = forge_accounts::account_unlink_op(
         &built,
