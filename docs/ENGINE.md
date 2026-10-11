@@ -710,7 +710,11 @@ than these routes.
   Places rail. Requires `sessions`, and the caller must be a person, the
   break-glass token, or vogt-core (relaying `session.set_role`, which refuses
   agents): a session token is refused with a 403 and an audit line, so a
-  worker cannot promote itself to oversight (WI-1255).
+  worker cannot promote itself to oversight (WI-1255). The same rule applies
+  to `SessionSpec.role` on `POST /api/sessions`: a non-`worker` role at
+  creation from any other caller is refused, as the core's `session.start`
+  refuses it from an agent — otherwise a worker could start an overseer
+  (which gets its own credential) and drive its terminal.
 - `POST /api/sessions/:id/work-item` `{"work_item": "WI-7" | null}` ->
   `SessionSummary` (WI-998). Labels a session with the work item it serves,
   or clears the label with `null` or a blank string. `SessionSpec.work_item`

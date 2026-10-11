@@ -4028,7 +4028,8 @@ class StartSessionParams(Params):
             "rollouts, check on and revive worker sessions): it is pinned "
             "awake, so it comes back by itself after a redeploy, and the GUI "
             "lists it first. `worker` (default) is every other session. "
-            "Change it later with session.set_role."
+            "Only a person starts an oversight session; an agent caller is "
+            "refused. Change it later with session.set_role."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")

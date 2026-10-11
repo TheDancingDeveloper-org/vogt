@@ -145,41 +145,56 @@ pub async fn keep_session_awake(
     Ok(Json(state.sessions.set_keep_awake(id, req.keep_awake)?))
 }
 
-/// Nominate a session as oversight, or make it a worker again (WI-957).
-/// Becoming oversight pins it awake too.
+/// Whether this caller may give a session a role other than `worker`, or
+/// change its role at all (WI-957, WI-1255).
 ///
-/// The role is a person's nomination: vogt-core's `session.set_role` refuses
-/// every agent principal, and an oversight role is what lets a session commit
-/// for others (C14, WI-1255). So here, too, only a person, the break-glass
-/// operator, or vogt-core relaying a person's `session.set_role` may set it —
-/// otherwise any session token, holding `sessions`, could promote itself in
-/// one call and walk past both checks.
-pub async fn set_session_role(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<Uuid>,
-    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
-    Json(req): Json<vogt_engine_contract::SessionRoleRequest>,
-) -> Result<Json<SessionSummary>> {
-    match identity.as_deref() {
-        Some(identity) if identity.person || identity.break_glass || identity.stack_secret => {}
+/// The role is a person's nomination: vogt-core's `session.set_role` and
+/// `session.start` refuse every agent principal, and an oversight role is
+/// what lets a session commit for others (C14) and ask for grants on their
+/// behalf. So here too only a person, the break-glass operator, or vogt-core
+/// (which has made that check for its own caller) may assign it — otherwise
+/// any session token, holding `sessions`, could promote itself, or start an
+/// overseer and drive its terminal, and walk past both checks. Decided by the
+/// gate's flags, never by `name`. A refusal is a 403 with an audit line.
+fn require_role_authority(
+    identity: Option<&crate::auth::AuthorizedIdentity>,
+    session: &str,
+    role: vogt_engine_contract::SessionRole,
+) -> crate::error::Result<()> {
+    match identity {
+        Some(identity) if identity.person || identity.break_glass || identity.stack_secret => {
+            Ok(())
+        }
         Some(identity) => {
             tracing::warn!(
                 target: "vogt::audit",
                 event = "session.role",
                 outcome = "refused",
                 caller = %identity.name,
-                session_id = %id,
-                role = req.role.as_str(),
-                "session role change refused"
+                session = session,
+                role = role.as_str(),
+                "session role refused"
             );
-            return Err(crate::error::ApiError::Forbidden(format!(
-                "only a person nominates an oversight session, or makes one a worker \
-                 again ({} is an agent); ask a person to set the role from the GUI",
+            Err(crate::error::ApiError::Forbidden(format!(
+                "only a person nominates an oversight session, or changes a session's \
+                 role ({} is an agent); ask a person to do it from the GUI",
                 identity.name
-            )));
+            )))
         }
-        None => return Err(crate::error::ApiError::Unauthorized),
+        None => Err(crate::error::ApiError::Unauthorized),
     }
+}
+
+/// Nominate a session as oversight, or make it a worker again (WI-957).
+/// Becoming oversight pins it awake too. Only a person, break-glass or
+/// vogt-core (`require_role_authority`).
+pub async fn set_session_role(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<Uuid>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
+    Json(req): Json<vogt_engine_contract::SessionRoleRequest>,
+) -> Result<Json<SessionSummary>> {
+    require_role_authority(identity.as_deref(), &id.to_string(), req.role)?;
     Ok(Json(state.sessions.set_role(id, req.role)?))
 }
 
@@ -515,8 +530,14 @@ pub async fn answer_session(
 
 pub async fn create_session(
     State(state): State<Arc<AppState>>,
+    identity: Option<axum::Extension<crate::auth::AuthorizedIdentity>>,
     Json(spec): Json<SessionSpec>,
 ) -> Result<Json<SessionSummary>> {
+    // Starting an overseer is nominating one (WI-1255): a worker that could
+    // start one would drive its terminal and borrow its standing.
+    if !spec.role.is_worker() {
+        require_role_authority(identity.as_deref(), "(new)", spec.role)?;
+    }
     let s = state.sessions.create_launched(spec).await?;
     Ok(Json(s.summary()))
 }

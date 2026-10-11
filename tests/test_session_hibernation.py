@@ -47,7 +47,8 @@ from vogt.application.services import (
     wake_session,
 )
 from vogt.core.auth import hash_token
-from vogt.errors import Conflict
+from vogt.core.principal import Principal
+from vogt.errors import Conflict, RoleRefused
 
 WHY = "hibernation test"
 ROOT = "/srv/estate/vogt"
@@ -454,6 +455,68 @@ def test_an_oversight_session_is_nominated_at_start_and_pinned(
     }
     assert rows[engine_id].role == "oversight"
     assert {row.role for row in rows.values()} == {"oversight", "worker"}
+
+
+def test_an_agent_cannot_start_an_oversight_session(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1255: an agent that could start an overseer would get its standing
+    by proxy — start one, then drive its terminal. Refused before the engine
+    is asked; a worker start by the same agent still works, and the engine's
+    own credential (relaying the break-glass operator) may start one."""
+    agent = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref="agent:session:ses_worker", kind="agent", display_name="w"
+        ),
+    )
+    sent_before = len(engine.sent)
+    with pytest.raises(RoleRefused, match="only a person starts an oversight"):
+        start_session(
+            agent,
+            StartSessionParams(
+                project="vogt", template="claude", role="oversight", reason=WHY
+            ),
+        )
+    assert [r for r in engine.sent[sent_before:] if r["path"] == "/api/sessions"] == []
+
+    worker = start_session(
+        agent, StartSessionParams(project="vogt", template="claude", reason=WHY)
+    )
+    assert worker.session.role == "worker"
+
+    core = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref=wired.config.bootstrap_core_token_actor,
+            kind="agent",
+            display_name="engine",
+        ),
+    )
+    overseer = start_session(
+        core,
+        StartSessionParams(
+            project="vogt", template="claude", role="oversight", reason=WHY
+        ),
+    )
+    assert overseer.session.role == "oversight"
+
+
+def test_set_role_refusal_no_longer_suggests_starting_an_overseer(
+    wired: AppContext,
+) -> None:
+    ses_id, _ = _started(wired)
+    agent = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref="agent:session:ses_worker", kind="agent", display_name="w"
+        ),
+    )
+    with pytest.raises(RoleRefused) as refused:
+        set_session_role(
+            agent, SetSessionRoleParams(id=ses_id, role="oversight", reason=WHY)
+        )
+    assert "role=oversight" not in str(refused.value)
 
 
 def test_set_role_nominates_any_session_and_is_audited(
