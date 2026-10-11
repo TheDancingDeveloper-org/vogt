@@ -392,13 +392,10 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             if let Some(flags) = permission {
                 rewritten.extend(flags);
             }
-            // The same driven-session policy and extra directories Claude Code
-            // is handed (WI-1250). Without them a woken Klaudia session ran
-            // under its own config, and could not re-read a brief that lives
-            // outside its working directory.
-            if let Some(file) = req.settings_file {
-                rewritten.push(format!("--settings={}", file.display()));
-            }
+            // The same extra directories Claude Code is handed (WI-1250):
+            // without them a woken Klaudia session could not re-read a brief
+            // that lives outside its working directory. Never `--settings`:
+            // Klaudia has no such flag and refuses to start with one.
             let mut dirs: Vec<&Path> = req.add_dirs.iter().map(PathBuf::as_path).collect();
             if dirs.is_empty() {
                 if let Some(dir) = req.brief_file.and_then(Path::parent) {
@@ -1191,6 +1188,27 @@ mod permission_tests {
         .command
         .unwrap();
         assert!(out.contains(&"--dangerously-skip-permissions".to_string()));
+        // Klaudia has no `--settings` flag and refuses to start with one, so
+        // the deployment's settings file never reaches its argv (WI-1250).
+        let settings = Path::new("/state/driven-settings.json");
+        let dirs = [PathBuf::from("/state/agent-task-prompts/sessions")];
+        let out = launch(
+            Some(&cmd(&["klaudia"])),
+            &LaunchRequest {
+                settings_file: Some(settings),
+                add_dirs: &dirs,
+                session_id: Some(Uuid::nil()),
+                ..LaunchRequest::default()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(!out.iter().any(|a| a.starts_with("--settings")), "{out:?}");
+        assert!(
+            out.contains(&"--add-dir=/state/agent-task-prompts/sessions".to_string()),
+            "{out:?}"
+        );
         let refused = launch(
             Some(&cmd(&["klaudia"])),
             &LaunchRequest {
