@@ -108,6 +108,21 @@ fn optional(value: &str) -> Option<&str> {
     }
 }
 
+/// Why git could not be run, worded as Python words it.
+///
+/// Python's `FileNotFoundError` for a missing `git` is
+/// `[Errno 2] No such file or directory: 'git'`. Rust's `NotFound` Display is
+/// `No such file or directory (os error 2)`, which names neither the errno
+/// bracket nor the program. Only that spawn failure is rewritten; a timeout
+/// and every other OS error keep their own text.
+fn spawn_failure(exc: &std::io::Error) -> String {
+    if exc.kind() == std::io::ErrorKind::NotFound {
+        "[Errno 2] No such file or directory: 'git'".to_string()
+    } else {
+        exc.to_string()
+    }
+}
+
 /// Run one git command, returning "" when git ran and had no answer.
 ///
 /// Deliberately forgiving about answers: a repository with no commits, no
@@ -125,8 +140,9 @@ pub fn git_output(root: &Path, args: &[&str], required: bool) -> Result<String, 
     command.arg("-C").arg(root).args(args);
     let output = run_bounded(&mut command, GIT_TIMEOUT).map_err(|exc| {
         collector_error(format!(
-            "git could not be run against {}: {exc}",
-            root.display()
+            "git could not be run against {}: {}",
+            root.display(),
+            spawn_failure(&exc)
         ))
     })?;
     if !output.status.success() {
@@ -436,6 +452,21 @@ mod tests {
         };
         assert!(message.starts_with("CollectorError:"), "{message}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_missing_git_binary_names_errno_2_the_way_python_does() {
+        // Python: FileNotFoundError -> "[Errno 2] No such file or directory: 'git'".
+        // Tested on the mapping, not by emptying PATH: tests run on parallel
+        // threads, and a process-wide PATH change would break every other
+        // test that runs git meanwhile.
+        let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
+        assert_eq!(
+            spawn_failure(&missing),
+            "[Errno 2] No such file or directory: 'git'"
+        );
+        let other = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(spawn_failure(&other), other.to_string());
     }
 
     #[test]
