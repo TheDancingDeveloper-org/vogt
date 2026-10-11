@@ -707,7 +707,10 @@ than these routes.
   becomes one, so a restart wakes it by itself; going back to `worker` leaves
   the pin. The role is kept in the session's record, shown on its summary
   (absent for a worker), and the PWA lists oversight sessions first in the
-  Places rail. Requires `sessions`.
+  Places rail. Requires `sessions`, and the caller must be a person, the
+  break-glass token, or vogt-core (relaying `session.set_role`, which refuses
+  agents): a session token is refused with a 403 and an audit line, so a
+  worker cannot promote itself to oversight (WI-1255).
 - `POST /api/sessions/:id/work-item` `{"work_item": "WI-7" | null}` ->
   `SessionSummary` (WI-998). Labels a session with the work item it serves,
   or clears the label with `null` or a blank string. `SessionSpec.work_item`
@@ -2267,6 +2270,29 @@ outside the workspace. An empty `repo` means the workspace root itself.
   returns the branch and takes `create` for `-b`. `discard` restores a tracked
   path from `HEAD` and `git clean`s an untracked one, which means it destroys
   work with no undo.
+
+  Who may run which op (WI-1255) — `git-write` alone is not enough, because
+  every `work.write` token, every driven session's included, holds it:
+
+  - a person (a core actor of kind `human`) or the break-glass token: any op —
+    this is the PWA's Git panel;
+  - vogt-core's stack secret: only a `commit` with `session` (the core's
+    `session.commit_for`, which has already checked its principal);
+  - any other token (a session's): only a `commit` with `session` naming
+    *another* session, and only when the caller's own engine session has the
+    `oversight` role. An `agent:session:<ses_…>` token is matched to its
+    engine session by the `VOGT_SESSION_ID` its record carries (exactly one
+    match, or it is not a session); `agent:engine:<uuid>` by the uuid.
+
+  Everything else is a 403, written to the `vogt::audit` log as
+  `event=git.op outcome=refused` with the caller, op and target session.
+
+  A `commit` with `session` whose target is a **worker** never lands in the
+  repo's main checkout: pool workers are launched there, so without
+  `worktree` the commit would go on whatever branch the shared checkout has
+  out. It is refused with a 400 unless it resolves to a linked worktree —
+  pass `worktree` (workspace-relative or absolute inside the workspace)
+  naming the worker's own.
 
 ### GUI APIs
 
