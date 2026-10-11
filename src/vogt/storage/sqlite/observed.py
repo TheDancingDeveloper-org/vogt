@@ -16,7 +16,7 @@ import json
 import os
 import socket
 import sqlite3
-from contextlib import suppress
+from contextlib import AbstractContextManager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -37,13 +37,15 @@ from vogt.storage.observed_types import (
     PruneReport,
     TranscriptCursor,
 )
-from vogt.storage.sqlite.connection import DEFAULT_SYNCHRONOUS, connect
+from vogt.storage.sqlite.connection import DEFAULT_SYNCHRONOUS, borrow_read, connect
 from vogt.storage.sqlite.migrator import DEFAULT_STALE_AFTER, Migrator, table_exists
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations" / "observed"
 
 META_INSTANCE_ID = "instance_id"
 META_CREATED_AT = "created_at"
+#: Moves on every rebuild of `latest_observations` (`latest_generation`).
+META_LATEST_GENERATION = "latest_generation"
 
 #: A subject is "open" unless the source says otherwise. Kept as one string so
 #: the ranked-view filter and the `closed_upstream` count read the same rule:
@@ -553,6 +555,7 @@ class SqliteObservedStore:
         retention always keeps the newest row per subject.
         """
         with self._write() as conn:
+            _bump_latest_generation(conn)
             conn.execute("DELETE FROM latest_observations")
             conn.execute(
                 "INSERT INTO latest_observations (subject_key, observation_id, "
@@ -569,6 +572,25 @@ class SqliteObservedStore:
                 "SELECT COUNT(*) AS n FROM latest_observations"
             ).fetchone()
             return int(row["n"])
+
+    def latest_generation(self) -> int:
+        """How many times `latest_observations` has been rebuilt.
+
+        The projection changes only in `rebuild_latest`, which moves this in
+        the same transaction, so two equal answers mean every read of the
+        projection in between saw the same rows — what a cache keyed on it
+        (`application/memo.py`) relies on.
+        """
+        if not self._path.exists():
+            return 0
+        try:
+            with self._read() as conn:
+                row = conn.execute(
+                    "SELECT value FROM meta WHERE key = ?", (META_LATEST_GENERATION,)
+                ).fetchone()
+        except sqlite3.OperationalError:  # pragma: no cover - unmigrated file
+            return 0
+        return 0 if row is None else int(row["value"])
 
     def replace_dep_refs(self, rows: list[DepRefRow]) -> int:
         """Replace the dependency projection with resolved rows."""
@@ -890,11 +912,18 @@ class SqliteObservedStore:
             connect(self._path, create=True, synchronous=self._synchronous), write=True
         )
 
-    def _read(self) -> SqliteObservedStore._Ctx:
-        return self._Ctx(
-            connect(self._path, create=False, synchronous=self._synchronous),
-            write=False,
-        )
+    def _read(self) -> AbstractContextManager[sqlite3.Connection]:
+        # Pooled (WI-1224): reads are the hot path, and one badge read used
+        # to open a hundred-odd connections here. See `borrow_read`.
+        return borrow_read(self._path, synchronous=self._synchronous)
+
+
+def _bump_latest_generation(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES (?, '1') "
+        "ON CONFLICT (key) DO UPDATE SET value = CAST(value AS INTEGER) + 1",
+        (META_LATEST_GENERATION,),
+    )
 
 
 # -- row mapping -----------------------------------------------------------

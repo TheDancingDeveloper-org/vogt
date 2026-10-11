@@ -23,7 +23,7 @@ use reqwest::StatusCode;
 use serde_json::{json, Value};
 use vogt_engine_server::{
     app::router,
-    vogt_core::{BUSY_CODE, PROXIED_READS_IN_FLIGHT},
+    vogt_core::{BUSY_CODE, HEAVY_READS_IN_FLIGHT, LIGHT_READS_IN_FLIGHT, PROXIED_READS_IN_FLIGHT},
     Config,
 };
 
@@ -131,6 +131,11 @@ async fn core_handler(
         "/api/slow" => {
             tokio::time::sleep(Duration::from_millis(400)).await;
             (AxumStatus::OK, Json(json!({"seen": "/api/slow"}))).into_response()
+        }
+        // An aggregate read the core takes its time over, for the heavy pool.
+        "/api/place/metrics" => {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            (AxumStatus::OK, Json(json!({"seen": "/api/place/metrics"}))).into_response()
         }
         "/health/ready" => (
             AxumStatus::OK,
@@ -1733,7 +1738,7 @@ async fn an_unusable_request_id_is_replaced_before_it_reaches_a_log() {
 async fn a_burst_past_the_in_flight_cap_is_shed_with_a_retry_after() {
     let (door, log) = front_door().await;
     let client = client();
-    let burst = PROXIED_READS_IN_FLIGHT + 6;
+    let burst = LIGHT_READS_IN_FLIGHT + 6;
     let mut pending = Vec::with_capacity(burst);
     for _ in 0..burst {
         let client = client.clone();
@@ -1775,7 +1780,7 @@ async fn a_burst_past_the_in_flight_cap_is_shed_with_a_retry_after() {
         }
     }
     assert_eq!(served + shed, burst);
-    assert!(served <= PROXIED_READS_IN_FLIGHT, "served {served}");
+    assert!(served <= LIGHT_READS_IN_FLIGHT, "served {served}");
     assert!(shed >= 6, "shed {shed}");
     // Nothing that was shed reached the core: the cap is at the door.
     assert_eq!(
@@ -1794,4 +1799,96 @@ async fn a_burst_past_the_in_flight_cap_is_shed_with_a_retry_after() {
         .await
         .unwrap();
     assert_eq!(after.status(), StatusCode::OK);
+}
+
+/// The cap is split (WI-1224): aggregate reads have a small pool of their own,
+/// so a flood of them is shed from that pool and the cheap reads the shell
+/// needs to draw at all still go through while every heavy slot is held.
+#[tokio::test]
+async fn a_heavy_read_flood_does_not_shed_cheap_reads() {
+    assert_eq!(
+        HEAVY_READS_IN_FLIGHT + LIGHT_READS_IN_FLIGHT,
+        PROXIED_READS_IN_FLIGHT,
+        "the split must not raise the overall cap"
+    );
+    let (door, log) = front_door().await;
+    let client = client();
+    let flood = HEAVY_READS_IN_FLIGHT + 6;
+    let mut heavy = Vec::with_capacity(flood);
+    for _ in 0..flood {
+        let client = client.clone();
+        let door = door.clone();
+        heavy.push(tokio::spawn(async move {
+            client
+                .get(format!("{door}/api/vogt/place/metrics"))
+                .headers(bearer(TEST_TOKEN))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+    // Wait until the heavy pool is full: every slot is held by a read the
+    // stand-in core is still sleeping on.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while proxied(&log)
+        .iter()
+        .filter(|s| s.path == "/api/place/metrics")
+        .count()
+        < HEAVY_READS_IN_FLIGHT
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the heavy pool never filled"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // Cheap reads, while the heavy pool is full: every one is answered.
+    let mut cheap = Vec::new();
+    for path in ["sessions", "preferences", "work/get", "status"] {
+        let client = client.clone();
+        let door = door.clone();
+        cheap.push(tokio::spawn(async move {
+            client
+                .get(format!("{door}/api/vogt/{path}"))
+                .headers(bearer(TEST_TOKEN))
+                .send()
+                .await
+                .unwrap()
+        }));
+    }
+    for task in cheap {
+        let response = task.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    let mut served = 0;
+    let mut shed = 0;
+    for task in heavy {
+        let response = task.await.unwrap();
+        match response.status() {
+            StatusCode::OK => served += 1,
+            StatusCode::SERVICE_UNAVAILABLE => {
+                shed += 1;
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok()),
+                    Some("2")
+                );
+                let body: Value = response.json().await.unwrap();
+                let reason = body["error"]["message"].as_str().unwrap();
+                assert!(
+                    reason.contains("heavy requests open against vogt-core"),
+                    "{reason}"
+                );
+                assert_eq!(body["error"]["code"], BUSY_CODE);
+            }
+            other => panic!("unexpected status {other}"),
+        }
+    }
+    assert_eq!(served + shed, flood);
+    assert!(served <= HEAVY_READS_IN_FLIGHT, "served {served}");
+    assert!(shed >= 6, "shed {shed}");
 }

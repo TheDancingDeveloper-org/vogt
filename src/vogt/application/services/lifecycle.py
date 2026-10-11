@@ -25,7 +25,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from vogt.application.context import AppContext, with_stores_at
+from vogt.application.context import (
+    AppContext,
+    release_store_connections,
+    with_stores_at,
+)
 from vogt.application.models import (
     BackupParams,
     BackupResult,
@@ -38,7 +42,9 @@ from vogt.application.models import (
     RestoreParams,
     RestoreResult,
 )
+from vogt.application.services.inbox import clear_badge_cache
 from vogt.application.services.instance_merge import merge_export
+from vogt.application.services.place import clear_metrics_cache
 from vogt.application.writes import WriteOutcome, audited_write, validate_reason
 from vogt.core.clock import from_iso, to_iso
 from vogt.core.entities import Actor
@@ -184,6 +190,15 @@ def _restore_engine_state(source: Path, target: Path | None) -> str:
     return f"restored into {resolved}"
 
 
+def _forget_live_stores() -> None:
+    """Close pooled connections and drop answers remembered from the stores
+    about to be replaced (WI-1224), in this process. Another process serving
+    the same data directory notices the swap on its own (`borrow_read`)."""
+    release_store_connections()
+    clear_badge_cache()
+    clear_metrics_cache()
+
+
 def _snapshot(source: Path, target: Path) -> None:
     """Copy one SQLite database consistently, using its own backup API."""
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -314,6 +329,7 @@ def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
 
     data_dir = ctx.config.resolved_data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
+    _forget_live_stores()
     for name in ("declared.sqlite3", "observed.sqlite3"):
         shutil.copy2(source / name, data_dir / name)
         # WAL and shm files belong to the replaced database, not the new one.
@@ -513,6 +529,7 @@ def clone(ctx: AppContext, params: CloneParams) -> CloneResult:
         )
         staged.observed.rebind_instance(instance_id)
 
+        _forget_live_stores()
         for name in _STORE_FILES:
             # WAL and shm files belong to the replaced database, not the new one.
             for suffix in ("-wal", "-shm"):

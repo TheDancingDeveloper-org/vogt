@@ -10,7 +10,6 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -25,6 +24,7 @@ from vogt.adapters.forge.kinds import (
     KIND_DEPLOY_LANE,
 )
 from vogt.application.context import AppContext
+from vogt.application.memo import StoreMemo
 from vogt.application.models import (
     InboxAction,
     InboxArchiveParams,
@@ -271,12 +271,27 @@ class InboxBadge:
     active_total: int
 
 
-#: How long one projection may answer badge reads. Short: the key already
-#: moves on every declared write and every published sweep, so the TTL only
-#: bounds what the key cannot see — live engine session state and a snooze
-#: running out.
-BADGE_TTL_SECONDS = 5.0
-_badge_cache: dict[tuple[int, int, int, int], tuple[float, list[InboxEntry]]] = {}
+@dataclass(frozen=True)
+class _StoredInbox:
+    """The half of the Inbox that is a pure function of the two stores.
+
+    Everything but the live engine half: notifications, CI, agent runs,
+    bound branches, deploy lanes and drift, with their triage applied. The
+    projects are kept beside them because the live half names its entries'
+    projects too.
+    """
+
+    projects: dict[str, Project]
+    entries: list[InboxEntry]
+
+
+#: The stored half, shared between every badge read while the stores have not
+#: moved (WI-1224). Every open tab and device nudges its badge on the same
+#: event; before, each one rebuilt the whole projection, and the cache that
+#: was meant to share it was keyed on the store *objects*, which are built
+#: per request, so it never hit across requests. The live half is not in it:
+#: it is read from the engine on every badge read, and is cheap.
+_stored_memo: StoreMemo[_StoredInbox] = StoreMemo()
 
 
 def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
@@ -284,27 +299,16 @@ def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
 
     Same answer as `inbox.list` under the same filter (`counts`/length), but
     cheaper: it skips the coverage and engine-status reads `inbox.list`
-    reports, and it shares one projection between every badge read that
-    arrives while nothing has changed — every open tab and device nudges its
-    badge on the same event, and before this each one rebuilt the whole
-    Inbox. It filters only on fields already on the entry (the actor was
-    resolved at collect time), so no forge call can happen here.
+    reports, and it shares one projection of the stored half between every
+    badge read that arrives while nothing has changed (`StoreMemo`). It
+    filters only on fields already on the entry (the actor was resolved at
+    collect time), so no forge call can happen here. A snooze that runs out
+    is judged at count time, so a shared projection cannot keep it hidden.
     """
+    stored = _stored_memo.get(ctx, lambda: _stored_triaged(ctx))
     with ctx.declared.read() as view:
-        key = (
-            id(ctx.declared),
-            id(ctx.observed),
-            view.current_revision(),
-            view.latest_event_seq(),
-        )
-        now = time.monotonic()
-        cached = _badge_cache.get(key)
-        if cached is not None and cached[0] > now:
-            entries = cached[1]
-        else:
-            entries = _collect(ctx, view)
-            _badge_cache.clear()
-            _badge_cache[key] = (now + BADGE_TTL_SECONDS, entries)
+        live = _triaged(ctx, view, _collect_live(ctx, view, stored.projects))
+    entries = [*stored.entries, *live]
     moment = ctx.clock()
     active_total = sum(
         1 for entry in entries if _triage_matches(entry, ["active"], moment)
@@ -323,10 +327,33 @@ def inbox_badge(ctx: AppContext, saved: InboxSavedFilter | None) -> InboxBadge:
 
 def clear_badge_cache() -> None:
     """Drop the shared badge projection (tests, and a restore)."""
-    _badge_cache.clear()
+    _stored_memo.clear()
+
+
+def _stored_triaged(ctx: AppContext) -> _StoredInbox:
+    with ctx.declared.read() as view:
+        stored = _collect_stored(ctx, view)
+        return _StoredInbox(
+            projects=stored.projects,
+            entries=_triaged(ctx, view, stored.entries),
+        )
+
+
+def _triaged(
+    ctx: AppContext, view: ReadView, entries: list[InboxEntry]
+) -> list[InboxEntry]:
+    triage = view.inbox_triage_by_keys([entry.entry_key for entry in entries])
+    return [_apply_triage(ctx, triage, entry) for entry in entries]
 
 
 def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
+    stored = _collect_stored(ctx, view)
+    live = _collect_live(ctx, view, stored.projects)
+    return _triaged(ctx, view, [*stored.entries, *live])
+
+
+def _collect_stored(ctx: AppContext, view: ReadView) -> _StoredInbox:
+    """The stored half, untriaged: a pure function of the two stores."""
     projects = {p.id: p for p in view.list_projects(limit=MAX_SCAN, offset=0)}
     entries: list[InboxEntry] = []
     bots = normalise_bot_logins(ctx.config.inbox_bot_logins)
@@ -498,7 +525,15 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
 
     for proposal in view.list_drift(status="open", limit=MAX_SCAN):
         entries.append(_drift_entry(ctx, proposal, projects, view))
+    return _StoredInbox(projects=projects, entries=entries)
 
+
+def _collect_live(
+    ctx: AppContext, view: ReadView, projects: dict[str, Project]
+) -> list[InboxEntry]:
+    """The live half, untriaged: grants waiting for a person and the engine's
+    sessions that need one. Read on every call — the engine is its truth."""
+    entries: list[InboxEntry] = []
     live: list[EngineSession] = []
     if ctx.engine is not None:
         try:
@@ -554,8 +589,7 @@ def _collect(ctx: AppContext, view: ReadView) -> list[InboxEntry]:
                 )
         except EngineUnavailable:
             pass
-    triage = view.inbox_triage_by_keys([entry.entry_key for entry in entries])
-    return [_apply_triage(ctx, triage, entry) for entry in entries]
+    return entries
 
 
 def _freshness(

@@ -63,7 +63,11 @@ from vogt.storage.interface import (
     WorkFilter,
     WorkItemUpdate,
 )
-from vogt.storage.sqlite.connection import DEFAULT_SYNCHRONOUS, connect
+from vogt.storage.sqlite.connection import (
+    DEFAULT_SYNCHRONOUS,
+    borrow_read,
+    connect,
+)
 from vogt.storage.sqlite.migrator import (
     DEFAULT_STALE_AFTER,
     Migrator,
@@ -505,16 +509,26 @@ class SqliteDeclaredStore:
 
     @contextmanager
     def read(self) -> Iterator[SqliteReadView]:
-        conn = self._open_initialized()
-        try:
-            # A ReadView promises one consistent snapshot. SQLite otherwise
-            # starts and ends a read transaction around each SELECT, which
-            # would let a count and its following page observe two revisions.
-            conn.execute("BEGIN")
-            yield SqliteReadView(conn)
-        finally:
-            _rollback_quietly(conn)
-            conn.close()
+        if not self._path.exists():
+            raise NotInitialized(self._not_initialized_message())
+        # A pooled connection (WI-1224): a read is the hot path, and a fresh
+        # connection per read paid the open, the pragmas and a cold page
+        # cache every time. Writes keep their own connection per transaction.
+        with borrow_read(self._path, synchronous=self._synchronous) as conn:
+            try:
+                if _meta_get(conn, META_INSTANCE_ID) is None:
+                    raise NotInitialized(self._not_initialized_message())
+            except sqlite3.OperationalError as exc:
+                raise NotInitialized(self._not_initialized_message()) from exc
+            try:
+                # A ReadView promises one consistent snapshot. SQLite otherwise
+                # starts and ends a read transaction around each SELECT, which
+                # would let a count and its following page observe two
+                # revisions.
+                conn.execute("BEGIN")
+                yield SqliteReadView(conn)
+            finally:
+                _rollback_quietly(conn)
 
     @contextmanager
     def write(self) -> Iterator[SqliteWriteTxn]:
