@@ -34,7 +34,7 @@
 //! to the brief file, so a paragraphs-long work-item brief stays out of `ps`
 //! and out of quoting.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
@@ -72,7 +72,7 @@ pub const CLAUDE_QUIET_ENV: &[(&str, &str)] = &[
 ];
 
 /// What a session asked of the agent CLI it runs, beyond the command itself.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 pub struct LaunchRequest<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
@@ -91,6 +91,11 @@ pub struct LaunchRequest<'a> {
     /// The deployment's driven-session settings (an `autoMode` policy) to
     /// hand Claude Code with `--settings`, when it has one.
     pub settings_file: Option<&'a Path>,
+    /// Extra directories the agent may read, as `--add-dir`. A fresh Claude
+    /// launch derives this from the brief's parent; a wake passes the
+    /// directories recorded at the first start so they survive a brief that
+    /// is not sent again (WI-1250).
+    pub add_dirs: &'a [std::path::PathBuf],
     /// The deployment's opencode driven-session policy (an opencode config
     /// with a `permission` block), for the default posture (WI-932).
     pub opencode_config: Option<&'a str>,
@@ -300,12 +305,20 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 // `--add-dir`, so it can never take a following positional.
                 rewritten.push(format!("--settings={}", file.display()));
             }
-            if let Some(dir) = req.brief_file.and_then(Path::parent) {
-                // The brief lives under the engine's state directory, outside
-                // the session's working directory, and reading it there would
-                // stop a fresh session at a permission prompt before it began
-                // (WI-912). `--add-dir` is variadic: the `=` form takes one
-                // value, so the positional prompt after it stays a prompt.
+            // The brief lives under the engine's state directory, outside the
+            // session's working directory, and reading it there would stop a
+            // fresh session at a permission prompt before it began (WI-912).
+            // `--add-dir` is variadic: the `=` form takes one value, so the
+            // positional prompt after it stays a prompt. A wake passes the
+            // directories recorded at the first start (`req.add_dirs`) because
+            // it has no new brief to derive them from (WI-1250).
+            let mut dirs: Vec<&Path> = req.add_dirs.iter().map(PathBuf::as_path).collect();
+            if dirs.is_empty() {
+                if let Some(dir) = req.brief_file.and_then(Path::parent) {
+                    dirs.push(dir);
+                }
+            }
+            for dir in dirs {
                 rewritten.push(format!("--add-dir={}", dir.display()));
             }
             // Positional, and last: `claude [options] [prompt]`.
@@ -378,6 +391,22 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             }
             if let Some(flags) = permission {
                 rewritten.extend(flags);
+            }
+            // The same driven-session policy and extra directories Claude Code
+            // is handed (WI-1250). Without them a woken Klaudia session ran
+            // under its own config, and could not re-read a brief that lives
+            // outside its working directory.
+            if let Some(file) = req.settings_file {
+                rewritten.push(format!("--settings={}", file.display()));
+            }
+            let mut dirs: Vec<&Path> = req.add_dirs.iter().map(PathBuf::as_path).collect();
+            if dirs.is_empty() {
+                if let Some(dir) = req.brief_file.and_then(Path::parent) {
+                    dirs.push(dir);
+                }
+            }
+            for dir in dirs {
+                rewritten.push(format!("--add-dir={}", dir.display()));
             }
             // Never positional: Klaudia reads a positional prompt as `-p`
             // (answer and exit), so a session started that way did one turn

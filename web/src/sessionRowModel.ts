@@ -75,7 +75,7 @@ export function sessionResourceWord(s: SessionSummary): string | null {
  *  transcript (`session.list` → `running`, shown on the Oversight board). */
 export function sessionRuntimeHint(s: SessionSummary): string | null {
   const words = (s.command ?? "").split(/\s+/);
-  const agent = words.map((w) => w.split("/").pop() ?? "").find((w) => ["claude", "codex", "opencode"].includes(w));
+  const agent = words.map((w) => w.split("/").pop() ?? "").find((w) => ["claude", "codex", "opencode", "klaudia"].includes(w));
   const flag = words.findIndex((w) => w === "--model" || w === "-m");
   const model = flag >= 0 ? words[flag + 1] : words.find((w) => w.startsWith("--model="))?.slice(8);
   const parts = [
@@ -86,6 +86,14 @@ export function sessionRuntimeHint(s: SessionSummary): string | null {
     s.stop ? `stopped${s.stop.by ? ` by ${s.stop.by}` : ""}${s.stop.reason ? `: ${s.stop.reason}` : ""}` : null,
   ].filter((part): part is string => Boolean(part));
   return parts.length ? parts.join(" · ") : null;
+}
+
+/** A non-default permission posture, as a short visible label. The default
+ *  posture is stored as nothing and stays unmarked; bypass is the one a person
+ *  granted and a wake must not silently drop (WI-1250). */
+export function permissionPostureLabel(mode: string | null | undefined): string | null {
+  if (!mode || mode === "default") return null;
+  return mode === "bypass" ? "no permission checks" : mode;
 }
 
 /** The row's state word beside the dot: "waiting for input · 40s",
