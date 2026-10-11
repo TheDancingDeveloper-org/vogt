@@ -9365,6 +9365,65 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     drop(tmp);
 }
 
+/// Hibernating a Klaudia session leaves `<state_dir>/handoffs/<id>.md` (C12).
+/// The stub is named `klaudia`, which is what the engine keys the agent on;
+/// this temp directory is not a checkout and no summary is planted, so the
+/// file records both halves as absent.
+#[tokio::test]
+async fn hibernating_a_klaudia_session_leaves_a_handoff_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut cfg = test_config();
+    cfg.default_cwd = tmp.path().to_path_buf();
+    cfg.workspace_root = tmp.path().canonicalize().unwrap();
+    cfg.state_dir = tmp.path().join("state");
+    let bin = tmp.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("klaudia");
+    std::fs::write(&stub, "#!/bin/sh\nprintf '> '\nexec sleep 300\n").unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let state_dir = cfg.state_dir.clone();
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "klaudia handoff",
+            "command": [stub.to_string_lossy()],
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["conversation"]["agent"], "klaudia");
+    let _ = live_output_containing(&client, &base, &id, &["> "]).await;
+
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "reason": "handoff" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+
+    let handoff =
+        std::fs::read_to_string(state_dir.join("handoffs").join(format!("{id}.md"))).unwrap();
+    assert!(
+        handoff.contains(&format!("conversation: {id}")),
+        "{handoff}"
+    );
+    assert!(handoff.contains("(no summary)"), "{handoff}");
+    assert!(handoff.contains("## Git (session directory)"), "{handoff}");
+    assert!(handoff.contains("(not a git checkout)"), "{handoff}");
+    drop(tmp);
+}
+
 #[tokio::test]
 async fn a_shell_hibernates_only_when_asked_and_wakes_fresh() {
     let (_tmp, cfg, _stub) = hibernation_sandbox();

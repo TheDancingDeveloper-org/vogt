@@ -34,6 +34,7 @@ from vogt.core.entities import (
     DriftProposal,
     Effort,
     Event,
+    HandoffFields,
     Initiative,
     InitiativeState,
     Label,
@@ -1505,6 +1506,14 @@ class GetWorkParams(Params):
             "`summary` omits the item body and comments; `full` (default) keeps them."
         ),
     )
+    comment_order: Literal["newest", "oldest"] = Field(
+        default="newest",
+        description=(
+            "Which end of the comment thread `comment_limit` keeps. `newest` "
+            "(default) returns the newest comments, newest first; `oldest` "
+            "returns the oldest, oldest first."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -1857,7 +1866,32 @@ class BindBranchParams(Params):
 class CommentParams(Params):
     ref: str
     body: Name = Field(description="The comment text.")
+    kind: Literal["note", "handoff"] = Field(
+        default="note",
+        description=(
+            "`note` (default) is an ordinary remark. `handoff` is the structured "
+            "hand-off a fresh session starts from, and requires `handoff`."
+        ),
+    )
+    handoff: HandoffFields | None = Field(
+        default=None,
+        description=(
+            "The structured fields of a hand-off: branch, head_sha, base, "
+            "done, remaining, touch_points, gates_run, blockers, session. "
+            "Required when kind is `handoff`, refused on a note."
+        ),
+    )
     reason: Reason
+
+    @model_validator(mode="after")
+    def _handoff_matches_kind(self) -> CommentParams:
+        if self.kind == "handoff" and self.handoff is None:
+            msg = "a hand-off comment requires handoff fields"
+            raise ValueError(msg)
+        if self.kind == "note" and self.handoff is not None:
+            msg = "handoff fields belong on a comment of kind handoff"
+            raise ValueError(msg)
+        return self
 
 
 class CommentResult(Result):
@@ -4029,6 +4063,15 @@ class StartSessionParams(Params):
             "awake, so it comes back by itself after a redeploy, and the GUI "
             "lists it first. `worker` (default) is every other session. "
             "Change it later with session.set_role."
+        ),
+    )
+    from_handoff: str | None = Field(
+        default=None,
+        description=(
+            "Start a fresh session from a work item's hand-off comment: the "
+            "work item ref (e.g. WI-7). Refused when that item has no hand-off "
+            "comment, and refused when `work_item` is also given and names a "
+            "different item. The brief carries the latest hand-off."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")

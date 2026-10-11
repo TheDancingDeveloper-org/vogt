@@ -561,7 +561,9 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
         item = upstream.resolve_work_ref(ctx, view, params.ref)
         native = view.work_item_by_ref(params.ref) is not None
         comments = (
-            view.comments_for(item.id, limit=params.comment_limit)
+            view.comments_for(
+                item.id, limit=params.comment_limit, order=params.comment_order
+            )
             if params.comment_limit and native
             else []
         )
@@ -1404,6 +1406,14 @@ def comment_work(ctx: AppContext, params: CommentParams) -> CommentResult:
         )
     if not native:
         assert project is not None  # an upstream item always has its project
+        if params.kind == "handoff":
+            # The forge thread has no kind: posting a hand-off there would
+            # flatten it to free text and the next session could not find it.
+            msg = (
+                f"{item.ref} is an upstream item; a hand-off comment is a "
+                "local record and cannot be posted to the forge"
+            )
+            raise InvalidRequest(msg)
         return _comment_upstream(ctx, params, item, project)
     # As with transitions, a native item's comment is local whatever the
     # project's link state; there is no upstream thread to post to (#770).
@@ -1420,6 +1430,8 @@ def _comment_native(ctx: AppContext, params: CommentParams) -> CommentResult:
             actor_display_name=actor.display_name,
             body=params.body,
             created_at=ctx.clock(),
+            kind=params.kind,
+            handoff=params.handoff,
         )
         txn.insert_comment(comment)
 
