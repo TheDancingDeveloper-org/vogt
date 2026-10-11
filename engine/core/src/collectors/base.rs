@@ -103,12 +103,17 @@ pub trait Collector {
     /// `now` is the sweep's clock. It is a function rather than the `Clock`
     /// itself so a collector can be a trait object: `Clock::now` needs `&mut`,
     /// and a generic clock would make this trait not dyn-compatible.
+    ///
+    /// Python collectors are generators: a finding already yielded stays when a
+    /// later iteration raises. `findings` is that prefix. `error` is the raise.
+    /// `Err` from a helper that ran before any finding is `findings: []` plus
+    /// the error, which is what a plain `Result` used to mean.
     fn collect(
         &mut self,
         ctx: &mut CollectorContext<'_>,
         project: &Project,
         now: &mut dyn FnMut() -> crate::core::Moment,
-    ) -> Result<Vec<Finding>, VogtError>;
+    ) -> Collection;
 
     /// Bookkeeping committed once the append has landed.
     ///
@@ -122,6 +127,46 @@ pub trait Collector {
     /// and shifts `finished_at` and the published event one tick later.
     fn post_append(&self) -> bool {
         false
+    }
+}
+
+/// What one `collect` produced, including a failure after some findings.
+#[derive(Debug)]
+pub struct Collection {
+    pub findings: Vec<Finding>,
+    pub error: Option<VogtError>,
+}
+
+impl Collection {
+    pub fn ok(findings: Vec<Finding>) -> Self {
+        Self {
+            findings,
+            error: None,
+        }
+    }
+
+    pub fn failed(error: VogtError) -> Self {
+        Self {
+            findings: Vec::new(),
+            error: Some(error),
+        }
+    }
+
+    /// Findings already produced, then the failure that stopped the rest.
+    pub fn partial(findings: Vec<Finding>, error: VogtError) -> Self {
+        Self {
+            findings,
+            error: Some(error),
+        }
+    }
+}
+
+impl From<Result<Vec<Finding>, VogtError>> for Collection {
+    fn from(result: Result<Vec<Finding>, VogtError>) -> Self {
+        match result {
+            Ok(findings) => Self::ok(findings),
+            Err(error) => Self::failed(error),
+        }
     }
 }
 

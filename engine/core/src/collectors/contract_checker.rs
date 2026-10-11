@@ -12,9 +12,8 @@ use serde_json::{json, Value};
 use crate::config::VogtConfig;
 use crate::core::Project;
 use crate::decisions::{contract_from_settings, evaluate, Contract, ContractTree};
-use crate::errors::VogtError;
 
-use super::base::{finding, Collector, CollectorContext, Finding};
+use super::base::{finding, Collection, Collector, CollectorContext, Finding};
 use super::git_local::tracked_names;
 
 const KIND_CONTRACT: &str = "contract.check";
@@ -75,7 +74,7 @@ impl Collector for ContractCheckerCollector {
         ctx: &mut CollectorContext<'_>,
         project: &Project,
         _now: &mut dyn FnMut() -> crate::core::Moment,
-    ) -> Result<Vec<Finding>, VogtError> {
+    ) -> Collection {
         let contract = Self::contract(ctx.config);
         let tracked = tracked_names(Path::new(&project.root_path));
         let result = evaluate(
@@ -108,7 +107,7 @@ impl Collector for ContractCheckerCollector {
                 })
             })
             .collect();
-        Ok(vec![finding(
+        Collection::ok(vec![finding(
             KIND_CONTRACT,
             &format!("contract:{}", project.slug),
             json!({
@@ -151,7 +150,7 @@ mod tests {
         let mut now = || Moment::from_unix(0, 0);
         let found = ContractCheckerCollector
             .collect(&mut context, &project(root), &mut now)
-            .unwrap();
+            .findings;
         assert_eq!(found.len(), 1);
         found.into_iter().next().unwrap()
     }

@@ -12,7 +12,7 @@ use serde_json::{json, Map, Value};
 use crate::adapters::engine::{
     EngineAgentTask, EngineArchivedSession, EngineClient, EngineSession,
 };
-use crate::collectors::base::{finding, Collector, CollectorContext, Finding};
+use crate::collectors::base::{finding, Collection, Collector, CollectorContext, Finding};
 use crate::core::{from_iso, Moment, Project};
 use crate::errors::VogtError;
 
@@ -76,19 +76,33 @@ impl<S: DeclaredSessions> Collector for SessionOutcomeCollector<S> {
         _ctx: &mut CollectorContext<'_>,
         project: &Project,
         _now: &mut dyn FnMut() -> Moment,
-    ) -> Result<Vec<Finding>, VogtError> {
-        let mut found = self.session_outcomes(project)?;
-        found.extend(self.bound_task_runs(project)?);
-        Ok(found)
+    ) -> Collection {
+        // Python yields each session before the next can raise, then yields
+        // the bound runs. A failure keeps the findings already produced.
+        let sessions = match self.session_outcomes(project) {
+            Ok(found) => found,
+            Err(stopped) => return Collection::partial(stopped.found, stopped.error),
+        };
+        match self.bound_task_runs(project) {
+            Ok(runs) => {
+                let mut found = sessions;
+                found.extend(runs);
+                Collection::ok(found)
+            }
+            Err(error) => Collection::partial(sessions, error),
+        }
     }
 }
 
 impl<S: DeclaredSessions> SessionOutcomeCollector<S> {
-    fn session_outcomes(&mut self, project: &Project) -> Result<Vec<Finding>, VogtError> {
+    fn session_outcomes(&mut self, project: &Project) -> Result<Vec<Finding>, PartialFindings> {
         let records = self.sessions.for_project(project);
         let mut found = Vec::with_capacity(records.len());
         for record in records {
-            found.push(self.outcome_of(project, &record)?);
+            match self.outcome_of(project, &record) {
+                Ok(finding) => found.push(finding),
+                Err(error) => return Err(PartialFindings { found, error }),
+            }
         }
         Ok(found)
     }
@@ -313,12 +327,21 @@ fn task_run_finding(
     )
 }
 
+/// Findings already yielded when a later session could not be read.
+struct PartialFindings {
+    found: Vec<Finding>,
+    error: VogtError,
+}
+
 fn delta(
     cwd: &str,
     since: Moment,
     until: Option<Moment>,
     still_open: bool,
 ) -> Result<Value, VogtError> {
+    // Python `Path("")` is `.`. An empty cwd is this process's directory,
+    // not a missing path.
+    let cwd = if cwd.is_empty() { "." } else { cwd };
     let root = expanduser(Path::new(cwd));
     if !root.is_dir() {
         return Ok(json!({
@@ -415,7 +438,7 @@ fn delta(
     Ok(Value::Object(body))
 }
 
-fn commit_stats(root: &Path, window: &[String]) -> Result<BTreeMap<String, Value>, VogtError> {
+fn commit_stats(root: &Path, window: &[String]) -> Result<Map<String, Value>, VogtError> {
     let cap = format!("--max-count={MAX_COMMITS_COUNTED}");
     let window_args: Vec<&str> = window.iter().map(String::as_str).collect();
     let mut rev_args = vec!["log", cap.as_str(), "--format=%H"];
@@ -452,7 +475,7 @@ fn commit_stats(root: &Path, window: &[String]) -> Result<BTreeMap<String, Value
         };
     }
 
-    let mut stats = BTreeMap::new();
+    let mut stats = Map::new();
     stats.insert("commits_in_window".to_string(), json!(commits));
     stats.insert("files_changed".to_string(), json!(files.len()));
     stats.insert("insertions".to_string(), json!(insertions));
@@ -588,7 +611,7 @@ mod tests {
         );
         collector
             .collect(&mut context, &project(root), &mut now)
-            .unwrap()
+            .findings
     }
 
     fn temp(label: &str) -> PathBuf {
@@ -930,7 +953,7 @@ mod tests {
         );
         let found = collector
             .collect(&mut context, &project(&root), &mut now)
-            .unwrap();
+            .findings;
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].kind, KIND_TASK_RUN);
         assert_eq!(found[0].subject_key, "task-run:r-bound");
@@ -958,9 +981,8 @@ mod tests {
                 work_items: BTreeMap::new(),
             },
         );
-        let error = collector
-            .collect(&mut context, &project(&root), &mut now)
-            .unwrap_err();
+        let collected = collector.collect(&mut context, &project(&root), &mut now);
+        let error = collected.error.expect("a dead engine fails the collect");
         assert!(error.to_string().contains("not answering"), "{error}");
     }
 }

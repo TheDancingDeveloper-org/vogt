@@ -1410,14 +1410,11 @@ pub struct EngineTaskFinding {
 impl EngineTaskFinding {
     fn from_payload(payload: &Value) -> Self {
         Self {
-            at: field_string(payload, "at"),
+            // Python `str(None)` is `"None"`. `field_string` would turn JSON
+            // null into `"null"`, which is not that string.
+            at: python_str(payload, "at", ""),
             text: field_string(payload, "text"),
-            source: payload
-                .get("source")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .unwrap_or("notify-phrase")
-                .to_string(),
+            source: python_str(payload, "source", "notify-phrase"),
         }
     }
 }
@@ -1441,12 +1438,10 @@ impl EngineTaskRun {
             id: field_string(payload, "id"),
             session_id: field_string(payload, "session_id"),
             started_at: field_string(payload, "started_at"),
-            status: payload
-                .get("status")
-                .and_then(Value::as_str)
-                .filter(|text| !text.is_empty())
-                .unwrap_or("running")
-                .to_string(),
+            // Missing status defaults to running. A present null is Python's
+            // `str(None)`, and an empty string stays empty — only the literal
+            // status `"running"` is provisional.
+            status: python_str(payload, "status", "running"),
             completed_at: optional_str(payload.get("completed_at")),
             exit_code: optional_int(payload.get("exit_code")),
             summary: optional_str(payload.get("summary")),
@@ -1555,6 +1550,19 @@ fn value_string(value: &Value) -> String {
 
 fn field_string(payload: &Value, name: &str) -> String {
     payload.get(name).map(value_string).unwrap_or_default()
+}
+
+/// Python `str(payload.get(name, default))` for a string field.
+///
+/// A missing key is the default. JSON null is `"None"`. A string, including
+/// `""`, is kept. Anything else is its JSON text, which is what
+/// `value_string` already does for non-strings.
+fn python_str(payload: &Value, name: &str, default: &str) -> String {
+    match payload.get(name) {
+        None => default.to_string(),
+        Some(Value::Null) => "None".to_string(),
+        Some(other) => value_string(other),
+    }
 }
 
 fn string_field(object: &Map<String, Value>, name: &str) -> String {

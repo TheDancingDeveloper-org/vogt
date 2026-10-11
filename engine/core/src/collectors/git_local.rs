@@ -19,7 +19,7 @@ use crate::branches::{compile_patterns, match_branch};
 use crate::core::{Moment, Project};
 use crate::errors::VogtError;
 
-use super::base::{collector_error, finding, Collector, CollectorContext, Finding};
+use super::base::{collector_error, finding, Collection, Collector, CollectorContext, Finding};
 
 const KIND_CHECKOUT: &str = "git.checkout";
 const KIND_TAG: &str = "git.tag";
@@ -45,58 +45,74 @@ impl Collector for GitLocalCollector {
         ctx: &mut CollectorContext<'_>,
         project: &Project,
         _now: &mut dyn FnMut() -> Moment,
-    ) -> Result<Vec<Finding>, VogtError> {
-        let root = expanduser(Path::new(&project.root_path));
-        if !root.join(".git").exists() {
-            return Ok(vec![finding(
-                KIND_CHECKOUT,
-                &format!("git:{}", project.slug),
-                json!({
-                    "is_git_repository": false,
-                    "detail": "no .git directory; this project is a plain folder",
-                }),
-                Some(project),
-                None,
-                false,
-            )]);
+    ) -> Collection {
+        // Python's `collect` is a generator: the checkout and tag findings are
+        // yielded before the branch walk, and each branch before the next, so a
+        // later failure keeps what came before it. Push as we go and hand back
+        // the prefix with the error.
+        let mut found = Vec::new();
+        match collect_into(ctx, project, &mut found) {
+            Ok(()) => Collection::ok(found),
+            Err(error) => Collection::partial(found, error),
         }
+    }
+}
 
-        let branch = git_output(&root, &["rev-parse", "--abbrev-ref", "HEAD"], false)?;
-        let head = git_output(&root, &["rev-parse", "HEAD"], false)?;
-        // Required: `dirty` is the one field here that is a claim about the
-        // tree rather than a value read off it, so it must never be inferred
-        // from a question that failed.
-        let status = git_output(&root, &["status", "--porcelain"], true)?;
-        let describe = git_output(&root, &["describe", "--tags", "--abbrev=0"], false)?;
-
-        let mut found = vec![finding(
+fn collect_into(
+    ctx: &mut CollectorContext<'_>,
+    project: &Project,
+    found: &mut Vec<Finding>,
+) -> Result<(), VogtError> {
+    let root = expanduser(Path::new(&project.root_path));
+    if !root.join(".git").exists() {
+        found.push(finding(
             KIND_CHECKOUT,
             &format!("git:{}", project.slug),
             json!({
-                "is_git_repository": true,
-                "branch": branch,
-                "head": head,
-                "dirty": !status.is_empty(),
-                "dirty_files": if status.is_empty() { 0 } else { status.lines().count() },
-                "latest_tag": optional(&describe),
+                "is_git_repository": false,
+                "detail": "no .git directory; this project is a plain folder",
             }),
             Some(project),
             None,
             false,
-        )];
-        if !describe.is_empty() {
-            found.push(finding(
-                KIND_TAG,
-                &format!("release:{}@{describe}", project.slug),
-                json!({"tag": describe, "source": "git describe"}),
-                Some(project),
-                None,
-                false,
-            ));
-        }
-        found.extend(branch_findings(ctx, project, &root)?);
-        Ok(found)
+        ));
+        return Ok(());
     }
+
+    let branch = git_output(&root, &["rev-parse", "--abbrev-ref", "HEAD"], false)?;
+    let head = git_output(&root, &["rev-parse", "HEAD"], false)?;
+    // Required: `dirty` is the one field here that is a claim about the
+    // tree rather than a value read off it, so it must never be inferred
+    // from a question that failed.
+    let status = git_output(&root, &["status", "--porcelain"], true)?;
+    let describe = git_output(&root, &["describe", "--tags", "--abbrev=0"], false)?;
+
+    found.push(finding(
+        KIND_CHECKOUT,
+        &format!("git:{}", project.slug),
+        json!({
+            "is_git_repository": true,
+            "branch": branch,
+            "head": head,
+            "dirty": !status.is_empty(),
+            "dirty_files": if status.is_empty() { 0 } else { status.lines().count() },
+            "latest_tag": optional(&describe),
+        }),
+        Some(project),
+        None,
+        false,
+    ));
+    if !describe.is_empty() {
+        found.push(finding(
+            KIND_TAG,
+            &format!("release:{}@{describe}", project.slug),
+            json!({"tag": describe, "source": "git describe"}),
+            Some(project),
+            None,
+            false,
+        ));
+    }
+    branch_findings(ctx, project, &root, found)
 }
 
 /// `""` is an absence; JSON `null` is what Python's `or None` produces.
@@ -259,7 +275,8 @@ fn branch_findings(
     ctx: &CollectorContext<'_>,
     project: &Project,
     root: &Path,
-) -> Result<Vec<Finding>, VogtError> {
+    found: &mut Vec<Finding>,
+) -> Result<(), VogtError> {
     let listing = git_output(
         root,
         &[
@@ -270,7 +287,7 @@ fn branch_findings(
         false,
     )?;
     if listing.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let mut rows = Vec::new();
     for line in listing.lines() {
@@ -293,7 +310,6 @@ fn branch_findings(
         .collect();
     let patterns = compile_patterns(&raw);
 
-    let mut found = Vec::new();
     for (name, sha, committed) in rows {
         let (ahead, behind) = match &default {
             None => (None, None),
@@ -320,7 +336,7 @@ fn branch_findings(
             false,
         ));
     }
-    Ok(found)
+    Ok(())
 }
 
 /// The top-level names this repository actually carries, or `None`.
@@ -379,7 +395,11 @@ mod tests {
             options: Map::new(),
         };
         let mut now = || Moment::from_unix(0, 0);
-        GitLocalCollector.collect(&mut context, &project(root), &mut now)
+        let collected = GitLocalCollector.collect(&mut context, &project(root), &mut now);
+        match collected.error {
+            Some(error) => Err(error),
+            None => Ok(collected.findings),
+        }
     }
 
     fn temp(label: &str) -> PathBuf {

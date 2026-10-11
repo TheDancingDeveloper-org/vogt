@@ -21,9 +21,8 @@ use std::path::{Component, Path, PathBuf};
 use serde_json::{json, Map, Value};
 
 use crate::core::{Moment, Project};
-use crate::errors::VogtError;
 
-use super::base::{finding, walk_project, Collector, CollectorContext, Finding};
+use super::base::{finding, walk_project, Collection, Collector, CollectorContext, Finding};
 
 const KIND_MIRRORED_SOURCE: &str = "mirrored_source";
 
@@ -113,13 +112,13 @@ impl Collector for MirroredSourceCollector {
         _ctx: &mut CollectorContext<'_>,
         project: &Project,
         _now: &mut dyn FnMut() -> Moment,
-    ) -> Result<Vec<Finding>, VogtError> {
+    ) -> Collection {
         if self.projects.is_empty() || self.published().is_empty() {
-            return Ok(Vec::new());
+            return Collection::ok(Vec::new());
         }
         let root = expanduser(Path::new(&project.root_path));
         let Ok(resolved_root) = root.canonicalize() else {
-            return Ok(Vec::new());
+            return Collection::ok(Vec::new());
         };
         // Copied out so the walk can borrow `project` without holding the index.
         let index: Vec<(String, RegisteredProject, Option<String>)> = self
@@ -222,7 +221,7 @@ impl Collector for MirroredSourceCollector {
                 false,
             ));
         }
-        Ok(found)
+        Collection::ok(found)
     }
 }
 
@@ -366,7 +365,7 @@ mod tests {
         let mut now = || Moment::from_unix(0, 0);
         MirroredSourceCollector::new(projects)
             .collect(&mut context, &project(root, slug), &mut now)
-            .unwrap()
+            .findings
     }
 
     fn crate_at(root: &Path, name: &str, version: &str) {

@@ -23,9 +23,8 @@ use regex::Regex;
 use serde_json::{json, Map, Value};
 
 use crate::core::{Moment, Project};
-use crate::errors::VogtError;
 
-use super::base::{finding, walk_project, Collector, CollectorContext, Finding};
+use super::base::{finding, walk_project, Collection, Collector, CollectorContext, Finding};
 
 const KIND_DEP_REF: &str = "dep_ref";
 const KIND_DEP_SCAN: &str = "dep_scan";
@@ -82,7 +81,7 @@ impl Collector for DepRefCollector {
         _ctx: &mut CollectorContext<'_>,
         project: &Project,
         _now: &mut dyn FnMut() -> Moment,
-    ) -> Result<Vec<Finding>, VogtError> {
+    ) -> Collection {
         let root = expanduser(Path::new(&project.root_path));
         let mut read = Vec::new();
         let mut unreadable = Vec::new();
@@ -147,7 +146,7 @@ impl Collector for DepRefCollector {
             None,
             false,
         ));
-        Ok(found)
+        Collection::ok(found)
     }
 }
 
@@ -461,7 +460,7 @@ mod tests {
         let mut now = || Moment::from_unix(0, 0);
         DepRefCollector
             .collect(&mut context, &project(root, exclusions), &mut now)
-            .unwrap()
+            .findings
     }
 
     fn dep_refs(root: &Path, exclusions: &[&str]) -> Vec<Finding> {

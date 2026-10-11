@@ -12,9 +12,8 @@ use regex::Regex;
 use serde_json::{json, Value};
 
 use crate::core::{Moment, Project};
-use crate::errors::VogtError;
 
-use super::base::{finding, walk_project, Collector, CollectorContext, Finding};
+use super::base::{finding, walk_project, Collection, Collector, CollectorContext, Finding};
 
 const KIND_MARKER: &str = "marker";
 
@@ -48,7 +47,7 @@ impl Collector for SourceMarkerCollector {
         ctx: &mut CollectorContext<'_>,
         project: &Project,
         _now: &mut dyn FnMut() -> Moment,
-    ) -> Result<Vec<Finding>, VogtError> {
+    ) -> Collection {
         let root = Path::new(&project.root_path);
         let pattern = marker_pattern();
         let mut found = Vec::new();
@@ -112,7 +111,7 @@ impl Collector for SourceMarkerCollector {
                 ));
             }
         }
-        Ok(found)
+        Collection::ok(found)
     }
 }
 
@@ -152,7 +151,7 @@ mod tests {
         let mut now = || Moment::from_unix(0, 0);
         collector
             .collect(&mut context, &project(root), &mut now)
-            .unwrap()
+            .findings
     }
 
     #[test]

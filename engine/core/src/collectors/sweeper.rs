@@ -105,13 +105,13 @@ impl<'a, S: ObservedStore, C: Clock> Sweeper<'a, S, C> {
         let mut findings: Vec<Finding> = Vec::new();
         let mut failures: BTreeMap<String, String> = BTreeMap::new();
         for project in projects {
-            match collector.collect(&mut self.ctx, project, &mut || self.clock.now()) {
-                Ok(found) => findings.extend(found),
-                // A bad project must not end the sweep. The message already
-                // carries the Python class name (see `typed_failure`).
-                Err(err) => {
-                    failures.insert(project.slug.clone(), failure_text(&err));
-                }
+            // Python `findings.extend(collector.collect(...))` keeps every
+            // finding the generator yielded before it raised. The project is
+            // still a failure, so the sweep stays partial or failed.
+            let collected = collector.collect(&mut self.ctx, project, &mut || self.clock.now());
+            findings.extend(collected.findings);
+            if let Some(err) = collected.error {
+                failures.insert(project.slug.clone(), failure_text(&err));
             }
         }
 
@@ -287,7 +287,7 @@ mod tests {
     use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
     use crate::storage::interface::{DeclaredStore, ObservedStore};
 
-    use super::super::base::{finding, typed_failure};
+    use super::super::base::{finding, typed_failure, Collection};
     use super::super::registry::Registered;
 
     fn moment() -> Moment {
@@ -345,8 +345,8 @@ mod tests {
             _ctx: &mut CollectorContext<'_>,
             project: &Project,
             _now: &mut dyn FnMut() -> Moment,
-        ) -> Result<Vec<Finding>, VogtError> {
-            Err(typed_failure(
+        ) -> Collection {
+            Collection::failed(typed_failure(
                 "OSError",
                 format!("cannot read {}", project.slug),
             ))
@@ -364,8 +364,8 @@ mod tests {
             _ctx: &mut CollectorContext<'_>,
             project: &Project,
             _now: &mut dyn FnMut() -> Moment,
-        ) -> Result<Vec<Finding>, VogtError> {
-            Ok(vec![finding(
+        ) -> Collection {
+            Collection::ok(vec![finding(
                 "test.subject",
                 &format!("test:{}", project.slug),
                 serde_json::json!({"stable": true}),
@@ -387,11 +387,37 @@ mod tests {
             ctx: &mut CollectorContext<'_>,
             project: &Project,
             now: &mut dyn FnMut() -> Moment,
-        ) -> Result<Vec<Finding>, VogtError> {
+        ) -> Collection {
             if project.slug == "bad" {
-                return Err(typed_failure("OSError", "nope"));
+                return Collection::failed(typed_failure("OSError", "nope"));
             }
             Fixed.collect(ctx, project, now)
+        }
+    }
+
+    /// Yields one finding, then fails. The finding must still be stored.
+    struct YieldThenFail;
+    impl Collector for YieldThenFail {
+        fn name(&self) -> &str {
+            "yield-then-fail"
+        }
+        fn collect(
+            &mut self,
+            _ctx: &mut CollectorContext<'_>,
+            project: &Project,
+            _now: &mut dyn FnMut() -> Moment,
+        ) -> Collection {
+            Collection::partial(
+                vec![finding(
+                    "test.subject",
+                    &format!("kept:{}", project.slug),
+                    serde_json::json!({"kept": true}),
+                    Some(project),
+                    None,
+                    false,
+                )],
+                typed_failure("OSError", "stopped after one"),
+            )
         }
     }
 
@@ -442,6 +468,97 @@ mod tests {
             .unwrap();
         assert_eq!(report.outcome, "partial");
         assert_eq!(report.new, 1);
+    }
+
+    #[test]
+    fn findings_yielded_before_a_failure_are_kept() {
+        let Built::StepSequential(ctx) = opened() else {
+            unreachable!()
+        };
+        let mut clock = ctx.clock.lock().unwrap();
+        let mut sweeper = Sweeper::new(
+            &ctx.observed,
+            CollectorContext {
+                config: &ctx.config,
+                options: serde_json::Map::new(),
+            },
+            &mut *clock,
+        );
+        let alone = sweeper
+            .run_one(
+                Registered::Collector(Box::new(YieldThenFail)),
+                &[project("one")],
+            )
+            .unwrap();
+        // Every project failed, so the outcome stays failed — the findings
+        // are what changed. A mixed sweep is partial.
+        assert_eq!(alone.outcome, "failed");
+        assert_eq!(alone.new, 1);
+        assert_eq!(
+            alone.detail.as_deref(),
+            Some("one: OSError: stopped after one")
+        );
+
+        let mixed = sweeper
+            .run_one(
+                Registered::Collector(Box::new(YieldThenFail)),
+                &[project("kept"), project("also")],
+            )
+            .unwrap();
+        // Both projects fail, so this is still failed, not partial. Pair the
+        // partial yield with a project that succeeds.
+        assert_eq!(mixed.outcome, "failed");
+        assert_eq!(mixed.new, 2);
+    }
+
+    #[test]
+    fn a_project_that_yields_then_fails_beside_a_clean_one_is_partial() {
+        let Built::StepSequential(ctx) = opened() else {
+            unreachable!()
+        };
+        let mut clock = ctx.clock.lock().unwrap();
+        let mut sweeper = Sweeper::new(
+            &ctx.observed,
+            CollectorContext {
+                config: &ctx.config,
+                options: serde_json::Map::new(),
+            },
+            &mut *clock,
+        );
+        // Selective fails with nothing; YieldThenFail keeps one. Run them as
+        // two projects by a collector that yields on "kept" and fails clean
+        // on "bad" — already covered. This one yields on the failing project.
+        struct YieldOnBad;
+        impl Collector for YieldOnBad {
+            fn name(&self) -> &str {
+                "yield-on-bad"
+            }
+            fn collect(
+                &mut self,
+                ctx: &mut CollectorContext<'_>,
+                project: &Project,
+                now: &mut dyn FnMut() -> Moment,
+            ) -> Collection {
+                if project.slug == "bad" {
+                    return YieldThenFail.collect(ctx, project, now);
+                }
+                Fixed.collect(ctx, project, now)
+            }
+        }
+        let report = sweeper
+            .run_one(
+                Registered::Collector(Box::new(YieldOnBad)),
+                &[project("good"), project("bad")],
+            )
+            .unwrap();
+        assert_eq!(report.outcome, "partial");
+        assert_eq!(report.new, 2);
+        assert!(report.failures.contains_key("bad"));
+        assert!(report
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("bad: OSError: stopped after one"));
     }
 
     #[test]
