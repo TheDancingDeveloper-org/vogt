@@ -522,6 +522,43 @@ pub struct SessionWait {
     pub screen: SessionScreen,
 }
 
+/// One change an overseer waits on (WI-1246), derived from a sequenced bus
+/// event about a session. `kind` is one of `ready`, `approval`, `exited`,
+/// `errored`, `blocked`, `unblocked`, `hibernated`, `woken`. `reply`,
+/// `commit` and `budget` are reserved for later slices and are not emitted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChange {
+    pub seq: u64,
+    /// When the bus published it (RFC 3339).
+    pub at: String,
+    pub session: Uuid,
+    pub kind: String,
+    /// At most 120 characters.
+    pub summary: String,
+}
+
+/// The answer to `GET /api/sessions/changes`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionChanges {
+    pub changes: Vec<SessionChange>,
+    /// The last sequence returned, or the bus head when nothing matched, so a
+    /// caller advances its cursor either way.
+    pub next_cursor: u64,
+    /// True when `since` is older than the ring: events were dropped and the
+    /// caller cannot reconstruct them from this answer.
+    pub truncated: bool,
+}
+
+/// The answer to `GET /api/sessions/wait-any`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionWaitAny {
+    /// `changed` or `timeout`.
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<SessionChange>,
+    pub next_cursor: u64,
+}
+
 /// A permission dialog an agent CLI is showing, read off the rendered screen
 /// (and the scrollback above it, where a long command scrolled).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -765,7 +802,7 @@ pub struct AssistantHistory {
     pub pending_action: Option<PendingAction>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ServerEvent {
     SessionCreated {

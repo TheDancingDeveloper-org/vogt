@@ -23,8 +23,10 @@ from vogt.application.models import (
     RegisterProjectParams,
     ReportBlockedParams,
     ReportUnblockedParams,
+    SessionChangesParams,
     SessionInputParams,
     SessionScreenParams,
+    SessionWaitAnyParams,
     SessionWaitParams,
     StartSessionParams,
     StopSessionParams,
@@ -36,9 +38,11 @@ from vogt.application.services import (
     register_project,
     report_blocked,
     report_unblocked,
+    session_changes,
     session_input,
     session_screen,
     session_wait,
+    session_wait_any,
     start_session,
     stop_session,
 )
@@ -66,6 +70,12 @@ class Engine:
         self.screen_queries: list[str] = []
         self.wait_queries: list[str] = []
         self.wait_supported = True
+        self.changes_queries: list[str] = []
+        self.changes_supported = True
+        self.wait_any_queries: list[str] = []
+        self.wait_any_supported = True
+        #: The engine id a canned change names as linked, when a test sets it.
+        self.linked: str | None = None
         #: The blocked report the engine holds (one for the whole stand-in).
         self.blocked: dict[str, Any] | None = None
         #: Bodies sent to POST /answer.
@@ -108,6 +118,54 @@ class Engine:
                 ]
             ).encode()
         parts = path.split("/")  # ['', 'api', 'sessions', id, verb?]
+        if method == "GET" and path == "/api/sessions/changes":
+            if not self.changes_supported:
+                return 404, b""
+            self.changes_queries.append(url.partition("?")[2])
+            return 200, json.dumps(
+                {
+                    "changes": [
+                        {
+                            "seq": 7,
+                            "at": "2026-10-11T00:00:00Z",
+                            "session": self.linked or UNLINKED,
+                            "kind": "ready",
+                            "summary": "ready",
+                        },
+                        {
+                            "seq": 8,
+                            "at": "2026-10-11T00:00:01Z",
+                            "session": UNLINKED,
+                            "kind": "blocked",
+                            "summary": "blocked: needs a token",
+                        },
+                    ],
+                    "next_cursor": 8,
+                    "truncated": False,
+                }
+            ).encode()
+        if method == "GET" and path == "/api/sessions/wait-any":
+            if not self.wait_any_supported:
+                return 404, b""
+            self.wait_any_queries.append(url.partition("?")[2])
+            query = url.partition("?")[2]
+            if "timeout" in query and "until=exited" in query:
+                return 200, json.dumps(
+                    {"outcome": "timeout", "next_cursor": 8}
+                ).encode()
+            return 200, json.dumps(
+                {
+                    "outcome": "changed",
+                    "change": {
+                        "seq": 8,
+                        "at": "2026-10-11T00:00:01Z",
+                        "session": UNLINKED,
+                        "kind": "blocked",
+                        "summary": "blocked: needs a token",
+                    },
+                    "next_cursor": 8,
+                }
+            ).encode()
         if len(parts) >= 4 and parts[2] == "sessions":
             engine_id = parts[3]
             verb = parts[4] if len(parts) > 4 else ""
@@ -540,6 +598,72 @@ def test_wait_on_an_engine_without_the_route_says_so(
 def test_wait_bounds_its_timeout() -> None:
     with pytest.raises(ValueError):
         SessionWaitParams(id=UNLINKED, timeout_s=601)
+
+
+def test_changes_maps_a_linked_session_and_keeps_an_unlinked_uuid(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1246: a delta names Vogt's id when the engine session is linked."""
+    ses_id, engine_id = _started(wired)
+    engine.linked = engine_id
+    page = session_changes(wired, SessionChangesParams(since=3, ids=[ses_id], limit=10))
+    assert engine.changes_queries[-1] == f"since=3&limit=10&ids={engine_id}"
+    assert page.next_cursor == 8 and page.truncated is False
+    linked, unlinked = page.changes
+    assert linked.session == ses_id and linked.kind == "ready" and linked.seq == 7
+    assert unlinked.session == UNLINKED and unlinked.kind == "blocked"
+    assert unlinked.summary == "blocked: needs a token"
+
+
+def test_changes_on_an_engine_without_the_route_says_so(
+    wired: AppContext, engine: Engine
+) -> None:
+    engine.changes_supported = False
+    with pytest.raises(EngineUnavailable, match="does not support changes yet"):
+        session_changes(wired, SessionChangesParams())
+
+
+def test_changes_rejects_an_unknown_session(wired: AppContext) -> None:
+    with pytest.raises(NotFound):
+        session_changes(wired, SessionChangesParams(ids=["ses_nope"]))
+
+
+def test_wait_any_passes_its_query_and_returns_the_mapped_change(
+    wired: AppContext, engine: Engine
+) -> None:
+    ses_id, _engine_id = _started(wired)
+    waited = session_wait_any(
+        wired,
+        SessionWaitAnyParams(
+            ids=[ses_id, UNLINKED], until=["blocked"], cursor=4, timeout_s=30
+        ),
+    )
+    query = engine.wait_any_queries[-1]
+    assert "timeout_s=30" in query and "until=blocked" in query and "cursor=4" in query
+    assert UNLINKED in query
+    assert waited.outcome == "changed"
+    assert waited.change is not None and waited.change.session == UNLINKED
+    assert waited.next_cursor == 8
+
+
+def test_wait_any_timeout_has_no_change(wired: AppContext, engine: Engine) -> None:
+    waited = session_wait_any(
+        wired, SessionWaitAnyParams(until=["exited"], timeout_s=5)
+    )
+    assert waited.outcome == "timeout" and waited.change is None
+
+
+def test_wait_any_on_an_engine_without_the_route_says_so(
+    wired: AppContext, engine: Engine
+) -> None:
+    engine.wait_any_supported = False
+    with pytest.raises(EngineUnavailable, match="does not support wait-any yet"):
+        session_wait_any(wired, SessionWaitAnyParams())
+
+
+def test_wait_any_bounds_its_timeout() -> None:
+    with pytest.raises(ValueError):
+        SessionWaitAnyParams(timeout_s=601)
 
 
 def test_a_session_reports_itself_blocked_without_naming_itself(

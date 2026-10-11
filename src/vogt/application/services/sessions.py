@@ -36,6 +36,7 @@ from vogt.adapters.engine import EngineClient, EngineSession, EngineUnavailable
 from vogt.adapters.engine.client import (
     EngineApproval,
     EngineBlocked,
+    EngineChange,
     EngineHibernation,
     EngineResources,
     EngineScreen,
@@ -73,6 +74,9 @@ from vogt.application.models import (
     SessionApprovalOption,
     SessionBlocked,
     SessionBlockedResult,
+    SessionChange,
+    SessionChangesParams,
+    SessionChangesResult,
     SessionDigest,
     SessionEconomicsParams,
     SessionEconomicsResult,
@@ -93,6 +97,8 @@ from vogt.application.models import (
     SessionSummary,
     SessionSweepResult,
     SessionSweepRow,
+    SessionWaitAnyParams,
+    SessionWaitAnyResult,
     SessionWaitParams,
     SessionWaitResult,
     SetSessionRoleParams,
@@ -1422,6 +1428,104 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
         screen=shown if params.screen else None,
         digest=None if params.screen else _wait_digest(ctx, params.id, engine_id),
         screen_tail=[] if params.screen else _tail_of(shown),
+    )
+
+
+def _session_labels(ctx: AppContext, engine_ids: list[str]) -> dict[str, str]:
+    """Vogt's `ses_…` id for each linked engine session, else the uuid itself.
+
+    One read for the page: opening the store per change is a query per row.
+    """
+    labels: dict[str, str] = {}
+    with ctx.declared.read() as view:
+        for engine_id in dict.fromkeys(engine_ids):
+            linked = view.session_by_engine_id(engine_id)
+            labels[engine_id] = linked.id if linked is not None else engine_id
+    return labels
+
+
+def _change(change: EngineChange, labels: dict[str, str]) -> SessionChange:
+    return SessionChange(
+        seq=change.seq,
+        at=_parse_engine_timestamp(change.at),
+        session=labels.get(change.session, change.session),
+        kind=change.kind,
+        summary=change.summary,
+    )
+
+
+def _engine_ids(ctx: AppContext, ids: list[str]) -> list[str] | None:
+    """Resolve named sessions to engine ids; `None` means every session."""
+    named = [one.strip() for one in ids if one.strip()]
+    if not named:
+        return None
+    return [_target(ctx, one).engine_session_id for one in named]
+
+
+def session_changes(
+    ctx: AppContext, params: SessionChangesParams
+) -> SessionChangesResult:
+    """Read session deltas published after `since`.
+
+    One call replaces re-sweeping every session. The engine keeps a bounded
+    ring of what it published; this reads a page of it.
+    """
+    engine = _engine(ctx)
+    ids = _engine_ids(ctx, params.ids)
+    try:
+        page = engine.session_changes(since=params.since, ids=ids, limit=params.limit)
+    except Conflict:
+        page = None
+    if page is None:
+        msg = (
+            "the session engine does not support changes yet (it has no "
+            "GET /api/sessions/changes route); upgrade the engine, or poll "
+            "session.sweep"
+        )
+        raise EngineUnavailable(msg)
+    labels = _session_labels(ctx, [one.session for one in page.changes])
+    return SessionChangesResult(
+        changes=[_change(one, labels) for one in page.changes],
+        next_cursor=page.next_cursor,
+        truncated=page.truncated,
+    )
+
+
+def session_wait_any(
+    ctx: AppContext, params: SessionWaitAnyParams
+) -> SessionWaitAnyResult:
+    """Block until one named session publishes a kind in `until`.
+
+    The overseer's loop: wait, then read `session.changes` from the cursor
+    this returns. The engine does the waiting; this is a read, held open for
+    at most `timeout_s`.
+    """
+    engine = _engine(ctx)
+    ids = _engine_ids(ctx, params.ids)
+    kinds = [one.strip() for one in params.until if one.strip()] or None
+    try:
+        waited = engine.wait_any(
+            ids=ids,
+            until=kinds,
+            cursor=params.cursor,
+            timeout_s=params.timeout_s,
+        )
+    except Conflict:
+        waited = None
+    if waited is None:
+        msg = (
+            "the session engine does not support wait-any yet (it has no "
+            "GET /api/sessions/wait-any route); upgrade the engine, or poll "
+            "session.sweep"
+        )
+        raise EngineUnavailable(msg)
+    labels = (
+        {} if waited.change is None else _session_labels(ctx, [waited.change.session])
+    )
+    return SessionWaitAnyResult(
+        outcome=waited.outcome,
+        change=None if waited.change is None else _change(waited.change, labels),
+        next_cursor=waited.next_cursor,
     )
 
 
@@ -3103,9 +3207,11 @@ __all__ = [
     "report_blocked",
     "report_unblocked",
     "search_output",
+    "session_changes",
     "session_input",
     "session_screen",
     "session_wait",
+    "session_wait_any",
     "start_session",
     "stop_session",
     "sweep_sessions",

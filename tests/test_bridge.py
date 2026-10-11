@@ -158,7 +158,45 @@ def test_discovery_gets_a_short_budget_not_the_clients_whole_one() -> None:
     assert DISCOVERY_TIMEOUT_SECONDS < DEFAULT_TIMEOUT_SECONDS
 
 
-def test_messages_are_forwarded_verbatim() -> None:
+def test_a_waiting_tool_call_extends_the_post_timeout() -> None:
+    """session.wait's timeout_s must not die at the bridge's 30 s default."""
+    from vogt.adapters.mcp.bridge import (
+        DEFAULT_TIMEOUT_SECONDS,
+        MAX_CALL_TIMEOUT_SECONDS,
+        call_timeout,
+    )
+
+    def call(arguments: object) -> dict[str, Any]:
+        return {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "session.wait", "arguments": arguments},
+        }
+
+    assert call_timeout(call({"timeout_s": 600})) == 630
+    assert call_timeout(call({"wake_timeout_s": 90})) == 120
+    assert call_timeout(call({"timeout_s": 700})) == MAX_CALL_TIMEOUT_SECONDS
+    assert call_timeout(call({"timeout_s": "600"})) == DEFAULT_TIMEOUT_SECONDS
+    assert call_timeout(call({"timeout_s": True})) == DEFAULT_TIMEOUT_SECONDS
+    assert call_timeout(call({})) == DEFAULT_TIMEOUT_SECONDS
+    assert call_timeout({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) == (
+        DEFAULT_TIMEOUT_SECONDS
+    )
+
+    seen: list[float] = []
+    bridge = Bridge(REMOTE, transport=_remote())
+
+    def opened(request: Any, *, timeout: float = 0) -> tuple[int, bytes]:
+        del request
+        seen.append(timeout)
+        return 200, b'{"jsonrpc":"2.0","id":1,"result":{}}'
+
+    bridge._transport = None  # the live branch, with urlopen replaced
+    bridge._open = opened  # type: ignore[method-assign]
+    bridge._post(f"{REMOTE}/mcp", call({"timeout_s": 600}))
+    bridge._post(f"{REMOTE}/mcp", {"jsonrpc": "2.0", "id": 2, "method": "ping"})
+    assert seen == [630, DEFAULT_TIMEOUT_SECONDS]
     transport = _remote()
     _, responses, _ = _run(
         transport,

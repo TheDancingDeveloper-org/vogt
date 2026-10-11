@@ -309,6 +309,11 @@ Rules:
   one call, most urgent first (`approval`, `blocked`, `waiting`, `stalled`,
   …). Each row carries its reason, last reply excerpt and the tail of its
   screen. Act on the top rows, then sweep again, or `session_wait` on one.
+  When you already know which sessions you oversee, prefer the delta loop:
+  `session_wait_any` (their ids, the kinds you care about) blocks until one
+  of them changes, then `session_changes` from the `next_cursor` it returns
+  reads what happened. There is no supervised-by-me filter yet, so pass the
+  ids yourself. A `truncated` page means events were dropped; sweep once.
 - **Hibernated sessions** (`activity: "hibernated"`) have had their
   processes stopped to free memory. Their screen is the last one they
   showed, and their conversation is intact. `session_input` wakes one by
