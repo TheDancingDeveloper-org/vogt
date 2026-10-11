@@ -47,7 +47,8 @@ from vogt.application.services import (
     wake_session,
 )
 from vogt.core.auth import hash_token
-from vogt.errors import Conflict
+from vogt.core.principal import Principal
+from vogt.errors import Conflict, RoleRefused
 
 WHY = "hibernation test"
 ROOT = "/srv/estate/vogt"
@@ -70,6 +71,11 @@ class Engine:
         self.wait_outcome = "ready"
         #: When set, a hibernate is refused (409) with this reason.
         self.refuse_hibernate: str | None = None
+        #: When set, a wake is refused (409) with this reason and the session
+        #: stays hibernated — the engine's handoff guard.
+        self.refuse_wake: str | None = None
+        #: The successor recorded by the last hibernate that named one.
+        self.superseded_by: dict[str, str] = {}
 
     def summary(self, engine_id: str) -> dict[str, Any]:
         asleep = engine_id in self.hibernated
@@ -90,6 +96,11 @@ class Engine:
                         "trigger": "manual",
                         "reason": "idle",
                         "resumable": True,
+                        **(
+                            {"superseded_by": self.superseded_by[engine_id]}
+                            if engine_id in self.superseded_by
+                            else {}
+                        ),
                     }
                 }
                 if asleep
@@ -132,10 +143,15 @@ class Engine:
         if method == "POST" and verb == "hibernate":
             if self.refuse_hibernate is not None:
                 return 409, json.dumps({"error": self.refuse_hibernate}).encode()
+            successor = payload.get("superseded_by")
+            if successor:
+                self.superseded_by[engine_id] = successor
             self.live.discard(engine_id)
             self.hibernated.add(engine_id)
             return 200, json.dumps(self.summary(engine_id)).encode()
         if method == "POST" and verb == "wake":
+            if self.refuse_wake is not None:
+                return 409, json.dumps({"error": self.refuse_wake}).encode()
             self.hibernated.discard(engine_id)
             self.live.add(engine_id)
             return 200, json.dumps(self.summary(engine_id)).encode()
@@ -373,7 +389,146 @@ def test_reading_and_waiting_never_wake_a_session(
     assert engine_id in engine.hibernated
 
 
-def test_a_refused_hibernation_says_why(wired: AppContext, engine: Engine) -> None:
+def _live_tokens(ctx: AppContext, actor_ref: str) -> int:
+    with ctx.declared.read() as view:
+        actor = view.actor_by_identity(actor_ref)
+        assert actor is not None
+        return sum(
+            1
+            for token in view.tokens_for_actor(actor.id, include_revoked=True)
+            if token.revoked_at is None
+        )
+
+
+def test_a_refused_wake_reaches_session_input_and_leaves_no_token(
+    wired: AppContext, engine: Engine
+) -> None:
+    """WI-1251: the engine refuses to wake a session whose work was handed on.
+    session_input never forces, so the refusal is the answer, the session stays
+    asleep, and the credential minted for the wake is never stored."""
+    ses_id, engine_id = _started(wired)
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    actor = f"agent:session:{ses_id}"
+    before = _live_tokens(wired, actor)
+    engine.refuse_wake = f"session {engine_id} was superseded by {UNLINKED}"
+
+    with pytest.raises(Conflict, match="superseded"):
+        session_input(wired, SessionInputParams(id=ses_id, text="go on", reason=WHY))
+
+    assert engine_id in engine.hibernated
+    assert _live_tokens(wired, actor) == before
+    wakes = [r for r in engine.sent if r["path"].endswith("/wake")]
+    assert wakes[-1]["body"].get("force") is not True
+
+
+def test_a_forced_wake_is_sent_and_succeeds(wired: AppContext, engine: Engine) -> None:
+    ses_id, engine_id = _started(wired)
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    person = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref="local:someone", kind="human", display_name="someone"
+        ),
+    )
+
+    result = wake_session(person, WakeSessionParams(id=ses_id, force=True, reason=WHY))
+
+    wakes = [r for r in engine.sent if r["path"].endswith("/wake")]
+    assert wakes[-1]["body"]["force"] is True
+    assert engine_id in engine.live
+    assert result.session.alive is True
+    recorded = [
+        e
+        for e in list_events(wired, ListEventsParams()).events
+        if e.kind == "session.woken"
+    ]
+    assert recorded[-1].summary["forced"] is True
+
+
+def test_an_agent_may_not_force_a_wake(wired: AppContext, engine: Engine) -> None:
+    """force overrides the handoff guard, so a worker agent is refused before
+    the engine is asked. An oversight session may."""
+    ses_id, _ = _started(wired)
+    hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
+    sent = len(engine.sent)
+    as_worker = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref="agent:session:ses_worker",
+            kind="agent",
+            display_name="worker",
+        ),
+    )
+
+    with pytest.raises(RoleRefused, match="oversight"):
+        wake_session(as_worker, WakeSessionParams(id=ses_id, force=True, reason=WHY))
+
+    assert len(engine.sent) == sent, "the refusal is the core's, not the engine's"
+
+    overseer, overseer_engine = _started(wired)
+    engine.oversight.add(overseer_engine)
+    as_overseer = dataclasses.replace(
+        wired,
+        principal=Principal(
+            identity_ref=f"agent:session:{overseer}",
+            kind="agent",
+            display_name="overseer",
+        ),
+    )
+    woken = wake_session(
+        as_overseer, WakeSessionParams(id=ses_id, force=True, reason=WHY)
+    )
+    assert woken.session.alive is True
+
+
+def test_a_refused_wake_names_the_successor_session(
+    wired: AppContext, engine: Engine
+) -> None:
+    """The engine refuses naming the successor's uuid; the core says its ses_ id
+    when one is linked, and leaves the uuid when none is."""
+    first, first_engine = _started(wired)
+    second, second_engine = _started(wired)
+    hibernate_session(wired, HibernateSessionParams(id=first, reason=WHY))
+    engine.refuse_wake = (
+        f"session {first_engine} was superseded by {second_engine}; "
+        "send to the successor instead"
+    )
+
+    with pytest.raises(Conflict, match=second):
+        wake_session(wired, WakeSessionParams(id=first, reason=WHY))
+
+    engine.refuse_wake = (
+        f"session {first_engine} was superseded by {UNLINKED}; "
+        "send to the successor instead"
+    )
+    with pytest.raises(Conflict, match=UNLINKED):
+        wake_session(wired, WakeSessionParams(id=first, reason=WHY))
+
+
+def test_hibernate_names_the_successor_by_its_engine_id(
+    wired: AppContext, engine: Engine
+) -> None:
+    """superseded_by is a ses_… id; the engine is told the UUID it knows."""
+    first, _ = _started(wired)
+    second, second_engine = _started(wired)
+
+    result = hibernate_session(
+        wired,
+        HibernateSessionParams(id=first, superseded_by=second, reason=WHY),
+    )
+
+    hibernate = next(
+        r for r in reversed(engine.sent) if r["path"].endswith("/hibernate")
+    )
+    assert hibernate["body"]["superseded_by"] == second_engine
+    assert result.session.hibernation is not None
+    assert result.session.hibernation.superseded_by == second_engine
+    recorded = [
+        e
+        for e in list_events(wired, ListEventsParams()).events
+        if e.kind == "session.hibernated"
+    ]
+    assert recorded[-1].summary["superseded_by"] == second_engine
     ses_id, _ = _started(wired)
     engine.refuse_hibernate = "the engine does not know an agent conversation"
     with pytest.raises(Conflict, match="agent conversation"):

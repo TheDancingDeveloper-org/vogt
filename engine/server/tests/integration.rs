@@ -11523,6 +11523,261 @@ async fn a_session_in_the_default_directory_outside_the_workspace_wakes() {
     assert_eq!(row["cwd"], home.to_string_lossy().as_ref(), "{row:?}");
 }
 
+/// WI-1251: a hibernated session whose work was handed to a successor is not
+/// woken by a plain wake, and neither is one whose work item is already being
+/// worked on by a live session in the same directory. `force` overrides both.
+/// Two sessions in the same directory on different work items do not contend.
+#[tokio::test]
+async fn a_superseded_session_and_a_contended_work_item_are_not_woken() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    let (base, state, _h) = boot_with_state(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+    let stub = stub.to_string_lossy().to_string();
+    let start = |name: &str| {
+        let (client, base, stub) = (client.clone(), base.clone(), stub.clone());
+        let name = name.to_string();
+        async move {
+            let created: Value = client
+                .post(format!("{base}/api/sessions"))
+                .json(&json!({ "name": name, "command": [stub] }))
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            created["id"].as_str().unwrap().to_string()
+        }
+    };
+    let old = start("old").await;
+    let successor = start("successor").await;
+    live_output_containing(&client, &base, &old, &["helper=["]).await;
+
+    let unknown = client
+        .post(format!("{base}/api/sessions/{old}/hibernate"))
+        .json(&json!({ "superseded_by": "not-a-session" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+    let self_named = client
+        .post(format!("{base}/api/sessions/{old}/hibernate"))
+        .json(&json!({ "superseded_by": old }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(self_named.status(), StatusCode::BAD_REQUEST);
+
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{old}/hibernate"))
+        .json(&json!({ "superseded_by": successor }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+    let row: Value = hibernated.json().await.unwrap();
+    assert_eq!(row["hibernation"]["superseded_by"], successor);
+
+    let refused = client
+        .post(format!("{base}/api/sessions/{old}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let why = refused.text().await.unwrap();
+    assert!(why.contains(&format!("superseded by {successor}")), "{why}");
+
+    let forced = client
+        .post(format!("{base}/api/sessions/{old}/wake"))
+        .json(&json!({ "force": true }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        forced.status(),
+        StatusCode::OK,
+        "{}",
+        forced.text().await.unwrap_or_default()
+    );
+    // The wake returns before the process is up; hibernating before it is
+    // alive is refused, so wait for output the way the first start did.
+    live_output_containing(&client, &base, &old, &["helper=["]).await;
+    let _ = client
+        .post(format!("{base}/api/sessions/{old}/hibernate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let list: Value = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let again = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == old)
+        .unwrap()
+        .clone();
+    assert_eq!(
+        again["hibernation"]["superseded_by"], successor,
+        "a later hibernation keeps the handoff: {again}"
+    );
+
+    // Declaring the handoff after the fact records it without a restart.
+    let late = start("late").await;
+    let _ = client
+        .post(format!("{base}/api/sessions/{late}/hibernate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let marked: Value = client
+        .post(format!("{base}/api/sessions/{late}/hibernate"))
+        .json(&json!({ "superseded_by": successor }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(marked["alive"], false);
+    assert_eq!(marked["hibernation"]["superseded_by"], successor);
+
+    // A successor that no longer exists does not block the wake forever.
+    let orphan = start("orphan").await;
+    live_output_containing(&client, &base, &orphan, &["helper=["]).await;
+    let gone = client
+        .post(format!("{base}/api/sessions/{orphan}/hibernate"))
+        .json(&json!({ "superseded_by": successor }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(gone.status(), StatusCode::OK);
+    let removed = client
+        .delete(format!("{base}/api/sessions/{successor}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(removed.status(), StatusCode::OK);
+    let freed = client
+        .post(format!("{base}/api/sessions/{orphan}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        freed.status(),
+        StatusCode::OK,
+        "{}",
+        freed.text().await.unwrap_or_default()
+    );
+
+    // Same directory, same work item: the live one blocks the wake.
+    let bind = |id: &str, work_item: &str| {
+        let (client, base) = (client.clone(), base.clone());
+        let (id, work_item) = (id.to_string(), work_item.to_string());
+        async move {
+            client
+                .post(format!("{base}/api/sessions/{id}/work-item"))
+                .json(&json!({ "work_item": work_item }))
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+    let first = start("first").await;
+    let second = start("second").await;
+    bind(&first, "WI-1251").await;
+    bind(&second, "WI-1251").await;
+    live_output_containing(&client, &base, &second, &["helper=["]).await;
+    let _ = client
+        .post(format!("{base}/api/sessions/{second}/hibernate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let contended = client
+        .post(format!("{base}/api/sessions/{second}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(contended.status(), StatusCode::CONFLICT);
+    let why = contended.text().await.unwrap();
+    assert!(why.contains(&first) && why.contains("WI-1251"), "{why}");
+
+    // A different work item in the same directory is not a contention.
+    bind(&second, "WI-other").await;
+    let woken = client
+        .post(format!("{base}/api/sessions/{second}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::OK, "{:?}", woken.text().await);
+
+    // Boot wake skips a manually hibernated pinned session and a superseded
+    // one, and still wakes one the policy hibernated.
+    let manual = start("manual").await;
+    let policy = start("policy").await;
+    let handed = start("handed").await;
+    for id in [&manual, &policy, &handed] {
+        let pinned = client
+            .post(format!("{base}/api/sessions/{id}/keep-awake"))
+            .json(&json!({ "keep_awake": true }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(pinned.status(), StatusCode::OK);
+    }
+    let _ = client
+        .post(format!("{base}/api/sessions/{manual}/hibernate"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    let _ = client
+        .post(format!("{base}/api/sessions/{handed}/hibernate"))
+        .json(&json!({ "superseded_by": successor }))
+        .send()
+        .await
+        .unwrap();
+    state
+        .sessions
+        .hibernate(
+            uuid::Uuid::parse_str(&policy).unwrap(),
+            Some("idle".into()),
+            vogt_engine_contract::HibernateTrigger::Idle,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    let due = state.sessions.hibernated_keep_awake();
+    assert!(
+        due.contains(&uuid::Uuid::parse_str(&policy).unwrap()),
+        "{due:?}"
+    );
+    assert!(
+        !due.contains(&uuid::Uuid::parse_str(&manual).unwrap()),
+        "{due:?}"
+    );
+    assert!(
+        !due.contains(&uuid::Uuid::parse_str(&handed).unwrap()),
+        "{due:?}"
+    );
+    drop(tmp);
+}
+
 /// WI-926: an agent session the engine starts itself is given its own agent
 /// credential, minted by vogt-core (`POST /api/sessions/token`), instead of
 /// running with the pod's token, which is bound to a person. A plain shell
