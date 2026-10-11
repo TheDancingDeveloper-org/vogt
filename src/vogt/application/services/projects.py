@@ -536,6 +536,13 @@ def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResul
                 "nothing else to update"
             )
             raise InvalidRequest(msg)
+        if params.agent_policy is not None:
+            # Write-time only. A project stored before this rule existed still
+            # loads; the engine skips a pattern it cannot compile.
+            try:
+                params.agent_policy.check_engine_dialect()
+            except ValueError as exc:
+                raise InvalidRequest(str(exc)) from exc
         txn.update_project(
             project.id,
             ProjectUpdate(

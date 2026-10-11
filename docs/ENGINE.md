@@ -1014,6 +1014,41 @@ to them: session prompts are retained by liveness, not by count.
 }
 ```
 
+#### Project policy enforcement
+
+A project's agent policy (`forbidden_text`, `merge_deploys_prod`,
+`main_branches`) reaches the engine as the session spec's `policy`. The rest
+of the policy — commit identity, the test recipe, free-text rules — is
+guidance the brief carries and nothing enforces. A project with nothing to
+refuse sends no policy, so its session spec is unchanged.
+
+The pod entrypoint installs `vogt-policy-hook`
+(`engine/deploy/policy-hook.sh`) as a `PreToolUse` hook for `Bash` into Claude
+Code's user settings and, as a marked block, into `~/.klaudia/config.toml`.
+`ENGINE_AGENT_POLICY_HOOK=0` skips both. Before a shell command runs, the hook
+asks `POST /api/agent-auth/policy-check` with the session's broker token,
+which names the session, so a session is only ever checked against its own
+policy. A command with no `git` or `gh` word is allowed without a request.
+
+What is refused, and only for an agent session that carries a policy:
+
+- a command matching one of the project's `forbidden_text` patterns, including
+  the contents of a `git commit -F`/`--file` message file;
+- any `gh pr merge`;
+- a `git push` whose destination refspec, or whose current branch when it
+  names none, is a protected branch (`main_branches`, or `main` when that list
+  is empty).
+
+A denial exits 2 with the reason on stderr and the command does not run. When
+the engine cannot be reached, or answers anything but 2xx, the hook fails
+closed for that `git` or `gh` command (`vogt policy check unavailable;
+refusing git/gh write`) and allows everything else. opencode and codex have no
+equivalent hook, so for them the policy stays guidance in the brief.
+
+This is a guardrail, not a boundary. The session runs as the same uid that
+owns the hook, so it can edit its own hook, and wrappers the parser does not
+see — `bash -c`, `eval`, `xargs`, `gh api` — pass unchecked.
+
 #### Activity states
 
 `SessionSummary.alive` is the fact: `true` while the child process runs,

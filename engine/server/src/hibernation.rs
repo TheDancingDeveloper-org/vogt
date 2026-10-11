@@ -35,7 +35,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vogt_engine_contract::{AgentConversation, Hibernation, SessionRole};
+use vogt_engine_contract::{AgentConversation, Hibernation, SessionPolicy, SessionRole};
 
 /// How much of a session's output is kept to show while it is hibernated.
 /// Enough to render the screen and a few hundred lines above it.
@@ -98,6 +98,10 @@ pub struct Record {
     /// On autopilot (WI-949); a wake keeps it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autopilot: bool,
+    /// The project policy it enforces (WI-1243); a wake keeps it. Absent on a
+    /// record written before the field existed, which wakes without one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SessionPolicy>,
     /// What the session is for (WI-957); a wake keeps it.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
@@ -145,6 +149,7 @@ impl Record {
             brief_file: None,
             keep_awake: false,
             autopilot: false,
+            policy: None,
             role: SessionRole::Worker,
             work_item: None,
             superseded_by: None,

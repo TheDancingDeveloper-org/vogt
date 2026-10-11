@@ -147,6 +147,19 @@ if [[ "${ENGINE_CARGO_CACHE_PERSIST:-1}" != "0" ]] \
         || echo "cargo-cache: could not move Cargo's caches onto the home volume; continuing" >&2
 fi
 
+# The project's agent policy, refused at the tool call rather than only written
+# into the brief (WI-1243). Installed as a PreToolUse hook for Bash into Claude
+# Code's settings and into Klaudia's config, so a `git` or `gh` the agent is
+# about to run is checked against the session's policy. Best effort; opt out
+# with ENGINE_AGENT_POLICY_HOOK=0. opencode and codex have no such hook, so for
+# them the policy stays guidance in the brief.
+if [[ "${ENGINE_AGENT_POLICY_HOOK:-1}" != "0" ]] \
+        && [[ -x /usr/local/bin/vogt-policy-hook ]] \
+        && command -v python3 >/dev/null 2>&1; then
+    /usr/local/bin/vogt-policy-hook install-policy \
+        || echo "agent-onboarding: could not add the policy hook; continuing" >&2
+fi
+
 # Agent CLIs are deliberately not installed at container startup; the image
 # carries neutral infrastructure tooling and optional agents can be added by
 # the user. Service credentials for agent commands are brokered on demand by a

@@ -128,6 +128,13 @@ pub struct SessionSpec {
     /// is reached. vogt-core sets it from `session.start`'s `autopilot`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub autopilot: bool,
+    /// The project's agent policy (WI-1243), enforced by the session's
+    /// PreToolUse hook through `POST /api/agent-auth/policy-check`. Absent
+    /// when the project states none, which is the common case and must stay
+    /// off the wire: a create request that omits it is byte-identical to one
+    /// from before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SessionPolicy>,
     /// What the session is for (WI-957): an ordinary `worker`, or an
     /// `oversight` session that supervises others. An oversight session is
     /// pinned awake from the start, so a redeploy brings it back by itself,
@@ -149,6 +156,31 @@ pub struct SessionSpec {
     pub rows: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrollback_bytes: Option<usize>,
+}
+
+/// The part of a project's agent policy the engine enforces (WI-1243).
+///
+/// vogt-core copies it from the project onto the session at start, and the
+/// engine keeps it for the session's life, including a wake. The hook asks
+/// `POST /api/agent-auth/policy-check` before a shell command runs; the
+/// engine answers from this. Every field defaults, so a policy that states
+/// only one rule deserialises, and a record written before the field existed
+/// wakes without one.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SessionPolicy {
+    /// Regular expressions. A shell command is refused when any of them
+    /// matches the command line, the body of a `git commit -F` message file,
+    /// or — for a push or a pull-request create — the current branch name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbidden_text: Vec<String>,
+    /// A merge into production is a deploy (the estate's release rule), so
+    /// refuse `gh pr merge` outright and refuse `git push` when it would
+    /// move a branch in `main_branches`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub merge_deploys_prod: bool,
+    /// The branches `merge_deploys_prod` protects. Empty means `main`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub main_branches: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -276,6 +276,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             autopilot=autopilot,
             role=params.role,
             work_item=subject.work_item_ref,
+            policy=subject.policy,
         )
     except VogtError as error:
         _LOG.warning(
@@ -3122,6 +3123,30 @@ def _touch_dir(root: Path, spec: str) -> Path | None:
     return resolved if resolved.is_dir() else None
 
 
+def _enforced_policy(policy: AgentPolicy | None) -> dict[str, Any] | None:
+    """The slice of a project's agent policy the engine can refuse on.
+
+    Guidance (`commit_identity`, `test_recipe`, `rules`) stays in the brief
+    and never reaches the session. With nothing to refuse — no forbidden
+    text and merges that do not deploy — the spec omits `policy` entirely,
+    so a start is byte-identical to one from before enforcement existed.
+    """
+    if policy is None:
+        return None
+    forbidden = [str(pattern) for pattern in policy.forbidden_text]
+    merges = policy.merge_deploys_prod
+    if not forbidden and not merges:
+        return None
+    branches = [str(branch) for branch in policy.main_branches]
+    enforced: dict[str, Any] = {
+        "forbidden_text": forbidden,
+        "merge_deploys_prod": merges,
+    }
+    if branches:
+        enforced["main_branches"] = branches
+    return enforced
+
+
 def _autopilot(params: StartSessionParams) -> bool:
     """Whether a start runs on autopilot (WI-949): as asked, or — asked
     nothing — on for an agent template given a task, the shape of a session
@@ -3147,7 +3172,9 @@ def _start_on_engine(
     autopilot: bool = False,
     role: str = "worker",
     work_item: str | None = None,
+    policy: AgentPolicy | None = None,
 ) -> EngineSession:
+    enforced = _enforced_policy(policy)
     return engine.create_session(
         prompt=brief,
         name=name,
@@ -3173,6 +3200,7 @@ def _start_on_engine(
         role=role,
         work_item=work_item,
         companion=companion or None,
+        policy=enforced,
     )
 
 

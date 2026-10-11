@@ -1477,6 +1477,7 @@ impl AgentTaskRegistry {
             resume: None,
             permission_mode: None,
             autopilot: false,
+            policy: None,
             role: Default::default(),
             // The rail shows the item a run works on, like any session's
             // (WI-998).

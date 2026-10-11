@@ -515,6 +515,9 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
             api::OWN_CONVERSATION_ROUTE,
             post(api::report_own_conversation),
         )
+        // A session's own project-policy check (WI-1243): the same caller and
+        // the same per-session token. The hook asks before a shell command.
+        .route(api::POLICY_CHECK_ROUTE, post(api::policy_check))
         // A session's own approved grants (WI-973): the same caller and the
         // same per-session token.
         .route(secret_broker::GRANTS_ROUTE, get(secret_broker::own_grants))
