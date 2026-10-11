@@ -181,7 +181,21 @@ credentials never leave) and redacted the same way, with `agent: "opencode"`.
 `session.wait` blocks (up to `timeout_s`, at most 600) until a session is
 ready — or needs a person, or exits — or, with `until`, until it exits or
 changes at all, and returns why with the screen: one call instead of a
-polling loop. `session.report_blocked` / `session.report_unblocked`
+polling loop. `session.changes` reads the deltas the engine has published
+since a cursor (`since`, 0 for the retained ring): each carries `seq`, `at`,
+the session (`ses_…` when Vogt linked it, otherwise the engine UUID), a `kind`
+(`ready`, `approval`, `exited`, `errored`, `blocked`, `unblocked`,
+`hibernated`, `woken`) and a short `summary`. `next_cursor` is the seq to
+pass next; `truncated` means the bounded ring dropped events, so the page
+starts at the oldest still kept. `ids` restricts the page (either id form);
+empty reads every session — there is no supervised-by-me filter yet, so the
+caller names the sessions. `session.wait_any` blocks (up to `timeout_s`, at
+most 600) until one of those sessions publishes a kind in `until` (default
+`ready`, `blocked`, `approval`, `exited`, `errored`) and returns that delta
+with `outcome: "changed"`, or `outcome: "timeout"` and no change. Pass
+`cursor` (the previous `next_cursor`) so a page already read is not waited on
+again. Together they are the overseer's loop: wait, read, act.
+`session.report_blocked` / `session.report_unblocked`
 (`work.write`, audited) let an agent say it is blocked on a person; the report
 shows as `blocked` on `session.list` and `session.screen`, raises an Inbox
 `session.blocked` entry and a push. `session.start` takes `autopilot` (see

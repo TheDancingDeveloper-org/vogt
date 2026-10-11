@@ -201,6 +201,8 @@ from vogt.application.models import (
     ServeResult,
     SessionAnswerResult,
     SessionBlockedResult,
+    SessionChangesParams,
+    SessionChangesResult,
     SessionEconomicsParams,
     SessionEconomicsResult,
     SessionGrantResult,
@@ -213,6 +215,8 @@ from vogt.application.models import (
     SessionScreenParams,
     SessionScreenResult,
     SessionSweepResult,
+    SessionWaitAnyParams,
+    SessionWaitAnyResult,
     SessionWaitParams,
     SessionWaitResult,
     SetPasswordParams,
@@ -1409,6 +1413,42 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.session_wait,
             route=HttpRoute("GET", "/sessions/wait"),
             cli=CliBinding(("session", "wait")),
+        ),
+        Operation(
+            name="session.changes",
+            summary=(
+                "Read session deltas published after `since`: ready, approval, "
+                "exited, errored, blocked, unblocked, hibernated, woken. "
+                "`next_cursor` is the seq to pass next; `truncated` means the "
+                "ring dropped events, so the page starts at the oldest still "
+                "kept. `ids` names the sessions (either id form); empty reads "
+                "every session. One page instead of re-sweeping."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionChangesParams,
+            result_model=SessionChangesResult,
+            handler=services.session_changes,
+            route=HttpRoute("GET", "/sessions/changes"),
+            cli=CliBinding(("session", "changes")),
+        ),
+        Operation(
+            name="session.wait_any",
+            summary=(
+                "Wait for any of the named sessions instead of polling them: "
+                "blocks (up to timeout_s, max 600) until one publishes a kind "
+                "in `until` (default: ready, blocked, approval, exited, "
+                "errored). Returns the delta, or `timeout`. Pass `cursor` (the "
+                "previous `next_cursor`) so a replayed page is not waited on "
+                "twice. `ids` empty waits on every session."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionWaitAnyParams,
+            result_model=SessionWaitAnyResult,
+            handler=services.session_wait_any,
+            route=HttpRoute("GET", "/sessions/wait-any"),
+            cli=CliBinding(("session", "wait-any")),
         ),
         # An agent saying it cannot go on without a person. `work.write`, the
         # scope a session's own token holds, because it is the agent's own

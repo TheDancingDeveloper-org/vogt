@@ -40,6 +40,10 @@ TOKEN_FILE_ENV = "VOGT_TOKEN_FILE"
 #: auth broker for everything else. See `resolve_token` for which wins.
 HTTP_TOKEN_ENV = "VOGT_HTTP_TOKEN"
 DEFAULT_TIMEOUT_SECONDS = 30
+#: A tools/call that itself waits (`timeout_s` / `wake_timeout_s`) needs the
+#: HTTP read to outlast that wait. The bridge adds the default on top and
+#: never holds a connection longer than this.
+MAX_CALL_TIMEOUT_SECONDS = 660
 #: The budget for the optional banner read. Discovery is a courtesy — a
 #: version-skew warning and a tool count on stderr — and a client gives the
 #: whole handshake about 30 s, so a pre-flight that may take 30 s of it is a
@@ -258,12 +262,13 @@ class Bridge:
 
     def _post(self, url: str, message: dict[str, Any]) -> tuple[int, bytes]:
         body = json.dumps(message).encode("utf-8")
+        timeout = call_timeout(message)
         if self._transport is not None:
             return self._transport(url, self._headers(), body)
         request = urllib.request.Request(
             url, data=body, headers=self._headers(), method="POST"
         )
-        return self._open(request)
+        return self._open(request, timeout=timeout)
 
     def _open(  # pragma: no cover - the live path; tests inject a transport
         self,
@@ -278,6 +283,28 @@ class Bridge:
                 return int(response.status), bytes(response.read())
         except urllib.error.HTTPError as exc:
             return int(exc.code), bytes(exc.read())
+
+
+def call_timeout(message: Mapping[str, Any]) -> float:
+    """How long `_post` may wait for this JSON-RPC message.
+
+    A `tools/call` whose arguments name `timeout_s` or `wake_timeout_s` as an
+    int waits that long plus the default, capped at
+    `MAX_CALL_TIMEOUT_SECONDS`. Anything else — including a non-int — keeps
+    the default, and never raises.
+    """
+    if message.get("method") != "tools/call":
+        return float(DEFAULT_TIMEOUT_SECONDS)
+    params = message.get("params")
+    arguments = params.get("arguments") if isinstance(params, Mapping) else None
+    if not isinstance(arguments, Mapping):
+        return float(DEFAULT_TIMEOUT_SECONDS)
+    for key in ("timeout_s", "wake_timeout_s"):
+        value = arguments.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            continue
+        return float(min(value + DEFAULT_TIMEOUT_SECONDS, MAX_CALL_TIMEOUT_SECONDS))
+    return float(DEFAULT_TIMEOUT_SECONDS)
 
 
 def read_token(path: str | None) -> str | None:
