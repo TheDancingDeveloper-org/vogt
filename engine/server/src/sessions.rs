@@ -562,6 +562,7 @@ impl SessionRegistry {
             .filter(|m| !m.is_empty() && m != "default");
         session.set_permission_mode(posture.clone());
         session.set_autopilot(spec.autopilot);
+        session.set_policy(spec.policy.clone());
         session.set_role(spec.role);
         session.set_work_item(spec.work_item.clone());
         // An oversight session is the one that brings the others back, so it
@@ -605,6 +606,7 @@ impl SessionRegistry {
                     .into_iter()
                     .collect();
                 record.autopilot = spec.autopilot;
+                record.policy = spec.policy.clone();
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();
                 record.keep_awake = session.keep_awake();
@@ -1285,6 +1287,7 @@ impl SessionRegistry {
             effort: record.effort.clone(),
             permission_mode: record.permission_mode.clone(),
             autopilot: record.autopilot,
+            policy: record.policy.clone(),
             role: record.role,
             work_item: record.work_item.clone(),
             resume: record.conversation.as_ref().map(|c| c.id.clone()),

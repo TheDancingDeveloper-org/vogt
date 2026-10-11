@@ -338,6 +338,119 @@ pub async fn report_own_conversation(
     }
 }
 
+/// The broker route for a policy check: `/api/agent-auth/policy-check`.
+pub const POLICY_CHECK_ROUTE: &str = "/api/agent-auth/policy-check";
+
+/// What the hook posts: the PreToolUse payload, of which only the tool name,
+/// the command and the working directory are read. Unknown fields are
+/// ignored so a CLI that adds one does not start failing closed.
+#[derive(serde::Deserialize)]
+struct PolicyCheckRequest {
+    #[serde(default)]
+    tool_name: String,
+    #[serde(default)]
+    tool_input: PolicyCheckInput,
+    #[serde(default)]
+    cwd: String,
+}
+
+#[derive(serde::Deserialize, Default)]
+struct PolicyCheckInput {
+    #[serde(default)]
+    command: String,
+}
+
+/// `POST /api/agent-auth/policy-check` — whether the shell command a session's
+/// agent is about to run breaks the project's policy (WI-1243). Authenticated
+/// like [`report_own_conversation`]: the session's own broker token, which
+/// names the session, so a session is only ever checked against its own
+/// policy. A session with no policy, or a tool that is not a shell, is
+/// allowed; the hook only asks about `Bash`.
+pub async fn policy_check(
+    State(state): State<Arc<AppState>>,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    use axum::{http::header, response::IntoResponse};
+    let path = request.uri().path().to_string();
+    let request_id = request
+        .extensions()
+        .get::<crate::observability::RequestId>()
+        .map(|id| id.0.clone())
+        .unwrap_or_default();
+    let session = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .and_then(|token| state.sessions.secret_broker().authenticate(token));
+    let Some(id) = session else {
+        crate::auth::record_auth_failure(
+            &axum::http::Method::POST,
+            &path,
+            &request_id,
+            "missing or unknown broker token",
+        )
+        .await;
+        return crate::error::ApiError::Unauthorized.into_response();
+    };
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(body) => body,
+        Err(_) => {
+            return crate::error::ApiError::BadRequest("policy check too large".into())
+                .into_response()
+        }
+    };
+    let req: PolicyCheckRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(e) => {
+            return crate::error::ApiError::BadRequest(format!("policy check: {e}")).into_response()
+        }
+    };
+    let allow = serde_json::json!({"decision": "allow"});
+    if req.tool_name != "Bash" {
+        return Json(allow).into_response();
+    }
+    let Ok(session) = state.sessions.get(id) else {
+        return Json(allow).into_response();
+    };
+    let Some(policy) = session.policy() else {
+        return Json(allow).into_response();
+    };
+    let cwd = if req.cwd.is_empty() {
+        std::path::PathBuf::from(&session.cwd)
+    } else {
+        std::path::PathBuf::from(&req.cwd)
+    };
+    let command = req.tool_input.command;
+    // The check reads a commit-message file and runs `git rev-parse`, both
+    // blocking, so it runs off the runtime and under a bound: a check that
+    // does not return is a refusal, not a pass.
+    let verdict = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        tokio::task::spawn_blocking(move || crate::policy::check(&policy, &command, &cwd)),
+    )
+    .await;
+    match verdict {
+        Ok(Ok(Some(reason))) => {
+            tracing::warn!(session = %id, event = "policy.deny", "project policy refused a command");
+            Json(serde_json::json!({"decision": "deny", "reason": reason})).into_response()
+        }
+        Ok(Ok(None)) => Json(allow).into_response(),
+        Ok(Err(_)) | Err(_) => {
+            // A check that did not finish says nothing, so it refuses, the same
+            // way the hook refuses a check it cannot read.
+            tracing::warn!(session = %id, event = "policy.timeout", "project policy check did not finish");
+            Json(serde_json::json!({
+                "decision": "deny",
+                "reason": "policy check timed out",
+            }))
+            .into_response()
+        }
+    }
+}
+
 /// Only vogt-core's own identity may change a session's grants (WI-973): the
 /// core sends one only after a person approved it, so every other credential
 /// — a person's token, the break-glass token, a session's token — is refused

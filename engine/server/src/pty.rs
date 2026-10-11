@@ -92,6 +92,9 @@ pub struct Session {
     keep_awake: AtomicBool,
     /// On autopilot (see `SessionSummary::autopilot`, WI-949).
     autopilot: AtomicBool,
+    /// The project's agent policy (WI-1243), when the session carries one.
+    /// The policy-check route reads it; a wake restores it from the record.
+    policy: Mutex<Option<vogt_engine_contract::SessionPolicy>>,
     /// Times the engine told it to carry on.
     autopilot_nudges: std::sync::atomic::AtomicU32,
     /// Nominated to supervise other sessions (see `SessionSummary::role`,
@@ -237,6 +240,15 @@ impl Session {
 
     pub fn set_autopilot(&self, on: bool) {
         self.autopilot.store(on, Ordering::Release);
+    }
+
+    /// The project policy this session enforces, when it has one (WI-1243).
+    pub fn policy(&self) -> Option<vogt_engine_contract::SessionPolicy> {
+        self.policy.lock().clone()
+    }
+
+    pub fn set_policy(&self, policy: Option<vogt_engine_contract::SessionPolicy>) {
+        *self.policy.lock() = policy;
     }
 
     pub fn role(&self) -> vogt_engine_contract::SessionRole {
@@ -1049,6 +1061,7 @@ pub fn spawn(
         conversation: Mutex::new(None),
         keep_awake: AtomicBool::new(false),
         autopilot: AtomicBool::new(false),
+        policy: Mutex::new(None),
         autopilot_nudges: std::sync::atomic::AtomicU32::new(0),
         oversight: AtomicBool::new(false),
         hibernating: AtomicBool::new(false),

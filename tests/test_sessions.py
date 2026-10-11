@@ -55,6 +55,7 @@ from vogt.application.services import (
 from vogt.core.auth import hash_token
 from vogt.core.entities import AgentPolicy
 from vogt.errors import Conflict, InvalidRequest, MissingReason, NotFound, RoleRefused
+from vogt.storage.interface import ProjectUpdate
 
 from tests.conftest import native_work_item
 
@@ -421,6 +422,40 @@ def test_autopilot_reaches_the_engine_and_is_on_by_default_for_an_agent_task(
         wired, StartSessionParams(project="vogt", task="look around", reason=WHY)
     )
     assert "autopilot" not in engine.last_spec
+
+
+def test_the_enforced_policy_reaches_the_engine_and_guidance_does_not(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1243: the session spec carries only what a hook can refuse on.
+
+    A project with nothing to refuse sends no policy at all, so the start
+    stays byte-identical to one from before enforcement.
+    """
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "policy" not in engine.last_spec
+
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                forbidden_text=["(?i)grok"],
+                merge_deploys_prod=True,
+                main_branches=["main", "release"],
+                commit_identity="a person",
+                test_recipe="uv run pytest",
+                rules=["guidance only"],
+            ),
+            reason=WHY,
+        ),
+    )
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert engine.last_spec["policy"] == {
+        "forbidden_text": ["(?i)grok"],
+        "merge_deploys_prod": True,
+        "main_branches": ["main", "release"],
+    }
 
 
 def test_a_template_is_sent_by_name_for_the_engine_to_expand(
@@ -1790,12 +1825,11 @@ def test_the_engines_stack_secret_may_mint_whoever_it_was_issued_to(
         )
 
 
-def test_a_project_policy_is_in_the_brief_and_nothing_else_is_sent(
+def test_a_project_policy_is_in_the_brief_and_only_the_enforced_slice_is_sent(
     wired: AppContext, engine: StandInEngine
 ) -> None:
-    """The brief says the whole policy. No enforcement payload is sent to the
-    engine: per-session hooks are a follow-up, and Klaudia has no flag to
-    carry one."""
+    """The brief says the whole policy. The engine gets only what a hook can
+    refuse on (WI-1243): guidance stays in the brief."""
     update_project(
         wired,
         UpdateProjectParams(
@@ -1819,7 +1853,11 @@ def test_a_project_policy_is_in_the_brief_and_nothing_else_is_sent(
     assert "`release`" in brief
     assert "uv run pytest" in brief
     assert "Never commit the design directory." in brief
-    assert "policy" not in engine.last_spec
+    assert engine.last_spec["policy"] == {
+        "forbidden_text": ["(?i)wip"],
+        "merge_deploys_prod": True,
+        "main_branches": ["release"],
+    }
 
 
 def test_a_policy_with_nothing_to_enforce_sends_no_hook_payload(
@@ -1850,6 +1888,59 @@ def test_a_pattern_that_does_not_compile_is_refused(wired: AppContext) -> None:
                 reason=WHY,
             ),
         )
+
+
+def test_a_pattern_the_engine_dialect_cannot_match_is_refused(
+    wired: AppContext,
+) -> None:
+    """Python compiles lookaround, backreferences, conditional groups and
+    named-group references; the engine's regex crate does not, so such a
+    pattern would be stored and then never fire. The refusal happens at the
+    write, not when the model is built."""
+    for pattern in (
+        "secret(?=key)",
+        "secret(?!key)",
+        "(?<=pre)secret",
+        "(?<!pre)secret",
+        r"(\w+)\s+\1",
+        r"(?P<name>\w+) (?P=name)",
+        r"(a)?(?(1)yes|no)",
+    ):
+        # Building the model is allowed: a project stored before this rule
+        # existed must still load.
+        AgentPolicy(forbidden_text=[pattern])
+        with pytest.raises(InvalidRequest, match="does not support"):
+            update_project(
+                wired,
+                UpdateProjectParams(
+                    slug="vogt",
+                    agent_policy=AgentPolicy(forbidden_text=[pattern]),
+                    reason=WHY,
+                ),
+            )
+
+
+def test_a_stored_unsupported_pattern_still_loads(wired: AppContext) -> None:
+    """The dialect rule is a write-time check. A project whose policy was
+    stored before it existed must still load, not vanish from every read."""
+    stored = AgentPolicy(
+        forbidden_text=[r"(?P<name>\w+) (?P=name)", r"(a)?(?(1)yes|no)"]
+    )
+    with wired.declared.write() as txn:
+        project = txn.project_by_slug("vogt")
+        assert project is not None
+        txn.update_project(
+            project.id,
+            ProjectUpdate(agent_policy=stored),
+            at=wired.clock(),
+        )
+    with wired.declared.read() as view:
+        loaded = view.project_by_slug("vogt")
+    assert loaded is not None
+    assert loaded.agent_policy.forbidden_text == [
+        r"(?P<name>\w+) (?P=name)",
+        r"(a)?(?(1)yes|no)",
+    ]
 
 
 def test_touch_points_render_and_the_map_stays_inside_the_tree(
