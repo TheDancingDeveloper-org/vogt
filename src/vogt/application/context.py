@@ -146,6 +146,7 @@ def build_context(
         observed=SqliteObservedStore(
             resolved_config.observed_db_path,
             clock=resolved_clock,
+            id_factory=resolved_ids,
             synchronous=resolved_config.sqlite_synchronous,
         ),
         principal=principal if principal is not None else local_principal(),
@@ -200,6 +201,7 @@ def with_stores_at(ctx: AppContext, data_dir: Path) -> AppContext:
         observed=SqliteObservedStore(
             data_dir / ctx.config.observed_db_path.name,
             clock=ctx.clock,
+            id_factory=ctx.id_factory,
             synchronous=synchronous,
         ),
     )
