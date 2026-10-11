@@ -11,6 +11,7 @@ from __future__ import annotations
 from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Protocol
 
 from vogt.core.entities import (
@@ -812,6 +813,11 @@ class WriteTxn(ReadView, Protocol):
 class DeclaredStore(Protocol):
     """The authoritative store. Only the application layer writes here."""
 
+    @property
+    def path(self) -> Path:
+        """Where the store lives: what identifies it across contexts."""
+        ...
+
     def migrate(self) -> MigrationReport: ...
 
     def is_initialized(self) -> bool: ...
@@ -888,6 +894,11 @@ class ObservedStore(Protocol):
     a registered project is a cross-store question the application layer
     answers and hands down (`SCHEMA.md` §1).
     """
+
+    @property
+    def path(self) -> Path:
+        """Where the store lives: what identifies it across contexts."""
+        ...
 
     def migrate(self) -> MigrationReport: ...
 
@@ -1025,6 +1036,12 @@ class ObservedStore(Protocol):
     # -- projections and retention -----------------------------------------
 
     def rebuild_latest(self) -> int: ...
+
+    def latest_generation(self) -> int:
+        """A number that moves whenever `rebuild_latest` changes the
+        projection every `latest`-based read is answered from; 0 before the
+        first rebuild."""
+        ...
 
     def replace_dep_refs(self, rows: list[DepRefRow]) -> int: ...
 

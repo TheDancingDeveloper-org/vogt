@@ -489,8 +489,18 @@ $VOGT_DATA_DIR/                  (in the stack: /var/lib/vogt)
 ```
 
 Every connection opens with `journal_mode = WAL`, `foreign_keys = ON`, a busy
-timeout and the configured `sqlite_synchronous`. There is no external
+timeout and the configured `sqlite_synchronous`. A write opens its own
+connection per transaction. Reads borrow from a small per-file pool in the
+process (`storage/sqlite/connection.py`). A pooled connection is lent to one
+thread at a time, always outside a transaction. It is closed rather than lent
+again once a restore or clone has replaced its file. There is no external
 database, cache or queue; the core needs SQLite and `git`.
+
+The shell's badge counts (`place.metrics`) and the stored half of the Inbox
+are shared within the process between callers while neither store has moved
+(`application/memo.py`). The key is the declared revision, the newest event,
+and the observed projection's generation, which every `rebuild_latest` bumps.
+Concurrent callers share one computation (WI-1224).
 
 **Migrations** are forward-only SQL files under
 `src/vogt/storage/sqlite/migrations/{declared,observed}/`, applied by

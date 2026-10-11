@@ -23,6 +23,7 @@ from vogt.core.ids import IdFactory, new_id
 from vogt.core.principal import Principal, local_principal
 from vogt.observability import logger
 from vogt.storage.interface import DeclaredStore, ObservedStore
+from vogt.storage.sqlite.connection import drain_read_pool
 from vogt.storage.sqlite.declared import SqliteDeclaredStore
 from vogt.storage.sqlite.observed import SqliteObservedStore
 
@@ -202,3 +203,14 @@ def with_stores_at(ctx: AppContext, data_dir: Path) -> AppContext:
             synchronous=synchronous,
         ),
     )
+
+
+def release_store_connections() -> None:
+    """Close every pooled read connection this process holds.
+
+    For `restore` and `clone`, before they replace a store's files: a pooled
+    connection (`storage/sqlite/connection.py`) must not outlive the database
+    it was opened on, and closing the last connection to a staged copy is
+    what folds its WAL back before the swap.
+    """
+    drain_read_pool()
