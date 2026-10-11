@@ -10,6 +10,10 @@ mod adapters;
 mod application;
 mod auth;
 mod branches;
+// Stop-gap while the sweep service is wired (WI-1071). The collectors module
+// is live code with no caller yet; without this every other worker's clippy
+// gate fails. Remove the allow in the commit that dispatches `sweep`.
+#[allow(dead_code, unused_imports)]
 mod collectors;
 #[allow(dead_code)]
 mod config;

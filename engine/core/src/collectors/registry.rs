@@ -7,6 +7,7 @@
 use crate::errors::VogtError;
 
 use super::base::{ActivityIndexer, Collector};
+use super::source_markers::SourceMarkerCollector;
 
 /// Whether this collector opts out of unnamed sweeps.
 pub fn is_on_demand(collector: &dyn Collector) -> bool {
@@ -16,10 +17,10 @@ pub fn is_on_demand(collector: &dyn Collector) -> bool {
 /// The offline collectors every instance has.
 ///
 /// `contract-checker` belongs here but marked `on_demand_only`, so a plain
-/// `sweep` does not run it. The four collectors land in later commits; until
-/// they do, an unnamed sweep selects nothing rather than a stand-in.
+/// `sweep` does not run it. The remaining collectors land in later commits;
+/// until they do, an unnamed sweep selects only `source-markers`.
 pub fn core_collectors() -> Vec<Box<dyn Collector>> {
-    Vec::new()
+    vec![Box::new(SourceMarkerCollector)]
 }
 
 /// What the sweeper holds: an ordinary collector, or one that indexes

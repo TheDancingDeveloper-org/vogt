@@ -38,23 +38,19 @@ impl SweepOutcomeSet {
     }
 
     pub fn worst_outcome(&self) -> &str {
-        let mut saw_partial = false;
-        let mut saw_ok = false;
-        for report in &self.reports {
-            match report.outcome.as_str() {
-                "failed" => return "failed",
-                "partial" => saw_partial = true,
-                "ok" => saw_ok = true,
-                _ => {}
+        // Python: the first of ("failed", "partial", "ok") present in the
+        // set of report outcomes, else "ok".
+        let outcomes: std::collections::BTreeSet<&str> = self
+            .reports
+            .iter()
+            .map(|report| report.outcome.as_str())
+            .collect();
+        for outcome in ["failed", "partial", "ok"] {
+            if outcomes.contains(outcome) {
+                return outcome;
             }
         }
-        if saw_partial {
-            "partial"
-        } else if saw_ok || self.reports.is_empty() {
-            "ok"
-        } else {
-            "ok"
-        }
+        "ok"
     }
 }
 

@@ -7,6 +7,7 @@
 
 mod base;
 mod registry;
+mod source_markers;
 mod sweeper;
 
 pub use base::{
