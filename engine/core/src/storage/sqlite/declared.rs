@@ -63,6 +63,19 @@ pub struct SqliteDeclaredStore<C, I> {
     synchronous: String,
 }
 
+impl<C, I> Clone for SqliteDeclaredStore<C, I> {
+    /// Another handle on the same file, clock and id factory. `read` opens its
+    /// own connection, so two handles do not share a transaction.
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            clock: Arc::clone(&self.clock),
+            ids: Arc::clone(&self.ids),
+            synchronous: self.synchronous.clone(),
+        }
+    }
+}
+
 impl<C, I> SqliteDeclaredStore<C, I>
 where
     C: Clock,
