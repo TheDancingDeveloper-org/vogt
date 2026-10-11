@@ -446,8 +446,11 @@ docker exec <core-container> \
   caller's saved `inbox.filter` (the same answer `inbox.list` gives under it;
   free-text search is client-side and never counted). `inbox_active_unfiltered`
   is every active entry and `inbox_filter` the filter applied (`null` = none).
-  The count reads only stored fields, and one Inbox projection serves every
-  badge read until the declared revision or the event feed moves (at most 5 s).
+  The count reads only stored fields. The stored half of the Inbox, and the
+  other counts, are computed once and shared by every badge read until the
+  declared revision, the event feed or the observed projection moves.
+  Concurrent reads share one computation. Live engine sessions and pending
+  grants are read fresh on every call.
 
 ## Agent activity: what agents did, searchable
 

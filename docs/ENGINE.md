@@ -2662,6 +2662,17 @@ so a write cannot be repeated). Only if the door is still busy does it show
 "busy" — never "Vogt is unavailable", and never into the connection breaker.
 `/mcp` is not capped.
 
+The cap is 16 requests in two pools that do not share slots
+(`HEAVY_READS_IN_FLIGHT`, `LIGHT_READS_IN_FLIGHT`). **Heavy** reads get 4:
+these are the aggregates `place/metrics`, `backlog`, `bugs`, `board/list` and
+`inbox`, matched on the exact path. **Light** requests get 12: everything
+else, writes included. The reason names the pool that shed the request
+(`… already has 4 heavy requests open against vogt-core; retry shortly`). The
+core cannot cancel work a browser has abandoned, so a queue here would only
+stack copies of a slow read. With the split, a burst of badge refreshes is
+shed from the heavy pool and never takes the slots that the session list and
+preference reads need (WI-1224).
+
 **Vogt's own operations are not documented here.** They are generated from
 Vogt's operation registry and described by its OpenAPI document, which the core
 serves at `/openapi.json`; the repository's `AGENTS.md` and [`ARCHITECTURE.md`](ARCHITECTURE.md)
