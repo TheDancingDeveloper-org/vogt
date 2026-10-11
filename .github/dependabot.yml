@@ -1,26 +1,43 @@
+# Version updates are kept, but batched (operator decision, 2026-10-11): monthly,
+# with every minor/patch bump in one PR per ecosystem. Majors still arrive one
+# per PR so each gets its own review. Security updates are unaffected.
 version: 2
 updates:
   - package-ecosystem: pip
     directory: "/"
     schedule:
-      interval: weekly
-    open-pull-requests-limit: 10
+      interval: monthly
+    groups:
+      pip-minor-patch:
+        update-types: [minor, patch]
   - package-ecosystem: npm
     directory: "/web"
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      web-minor-patch:
+        update-types: [minor, patch]
   - package-ecosystem: npm
     directory: "/mobile"
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      mobile-minor-patch:
+        update-types: [minor, patch]
   - package-ecosystem: cargo
     directory: "/engine"
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      engine-minor-patch:
+        update-types: [minor, patch]
   - package-ecosystem: cargo
     directory: "/voice"
     schedule:
-      interval: weekly
+      interval: monthly
+    groups:
+      voice-minor-patch:
+        update-types: [minor, patch]
     # ort and ort-sys are a matched pair pinned at =2.0.0-rc.12 for
     # piper-rs 0.2.0 (voice/tts Cargo.toml), which requires exactly that
     # ort. A lone bump of either does not build (ort-sys fails its own build
@@ -32,14 +49,16 @@ updates:
   - package-ecosystem: docker
     directory: "/"
     schedule:
-      interval: weekly
+      interval: monthly
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
+      interval: monthly
     groups:
       # init and analyze must run the same CodeQL bundle; split bumps fail
       # the analyze job on whichever PR lands first.
       codeql-action:
         patterns:
           - "github/codeql-action*"
+      actions-minor-patch:
+        update-types: [minor, patch]
