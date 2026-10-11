@@ -98,3 +98,17 @@ def test_a_cargo_home_under_home_is_left_alone(tmp_path: Path) -> None:
     assert not (cargo / "registry").is_symlink()
     assert not (home / ".cache" / "vogt-cargo").exists()
     assert result.stdout == ""
+
+
+def test_an_interrupted_first_copy_is_redone(tmp_path: Path) -> None:
+    cargo = _image_cargo_home(tmp_path)
+    home = tmp_path / "home"
+    partial = home / ".cache" / "vogt-cargo" / "registry.partial"
+    (partial / "half").mkdir(parents=True)
+
+    _run(cargo, home)
+
+    registry = home / ".cache" / "vogt-cargo" / "registry"
+    assert (registry / "cache" / "baked.crate").is_file()
+    assert not (registry / "registry").exists()
+    assert not partial.exists()
