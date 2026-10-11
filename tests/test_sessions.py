@@ -54,7 +54,7 @@ from vogt.application.services import (
 )
 from vogt.core.auth import hash_token
 from vogt.core.entities import AgentPolicy
-from vogt.errors import Conflict, InvalidRequest, MissingReason, NotFound
+from vogt.errors import Conflict, InvalidRequest, MissingReason, NotFound, RoleRefused
 
 from tests.conftest import native_work_item
 
@@ -86,6 +86,9 @@ class StandInEngine:
         #: POST /api/git/op answers. `None` commits; a tuple is the status and
         #: error text the engine refuses with (400 checklist, 409 mid-turn).
         self.git_refusal: tuple[int, str] | None = None
+        #: Engine role of a session id, for GET /api/sessions/{id}. A session
+        #: that is not named here is a worker.
+        self.roles: dict[str, str] = {}
         #: A resumed session starts back in the directory its transcript
         #: records; tests that assert that set this.
         self.resume_cwd: str | None = None
@@ -151,6 +154,22 @@ class StandInEngine:
                     }
                     for key, state in {**self.alive, **self.unlinked}.items()
                 ]
+            ).encode()
+        if method == "GET" and "/api/sessions/" in url:
+            engine_id = url.rstrip("/").rsplit("/", 1)[-1]
+            known = {**self.alive, **self.unlinked}
+            if engine_id not in known and engine_id not in self.roles:
+                return 404, b""
+            return 200, json.dumps(
+                {
+                    "summary": {
+                        "id": engine_id,
+                        "name": engine_id,
+                        "activity": known.get(engine_id, "idle"),
+                        "cwd": ROOT,
+                        "role": self.roles.get(engine_id, "worker"),
+                    }
+                }
             ).encode()
         # Session history. Canned rows; tests assert both the mapping
         # and, via `self.sent`, that the query params were forwarded.
@@ -1537,7 +1556,6 @@ def test_commit_for_a_session_returns_the_digest_and_is_audited(
             id=started.session.id,
             message="record the session commit",
             paths=["src/a.rs"],
-            forbidden_text=["WIP"],
             reason=WHY,
         ),
     )
@@ -1552,7 +1570,7 @@ def test_commit_for_a_session_returns_the_digest_and_is_audited(
         "message": "record the session commit",
         "paths": ["src/a.rs"],
         "full_diff": False,
-        "forbidden_text": ["WIP"],
+        "forbidden_text": [],
     }
     audit = list_audit(wired, ListAuditParams(operation="session.commit_for"))
     assert audit.records, "the commit is an audited action"
@@ -1608,6 +1626,92 @@ def test_the_engines_commit_refusal_reaches_the_caller(
     assert not list_audit(
         wired, ListAuditParams(operation="session.commit_for")
     ).records
+
+
+def test_a_named_worktree_is_forwarded_and_patterns_are_not(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The caller names a worktree; it never names the forbidden patterns.
+    Those stay empty until the project's own policy supplies them."""
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    commit_for_session(
+        wired,
+        CommitForSessionParams(
+            id=started.session.id,
+            message="commit in the linked worktree",
+            worktree="/srv/estate/vogt-wt",
+            reason=WHY,
+        ),
+    )
+    sent = [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+    assert sent[-1]["body"]["worktree"] == "/srv/estate/vogt-wt"
+    assert sent[-1]["body"]["forbidden_text"] == []
+
+
+def test_a_session_cannot_commit_its_own_work(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    caller = _as(wired, f"agent:session:{started.session.id}")
+    with pytest.raises(RoleRefused, match="does not commit its own work"):
+        commit_for_session(
+            caller,
+            CommitForSessionParams(
+                id=started.session.id, message="my own commit", reason=WHY
+            ),
+        )
+    assert not [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+
+
+def test_a_worker_cannot_commit_for_another_worker(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    target = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    caller = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    engine.roles[ENGINE_SESSION] = "worker"
+    with pytest.raises(RoleRefused, match="is worker"):
+        commit_for_session(
+            caller,
+            CommitForSessionParams(
+                id=target.session.id, message="another worker's commit", reason=WHY
+            ),
+        )
+    assert not [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+
+
+def test_oversight_may_commit_for_a_worker(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    target = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    caller = _as(wired, f"agent:engine:{ENGINE_SESSION}")
+    engine.roles[ENGINE_SESSION] = "oversight"
+    result = commit_for_session(
+        caller,
+        CommitForSessionParams(
+            id=target.session.id, message="oversight commits it", reason=WHY
+        ),
+    )
+    assert result.commit == "abc123def456"
+
+
+def test_a_person_may_commit_without_a_role_lookup(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    person = _as(wired, "local:someone", kind="human")
+    result = commit_for_session(
+        person,
+        CommitForSessionParams(
+            id=started.session.id, message="a person commits it", reason=WHY
+        ),
+    )
+    assert result.commit == "abc123def456"
+    looked_up = [
+        row
+        for row in engine.sent
+        if row["method"] == "GET" and "/api/sessions/" in row["url"]
+    ]
+    assert looked_up == []
 
 
 def test_the_engines_stack_secret_may_mint_whoever_it_was_issued_to(

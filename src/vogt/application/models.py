@@ -4251,12 +4251,12 @@ class CommitForSessionParams(Params):
             "enters a caller's context unasked; the digest and stat always do."
         ),
     )
-    forbidden_text: list[str] = Field(
-        default_factory=list,
+    worktree: str | None = Field(
+        default=None,
         description=(
-            "The project's forbidden-text patterns, matched against the "
-            "message and the branch name. Empty until a project states a "
-            "policy, which checks nothing."
+            "Commit in this linked worktree instead of the session's own "
+            "directory. It must be a worktree of the repo that directory "
+            "belongs to; a stranger repo is refused."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
