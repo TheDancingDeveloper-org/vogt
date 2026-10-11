@@ -313,15 +313,15 @@ describe("a pasted link opens the surface it names", () => {
     const { container, vogt } = mountShell("/sessions", {
       sessions,
       vogt: {
-        "GET /work": (call) => ({
+        "GET /work/get-many": {
           body: {
             items: [
-              call.query.get("query") === "WI-7"
-                ? { ref: "WI-7", title: "terminal render bug", state: "in_progress" }
-                : { ref: "WI-8", title: "shipped thing", state: "done" },
+              { ref: "WI-7", title: "terminal render bug", state: "in_progress" },
+              { ref: "WI-8", title: "shipped thing", state: "done" },
             ],
+            missing: [],
           },
-        }),
+        },
         "POST /sessions/work-item": { body: { session: {}, engine_label: "written" } },
       },
     });
@@ -334,6 +334,12 @@ describe("a pasted link opens the surface it names", () => {
     await waitFor(() => expect(chip("WI-8")?.className).toContain("session-work-chip--finished"));
     expect(chip("WI-8")?.textContent).toContain("· done");
     expect(container.querySelectorAll("[data-testid=session-work-chip]")).toHaveLength(2);
+    // Both chips came from one read (WI-1224), not one search each.
+    expect(vogt.matching("GET /work/get-many")).toHaveLength(1);
+    expect(vogt.matching("GET /work/get-many")[0]?.query.getAll("refs").sort()).toEqual([
+      "WI-7",
+      "WI-8",
+    ]);
 
     const unbind = [...container.querySelectorAll<HTMLButtonElement>("[role=menuitem]")].find(
       (button) => button.getAttribute("aria-label") === "Unbind on-item from WI-7",
