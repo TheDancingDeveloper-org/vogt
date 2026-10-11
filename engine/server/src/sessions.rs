@@ -765,6 +765,32 @@ impl SessionRegistry {
         self.sessions.contains_key(&id) || self.records.contains_key(&id)
     }
 
+    /// A session's summary whether it is live, exited but still listed, or
+    /// hibernated; `None` when the engine does not know it.
+    pub fn summary_of(&self, id: Uuid) -> Option<SessionSummary> {
+        match self.sessions.get(&id) {
+            Some(session) => Some(session.summary()),
+            None => self.hibernated_summary(id),
+        }
+    }
+
+    /// The engine sessions Vogt started as `vogt_id` (`ses_…`): the ones whose
+    /// recorded environment carries `VOGT_SESSION_ID=<vogt_id>`, the variable
+    /// vogt-core gives each session it starts. More than one means somebody
+    /// started a second session claiming the same id, and a caller that needs
+    /// to know which session a token belongs to must treat that as unknown.
+    pub fn engine_ids_for_vogt_session(&self, vogt_id: &str) -> Vec<Uuid> {
+        self.records
+            .iter()
+            .filter(|r| {
+                r.env
+                    .iter()
+                    .any(|(k, v)| k == "VOGT_SESSION_ID" && v == vogt_id)
+            })
+            .map(|r| *r.key())
+            .collect()
+    }
+
     pub fn is_hibernated(&self, id: Uuid) -> bool {
         !self.sessions.contains_key(&id)
             && self
