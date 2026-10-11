@@ -133,7 +133,7 @@ fn request<C: Clock + 'static, I: IdFactory + 'static>(
     let uses = parse_uses(asked.uses)?;
 
     let engine = engine_of(ctx)?;
-    let target_engine_id = resolve_target(ctx, asked.target)?;
+    let target_engine_id = crate::application::services::resolve_session(ctx, asked.target)?;
     let live = engine.get_session(&target_engine_id)?;
     if live.as_ref().is_none_or(|session| !session.alive) {
         return Err(VogtError::Conflict(format!(
@@ -329,7 +329,9 @@ fn list<C: Clock, I: IdFactory>(
     limit: i64,
 ) -> Result<Value, VogtError> {
     let mut target = match target {
-        Some(reference) => Some(resolve_target(ctx, reference)?),
+        Some(reference) => Some(crate::application::services::resolve_session(
+            ctx, reference,
+        )?),
         None => None,
     };
     if ctx.principal.kind == crate::core::ActorKind::Agent {
@@ -475,32 +477,6 @@ fn record_decision<C: Clock + 'static, I: IdFactory + 'static>(
             summary: summary_of(&decided),
         })
     })
-}
-
-/// A session reference is either a Vogt session id or an engine session id.
-///
-/// Inlined from `sessions.py`'s `_target` until W9 lands the sessions module,
-/// which should own this once and replace the copy. A `ses_…` id must be one
-/// Vogt recorded — an unknown one is a wrong id, not an engine id. Anything
-/// else is the engine's own id, passed through as given.
-fn resolve_target<C: Clock, I: IdFactory>(
-    ctx: &AppContext<C, I>,
-    target: &str,
-) -> Result<String, VogtError> {
-    let wanted = target.trim();
-    if wanted.is_empty() {
-        return Err(VogtError::InvalidRequest(
-            "a session id is required (ses_… or the engine's session UUID)".to_string(),
-        ));
-    }
-    let view = ctx.declared.read()?;
-    if wanted.starts_with("ses_") {
-        let session = view.session_by_id(wanted)?.ok_or_else(|| {
-            VogtError::NotFound(format!("no session {}", crate::core::py_repr(wanted)))
-        })?;
-        return Ok(session.engine_session_id);
-    }
-    Ok(wanted.to_string())
 }
 
 fn view_of(view: &impl ReadView, grant: &SessionGrant, now: Moment) -> Result<Value, VogtError> {

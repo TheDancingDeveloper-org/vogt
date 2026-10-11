@@ -26,6 +26,23 @@ pub mod preferences;
 #[allow(dead_code)]
 pub mod sessions;
 
+/// The session resolver for callers outside `services`.
+///
+/// W9's `sessions::resolve_target` is `pub(super)`, so it reaches this module
+/// and nothing further. The grants half (WI-1074) sits beside `services` and
+/// must resolve a session the same way, so it calls through here instead of
+/// keeping a second copy of `sessions.py`'s `_target`.
+pub(crate) fn resolve_session<C, I>(
+    ctx: &AppContext<C, I>,
+    session_id: &str,
+) -> Result<String, crate::errors::VogtError>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    sessions::resolve_target(ctx, session_id).map(|target| target.engine_session_id)
+}
+
 use crate::application::context::{AppContext, Built};
 use crate::application::writes::WriteContext;
 use crate::core::{Clock, IdFactory, Moment, Principal};
