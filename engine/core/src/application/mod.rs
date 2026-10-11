@@ -10,6 +10,7 @@ pub mod coverage;
 pub mod deployed;
 pub mod drift;
 pub mod git_signals;
+pub mod git_story;
 pub mod grants;
 pub mod instance;
 pub mod observations;

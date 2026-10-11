@@ -148,7 +148,7 @@ pub fn git_signals<C: Clock, I: IdFactory>(
 /// `_forge_number` is `#(\d+)$`, and `\d` is any Unicode decimal digit, so the
 /// captured run goes through the same normalisation the branch binding uses —
 /// `int()` strips leading zeros. A `gh-<n>` prefix is not one.
-fn forge_number(reference: &str) -> Option<i64> {
+pub(crate) fn forge_number(reference: &str) -> Option<i64> {
     static PATTERN: std::sync::LazyLock<regex::Regex> =
         std::sync::LazyLock::new(|| regex::Regex::new(r"#(\d+)$").unwrap());
     let tail = PATTERN.captures(reference)?.get(1)?.as_str();
