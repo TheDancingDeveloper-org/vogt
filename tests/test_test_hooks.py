@@ -99,6 +99,16 @@ def test_a_caller_supplied_clock_is_not_overridden(
     assert ctx.id_factory("act") == "act_x"
 
 
+def test_the_observed_store_mints_ids_from_the_context_factory(
+    config: VogtConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sweep ids come from the same factory as declared ids, so sequential
+    test ids reach the observed store too."""
+    monkeypatch.setenv(IDS_ENV, "sequential")
+    ctx = build_context(config=config)
+    assert ctx.observed._id_factory is ctx.id_factory
+
+
 def test_a_bad_hook_value_refuses_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(CLOCK_ENV, "yesterday")
     with pytest.raises(InvalidRequest):
