@@ -57,6 +57,8 @@ from vogt.application.models import (
     CloneResult,
     CommentParams,
     CommentResult,
+    CommitForSessionParams,
+    CommitForSessionResult,
     ComplianceParams,
     ComplianceResult,
     ConnectParams,
@@ -1150,6 +1152,25 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.keep_session_awake,
             route=HttpRoute("POST", "/sessions/keep-awake"),
             cli=CliBinding(("session", "keep-awake")),
+        ),
+        Operation(
+            name="session.commit_for",
+            summary=(
+                "Commit a worker session's staged changes on its behalf. The "
+                "worker must be idle, hibernated or blocked — never mid-turn — "
+                "and the commit is refused when the staged diff carries a "
+                "conflict marker, a secret or an intent-to-add entry, or when "
+                "the message or branch matches the project's forbidden text. "
+                "Committed under the repo's own git identity. Returns a digest "
+                "line and the SHA; the full diff only when asked. Takes either id."
+            ),
+            scope="work.write",
+            mutating=True,
+            params_model=CommitForSessionParams,
+            result_model=CommitForSessionResult,
+            handler=services.commit_for_session,
+            route=HttpRoute("POST", "/sessions/commit"),
+            cli=CliBinding(("session", "commit")),
         ),
         Operation(
             name="session.rename",

@@ -121,6 +121,7 @@ from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
     answer_session,
     bind_session_work,
+    commit_for_session,
     economics,
     engine_session_token,
     hibernate_session,
@@ -195,6 +196,7 @@ __all__ = [
     "chat_set_model",
     "clone",
     "comment_work",
+    "commit_for_session",
     "compliance",
     "connect",
     "contract_adopt",
