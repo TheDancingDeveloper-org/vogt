@@ -463,6 +463,13 @@ pub struct Config {
     /// picker offers, and how long an idle chat process and an unanswered
     /// approval live (`ENGINE_CHAT_*`). Off in a hand-built config.
     pub chat: crate::chats::ChatPolicy,
+    /// `ENGINE_ECONOMICS_TICK_SECS` (15): how often the economics tailer reads
+    /// each live session's transcript (`economics`). Zero disables it. A
+    /// hand-built config starts disabled.
+    pub economics_tick: std::time::Duration,
+    /// The home the economics tailer reads transcripts under. `None` uses the
+    /// process home; tests set it so they never touch the real one.
+    pub economics_home: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -945,6 +952,12 @@ pub fn load(
             })?),
             _ => None,
         },
+        economics_tick: match parse_u64_env("ENGINE_ECONOMICS_TICK_SECS")? {
+            Some(0) => std::time::Duration::ZERO,
+            Some(secs) => std::time::Duration::from_secs(secs),
+            None => std::time::Duration::from_secs(15),
+        },
+        economics_home: None,
         vogt_import_root: std::env::var("VOGT_IMPORT_ROOT")
             .ok()
             .map(|value| value.trim().to_string())

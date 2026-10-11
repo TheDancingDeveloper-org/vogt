@@ -190,9 +190,9 @@ class EngineSession:
     #: Who asked the session to stop, and why (WI-913).
     stopped_by: str | None = None
     stop_reason: str | None = None
-    #: Metered transcript numbers the engine already computed (WI-1242), when
-    #: the row carries them. Absent means not measured here — the core does
-    #: not read the transcript to fill it.
+    #: The engine's live reading of the agent transcript (WI-1245), when its
+    #: tailer has one. `None` from an engine that predates it, or one that
+    #: has not read the transcript yet.
     economics: dict[str, Any] | None = None
 
     @property
@@ -236,7 +236,7 @@ class EngineSession:
             stop_reason=_optional_str((payload.get("stop") or {}).get("reason"))
             if isinstance(payload.get("stop"), dict)
             else None,
-            economics=payload["economics"]
+            economics=payload.get("economics")
             if isinstance(payload.get("economics"), dict)
             else None,
         )

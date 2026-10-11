@@ -117,6 +117,11 @@ pub struct Record {
     /// Set while hibernated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernation: Option<Hibernation>,
+    /// The latest economics snapshot, as JSON (WI-1245). Kept so removing a
+    /// hibernated session can record its cost once; nothing reads it back
+    /// onto a summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub economics: Option<String>,
     /// The terminal size at hibernation, to render the kept screen with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
@@ -154,6 +159,7 @@ impl Record {
             work_item: None,
             superseded_by: None,
             hibernation: None,
+            economics: None,
             rows: None,
             cols: None,
             blocked: None,

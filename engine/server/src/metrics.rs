@@ -128,6 +128,97 @@ impl HistogramVec {
     }
 }
 
+/// A histogram whose observations are raw magnitudes (token counts, turn
+/// counts) rather than durations: the same exposition shape, but the sum is
+/// the sum of the values, not microseconds divided back into seconds.
+struct ValueHistogram {
+    buckets: &'static [f64],
+    counts: Vec<AtomicU64>,
+    sum: AtomicU64,
+    count: AtomicU64,
+}
+
+impl ValueHistogram {
+    fn new(buckets: &'static [f64]) -> Self {
+        Self {
+            buckets,
+            counts: buckets.iter().map(|_| AtomicU64::new(0)).collect(),
+            sum: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+        }
+    }
+
+    fn observe(&self, value: f64) {
+        for (bound, count) in self.buckets.iter().zip(&self.counts) {
+            if value <= *bound {
+                count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        self.sum.fetch_add(value as u64, Ordering::Relaxed);
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A family of raw-value histograms, one series per label set.
+pub struct ValueHistogramVec {
+    name: &'static str,
+    help: &'static str,
+    buckets: &'static [f64],
+    series: Mutex<BTreeMap<Labels, Arc<ValueHistogram>>>,
+}
+
+impl ValueHistogramVec {
+    fn new(name: &'static str, help: &'static str, buckets: &'static [f64]) -> Self {
+        Self {
+            name,
+            help,
+            buckets,
+            series: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn observe(&self, labels: &[(&'static str, &str)], value: f64) {
+        let key: Labels = labels.iter().map(|(k, v)| (*k, (*v).to_string())).collect();
+        let histogram = Arc::clone(
+            self.series
+                .lock()
+                .entry(key)
+                .or_insert_with(|| Arc::new(ValueHistogram::new(self.buckets))),
+        );
+        histogram.observe(value);
+    }
+
+    fn render(&self, out: &mut String) {
+        let _ = writeln!(out, "# HELP {} {}", self.name, self.help);
+        let _ = writeln!(out, "# TYPE {} histogram", self.name);
+        for (labels, h) in self.series.lock().iter() {
+            for (bound, count) in h.buckets.iter().zip(&h.counts) {
+                let mut with_le = labels.clone();
+                with_le.push(("le", format_bound(*bound)));
+                let _ = writeln!(
+                    out,
+                    "{}_bucket{} {}",
+                    self.name,
+                    format_labels(&with_le),
+                    count.load(Ordering::Relaxed)
+                );
+            }
+            let mut inf = labels.clone();
+            inf.push(("le", "+Inf".to_string()));
+            let count = h.count.load(Ordering::Relaxed);
+            let _ = writeln!(out, "{}_bucket{} {count}", self.name, format_labels(&inf));
+            let _ = writeln!(
+                out,
+                "{}_sum{} {}",
+                self.name,
+                format_labels(labels),
+                h.sum.load(Ordering::Relaxed)
+            );
+            let _ = writeln!(out, "{}_count{} {count}", self.name, format_labels(labels));
+        }
+    }
+}
+
 /// A counter family: one series per label set.
 pub struct CounterVec {
     name: &'static str,
@@ -200,6 +291,13 @@ pub struct Metrics {
     /// Secret projects read at launch, by how (`bulk`: one request; `cli`:
     /// one vendor-CLI run per secret, the slow fallback) and outcome.
     pub launch_secret_reads: CounterVec,
+    /// Turns a session had when it ended, by template and model. Observed once,
+    /// at exit or hibernation, from the session's economics snapshot.
+    pub session_turns: ValueHistogramVec,
+    /// Peak context window a session reached, in tokens.
+    pub session_peak_context: ValueHistogramVec,
+    /// Compactions a session performed.
+    pub session_compactions: ValueHistogramVec,
 }
 
 impl Metrics {
@@ -228,6 +326,29 @@ impl Metrics {
                 "vogt_session_launch_secret_reads_total",
                 "Secret projects read at session launch, by mode (bulk or cli) and outcome.",
             ),
+            session_turns: ValueHistogramVec::new(
+                "vogt_session_turns",
+                "Turns a session had when it ended, by template and model.",
+                &[10.0, 25.0, 50.0, 100.0, 150.0, 250.0, 500.0, 1000.0],
+            ),
+            session_peak_context: ValueHistogramVec::new(
+                "vogt_session_peak_context_tokens",
+                "Peak context window a session reached, in tokens, by template and model.",
+                &[
+                    10_000.0,
+                    25_000.0,
+                    50_000.0,
+                    100_000.0,
+                    200_000.0,
+                    400_000.0,
+                    1_000_000.0,
+                ],
+            ),
+            session_compactions: ValueHistogramVec::new(
+                "vogt_session_compactions",
+                "Compactions a session performed, by template and model.",
+                &[0.0, 1.0, 2.0, 3.0, 5.0, 10.0, 25.0, 50.0],
+            ),
         }
     }
 
@@ -239,6 +360,9 @@ impl Metrics {
         self.launch_stage.render(&mut out);
         self.session_starts.render(&mut out);
         self.launch_secret_reads.render(&mut out);
+        self.session_turns.render(&mut out);
+        self.session_peak_context.render(&mut out);
+        self.session_compactions.render(&mut out);
         out
     }
 }
