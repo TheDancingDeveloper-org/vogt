@@ -8,6 +8,7 @@ use crate::errors::VogtError;
 
 use super::base::{ActivityIndexer, Collector};
 use super::dep_refs::DepRefCollector;
+use super::git_local::GitLocalCollector;
 use super::source_markers::SourceMarkerCollector;
 
 /// Whether this collector opts out of unnamed sweeps.
@@ -19,9 +20,14 @@ pub fn is_on_demand(collector: &dyn Collector) -> bool {
 ///
 /// `contract-checker` belongs here but marked `on_demand_only`, so a plain
 /// `sweep` does not run it. The remaining collectors land in later commits;
-/// until they do, an unnamed sweep selects `dep-refs` and `source-markers`.
+/// until they do, an unnamed sweep selects `dep-refs`, `git-local` and
+/// `source-markers`.
 pub fn core_collectors() -> Vec<Box<dyn Collector>> {
-    vec![Box::new(DepRefCollector), Box::new(SourceMarkerCollector)]
+    vec![
+        Box::new(DepRefCollector),
+        Box::new(GitLocalCollector),
+        Box::new(SourceMarkerCollector),
+    ]
 }
 
 /// What the sweeper holds: an ordinary collector, or one that indexes

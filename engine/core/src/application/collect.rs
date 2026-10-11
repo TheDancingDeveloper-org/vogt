@@ -571,11 +571,12 @@ mod tests {
         assert_eq!(first["scope"], "all registered projects");
         assert_eq!(first["projects"], 1);
         // source-markers finds the one TODO; dep-refs finds nothing in a tree
-        // with no manifest, but it always writes its scan record.
-        assert_eq!(first["subjects"], 2);
+        // with no manifest, but it always writes its scan record; git-local
+        // finds the directory is not a checkout.
+        assert_eq!(first["subjects"], 3);
         assert_eq!(first["dep_refs"], 0);
         let reports = first["reports"].as_array().unwrap();
-        assert_eq!(reports.len(), 2);
+        assert_eq!(reports.len(), 3);
         let markers = reports
             .iter()
             .find(|report| report["collector"] == "source-markers")
@@ -598,7 +599,7 @@ mod tests {
             .iter()
             .filter(|event| event["kind"] == "sweep.completed")
             .collect();
-        assert_eq!(completed.len(), 2);
+        assert_eq!(completed.len(), 3);
         assert_eq!(completed[0]["entity_kind"], "sweep");
         let marker_event = completed
             .iter()
@@ -608,7 +609,7 @@ mod tests {
         assert_eq!(marker_event["summary"]["new"], 1);
 
         let second = sweep_op(&built, json!({})).unwrap();
-        assert_eq!(second["subjects"], 2);
+        assert_eq!(second["subjects"], 3);
         assert_eq!(second["dep_refs"], 0);
         let second_markers = second["reports"]
             .as_array()
@@ -623,13 +624,13 @@ mod tests {
     #[test]
     fn missing_collector_is_not_found() {
         let built = opened();
-        let missing = sweep_op(&built, json!({"collectors": ["git-local"]}));
+        let missing = sweep_op(&built, json!({"collectors": ["contract-checker"]}));
         let Err(VogtError::NotFound(message)) = missing else {
             panic!("a collector that is not ported is not found, not silently skipped");
         };
         assert_eq!(
             message,
-            "no collector named 'git-local' (available: dep-refs, source-markers)"
+            "no collector named 'contract-checker' (available: dep-refs, git-local, source-markers)"
         );
     }
 

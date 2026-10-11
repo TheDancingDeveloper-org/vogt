@@ -7,6 +7,7 @@
 
 mod base;
 mod dep_refs;
+mod git_local;
 mod registry;
 mod source_markers;
 mod sweeper;
