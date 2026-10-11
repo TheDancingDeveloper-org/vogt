@@ -121,6 +121,7 @@ from vogt.application.services.retention import prune
 from vogt.application.services.sessions import (
     answer_session,
     bind_session_work,
+    economics,
     engine_session_token,
     hibernate_session,
     history_list,
@@ -213,6 +214,7 @@ __all__ = [
     "deployed_versions",
     "deps",
     "detect_drift",
+    "economics",
     "engine_session_token",
     "engine_status",
     "export_instance",

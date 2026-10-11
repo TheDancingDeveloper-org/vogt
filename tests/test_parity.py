@@ -474,6 +474,10 @@ SCRIPT: list[tuple[str, StepParams]] = [
         lambda seen: {"id": seen["session.start"]["session"]["id"], "n": 2},
     ),
     (
+        "session.economics",
+        lambda seen: {"id": seen["session.start"]["session"]["id"]},
+    ),
+    (
         "session.wait",
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],

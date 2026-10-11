@@ -22,6 +22,21 @@ pub struct SessionHistory {
     log_dir: PathBuf,
 }
 
+/// One economics reading (C16), stored beside the session row. Counts only:
+/// cost, commits and files changed are not recorded here.
+#[derive(Debug, Clone, Copy)]
+pub struct SessionEconomics {
+    pub turns: i64,
+    pub context_tokens: i64,
+    pub peak_context_tokens: i64,
+    pub compactions: i64,
+    pub reads_repeated: i64,
+    pub wall_clock_count: i64,
+    pub wall_clock_max_ms: i64,
+    pub wall_clock_mean_ms: i64,
+    pub output_tokens: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HistoryStorageStats {
     pub archived_session_count: u64,
@@ -68,6 +83,35 @@ pub struct SessionMetadata {
     #[sqlx(default)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// Session economics (C16), recorded beside the row. NULL until a reading
+    /// is stored, including on a database from before the columns existed.
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<i64>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<i64>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_context_tokens: Option<i64>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compactions: Option<i64>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reads_repeated: Option<i64>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_count: Option<i64>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_max_ms: Option<i64>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_mean_ms: Option<i64>,
+    #[sqlx(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<i64>,
     /// The template a resume of `conversation_id` would start, worked out
     /// against the deployment's templates when the row is read: the row's
     /// own template when it runs that agent, else the one the agent's name
@@ -98,10 +142,28 @@ const IDENTITY_COLUMNS: &[&str] = &[
     "work_item",
 ];
 
+/// Economics columns (C16). Integers, added beside the session row. The
+/// Python `session.economics` read meters the transcript; this stores the
+/// same numbers when a caller has them. Cost, commits and files changed are
+/// not here: there is no price table, and a worktree is not counted.
+const ECONOMICS_COLUMNS: &[&str] = &[
+    "turns",
+    "context_tokens",
+    "peak_context_tokens",
+    "compactions",
+    "reads_repeated",
+    "wall_clock_count",
+    "wall_clock_max_ms",
+    "wall_clock_mean_ms",
+    "output_tokens",
+];
+
 /// The columns every metadata read selects. Spliced into queries with
 /// `format!` behind `AssertSqlSafe`: a constant, never input.
 const METADATA_COLUMNS: &str = "id, name, created_at, ended_at, exit_code, cwd, command, \
-     scrollback_bytes, end_reason, template, role, conversation_agent, conversation_id, work_item";
+     scrollback_bytes, end_reason, template, role, conversation_agent, conversation_id, work_item, \
+     turns, context_tokens, peak_context_tokens, compactions, reads_repeated, \
+     wall_clock_count, wall_clock_max_ms, wall_clock_mean_ms, output_tokens";
 
 /// `end_reason` values. See [`SessionMetadata::end_reason`].
 pub const END_EXITED: &str = "exited";
@@ -245,23 +307,10 @@ impl SessionHistory {
         // add them to an existing database. SQLite has no ADD COLUMN IF NOT
         // EXISTS, so look first.
         for column in std::iter::once(&"end_reason").chain(IDENTITY_COLUMNS) {
-            let present = sqlx::query("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?")
-                .bind(column)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(|e| {
-                    ApiError::Internal(format!("failed to inspect sessions table: {}", e))
-                })?
-                .is_some();
-            if !present {
-                // `column` comes from the compile-time list above, never input.
-                sqlx::query(AssertSqlSafe(format!(
-                    "ALTER TABLE sessions ADD COLUMN {column} TEXT"
-                )))
-                .execute(&self.pool)
-                .await
-                .map_err(|e| ApiError::Internal(format!("failed to add {column}: {}", e)))?;
-            }
+            self.add_column(column, "TEXT").await?;
+        }
+        for column in ECONOMICS_COLUMNS {
+            self.add_column(column, "INTEGER").await?;
         }
 
         // Index on created_at for date-range queries
@@ -270,6 +319,28 @@ impl SessionHistory {
             .await
             .map_err(|e| ApiError::Internal(format!("failed to create index: {}", e)))?;
 
+        Ok(())
+    }
+
+    /// Add one column when an older database does not have it. SQLite has no
+    /// ADD COLUMN IF NOT EXISTS. `column` and `kind` come from the compile-time
+    /// lists above, never from input.
+    async fn add_column(&self, column: &str, kind: &str) -> Result<()> {
+        let present = sqlx::query("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?")
+            .bind(column)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| ApiError::Internal(format!("failed to inspect sessions table: {}", e)))?
+            .is_some();
+        if present {
+            return Ok(());
+        }
+        sqlx::query(AssertSqlSafe(format!(
+            "ALTER TABLE sessions ADD COLUMN {column} {kind}"
+        )))
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to add {column}: {}", e)))?;
         Ok(())
     }
 
@@ -377,6 +448,34 @@ impl SessionHistory {
             .execute(&self.pool)
             .await
             .map_err(|e| ApiError::Internal(format!("failed to update session work item: {e}")))?;
+        Ok(done.rows_affected() > 0)
+    }
+
+    /// Record a session's economics (C16) on the row beside it. A dedicated
+    /// update, not a column of the archive upsert: a later, less-complete
+    /// archive must not erase a reading. `false` while the provisional row is
+    /// still on its way. A negative count is stored as zero — a meter that
+    /// went backwards is a bug, and a negative token count would read as one.
+    pub async fn set_economics(&self, id: Uuid, reading: SessionEconomics) -> Result<bool> {
+        let done = sqlx::query(
+            "UPDATE sessions SET turns = ?, context_tokens = ?, \
+             peak_context_tokens = ?, compactions = ?, reads_repeated = ?, \
+             wall_clock_count = ?, wall_clock_max_ms = ?, wall_clock_mean_ms = ?, \
+             output_tokens = ? WHERE id = ?",
+        )
+        .bind(reading.turns.max(0))
+        .bind(reading.context_tokens.max(0))
+        .bind(reading.peak_context_tokens.max(0))
+        .bind(reading.compactions.max(0))
+        .bind(reading.reads_repeated.max(0))
+        .bind(reading.wall_clock_count.max(0))
+        .bind(reading.wall_clock_max_ms.max(0))
+        .bind(reading.wall_clock_mean_ms.max(0))
+        .bind(reading.output_tokens.max(0))
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ApiError::Internal(format!("failed to update session economics: {e}")))?;
         Ok(done.rows_affected() > 0)
     }
 
@@ -1117,5 +1216,56 @@ mod tests {
             Some("WI-8"),
             "a finalize keeps it"
         );
+        // An old database also gains the economics columns (C16), empty until
+        // a reading is recorded, and a later archive does not erase them.
+        assert_eq!(row.turns, None);
+        assert_eq!(row.context_tokens, None);
+        assert_eq!(row.compactions, None);
+        let reading = SessionEconomics {
+            turns: 3,
+            context_tokens: 120,
+            peak_context_tokens: 140,
+            compactions: 1,
+            reads_repeated: 2,
+            wall_clock_count: 2,
+            wall_clock_max_ms: 4000,
+            wall_clock_mean_ms: 2500,
+            output_tokens: 15,
+        };
+        assert!(history.set_economics(id, reading).await.unwrap());
+        assert!(!history
+            .set_economics(
+                Uuid::new_v4(),
+                SessionEconomics {
+                    turns: 1,
+                    ..reading
+                },
+            )
+            .await
+            .unwrap());
+        history
+            .archive_session(ArchiveRecord {
+                id,
+                name: "Oversight".into(),
+                created_at: OffsetDateTime::now_utc(),
+                ended_at: Some(OffsetDateTime::now_utc()),
+                exit_code: Some(0),
+                cwd: None,
+                command: None,
+                scrollback_bytes: 12,
+                end_reason: Some(END_EXITED),
+                identity: None,
+            })
+            .await
+            .unwrap();
+        let row_after = history.get_session(id).await.unwrap();
+        let stored: (i64, i64, i64) = (
+            row_after.turns.unwrap(),
+            row_after.context_tokens.unwrap(),
+            row_after.compactions.unwrap(),
+        );
+        assert_eq!(stored, (3, 120, 1));
+        assert_eq!(row_after.peak_context_tokens, Some(140));
+        assert_eq!(row_after.output_tokens, Some(15));
     }
 }

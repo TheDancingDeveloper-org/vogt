@@ -4975,6 +4975,71 @@ class SessionLastReplyResult(Result):
     )
 
 
+class SessionEconomicsParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+
+
+class SessionEconomicsResult(Result):
+    """What a session's agent transcript cost (C16).
+
+    Read from the same transcript `session.last_reply` finds, whole rather
+    than tailed. `context_tokens` is the latest turn's window, not a sum.
+    `usage_measured` is true only when that number came from recorded usage
+    (Claude Code); Klaudia and Codex are estimated at four characters per
+    token. `cost_usd` stays null: this product has no price table, and a zero
+    would say the session was free. `commits` and `files_changed` stay null
+    until a worktree is measured; zero would say the tree was clean.
+    `detail` set means the transcript could not be read, and the counts are
+    then the empty reading, not a claim that the session did nothing.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    engine_session_id: str
+    agent: str | None = None
+    conversation_id: str | None = None
+    basis: str | None = None
+    transcript: str | None = Field(
+        default=None, description="The transcript file the numbers came from."
+    )
+    turns: int = 0
+    context_tokens: int = 0
+    peak_context_tokens: int = 0
+    compactions: int = 0
+    tool_result_bytes: dict[str, int] = Field(
+        default_factory=dict,
+        description="Bytes of tool result the model was shown, by tool name.",
+    )
+    reads_repeated: int = 0
+    wall_clock_count: int = Field(
+        default=0, description="Gaps between consecutive timestamped turns."
+    )
+    wall_clock_max_ms: int = 0
+    wall_clock_mean_ms: int = 0
+    output_tokens: int = 0
+    usage_measured: bool = False
+    commits: int | None = Field(
+        default=None,
+        description=(
+            "Commits on the worktree since the session started; null when not measured."
+        ),
+    )
+    files_changed: int | None = Field(
+        default=None,
+        description="Files the worktree differs in; null when not measured.",
+    )
+    cost_usd: float | None = Field(
+        default=None,
+        description="Null: no price table is configured, so cost is not claimed.",
+    )
+    budget_line: str = Field(
+        default="",
+        description="The digest line, e.g. `96 turns, 2 compactions`.",
+    )
+    detail: str | None = Field(
+        default=None, description="Why the transcript was not read, when it was not."
+    )
+
+
 class ReportBlockedParams(Params):
     """An agent's own report that it cannot go on without a person."""
 
@@ -5160,6 +5225,25 @@ class AgentActivitySessionSummary(Result):
     unfinished: int = Field(description="Calls with no result read (yet).")
     tools: dict[str, int] = Field(description="Calls per tool, most used first.")
     services: dict[str, int] = Field(description="Calls per service tag.")
+    turns: int | None = Field(
+        default=None,
+        description=(
+            "Assistant turns in the conversation's transcript. Null when the "
+            "transcript could not be read; zero would claim an empty one."
+        ),
+    )
+    context_tokens: int | None = Field(
+        default=None,
+        description="Latest context size of that transcript. Null when unread.",
+    )
+    peak_context_tokens: int | None = Field(
+        default=None,
+        description="Largest context size read from that transcript. Null when unread.",
+    )
+    compactions: int | None = Field(
+        default=None,
+        description="Compactions counted in that transcript. Null when unread.",
+    )
 
 
 class AgentActivitySummaryResult(Result):

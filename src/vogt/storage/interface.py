@@ -1061,7 +1061,8 @@ class ObservedStore(Protocol):
         self, query: ActivityQuery, *, limit: int, offset: int
     ) -> list[ActivitySessionRow]:
         """Per agent conversation, what its matching calls add up to, most
-        recently active first."""
+        recently active first. `transcript_path` is the newest indexed file
+        for that conversation, or none; context is not stored here."""
         ...
 
 
