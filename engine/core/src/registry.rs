@@ -152,6 +152,10 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "drift.list" => Some(crate::application::drift::drift_list_op),
         "drift.resolve" => Some(crate::application::drift::drift_resolve_op),
         "session.bind_work" => Some(crate::application::session_work::bind_work_op),
+        "session.report_blocked" => Some(crate::application::session_blocked::report_blocked_op),
+        "session.report_unblocked" => {
+            Some(crate::application::session_blocked::report_unblocked_op)
+        }
         "session.last_reply" => Some(crate::application::session_reads::last_reply),
         "session.history_list" => Some(crate::application::session_reads::history_list),
         "session.search_output" => Some(crate::application::session_reads::search_output),

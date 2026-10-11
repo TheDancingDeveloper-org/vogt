@@ -1936,7 +1936,7 @@ fn minted_token() -> Result<(String, String), VogtError> {
 }
 
 /// The engine client, or the unconfigured error.
-pub(super) fn engine_of<C, I>(ctx: &AppContext<C, I>) -> Result<&EngineClient, VogtError>
+pub(crate) fn engine_of<C, I>(ctx: &AppContext<C, I>) -> Result<&EngineClient, VogtError>
 where
     C: Clock,
     I: IdFactory,
@@ -1953,7 +1953,7 @@ where
 /// A session named by either id form, resolved to the engine's id. `session` is
 /// Vogt's record when there is one; `None` means the engine id names a session
 /// Vogt never linked, which the caller may still read or drive.
-pub(super) struct Target {
+pub(crate) struct Target {
     pub engine_session_id: String,
     pub session: Option<CodingSession>,
 }
@@ -1963,7 +1963,7 @@ pub(super) struct Target {
 /// A `ses_…` id must be one Vogt recorded — otherwise it is a wrong id and says
 /// so. Anything else is the engine's own id, passed through as given and linked
 /// to Vogt's record when one exists. Shared with the grants half (WI-1074).
-pub(super) fn resolve_target<C, I>(
+pub(crate) fn resolve_target<C, I>(
     ctx: &AppContext<C, I>,
     session_id: &str,
 ) -> Result<Target, VogtError>

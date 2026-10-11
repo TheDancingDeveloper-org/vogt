@@ -19,6 +19,7 @@ pub mod place;
 pub mod projects;
 pub mod resolve;
 pub mod services;
+pub mod session_blocked;
 pub mod session_reads;
 pub mod session_work;
 pub mod suppressions;
