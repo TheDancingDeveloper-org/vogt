@@ -2,11 +2,12 @@
 //! resolution from `services/collect.py`.
 //!
 //! Scope is always the registered project list, optionally narrowed to one
-//! project and never widened by looking around. The registry is the core set
-//! only: collectors that register conditionally in Python are not ported yet,
-//! and an unnamed sweep names the ones that are rather than pretending the
-//! others ran. CI watch is not started here — nothing announces concluded
-//! checks until that collector exists.
+//! project and never widened by looking around. An unnamed sweep runs the core
+//! collectors that are not on-demand: dep-refs, git-local, source-markers and
+//! mirrored-source. Contract-checker runs only when named. Session-outcomes
+//! and agent-activity register only when their source is configured, which is
+//! not this path yet. CI watch is not started here — nothing announces
+//! concluded checks until that collector exists.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};

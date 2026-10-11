@@ -147,11 +147,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "contract.applicable" => Some(crate::application::contracts::contract_applicable_op),
         "compliance" => Some(crate::application::contracts::compliance_op),
         "coverage" => Some(crate::application::coverage::coverage_op),
-        // `sweep` stays unwired until the core collectors (git-local,
-        // source-markers, dep-refs, contract-checker) and mirrored-source are
-        // ported. Wiring it over the source-markers-only registry makes an
-        // unnamed sweep report one collector where Python reports four
-        // (WI-1071, review B42).
+        "sweep" => Some(crate::application::collect::sweep_op),
         "drift.detect" => Some(crate::application::drift::drift_detect_op),
         "drift.list" => Some(crate::application::drift::drift_list_op),
         "drift.resolve" => Some(crate::application::drift::drift_resolve_op),
