@@ -125,7 +125,9 @@ def summarize_agent_activity(
     links = _vogt_sessions(ctx, {row.agent_session_id for row in rows})
     sessions = []
     for row in rows:
-        reading = _economics(row.transcript_path, row.agent)
+        reading = (
+            _economics(row.transcript_path, row.agent) if params.economics else None
+        )
         sessions.append(
             AgentActivitySessionSummary(
                 agent=row.agent,

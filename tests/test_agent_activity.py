@@ -688,18 +688,23 @@ def test_a_sweep_indexes_and_the_ops_link_project_and_vogt_session(
     assert only.error_rate == 1.0
     assert only.services == {"git": 1}
     assert only.vogt_session_id == started.session.id
-    # The same transcript the index read, metered live. Claude with no usage
-    # block counts the turn and leaves context at 0: the 4-char estimate is
-    # only for agents that never record usage. Zero here is a reading, not
-    # "unread" — unlinking the file below is what makes the fields null.
-    assert only.turns == 1
-    assert only.context_tokens == 0
-    assert only.peak_context_tokens == 0
-    assert only.compactions == 0
+    # Metering a transcript is opt-in. The default summary does not read it,
+    # so the economics fields stay null rather than claiming a reading.
+    assert only.turns is None
+    assert only.context_tokens is None
+    assert only.compactions is None
+    metered = summarize_agent_activity(
+        ctx, AgentActivitySummaryParams(session=started.session.id, economics=True)
+    ).sessions[0]
+    # Claude with no usage block counts the turn and leaves context at 0.
+    assert metered.turns == 1
+    assert metered.context_tokens == 0
+    assert metered.peak_context_tokens == 0
+    assert metered.compactions == 0
     transcript = claude_root / "-estate" / "eng-1.jsonl"
     transcript.unlink()
     unread = summarize_agent_activity(
-        ctx, AgentActivitySummaryParams(session=started.session.id)
+        ctx, AgentActivitySummaryParams(session=started.session.id, economics=True)
     ).sessions[0]
     assert unread.turns is None
     assert unread.context_tokens is None
