@@ -18,17 +18,13 @@ import {
 
 function session(over: Partial<SessionSummary> & { id: string }): SessionSummary {
   return {
-    id: over.id,
+    ...over,
     name: over.name ?? over.id,
     activity: over.activity ?? "idle",
     exit_code: over.exit_code ?? null,
     scrollback_bytes: 0,
     cwd: over.cwd ?? "/workspace",
     created_at: over.created_at ?? "2026-08-18T08:00:00Z",
-    activity_changed_at: over.activity_changed_at,
-    blocked: over.blocked,
-    role: over.role,
-    ...over,
   };
 }
 
