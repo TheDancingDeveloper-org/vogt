@@ -1073,6 +1073,9 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "menu it accepts whatever is highlighted (dismiss with esc). "
                 "While a permission prompt shows, only a person's input is "
                 "typed: an agent's is refused (403 person_required). "
+                "On a hibernated session it wakes first, and that wake is "
+                "never forced: a session handed to a successor, or whose work "
+                "item is already live in the same directory, is refused (409). "
                 "Audited (byte count and keys, never the text)."
             ),
             scope="work.write",
@@ -1115,7 +1118,9 @@ def build_operations() -> list[Operation[Any, Any]]:
                 "wakes it) resumes the same agent conversation under the same "
                 "id. Only for a session whose conversation id the engine knows "
                 "(Claude Code started by Vogt, or any resume); a shell needs "
-                "allow_shell and wakes fresh. Takes either id."
+                "allow_shell and wakes fresh. superseded_by names the session "
+                "taking over the work (ses_… or the engine UUID); a later wake "
+                "is then refused unless forced. Takes either id."
             ),
             scope="work.write",
             mutating=True,
@@ -1130,10 +1135,13 @@ def build_operations() -> list[Operation[Any, Any]]:
             summary=(
                 "Wake a hibernated session: start it again under the same id, "
                 "resuming its agent conversation in the directory it ran in, "
-                "with a new token for the same actor. A live session is "
-                "returned as it is. session_input wakes one by itself; wait "
-                "for ready (session_wait) before typing after this. Takes "
-                "either id."
+                "with a new token for the same actor. Refused (409) when the "
+                "session was hibernated naming a successor, or when another "
+                "live session holds the same work item in the same directory, "
+                "unless force, which only a person or an oversight session may "
+                "set. A live session is returned as it is. "
+                "session_input wakes one by itself and never forces; wait for "
+                "ready (session_wait) before typing after this. Takes either id."
             ),
             scope="work.write",
             mutating=True,

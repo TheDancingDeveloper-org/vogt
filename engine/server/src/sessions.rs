@@ -617,6 +617,10 @@ impl SessionRegistry {
                 record.hibernation = None;
                 record.name = session.name();
                 session.set_keep_awake(record.keep_awake);
+                // A forced wake does not undo the handoff. The next hibernation
+                // rebuilds the record from the live session, so the mark has to
+                // live there too.
+                session.set_superseded_by(record.superseded_by.clone());
                 hibernation::remove_screen(&self.cfg.state_dir, id);
                 Some(record)
             }
@@ -746,13 +750,18 @@ impl SessionRegistry {
     /// Hibernated sessions pinned awake: what the engine wakes at boot. Only
     /// those with a conversation to resume: waking a shell the engine kept
     /// only so it stays listed (an oversight shell, WI-962) would open an
-    /// empty shell in its place.
+    /// empty shell in its place. A session whose work was handed to a
+    /// successor, and one a person hibernated by hand, stay hibernated
+    /// (WI-1251): keep_awake must not bring either back on every restart.
     pub fn hibernated_keep_awake(&self) -> Vec<Uuid> {
         self.records
             .iter()
             .filter(|r| {
                 r.keep_awake
-                    && r.hibernation.is_some()
+                    && r.hibernation.as_ref().is_some_and(|h| {
+                        h.trigger != vogt_engine_contract::HibernateTrigger::Manual
+                    })
+                    && r.superseded_by.is_none()
                     && r.conversation.is_some()
                     && !self.sessions.contains_key(r.key())
             })
@@ -986,17 +995,25 @@ impl SessionRegistry {
 
     /// Stop a live session's process tree and keep it listed as hibernated,
     /// to be woken later by resuming its agent conversation under the same
-    /// id. Hibernating a hibernated session returns it unchanged.
+    /// id. `superseded_by` names the session its work was handed to (WI-1251);
+    /// it must be a session the engine knows, other than this one. Hibernating
+    /// a session that is already hibernated returns it unchanged, except that
+    /// a `superseded_by` is recorded on it.
     pub async fn hibernate(
         &self,
         id: Uuid,
         reason: Option<String>,
         trigger: HibernateTrigger,
         allow_shell: bool,
+        superseded_by: Option<String>,
     ) -> Result<SessionSummary> {
+        let superseded_by = self.checked_successor(id, superseded_by)?;
         let lock = self.transition_lock(id);
         let _held = lock.lock().await;
         let Some(session) = self.sessions.get(&id).map(|s| Arc::clone(s.value())) else {
+            if superseded_by.is_some() {
+                self.mark_superseded(id, superseded_by)?;
+            }
             return self.hibernated_summary(id).ok_or(ApiError::NotFound);
         };
         if let Some(refusal) = self.hibernate_refusal(&session, allow_shell) {
@@ -1015,6 +1032,9 @@ impl SessionRegistry {
         record.keep_awake = session.keep_awake();
         record.rows = Some(rows);
         record.cols = Some(cols);
+        // A handoff survives a forced wake and a later hibernation that does
+        // not name one: the live session carries the mark the record had.
+        record.superseded_by = superseded_by.or_else(|| session.superseded_by());
         record.hibernation = Some(Hibernation {
             at: now_rfc3339(),
             trigger,
@@ -1022,6 +1042,7 @@ impl SessionRegistry {
                 .map(|r| r.trim().chars().take(500).collect::<String>())
                 .filter(|r| !r.is_empty()),
             resumable: record.conversation.is_some(),
+            superseded_by: record.superseded_by.clone(),
         });
         hibernation::write_screen(&self.cfg.state_dir, id, &screen)
             .and_then(|()| hibernation::write(&self.cfg.state_dir, &record))
@@ -1069,6 +1090,107 @@ impl SessionRegistry {
         self.hibernated_summary(id).ok_or(ApiError::NotFound)
     }
 
+    /// `superseded_by` as the engine stores it: a known session other than
+    /// `id`, or `None` when the caller named none. Anything else is a 400.
+    fn checked_successor(&self, id: Uuid, superseded_by: Option<String>) -> Result<Option<String>> {
+        let Some(raw) = superseded_by else {
+            return Ok(None);
+        };
+        let successor = Uuid::parse_str(raw.trim()).map_err(|_| {
+            ApiError::BadRequest(
+                "superseded_by must be the engine session id of a session the engine knows".into(),
+            )
+        })?;
+        if successor == id || !self.knows(successor) {
+            return Err(ApiError::BadRequest(format!(
+                "superseded_by must name a known session other than {id}"
+            )));
+        }
+        Ok(Some(successor.to_string()))
+    }
+
+    /// Record `superseded_by` on a session that is already hibernated, without
+    /// touching a process: the handoff can be declared after the stop.
+    fn mark_superseded(&self, id: Uuid, superseded_by: Option<String>) -> Result<()> {
+        let Some(mut record) = self.records.get_mut(&id) else {
+            return Err(ApiError::NotFound);
+        };
+        if record.hibernation.is_none() {
+            return Err(ApiError::NotFound);
+        }
+        record.superseded_by = superseded_by.clone();
+        if let Some(hibernation) = record.hibernation.as_mut() {
+            hibernation.superseded_by = superseded_by;
+        }
+        hibernation::write(&self.cfg.state_dir, &record)
+            .map_err(|e| ApiError::Internal(format!("write the hibernation record: {e}")))?;
+        Ok(())
+    }
+
+    /// Why waking `id` would put two agents on one piece of work (WI-1251), or
+    /// `None` when it would not.
+    fn refuse_contested_wake(&self, id: Uuid, record: &Record) -> Result<()> {
+        if let Some(successor) = record.superseded_by.as_deref() {
+            if self.successor_still_known(successor) {
+                return Err(ApiError::Conflict(format!(
+                    "session {id} was superseded by {successor}; send to the successor instead"
+                )));
+            }
+            tracing::info!(
+                session = %id,
+                successor,
+                event = "session.wake.successor_gone",
+                "the successor is gone; the handoff no longer blocks the wake"
+            );
+        }
+        if let Some(contender) = self.same_work_contender(id, record) {
+            let work_item = record.work_item.as_deref().unwrap_or_default();
+            return Err(ApiError::Conflict(format!(
+                "{contender} is working on {work_item} in the same directory"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether `successor` still exists: live, or still hibernated. A session
+    /// that was removed leaves no record, and a handoff to it must not block
+    /// the wake forever.
+    fn successor_still_known(&self, successor: &str) -> bool {
+        let Ok(id) = Uuid::parse_str(successor) else {
+            return false;
+        };
+        self.sessions.contains_key(&id) || self.records.contains_key(&id)
+    }
+
+    /// A live session in the same directory, bound to the same non-empty work
+    /// item as `record`.
+    fn same_work_contender(&self, id: Uuid, record: &Record) -> Option<Uuid> {
+        let work_item = record.work_item.as_deref().filter(|w| !w.is_empty())?;
+        let cwd = self.canonical_dir(record.cwd.as_deref());
+        self.live_sessions().into_iter().find_map(|session| {
+            (session.id != id
+                && session.is_alive()
+                && session.work_item().as_deref() == Some(work_item)
+                && self.canonical_dir(Some(session.cwd.as_str())) == cwd)
+                .then_some(session.id)
+        })
+    }
+
+    /// `path` with symlinks resolved, or the engine's default directory when
+    /// none was recorded. A path that cannot be resolved is compared as given,
+    /// so a missing directory still matches its twin.
+    fn canonical_dir(&self, path: Option<&str>) -> String {
+        let path = path
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| self.cfg.default_cwd.clone());
+        std::fs::canonicalize(&path)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned()
+    }
+
     /// Start a hibernated session again, under the same id, by resuming its
     /// agent conversation in the directory it ran in. `env` is set on top of
     /// the recorded environment (which holds no secrets). Waking a live
@@ -1095,6 +1217,12 @@ impl SessionRegistry {
             .map(|r| r.clone())
             .filter(|r| r.hibernation.is_some())
             .ok_or(ApiError::NotFound)?;
+        if !req.force {
+            self.refuse_contested_wake(id, &record)?;
+        } else if record.superseded_by.is_some() || self.same_work_contender(id, &record).is_some()
+        {
+            tracing::info!(session = %id, event = "session.wake.forced", "waking a session past a handoff guard");
+        }
         let mut env = record.env.clone();
         env.extend(req.env.unwrap_or_default());
         let (command, template) = self.wake_launch(&record);
@@ -1456,6 +1584,7 @@ impl SessionRegistry {
                         Some("the engine was shutting down".into()),
                         HibernateTrigger::Shutdown,
                         allow_shell,
+                        None,
                     )
                     .await,
                 )
@@ -1643,6 +1772,7 @@ fn recover_records(
                 trigger: HibernateTrigger::Recovered,
                 reason: Some("the engine stopped without hibernating it".into()),
                 resumable,
+                superseded_by: record.superseded_by.clone(),
             });
             if hibernation::read_screen(state_dir, id).is_empty() {
                 if let Some(tail) = history.and_then(|h| log_tail(&h.log_path(id))) {

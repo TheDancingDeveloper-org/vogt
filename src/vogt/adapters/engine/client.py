@@ -276,6 +276,8 @@ class EngineHibernation:
     trigger: str
     resumable: bool = True
     reason: str | None = None
+    #: The session this one's work was handed to, when the hibernate named one.
+    superseded_by: str | None = None
 
     @classmethod
     def from_payload(cls, payload: object) -> EngineHibernation | None:
@@ -286,6 +288,7 @@ class EngineHibernation:
             trigger=str(payload.get("trigger", "")),
             resumable=payload.get("resumable") is not False,
             reason=_optional_str(payload.get("reason")),
+            superseded_by=_optional_str(payload.get("superseded_by")),
         )
 
 
@@ -1172,7 +1175,12 @@ class EngineClient:
     # -- hibernation ---------------------------------------------------------
 
     def hibernate_session(
-        self, session_id: str, *, reason: str | None = None, allow_shell: bool = False
+        self,
+        session_id: str,
+        *,
+        reason: str | None = None,
+        allow_shell: bool = False,
+        superseded_by: str | None = None,
     ) -> EngineSession | None:
         """Stop the session's process tree, keeping it listed to wake later.
 
@@ -1184,6 +1192,10 @@ class EngineClient:
         body: dict[str, Any] = {"allow_shell": allow_shell}
         if reason:
             body["reason"] = reason
+        # Omitted when unset, so a plain hibernate body stays exactly what it
+        # has always been.
+        if superseded_by:
+            body["superseded_by"] = superseded_by
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/hibernate",
             method="POST",
@@ -1197,7 +1209,11 @@ class EngineClient:
         return EngineSession.from_payload(payload)
 
     def wake_session(
-        self, session_id: str, *, env: dict[str, str] | None = None
+        self,
+        session_id: str,
+        *,
+        env: dict[str, str] | None = None,
+        force: bool = False,
     ) -> EngineSession | None:
         """Start a hibernated session again under its own id, resuming its
         conversation, with `env` set on top of what the engine recorded (which
@@ -1207,6 +1223,10 @@ class EngineClient:
         body: dict[str, Any] = {}
         if env:
             body["env"] = [[key, value] for key, value in env.items()]
+        # The engine skips a false `force` on the wire too, so it is sent only
+        # when it changes what the wake does.
+        if force:
+            body["force"] = True
         payload = self._call(
             f"/api/sessions/{urllib.parse.quote(session_id)}/wake",
             method="POST",
