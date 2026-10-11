@@ -301,7 +301,7 @@ def test_last_reply_reads_the_sessions_own_conversation(
     ]
     assert result.detail is None
     # And the list carries the excerpt of the latest one.
-    rows = list_sessions(wired, ListSessionsParams()).sessions
+    rows = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert rows[0].last_reply_excerpt == "The operator list: token, HAR."
 
 
@@ -310,7 +310,7 @@ def test_no_transcript_is_an_honest_detail_not_an_error(wired: AppContext) -> No
     result = last_reply(wired, SessionLastReplyParams(id=started.session.id))
     assert result.messages == []
     assert result.detail is not None and "no agent transcript" in result.detail
-    rows = list_sessions(wired, ListSessionsParams()).sessions
+    rows = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert rows[0].last_reply_excerpt is None
 
 
@@ -365,7 +365,7 @@ def test_the_list_says_which_model_the_conversation_actually_ran(
     )
     row = next(
         s
-        for s in list_sessions(wired, ListSessionsParams()).sessions
+        for s in list_sessions(wired, ListSessionsParams(mode="full")).sessions
         if s.id == started.session.id
     )
     assert row.model is None, "nothing was asked for"
@@ -573,7 +573,7 @@ def test_an_opencode_sessions_replies_come_from_the_engine_redacted(
     )
     assert engine.replies_asked == ["n=2"]
 
-    rows = list_sessions(ctx, ListSessionsParams()).sessions
+    rows = list_sessions(ctx, ListSessionsParams(mode="full")).sessions
     excerpt = next(
         r for r in rows if r.engine_session_id == ENGINE_ID
     ).last_reply_excerpt

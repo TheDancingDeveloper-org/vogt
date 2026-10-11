@@ -497,7 +497,7 @@ def test_session_list_and_inbox_show_a_permission_dialog(
 ) -> None:
     engine.extra = dict(APPROVAL)
     _started(wired)
-    rows = list_sessions(wired, ListSessionsParams()).sessions
+    rows = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert rows and all(row.activity == "awaiting-approval" for row in rows)
     approval = rows[0].approval
     assert approval is not None and approval.deadline_seconds == 61
@@ -516,13 +516,15 @@ def test_wait_passes_until_and_timeout_and_returns_why(
     """WI-874: one call waits on the engine and says why it stopped."""
     ses_id, engine_id = _started(wired)
     waited = session_wait(
-        wired, SessionWaitParams(id=ses_id, until="any_change", timeout_s=30)
+        wired,
+        SessionWaitParams(id=ses_id, until="any_change", timeout_s=30, screen=True),
     )
     assert engine.wait_queries[-1] == "until=any-change&timeout_s=30"
     assert waited.engine_session_id == engine_id
     assert waited.outcome == "awaiting-approval"
     assert waited.matched is False
     assert waited.waited_ms == 1234
+    assert waited.screen is not None
     assert waited.screen.approval is not None
     assert waited.screen.ready is False
 
@@ -568,7 +570,9 @@ def test_a_session_reports_itself_blocked_without_naming_itself(
     assert sent["body"]["blocked"] is True
     # It is on the list and in the Inbox, and the write is audited with it.
     row = next(
-        r for r in list_sessions(wired, ListSessionsParams()).sessions if r.id == ses_id
+        r
+        for r in list_sessions(wired, ListSessionsParams(mode="full")).sessions
+        if r.id == ses_id
     )
     assert row.blocked is not None
     assert row.blocked.blocker == "needs the Telegram bot token"

@@ -44,6 +44,7 @@ from vogt.adapters.engine.client import (
 from vogt.application import writes
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    DIGEST_LIVE_STATES,
     SESSION_INPUT_MAX_BYTES,
     AnswerSessionParams,
     BindSessionWorkParams,
@@ -70,6 +71,7 @@ from vogt.application.models import (
     SessionApprovalOption,
     SessionBlocked,
     SessionBlockedResult,
+    SessionDigest,
     SessionHibernation,
     SessionInputParams,
     SessionInputResult,
@@ -169,6 +171,15 @@ SESSION_KEYS: dict[SessionKey, str] = {
 #: own actor-bound token; only the scope set is deployment-chosen (FR-S10).
 def _session_scopes(ctx: AppContext) -> tuple[Scope, ...]:
     return parse_scopes(ctx.config.agent_session_scopes)
+
+
+def _as_digest(result: SessionResult) -> SessionResult:
+    """C1: start, hibernate and wake carry the digest row as well as the summary.
+
+    The summary stays. Parity, the CLI and the PWA read `session`; the digest
+    is what an MCP caller keeps. `exclude_none` does not drop it.
+    """
+    return result.model_copy(update={"digest": _digest_of(result.session)})
 
 
 def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
@@ -339,7 +350,9 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             },
         )
 
-    return audited_write(ctx, operation=SESSION_START, reason=reason, body=body)
+    return _as_digest(
+        audited_write(ctx, operation=SESSION_START, reason=reason, body=body)
+    )
 
 
 def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:
@@ -405,6 +418,106 @@ def stop_session(ctx: AppContext, params: StopSessionParams) -> SessionResult:
     return audited_write(ctx, operation=SESSION_STOP, reason=params.reason, body=body)
 
 
+_EXCLUDED_STATES = frozenset({"hibernated", "stopped", "exited"})
+_DIGEST_CLIP = 120
+
+
+def _clip(text: str | None, limit: int = _DIGEST_CLIP) -> str | None:
+    if text is None:
+        return None
+    return text if len(text) <= limit else text[:limit]
+
+
+def _digest_of(
+    summary: SessionSummary,
+    *,
+    attention: str | None = None,
+    ready: bool | None = None,
+    fields: list[str] | None = None,
+) -> SessionDigest:
+    """One line of state from a full summary (design C1).
+
+    `command` stays off the digest; `template` is the replacement, and
+    `brief_file` is null until the engine reports a path. `budget` and
+    `supervisor` stay null until C7 and WI-956 exist.
+    """
+    extra: dict[str, Any] = {}
+    for name in fields or []:
+        if name in {"command"} or not hasattr(summary, name):
+            continue
+        value = getattr(summary, name)
+        if hasattr(value, "model_dump"):
+            value = value.model_dump(mode="json")
+        extra[name] = value
+    blocked = None if summary.blocked is None else summary.blocked.blocker
+    return SessionDigest(
+        id=summary.id,
+        name=summary.name,
+        work_item=summary.work_item,
+        activity=summary.activity,
+        attention=attention,
+        ready=ready,
+        blocked_reason=_clip(blocked),
+        turn_started_at=summary.turn_started_at,
+        last_reply_excerpt=_clip(summary.last_reply_excerpt),
+        template=summary.template,
+        extra=extra or None,
+    )
+
+
+def _state_of(summary: SessionSummary, attention: str | None) -> str | None:
+    if summary.activity == "stopped" or attention == "exited":
+        return "exited" if attention == "exited" else (summary.activity or attention)
+    return summary.activity or attention
+
+
+def _kept(
+    summary: SessionSummary, attention: str | None, states: list[str] | None
+) -> bool:
+    """Default listings drop hibernated, stopped and exited.
+
+    An empty list means the caller asked for every state.
+    """
+    if states is not None and len(states) == 0:
+        return True
+    allowed = DIGEST_LIVE_STATES if states is None else frozenset(states)
+    state = _state_of(summary, attention)
+    if state is None:
+        return "unknown" in allowed
+    if state in allowed or (attention is not None and attention in allowed):
+        return True
+    return state not in _EXCLUDED_STATES and state in allowed
+
+
+def _attention_of(
+    summary: SessionSummary, *, now: datetime, stall_after: timedelta
+) -> oversight.Verdict:
+    """The same attention class a sweep row would carry, without a screen."""
+    return oversight.classify(
+        activity=summary.activity,
+        alive=summary.alive,
+        ready=summary.activity == "waiting-for-input",
+        approval_question=None
+        if summary.approval is None
+        else summary.approval.question,
+        blocker=None if summary.blocked is None else summary.blocked.blocker,
+        approval_kind=None if summary.approval is None else summary.approval.kind,
+        last_output_at=summary.last_output_at,
+        now=now,
+        stall_after=stall_after,
+    )
+
+
+def _attention_kept(attention: str, wanted: list[str] | None) -> bool:
+    if not wanted:
+        return True
+    names = set(wanted)
+    if "needs_you" in names:
+        names.discard("needs_you")
+        names.update(oversight.NEEDS_YOU)
+    return attention in names
+
+
 def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListResult:
     """Vogt's session links, enriched with what the engine says right now,
     plus any live session the engine holds that Vogt never linked.
@@ -437,7 +550,24 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
         summaries.sort(
             key=lambda s: (1, 0) if s.resources is None else (0, -s.resources.rss_bytes)
         )
-    return SessionListResult(sessions=summaries, engine=detail)
+    if params.mode == "full":
+        return SessionListResult(sessions=summaries, engine=detail)
+    now = ctx.clock()
+    stall_after = timedelta(minutes=params.stall_after_minutes)
+    digests: list[SessionDigest] = []
+    for summary in summaries:
+        verdict = _attention_of(summary, now=now, stall_after=stall_after)
+        if not _kept(summary, verdict.attention, params.states):
+            continue
+        digests.append(
+            _digest_of(
+                summary,
+                attention=verdict.attention,
+                ready=summary.activity == "waiting-for-input",
+                fields=params.fields,
+            )
+        )
+    return SessionListResult(digests=digests, engine=detail)
 
 
 def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweepResult:
@@ -508,14 +638,16 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
                 attention=verdict.attention,
                 attention_reason=verdict.reason,
                 session=summary,
-                screen_tail=list(entry.screen_tail),
+                screen_tail=list(entry.screen_tail) if params.screen_lines else [],
                 ready=entry.ready,
             )
         )
     rows.sort(
         key=lambda row: (
             oversight.ORDER.get(row.attention, 99),  # type: ignore[call-overload]
-            -(row.session.last_output_at or now).timestamp(),
+            -(
+                (row.session.last_output_at if row.session is not None else None) or now
+            ).timestamp(),
         )
     )
     counts: dict[str, int] = {"total": len(rows), "needs_you": 0}
@@ -523,6 +655,30 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         counts[row.attention] = counts.get(row.attention, 0) + 1
         if row.attention in oversight.NEEDS_YOU:
             counts["needs_you"] += 1
+    if params.mode == "digest":
+        kept: list[SessionSweepRow] = []
+        for row in rows:
+            if row.session is None:
+                continue
+            if not _kept(row.session, row.attention, params.states):
+                continue
+            if not _attention_kept(row.attention, params.attention):
+                continue
+            kept.append(
+                SessionSweepRow(
+                    attention=row.attention,
+                    attention_reason=row.attention_reason,
+                    digest=_digest_of(
+                        row.session,
+                        attention=row.attention,
+                        ready=row.ready,
+                        fields=params.fields,
+                    ),
+                    screen_tail=row.screen_tail,
+                    ready=row.ready,
+                )
+            )
+        rows = kept[: params.limit]
     return SessionSweepResult(rows=rows, counts=counts, swept_at=now, engine=None)
 
 
@@ -797,7 +953,7 @@ def history_list(ctx: AppContext, params: HistoryListParams) -> HistoryListResul
                 ended_at=row.ended_at,
                 exit_code=row.exit_code,
                 cwd=row.cwd,
-                command=row.command,
+                command=None if params.mode == "summary" else row.command,
                 scrollback_bytes=row.scrollback_bytes,
                 template=row.template,
                 role=row.role,
@@ -975,6 +1131,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         },
         event_kind=SESSION_INPUT_EVENT,
     )
+    digest = _input_digest(ctx, target)
     return SessionInputResult(
         id=params.id,
         engine_session_id=engine_id,
@@ -985,6 +1142,7 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
         delivery=verdict.delivery,
         delivery_evidence=verdict.evidence,
         woke=woke,
+        digest=digest,
     )
 
 
@@ -1115,13 +1273,16 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
         screen = engine.session_screen(engine_id)
         if screen is None or screen.activity != "hibernated":
             raise
+        shown = _screen_result(params.id, engine_id, screen)
         return SessionWaitResult(
             id=params.id,
             engine_session_id=engine_id,
             outcome="hibernated",
             matched=False,
             waited_ms=0,
-            screen=_screen_result(params.id, engine_id, screen),
+            screen=shown if params.screen else None,
+            digest=None if params.screen else _wait_digest(ctx, params.id, engine_id),
+            screen_tail=[] if params.screen else _tail_of(shown),
         )
     if waited is None:
         if engine.get_session(engine_id) is not None:
@@ -1133,13 +1294,16 @@ def session_wait(ctx: AppContext, params: SessionWaitParams) -> SessionWaitResul
             raise EngineUnavailable(msg)
         msg = f"the engine has no live session {params.id!r}"
         raise NotFound(msg)
+    shown = _screen_result(params.id, engine_id, waited.screen)
     return SessionWaitResult(
         id=params.id,
         engine_session_id=engine_id,
         outcome=waited.outcome,
         matched=waited.matched,
         waited_ms=waited.waited_ms,
-        screen=_screen_result(params.id, engine_id, waited.screen),
+        screen=shown if params.screen else None,
+        digest=None if params.screen else _wait_digest(ctx, params.id, engine_id),
+        screen_tail=[] if params.screen else _tail_of(shown),
     )
 
 
@@ -1189,7 +1353,7 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
             outcome=outcome,
             event_kind=SESSION_HIBERNATED_EVENT,
         )
-        return SessionResult(session=_summarize_engine_only(hibernated))
+        return _as_digest(SessionResult(session=_summarize_engine_only(hibernated)))
     session = target.session
 
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[SessionResult]:
@@ -1215,7 +1379,9 @@ def hibernate_session(ctx: AppContext, params: HibernateSessionParams) -> Sessio
             summary={**outcome, "tokens_revoked": len(revoked)},
         )
 
-    return audited_write(ctx, operation=SESSION_HIBERNATE, reason=reason, body=body)
+    return _as_digest(
+        audited_write(ctx, operation=SESSION_HIBERNATE, reason=reason, body=body)
+    )
 
 
 def wake_session(ctx: AppContext, params: WakeSessionParams) -> SessionResult:
@@ -1256,10 +1422,10 @@ def _wake(
             )
             raise Conflict(msg)
         if session is None:
-            return SessionResult(session=_summarize_engine_only(current))
+            return _as_digest(SessionResult(session=_summarize_engine_only(current)))
         with ctx.declared.read() as view:
-            return SessionResult(
-                session=_summarize(view, session, engine_session=current)
+            return _as_digest(
+                SessionResult(session=_summarize(view, session, engine_session=current))
             )
 
     if session is None:
@@ -1276,7 +1442,7 @@ def _wake(
             outcome={"engine_session_id": engine_id, "linked": False},
             event_kind=SESSION_WOKEN_EVENT,
         )
-        return SessionResult(session=_summarize_engine_only(woken))
+        return _as_digest(SessionResult(session=_summarize_engine_only(woken)))
 
     if session.stopped_at is not None:
         msg = f"session {session.id!r} was stopped; start a new one instead"
@@ -1330,7 +1496,9 @@ def _wake(
             },
         )
 
-    return audited_write(ctx, operation=SESSION_WAKE, reason=reason, body=body)
+    return _as_digest(
+        audited_write(ctx, operation=SESSION_WAKE, reason=reason, body=body)
+    )
 
 
 def keep_session_awake(
@@ -1984,6 +2152,41 @@ def _set_blocked(
         engine_session_id=engine_id,
         blocked=_blocked(updated.blocked),
     )
+
+
+def _input_digest(ctx: AppContext, target: _Target) -> SessionDigest | None:
+    """The digest of the session just typed into, when it can be read."""
+    try:
+        live = _engine(ctx).get_session(target.engine_session_id)
+    except (EngineUnavailable, NotFound):
+        return None
+    if target.session is None:
+        if live is None:
+            return None
+        return _digest_of(_summarize_engine_only(live))
+    with ctx.declared.read() as view:
+        return _digest_of(_summarize(view, target.session, engine_session=live))
+
+
+def _wait_digest(
+    ctx: AppContext, params_id: str, engine_id: str
+) -> SessionDigest | None:
+    try:
+        live = _engine(ctx).get_session(engine_id)
+    except (EngineUnavailable, NotFound):
+        return None
+    if live is None:
+        return None
+    target = _target(ctx, params_id)
+    if target.session is None:
+        return _digest_of(_summarize_engine_only(live))
+    with ctx.declared.read() as view:
+        return _digest_of(_summarize(view, target.session, engine_session=live))
+
+
+def _tail_of(screen: SessionScreenResult, lines: int = 8) -> list[str]:
+    kept = [line for line in screen.lines if line.strip()]
+    return kept[-lines:]
 
 
 def _own_session(ctx: AppContext) -> str:

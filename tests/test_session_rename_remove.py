@@ -149,7 +149,7 @@ def test_rename_reaches_the_engine_and_reads_back_as_name(
     )
     assert engine.names[engine_id] == "driver"
     assert result.session.name == "driver"
-    listed = list_sessions(wired, ListSessionsParams()).sessions
+    listed = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert [s.name for s in listed if s.id == ses_id] == ["driver"]
     audit = list_audit(wired, ListAuditParams(limit=5)).records
     assert audit[0].operation == "session.rename"

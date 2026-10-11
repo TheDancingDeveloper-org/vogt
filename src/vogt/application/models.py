@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -85,6 +85,18 @@ class Result(BaseModel):
 #: agent can hold two hundred of in one tool result; `full` is every field,
 #: bodies included, which is what a GUI rendering a detail pane needs.
 ListMode = Literal["summary", "full"]
+
+#: How much of a session row the session tools return. `digest` is one line of
+#: state (design C1); `full` is the SessionSummary a GUI already renders.
+SessionViewMode = Literal["digest", "full"]
+
+#: Session states a digest listing keeps unless the caller names others.
+#: Hibernated, stopped and exited stay in `counts` but not in the rows.
+DIGEST_LIVE_STATES: frozenset[str] = frozenset(
+    {"running", "idle", "waiting", "blocked", "approval", "stalled", "unknown"}
+)
+
+_DIGEST_ROW_BUDGET = 300
 
 
 def apply_aliases(data: object, aliases: dict[str, str], *, model: str) -> object:
@@ -1011,6 +1023,48 @@ class SessionHibernation(Result):
     )
 
 
+class SessionDigest(Result):
+    """One line of session state (design C1).
+
+    Target under 300 characters so fifty rows fit in one 15k tool result.
+    `budget` and `supervisor` are named for later changes (C7, WI-956) and
+    stay null until those exist. `brief_file` is null until the engine
+    reports a brief path; the launch argv stays on `mode=full`.
+    """
+
+    id: str
+    name: str | None = None
+    work_item: str | None = None
+    activity: str | None = None
+    attention: str | None = None
+    ready: bool | None = None
+    blocked_reason: str | None = Field(
+        default=None,
+        description="First 120 characters of the blocked report (engine reason).",
+    )
+    turn_started_at: datetime | None = None
+    last_reply_excerpt: str | None = Field(
+        default=None,
+        description="First 120 characters of the last reply.",
+    )
+    template: str | None = None
+    brief_file: str | None = None
+    budget: str | None = Field(
+        default=None, description="Reserved for C7; null until a budget exists."
+    )
+    supervisor: str | None = Field(
+        default=None, description="Reserved for WI-956; null until supervision exists."
+    )
+    extra: dict[str, Any] | None = Field(
+        default=None,
+        description="SessionSummary attributes named in `fields`, when asked.",
+    )
+
+    def over_budget(self) -> bool:
+        """True when the JSON of this row exceeds the 300-character target."""
+        return len(self.model_dump_json(exclude_none=True)) > _DIGEST_ROW_BUDGET
+
+
 class SessionSummary(Result):
     """One session, as Vogt knows it and as the engine currently reports it.
 
@@ -1435,6 +1489,12 @@ class WorkResult(Result):
 class GetWorkParams(Params):
     ref: str = Field(description="Work item reference, e.g. WI-7. Alias: `id`.")
     comment_limit: int = Field(default=50, ge=0, le=500)
+    mode: ListMode = Field(
+        default="full",
+        description=(
+            "`summary` omits the item body and comments; `full` (default) keeps them."
+        ),
+    )
 
     @model_validator(mode="before")
     @classmethod
@@ -1823,6 +1883,12 @@ class InitiativeResult(Result):
 class ListInitiativesParams(Params):
     limit: int = Field(default=100, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
+    mode: ListMode = Field(
+        default="full",
+        description=(
+            "`summary` omits each initiative's body; `full` (default) keeps it."
+        ),
+    )
 
 
 class InitiativeListResult(Result):
@@ -3930,11 +3996,47 @@ class SweepSessionsParams(Params):
         default=None,
         description="Only sessions Vogt linked to this project (slug).",
     )
+    mode: SessionViewMode = Field(
+        default="digest",
+        description=(
+            "`digest` (default) is one line per session; `full` is the "
+            "SessionSummary a GUI renders, including command."
+        ),
+    )
+    fields: list[str] = Field(
+        default=[],
+        description=(
+            "Extra SessionSummary attribute names copied onto each digest row."
+        ),
+    )
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these activities (or attention classes). Default excludes "
+            "hibernated, stopped and exited; pass an empty list for every state."
+        ),
+    )
+    attention: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these attention classes. `needs_you` means approval, "
+            "blocked and waiting."
+        ),
+    )
+    limit: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="How many rows to return. Counts cover every session.",
+    )
     screen_lines: int = Field(
-        default=8,
+        default=0,
         ge=0,
         le=40,
-        description="Non-blank lines from the bottom of each session's screen.",
+        description=(
+            "Non-blank lines from the bottom of each session's screen. Zero "
+            "(the default) asks for none; a positive value is honoured."
+        ),
     )
     stall_after_minutes: int = Field(
         default=10,
@@ -3958,7 +4060,8 @@ class SessionSweepRow(Result):
         )
     )
     attention_reason: str = Field(description="Why, in words.")
-    session: SessionSummary
+    session: SessionSummary | None = None
+    digest: SessionDigest | None = None
     screen_tail: list[str] = Field(
         default=[],
         description="The last non-blank lines of its screen. Untrusted terminal text.",
@@ -4243,16 +4346,42 @@ class ListSessionsParams(Params):
     include_stopped: bool = Field(
         default=False, description="Include sessions Vogt has already stopped."
     )
+    mode: SessionViewMode = Field(
+        default="digest",
+        description="`digest` (default) or `full` (every SessionSummary field).",
+    )
+    fields: list[str] = Field(
+        default=[],
+        description="Extra SessionSummary attribute names on each digest row.",
+    )
+    states: list[str] | None = Field(
+        default=None,
+        description=(
+            "Keep only these activities. Default excludes hibernated, stopped "
+            "and exited; pass an empty list for every state."
+        ),
+    )
+    stall_after_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description=(
+            "A running session that has printed nothing for this long is "
+            "classified `stalled` on a digest row."
+        ),
+    )
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
 
 class SessionResult(Result):
     session: SessionSummary
+    digest: SessionDigest | None = None
 
 
 class SessionListResult(Result):
     sessions: list[SessionSummary] = []
+    digests: list[SessionDigest] = []
     engine: str | None = Field(
         default=None,
         description=(
@@ -4282,6 +4411,10 @@ _HISTORY_ENGINE_FIELD_DESC = (
 class HistoryListParams(Params):
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0)
+    mode: ListMode = Field(
+        default="full",
+        description="`summary` omits each row's command; `full` (default) keeps it.",
+    )
 
 
 class HistorySessionRow(Result):
@@ -4656,6 +4789,7 @@ class SessionInputResult(Result):
         default=False,
         description="True when the session was hibernated and was woken first.",
     )
+    digest: SessionDigest | None = None
 
 
 class SessionScreenParams(Params):
@@ -4731,6 +4865,13 @@ class SessionWaitParams(Params):
         le=600,
         description="Seconds to wait at most (1-600). Answers `timeout` then.",
     )
+    screen: bool = Field(
+        default=False,
+        description=(
+            "True restores the full screen. False (default) returns the digest "
+            "row plus an 8-line screen tail."
+        ),
+    )
 
 
 class SessionWaitResult(Result):
@@ -4750,7 +4891,9 @@ class SessionWaitResult(Result):
         description="True when the outcome is what `until` asked for."
     )
     waited_ms: int
-    screen: SessionScreenResult
+    screen: SessionScreenResult | None = None
+    digest: SessionDigest | None = None
+    screen_tail: list[str] = []
 
 
 class SessionLastReplyParams(Params):

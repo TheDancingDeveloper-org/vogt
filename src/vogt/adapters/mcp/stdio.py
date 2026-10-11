@@ -205,14 +205,7 @@ class StdioServer:
             return _result(
                 message_id, _tool_error("error", f"internal error (ref {ref})")
             )
-        return _result(
-            message_id,
-            {
-                "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
-                "structuredContent": payload,
-                "isError": False,
-            },
-        )
+        return _result(message_id, tool_success(payload))
 
 
 def _result(message_id: MessageId, result: dict[str, Any]) -> dict[str, Any]:
@@ -236,6 +229,28 @@ def _tool_error(code: str, message: str) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": f"{code}: {message}"}],
         "isError": True,
+    }
+
+
+_TEXT_CAP = 200
+
+
+def tool_success(payload: dict[str, Any]) -> dict[str, Any]:
+    """structuredContent plus a one-line text summary (design C1, decision 4).
+
+    The text is what a client that ignores structuredContent still reads, so it
+    stays under ~200 characters and drops nulls. structuredContent is the full
+    result, nulls included, so it matches CLI and REST. Errors stay text-only
+    via `_tool_error`.
+    """
+    summary = {key: value for key, value in payload.items() if value is not None}
+    text = json.dumps(summary, separators=(",", ":"), default=str)
+    if len(text) > _TEXT_CAP:
+        text = text[: _TEXT_CAP - 1] + "…"
+    return {
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": payload,
+        "isError": False,
     }
 
 

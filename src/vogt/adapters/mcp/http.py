@@ -25,6 +25,7 @@ from vogt.adapters.mcp.stdio import (
     METHOD_NOT_FOUND,
     MessageId,
     negotiate_protocol_version,
+    tool_success,
 )
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.application.context import AppContext
@@ -190,17 +191,11 @@ def _call(
         logger("mcp").exception("mcp tool %r failed (ref=%s)", operation.name, ref)
         return _result(message_id, _tool_error("error", f"internal error (ref {ref})"))
 
+    # The wire text is the compact summary; structuredContent stays the full
+    # dump so CLI, REST and MCP still agree (parity reads structuredContent
+    # via McpSurface, and a null field is part of the result).
     body: dict[str, Any] = payload.model_dump(mode="json")
-    import json as _json
-
-    return _result(
-        message_id,
-        {
-            "content": [{"type": "text", "text": _json.dumps(body, indent=2)}],
-            "structuredContent": body,
-            "isError": False,
-        },
-    )
+    return _result(message_id, tool_success(body))
 
 
 def _version() -> str:
