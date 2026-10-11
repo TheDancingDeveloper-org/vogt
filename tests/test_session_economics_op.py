@@ -52,12 +52,16 @@ def _write(root: Path, conversation: str, lines: list[str]) -> None:
 
 
 class Engine:
+    def __init__(self, economics: dict[str, object] | None = None) -> None:
+        self.economics = economics
+
     def __call__(
         self, url: str, headers: dict[str, str], body: bytes = b"", method: str = "GET"
     ) -> tuple[int, bytes]:
         path = url.split("?", 1)[0].removeprefix("http://127.0.0.1:8910")
         summary = {
             "id": ENGINE_ID,
+            "economics": self.economics,
             "name": "agent",
             "activity": "idle",
             "cwd": ROOT,
@@ -142,3 +146,38 @@ def test_reading_is_off_with_no_roots(instance: AppContext) -> None:
 def test_an_unknown_session_is_not_found(wired: AppContext) -> None:
     with pytest.raises(NotFound):
         economics(wired, SessionEconomicsParams(id="ses_nope"))
+
+
+def test_engine_economics_is_used_and_the_transcript_is_not_read(
+    wired: AppContext, tmp_path: Path
+) -> None:
+    """A session whose engine row already carries economics skips the file."""
+    started = start_session(
+        wired, StartSessionParams(project="vogt", template="claude", reason=WHY)
+    )
+    _write(tmp_path / "claude", ENGINE_ID, [_line("a", "ignored")])
+    transport = wired.engine.transport if wired.engine is not None else None
+    assert isinstance(transport, Engine)
+    transport.economics = {
+        "turns": 7,
+        "context_tokens": 400,
+        "peak_context_tokens": 900,
+        "compactions": 2,
+        "tool_result_bytes": {"Bash": 12},
+        "reads_repeated": 0,
+        "wall_clock": {"count": 3, "max_ms": 5000, "mean_ms": 2000},
+        "output_tokens": 30,
+        "usage_measured": True,
+    }
+    result = economics(wired, SessionEconomicsParams(id=started.session.id))
+    assert result.basis == "engine"
+    assert result.transcript is None
+    assert result.turns == 7
+    assert result.context_tokens == 400
+    assert result.peak_context_tokens == 900
+    assert result.compactions == 2
+    assert result.tool_result_bytes == {"Bash": 12}
+    assert result.wall_clock_count == 3 and result.wall_clock_mean_ms == 2000
+    assert result.usage_measured is True
+    assert result.budget_line == "7 turns, 2 compactions"
+    assert result.detail is None

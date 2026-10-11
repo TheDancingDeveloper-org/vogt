@@ -127,6 +127,10 @@ pub struct Session {
     first_output_seen: AtomicBool,
     /// The launch wrapper's report was accepted; a second is refused.
     launch_reported: AtomicBool,
+    /// The economics tailer's place in this session's transcript, and the
+    /// snapshot it last produced (WI-1245).
+    economics: parking_lot::Mutex<Option<crate::economics::Tail>>,
+    economics_snapshot: parking_lot::Mutex<Option<vogt_engine_contract::SessionEconomics>>,
 }
 
 impl Session {
@@ -394,8 +398,31 @@ impl Session {
             template: self.template.lock().clone(),
             permission_mode: self.permission_mode.lock().clone(),
             stop: self.stop.lock().clone(),
-            economics: None,
+            economics: self.economics_snapshot.lock().clone(),
         }
+    }
+
+    /// Take the tailer's place so it can read the transcript off the runtime
+    /// and hand it back through [`store_economics_tail`].
+    pub(crate) fn take_economics_tail(&self) -> Option<crate::economics::Tail> {
+        self.economics.lock().take()
+    }
+
+    /// Put the tailer's place back, with the snapshot the read produced.
+    pub(crate) fn store_economics_tail(
+        &self,
+        tail: crate::economics::Tail,
+        snapshot: Option<vogt_engine_contract::SessionEconomics>,
+    ) {
+        if snapshot.is_some() {
+            *self.economics_snapshot.lock() = snapshot;
+        }
+        *self.economics.lock() = Some(tail);
+    }
+
+    /// The snapshot the tailer last produced, for the exit and hibernate paths.
+    pub(crate) fn economics_snapshot(&self) -> Option<vogt_engine_contract::SessionEconomics> {
+        self.economics_snapshot.lock().clone()
     }
 
     /// Record that the session was asked to stop, before anything signals
@@ -1079,6 +1106,8 @@ pub fn spawn(
         },
         first_output_seen: AtomicBool::new(false),
         launch_reported: AtomicBool::new(false),
+        economics: parking_lot::Mutex::new(None),
+        economics_snapshot: parking_lot::Mutex::new(None),
     });
 
     spawn_reader_thread(
@@ -1174,6 +1203,81 @@ fn spawn_reader_thread(
     Ok(())
 }
 
+/// Record a session's economics in the Prometheus histograms, once, at the
+/// session's real end. A session started without a template is labelled
+/// `unknown`. The model is the `--model` its command was launched with, and a
+/// session whose command names none carries no model label rather than
+/// `unknown`.
+/// The `--model` (or `-m`) the session's command was launched with, if it
+/// names one. Read from the command the engine spawned, so it is the model
+/// the session actually runs rather than a guess from its transcript.
+fn launched_model(session: &Session) -> Option<String> {
+    let command = session.command()?;
+    let args: Vec<&str> = command.split_whitespace().collect();
+    let mut last = None;
+    let mut args = args.as_slice();
+    while let Some((flag, rest)) = args.split_first() {
+        if *flag == "--" {
+            break;
+        }
+        if *flag == "--model" || *flag == "-m" {
+            last = rest
+                .first()
+                .filter(|value| !value.starts_with('-'))
+                .copied();
+        } else if let Some(value) = flag.strip_prefix("--model=") {
+            if !value.is_empty() {
+                last = Some(value);
+            }
+        }
+        args = rest;
+    }
+    last.map(str::to_string)
+}
+
+pub(crate) fn observe_session_economics(session: &Session) {
+    let Some(snapshot) = session.economics_snapshot() else {
+        return;
+    };
+    let Ok(json) = serde_json::to_string(&snapshot) else {
+        return;
+    };
+    observe_economics(session.template(), launched_model(session), Some(&json));
+}
+
+/// Record a stored economics snapshot. `json` is the snapshot as the tailer
+/// persists it; a record without one records nothing.
+pub(crate) fn observe_economics(
+    template: Option<String>,
+    model: Option<String>,
+    json: Option<&str>,
+) {
+    let Some(json) = json else {
+        return;
+    };
+    let Ok(snapshot) = serde_json::from_str::<vogt_engine_contract::SessionEconomics>(json) else {
+        return;
+    };
+    let mut owned = vec![(
+        "template",
+        template.unwrap_or_else(|| "unknown".to_string()),
+    )];
+    if let Some(model) = model {
+        owned.push(("model", model));
+    }
+    let labels: Vec<(&str, &str)> = owned.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let metrics = crate::metrics::metrics();
+    metrics
+        .session_turns
+        .observe(&labels, snapshot.turns as f64);
+    metrics
+        .session_peak_context
+        .observe(&labels, snapshot.peak_context_tokens as f64);
+    metrics
+        .session_compactions
+        .observe(&labels, snapshot.compactions as f64);
+}
+
 fn spawn_exit_waiter(
     session: Arc<Session>,
     bus: EventBus,
@@ -1214,6 +1318,12 @@ fn spawn_exit_waiter(
         });
         if let Some(hook) = on_exit {
             hook(&session);
+        }
+        // A hibernation stops the process too, but the session is not over:
+        // a wake resumes it. It is counted when its hibernated record is
+        // removed, which is the end it does not come back from.
+        if !session.is_hibernating() {
+            observe_session_economics(&session);
         }
         try_spawn_archive(&session, history, &runtime);
     });
@@ -1268,6 +1378,9 @@ fn try_spawn_archive(
                 crate::history::END_EXITED
             }),
             identity: None,
+            economics: session
+                .economics_snapshot()
+                .and_then(|snapshot| serde_json::to_string(&snapshot).ok()),
         };
 
         if let Err(e) = history
@@ -1308,6 +1421,9 @@ pub async fn archive_live_session(session: &Arc<Session>, history: &SessionHisto
             crate::history::END_ENGINE_SHUTDOWN
         }),
         identity: None,
+        economics: session
+            .economics_snapshot()
+            .and_then(|snapshot| serde_json::to_string(&snapshot).ok()),
     };
     if let Err(e) = history
         .archive_session_with_output(record, output_text.as_ref())
@@ -1542,6 +1658,45 @@ fn update_activity_if_changed(session: &Arc<Session>, new: ActivityState, bus: &
 fn begins_turn(old: ActivityState, new: ActivityState) -> bool {
     new == ActivityState::Running
         && matches!(old, ActivityState::Idle | ActivityState::WaitingForInput)
+}
+
+#[cfg(test)]
+mod economics_tests {
+    use super::observe_economics;
+
+    fn count_for(label: &str) -> u64 {
+        crate::metrics::metrics()
+            .render()
+            .lines()
+            .find(|line| line.starts_with(&format!("vogt_session_turns_count{{{label}}}")))
+            .and_then(|line| line.rsplit(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Observing is what the exit waiter and the removal of a hibernated
+    /// record both call, and each calls it exactly once. A missing model is
+    /// no label, not `unknown`.
+    #[test]
+    fn observing_counts_once_and_omits_an_unnamed_model() {
+        let json = r#"{"turns":4,"context_tokens":10,"peak_context_tokens":10,"compactions":1,"tool_result_bytes":{},"reads_repeated":0,"wall_clock":{"count":0,"max_ms":0,"mean_ms":0},"output_tokens":0,"usage_measured":false}"#;
+        let label = "template=\"wi-1245-observe\"";
+        let before = count_for(label);
+        observe_economics(Some("wi-1245-observe".into()), None, Some(json));
+        assert_eq!(count_for(label), before + 1);
+        observe_economics(Some("wi-1245-observe".into()), None, None);
+        observe_economics(Some("wi-1245-observe".into()), None, Some("not json"));
+        assert_eq!(
+            count_for(label),
+            before + 1,
+            "a record without a snapshot adds nothing"
+        );
+        let rendered = crate::metrics::metrics().render();
+        assert!(
+            !rendered.contains("template=\"wi-1245-observe\",model="),
+            "{rendered}"
+        );
+    }
 }
 
 #[cfg(test)]

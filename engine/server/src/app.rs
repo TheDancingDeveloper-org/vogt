@@ -290,6 +290,18 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     crate::hibernate_policy::spawn_watcher(Arc::clone(&state));
     crate::autopilot::spawn_watcher(Arc::clone(&state));
     crate::resources::spawn_sampler(Arc::clone(&state));
+    if !state.config.economics_tick.is_zero() {
+        let home = state.config.economics_home.clone().unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_default()
+        });
+        crate::economics::spawn_economics_tailer(
+            Arc::clone(&state),
+            home,
+            state.config.economics_tick,
+        );
+    }
     crate::hibernate_policy::spawn_boot_wake(Arc::clone(&state));
 
     // Public: /healthz, /api/config, /api/push/public-key. None reveal secrets.

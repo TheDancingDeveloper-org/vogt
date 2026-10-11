@@ -205,7 +205,8 @@ def test_digest_drops_hibernated_keeps_counts_and_fits_fifteen_k(
     wired: AppContext, engine: Engine
 ) -> None:
     """C1: the default sweep is a digest. Counts include the rows the filter drops."""
-    live_ids = [_start(wired)[0] for _ in range(3)]
+    started = [_start(wired) for _ in range(3)]
+    live_ids = [session_id for session_id, _engine_id in started]
     _, hibernated_engine = _start(wired)
     engine.rows[hibernated_engine].update(activity="hibernated", alive=False)
 
@@ -222,6 +223,15 @@ def test_digest_drops_hibernated_keeps_counts_and_fits_fifteen_k(
     for row in result.rows:
         assert row.digest is not None
         assert row.digest.over_budget() is False
+        # No economics reported yet, so the digest carries no budget line.
+        assert row.digest.budget is None
+
+    metered, metered_engine = started[0]
+    engine.rows[metered_engine]["economics"] = {"turns": 7, "compactions": 2}
+    again = sweep_sessions(wired, SweepSessionsParams())
+    by_id = {row.digest.id: row.digest for row in again.rows if row.digest}
+    assert by_id[metered].budget == "7 turns, 2 compactions"
+    assert all(digest.budget is None for key, digest in by_id.items() if key != metered)
 
 
 def test_digest_attention_needs_you_and_limit(
