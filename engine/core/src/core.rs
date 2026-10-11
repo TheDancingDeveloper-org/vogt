@@ -383,6 +383,55 @@ pub fn to_json_timestamp(moment: Moment) -> String {
     moment.to_iso().replace("+00:00", "Z")
 }
 
+/// A timestamp parsed the way CPython 3.12 `datetime.fromisoformat` parses it,
+/// before it is folded into UTC: the wall clock as written, its fraction in
+/// microseconds, and the offset in seconds as written. `None` is a naive value.
+///
+/// The offset keeps its seconds here; pydantic's JSON form prints only
+/// `±HH:MM`, truncating toward zero, and that is the renderer's job.
+pub struct ParsedTimestamp {
+    pub year: i32,
+    pub month: u32,
+    pub day: u32,
+    pub hour: u32,
+    pub minute: u32,
+    pub second: u32,
+    pub micros: u32,
+    pub offset_seconds: Option<i64>,
+}
+
+/// Parse what CPython 3.12 `datetime.fromisoformat` accepts, keeping the offset
+/// instead of folding it into UTC. A missing offset is `None`. A trailing `Z`
+/// is accepted only as uppercase, because Python rewrites only `"Z"`.
+pub fn parse_timestamp(text: &str) -> Result<ParsedTimestamp, String> {
+    let bytes = text.as_bytes();
+    let (year, month, day, consumed) = parse_iso_date(bytes)?;
+    let (hour, minute, second, micros, offset) = if consumed == bytes.len() {
+        (0, 0, 0, 0, None)
+    } else {
+        let (hour, minute, second, micros, seconds, _, offset_len) =
+            parse_iso_time(&bytes[consumed..])?;
+        // `offset_len` counts the separator. Nothing after it means no offset.
+        let offset = (offset_len > 1).then_some(seconds);
+        (hour, minute, second, micros, offset)
+    };
+    // Reject a date or time the calendar does not have, as Python does.
+    chrono::NaiveDate::from_ymd_opt(year, month, day)
+        .ok_or_else(|| format!("not a timestamp: {text}"))?;
+    chrono::NaiveTime::from_hms_micro_opt(hour, minute, second, micros)
+        .ok_or_else(|| format!("not a timestamp: {text}"))?;
+    Ok(ParsedTimestamp {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+        micros,
+        offset_seconds: offset,
+    })
+}
+
 /// Parse what CPython 3.12 `datetime.fromisoformat` accepts, as aware UTC.
 ///
 /// The grammar is `_parse_isoformat_date` and `_parse_isoformat_time`: fixed
@@ -395,7 +444,9 @@ pub fn from_iso(text: &str) -> Result<Moment, String> {
     let (hour, minute, second, micros, offset_seconds, offset_micros) = if consumed == bytes.len() {
         (0, 0, 0, 0, 0, 0)
     } else {
-        parse_iso_time(&bytes[consumed..])?
+        let (hour, minute, second, micros, seconds, micros_part, _) =
+            parse_iso_time(&bytes[consumed..])?;
+        (hour, minute, second, micros, seconds, micros_part)
     };
     let date = chrono::NaiveDate::from_ymd_opt(year, month, day)
         .ok_or_else(|| format!("not a timestamp: {text}"))?;
@@ -454,21 +505,25 @@ fn parse_iso_date(bytes: &[u8]) -> Result<(i32, u32, u32, usize), String> {
 }
 
 /// The time half, starting at its separator. Any single byte separates the
-/// date from the time, so `T`, `t` and `X` all work.
-fn parse_iso_time(bytes: &[u8]) -> Result<(u32, u32, u32, u32, i64, i64), String> {
+/// date from the time, so `T`, `t` and `X` all work. The tuple is the clock,
+/// its microseconds, the offset in seconds and microseconds, and how many
+/// bytes of offset were present (zero when there was none).
+fn parse_iso_time(bytes: &[u8]) -> Result<IsoTime, String> {
     if bytes.is_empty() {
         return Err("not a timestamp".to_string());
     }
     let rest = &bytes[1..];
     let (hour, minute, second, at) = parse_hms(rest)?;
     let (micros, at) = parse_fraction(rest, at)?;
-    let offset = if at == rest.len() {
-        (0, 0)
+    let (offset, offset_len) = if at == rest.len() {
+        ((0, 0), 0)
     } else {
-        parse_offset(&rest[at..])?
+        (parse_offset(&rest[at..])?, rest.len() - at)
     };
-    Ok((hour, minute, second, micros, offset.0, offset.1))
+    Ok((hour, minute, second, micros, offset.0, offset.1, offset_len))
 }
+
+type IsoTime = (u32, u32, u32, u32, i64, i64, usize);
 
 fn parse_hms(bytes: &[u8]) -> Result<(u32, u32, u32, usize), String> {
     let hour = fixed(bytes, 0, 2).ok_or_else(|| "not a timestamp".to_string())?;
