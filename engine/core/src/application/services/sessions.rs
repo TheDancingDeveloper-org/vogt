@@ -747,81 +747,86 @@ where
         let permission_mode = params.permission_mode.clone();
         let autopilot = spec.autopilot;
         let overlay_template = ctx.config.branch_binding_template.clone();
-        audited_write(&mut writing, SESSION_START, &reason.clone(), move |txn, _actor| {
-            let actor = Actor {
-                id: actor_id.clone(),
-                kind: ActorKind::Agent,
-                display_name: format!("Session {session_id}"),
-                identity_ref: actor_ref.clone(),
-                disabled: false,
-                created_at: now,
-            };
-            let token = Token {
-                id: token_id.clone(),
-                actor_id: actor.id.clone(),
-                actor_identity_ref: Some(actor_ref),
-                name: format!("session {session_id}"),
-                scopes,
-                kind: TokenKind::Api,
-                created_at: now,
-                expires_at: None,
-                last_used_at: None,
-                revoked_at: None,
-                revoked_reason: None,
-            };
-            let recorded = CodingSession {
-                id: session_id.clone(),
-                engine_session_id,
-                project_id: project_id.clone(),
-                work_item_id,
-                actor_id: actor.id.clone(),
-                cwd: cwd.clone(),
-                template,
-                model: model.clone(),
-                effort: effort.clone(),
-                reason,
-                started_at: now,
-                stopped_at: None,
-            };
-            txn.insert_actor(&actor)?;
-            txn.insert_token(&token, &token_hash)?;
-            txn.insert_session(&recorded)?;
-            let payload = audited_payload(&recorded);
-            // The declared half of the branch binding: a session opened for a
-            // work item records the branch it will use. The summary's branch
-            // is what was recorded, which is nothing when there is no item.
-            let declared_branch = match &work_item_ref {
-                Some(work_ref) => Some(record_declared_branch(
-                    txn,
-                    work_ref,
-                    &project_id,
-                    &overlay_template,
-                    now,
-                )?),
-                None => None,
-            };
-            Ok(WriteOutcome::new(
-                recorded,
-                "session",
-                &session_id,
-                payload,
-                "session.started",
-                json!({
-                    "work_item": work_item_ref,
-                    "branch": declared_branch,
-                    "project": project_slug,
-                    "cwd": cwd,
-                    "scratch": is_scratch,
-                    "model": model,
-                    "effort": effort,
-                    "resume": resume,
-                    "autopilot": autopilot,
-                    "role": role,
-                    "permission_mode": permission_mode,
-                    "engine_spawn_ms": engine_spawn_ms,
-                }),
-            ))
-        })
+        audited_write(
+            &mut writing,
+            SESSION_START,
+            &reason.clone(),
+            move |txn, _actor| {
+                let actor = Actor {
+                    id: actor_id.clone(),
+                    kind: ActorKind::Agent,
+                    display_name: format!("Session {session_id}"),
+                    identity_ref: actor_ref.clone(),
+                    disabled: false,
+                    created_at: now,
+                };
+                let token = Token {
+                    id: token_id.clone(),
+                    actor_id: actor.id.clone(),
+                    actor_identity_ref: Some(actor_ref),
+                    name: format!("session {session_id}"),
+                    scopes,
+                    kind: TokenKind::Api,
+                    created_at: now,
+                    expires_at: None,
+                    last_used_at: None,
+                    revoked_at: None,
+                    revoked_reason: None,
+                };
+                let recorded = CodingSession {
+                    id: session_id.clone(),
+                    engine_session_id,
+                    project_id: project_id.clone(),
+                    work_item_id,
+                    actor_id: actor.id.clone(),
+                    cwd: cwd.clone(),
+                    template,
+                    model: model.clone(),
+                    effort: effort.clone(),
+                    reason,
+                    started_at: now,
+                    stopped_at: None,
+                };
+                txn.insert_actor(&actor)?;
+                txn.insert_token(&token, &token_hash)?;
+                txn.insert_session(&recorded)?;
+                let payload = audited_payload(&recorded);
+                // The declared half of the branch binding: a session opened for a
+                // work item records the branch it will use. The summary's branch
+                // is what was recorded, which is nothing when there is no item.
+                let declared_branch = match &work_item_ref {
+                    Some(work_ref) => Some(record_declared_branch(
+                        txn,
+                        work_ref,
+                        &project_id,
+                        &overlay_template,
+                        now,
+                    )?),
+                    None => None,
+                };
+                Ok(WriteOutcome::new(
+                    recorded,
+                    "session",
+                    &session_id,
+                    payload,
+                    "session.started",
+                    json!({
+                        "work_item": work_item_ref,
+                        "branch": declared_branch,
+                        "project": project_slug,
+                        "cwd": cwd,
+                        "scratch": is_scratch,
+                        "model": model,
+                        "effort": effort,
+                        "resume": resume,
+                        "autopilot": autopilot,
+                        "role": role,
+                        "permission_mode": permission_mode,
+                        "engine_spawn_ms": engine_spawn_ms,
+                    }),
+                ))
+            },
+        )
     };
     if let Err(error) = stored {
         // The terminal is already running and Vogt holds no record of it.
@@ -878,9 +883,9 @@ where
     let named = params.id.clone();
     let stop_reason = reason.clone();
     audited_write(&mut writing, SESSION_STOP, &reason, move |txn, _actor| {
-        let current = txn.session_by_id(&session_id)?.ok_or_else(|| {
-            VogtError::NotFound(format!("no session {}", py_repr(&named)))
-        })?;
+        let current = txn
+            .session_by_id(&session_id)?
+            .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(&named))))?;
         if current.stopped_at.is_some() {
             return Err(VogtError::Conflict(format!(
                 "session {} was already stopped",
@@ -1097,10 +1102,7 @@ where
         Err(VogtError::EngineUnavailable(text)) => return Ok(empty(Some(text))),
         Err(error) => return Err(error),
     };
-    let live: Vec<EngineSession> = entries
-        .iter()
-        .map(|entry| entry.session.clone())
-        .collect();
+    let live: Vec<EngineSession> = entries.iter().map(|entry| entry.session.clone()).collect();
     let listed = rows_of(
         ctx,
         &ListSessionsParams {
@@ -1435,12 +1437,7 @@ where
         other => other?,
     };
     let waited = found.ok_or_else(|| {
-        if engine
-            .get_session(&engine_id)
-            .ok()
-            .flatten()
-            .is_some()
-        {
+        if engine.get_session(&engine_id).ok().flatten().is_some() {
             VogtError::EngineUnavailable(
                 "the session engine does not support wait yet (it has no GET \
                  /api/sessions/{id}/wait route); upgrade the engine, or poll \
@@ -1979,9 +1976,9 @@ where
 {
     // Read first: the kill removes the session, and the summary is built from
     // what the engine said it was, with the stop applied on top.
-    let session = engine.get_session(engine_id)?.ok_or_else(|| {
-        VogtError::NotFound(format!("no session {}", py_repr(engine_id)))
-    })?;
+    let session = engine
+        .get_session(engine_id)?
+        .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(engine_id))))?;
     let killed = engine.kill_session(engine_id, Some(reason), Some(&ctx.principal.identity_ref))?;
     let outcome = json!({"engine_session_id": engine_id, "linked": false});
     let summary_row = json!({"engine_killed": killed, "linked": false});

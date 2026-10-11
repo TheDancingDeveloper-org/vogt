@@ -324,15 +324,17 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         approval: None,
         blocked: None,
         hibernation: None,
-        keep_awake: false,
-        autopilot: false,
-        autopilot_nudges: 0,
-        role: "worker".to_string(),
+        keep_awake: None,
+        autopilot: None,
+        autopilot_nudges: None,
+        role: None,
         conversation_id: None,
         resources: None,
         permission_mode: None,
         stopped_by: None,
         stop_reason: None,
+        last_reply_excerpt: None,
+        running: None,
     };
     if let Some(live) = live {
         apply_live(&mut summary, live);
@@ -376,15 +378,17 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
         approval: None,
         blocked: None,
         hibernation: None,
-        keep_awake: false,
-        autopilot: false,
-        autopilot_nudges: 0,
-        role: "worker".to_string(),
+        keep_awake: None,
+        autopilot: None,
+        autopilot_nudges: None,
+        role: None,
         conversation_id: None,
         resources: None,
         permission_mode: None,
         stopped_by: None,
         stop_reason: None,
+        last_reply_excerpt: None,
+        running: None,
     };
     apply_live(&mut summary, session);
     Ok(summary)
@@ -430,10 +434,10 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
             resumable: hibernation.resumable,
             reason: hibernation.reason.clone(),
         });
-    summary.keep_awake = live.keep_awake;
-    summary.autopilot = live.autopilot;
-    summary.autopilot_nudges = live.autopilot_nudges;
-    summary.role = live.role.clone();
+    summary.keep_awake = Some(live.keep_awake);
+    summary.autopilot = Some(live.autopilot);
+    summary.autopilot_nudges = Some(live.autopilot_nudges);
+    summary.role = Some(live.role.clone());
     summary.conversation_id = live.conversation_id.clone();
     summary.resources = live.resources.as_ref().map(|resources| SessionResources {
         rss_bytes: resources.rss_bytes,
