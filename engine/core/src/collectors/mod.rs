@@ -6,6 +6,7 @@
 //! demand. The sweeper is the only thing here that touches the observed store.
 
 mod agent_activity;
+pub use agent_activity::AgentActivityCollector;
 mod base;
 mod contract_checker;
 mod dep_refs;
@@ -14,6 +15,9 @@ mod mirrored_source;
 pub use mirrored_source::{MirroredSourceCollector, RegisteredProject};
 mod registry;
 mod session_outcomes;
+pub use session_outcomes::{
+    DeclaredSessions, SessionOutcomeCollector, SessionRecord, SESSION_OBSERVATION_LIMIT,
+};
 mod source_markers;
 mod sweeper;
 

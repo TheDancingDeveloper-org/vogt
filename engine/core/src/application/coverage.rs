@@ -18,11 +18,12 @@ use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 /// The collectors this instance can run, in the order Python's registry yields
 /// them once sorted by name.
 ///
-/// The core collectors are always present. The forge collectors register only
-/// when a forge is configured, deploy lanes only when a lane is, and the
-/// session and agent collectors only when their source is configured. An
-/// absent collector is "not collected", which is a different answer from
-/// "there are none", so it must not appear here at all.
+/// This lists what `sweep` actually registers. The core collectors are always
+/// present. Session-outcomes registers only when an engine is configured, and
+/// agent-activity only when transcript roots are. The forge collectors and
+/// deploy-lanes are not ported, and a sweep refuses while either is configured,
+/// so they are not listed here: coverage must not claim a collector the
+/// registry does not load.
 fn collector_names<C, I>(ctx: &AppContext<C, I>) -> Vec<&'static str>
 where
     C: Clock,
@@ -33,22 +34,8 @@ where
         "dep-refs",
         "git-local",
         "source-markers",
+        "mirrored-source",
     ];
-    names.push("mirrored-source");
-    if crate::adapters::forge::has_configured_forge(&ctx.config) {
-        names.extend([
-            "forge-issues",
-            "forge-prs",
-            "forge-checks",
-            "forge-releases",
-            "forge-labels",
-            "forge-posture",
-            "forge-notifications",
-        ]);
-    }
-    if !ctx.config.deploy_lanes.is_empty() {
-        names.push("deploy-lanes");
-    }
     if ctx.engine.is_some() {
         names.push("session-outcomes");
     }

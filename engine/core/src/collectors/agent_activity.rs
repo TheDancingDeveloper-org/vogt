@@ -1,8 +1,9 @@
 //! `agent-activity` — what agents did, read from their own transcripts.
 //!
-//! Ports `src/vogt/collectors/agent_activity.py`. Not registered with the
-//! sweeper: its scope is the configured transcript roots, and `scan` is the
-//! read path. `collect` returns nothing.
+//! Ports `src/vogt/collectors/agent_activity.py`. The application registers it
+//! only when transcript roots are configured. Its scope is those roots, not
+//! projects, so `project_scoped` is false and an unnamed project-narrowed sweep
+//! leaves it out. `collect` returns nothing; the sweeper calls `scan`.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -17,11 +18,12 @@ use crate::decisions::{
     dumps_secrets, is_error, py_str, python_json_dumps, result_excerpt, summarize_input,
     ServiceMatcher,
 };
+use crate::errors::VogtError;
 use crate::storage::observed_types::{
     ActivityBatch, ActivityCall, ActivityResult, TranscriptCursor,
 };
 
-use super::base::{Collection, Collector, CollectorContext};
+use super::base::{ActivityIndexer, Collection, Collector, CollectorContext};
 
 pub const COLLECTOR_NAME: &str = "agent-activity";
 
@@ -68,7 +70,7 @@ impl AgentActivityCollector {
     }
 
     /// Read up to the byte budget of unread transcript, newest files first.
-    pub fn scan(&self, cursors: &BTreeMap<String, TranscriptCursor>) -> ActivityBatch {
+    fn read_batch(&self, cursors: &BTreeMap<String, TranscriptCursor>) -> ActivityBatch {
         let mut skipped = BTreeMap::new();
         let mut candidates: Vec<(i64, i64, String, PathBuf, i64)> = Vec::new();
         for (agent, root) in &self.roots {
@@ -196,6 +198,10 @@ impl Collector for AgentActivityCollector {
         false
     }
 
+    fn project_scoped(&self) -> bool {
+        false
+    }
+
     fn collect(
         &mut self,
         _ctx: &mut CollectorContext<'_>,
@@ -203,6 +209,15 @@ impl Collector for AgentActivityCollector {
         _now: &mut dyn FnMut() -> Moment,
     ) -> Collection {
         Collection::ok(Vec::new())
+    }
+}
+
+impl ActivityIndexer for AgentActivityCollector {
+    fn scan(
+        &mut self,
+        cursors: &BTreeMap<String, TranscriptCursor>,
+    ) -> Result<ActivityBatch, VogtError> {
+        Ok(self.read_batch(cursors))
     }
 }
 
@@ -836,7 +851,7 @@ mod tests {
             BTreeMap::from([("claude".to_string(), root.clone())]),
             1 << 20,
         )
-        .scan(&BTreeMap::new());
+        .read_batch(&BTreeMap::new());
         assert_eq!(
             batch
                 .calls
@@ -882,7 +897,7 @@ mod tests {
             BTreeMap::from([("claude".to_string(), root.clone())]),
             1 << 20,
         );
-        let first = collector.scan(&BTreeMap::new());
+        let first = collector.read_batch(&BTreeMap::new());
         assert_eq!(first.calls.len(), 1);
         std::fs::write(
             &file,
@@ -899,7 +914,7 @@ mod tests {
             .collect();
         // The stored cursor is at the complete line. Re-scan from a cursor that
         // has not seen the half line yet: the half line is left unread.
-        let second = collector.scan(&cursors);
+        let second = collector.read_batch(&cursors);
         assert!(second.calls.is_empty());
         assert!(second.results.is_empty());
         let cursor = second
@@ -942,7 +957,7 @@ mod tests {
             BTreeMap::from([("claude".to_string(), root.clone())]),
             1 << 20,
         );
-        let first = collector.scan(&BTreeMap::new());
+        let first = collector.read_batch(&BTreeMap::new());
         write_jsonl(
             &file,
             &[claude_use(
@@ -959,7 +974,7 @@ mod tests {
             .iter()
             .map(|cursor| (cursor.path.clone(), cursor.clone()))
             .collect();
-        let batch = collector.scan(&cursors);
+        let batch = collector.read_batch(&cursors);
         assert_eq!(
             batch
                 .calls
@@ -999,7 +1014,7 @@ mod tests {
             BTreeMap::from([("claude".to_string(), root.clone())]),
             budget,
         );
-        let batch = collector.scan(&BTreeMap::new());
+        let batch = collector.read_batch(&BTreeMap::new());
         assert!(batch.bytes_read <= budget + 2_000);
         assert_eq!(batch.backlog_bytes, total - batch.bytes_read);
         let cursors = batch
@@ -1008,7 +1023,7 @@ mod tests {
             .cloned()
             .map(|cursor| (cursor.path.clone(), cursor))
             .collect();
-        let second = collector.scan(&cursors);
+        let second = collector.read_batch(&cursors);
         assert!(second.bytes_read > 0);
         let first_ids: std::collections::BTreeSet<_> = batch
             .calls
@@ -1057,7 +1072,7 @@ mod tests {
             BTreeMap::from([("codex".to_string(), root.clone())]),
             1 << 20,
         )
-        .scan(&BTreeMap::new());
+        .read_batch(&BTreeMap::new());
         assert_eq!(batch.calls[0].tool, "exec_command");
         assert_eq!(batch.calls[0].summary, "docker compose ps");
         assert_eq!(batch.calls[1].tool, "spawn_agent");

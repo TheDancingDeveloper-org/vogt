@@ -4,10 +4,11 @@
 //! Scope is always the registered project list, optionally narrowed to one
 //! project and never widened by looking around. An unnamed sweep runs the core
 //! collectors that are not on-demand: dep-refs, git-local, source-markers and
-//! mirrored-source. Contract-checker runs only when named. Session-outcomes
-//! and agent-activity register only when their source is configured, which is
-//! not this path yet. CI watch is not started here — nothing announces
-//! concluded checks until that collector exists.
+//! mirrored-source, plus session-outcomes when an engine is configured and
+//! agent-activity when transcript roots are. Contract-checker runs only when
+//! named. Forge and deploy-lane collectors are not ported: a sweep refuses
+//! while either is configured rather than answering as if they did not exist.
+//! CI watch is not started here.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
@@ -17,10 +18,11 @@ use serde_json::{json, Map, Value};
 use crate::application::context::{AppContext, Built};
 use crate::application::resolve;
 use crate::collectors::{
-    CollectorContext, CollectorRegistry, MirroredSourceCollector, Registered, RegisteredProject,
-    Sweeper,
+    AgentActivityCollector, CollectorContext, CollectorRegistry, DeclaredSessions,
+    MirroredSourceCollector, Registered, RegisteredProject, SessionOutcomeCollector, SessionRecord,
+    Sweeper, SESSION_OBSERVATION_LIMIT,
 };
-use crate::core::{Clock, IdFactory, Observation, Project};
+use crate::core::{Clock, CodingSession, IdFactory, Observation, Project};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 use crate::storage::observed_types::{DepRefRow, SweepReport};
@@ -40,7 +42,7 @@ pub fn sweep_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     crate::with_ctx!(ctx, |ctx| sweep(ctx, &params))
 }
 
-fn sweep<C: Clock, I: IdFactory>(
+fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
     ctx: &AppContext<C, I>,
     params: &Value,
 ) -> Result<Value, VogtError> {
@@ -50,6 +52,22 @@ fn sweep<C: Clock, I: IdFactory>(
         .get("offline_only")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+
+    // Forge and deploy-lane collectors are not ported. Python registers them
+    // whenever one is configured, so a sweep that quietly omitted them would
+    // answer differently from Python on every real deployment that has one.
+    if crate::adapters::forge::has_configured_forge(&ctx.config) {
+        return Err(VogtError::InvalidRequest(
+            "sweep cannot run while a forge is configured: the forge collectors (forge-issues, forge-prs, forge-checks, forge-releases, forge-posture, forge-notifications, forge-labels) are not ported yet"
+                .to_string(),
+        ));
+    }
+    if !ctx.config.deploy_lanes.is_empty() {
+        return Err(VogtError::InvalidRequest(
+            "sweep cannot run while a deploy lane is configured: the deploy-lanes collector is not ported yet"
+                .to_string(),
+        ));
+    }
 
     let projects = {
         let view = ctx.declared.read()?;
@@ -80,6 +98,33 @@ fn sweep<C: Clock, I: IdFactory>(
             MirroredSourceCollector::new(registered),
         )))
         .map_err(VogtError::InvalidRequest)?;
+    if let Some(engine) = ctx.engine.clone() {
+        registry
+            .add(Registered::Collector(Box::new(
+                SessionOutcomeCollector::new(
+                    engine,
+                    DeclaredSessionJoin::new(ctx.declared.clone()),
+                ),
+            )))
+            .map_err(VogtError::InvalidRequest)?;
+    }
+    if !ctx.config.agent_activity_roots.is_empty() {
+        let services: Vec<(&str, &str)> = ctx
+            .config
+            .agent_activity_services
+            .iter()
+            .map(|(pattern, service)| (pattern.as_str(), service.as_str()))
+            .collect();
+        let indexer = AgentActivityCollector::new(
+            ctx.config.agent_activity_roots.clone(),
+            ctx.config.agent_activity_max_bytes_per_sweep,
+            &services,
+        )
+        .map_err(VogtError::InvalidRequest)?;
+        registry
+            .add(Registered::Indexer(Box::new(indexer)))
+            .map_err(VogtError::InvalidRequest)?;
+    }
     let mut selected: Vec<String> = registry
         .select(&named, offline_only)?
         .into_iter()
@@ -197,6 +242,89 @@ fn projections<C: Clock, I: IdFactory>(
 
 fn count_of(counts: &BTreeMap<String, i64>, key: &str) -> i64 {
     counts.get(key).copied().unwrap_or(0)
+}
+
+/// The declared reads `session-outcomes` needs, done on its behalf.
+///
+/// Collectors never touch declared data. This holds another handle on the same
+/// store and re-reads per project, the way Python's `_DeclaredSessions` does.
+struct DeclaredSessionJoin<C, I> {
+    declared: crate::storage::sqlite::declared::SqliteDeclaredStore<C, I>,
+    work_item_projects: std::cell::RefCell<HashMap<String, Option<String>>>,
+}
+
+impl<C: Clock, I: IdFactory> DeclaredSessionJoin<C, I> {
+    fn new(declared: crate::storage::sqlite::declared::SqliteDeclaredStore<C, I>) -> Self {
+        Self {
+            declared,
+            work_item_projects: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
+}
+
+impl<C: Clock, I: IdFactory> DeclaredSessions for DeclaredSessionJoin<C, I> {
+    fn for_project(&self, project: &Project) -> Vec<SessionRecord> {
+        let Ok(view) = self.declared.read() else {
+            return Vec::new();
+        };
+        let Ok(sessions) = view.list_sessions(
+            Some(&project.id),
+            None,
+            true,
+            i64::try_from(SESSION_OBSERVATION_LIMIT).unwrap_or(i64::MAX),
+            0,
+        ) else {
+            return Vec::new();
+        };
+        let mut refs: HashMap<String, String> = HashMap::new();
+        for session in &sessions {
+            let Some(work_item_id) = session.work_item_id.as_deref() else {
+                continue;
+            };
+            if refs.contains_key(work_item_id) {
+                continue;
+            }
+            if let Ok(Some(item)) = view.work_item_by_id(work_item_id) {
+                refs.insert(work_item_id.to_string(), item.reference);
+            }
+        }
+        sessions
+            .iter()
+            .map(|session| session_record(session, &refs))
+            .collect()
+    }
+
+    fn project_of_work_item(&self, work_item_ref: &str) -> Option<String> {
+        if let Some(cached) = self.work_item_projects.borrow().get(work_item_ref) {
+            return cached.clone();
+        }
+        let slug = self.declared.read().ok().and_then(|view| {
+            let item = view.work_item_by_ref(work_item_ref).ok().flatten()?;
+            let project_id = item.project_id.as_deref()?;
+            view.project_by_id(project_id)
+                .ok()
+                .flatten()
+                .map(|project| project.slug)
+        });
+        self.work_item_projects
+            .borrow_mut()
+            .insert(work_item_ref.to_string(), slug.clone());
+        slug
+    }
+}
+
+fn session_record(session: &CodingSession, refs: &HashMap<String, String>) -> SessionRecord {
+    SessionRecord {
+        id: session.id.clone(),
+        engine_session_id: session.engine_session_id.clone(),
+        cwd: session.cwd.clone(),
+        started_at: session.started_at,
+        stopped_at: session.stopped_at,
+        work_item: session
+            .work_item_id
+            .as_deref()
+            .and_then(|id| refs.get(id).cloned()),
+    }
 }
 
 fn report_summary(report: &SweepReport) -> Value {
@@ -574,6 +702,77 @@ mod tests {
             params["repo_url"] = Value::String(repo.to_string());
         }
         register_op(built, params).unwrap();
+    }
+
+    /// A configured forge or deploy lane refuses the whole sweep, and the
+    /// refusal names the collectors that are not ported yet.
+    #[test]
+    fn a_configured_forge_or_deploy_lane_refuses_the_sweep() {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-collect-refuse-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = dir.join("forge-token");
+        std::fs::write(&token, "secret-token\n").unwrap();
+        let config = VogtConfig {
+            data_dir: dir.clone(),
+            github_token_file: Some(token),
+            ..VogtConfig::default()
+        };
+        let forged = build_context(
+            config,
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let refused = sweep_op(&forged, json!({})).unwrap_err();
+        let message = refused.to_string();
+        assert!(matches!(refused, VogtError::InvalidRequest(_)), "{message}");
+        for name in [
+            "forge-issues",
+            "forge-prs",
+            "forge-checks",
+            "forge-releases",
+            "forge-posture",
+            "forge-notifications",
+            "forge-labels",
+        ] {
+            assert!(message.contains(name), "{message}");
+        }
+
+        let config = VogtConfig {
+            data_dir: dir,
+            deploy_lanes: vec![crate::config::DeployLane {
+                name: "dev".to_string(),
+                project: "alpha".to_string(),
+                branch: "main".to_string(),
+                receipt_repo: None,
+                receipt_path: None,
+                version_url: None,
+            }],
+            ..VogtConfig::default()
+        };
+        let laned = build_context(
+            config,
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let refused = sweep_op(&laned, json!({})).unwrap_err();
+        let message = refused.to_string();
+        assert!(message.contains("deploy-lanes"), "{message}");
     }
 
     /// An unnamed sweep over a project holding one `TODO(vogt)` runs
