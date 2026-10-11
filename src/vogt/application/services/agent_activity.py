@@ -36,6 +36,7 @@ from vogt.application.models import (
 )
 from vogt.application.services import _resolve
 from vogt.collectors.agent_activity import COLLECTOR_NAME
+from vogt.core.session_economics import SessionEconomics, meter
 from vogt.errors import NotFound
 from vogt.storage.observed_types import ActivityQuery
 
@@ -122,25 +123,33 @@ def summarize_agent_activity(
         query, limit=params.limit, offset=params.offset
     )
     links = _vogt_sessions(ctx, {row.agent_session_id for row in rows})
-    sessions = [
-        AgentActivitySessionSummary(
-            agent=row.agent,
-            agent_session_id=row.agent_session_id,
-            vogt_session_id=links.get(row.agent_session_id),
-            project=_project_of(projects, row.cwd),
-            cwd=row.cwd,
-            first_at=row.first_at,
-            last_at=row.last_at,
-            calls=row.calls,
-            errors=row.errors,
-            error_rate=round(row.errors / row.calls, 4) if row.calls else 0.0,
-            tool_wait_ms=row.wait_ms,
-            unfinished=row.calls - row.finished,
-            tools=row.tools,
-            services=row.services,
+    sessions = []
+    for row in rows:
+        reading = _economics(row.transcript_path, row.agent)
+        sessions.append(
+            AgentActivitySessionSummary(
+                agent=row.agent,
+                agent_session_id=row.agent_session_id,
+                vogt_session_id=links.get(row.agent_session_id),
+                project=_project_of(projects, row.cwd),
+                cwd=row.cwd,
+                first_at=row.first_at,
+                last_at=row.last_at,
+                calls=row.calls,
+                errors=row.errors,
+                error_rate=round(row.errors / row.calls, 4) if row.calls else 0.0,
+                tool_wait_ms=row.wait_ms,
+                unfinished=row.calls - row.finished,
+                tools=row.tools,
+                services=row.services,
+                turns=None if reading is None else reading.turns,
+                context_tokens=None if reading is None else reading.context_tokens,
+                peak_context_tokens=(
+                    None if reading is None else reading.peak_context_tokens
+                ),
+                compactions=None if reading is None else reading.compactions,
+            )
         )
-        for row in rows
-    ]
     return AgentActivitySummaryResult(
         sessions=sessions,
         total=len(sessions),
@@ -229,3 +238,15 @@ def _vogt_sessions(ctx: AppContext, agent_ids: Iterable[str]) -> dict[str, str]:
             if session is not None:
                 links[agent_id] = session.id
     return links
+
+
+def _economics(path: str | None, agent: str) -> SessionEconomics | None:
+    """Meter the conversation's transcript. None when it cannot be read:
+    a missing file is "not measured", not an empty conversation."""
+    if not path:
+        return None
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    return meter(text.splitlines(), agent=agent)

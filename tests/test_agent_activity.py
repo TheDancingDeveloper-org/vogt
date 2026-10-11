@@ -587,6 +587,8 @@ def test_store_filters_narrow(claude_root: Path, tmp_path: Path) -> None:
     assert summary[0].wait_ms == 3000
     assert summary[0].tools == {"Bash": 2}
     assert summary[0].services == {"github": 1, "http": 1}
+    assert summary[0].transcript_path is not None
+    assert summary[0].transcript_path.endswith("conv-1.jsonl")
 
 
 # -- the operations --------------------------------------------------------
@@ -686,6 +688,22 @@ def test_a_sweep_indexes_and_the_ops_link_project_and_vogt_session(
     assert only.error_rate == 1.0
     assert only.services == {"git": 1}
     assert only.vogt_session_id == started.session.id
+    # The same transcript the index read, metered live. Claude with no usage
+    # block counts the turn and leaves context at 0: the 4-char estimate is
+    # only for agents that never record usage. Zero here is a reading, not
+    # "unread" — unlinking the file below is what makes the fields null.
+    assert only.turns == 1
+    assert only.context_tokens == 0
+    assert only.peak_context_tokens == 0
+    assert only.compactions == 0
+    transcript = claude_root / "-estate" / "eng-1.jsonl"
+    transcript.unlink()
+    unread = summarize_agent_activity(
+        ctx, AgentActivitySummaryParams(session=started.session.id)
+    ).sessions[0]
+    assert unread.turns is None
+    assert unread.context_tokens is None
+    assert unread.compactions is None
 
     unlinked = search_agent_activity(
         ctx, AgentActivitySearchParams(session="conv-1", errors_only=True)

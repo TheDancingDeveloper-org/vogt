@@ -199,6 +199,8 @@ from vogt.application.models import (
     ServeResult,
     SessionAnswerResult,
     SessionBlockedResult,
+    SessionEconomicsParams,
+    SessionEconomicsResult,
     SessionGrantResult,
     SessionInputParams,
     SessionInputResult,
@@ -1351,6 +1353,23 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.last_reply,
             route=HttpRoute("GET", "/sessions/last-reply"),
             cli=CliBinding(("session", "last-reply")),
+        ),
+        Operation(
+            name="session.economics",
+            summary=(
+                "Read what a session's agent transcript cost: turns, context "
+                "tokens (measured for Claude Code, estimated otherwise), peak "
+                "context, compactions, tool-result bytes, repeated reads and "
+                "per-turn wall clock. Cost is null (no price table) and the "
+                "worktree is not counted. Takes either id."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionEconomicsParams,
+            result_model=SessionEconomicsResult,
+            handler=services.economics,
+            route=HttpRoute("GET", "/sessions/economics"),
+            cli=CliBinding(("session", "economics")),
         ),
         Operation(
             name="session.wait",
