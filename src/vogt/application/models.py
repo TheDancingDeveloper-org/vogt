@@ -5026,6 +5026,101 @@ class SessionWaitResult(Result):
     screen_tail: list[str] = []
 
 
+class SessionChange(Result):
+    """One session delta, oldest first in a page."""
+
+    seq: int
+    at: datetime | None = None
+    session: str = Field(
+        description=(
+            "The session: Vogt's `ses_…` id when the engine session is linked, "
+            "otherwise the engine's own UUID."
+        )
+    )
+    kind: str = Field(
+        description=(
+            "ready, approval, exited, errored, blocked, unblocked, hibernated or woken."
+        )
+    )
+    summary: str = ""
+
+
+class SessionChangesParams(Params):
+    since: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Return deltas published after this seq. 0 reads the retained "
+            "ring. Pass the previous result's `next_cursor`."
+        ),
+    )
+    ids: list[str] = Field(
+        default=[],
+        description=(
+            "Sessions to read, each `ses_…` or an engine UUID. Empty reads "
+            "every session. There is no supervised-by-me filter yet."
+        ),
+    )
+    limit: int = Field(
+        default=100, ge=1, le=500, description="How many deltas at most (1-500)."
+    )
+
+
+class SessionChangesResult(Result):
+    """Deltas since a cursor, and where to read from next."""
+
+    changes: list[SessionChange] = []
+    next_cursor: int = Field(description="The seq to pass as `since` on the next read.")
+    truncated: bool = Field(
+        description=(
+            "True when the ring no longer holds everything after `since`; "
+            "the page starts at the oldest event still retained."
+        )
+    )
+
+
+class SessionWaitAnyParams(Params):
+    ids: list[str] = Field(
+        default=[],
+        description=(
+            "Sessions to wait on, each `ses_…` or an engine UUID. Empty waits "
+            "on every session. There is no supervised-by-me filter yet."
+        ),
+    )
+    until: list[str] = Field(
+        default=[],
+        description=(
+            "Kinds that end the wait: ready, approval, exited, errored, "
+            "blocked, unblocked, hibernated, woken. Empty uses the engine's "
+            "default (ready, blocked, approval, exited, errored)."
+        ),
+    )
+    cursor: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Ignore deltas at or before this seq, so a replayed page is not "
+            "waited on twice. Omit to accept the next match."
+        ),
+    )
+    timeout_s: int = Field(
+        default=120,
+        ge=1,
+        le=600,
+        description="Seconds to wait at most (1-600). Answers `timeout` then.",
+    )
+
+
+class SessionWaitAnyResult(Result):
+    """Why a wait across sessions ended."""
+
+    outcome: str = Field(description="`changed` when a delta matched, else `timeout`.")
+    change: SessionChange | None = None
+    next_cursor: int = Field(
+        description="The seq to pass as `cursor` on the next wait."
+    )
+
+
 class SessionLastReplyParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     n: int = Field(

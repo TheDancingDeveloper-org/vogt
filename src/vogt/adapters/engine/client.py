@@ -520,6 +520,69 @@ class EngineWait:
 
 
 @dataclass(frozen=True)
+class EngineChange:
+    """One session delta from `GET /api/sessions/changes`."""
+
+    seq: int
+    at: str
+    session: str
+    kind: str
+    summary: str
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineChange:
+        return cls(
+            seq=_optional_int(payload.get("seq")) or 0,
+            at=_optional_str(payload.get("at")) or "",
+            session=str(payload.get("session", "")),
+            kind=str(payload.get("kind", "")),
+            summary=str(payload.get("summary", "")),
+        )
+
+
+@dataclass(frozen=True)
+class EngineChanges:
+    """A page of session deltas since a cursor."""
+
+    changes: tuple[EngineChange, ...]
+    next_cursor: int
+    truncated: bool
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineChanges:
+        raw = payload.get("changes")
+        return cls(
+            changes=tuple(
+                EngineChange.from_payload(row) for row in raw if isinstance(row, dict)
+            )
+            if isinstance(raw, list)
+            else (),
+            next_cursor=_optional_int(payload.get("next_cursor")) or 0,
+            truncated=bool(payload.get("truncated", False)),
+        )
+
+
+@dataclass(frozen=True)
+class EngineWaitAny:
+    """Why `GET /api/sessions/wait-any` returned."""
+
+    outcome: str
+    change: EngineChange | None
+    next_cursor: int
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, Any]) -> EngineWaitAny:
+        change = payload.get("change")
+        return cls(
+            outcome=str(payload.get("outcome", "")),
+            change=(
+                EngineChange.from_payload(change) if isinstance(change, dict) else None
+            ),
+            next_cursor=_optional_int(payload.get("next_cursor")) or 0,
+        )
+
+
+@dataclass(frozen=True)
 class EngineTaskFinding:
     """Something a bound agent-task run reported about itself.
 
@@ -1005,6 +1068,59 @@ class EngineClient:
         if not isinstance(payload, dict):
             return None
         return EngineWait.from_payload(payload)
+
+    def session_changes(
+        self,
+        *,
+        since: int,
+        ids: list[str] | None = None,
+        limit: int = 100,
+    ) -> EngineChanges | None:
+        """Session deltas published after `since` (0 reads the whole ring).
+
+        `ids` restricts the page to those engine session ids (absent: every
+        session). `None` on a 404 (an engine without the route).
+        """
+        query: dict[str, str] = {"since": str(int(since)), "limit": str(int(limit))}
+        if ids:
+            query["ids"] = ",".join(ids)
+        payload = self._call(
+            f"/api/sessions/changes?{urllib.parse.urlencode(query)}",
+            allow_missing=True,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineChanges.from_payload(payload)
+
+    def wait_any(
+        self,
+        *,
+        ids: list[str] | None = None,
+        until: list[str] | None = None,
+        cursor: int | None = None,
+        timeout_s: int = 120,
+    ) -> EngineWaitAny | None:
+        """Block until one of `ids` publishes a kind in `until`, or time runs
+        out. `None` on a 404 (an engine without the route).
+
+        The HTTP timeout is the wait plus a margin, so a wait that runs its
+        full course is answered rather than cut off by the client.
+        """
+        query: dict[str, str] = {"timeout_s": str(int(timeout_s))}
+        if ids:
+            query["ids"] = ",".join(ids)
+        if until:
+            query["until"] = ",".join(until)
+        if cursor is not None:
+            query["cursor"] = str(int(cursor))
+        payload = self._call(
+            f"/api/sessions/wait-any?{urllib.parse.urlencode(query)}",
+            allow_missing=True,
+            timeout=timeout_s + 15,
+        )
+        if not isinstance(payload, dict):
+            return None
+        return EngineWaitAny.from_payload(payload)
 
     def set_blocked(
         self,

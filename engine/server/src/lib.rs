@@ -14,6 +14,7 @@ pub mod assistant_stream;
 pub mod auth;
 pub mod autopilot;
 pub mod call;
+pub mod changes;
 pub mod chat_api;
 pub mod chat_store;
 pub mod chats;
