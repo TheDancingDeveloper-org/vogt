@@ -6,6 +6,7 @@
 //! demand. The sweeper is the only thing here that touches the observed store.
 
 mod base;
+mod dep_refs;
 mod registry;
 mod source_markers;
 mod sweeper;

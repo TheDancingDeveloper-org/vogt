@@ -570,15 +570,26 @@ mod tests {
         let first = sweep_op(&built, json!({})).unwrap();
         assert_eq!(first["scope"], "all registered projects");
         assert_eq!(first["projects"], 1);
-        assert_eq!(first["subjects"], 1);
+        // source-markers finds the one TODO; dep-refs finds nothing in a tree
+        // with no manifest, but it always writes its scan record.
+        assert_eq!(first["subjects"], 2);
         assert_eq!(first["dep_refs"], 0);
         let reports = first["reports"].as_array().unwrap();
-        assert_eq!(reports.len(), 1);
-        assert_eq!(reports[0]["collector"], "source-markers");
-        assert_eq!(reports[0]["outcome"], "ok");
-        assert_eq!(reports[0]["new"], 1);
-        assert_eq!(reports[0]["unchanged"], 0);
-        assert!(reports[0].get("detail").is_none());
+        assert_eq!(reports.len(), 2);
+        let markers = reports
+            .iter()
+            .find(|report| report["collector"] == "source-markers")
+            .unwrap();
+        assert_eq!(markers["outcome"], "ok");
+        assert_eq!(markers["new"], 1);
+        assert_eq!(markers["unchanged"], 0);
+        assert!(markers.get("detail").is_none());
+        let deps = reports
+            .iter()
+            .find(|report| report["collector"] == "dep-refs")
+            .unwrap();
+        assert_eq!(deps["outcome"], "ok");
+        assert_eq!(deps["new"], 1);
 
         let events = events_list_op(&built, json!({"limit": 100})).unwrap();
         let completed: Vec<_> = events["events"]
@@ -587,17 +598,26 @@ mod tests {
             .iter()
             .filter(|event| event["kind"] == "sweep.completed")
             .collect();
-        assert_eq!(completed.len(), 1);
+        assert_eq!(completed.len(), 2);
         assert_eq!(completed[0]["entity_kind"], "sweep");
-        assert_eq!(completed[0]["entity_id"], reports[0]["sweep_id"]);
-        assert_eq!(completed[0]["summary"]["collector"], "source-markers");
-        assert_eq!(completed[0]["summary"]["new"], 1);
+        let marker_event = completed
+            .iter()
+            .find(|event| event["summary"]["collector"] == "source-markers")
+            .unwrap();
+        assert_eq!(marker_event["entity_id"], markers["sweep_id"]);
+        assert_eq!(marker_event["summary"]["new"], 1);
 
         let second = sweep_op(&built, json!({})).unwrap();
-        assert_eq!(second["subjects"], 1);
+        assert_eq!(second["subjects"], 2);
         assert_eq!(second["dep_refs"], 0);
-        assert_eq!(second["reports"][0]["new"], 0);
-        assert_eq!(second["reports"][0]["unchanged"], 1);
+        let second_markers = second["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|report| report["collector"] == "source-markers")
+            .unwrap();
+        assert_eq!(second_markers["new"], 0);
+        assert_eq!(second_markers["unchanged"], 1);
     }
 
     #[test]
@@ -609,7 +629,7 @@ mod tests {
         };
         assert_eq!(
             message,
-            "no collector named \"git-local\" (available: source-markers)"
+            "no collector named 'git-local' (available: dep-refs, source-markers)"
         );
     }
 

@@ -7,6 +7,7 @@
 use crate::errors::VogtError;
 
 use super::base::{ActivityIndexer, Collector};
+use super::dep_refs::DepRefCollector;
 use super::source_markers::SourceMarkerCollector;
 
 /// Whether this collector opts out of unnamed sweeps.
@@ -18,9 +19,9 @@ pub fn is_on_demand(collector: &dyn Collector) -> bool {
 ///
 /// `contract-checker` belongs here but marked `on_demand_only`, so a plain
 /// `sweep` does not run it. The remaining collectors land in later commits;
-/// until they do, an unnamed sweep selects only `source-markers`.
+/// until they do, an unnamed sweep selects `dep-refs` and `source-markers`.
 pub fn core_collectors() -> Vec<Box<dyn Collector>> {
-    vec![Box::new(SourceMarkerCollector)]
+    vec![Box::new(DepRefCollector), Box::new(SourceMarkerCollector)]
 }
 
 /// What the sweeper holds: an ordinary collector, or one that indexes
@@ -120,7 +121,7 @@ impl CollectorRegistry {
         self.collectors.get(name).ok_or_else(|| {
             let available = self.names().join(", ");
             VogtError::NotFound(format!(
-                "no collector named {name:?} (available: {})",
+                "no collector named '{name}' (available: {})",
                 if available.is_empty() {
                     "none"
                 } else {
@@ -165,7 +166,7 @@ impl CollectorRegistry {
             let collector = self.collectors.remove(name).ok_or_else(|| {
                 let available = self.names().join(", ");
                 VogtError::NotFound(format!(
-                    "no collector named {name:?} (available: {})",
+                    "no collector named '{name}' (available: {})",
                     if available.is_empty() {
                         "none"
                     } else {
