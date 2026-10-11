@@ -75,6 +75,16 @@ pub struct Record {
     /// quietly change it (WI-926).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The launch posture actually applied at the first start (WI-1250): the
+    /// driven-session settings file, and every extra directory the agent was
+    /// given. A wake replays these instead of reading the deployment's current
+    /// config or dropping them because the wake has no new brief. Absent on a
+    /// record written before this field existed; a wake of one falls back to
+    /// the deployment's current settings and adds no directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub add_dirs: Vec<PathBuf>,
     /// What a wake resumes. `None` only for a shell hibernated on request.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation: Option<AgentConversation>,
@@ -118,6 +128,8 @@ impl Record {
             model: None,
             effort: None,
             permission_mode: None,
+            settings_file: None,
+            add_dirs: Vec::new(),
             conversation: None,
             brief_file: None,
             keep_awake: false,

@@ -131,6 +131,7 @@ import {
   activityLabel,
   holdRailOrder,
   isOversight,
+  permissionPostureLabel,
   sessionActivityAge,
   sessionStateWord,
   sessionRuntimeHint,
@@ -1779,6 +1780,16 @@ const App: Component = () => {
                             </a>
                           );
                         }}
+                      </Show>
+                      <Show when={permissionPostureLabel(s.permission_mode)}>
+                        {(label) => (
+                          <span
+                            class={`session-posture${s.permission_mode === "bypass" ? " session-posture--bypass" : ""}`}
+                            title={s.permission_mode === "bypass" ? "Started with no permission checks" : "Edits auto-accepted"}
+                          >
+                            {label()}
+                          </span>
+                        )}
                       </Show>
                     </span>
                     <span class={`state${s.activity === "waiting-for-input" ? " state--waiting" : ""}`}>

@@ -28,6 +28,7 @@ function session(over: Partial<SessionSummary> & { id: string }): SessionSummary
     activity_changed_at: over.activity_changed_at,
     blocked: over.blocked,
     role: over.role,
+    ...over,
   };
 }
 
@@ -176,6 +177,25 @@ describe("resource words", () => {
     expect(sessionStateWord(heavy, 0)).toContain("⚠ 50 GiB");
     expect(sessionResourceWord({ ...heavy, activity: "hibernated" })).toBeNull();
     expect(sessionResourceWord(session({ id: "n" }))).toBeNull();
+  });
+});
+
+describe("a non-default permission posture (WI-1250)", () => {
+  it("names bypass and leaves the default unmarked", async () => {
+    const { permissionPostureLabel, sessionRuntimeHint } = await import("../sessionRowModel");
+    expect(permissionPostureLabel(null)).toBeNull();
+    expect(permissionPostureLabel("")).toBeNull();
+    expect(permissionPostureLabel("default")).toBeNull();
+    expect(permissionPostureLabel("bypass")).toBe("no permission checks");
+    expect(permissionPostureLabel("accept-edits")).toBe("accept-edits");
+    const klaudia = session({
+      id: "k",
+      command: "/usr/bin/klaudia --model test-model --dangerously-skip-permissions",
+      template: "klaudia",
+    });
+    expect(sessionRuntimeHint({ ...klaudia, permission_mode: "bypass" })).toBe(
+      "template klaudia · klaudia · model test-model · permissions bypass",
+    );
   });
 });
 
