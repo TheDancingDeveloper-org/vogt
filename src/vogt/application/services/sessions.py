@@ -1670,10 +1670,7 @@ def commit_for_session(
     engine = _engine(ctx)
     target = _target(ctx, params.id)
     _require_commit_authority(ctx, engine, target.engine_session_id)
-    # TODO(C13, PR #939): read `project.agent_policy.forbidden_text` once that
-    # policy lands. Until then, and with no project to read, send nothing — a
-    # caller never chooses the patterns.
-    forbidden_text: list[str] = []
+    forbidden_text = _forbidden_text_for(ctx, target)
     committed = engine.git_commit(
         session_id=target.engine_session_id,
         message=message,
@@ -2142,6 +2139,17 @@ def _answers_as_person(ctx: AppContext) -> bool:
     process that can read it.
     """
     return ctx.principal.kind == "human" and not _is_engine_credential(ctx)
+
+
+def _forbidden_text_for(ctx: AppContext, target: _Target) -> list[str]:
+    """The target session's project policy patterns (C13), read here, never
+    taken from the caller. A session Vogt never linked has no project, so
+    nothing is forbidden for it beyond what the engine checks anyway."""
+    if target.session is None:
+        return []
+    with ctx.declared.read() as view:
+        project = view.project_by_id(target.session.project_id)
+    return [] if project is None else list(project.agent_policy.forbidden_text)
 
 
 def _caller_engine_session_id(ctx: AppContext) -> str | None:
