@@ -20,8 +20,10 @@ pub fn is_on_demand(collector: &dyn Collector) -> bool {
 /// The offline collectors every instance has.
 ///
 /// `contract-checker` is `on_demand_only`, so a plain `sweep` does not run it.
-/// The remaining collectors land in later commits; until they do, an unnamed
-/// sweep selects `dep-refs`, `git-local` and `source-markers`.
+/// `mirrored-source` needs the registered project list, so the application
+/// layer adds it after this set is built. Until the remaining collectors land,
+/// an unnamed sweep selects `dep-refs`, `git-local`, `source-markers` and
+/// `mirrored-source`.
 pub fn core_collectors() -> Vec<Box<dyn Collector>> {
     vec![
         Box::new(ContractCheckerCollector),

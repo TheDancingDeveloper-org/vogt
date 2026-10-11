@@ -9,10 +9,12 @@ mod base;
 mod contract_checker;
 mod dep_refs;
 mod git_local;
+mod mirrored_source;
+pub use mirrored_source::{MirroredSourceCollector, RegisteredProject};
 mod registry;
 mod source_markers;
 mod sweeper;
 
 pub use base::CollectorContext;
-pub use registry::CollectorRegistry;
+pub use registry::{CollectorRegistry, Registered};
 pub use sweeper::Sweeper;

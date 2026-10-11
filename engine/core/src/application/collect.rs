@@ -15,7 +15,10 @@ use serde_json::{json, Map, Value};
 
 use crate::application::context::{AppContext, Built};
 use crate::application::resolve;
-use crate::collectors::{CollectorContext, CollectorRegistry, Sweeper};
+use crate::collectors::{
+    CollectorContext, CollectorRegistry, MirroredSourceCollector, Registered, RegisteredProject,
+    Sweeper,
+};
 use crate::core::{Clock, IdFactory, Observation, Project};
 use crate::errors::VogtError;
 use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
@@ -57,6 +60,25 @@ fn sweep<C: Clock, I: IdFactory>(
     };
 
     let mut registry = CollectorRegistry::new(None).map_err(VogtError::InvalidRequest)?;
+    // mirrored-source matches a path member against every registered project's
+    // root manifest, so a sweep narrowed to one slug still has to see them all.
+    let registered = {
+        let view = ctx.declared.read()?;
+        view.list_projects(10_000, 0)?
+            .into_iter()
+            .map(|project| RegisteredProject {
+                id: project.id,
+                slug: project.slug,
+                root_path: project.root_path,
+                repo_url: project.repo_url,
+            })
+            .collect()
+    };
+    registry
+        .add(Registered::Collector(Box::new(
+            MirroredSourceCollector::new(registered),
+        )))
+        .map_err(VogtError::InvalidRequest)?;
     let mut selected: Vec<String> = registry
         .select(&named, offline_only)?
         .into_iter()
@@ -572,11 +594,12 @@ mod tests {
         assert_eq!(first["projects"], 1);
         // source-markers finds the one TODO; dep-refs finds nothing in a tree
         // with no manifest, but it always writes its scan record; git-local
-        // finds the directory is not a checkout.
+        // finds the directory is not a checkout; mirrored-source finds nothing
+        // because the tree declares no package.
         assert_eq!(first["subjects"], 3);
         assert_eq!(first["dep_refs"], 0);
         let reports = first["reports"].as_array().unwrap();
-        assert_eq!(reports.len(), 3);
+        assert_eq!(reports.len(), 4);
         let markers = reports
             .iter()
             .find(|report| report["collector"] == "source-markers")
@@ -599,7 +622,7 @@ mod tests {
             .iter()
             .filter(|event| event["kind"] == "sweep.completed")
             .collect();
-        assert_eq!(completed.len(), 3);
+        assert_eq!(completed.len(), 4);
         assert_eq!(completed[0]["entity_kind"], "sweep");
         let marker_event = completed
             .iter()
@@ -624,13 +647,13 @@ mod tests {
     #[test]
     fn missing_collector_is_not_found() {
         let built = opened();
-        let missing = sweep_op(&built, json!({"collectors": ["mirrored-source"]}));
+        let missing = sweep_op(&built, json!({"collectors": ["not-a-collector"]}));
         let Err(VogtError::NotFound(message)) = missing else {
             panic!("a collector that is not ported is not found, not silently skipped");
         };
         assert_eq!(
             message,
-            "no collector named 'mirrored-source' (available: contract-checker, dep-refs, git-local, source-markers)"
+            "no collector named 'not-a-collector' (available: contract-checker, dep-refs, git-local, mirrored-source, source-markers)"
         );
     }
 
