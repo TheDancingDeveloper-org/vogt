@@ -905,6 +905,23 @@ in `ps` for every process in the pod to read. vogt-core folds a `session.start`
 the engine does not recognise, gets no first prompt and keeps only the
 variable.
 
+**The companion guide.** When the start request carries a non-empty
+`companion`, the engine writes it beside the brief as
+`state_dir/agent-task-prompts/sessions/<session-id>.guide.md`
+(`prompt_files.rs`). It holds the standing instructions — how to report being
+blocked, how to drive another session, how to record a result — that used to
+be copied into every brief. The brief itself keeps a one-line pointer to it: the
+brief's own file name, ending `.guide.md` instead of `.md`. `--add-dir` already covers the directory, so the guide needs no flag of
+its own. `DELETE /api/sessions/:id` removes the guide with the brief, and the
+prompt sweep keeps a guide while its session is known, live or hibernated,
+exactly as it keeps the brief.
+
+**Project policy.** A project's `agent_policy` reaches a session only as
+text in its brief, which vogt-core composes. The engine writes no
+per-session hooks and enforces none of it yet: refusing `forbidden_text` and
+an agent's merge onto a production branch is a follow-up, and Klaudia has
+no per-session settings flag to carry such a hook.
+
 **Quiet defaults for Claude Code.** Engine sessions are often driven by
 another agent through `POST /api/sessions/:id/input`, and Claude Code's
 interactive niceties become traps there. Every session whose agent binary is

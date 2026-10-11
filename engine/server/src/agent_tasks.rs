@@ -1279,7 +1279,10 @@ impl AgentTaskRegistry {
             }
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let live = prompt_files::session_id_from_prompt_file(name.as_ref())
+            // A brief and its companion guide both belong to the session. Either
+            // stays while the session is known — live or hibernated — and both
+            // go once the registry has forgotten it.
+            let live = prompt_files::session_id_from_artifact(name.as_ref())
                 .is_some_and(|id| self.sessions.knows(id));
             if !live {
                 remove_session_prompt_with_tally(&entry_path, tally)?;
@@ -1481,6 +1484,7 @@ impl AgentTaskRegistry {
             cols: Some(100),
             rows: Some(30),
             scrollback_bytes: None,
+            companion: None,
         })?;
 
         // Capture the run's starting git position in its own workspace, so the

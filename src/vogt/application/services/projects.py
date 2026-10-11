@@ -526,8 +526,15 @@ def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResul
     def body(txn: WriteTxn, actor: Actor) -> WriteOutcome[ProjectResult]:
         del actor
         project = _resolve.project(txn, params.slug)
-        if params.repo_url is None and params.exclusions is None:
-            msg = "give --repo-url or --exclusions; there is nothing else to update"
+        if (
+            params.repo_url is None
+            and params.exclusions is None
+            and params.agent_policy is None
+        ):
+            msg = (
+                "give --repo-url, --exclusions or --agent-policy; there is "
+                "nothing else to update"
+            )
             raise InvalidRequest(msg)
         txn.update_project(
             project.id,
@@ -536,6 +543,7 @@ def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResul
                 exclusions=(
                     None if params.exclusions is None else tuple(params.exclusions)
                 ),
+                agent_policy=params.agent_policy,
             ),
             at=ctx.clock(),
         )
@@ -551,6 +559,7 @@ def update_project(ctx: AppContext, params: UpdateProjectParams) -> ProjectResul
                 "slug": project.slug,
                 "exclusions": list(updated.exclusions),
                 "repo_url": updated.repo_url,
+                "agent_policy": updated.agent_policy.model_dump(mode="json"),
             },
         )
 

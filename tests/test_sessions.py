@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from pathlib import Path
 from typing import Any, Literal
 
 import pytest
@@ -32,6 +33,7 @@ from vogt.application.models import (
     SearchOutputParams,
     StartSessionParams,
     StopSessionParams,
+    UpdateProjectParams,
 )
 from vogt.application.services import (
     create_work,
@@ -46,8 +48,10 @@ from vogt.application.services import (
     search_output,
     start_session,
     stop_session,
+    update_project,
 )
 from vogt.core.auth import hash_token
+from vogt.core.entities import AgentPolicy
 from vogt.errors import InvalidRequest, MissingReason, NotFound
 
 from tests.conftest import native_work_item
@@ -302,11 +306,19 @@ def test_no_task_leaves_the_brief_untouched(
 def test_every_brief_says_how_to_report_being_blocked(
     wired: AppContext, engine: StandInEngine
 ) -> None:
-    """WI-873: the convention is in the brief, not left to be discovered."""
+    """WI-873: the convention travels with the session, not left to be discovered.
+
+    It lives in the companion guide rather than copied into the brief: the
+    brief names that file, and the guide carries the full text.
+    """
     start_session(wired, StartSessionParams(project="vogt", reason=WHY))
-    assert "session_report_blocked" in engine.last_spec["prompt"]
+    prompt = engine.last_spec["prompt"]
+    guide = engine.last_spec["companion"]
+    assert ".guide.md" in prompt
+    assert "session_report_blocked" not in prompt
+    assert "session_report_blocked" in guide
     start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
-    assert "session_report_unblocked" in engine.last_spec["prompt"]
+    assert "session_report_unblocked" in engine.last_spec["companion"]
 
 
 def test_autopilot_adds_the_keep_going_convention_and_is_audited(
@@ -807,8 +819,14 @@ def test_the_work_items_brief_travels_with_the_session(
     assert "WI-2 — Sweep drops a page" in brief
     assert "The second page of results never arrives." in brief
     assert result.session.id in brief, "the brief says which session it belongs to"
-    assert "VOGT_HTTP_TOKEN" in brief, (
-        "a brief that describes the work without saying how to record what was "
+    guide = engine.last_spec["companion"]
+    # The engine names the guide for its own id, so the brief points at it by
+    # its relation to the brief file, never by the Vogt id.
+    assert ".guide.md" in brief
+    assert f"{result.session.id}.guide.md" not in brief
+    assert "VOGT_HTTP_TOKEN" not in brief
+    assert "VOGT_HTTP_TOKEN" in guide, (
+        "a session that describes the work without saying how to record what was "
         "found leaves the write capability undiscovered"
     )
 
@@ -1357,7 +1375,10 @@ def test_every_brief_says_a_denial_is_reported_not_routed_around(
         wired, StartSessionParams(work_item="WI-1", autopilot=True, reason=WHY)
     )
     prompt = engine.last_spec["prompt"]
-    assert "A permission denial is one of these" in prompt
+    guide = engine.last_spec["companion"]
+    assert "A permission denial is one of these" not in prompt
+    assert "A permission denial is one of these" in guide
+    # Autopilot's own line stays in the brief: it is per start, not boilerplate.
     assert "never routed around" in prompt
 
 
@@ -1536,3 +1557,114 @@ def test_the_engines_stack_secret_may_mint_whoever_it_was_issued_to(
             as_bearer(phone),
             EngineSessionTokenParams(engine_session_id=ENGINE_SESSION, reason=WHY),
         )
+
+
+def test_a_project_policy_is_in_the_brief_and_nothing_else_is_sent(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The brief says the whole policy. No enforcement payload is sent to the
+    engine: per-session hooks are a follow-up, and Klaudia has no flag to
+    carry one."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(
+                forbidden_text=["(?i)wip"],
+                merge_deploys_prod=True,
+                main_branches=["release"],
+                commit_identity="Author Name <name@example.com>",
+                test_recipe="uv run pytest",
+                rules=["Never commit the design directory."],
+            ),
+            reason=WHY,
+        ),
+    )
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    brief = engine.last_spec["prompt"]
+    assert "## Project policy — vogt" in brief
+    assert "(?i)wip" in brief
+    assert "Merges deploy production" in brief
+    assert "`release`" in brief
+    assert "uv run pytest" in brief
+    assert "Never commit the design directory." in brief
+    assert "policy" not in engine.last_spec
+
+
+def test_a_policy_with_nothing_to_enforce_sends_no_hook_payload(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """Guidance alone changes the brief and nothing about the start request."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(test_recipe="uv run pytest"),
+            reason=WHY,
+        ),
+    )
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "uv run pytest" in engine.last_spec["prompt"]
+    assert "policy" not in engine.last_spec
+
+
+def test_a_pattern_that_does_not_compile_is_refused(wired: AppContext) -> None:
+    """A rule that could never match is a mistake, stored it would do nothing."""
+    with pytest.raises(ValidationError, match="does not compile"):
+        update_project(
+            wired,
+            UpdateProjectParams(
+                slug="vogt",
+                agent_policy=AgentPolicy(forbidden_text=["(unclosed"]),
+                reason=WHY,
+            ),
+        )
+
+
+def test_touch_points_render_and_the_map_stays_inside_the_tree(
+    instance: AppContext, engine: StandInEngine, tmp_path: Path
+) -> None:
+    """Files, symbols, done and gates are a block; the map is the tree they sit in.
+
+    A file outside the working tree is a hint that was wrong, so it adds no
+    directory. Dotfiles are skipped, and a brief with no touch points is
+    unchanged.
+    """
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.py").write_text("x = 1\n", encoding="utf-8")
+    (src / ".secret").write_text("no\n", encoding="utf-8")
+    (tmp_path / "README.md").write_text("hi\n", encoding="utf-8")
+    ctx = dataclasses.replace(
+        instance,
+        engine=EngineClient(base_url="http://127.0.0.1:8910", transport=engine),
+    )
+    register_project(
+        ctx, RegisterProjectParams(name="Mapped", root_path=str(tmp_path), reason=WHY)
+    )
+    start_session(
+        ctx,
+        StartSessionParams(
+            project="mapped",
+            task="wire the map",
+            files=["src/lib.py", "README.md:1-3", "/etc/passwd"],
+            symbols=["lib"],
+            done=["the map renders"],
+            gates=["uv run pytest"],
+            reason=WHY,
+        ),
+    )
+    brief = engine.last_spec["prompt"]
+    assert "## Touch points" in brief
+    assert "`src/lib.py`" in brief
+    assert "**Symbols** `lib`" in brief
+    assert "the map renders" in brief
+    assert "uv run pytest" in brief
+    assert "`/etc/passwd`" in brief
+    outline = brief.split("**Repo map**", 1)[1]
+    assert "src/" in outline
+    assert "lib.py" in outline
+    assert ".secret" not in outline
+    assert "passwd" not in outline
+    start_session(ctx, StartSessionParams(project="mapped", reason=WHY))
+    assert "## Touch points" not in engine.last_spec["prompt"]
