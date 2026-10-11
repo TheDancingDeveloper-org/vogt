@@ -5,6 +5,7 @@
 //! anything, and does not know whether it is being run on a schedule or on
 //! demand. The sweeper is the only thing here that touches the observed store.
 
+mod agent_activity;
 mod base;
 mod contract_checker;
 mod dep_refs;
