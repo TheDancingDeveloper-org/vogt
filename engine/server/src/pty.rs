@@ -1759,10 +1759,13 @@ mod economics_tests {
             before + 1,
             "a record without a snapshot adds nothing"
         );
+        // The message names the label, not the rendered text: that text holds
+        // every family, including the secret-read counter, and has no place in
+        // a test log.
         let rendered = crate::metrics::metrics().render();
         assert!(
             !rendered.contains("template=\"wi-1245-observe\",model="),
-            "{rendered}"
+            "an unnamed model was labelled on the wi-1245-observe series"
         );
     }
 }
