@@ -7,6 +7,7 @@
 use crate::errors::VogtError;
 
 use super::base::{ActivityIndexer, Collector};
+use super::contract_checker::ContractCheckerCollector;
 use super::dep_refs::DepRefCollector;
 use super::git_local::GitLocalCollector;
 use super::source_markers::SourceMarkerCollector;
@@ -18,12 +19,12 @@ pub fn is_on_demand(collector: &dyn Collector) -> bool {
 
 /// The offline collectors every instance has.
 ///
-/// `contract-checker` belongs here but marked `on_demand_only`, so a plain
-/// `sweep` does not run it. The remaining collectors land in later commits;
-/// until they do, an unnamed sweep selects `dep-refs`, `git-local` and
-/// `source-markers`.
+/// `contract-checker` is `on_demand_only`, so a plain `sweep` does not run it.
+/// The remaining collectors land in later commits; until they do, an unnamed
+/// sweep selects `dep-refs`, `git-local` and `source-markers`.
 pub fn core_collectors() -> Vec<Box<dyn Collector>> {
     vec![
+        Box::new(ContractCheckerCollector),
         Box::new(DepRefCollector),
         Box::new(GitLocalCollector),
         Box::new(SourceMarkerCollector),

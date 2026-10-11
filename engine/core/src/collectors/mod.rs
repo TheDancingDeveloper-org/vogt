@@ -6,6 +6,7 @@
 //! demand. The sweeper is the only thing here that touches the observed store.
 
 mod base;
+mod contract_checker;
 mod dep_refs;
 mod git_local;
 mod registry;

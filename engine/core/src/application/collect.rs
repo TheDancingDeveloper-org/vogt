@@ -624,13 +624,13 @@ mod tests {
     #[test]
     fn missing_collector_is_not_found() {
         let built = opened();
-        let missing = sweep_op(&built, json!({"collectors": ["contract-checker"]}));
+        let missing = sweep_op(&built, json!({"collectors": ["mirrored-source"]}));
         let Err(VogtError::NotFound(message)) = missing else {
             panic!("a collector that is not ported is not found, not silently skipped");
         };
         assert_eq!(
             message,
-            "no collector named 'contract-checker' (available: dep-refs, git-local, source-markers)"
+            "no collector named 'mirrored-source' (available: contract-checker, dep-refs, git-local, source-markers)"
         );
     }
 
