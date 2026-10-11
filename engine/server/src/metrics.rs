@@ -30,21 +30,6 @@ use std::{
 use axum::{http::header, response::IntoResponse, routing::get, Router};
 use parking_lot::Mutex;
 
-/// Tokens. A session's context sits in the lower buckets; a full window in the last.
-const CONTEXT_BUCKETS: &[f64] = &[
-    1_000.0,
-    4_000.0,
-    16_000.0,
-    32_000.0,
-    64_000.0,
-    128_000.0,
-    200_000.0,
-    1_000_000.0,
-];
-
-/// How many times a conversation was compacted. Most are zero or one.
-const COMPACTION_BUCKETS: &[f64] = &[0.0, 1.0, 2.0, 4.0, 8.0, 16.0];
-
 /// Seconds. Spans "instant" to "someone gave up": a healthy launch sits in the
 /// first buckets and the 2026-10-05 incident (85–145 s) in the last.
 const LAUNCH_BUCKETS: &[f64] = &[
@@ -56,35 +41,29 @@ type Labels = Vec<(&'static str, String)>;
 struct Histogram {
     buckets: &'static [f64],
     counts: Vec<AtomicU64>,
-    /// Duration families: microseconds. Count families: the observed number.
     sum_micros: AtomicU64,
     count: AtomicU64,
-    /// Divide the stored sum by this when rendering. `1e6` makes microseconds
-    /// into seconds; `1.0` leaves a token or turn count as itself.
-    sum_divisor: f64,
 }
 
 impl Histogram {
-    fn new(buckets: &'static [f64], sum_divisor: f64) -> Self {
+    fn new(buckets: &'static [f64]) -> Self {
         Self {
             buckets,
             counts: buckets.iter().map(|_| AtomicU64::new(0)).collect(),
             sum_micros: AtomicU64::new(0),
             count: AtomicU64::new(0),
-            sum_divisor,
         }
     }
 
-    /// `sum_units` is the exposition sum, already in the family's unit. A
-    /// duration histogram stores microseconds and renders them as seconds; a
-    /// count histogram (tokens, turns) stores the number itself.
-    fn observe_number(&self, value: f64, sum_units: u64) {
+    fn observe(&self, value: Duration) {
+        let secs = value.as_secs_f64();
         for (bound, count) in self.buckets.iter().zip(&self.counts) {
-            if value <= *bound {
+            if secs <= *bound {
                 count.fetch_add(1, Ordering::Relaxed);
             }
         }
-        self.sum_micros.fetch_add(sum_units, Ordering::Relaxed);
+        self.sum_micros
+            .fetch_add(value.as_micros() as u64, Ordering::Relaxed);
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -94,50 +73,28 @@ pub struct HistogramVec {
     name: &'static str,
     help: &'static str,
     buckets: &'static [f64],
-    /// `1e6` for a seconds histogram stored as microseconds; `1.0` for a count.
-    sum_divisor: f64,
     series: Mutex<BTreeMap<Labels, Arc<Histogram>>>,
 }
 
 impl HistogramVec {
     fn new(name: &'static str, help: &'static str, buckets: &'static [f64]) -> Self {
-        Self::with_sum_divisor(name, help, buckets, 1e6)
-    }
-
-    fn with_sum_divisor(
-        name: &'static str,
-        help: &'static str,
-        buckets: &'static [f64],
-        sum_divisor: f64,
-    ) -> Self {
         Self {
             name,
             help,
             buckets,
-            sum_divisor,
             series: Mutex::new(BTreeMap::new()),
         }
     }
 
     pub fn observe(&self, labels: &[(&'static str, &str)], value: Duration) {
-        self.observe_with(labels, value.as_secs_f64(), value.as_micros() as u64);
-    }
-
-    /// Observe a count (tokens, turns, compactions). The sum is the number
-    /// itself, not seconds. A negative observation is dropped.
-    pub fn observe_count(&self, labels: &[(&'static str, &str)], value: u64) {
-        self.observe_with(labels, value as f64, value);
-    }
-
-    fn observe_with(&self, labels: &[(&'static str, &str)], value: f64, sum_units: u64) {
         let key: Labels = labels.iter().map(|(k, v)| (*k, (*v).to_string())).collect();
         let histogram = Arc::clone(
             self.series
                 .lock()
                 .entry(key)
-                .or_insert_with(|| Arc::new(Histogram::new(self.buckets, self.sum_divisor))),
+                .or_insert_with(|| Arc::new(Histogram::new(self.buckets))),
         );
-        histogram.observe_number(value, sum_units);
+        histogram.observe(value);
     }
 
     fn render(&self, out: &mut String) {
@@ -164,7 +121,7 @@ impl HistogramVec {
                 "{}_sum{} {}",
                 self.name,
                 format_labels(labels),
-                h.sum_micros.load(Ordering::Relaxed) as f64 / h.sum_divisor
+                h.sum_micros.load(Ordering::Relaxed) as f64 / 1e6
             );
             let _ = writeln!(out, "{}_count{} {count}", self.name, format_labels(labels));
         }
@@ -243,11 +200,6 @@ pub struct Metrics {
     /// Secret projects read at launch, by how (`bulk`: one request; `cli`:
     /// one vendor-CLI run per secret, the slow fallback) and outcome.
     pub launch_secret_reads: CounterVec,
-    /// Context tokens of a metered transcript, by agent. Not per session:
-    /// a session id would unbound the series count (C16).
-    pub context_tokens: HistogramVec,
-    /// Compactions counted in a metered transcript, by agent.
-    pub compactions: HistogramVec,
 }
 
 impl Metrics {
@@ -276,18 +228,6 @@ impl Metrics {
                 "vogt_session_launch_secret_reads_total",
                 "Secret projects read at session launch, by mode (bulk or cli) and outcome.",
             ),
-            context_tokens: HistogramVec::with_sum_divisor(
-                "vogt_session_context_tokens",
-                "Context tokens of a metered agent transcript, by agent.",
-                CONTEXT_BUCKETS,
-                1.0,
-            ),
-            compactions: HistogramVec::with_sum_divisor(
-                "vogt_session_compactions",
-                "Compactions counted in a metered agent transcript, by agent.",
-                COMPACTION_BUCKETS,
-                1.0,
-            ),
         }
     }
 
@@ -299,8 +239,6 @@ impl Metrics {
         self.launch_stage.render(&mut out);
         self.session_starts.render(&mut out);
         self.launch_secret_reads.render(&mut out);
-        self.context_tokens.render(&mut out);
-        self.compactions.render(&mut out);
         out
     }
 }
@@ -391,25 +329,5 @@ mod tests {
         c.render(&mut out);
         assert!(out.contains("t_total{outcome=\"ok\"} 2"), "{out}");
         assert!(out.contains("t_total{outcome=\"a\\\"b\"} 1"), "{out}");
-    }
-
-    #[test]
-    fn a_count_histogram_renders_the_sum_as_the_number() {
-        let h = HistogramVec::with_sum_divisor("t_tokens", "help text", &[100.0, 1_000.0], 1.0);
-        h.observe_count(&[("agent", "claude")], 80);
-        h.observe_count(&[("agent", "claude")], 400);
-        let mut out = String::new();
-        h.render(&mut out);
-        assert!(
-            out.contains("t_tokens_bucket{agent=\"claude\",le=\"100.0\"} 1"),
-            "{out}"
-        );
-        assert!(
-            out.contains("t_tokens_bucket{agent=\"claude\",le=\"1000.0\"} 2"),
-            "{out}"
-        );
-        assert!(out.contains("t_tokens_sum{agent=\"claude\"} 480"), "{out}");
-        assert!(out.contains("t_tokens_count{agent=\"claude\"} 2"), "{out}");
-        assert!(!out.contains("0.00048"), "{out}");
     }
 }

@@ -5199,6 +5199,14 @@ class AgentActivitySummaryParams(Params):
     )
     limit: int = Field(default=50, ge=1, le=200)
     offset: int = Field(default=0, ge=0)
+    economics: bool = Field(
+        default=False,
+        description=(
+            "Also meter each conversation's transcript (turns, context, "
+            "compactions). Off by default: a summary must not read every "
+            "transcript on the page."
+        ),
+    )
 
 
 class AgentActivitySessionSummary(Result):
