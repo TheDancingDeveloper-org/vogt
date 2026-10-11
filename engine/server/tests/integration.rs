@@ -10185,7 +10185,9 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         "{config}"
     );
 
-    // A wake resumes; it neither re-sends the brief nor needs its directory.
+    // A wake resumes and does not re-send the brief. It keeps the brief's
+    // directory, recorded at the first start, so the resumed agent can still
+    // re-read its brief without a permission prompt (WI-1250).
     client
         .post(format!("{base}/api/sessions/{id}/hibernate"))
         .send()
@@ -10199,10 +10201,8 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
     let printed =
         live_output_containing(&client, &base, &id, &["arg=[--resume]", "helper=["]).await;
     let woken = &printed[printed.rfind("arg=[--resume]").unwrap()..];
-    assert!(
-        !woken.contains("--add-dir") && !woken.contains("Vogt started"),
-        "{woken:?}"
-    );
+    assert!(woken.contains("arg=[--add-dir="), "{woken:?}");
+    assert!(!woken.contains("Vogt started"), "{woken:?}");
 }
 
 #[tokio::test]
