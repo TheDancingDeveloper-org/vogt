@@ -1943,7 +1943,9 @@ where
 {
     ctx.engine.as_ref().ok_or_else(|| {
         VogtError::EngineUnavailable(
-            "no session engine is configured (set session_engine_url)".to_string(),
+            "no session engine is configured, so there is nothing to open a \
+             terminal on (set VOGT_ENGINE_URL)"
+                .to_string(),
         )
     })
 }

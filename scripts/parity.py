@@ -181,7 +181,11 @@ def _run_cli(binary: str, steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if "params" not in step:
                 continue
             params = _substitute(step["params"], seen, root)
-            argv = [binary, "--json", "--data-dir", str(data), *step["operation"].split("."), *_flags(params)]
+            # A step may name its CLI words explicitly when the operation's
+            # dotted name does not match the command path, as `session.log_tail`
+            # is the `session log` subcommand.
+            words = step["cli"] if "cli" in step else step["operation"].split(".")
+            argv = [binary, "--json", "--data-dir", str(data), *words, *_flags(params)]
             completed = subprocess.run(
                 argv, env=env, capture_output=True, text=True, check=False
             )

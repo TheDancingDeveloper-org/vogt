@@ -1447,5 +1447,88 @@
     },
     "exit": 0,
     "operation": "import"
+  },
+  {
+    "body": {
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "sessions": []
+    },
+    "exit": 0,
+    "operation": "session.list"
+  },
+  {
+    "body": {
+      "counts": {
+        "needs_you": 0,
+        "total": 0
+      },
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "rows": [],
+      "swept_at": "2026-01-02T03:04:05Z"
+    },
+    "exit": 0,
+    "operation": "session.sweep"
+  },
+  {
+    "body": {
+      "bytes": 0,
+      "engine": "no session engine is configured (VOGT_ENGINE_URL is unset)",
+      "session_id": null,
+      "text": "",
+      "total_bytes": 0,
+      "truncated": false
+    },
+    "exit": 0,
+    "operation": "session.log_tail"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.start"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.input"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.screen"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.wait"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.answer"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.hibernate"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.keep_awake"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.set_role"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.wake"
+  },
+  {
+    "body": null,
+    "exit": 1,
+    "operation": "session.stop"
   }
 ]
