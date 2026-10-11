@@ -1632,7 +1632,7 @@ def test_a_named_worktree_is_forwarded_and_patterns_are_not(
     wired: AppContext, engine: StandInEngine
 ) -> None:
     """The caller names a worktree; it never names the forbidden patterns.
-    Those stay empty until the project's own policy supplies them."""
+    A project with no policy sends none."""
     started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
     commit_for_session(
         wired,
@@ -1646,6 +1646,30 @@ def test_a_named_worktree_is_forwarded_and_patterns_are_not(
     sent = [row for row in engine.sent if row["url"].endswith("/api/git/op")]
     assert sent[-1]["body"]["worktree"] == "/srv/estate/vogt-wt"
     assert sent[-1]["body"]["forbidden_text"] == []
+
+
+def test_the_projects_forbidden_text_is_what_the_engine_checks(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """C13 meets C14: the patterns come from the target's project policy."""
+    update_project(
+        wired,
+        UpdateProjectParams(
+            slug="vogt",
+            agent_policy=AgentPolicy(forbidden_text=["(?i)grok"]),
+            reason=WHY,
+        ),
+    )
+    started = start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    commit_for_session(
+        wired,
+        CommitForSessionParams(
+            id=started.session.id, message="commit for the worker", reason=WHY
+        ),
+    )
+    sent = [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+    assert sent[-1]["body"]["forbidden_text"] == ["(?i)grok"]
+    assert "forbidden_text" not in CommitForSessionParams.model_fields
 
 
 def test_a_session_cannot_commit_its_own_work(
