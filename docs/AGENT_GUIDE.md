@@ -282,7 +282,9 @@ The recipe is **start with a task → wait until ready → read → answer → s
    agents share a directory). `session_screen` gives the visible `lines` now;
    `session_log_tail` the raw history. `session_list` shows each live agent
    session's `last_reply_excerpt`, so you can pick which to act on without
-   prompting every one.
+   prompting every one. An overseer reads `session_digest` instead of
+   `session_screen` plus `session_last_reply` plus a git log: one engine row,
+   with the blocked report and the economics the engine already computed.
 4. **Answer.** `session_input` types `text`, then presses the named `keys` in
    order (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl-c`,
    `ctrl-d`, `backspace`), then Enter if `submit`. A menu or dialog: `keys:

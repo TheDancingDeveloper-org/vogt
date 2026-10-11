@@ -190,6 +190,10 @@ class EngineSession:
     #: Who asked the session to stop, and why (WI-913).
     stopped_by: str | None = None
     stop_reason: str | None = None
+    #: Metered transcript numbers the engine already computed (WI-1242), when
+    #: the row carries them. Absent means not measured here — the core does
+    #: not read the transcript to fill it.
+    economics: dict[str, Any] | None = None
 
     @property
     def hibernated(self) -> bool:
@@ -231,6 +235,9 @@ class EngineSession:
             else None,
             stop_reason=_optional_str((payload.get("stop") or {}).get("reason"))
             if isinstance(payload.get("stop"), dict)
+            else None,
+            economics=payload["economics"]
+            if isinstance(payload.get("economics"), dict)
             else None,
         )
 

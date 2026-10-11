@@ -452,6 +452,14 @@ impl Session {
         self.blocked.lock().clone()
     }
 
+    /// Put a blocked report back onto a session that was just woken, without
+    /// announcing it. `set_blocked` publishes, and a publish becomes a push, so
+    /// restoring through it would page the operator again for a block they were
+    /// already told about. The next hibernation re-reads whatever is here.
+    pub fn restore_blocked(&self, report: Option<vogt_engine_contract::BlockedReport>) {
+        *self.blocked.lock() = report;
+    }
+
     /// Record (or, with `None`, clear) the agent's blocked report and
     /// announce the change. Refused for a session whose child has exited:
     /// nothing is left to unblock.

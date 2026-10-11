@@ -621,6 +621,11 @@ impl SessionRegistry {
                 // rebuilds the record from the live session, so the mark has to
                 // live there too.
                 session.set_superseded_by(record.superseded_by.clone());
+                // Taken, not cloned: the live record must not keep a report the
+                // woken session can later clear, and restoring must not publish
+                // — a publish is a push the operator already received. The next
+                // hibernation captures whatever the session still holds.
+                session.restore_blocked(record.blocked.take());
                 hibernation::remove_screen(&self.cfg.state_dir, id);
                 Some(record)
             }
@@ -1056,6 +1061,9 @@ impl SessionRegistry {
         let (screen, rows, cols) = session.screen_source(hibernation::SCREEN_BYTES);
         record.name = session.name();
         record.keep_awake = session.keep_awake();
+        // The report survives the stop: a wake and a restart both read it
+        // back off this record (C4).
+        record.blocked = session.blocked();
         record.rows = Some(rows);
         record.cols = Some(cols);
         // A handoff survives a forced wake and a later hibernation that does
@@ -1754,7 +1762,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         turn_started_at: None,
         last_output_at: None,
         approval: None,
-        blocked: None,
+        blocked: record.blocked.clone(),
         conversation: record.conversation.clone(),
         hibernation: Some(hibernation),
         keep_awake: record.keep_awake,
