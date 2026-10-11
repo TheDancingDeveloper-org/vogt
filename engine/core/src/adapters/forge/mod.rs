@@ -22,7 +22,7 @@ mod lanes;
 mod models;
 mod payloads;
 mod provider;
-mod registry;
+pub mod registry;
 mod sync;
 mod transport;
 mod urls;

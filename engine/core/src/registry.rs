@@ -215,6 +215,12 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "import" => Some(crate::application::services::import_merge::import_op),
         "events.list" => Some(crate::application::services::history::events_list_op),
         "audit.list" => Some(crate::application::services::history::audit_list_op),
+        "forge.account_status" => {
+            Some(crate::application::services::forge_accounts::account_status_op)
+        }
+        "forge.account_unlink" => {
+            Some(crate::application::services::forge_accounts::account_unlink_op)
+        }
         _ => None,
     }
 }

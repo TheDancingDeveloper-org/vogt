@@ -10,7 +10,7 @@ use crate::application::context::{build_context, Built};
 use crate::application::services::{inbox, initiatives, notifications, preferences};
 use crate::core::{ActorKind, Moment, Principal, SequentialIds, StepClock};
 use crate::errors::VogtError;
-use crate::storage::interface::{DeclaredStore, ObservedStore, WriteTxn};
+use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView, WriteTxn};
 use crate::storage::observed_types::PendingObservation;
 
 fn moment() -> Moment {
@@ -430,4 +430,100 @@ fn time_inbox_list(built: &Built, count: usize) -> std::time::Duration {
     let elapsed = started.elapsed();
     assert_eq!(listed["entries"].as_array().unwrap().len(), count);
     elapsed
+}
+
+/// Status reports only the acting actor's accounts, never the token, and a
+/// principal who has never written has none.
+#[test]
+fn forge_account_status_lists_what_is_linked() {
+    use crate::application::services::forge_accounts;
+    let built = opened();
+    let Built::StepSequential(ctx) = &built else {
+        panic!("expected a step clock");
+    };
+    let empty = forge_accounts::account_status_op(&built, json!({})).unwrap();
+    assert_eq!(empty["accounts"].as_array().unwrap().len(), 0);
+
+    let actor = ctx
+        .declared
+        .read()
+        .unwrap()
+        .actor_by_identity(&principal().identity_ref)
+        .unwrap()
+        .unwrap();
+    let mut txn = ctx.declared.write().unwrap();
+    txn.upsert_forge_account(
+        &actor.id,
+        "github.com",
+        "octocat",
+        "repo",
+        "ciphertext",
+        moment(),
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let listed = forge_accounts::account_status_op(&built, json!({})).unwrap();
+    let accounts = listed["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0]["login"], "octocat");
+    assert_eq!(accounts[0]["linked"], true);
+    assert!(accounts[0].get("encrypted_token").is_none());
+
+    let one = forge_accounts::account_status_op(&built, json!({"host": "github.com"})).unwrap();
+    assert_eq!(one["accounts"].as_array().unwrap().len(), 1);
+    let none = forge_accounts::account_status_op(&built, json!({"host": "other.example"})).unwrap();
+    assert_eq!(none["accounts"].as_array().unwrap().len(), 0);
+}
+
+/// Unlink deletes the stored account and records that one was linked. An
+/// unknown host is refused, and unlinking twice reports that nothing was.
+#[test]
+fn forge_account_unlink_removes_the_stored_account() {
+    use crate::application::services::forge_accounts;
+    let built = opened();
+    let Built::StepSequential(ctx) = &built else {
+        panic!("expected a step clock");
+    };
+    let actor = ctx
+        .declared
+        .read()
+        .unwrap()
+        .actor_by_identity(&principal().identity_ref)
+        .unwrap()
+        .unwrap();
+    let mut txn = ctx.declared.write().unwrap();
+    txn.upsert_forge_account(
+        &actor.id,
+        "github.com",
+        "octocat",
+        "repo",
+        "ciphertext",
+        moment(),
+    )
+    .unwrap();
+    txn.commit().unwrap();
+
+    let refused = forge_accounts::account_unlink_op(
+        &built,
+        json!({"host": "no.such.host", "reason": "tidying"}),
+    );
+    assert!(matches!(refused, Err(VogtError::InvalidRequest(_))));
+
+    let unlinked = forge_accounts::account_unlink_op(
+        &built,
+        json!({"host": "github.com", "reason": "the token leaked"}),
+    )
+    .unwrap();
+    assert_eq!(unlinked["linked"], false);
+    assert!(unlinked["login"].is_null());
+    let after = forge_accounts::account_status_op(&built, json!({})).unwrap();
+    assert_eq!(after["accounts"].as_array().unwrap().len(), 0);
+
+    let again = forge_accounts::account_unlink_op(
+        &built,
+        json!({"host": "github.com", "reason": "nothing left"}),
+    )
+    .unwrap();
+    assert_eq!(again["linked"], false);
 }
