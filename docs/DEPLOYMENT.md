@@ -610,10 +610,6 @@ cosign verify \
   ghcr.io/thedancingdeveloper-org/vogt-stack@sha256:<digest>
 ```
 
-Use cosign 2.6 or newer. The workflows sign with cosign 3, which stores each
-signature as a Sigstore bundle; older cosign looks only for the legacy
-`.sig` tag and reports "no signatures found" on a correctly signed image.
-
 The same command applies to `vogt-voice@sha256:<digest>` unchanged. Then, in
 `deploy/.env`:
 
