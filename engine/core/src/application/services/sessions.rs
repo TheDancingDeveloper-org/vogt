@@ -59,9 +59,6 @@ const SESSION_INPUT_MAX_BYTES: usize = 64 * 1024;
 const CONFIRM_READS: usize = 10;
 const CONFIRM_INTERVAL: Duration = Duration::from_millis(200);
 
-/// The longest a session's own log tail may be. The engine caps it the same way.
-const LOG_TAIL_MAX_BYTES: i64 = 262_144;
-
 /// The keys `session.input` accepts.
 const INPUT_KEYS: [&str; 10] = [
     "enter",
@@ -1227,8 +1224,9 @@ where
         });
     };
     let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
-    let bytes = params.tail_bytes.clamp(1, LOG_TAIL_MAX_BYTES);
-    let log = match engine.history_log(&engine_id, bytes, params.strip_ansi) {
+    // `tail_bytes` is bounded by the parameter schema (1..=256 KiB), exactly as
+    // Python's pydantic model bounds it, and the service passes it through.
+    let log = match engine.history_log(&engine_id, params.tail_bytes, params.strip_ansi) {
         // A missing log — unknown id, or history off — is an empty answer, not
         // an error: there is simply no output to show.
         Ok(None) => return Ok(LogTailResult::empty()),

@@ -195,10 +195,7 @@ pub fn last_replies(transcript: &Transcript, n: usize) -> Vec<Reply> {
     };
     picked
         .into_iter()
-        .map(|(text, at)| Reply {
-            text: cut(&decisions::activity_redact(&text), MAX_MESSAGE_CHARS),
-            at,
-        })
+        .map(|(text, at)| reply(&text, at))
         .collect()
 }
 
@@ -207,8 +204,20 @@ pub fn last_replies(transcript: &Transcript, n: usize) -> Vec<Reply> {
 pub fn reply(text: &str, at: Option<String>) -> Reply {
     Reply {
         text: cut(&decisions::activity_redact(text), MAX_MESSAGE_CHARS),
-        at,
+        // Both paths hand `at` over raw: the file path after a shape check, the
+        // opencode path straight from the engine. Python parses it and pydantic
+        // re-renders the JSON with a `Z` suffix, so normalise here once.
+        at: at.as_deref().and_then(json_timestamp),
     }
+}
+
+/// An instant as pydantic writes it for `model_dump(mode="json")`, or `None`
+/// when it is not one. `datetime.fromisoformat` only accepts a trailing `Z`
+/// after it is rewritten to `+00:00`, and a missing offset is UTC.
+fn json_timestamp(value: &str) -> Option<String> {
+    crate::core::from_iso(&value.replace('Z', "+00:00"))
+        .ok()
+        .map(|moment| moment.to_json())
 }
 
 /// The one-line list excerpt of a reply's (redacted) text.
@@ -795,6 +804,23 @@ mod tests {
         // whole dump (`looks_like_dump`), and the redactor leaves the label.
         assert!(reply.text.contains("authority-data"));
         assert!(!reply.text.contains("LS0tLS1CRUdJTi"));
+    }
+
+    #[test]
+    fn a_reply_timestamp_is_rendered_as_pydantic_writes_it() {
+        // `+00:00` is what the engine stores; the answer's JSON carries `Z`.
+        let offset = reply("done", Some("2026-10-05T00:01:00+00:00".to_string()));
+        assert_eq!(offset.at.as_deref(), Some("2026-10-05T00:01:00Z"));
+        // A trailing `Z` parses the same and stays `Z`.
+        let zulu = reply("done", Some("2026-10-05T00:01:00.500000Z".to_string()));
+        assert_eq!(zulu.at.as_deref(), Some("2026-10-05T00:01:00.500000Z"));
+        // A non-UTC offset is converted, not just rewritten.
+        let ahead = reply("done", Some("2026-10-05T02:01:00+02:00".to_string()));
+        assert_eq!(ahead.at.as_deref(), Some("2026-10-05T00:01:00Z"));
+        // Anything that is not an instant is no time, in both paths.
+        assert_eq!(reply("done", Some("yesterday".to_string())).at, None);
+        assert_eq!(reply("done", Some(String::new())).at, None);
+        assert_eq!(reply("done", None).at, None);
     }
 
     #[test]

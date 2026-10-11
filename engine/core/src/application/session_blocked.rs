@@ -46,10 +46,14 @@ pub fn report_blocked_op(ctx: &Built, params: Value) -> Result<Value, VogtError>
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    // Do not trim `id` here. Python treats a whitespace-only id as given
-    // (`params.id or _own_session`), and the shared resolver is what then
-    // refuses it; trimming first would fall through to the own-session path.
-    let id = params.get("id").and_then(Value::as_str).map(str::to_string);
+    // Python treats an exactly-empty id as omitted (`params.id or
+    // _own_session`), so it takes the own-session path. Whitespace is given:
+    // the shared resolver refuses it, and trimming first would fall through.
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
     crate::with_ctx!(ctx, |ctx| set_blocked(
         ctx,
         id.as_deref(),
@@ -61,7 +65,11 @@ pub fn report_blocked_op(ctx: &Built, params: Value) -> Result<Value, VogtError>
 
 pub fn report_unblocked_op(ctx: &Built, params: Value) -> Result<Value, VogtError> {
     let reason = required_text(&params, "reason", REPORT_UNBLOCKED)?;
-    let id = params.get("id").and_then(Value::as_str).map(str::to_string);
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
     crate::with_ctx!(ctx, |ctx| set_blocked(
         ctx,
         id.as_deref(),
@@ -79,11 +87,13 @@ fn set_blocked<C: Clock + 'static, I: IdFactory + 'static>(
     items: &[String],
 ) -> Result<Value, VogtError> {
     let reason = validate_reason(reason)?;
+    // Python asks for the engine before resolving the own session, so a caller
+    // with no engine and no id hears that no engine is configured.
+    let engine = engine_of(ctx)?;
     let reference = match id {
         Some(id) => id.to_string(),
         None => own_session(ctx)?,
     };
-    let engine = engine_of(ctx)?;
     let target = resolve_target(ctx, &reference)?;
     let engine_id = target.engine_session_id.clone();
     let updated = engine
@@ -401,6 +411,50 @@ mod tests {
             "{err:?}"
         );
         assert!(seen.0.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_empty_id_is_the_own_session() {
+        let seen = Seen(Arc::new(Mutex::new(Vec::new())));
+        let built = fresh("empty", session_principal(), &seen);
+        seed(&built);
+        let reported = super::report_blocked_op(
+            &built,
+            json!({"id": "", "blocker": "need a decision", "reason": "because"}),
+        )
+        .unwrap();
+        assert_eq!(reported["id"], "ses_0001");
+        assert_eq!(seen.0.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn no_engine_is_reported_before_the_own_session() {
+        let dir =
+            std::env::temp_dir().join(format!("vogt-blocked-noengine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut clock = None;
+        let mut ids = None;
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let built = build_context(
+            crate::config::VogtConfig {
+                data_dir: dir,
+                ..crate::config::VogtConfig::default()
+            },
+            Some(Principal::new("local:ada", ActorKind::Human, "Ada").unwrap()),
+            Some(StepClock::new(Moment::from_unix(1_700_000_000, 0))),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let err = super::report_unblocked_op(&built, json!({"reason": "because"})).unwrap_err();
+        assert!(
+            matches!(&err, VogtError::EngineUnavailable(message) if message.contains("no session engine is configured")),
+            "{err:?}"
+        );
     }
 
     #[test]
