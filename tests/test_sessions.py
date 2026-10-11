@@ -450,7 +450,7 @@ def test_a_blank_reason_is_refused_before_the_engine_starts(
         )
 
     assert len(engine.sent) == before, "an invalid write must start no terminal"
-    assert list_sessions(wired, ListSessionsParams()).sessions == []
+    assert list_sessions(wired, ListSessionsParams(mode="full")).sessions == []
 
 
 def test_a_work_item_with_no_project_has_no_tree_to_open_in(
@@ -555,7 +555,7 @@ def test_stopping_a_session_revokes_what_it_held(
 
 def test_the_session_is_linked_to_its_work_item(wired: AppContext) -> None:
     result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
-    listed = list_sessions(wired, ListSessionsParams(work_item="WI-1"))
+    listed = list_sessions(wired, ListSessionsParams(mode="full", work_item="WI-1"))
     assert [row.id for row in listed.sessions] == [result.session.id]
     assert listed.sessions[0].work_item == "WI-1"
     assert listed.sessions[0].reason == WHY
@@ -570,10 +570,13 @@ def test_activity_comes_from_the_engine_not_from_storage(
     "running" would outlive the process it described.
     """
     result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
-    assert list_sessions(wired, ListSessionsParams()).sessions[0].activity == "running"
+    assert (
+        list_sessions(wired, ListSessionsParams(mode="full")).sessions[0].activity
+        == "running"
+    )
 
     engine.alive.clear()
-    after = list_sessions(wired, ListSessionsParams()).sessions[0]
+    after = list_sessions(wired, ListSessionsParams(mode="full")).sessions[0]
     assert after.activity is None
     assert after.alive is False
     assert after.id == result.session.id, "the link survives the process"
@@ -594,7 +597,7 @@ def test_an_exited_process_is_not_alive_though_the_engine_still_lists_it(
     engine.alive[engine_id] = "exited"
     engine.exit_codes[engine_id] = 0
 
-    row = list_sessions(wired, ListSessionsParams()).sessions[0]
+    row = list_sessions(wired, ListSessionsParams(mode="full")).sessions[0]
     assert row.activity == "exited"
     assert row.alive is False
 
@@ -605,10 +608,12 @@ def test_an_exited_unlinked_session_is_listed_only_with_the_stopped_ones(
     engine.unlinked["eng-smoke"] = "exited"
     engine.exit_codes["eng-smoke"] = 0
 
-    default = list_sessions(wired, ListSessionsParams()).sessions
+    default = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert all(row.id != "eng-smoke" for row in default)
 
-    kept = list_sessions(wired, ListSessionsParams(include_stopped=True)).sessions
+    kept = list_sessions(
+        wired, ListSessionsParams(mode="full", include_stopped=True)
+    ).sessions
     smoke = [row for row in kept if row.id == "eng-smoke"]
     assert len(smoke) == 1
     assert smoke[0].alive is False
@@ -630,8 +635,8 @@ def test_a_stopped_session_leaves_the_list(wired: AppContext) -> None:
     result = start_session(wired, StartSessionParams(project="vogt", reason=WHY))
     stop_session(wired, StopSessionParams(id=result.session.id, reason=WHY))
 
-    assert list_sessions(wired, ListSessionsParams()).sessions == []
-    kept = list_sessions(wired, ListSessionsParams(include_stopped=True))
+    assert list_sessions(wired, ListSessionsParams(mode="full")).sessions == []
+    kept = list_sessions(wired, ListSessionsParams(mode="full", include_stopped=True))
     assert [row.id for row in kept.sessions] == [result.session.id]
     assert kept.sessions[0].stopped_at is not None
 
@@ -654,7 +659,7 @@ def test_an_unlinked_live_session_is_reported(
 ) -> None:
     engine.unlinked["eng-foreign"] = "running"
 
-    listed = list_sessions(wired, ListSessionsParams()).sessions
+    listed = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     foreign = [row for row in listed if row.id == "eng-foreign"]
     assert len(foreign) == 1, "a live session Vogt never started must still show"
     row = foreign[0]
@@ -676,7 +681,7 @@ def test_linked_and_unlinked_sessions_appear_together(
     result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
     engine.unlinked["eng-foreign"] = "idle"
 
-    listed = list_sessions(wired, ListSessionsParams()).sessions
+    listed = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     by_linked = {row.linked: row for row in listed}
     assert by_linked[True].id == result.session.id
     assert by_linked[True].work_item == "WI-1"
@@ -690,7 +695,9 @@ def test_a_project_filter_excludes_unlinked_sessions(
     start_session(wired, StartSessionParams(project="vogt", reason=WHY))
     engine.unlinked["eng-foreign"] = "running"
 
-    listed = list_sessions(wired, ListSessionsParams(project="vogt")).sessions
+    listed = list_sessions(
+        wired, ListSessionsParams(mode="full", project="vogt")
+    ).sessions
     assert all(row.linked for row in listed)
     assert "eng-foreign" not in {row.id for row in listed}
 
@@ -700,8 +707,12 @@ def test_unlinked_sessions_are_not_repeated_across_pages(
 ) -> None:
     engine.unlinked["eng-foreign"] = "running"
 
-    first = list_sessions(wired, ListSessionsParams(limit=50, offset=0)).sessions
-    later = list_sessions(wired, ListSessionsParams(limit=50, offset=50)).sessions
+    first = list_sessions(
+        wired, ListSessionsParams(mode="full", limit=50, offset=0)
+    ).sessions
+    later = list_sessions(
+        wired, ListSessionsParams(mode="full", limit=50, offset=50)
+    ).sessions
     assert "eng-foreign" in {row.id for row in first}
     assert "eng-foreign" not in {row.id for row in later}
 
@@ -714,7 +725,7 @@ def test_a_dead_engine_hides_no_unlinked_sessions(wired: AppContext) -> None:
         engine=EngineClient(base_url="http://127.0.0.1:8910", transport=DeadEngine()),
     )
     start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
-    listed = list_sessions(dead, ListSessionsParams()).sessions
+    listed = list_sessions(dead, ListSessionsParams(mode="full")).sessions
     assert all(row.linked for row in listed)
 
 
@@ -737,7 +748,7 @@ def test_with_no_engine_the_links_still_list(wired: AppContext) -> None:
     result = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
     without = dataclasses.replace(wired, engine=None)
 
-    listed = list_sessions(without, ListSessionsParams())
+    listed = list_sessions(without, ListSessionsParams(mode="full"))
     assert [row.id for row in listed.sessions] == [result.session.id]
     assert listed.engine is not None and "VOGT_ENGINE_URL" in listed.engine
     assert listed.sessions[0].alive is None, (
@@ -754,7 +765,7 @@ def test_a_dead_engine_is_reported_not_rendered_as_stopped(
     )
     start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
 
-    listed = list_sessions(dead, ListSessionsParams())
+    listed = list_sessions(dead, ListSessionsParams(mode="full"))
     assert len(listed.sessions) == 1
     assert listed.engine is not None and "not answering" in listed.engine
     assert listed.sessions[0].alive is None
@@ -1036,7 +1047,7 @@ def test_the_model_asked_for_is_recorded_and_read_back(
     assert started.session.model == "claude-opus-4-5"
     assert started.session.effort == "high"
 
-    listed = list_sessions(wired, ListSessionsParams()).sessions
+    listed = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     assert [(row.model, row.effort) for row in listed] == [("claude-opus-4-5", "high")]
 
 
