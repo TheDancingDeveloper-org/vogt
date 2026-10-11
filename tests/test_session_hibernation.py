@@ -333,6 +333,7 @@ def test_typing_into_a_hibernated_session_wakes_it_first(
         "GET wait",  # until ready
         "POST input",
         "POST input",
+        "GET ",  # the digest row reads the session once more
     ]
 
 
@@ -358,14 +359,16 @@ def test_reading_and_waiting_never_wake_a_session(
     hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
 
     screen = session_screen(wired, SessionScreenParams(id=ses_id))
-    waited = session_wait(wired, SessionWaitParams(id=ses_id, timeout_s=30))
+    waited = session_wait(
+        wired, SessionWaitParams(id=ses_id, timeout_s=30, screen=True)
+    )
 
     assert screen.activity == "hibernated"
     assert screen.lines == HIBERNATED_SCREEN
     assert waited.outcome == "hibernated"
     assert waited.matched is False
     assert waited.waited_ms == 0
-    assert waited.screen.lines == HIBERNATED_SCREEN
+    assert waited.screen is not None and waited.screen.lines == HIBERNATED_SCREEN
     assert "POST wake" not in engine.calls(engine_id)
     assert engine_id in engine.hibernated
 
@@ -384,7 +387,10 @@ def test_hibernated_sessions_are_listed_linked_or_not(
     hibernate_session(wired, HibernateSessionParams(id=ses_id, reason=WHY))
     engine.hibernated.add(UNLINKED)
 
-    rows = {row.id: row for row in list_sessions(wired, ListSessionsParams()).sessions}
+    rows = {
+        row.id: row
+        for row in list_sessions(wired, ListSessionsParams(mode="full")).sessions
+    }
 
     assert rows[ses_id].activity == "hibernated"
     assert rows[ses_id].hibernation is not None
@@ -444,7 +450,7 @@ def test_an_oversight_session_is_nominated_at_start_and_pinned(
     assert "role" not in starts[-1]["body"]
     rows = {
         row.engine_session_id: row
-        for row in list_sessions(wired, ListSessionsParams()).sessions
+        for row in list_sessions(wired, ListSessionsParams(mode="full")).sessions
     }
     assert rows[engine_id].role == "oversight"
     assert {row.role for row in rows.values()} == {"oversight", "worker"}

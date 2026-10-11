@@ -266,7 +266,9 @@ def test_bind_records_the_declared_branch_and_shows_on_the_item(
     assert [s.id for s in detail.sessions] == [ses_id]
     assert detail.sessions[0].alive is True
     assert any(b.source in ("declared", "both") for b in detail.branches)
-    listed = list_sessions(wired, ListSessionsParams(work_item="WI-1")).sessions
+    listed = list_sessions(
+        wired, ListSessionsParams(mode="full", work_item="WI-1")
+    ).sessions
     assert [s.id for s in listed] == [ses_id]
 
 
@@ -344,7 +346,7 @@ def test_an_unlinked_session_is_bound_by_its_engine_label_only(
     assert result.session.work_item_title == "terminal render bug"
     assert engine.labels[UNLINKED] == "WI-1"
     # No adoption (decision 5): the core has no row for it afterwards either.
-    rows = list_sessions(wired, ListSessionsParams()).sessions
+    rows = list_sessions(wired, ListSessionsParams(mode="full")).sessions
     unlinked = next(s for s in rows if s.engine_session_id == UNLINKED)
     assert unlinked.linked is False
     assert unlinked.work_item == "WI-1"

@@ -574,10 +574,13 @@ def get_work(ctx: AppContext, params: GetWorkParams) -> WorkResult:
         # written back onto the item.
         git = git_story_for(ctx, view, item, branches)
     sessions = (
-        list_sessions(ctx, ListSessionsParams(work_item=item.ref)).sessions
+        list_sessions(ctx, ListSessionsParams(work_item=item.ref, mode="full")).sessions
         if native
         else []
     )
+    if params.mode == "summary":
+        item = item.model_copy(update={"body": ""})
+        comments = []
     return WorkResult(
         item=item, comments=comments, sessions=sessions, branches=branches, git=git
     )
@@ -965,7 +968,9 @@ def _warn_live_sessions(ctx: AppContext, result: WorkResult) -> WorkResult:
     with ctx.declared.read() as view:
         if view.work_item_by_ref(item.ref) is None:
             return result  # an upstream item: no session rows point at it
-    sessions = list_sessions(ctx, ListSessionsParams(work_item=item.ref)).sessions
+    sessions = list_sessions(
+        ctx, ListSessionsParams(mode="full", work_item=item.ref)
+    ).sessions
     live = [
         session
         for session in sessions

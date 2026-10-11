@@ -784,7 +784,8 @@ export const listWork = (
 export const listBoard = (params: Record<string, unknown>, signal?: AbortSignal) =>
   call<BoardListResult>("board.list", params, "POST", signal);
 
-export const getWork = (ref: string) => call<WorkDetail>("work.get", { ref });
+export const getWork = (ref: string) =>
+  call<WorkDetail>("work.get", { ref, mode: "full" });
 
 export const backlog = (params: Record<string, unknown> = {}) =>
   call<RankedView>("backlog", { mode: "full", ...params });
@@ -826,7 +827,7 @@ export const listInitiatives = (options: { cache?: boolean } = {}) =>
   // cannot be labelled from the slug alone.
   call<{ initiatives: { id: string; slug: string; title: string }[] }>(
     "initiative.list",
-    {},
+    { mode: "full" },
     "GET",
     undefined,
     options,
@@ -1002,7 +1003,7 @@ export const listSessions = (
 ) =>
   call<{ sessions: SessionSummary[]; engine?: string | null }>(
     "session.list",
-    params,
+    { mode: "full", ...params },
     "GET",
     signal,
   );
@@ -1074,7 +1075,9 @@ export const answerSessionInVogt = (
 export const sweepSessions = (
   params: { screen_lines?: number; project?: string } = {},
   signal?: AbortSignal,
-) => call<SessionSweepResult>("session.sweep", params, "GET", signal);
+) =>
+  // Digest is the MCP default; the board reads `row.session`, so ask for full.
+  call<SessionSweepResult>("session.sweep", { mode: "full", ...params }, "GET", signal);
 
 // -- writes, each carrying the reason its view collected --------------------
 
