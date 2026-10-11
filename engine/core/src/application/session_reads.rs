@@ -579,6 +579,12 @@ mod tests {
         ));
     }
 
+    /// A token shape long enough for the agent-activity redactor (`sk-` needs
+    /// sixteen characters after it), assembled so the source holds no secret.
+    fn secret() -> String {
+        format!("{}{}", "sk-", "abcdefghijklmnop")
+    }
+
     #[test]
     fn an_unknown_session_is_not_found() {
         let built = built("missing", Vec::new(), None);
@@ -612,7 +618,7 @@ mod tests {
                     serde_json::to_vec(&json!({
                         "conversation_id": "oc-1",
                         "replies": [
-                            {"text": "bearer sk-secret-value", "at": "2024-01-02T03:04:05Z"},
+                            {"text": format!("bearer {}", secret()), "at": "2024-01-02T03:04:05Z"},
                             {"text": "later", "at": null}
                         ]
                     }))
@@ -637,8 +643,8 @@ mod tests {
         assert_eq!(result["agent"], "opencode");
         assert!(result["detail"].is_null());
         let text = result["messages"][0]["text"].as_str().unwrap();
-        assert!(text.contains("[redacted]"), "{text}");
-        assert!(!text.contains("sk-secret-value"), "{text}");
+        assert!(text.contains("[REDACTED:token]"), "{text}");
+        assert!(!text.contains(&secret()), "{text}");
         assert_eq!(result["messages"][1]["text"], "later");
         assert_eq!(result["id"], "eng-1");
     }

@@ -6,7 +6,7 @@
 //! `codex resume`, `--session`), then the engine session id itself, then —
 //! only when `allow_cwd_guess` — the newest transcript in the session's
 //! directory written since the session started. Only the tail of one file is
-//! read, and every message is redacted with the observability redactor before
+//! read, and every message is redacted with the agent-activity redactor before
 //! it leaves here. Transcript content is untrusted data.
 
 use std::collections::HashMap;
@@ -18,7 +18,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
-use crate::observability;
+use crate::decisions;
 
 /// The most of a transcript's tail read looking for replies.
 pub const TAIL_BYTES: u64 = 4 * 1024 * 1024;
@@ -66,6 +66,21 @@ static CACHE: LazyLock<Mutex<Cache>> = LazyLock::new(|| {
         runtimes: HashMap::new(),
     })
 });
+
+/// `pathlib.Path.expanduser`. Only a leading `~` is the current user's home;
+/// `~other` is left as written, which is what Python does for an unknown name.
+fn expand_user(path: &Path) -> PathBuf {
+    let mut components = path.components();
+    let Some(std::path::Component::Normal(first)) = components.next() else {
+        return path.to_path_buf();
+    };
+    if first == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(components.as_path());
+        }
+    }
+    path.to_path_buf()
+}
 
 /// Which transcript formats to look in, most likely first.
 pub fn agent_of(command: Option<&str>, template: Option<&str>) -> Vec<&'static str> {
@@ -138,11 +153,14 @@ pub fn find(
         let Some(root) = roots.get(agent) else {
             continue;
         };
+        // Python expands here, so a default of `~/.claude/projects` is a real
+        // directory rather than a literal name that never exists.
+        let root = expand_user(root);
         if !root.is_dir() {
             continue;
         }
         for (conversation_id, basis) in &candidates {
-            if let Some(path) = by_id(agent, root, conversation_id) {
+            if let Some(path) = by_id(agent, &root, conversation_id) {
                 return Some(Transcript {
                     agent: agent.to_string(),
                     path,
@@ -153,7 +171,7 @@ pub fn find(
         }
         if allow_cwd_guess {
             if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
-                if let Some(guessed) = by_cwd(agent, root, cwd, started_at) {
+                if let Some(guessed) = by_cwd(agent, &root, cwd, started_at) {
                     return Some(guessed);
                 }
             }
@@ -178,7 +196,7 @@ pub fn last_replies(transcript: &Transcript, n: usize) -> Vec<Reply> {
     picked
         .into_iter()
         .map(|(text, at)| Reply {
-            text: cut(&observability::redact(&text), MAX_MESSAGE_CHARS),
+            text: cut(&decisions::activity_redact(&text), MAX_MESSAGE_CHARS),
             at,
         })
         .collect()
@@ -188,7 +206,7 @@ pub fn last_replies(transcript: &Transcript, n: usize) -> Vec<Reply> {
 /// same way.
 pub fn reply(text: &str, at: Option<String>) -> Reply {
     Reply {
-        text: cut(&observability::redact(text), MAX_MESSAGE_CHARS),
+        text: cut(&decisions::activity_redact(text), MAX_MESSAGE_CHARS),
         at,
     }
 }
@@ -721,6 +739,87 @@ mod tests {
 
     fn secret() -> String {
         format!("ghp_{}", "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8")
+    }
+
+    /// Assembled at runtime, so this file never holds a whole credential a
+    /// scanner would refuse, and so the test proves the shape rather than one
+    /// value. Each is a shape Python's agent-activity redactor replaces and the
+    /// log-line redactor does not.
+    fn pem_block() -> String {
+        format!(
+            "-----BEGIN {}-----\n{}{}\n-----END {}-----",
+            "OPENSSH PRIVATE KEY",
+            "b3BlbnNzaC1rZXktdjEAAAAA",
+            "BG5vbmUAAAAEbm9uZQ",
+            "OPENSSH PRIVATE KEY",
+        )
+    }
+
+    fn kube_ca() -> String {
+        format!(
+            "{}: {}",
+            "certificate-authority-data",
+            "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0tCkZha2VDZXJ0Rm9yVGVzdHM="
+        )
+    }
+
+    fn aws_access_key() -> String {
+        format!("{}{}", "AKIA", "QWERTYUIOP234567")
+    }
+
+    fn slack_token() -> String {
+        format!(
+            "{}-{}-{}",
+            "xoxb", "123456789012", "AbCdEfGhIjKlMnOpQrStUvWx"
+        )
+    }
+
+    #[test]
+    fn replies_use_the_agent_activity_redactor() {
+        let reply = reply(
+            &format!(
+                "key {} then {} then {} then {}",
+                pem_block(),
+                kube_ca(),
+                aws_access_key(),
+                slack_token(),
+            ),
+            None,
+        );
+        assert!(reply.text.contains("[REDACTED:pem]"));
+        assert!(reply.text.contains("[REDACTED:token]"));
+        assert!(!reply.text.contains("OPENSSH"));
+        assert!(!reply.text.contains(&aws_access_key()));
+        assert!(!reply.text.contains(&slack_token()));
+        // A kubeconfig line is not a token shape. Python withholds it as a
+        // whole dump (`looks_like_dump`), and the redactor leaves the label.
+        assert!(reply.text.contains("authority-data"));
+        assert!(!reply.text.contains("LS0tLS1CRUdJTi"));
+    }
+
+    #[test]
+    fn a_tilde_root_is_expanded_before_it_is_looked_up() {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let Some(home) = home else {
+            return;
+        };
+        let base = temp();
+        // Put the transcript under the real home so expanduser reaches it,
+        // then look it up through a `~` root the way the defaults are written.
+        let real = home.join(".vogt-transcripts-tilde-test");
+        let _ = fs::remove_dir_all(&real);
+        write_claude(&real, ENGINE_ID, &[claude_line("m", "found at home")]);
+        let tilde = PathBuf::from("~/.vogt-transcripts-tilde-test");
+        let mut roots = HashMap::new();
+        roots.insert("claude", tilde.as_path());
+        let found = find(&roots, ENGINE_ID, Some("claude"), None, None, None, false);
+        let found = found.expect("a ~ root must be expanded, not taken literally");
+        let replies = last_replies(&found, 1);
+        let _ = fs::remove_dir_all(&real);
+        let _ = fs::remove_dir_all(&base);
+        assert_eq!(found.basis, "engine-id");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].text, "found at home");
     }
 
     fn claude_line(message_id: &str, text: &str) -> String {
