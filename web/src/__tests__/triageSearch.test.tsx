@@ -14,6 +14,7 @@ import {
   settle,
   stopLiveStream,
   workItem,
+  type RecordedCall,
 } from "./harness";
 
 afterEach(() => {
@@ -22,18 +23,26 @@ afterEach(() => {
 });
 
 describe("board free-text search", () => {
-  it("filters the loaded cards to the term and writes it to the URL", async () => {
-    fakeVogt({
-      "GET /work": {
-        body: {
-          items: [
-            workItem({ ref: "WI-1", title: "Login page throws on submit", state: "open" }),
-            workItem({ ref: "WI-2", title: "Export the weekly report", state: "open" }),
-          ],
-          total: 2,
-        },
+  // Search asks work.list. The board projection (POST /board/list) is derived
+  // from the unfiltered list; a query-bearing GET /work returns only the hit.
+  function searchRoutes() {
+    const items = [
+      workItem({ ref: "WI-1", title: "Login page throws on submit", state: "open" }),
+      workItem({ ref: "WI-2", title: "Export the weekly report", state: "open" }),
+    ];
+    return {
+      "GET /work": (call: RecordedCall) => {
+        const term = (call.query.get("query") ?? "").toLowerCase();
+        const matched = term
+          ? items.filter((item) => `${item.ref} ${item.title}`.toLowerCase().includes(term))
+          : items;
+        return { body: { items: matched, total: matched.length, next_offset: null } };
       },
-    });
+    };
+  }
+
+  it("filters the loaded cards to the term and writes it to the URL", async () => {
+    fakeVogt(searchRoutes());
     const mounted = mountAt("/board", "/board", () => <Board />);
     const { container } = mounted;
     await waitFor(() => expect(container.querySelector("#board-card-WI-1")).toBeTruthy());
@@ -42,28 +51,17 @@ describe("board free-text search", () => {
     const search = container.querySelector<HTMLInputElement>('input[aria-label="Search work items"]');
     expect(search).toBeTruthy();
     fireEvent.input(search!, { target: { value: "login" } });
-    await settle();
+    await waitFor(() => expect(mounted.url()).toContain("q=login"));
 
     // Only the matching card is drawn, and the term is in the URL so it
     // deep-links and saves into a lens.
+    await waitFor(() => expect(container.querySelector("#board-card-WI-2")).toBeNull());
     expect(container.querySelector("#board-card-WI-1")).toBeTruthy();
-    expect(container.querySelector("#board-card-WI-2")).toBeNull();
-    expect(mounted.url()).toContain("q=login");
     mounted.unmount();
   });
 
   it("restores a pasted ?q= term and applies it on load", async () => {
-    fakeVogt({
-      "GET /work": {
-        body: {
-          items: [
-            workItem({ ref: "WI-1", title: "Login page throws on submit", state: "open" }),
-            workItem({ ref: "WI-2", title: "Export the weekly report", state: "open" }),
-          ],
-          total: 2,
-        },
-      },
-    });
+    fakeVogt(searchRoutes());
     const mounted = mountAt("/board", "/board?q=export", () => <Board />);
     const { container } = mounted;
     await waitFor(() => expect(container.querySelector("#board-card-WI-2")).toBeTruthy());
