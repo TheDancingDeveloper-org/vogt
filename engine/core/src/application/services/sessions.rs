@@ -151,7 +151,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = StopSessionParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         reason: require_string(&params, "reason")?,
     };
     Ok(serde_json::to_value(stop_session(ctx, &parsed)?).expect("a session result serialises"))
@@ -192,7 +192,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = LogTailParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         tail_bytes: optional_i64(&params, "tail_bytes", 64 * 1024)?,
         strip_ansi: optional_bool(&params, "strip_ansi")?.unwrap_or(true),
     };
@@ -205,7 +205,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = InputParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         text: optional_string(&params, "text")?,
         keys: optional_string_list(&params, "keys")?,
         submit: optional_bool(&params, "submit")?.unwrap_or(false),
@@ -222,7 +222,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = ScreenParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         scrollback_lines: optional_i64(&params, "scrollback_lines", 0)?,
     };
     Ok(serde_json::to_value(screen(ctx, &parsed)?).expect("a session result serialises"))
@@ -234,7 +234,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = WaitParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         until: optional_string(&params, "until")?.unwrap_or_else(|| "ready".to_string()),
         timeout_s: optional_i64(&params, "timeout_s", 120)?,
     };
@@ -247,7 +247,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = WakeParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         reason: require_string(&params, "reason")?,
     };
     Ok(serde_json::to_value(wake(ctx, &parsed)?).expect("a session result serialises"))
@@ -259,7 +259,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = KeepAwakeParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         keep_awake: require_bool(&params, "keep_awake")?,
         reason: require_string(&params, "reason")?,
     };
@@ -272,7 +272,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = SetRoleParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         role: require_string(&params, "role")?,
         reason: require_string(&params, "reason")?,
     };
@@ -285,7 +285,7 @@ where
     I: IdFactory + 'static,
 {
     let parsed = AnswerParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         option: optional_i64_some(&params, "option")?,
         label: optional_string(&params, "label")?,
         expect_question: optional_string(&params, "expect_question")?,
@@ -300,11 +300,23 @@ where
     I: IdFactory + 'static,
 {
     let parsed = HibernateParams {
-        id: require_string(&params, "id")?,
+        id: require_session_id(&params)?,
         reason: require_string(&params, "reason")?,
         allow_shell: optional_bool(&params, "allow_shell")?.unwrap_or(false),
     };
     Ok(serde_json::to_value(hibernate(ctx, &parsed)?).expect("a session result serialises"))
+}
+
+/// A session id the caller must give. Blank or whitespace is the same refusal
+/// `resolve_target` gives, so the JSON entry points and the typed functions
+/// agree on the text.
+fn require_session_id(params: &Value) -> Result<String, VogtError> {
+    match params.get("id").and_then(Value::as_str) {
+        Some(text) if !text.trim().is_empty() => Ok(text.to_string()),
+        _ => Err(VogtError::InvalidRequest(
+            "a session id is required (ses_… or the engine's session UUID)".to_string(),
+        )),
+    }
 }
 
 /// A bool that may be absent.
@@ -478,11 +490,13 @@ pub struct SessionApprovalOption {
 pub struct SessionApproval {
     pub question: String,
     pub command_excerpt: String,
-    pub detected_at: String,
-    pub deadline_seconds: Option<i64>,
-    pub deadline_at: Option<String>,
     pub kind: String,
     pub options: Vec<SessionApprovalOption>,
+    pub deadline_seconds: Option<i64>,
+    pub deadline_at: Option<String>,
+    /// Absent when the engine did not say when it noticed, which serialises as
+    /// null rather than an empty string.
+    pub detected_at: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -536,6 +550,14 @@ pub struct SessionSummary {
     pub reason: Option<String>,
     pub started_at: Option<Moment>,
     pub stopped_at: Option<Moment>,
+    // The engine's own facts about the process, copied straight across. They
+    // sit here because pydantic emits fields in declaration order and Python
+    // declares them right after `stopped_at`.
+    pub name: Option<String>,
+    pub command: Option<String>,
+    pub exit_code: Option<i64>,
+    pub activity_changed_at: Option<String>,
+    pub conversation_agent: Option<String>,
     pub activity: Option<String>,
     pub alive: Option<bool>,
     pub turn_started_at: Option<String>,
@@ -1788,6 +1810,13 @@ where
     C: Clock,
     I: IdFactory,
 {
+    // Both is a bad request, and it is reported before either is resolved so a
+    // missing work item does not hide it.
+    if params.work_item.is_some() && params.project.is_some() {
+        return Err(VogtError::InvalidRequest(
+            "give at most one of --work-item or --project".to_string(),
+        ));
+    }
     let work_item = match &params.work_item {
         Some(reference) => Some(resolve::work_item(&ctx.declared.read()?, reference)?),
         None => None,
@@ -1980,10 +2009,11 @@ where
         .get_session(engine_id)?
         .ok_or_else(|| VogtError::NotFound(format!("no session {}", py_repr(engine_id))))?;
     let killed = engine.kill_session(engine_id, Some(reason), Some(&ctx.principal.identity_ref))?;
+    // The audit records its own moment, so the summary's stopped_at is the read
+    // after it, one tick later than the moment the stop was asked.
     let outcome = json!({"engine_session_id": engine_id, "linked": false});
     let summary_row = json!({"engine_killed": killed, "linked": false});
     let mut writing = write_of(ctx);
-    let stopped_at = now(&writing);
     audited_action(
         &mut writing,
         SESSION_STOP,
@@ -1994,6 +2024,7 @@ where
         "session.stopped",
         Some(&summary_row),
     )?;
+    let stopped_at = now(&writing);
     let mut summary = unlinked_summary(&ctx.declared.read()?, &session)?;
     summary.alive = killed.then_some(false);
     summary.stopped_at = Some(stopped_at);
@@ -2151,6 +2182,11 @@ where
         reason: Some(session.reason.clone()),
         started_at: Some(session.started_at),
         stopped_at: session.stopped_at,
+        name: None,
+        command: None,
+        exit_code: None,
+        activity_changed_at: None,
+        conversation_agent: None,
         activity: None,
         alive: asked.then(|| live.is_some_and(|live| live.alive)),
         turn_started_at: None,
@@ -2181,6 +2217,11 @@ where
 /// Copy the engine's live fields onto a summary.
 fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.activity = Some(live.activity.clone());
+    summary.name = Some(live.name.clone());
+    summary.command = live.command.clone();
+    summary.exit_code = live.exit_code;
+    summary.activity_changed_at = live.activity_changed_at.clone();
+    summary.conversation_agent = live.conversation_agent.clone();
     summary.turn_started_at = live.turn_started_at.clone();
     summary.last_output_at = live.last_output_at.clone();
     summary.approval = live.approval.as_ref().map(approval_of);
@@ -2318,9 +2359,6 @@ fn approval_of(approval: &EngineApproval) -> SessionApproval {
     SessionApproval {
         question: approval.question.clone(),
         command_excerpt: approval.command_excerpt.clone(),
-        detected_at: approval.detected_at.clone(),
-        deadline_seconds: approval.deadline_seconds,
-        deadline_at: approval.deadline_at.clone(),
         kind: approval.kind.clone(),
         options: approval
             .options
@@ -2331,6 +2369,9 @@ fn approval_of(approval: &EngineApproval) -> SessionApproval {
                 selected: *selected,
             })
             .collect(),
+        deadline_seconds: approval.deadline_seconds,
+        deadline_at: approval.deadline_at.clone(),
+        detected_at: (!approval.detected_at.is_empty()).then(|| approval.detected_at.clone()),
     }
 }
 
@@ -2391,6 +2432,11 @@ fn unlinked_summary(
             .as_deref()
             .and_then(|text| crate::core::from_iso(text).ok()),
         stopped_at: None,
+        name: None,
+        command: None,
+        exit_code: None,
+        activity_changed_at: None,
+        conversation_agent: None,
         activity: None,
         alive: Some(session.alive),
         turn_started_at: None,

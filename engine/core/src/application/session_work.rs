@@ -317,6 +317,11 @@ fn summarize_asked<C: Clock, I: IdFactory>(
         reason: Some(session.reason.clone()),
         started_at: Some(session.started_at),
         stopped_at: session.stopped_at,
+        name: None,
+        command: None,
+        exit_code: None,
+        activity_changed_at: None,
+        conversation_agent: None,
         activity: None,
         alive: asked.then(|| live.is_some_and(|live| live.alive)),
         turn_started_at: None,
@@ -371,6 +376,11 @@ fn unlinked_summary<C: Clock, I: IdFactory>(
             .as_deref()
             .and_then(|text| crate::core::from_iso(text).ok()),
         stopped_at: None,
+        name: None,
+        command: None,
+        exit_code: None,
+        activity_changed_at: None,
+        conversation_agent: None,
         activity: None,
         alive: Some(session.alive),
         turn_started_at: None,
@@ -401,14 +411,16 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
         SessionResources,
     };
     summary.activity = Some(live.activity.clone());
+    summary.name = Some(live.name.clone());
+    summary.command = live.command.clone();
+    summary.exit_code = live.exit_code;
+    summary.activity_changed_at = live.activity_changed_at.clone();
+    summary.conversation_agent = live.conversation_agent.clone();
     summary.turn_started_at = live.turn_started_at.clone();
     summary.last_output_at = live.last_output_at.clone();
     summary.approval = live.approval.as_ref().map(|approval| SessionApproval {
         question: approval.question.clone(),
         command_excerpt: approval.command_excerpt.clone(),
-        detected_at: approval.detected_at.clone(),
-        deadline_seconds: approval.deadline_seconds,
-        deadline_at: approval.deadline_at.clone(),
         kind: approval.kind.clone(),
         options: approval
             .options
@@ -419,6 +431,9 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
                 selected: *selected,
             })
             .collect(),
+        deadline_seconds: approval.deadline_seconds,
+        deadline_at: approval.deadline_at.clone(),
+        detected_at: (!approval.detected_at.is_empty()).then(|| approval.detected_at.clone()),
     });
     summary.blocked = live.blocked.as_ref().map(|blocked| SessionBlocked {
         reason: blocked.reason.clone(),
