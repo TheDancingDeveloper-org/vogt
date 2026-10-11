@@ -79,6 +79,7 @@ fn test_config() -> Config {
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
         assistant_call: vogt_engine_server::call::CallPolicy::default(),
         autopilot: vogt_engine_server::autopilot::Policy::default(),
+        budget: vogt_engine_server::budget::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         metrics_bind: None,
@@ -9419,6 +9420,76 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     drop(tmp);
 }
 
+/// A budget is part of the session, not of the process: hibernating and
+/// waking under the same id must bring back the same limits (WI-1245 / C7).
+#[tokio::test]
+async fn a_sessions_budget_survives_hibernate_and_wake() {
+    let (tmp, cfg, stub) = hibernation_sandbox();
+    let _tmp = tmp;
+    let (base, _h) = boot_with_config(cfg).await;
+    let client = reqwest::Client::builder()
+        .default_headers(auth())
+        .build()
+        .unwrap();
+
+    let created: Value = client
+        .post(format!("{base}/api/sessions"))
+        .json(&json!({
+            "name": "budgeted agent",
+            "prompt": "## Task\n\nDo the thing.\n",
+            "command": [stub.to_string_lossy()],
+            "budget": { "turns": 120, "wall_clock_minutes": 90 },
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["budget"]["turns"], 120);
+    assert_eq!(created["budget"]["wall_clock_minutes"], 90);
+    assert!(created["budget"].get("context_tokens").is_none());
+
+    let hibernated = client
+        .post(format!("{base}/api/sessions/{id}/hibernate"))
+        .json(&json!({ "reason": "budget round trip" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(hibernated.status(), StatusCode::OK);
+    let hibernated: Value = hibernated.json().await.unwrap();
+    assert_eq!(hibernated["activity"], "hibernated");
+    assert_eq!(hibernated["budget"]["turns"], 120);
+    assert_eq!(hibernated["budget"]["wall_clock_minutes"], 90);
+
+    let listed: Vec<Value> = client
+        .get(format!("{base}/api/sessions"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let row = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
+    assert_eq!(row["budget"]["turns"], 120);
+    assert_eq!(row["budget"]["wall_clock_minutes"], 90);
+
+    let woken = client
+        .post(format!("{base}/api/sessions/{id}/wake"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(woken.status(), StatusCode::OK);
+    let woken: Value = woken.json().await.unwrap();
+    assert_eq!(woken["id"], id.as_str());
+    assert_eq!(woken["alive"], true);
+    assert_eq!(woken["budget"]["turns"], 120);
+    assert_eq!(woken["budget"]["wall_clock_minutes"], 90);
+    assert!(woken["budget"].get("context_tokens").is_none());
+}
+
 /// Hibernating a Klaudia session leaves `<state_dir>/handoffs/<id>.md` (C12).
 /// The stub is named `klaudia`, which is what the engine keys the agent on;
 /// this temp directory is not a checkout and no summary is planted, so the
@@ -11903,12 +11974,14 @@ async fn a_superseded_session_and_a_contended_work_item_are_not_woken() {
         .unwrap();
     assert_eq!(woken.status(), StatusCode::OK, "{:?}", woken.text().await);
 
-    // Boot wake skips a manually hibernated pinned session and a superseded
-    // one, and still wakes one the policy hibernated.
+    // Boot wake skips a manually hibernated pinned session, a superseded one,
+    // and one the budget watcher hibernated, and still wakes one the policy
+    // hibernated.
     let manual = start("manual").await;
     let policy = start("policy").await;
     let handed = start("handed").await;
-    for id in [&manual, &policy, &handed] {
+    let budgeted = start("budgeted").await;
+    for id in [&manual, &policy, &handed, &budgeted] {
         let pinned = client
             .post(format!("{base}/api/sessions/{id}/keep-awake"))
             .json(&json!({ "keep_awake": true }))
@@ -11940,6 +12013,17 @@ async fn a_superseded_session_and_a_contended_work_item_are_not_woken() {
         )
         .await
         .unwrap();
+    state
+        .sessions
+        .hibernate(
+            uuid::Uuid::parse_str(&budgeted).unwrap(),
+            Some("budget".into()),
+            vogt_engine_contract::HibernateTrigger::Budget,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
     let due = state.sessions.hibernated_keep_awake();
     assert!(
         due.contains(&uuid::Uuid::parse_str(&policy).unwrap()),
@@ -11951,6 +12035,10 @@ async fn a_superseded_session_and_a_contended_work_item_are_not_woken() {
     );
     assert!(
         !due.contains(&uuid::Uuid::parse_str(&handed).unwrap()),
+        "{due:?}"
+    );
+    assert!(
+        !due.contains(&uuid::Uuid::parse_str(&budgeted).unwrap()),
         "{due:?}"
     );
     drop(tmp);

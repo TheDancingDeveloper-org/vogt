@@ -8,8 +8,9 @@
 //! Not every bus event is a change. Activity states an overseer acts on
 //! (`waiting-for-input`, `awaiting-approval`, `exited`, `stopped`, `errored`)
 //! become `ready`, `approval`, `exited` and `errored`; `running`, `idle` and
-//! `hibernated` do not, because hibernation has its own events. `reply`,
-//! `commit` and `budget` are reserved kinds and are not emitted here.
+//! `hibernated` do not, because hibernation has its own events. `budget` is
+//! emitted from the budget watcher (WI-1245 / C7). `reply` and `commit` are
+//! reserved kinds and are not emitted here.
 
 use std::{collections::HashSet, time::Duration};
 
@@ -38,6 +39,7 @@ const KINDS: &[&str] = &[
     "unblocked",
     "hibernated",
     "woken",
+    "budget",
 ];
 
 /// What an overseer waits for when it does not say.
@@ -78,10 +80,14 @@ pub fn change_of(sequenced: &Sequenced) -> Option<SessionChange> {
                 vogt_engine_contract::HibernateTrigger::Memory => "memory",
                 vogt_engine_contract::HibernateTrigger::Shutdown => "shutdown",
                 vogt_engine_contract::HibernateTrigger::Recovered => "recovered",
+                vogt_engine_contract::HibernateTrigger::Budget => "budget",
             };
             (*id, "hibernated", format!("hibernated ({why})"))
         }
         ServerEvent::SessionWoken { id } => (*id, "woken", "woken".to_string()),
+        ServerEvent::SessionBudget { id, level, summary } => {
+            (*id, "budget", format!("{level}: {summary}"))
+        }
         ServerEvent::SessionKilled { id, exit_code } => (
             *id,
             "exited",

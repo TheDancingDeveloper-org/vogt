@@ -75,6 +75,7 @@ from vogt.application.models import (
     SessionApprovalOption,
     SessionBlocked,
     SessionBlockedResult,
+    SessionBudgetParams,
     SessionChange,
     SessionChangesParams,
     SessionChangesResult,
@@ -254,6 +255,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
     # A refusal raises before any audit write, so it is logged here; the
     # engine audits its own side (`event=session.start`) either way.
     autopilot = _autopilot(params)
+    budget = _budget(params)
     spawn_started = time.monotonic()
     try:
         started = _start_on_engine(
@@ -276,6 +278,7 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             role=params.role,
             work_item=subject.work_item_ref,
             policy=subject.policy,
+            budget=budget,
         )
     except VogtError as error:
         _LOG.warning(
@@ -3233,6 +3236,62 @@ def _enforced_policy(policy: AgentPolicy | None) -> dict[str, Any] | None:
     return enforced
 
 
+def _budget(params: StartSessionParams) -> SessionBudgetParams | None:
+    """The limits a start carries (C7, WI-1245).
+
+    Asked explicitly, that object is the answer — even an empty one, which is
+    how a caller declines the default rather than inheriting it. Asked nothing,
+    an agent template given a task in the worker role gets the default (120
+    turns, 90 minutes of wall clock, no context limit). An oversight session
+    and a shell or no-task start get none: there is nothing to bound.
+    """
+    if params.budget is not None:
+        return params.budget
+    if (
+        params.template
+        and params.task
+        and params.task.strip()
+        and params.role == "worker"
+    ):
+        return SessionBudgetParams(turns=120, wall_clock_minutes=90)
+    return None
+
+
+def _budget_wire(budget: SessionBudgetParams | None) -> dict[str, int] | None:
+    """The engine's `budget` object, or None when the start sets no budget.
+
+    An empty object is sent as `{}`: it means "no limits", which the engine
+    reads differently from a field that was never sent.
+    """
+    if budget is None:
+        return None
+    return {
+        key: value
+        for key, value in (
+            ("turns", budget.turns),
+            ("context_tokens", budget.context_tokens),
+            ("wall_clock_minutes", budget.wall_clock_minutes),
+        )
+        if value is not None
+    }
+
+
+def _budget_params(raw: dict[str, Any] | None) -> SessionBudgetParams | None:
+    """The engine's budget object as the summary carries it.
+
+    Only positive limits survive: zero is not a limit, and a row that yields
+    nothing is no budget rather than an empty object.
+    """
+    if not isinstance(raw, dict):
+        return None
+    limits = {
+        key: value
+        for key in ("turns", "context_tokens", "wall_clock_minutes")
+        if isinstance(value := raw.get(key), int) and value > 0
+    }
+    return SessionBudgetParams(**limits) if limits else None
+
+
 def _autopilot(params: StartSessionParams) -> bool:
     """Whether a start runs on autopilot (WI-949): as asked, or — asked
     nothing — on for an agent template given a task, the shape of a session
@@ -3259,6 +3318,7 @@ def _start_on_engine(
     role: str = "worker",
     work_item: str | None = None,
     policy: AgentPolicy | None = None,
+    budget: SessionBudgetParams | None = None,
 ) -> EngineSession:
     enforced = _enforced_policy(policy)
     return engine.create_session(
@@ -3287,6 +3347,7 @@ def _start_on_engine(
         work_item=work_item,
         companion=companion or None,
         policy=enforced,
+        budget=_budget_wire(budget),
     )
 
 
@@ -3434,6 +3495,7 @@ def _live_fields(engine_session: EngineSession | None) -> dict[str, Any]:
         "permission_mode": engine_session.permission_mode,
         "stopped_by": engine_session.stopped_by,
         "stop_reason": engine_session.stop_reason,
+        "budget": _budget_params(engine_session.budget),
     }
 
 
