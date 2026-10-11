@@ -1431,9 +1431,9 @@ class SqliteWriteTxn(SqliteReadView):
             "INSERT INTO projects (id, slug, name, root_path, repo_url, "
             "lifecycle_state, current_version, contract_version, "
             "compliance_status, compliance_checked_at, contract_adopted_at, "
-            "write_back, link_state, exclusions, trust_state, created_at, "
-            "updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "write_back, link_state, exclusions, agent_policy, trust_state, "
+            "created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 project.id,
                 project.slug,
@@ -1453,6 +1453,7 @@ class SqliteWriteTxn(SqliteReadView):
                 project.write_back,
                 project.link_state,
                 json.dumps(project.exclusions),
+                project.agent_policy.model_dump_json(),
                 project.trust_state,
                 to_iso(project.created_at),
                 to_iso(project.updated_at),
@@ -1486,6 +1487,9 @@ class SqliteWriteTxn(SqliteReadView):
         if update.exclusions is not None:
             assignments.append("exclusions = ?")
             params.append(json.dumps(list(update.exclusions)))
+        if update.agent_policy is not None:
+            assignments.append("agent_policy = ?")
+            params.append(update.agent_policy.model_dump_json())
         if not assignments:
             return
         assignments.append("updated_at = ?")
@@ -2313,6 +2317,7 @@ def _row_to_project(row: sqlite3.Row) -> Project:
                 None if checked_at is None else from_iso(str(checked_at))
             ),
             "exclusions": json.loads(str(row["exclusions"])),
+            "agent_policy": json.loads(str(row["agent_policy"])),
             "contract_adopted_at": (
                 None if adopted_at is None else from_iso(str(adopted_at))
             ),

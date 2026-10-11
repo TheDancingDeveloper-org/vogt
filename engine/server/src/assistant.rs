@@ -2661,6 +2661,7 @@ mod tests {
                 cols: Some(80),
                 rows: Some(24),
                 scrollback_bytes: None,
+                companion: None,
             })
             .expect("spawn cat")
     }

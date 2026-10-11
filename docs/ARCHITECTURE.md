@@ -192,6 +192,9 @@ binary and `contract/` holds the shared wire DTOs. One module per concern:
   embedded PWA, the bearer gate, and the two proxied route families.
 - **Push and history** (`push*.rs`, `history.rs`) — web push (VAPID), native
   push (FCM), and archived session history.
+- **Session briefs** (`prompt_files.rs`) — the brief vogt-core composed and a
+  companion guide beside it. A project's agent policy is text in the brief;
+  the engine enforces none of it yet.
 
 The engine is bootable alone: with no core configured it serves sessions,
 stays ready, and refuses the Vogt routes with a named reason. The wire
@@ -287,7 +290,13 @@ Two SQLite databases with different write disciplines:
   labels, initiatives, actors, tokens, suppressions, contract adoptions and
   exemptions, coding sessions, drift proposals, workflow definitions, the
   `events` feed and the `audit` log. Every write goes through the
-  application layer with an actor and a reason.
+  application layer with an actor and a reason. A project also carries an
+  `agent_policy`: text a commit, branch or PR must not match, whether a merge
+  to a named branch deploys production, and guidance (a commit identity, a
+  test recipe, free-text rules). `project.update` replaces it wholesale.
+  Only the first two are enforced, and only by the session hooks the engine
+  writes (§4.2); the guidance is told to the agent in its brief and nothing
+  else acts on it.
 - **`observed.sqlite3`** — what collectors found: `sweeps` (coverage records)
   and `observations` (immutable evidence rows), the derived
   `latest_observations` and `latest_dep_refs` tables rebuilt at sweep

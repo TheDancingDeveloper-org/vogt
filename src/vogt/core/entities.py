@@ -7,10 +7,11 @@ REST, CLI and MCP surfaces return. One definition, three transports.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, StringConstraints, field_validator
 
 from vogt.core.principal import ActorKind
 
@@ -77,6 +78,43 @@ class Actor(Entity):
     created_at: datetime
 
 
+class AgentPolicy(Entity):
+    """A project's agent policy, stored as data and shown in every session brief.
+
+    `forbidden_text` and `merge_deploys_prod` are the two facts the session
+    hooks refuse on. Everything else is guidance the brief carries and nothing
+    enforces: compliance stays a fact to read, never a precondition.
+    """
+
+    #: Regexes matched against commit messages, authors, trailers, PR text and
+    #: branch names. They must compile, so a rule that could never match is
+    #: refused at the write rather than silently doing nothing later.
+    forbidden_text: list[str] = []
+    #: This project's merges deploy production, so a hook refuses `gh pr merge`
+    #: from an agent. A person is not refused.
+    merge_deploys_prod: bool = False
+    #: The branches a merge onto counts as deploying. Empty means `main`.
+    main_branches: list[str] = []
+    #: How a commit should be attributed, in the project's own words.
+    commit_identity: str = ""
+    #: The short named block that says how this project is tested.
+    test_recipe: str = ""
+    #: Free-text rules. Guidance only; a hook never reads these.
+    rules: list[str] = []
+
+    @field_validator("forbidden_text")
+    @classmethod
+    def _patterns_compile(cls, patterns: list[str]) -> list[str]:
+        for pattern in patterns:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ValueError(
+                    f"forbidden_text pattern {pattern!r} does not compile: {exc}"
+                ) from exc
+        return patterns
+
+
 class Project(Entity):
     """One explicitly registered repository or folder."""
 
@@ -90,6 +128,9 @@ class Project(Entity):
     contract_version: str | None = None
     compliance_status: ComplianceStatus = "not_checked"
     compliance_checked_at: datetime | None = None
+    #: What an agent working here is told, and — for the two enforced facts —
+    #: what its session hooks refuse. Empty means the project states none.
+    agent_policy: AgentPolicy = AgentPolicy()
     #: When this project opted into the contract. Null is the
     #: ordinary case and carries no fault: the contract is something a
     #: project adopts, not something it is measured against by default.

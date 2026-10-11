@@ -90,6 +90,12 @@ pub struct SessionSpec {
     /// a file the engine owns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// The standing guide written beside the brief (WI-1243): how to record
+    /// findings, report being blocked, and drive another session. The brief
+    /// names the file; the engine writes this text next to it. Omitted when
+    /// there is no brief.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub companion: Option<String>,
     /// Which model the agent CLI in `command` should run, and how hard it
     /// should think. The engine turns these into that CLI's own
     /// flags or environment; a command it has no mapping for is refused by
@@ -1397,6 +1403,14 @@ mod tests {
         let spec: SessionSpec =
             serde_json::from_str(r#"{"name":"term","prompt":"Fix the flaky test."}"#).unwrap();
         assert_eq!(spec.prompt.as_deref(), Some("Fix the flaky test."));
+    }
+
+    #[test]
+    fn session_spec_reads_a_companion_from_the_wire() {
+        // vogt-core codes against this exact field name (WI-1243).
+        let spec: SessionSpec =
+            serde_json::from_str(r##"{"name":"term","companion":"# guide"}"##).unwrap();
+        assert_eq!(spec.companion.as_deref(), Some("# guide"));
     }
 
     #[test]

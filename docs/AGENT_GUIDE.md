@@ -150,7 +150,20 @@ A session is how a checkout gets bound to a work item. `session_start` (availabl
 when the engine is running) opens a PTY in the project's registered working tree
 and writes the item's brief — its description, its `why`, its relations — to a
 prompt file the agent is pointed at, so you begin with the item's context rather
-than reconstructing it.
+than reconstructing it. The brief is short on purpose. Standing instructions
+(how to report being blocked, how to drive another session, how to record a
+result) live in a guide beside it, `<session-id>.guide.md`, which the brief
+names in one line. A task can also name **touch points** — `files`, `symbols`,
+`done`, `gates` — rendered as a block in the brief, with a one-level map of the
+directories those files sit in when one was asked for.
+
+A project can carry an **agent policy** (`project.update --agent-policy`). The
+brief states all of it: text that must not appear in a commit, branch or PR
+(`forbidden_text`, regexes checked when the policy is saved), whether merging
+deploys production (`merge_deploys_prod`, with `main_branches`; an empty list
+means `main`), `commit_identity`, `test_recipe` and `rules`. Today all of it
+is guidance. The brief says it and nothing refuses it; enforcement hooks are
+a follow-up.
 
 ```console
 $ uv run vogt session start --work-item WI-42 --reason "start on the login-timeout fix"

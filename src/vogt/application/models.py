@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from vogt.core.entities import (
     Actor,
+    AgentPolicy,
     AuditRecord,
     AuthDecision,
     Comment,
@@ -626,9 +627,10 @@ class UpdateProjectParams(Params):
 
     Deliberately narrow. `lifecycle_state` is absent because it has its own
     operation with a validated edge (`project transition`), and the observed
-    fields are absent because nothing declares them. What is left is the two
-    facts a registration can get wrong and nothing else could fix: where the
-    project is published, and what collection should skip.
+    fields are absent because nothing declares them. What is left is what a
+    registration can get wrong and nothing else could fix — where the project
+    is published, what collection should skip — and the agent policy, which is
+    data the project states rather than something derived.
     """
 
     slug: str = Field(description="Project to update.")
@@ -640,6 +642,14 @@ class UpdateProjectParams(Params):
         description=(
             "Replaces the current list entirely. Leave unset to keep it; pass "
             "an empty list to collect everything."
+        ),
+    )
+    agent_policy: AgentPolicy | None = Field(
+        default=None,
+        description=(
+            "Replaces the project's agent policy entirely. Leave unset to keep "
+            "it. `forbidden_text` entries are regexes and must compile; a "
+            "pattern that does not is refused rather than stored."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
@@ -3909,6 +3919,38 @@ class StartSessionParams(Params):
             "them. A plain shell only gets the brief's path in "
             "VOGT_ENGINE_AGENT_TASK_PROMPT_FILE, so pair a task with "
             "`template` when it is something to carry out."
+        ),
+    )
+    files: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Files the task touches, each `path` or `path:start-end`. Rendered "
+            "under Touch points; a line range is a hint, not a slice of the file."
+        ),
+    )
+    symbols: list[str] = Field(
+        default_factory=list,
+        description="Symbols the task touches. Rendered under Touch points.",
+    )
+    done: list[str] = Field(
+        default_factory=list,
+        description=(
+            "What finished looks like, one line each. Rendered under Touch points."
+        ),
+    )
+    gates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Checks that must pass before the task is done. "
+            "Rendered under Touch points."
+        ),
+    )
+    repo_map: bool | None = Field(
+        default=None,
+        description=(
+            "Include a two-level outline of the touch-point directories in the "
+            "brief. Omitted means include one when touch points name files, and "
+            "not otherwise. The outline is capped; it is a map, not a listing."
         ),
     )
     permission_mode: Literal["default", "accept_edits", "bypass"] = Field(

@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 
-from vogt.core.entities import ActorPreference, CodingSession
+from vogt.core.entities import ActorPreference, AgentPolicy, CodingSession
 from vogt.errors import MigrationError, MigrationLocked
+from vogt.storage.interface import ProjectUpdate
 from vogt.storage.sqlite.connection import connect, split_statements
 from vogt.storage.sqlite.declared import MIGRATIONS_DIR as DECLARED_MIGRATIONS
 from vogt.storage.sqlite.declared import SqliteDeclaredStore
@@ -397,3 +398,75 @@ def test_an_instance_before_preferences_gains_them_with_its_actors(
         stored = view.actor_preference(actor_id=actor_id, key="inbox.filter")
         assert stored is not None and stored.value == {"actor": "external"}
         assert view.actor_preferences(actor_id) == [stored]
+
+
+#: The migration that added `projects.agent_policy`.
+AGENT_POLICY_MIGRATION = 21
+
+
+def test_a_project_from_before_agent_policy_reads_back_as_none(tmp_path: Path) -> None:
+    """An instance created before 0021 gains the column without losing the row.
+
+    The default is the empty document, which reads back as a policy that states
+    nothing — the same as a project registered with no policy today.
+    """
+    shipped = load_migrations(DECLARED_MIGRATIONS)
+    old_migrations = tmp_path / "before-agent-policy"
+    old_migrations.mkdir()
+    for migration in shipped:
+        if migration.number < AGENT_POLICY_MIGRATION:
+            (old_migrations / f"{migration.id}.sql").write_text(
+                migration.sql, encoding="utf-8"
+            )
+    path = tmp_path / "declared.sqlite3"
+    conn = connect(path, create=True)
+    Migrator(store="declared", directory=old_migrations, holder="old/1").migrate(
+        conn, now=NOW
+    )
+    conn.execute(
+        "INSERT INTO projects (id, slug, name, root_path, lifecycle_state, "
+        "compliance_status, exclusions, trust_state, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            "prj_old",
+            "already-here",
+            "Already Here",
+            "/srv/already-here",
+            "active",
+            "not_checked",
+            "[]",
+            "unverified",
+            NOW.isoformat(),
+            NOW.isoformat(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    store = SqliteDeclaredStore(path, clock=StepClock())
+    store.bootstrap(TEST_PRINCIPAL)
+    assert store.schema_version() == AGENT_POLICY_MIGRATION - 1
+    report = store.migrate()
+    assert "0021_agent_policy" in report.applied
+    with store.read() as view:
+        project = view.project_by_slug("already-here")
+        assert project is not None
+        assert project.agent_policy == AgentPolicy()
+
+    with store.write() as txn:
+        current = txn.project_by_slug("already-here")
+        assert current is not None
+        txn.update_project(
+            current.id,
+            ProjectUpdate(
+                agent_policy=AgentPolicy(
+                    forbidden_text=["(?i)wip"], merge_deploys_prod=True
+                )
+            ),
+            at=NOW,
+        )
+    with store.read() as view:
+        stored = view.project_by_slug("already-here")
+        assert stored is not None
+        assert stored.agent_policy.forbidden_text == ["(?i)wip"]
+        assert stored.agent_policy.merge_deploys_prod is True

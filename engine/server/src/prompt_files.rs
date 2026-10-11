@@ -43,6 +43,17 @@ pub fn session_prompt_path(state_dir: &Path, session_id: Uuid) -> PathBuf {
     session_prompt_dir(state_dir).join(prompt_file_name(session_id))
 }
 
+/// `<uuid>.guide.md`, beside the brief. Both names map back to the session
+/// (`session_id_from_artifact`), so the prompt sweep keeps the guide while the
+/// session is known and removes it with the brief once the session is gone.
+pub fn session_guide_name(session_id: Uuid) -> String {
+    format!("{session_id}.guide.md")
+}
+
+pub fn session_guide_path(state_dir: &Path, session_id: Uuid) -> PathBuf {
+    session_prompt_dir(state_dir).join(session_guide_name(session_id))
+}
+
 /// `<owner-id>.md` — the naming every prompt artifact uses, whether the owner
 /// is a task run or a session.
 pub fn prompt_file_name(owner_id: Uuid) -> String {
@@ -64,21 +75,35 @@ pub fn write_session_prompt(state_dir: &Path, session_id: Uuid, body: &str) -> R
     write_prompt(&session_prompt_dir(state_dir), session_id, body)
 }
 
+/// Write the standing guide beside the brief. Same directory, so the
+/// `--add-dir` the launch already passes covers it.
+pub fn write_session_guide(state_dir: &Path, session_id: Uuid, body: &str) -> Result<PathBuf> {
+    let dir = session_prompt_dir(state_dir);
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(session_guide_name(session_id));
+    std::fs::write(&path, body)?;
+    Ok(path)
+}
+
 /// Forget a session's brief. Best effort: a prompt file that outlives its
 /// session is collected by the agent-task artifact cleanup, so failing to
 /// delete it here is a warning, never a failed request.
 pub fn remove_session_prompt(state_dir: &Path, session_id: Uuid) {
-    let path = session_prompt_path(state_dir, session_id);
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            tracing::warn!(
-                session = %session_id,
-                path = %path.display(),
-                error = %e,
-                "failed to remove session prompt file"
-            );
+    for path in [
+        session_prompt_path(state_dir, session_id),
+        session_guide_path(state_dir, session_id),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(
+                    session = %session_id,
+                    path = %path.display(),
+                    error = %e,
+                    "failed to remove session prompt file"
+                );
+            }
         }
     }
 }
@@ -89,6 +114,16 @@ pub fn session_id_from_prompt_file(file_name: &str) -> Option<Uuid> {
     file_name
         .strip_suffix(".md")
         .and_then(|stem| Uuid::parse_str(stem).ok())
+}
+
+/// The session a sessions-directory entry belongs to: a brief (`<uuid>.md`) or
+/// its companion guide (`<uuid>.guide.md`). The sweep keeps either while the
+/// session is known and removes both once it is forgotten.
+pub fn session_id_from_artifact(file_name: &str) -> Option<Uuid> {
+    let stem = file_name
+        .strip_suffix(".guide.md")
+        .or_else(|| file_name.strip_suffix(".md"))?;
+    Uuid::parse_str(stem).ok()
 }
 
 #[cfg(test)]
@@ -111,5 +146,16 @@ mod tests {
         assert_eq!(session_id_from_prompt_file(&prompt_file_name(id)), Some(id));
         assert!(session_id_from_prompt_file("context.md").is_none());
         assert!(session_id_from_prompt_file(&id.to_string()).is_none());
+        // The guide is not a brief, so the brief-only mapping leaves it alone.
+        assert!(session_id_from_prompt_file(&session_guide_name(id)).is_none());
+    }
+
+    #[test]
+    fn a_guide_maps_back_to_its_session_like_its_brief() {
+        let id = Uuid::new_v4();
+        assert_eq!(session_id_from_artifact(&prompt_file_name(id)), Some(id));
+        assert_eq!(session_id_from_artifact(&session_guide_name(id)), Some(id));
+        assert!(session_id_from_artifact("context.md").is_none());
+        assert!(session_id_from_artifact(&format!("{id}.hooks")).is_none());
     }
 }
