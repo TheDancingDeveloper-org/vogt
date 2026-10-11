@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import sqlite3
 from collections.abc import Iterator
@@ -122,6 +123,9 @@ _FORGE_ACCOUNT_CARRY_COLUMNS: tuple[str, ...] = (
 )
 
 WORK_REF_PREFIX = "WI-"
+# A search that names one work item: "1241", "WI-1241" or "wi-1241". The
+# substring filter still applies; this only decides who sorts first.
+_EXACT_REF_QUERY = re.compile(r"^(?:wi-)?(\d+)$", re.IGNORECASE)
 
 WORK_KINDS: tuple[WorkKind, ...] = ("feature", "bug", "chore", "question")
 
@@ -659,10 +663,10 @@ class SqliteReadView:
 
     def list_work_items(self, work_filter: WorkFilter) -> list[WorkItem]:
         where, params = _work_where(work_filter)
+        order, order_params = _work_order(work_filter)
         rows = self._conn.execute(
-            f"SELECT {_WORK_COLUMNS} {_WORK_JOINS} {where} "
-            "ORDER BY w.created_at, w.ref LIMIT ? OFFSET ?",
-            (*params, work_filter.limit, work_filter.offset),
+            f"SELECT {_WORK_COLUMNS} {_WORK_JOINS} {where} {order} LIMIT ? OFFSET ?",
+            (*params, *order_params, work_filter.limit, work_filter.offset),
         ).fetchall()
         return self._hydrate(rows)
 
@@ -2470,6 +2474,26 @@ def _work_where(work_filter: WorkFilter) -> tuple[str, list[object]]:
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, params
+
+
+def _work_order(work_filter: WorkFilter) -> tuple[str, tuple[object, ...]]:
+    """Stable created-at order, with an exact ref first when the query is one.
+
+    `1241` is also a substring of `WI-12410` and of a body that cites
+    `WI-1241`. Those stay in the result (the filter is unchanged), but the
+    item whose ref *is* `WI-1241` leads, so a 100-row page still shows it.
+    The ref is bound, never interpolated.
+    """
+    text = work_filter.text
+    if text:
+        match = _EXACT_REF_QUERY.fullmatch(text.strip())
+        if match is not None:
+            exact = f"{WORK_REF_PREFIX}{match.group(1)}".lower()
+            return (
+                "ORDER BY (lower(w.ref) = ?) DESC, w.created_at, w.ref",
+                (exact,),
+            )
+    return "ORDER BY w.created_at, w.ref", ()
 
 
 def _append_where(where: str, clause: str) -> str:
