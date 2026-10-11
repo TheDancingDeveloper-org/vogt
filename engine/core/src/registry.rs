@@ -147,6 +147,7 @@ pub fn service_for(name: &str) -> Option<ServiceFn> {
         "contract.applicable" => Some(crate::application::contracts::contract_applicable_op),
         "compliance" => Some(crate::application::contracts::compliance_op),
         "coverage" => Some(crate::application::coverage::coverage_op),
+        "sweep" => Some(crate::application::collect::sweep_op),
         "drift.detect" => Some(crate::application::drift::drift_detect_op),
         "drift.list" => Some(crate::application::drift::drift_list_op),
         "drift.resolve" => Some(crate::application::drift::drift_resolve_op),

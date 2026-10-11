@@ -10,9 +10,6 @@ mod registry;
 mod source_markers;
 mod sweeper;
 
-pub use base::{
-    collector_error, finding, typed_failure, walk_project, ActivityIndexer, Collector,
-    CollectorContext, CollectorError, Finding,
-};
-pub use registry::{core_collectors, is_on_demand, CollectorRegistry, Registered};
-pub use sweeper::{SweepOutcomeSet, Sweeper};
+pub use base::CollectorContext;
+pub use registry::CollectorRegistry;
+pub use sweeper::Sweeper;

@@ -4,6 +4,7 @@
 //! `instance` is the bootstrap use-case.
 
 pub mod brief;
+pub mod collect;
 pub mod context;
 pub mod contracts;
 pub mod coverage;
