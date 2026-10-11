@@ -213,7 +213,10 @@ fn run_bounded(command: &mut Command, timeout: Duration, argv: &str) -> std::io:
             let _ = child.wait();
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                format!("Command '{argv}' timed out after {} seconds", timeout.as_secs()),
+                format!(
+                    "Command '{argv}' timed out after {} seconds",
+                    timeout.as_secs()
+                ),
             ));
         }
         std::thread::sleep(Duration::from_millis(20));
