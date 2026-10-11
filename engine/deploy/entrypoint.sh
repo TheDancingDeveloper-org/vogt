@@ -137,6 +137,16 @@ if [[ "${ENGINE_AGENT_CONVERSATION_HOOK:-1}" != "0" ]] \
         || echo "agent-onboarding: could not add the conversation hook to Claude Code's settings; continuing" >&2
 fi
 
+# Cargo's crate index and downloaded sources live in the image's CARGO_HOME, so
+# a redeploy used to reset them and offline cargo gates failed until someone ran
+# `cargo fetch` (WI-1256). Keep them on the home volume instead. Best effort;
+# opt out with ENGINE_CARGO_CACHE_PERSIST=0.
+if [[ "${ENGINE_CARGO_CACHE_PERSIST:-1}" != "0" ]] \
+        && [[ -x /usr/local/bin/vogt-cargo-cache ]]; then
+    /usr/local/bin/vogt-cargo-cache \
+        || echo "cargo-cache: could not move Cargo's caches onto the home volume; continuing" >&2
+fi
+
 # Agent CLIs are deliberately not installed at container startup; the image
 # carries neutral infrastructure tooling and optional agents can be added by
 # the user. Service credentials for agent commands are brokered on demand by a
