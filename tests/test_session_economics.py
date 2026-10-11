@@ -358,3 +358,13 @@ def test_shared_unicode_fixture_counts_characters_as_python_does() -> None:
     assert result.wall_clock.count == 2
     assert result.wall_clock.max_ms == 3
     assert result.wall_clock.mean_ms == 2
+
+
+def test_shared_gap_fixture_counts_milliseconds_exactly() -> None:
+    """A 1.001 s gap is 1001 ms (float seconds * 1000 said 1000), and a DEL
+    in a tool input is a six-character escape in json.dumps."""
+    lines = (_FIXTURES / "claude_gap.jsonl").read_text().splitlines()
+    result = meter(lines, agent="claude")
+    assert result.wall_clock.max_ms == 1001
+    assert result.wall_clock.mean_ms == 1001
+    assert dict(result.tool_result_bytes) == {"Grep": 71}
