@@ -179,8 +179,37 @@ class Relation(Entity):
     related_state: str
 
 
+CommentKind = Literal["note", "handoff"]
+
+
+class HandoffFields(BaseModel):
+    """The structured half of a hand-off comment (design C11).
+
+    Every field is optional: a hand-off records what the writer knows, and a
+    field left out means "not stated", not "empty on purpose". Free text stays
+    on the comment body.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    branch: str | None = None
+    head_sha: str | None = None
+    base: str | None = None
+    done: list[str] = []
+    remaining: list[str] = []
+    touch_points: list[str] = []
+    gates_run: list[str] = []
+    blockers: list[str] = []
+    session: str | None = None
+
+
 class Comment(Entity):
-    """A remark on a work item, attributed to an actor."""
+    """A remark on a work item, attributed to an actor.
+
+    `kind` is `note` for an ordinary remark and `handoff` for the structured
+    hand-off a fresh session starts from (design C11). `handoff` is present
+    only on a hand-off comment.
+    """
 
     id: str
     work_item_id: str
@@ -188,6 +217,8 @@ class Comment(Entity):
     actor_display_name: str
     body: str
     created_at: datetime
+    kind: CommentKind = "note"
+    handoff: HandoffFields | None = None
 
 
 class WorkItem(Entity):

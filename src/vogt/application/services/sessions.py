@@ -2663,6 +2663,27 @@ class _Subject:
 
 
 def _subject(ctx: AppContext, params: StartSessionParams, session_id: str) -> _Subject:
+    if params.from_handoff is not None:
+        # Sugar for "fresh session on the item the hand-off belongs to".
+        # The brief carries the hand-off because the brief always does,
+        # once the item is the subject.
+        if params.work_item is not None and params.work_item != params.from_handoff:
+            msg = (
+                "from_handoff names "
+                f"{params.from_handoff}, but work_item names {params.work_item}"
+            )
+            raise InvalidRequest(msg)
+        with ctx.declared.read() as view:
+            item = _resolve.work_item(view, params.from_handoff)
+            handoffs = [
+                one
+                for one in view.comments_for(item.id, limit=200, order="newest")
+                if one.kind == "handoff"
+            ]
+        if not handoffs:
+            msg = f"{item.ref} has no hand-off comment to start a session from"
+            raise InvalidRequest(msg)
+        params = params.model_copy(update={"work_item": item.ref})
     if params.work_item is not None and params.project is not None:
         msg = "give at most one of --work-item or --project"
         raise InvalidRequest(msg)

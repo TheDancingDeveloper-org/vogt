@@ -176,6 +176,25 @@ to its subject with `vogt_work_item` (a ref like `WI-42`) or `vogt_project` (a
 slug) so the run's findings file as observations against that subject with the
 same freshness and trust every other kind of evidence carries.
 
+### Fresh sessions start from the hand-off
+
+A worker starts a **fresh** session from the item's hand-off, never by resuming
+the previous worker's conversation:
+
+```console
+$ uv run vogt session start --from-handoff WI-42 --reason "continue from the hand-off"
+```
+
+That refuses when the item has no hand-off comment. Before stopping, the worker
+writes one with `work.comment --kind handoff`, carrying the branch, head, what
+is done, what remains, and the free-text body. Resume is only for recovering a
+session that died mid-turn, and only once.
+
+An overseer resumes (that is what a long-running investigation is for) and
+writes a checkpoint before any planned restart. A review session is fresh too:
+its input is the diff plus the hand-off comment, never the worker's screen or
+transcript.
+
 ### Search session history — live and archived
 
 Vogt exposes the engine's session history as three reads, so you can find what

@@ -44,6 +44,7 @@ FROZEN: dict[str, str] = {
     "declared/0019_session_grants": "2c307b06be247b5b5739230750785d9209dee953a22da0354952ebe1cf45811d",
     "declared/0020_install_latch": "e5fd2b7bd062d50c9d21a923df3176e9e5b69e9fb06b0dd6bf75b295d694b761",
     "declared/0021_agent_policy": "9f11063cfd66c2940b21819453fa18f16123b56f59ce77f2bad74d50523d5127",
+    "declared/0022_comment_kind": "1a86e121ab2879671fd44ee5a9276e05d4af19bb4b98e71e3426634958be7078",
     "observed/0001_foundation": "c050f9e4dba983119f045b8fb4ccbe8b1ee97473170eead7d28279e99468de4b",
     "observed/0002_evidence": "9cdc9c9179740af96606bab0b557c7b35639eaabc78faf16630c7705f1d368f5",
     "observed/0003_inherited_dep_refs": "8bf0b8533774a156762fddc2e56bbb9656ba3b6bf0e38ec85a66c9dc9c325ed1",
