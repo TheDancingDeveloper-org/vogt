@@ -49,6 +49,8 @@ from vogt.application.models import (
     AnswerSessionParams,
     BindSessionWorkParams,
     BindSessionWorkResult,
+    CommitForSessionParams,
+    CommitForSessionResult,
     EngineSessionTokenParams,
     EngineSessionTokenResult,
     HibernateSessionParams,
@@ -148,6 +150,8 @@ SESSION_WAKE = "session.wake"
 SESSION_WOKEN_EVENT = "session.woken"
 SESSION_KEEP_AWAKE = "session.keep_awake"
 SESSION_KEEP_AWAKE_EVENT = "session.keep_awake"
+SESSION_COMMIT_FOR = "session.commit_for"
+SESSION_COMMITTED_EVENT = "session.committed"
 SESSION_SET_ROLE = "session.set_role"
 SESSION_ROLE_EVENT = "session.role_set"
 SESSION_RENAME = "session.rename"
@@ -1646,6 +1650,61 @@ def keep_session_awake(
         return SessionResult(
             session=_summarize(view, target.session, engine_session=updated)
         )
+
+
+def commit_for_session(
+    ctx: AppContext, params: CommitForSessionParams
+) -> CommitForSessionResult:
+    """Commit a worker session's staged work (C14).
+
+    The engine owns the checklist: the worker must be idle, hibernated or
+    blocked, and the staged diff must carry no conflict marker, secret or
+    intent-to-add. The commit uses the repo's own identity. The result is a
+    digest and the SHA; the diff itself only when the caller asked for it.
+    """
+    reason = writes.validate_reason(params.reason)
+    message = params.message.strip()
+    if not message:
+        msg = "message must not be empty: say what the commit does"
+        raise InvalidRequest(msg)
+    engine = _engine(ctx)
+    target = _target(ctx, params.id)
+    committed = engine.git_commit(
+        session_id=target.engine_session_id,
+        message=message,
+        paths=params.paths,
+        full_diff=params.full_diff,
+        forbidden_text=params.forbidden_text,
+    )
+    sha = str(committed.get("commit") or "")
+    if not sha:
+        msg = f"the engine committed nothing for session {params.id!r}"
+        raise InvalidRequest(msg)
+    audited_action(
+        ctx,
+        operation=SESSION_COMMIT_FOR,
+        reason=reason,
+        entity_kind="session",
+        entity_id=(
+            target.session.id
+            if target.session is not None
+            else target.engine_session_id
+        ),
+        outcome={
+            "engine_session_id": target.engine_session_id,
+            "commit": sha,
+            "digest": str(committed.get("digest") or ""),
+            "paths": len(params.paths),
+        },
+        event_kind=SESSION_COMMITTED_EVENT,
+    )
+    return CommitForSessionResult(
+        commit=sha,
+        digest=str(committed.get("digest") or ""),
+        diff_stat=str(committed.get("diff_stat") or ""),
+        diff=committed.get("diff"),
+        review=[str(flag) for flag in committed.get("review") or []],
+    )
 
 
 def rename_session(ctx: AppContext, params: RenameSessionParams) -> SessionResult:

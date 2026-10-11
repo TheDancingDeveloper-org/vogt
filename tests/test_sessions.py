@@ -21,6 +21,7 @@ from pydantic import ValidationError
 from vogt.adapters.engine import EngineClient, EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
+    CommitForSessionParams,
     CreateWorkParams,
     GetWorkParams,
     HistoryListParams,
@@ -36,6 +37,7 @@ from vogt.application.models import (
     UpdateProjectParams,
 )
 from vogt.application.services import (
+    commit_for_session,
     create_work,
     get_work,
     history_list,
@@ -52,7 +54,7 @@ from vogt.application.services import (
 )
 from vogt.core.auth import hash_token
 from vogt.core.entities import AgentPolicy
-from vogt.errors import InvalidRequest, MissingReason, NotFound
+from vogt.errors import Conflict, InvalidRequest, MissingReason, NotFound
 
 from tests.conftest import native_work_item
 
@@ -81,8 +83,11 @@ class StandInEngine:
         #: When set, POST /api/sessions is refused with this reason (400),
         #: the way the engine refuses an effort with no agent CLI to take it.
         self.refuse_start: str | None = None
-        #: When set, a start that carries `resume` answers with this cwd — the
-        #: engine starting a resumed conversation where its transcript ran.
+        #: POST /api/git/op answers. `None` commits; a tuple is the status and
+        #: error text the engine refuses with (400 checklist, 409 mid-turn).
+        self.git_refusal: tuple[int, str] | None = None
+        #: A resumed session starts back in the directory its transcript
+        #: records; tests that assert that set this.
         self.resume_cwd: str | None = None
 
     def __call__(
@@ -95,6 +100,19 @@ class StandInEngine:
         payload = json.loads(body.decode("utf-8")) if body else {}
         self.sent.append({"url": url, "method": method, "body": payload})
 
+        if method == "POST" and url.endswith("/api/git/op"):
+            if self.git_refusal is not None:
+                status, said = self.git_refusal
+                return status, json.dumps({"error": said}).encode()
+            return 200, json.dumps(
+                {
+                    "ok": True,
+                    "commit": "abc123def456",
+                    "digest": "1 file changed, 2 insertions(+)",
+                    "diff_stat": " a.rs | 2 ++\n 1 file changed, 2 insertions(+)",
+                    "review": ["1 pin"],
+                }
+            ).encode()
         if method == "POST" and url.endswith("/api/sessions"):
             if self.refuse_start is not None:
                 return 400, json.dumps({"error": self.refuse_start}).encode()
@@ -1505,6 +1523,91 @@ def test_only_the_engine_may_mint_a_session_token(wired: AppContext) -> None:
             )
     with pytest.raises(ValidationError):
         EngineSessionTokenParams(engine_session_id="../../etc", reason=WHY)
+
+
+def test_commit_for_a_session_returns_the_digest_and_is_audited(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """C14: the commit goes through the engine's git op, named by the session,
+    and the audit records the SHA and digest — never the diff."""
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    result = commit_for_session(
+        wired,
+        CommitForSessionParams(
+            id=started.session.id,
+            message="record the session commit",
+            paths=["src/a.rs"],
+            forbidden_text=["WIP"],
+            reason=WHY,
+        ),
+    )
+    assert result.commit == "abc123def456"
+    assert result.digest == "1 file changed, 2 insertions(+)"
+    assert result.diff is None
+    assert result.review == ["1 pin"]
+    sent = [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+    assert sent[-1]["body"] == {
+        "op": "commit",
+        "session": started.session.engine_session_id,
+        "message": "record the session commit",
+        "paths": ["src/a.rs"],
+        "full_diff": False,
+        "forbidden_text": ["WIP"],
+    }
+    audit = list_audit(wired, ListAuditParams(operation="session.commit_for"))
+    assert audit.records, "the commit is an audited action"
+    events = [
+        event
+        for event in list_events(wired, ListEventsParams()).events
+        if event.kind == "session.committed"
+    ]
+    assert events[-1].summary["commit"] == "abc123def456"
+    assert "diff" not in events[-1].summary
+
+
+def test_a_blank_commit_message_never_reaches_the_engine(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    with pytest.raises(InvalidRequest):
+        commit_for_session(
+            wired,
+            CommitForSessionParams(id=started.session.id, message="   ", reason=WHY),
+        )
+    assert not [row for row in engine.sent if row["url"].endswith("/api/git/op")]
+
+
+@pytest.mark.parametrize(
+    ("status", "said", "error"),
+    [
+        (400, "staged diff has a conflict marker", InvalidRequest),
+        (400, "staged diff has an intent-to-add entry", InvalidRequest),
+        (400, "message matches forbidden text", InvalidRequest),
+        (409, "session eng-1 is Running: a commit waits until it is quiet", Conflict),
+    ],
+)
+def test_the_engines_commit_refusal_reaches_the_caller(
+    wired: AppContext,
+    engine: StandInEngine,
+    status: int,
+    said: str,
+    error: type[Exception],
+) -> None:
+    """Each checklist rejection (conflict, secret, intent-to-add, forbidden
+    text, a worker mid-turn) is the engine's word, surfaced as a typed error
+    and never audited as a commit."""
+    started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+    engine.git_refusal = (status, said)
+    with pytest.raises(error, match=said):
+        commit_for_session(
+            wired,
+            CommitForSessionParams(
+                id=started.session.id, message="should not land", reason=WHY
+            ),
+        )
+    assert not list_audit(
+        wired, ListAuditParams(operation="session.commit_for")
+    ).records
 
 
 def test_the_engines_stack_secret_may_mint_whoever_it_was_issued_to(

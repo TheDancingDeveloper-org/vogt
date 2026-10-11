@@ -1101,6 +1101,36 @@ class EngineClient:
             return None
         return EngineSession.from_payload(payload)
 
+    def git_commit(
+        self,
+        *,
+        session_id: str,
+        message: str,
+        paths: list[str],
+        full_diff: bool,
+        forbidden_text: list[str],
+    ) -> dict[str, Any]:
+        """Commit on a session's behalf (C14). The engine runs the checklist
+        and commits in the repo that session works in, under the repo's own
+        identity. A refusal arrives as `InvalidRequest` (400: conflict marker,
+        secret, intent-to-add, forbidden text) or `Conflict` (409: mid-turn)."""
+        payload = self._call(
+            "/api/git/op",
+            method="POST",
+            payload={
+                "op": "commit",
+                "session": session_id,
+                "message": message,
+                "paths": paths,
+                "full_diff": full_diff,
+                "forbidden_text": forbidden_text,
+            },
+        )
+        if not isinstance(payload, dict):
+            msg = f"the {self.label} returned no commit for session {session_id}"
+            raise EngineUnavailable(msg)
+        return payload
+
     def keep_awake(self, session_id: str, *, keep_awake: bool) -> EngineSession | None:
         """Pin a session awake (or unpin it); `None` on a 404."""
         payload = self._call(
