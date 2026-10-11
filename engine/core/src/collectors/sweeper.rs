@@ -119,7 +119,10 @@ impl<'a, S: ObservedStore, C: Clock> Sweeper<'a, S, C> {
 
         // Only now that the append has committed does the collector's own
         // bookkeeping advance — never ahead of the evidence it summarises.
-        collector.after_append(self.clock.now());
+        // Python reads the clock here only for PostAppend collectors.
+        if collector.post_append() {
+            collector.after_append(self.clock.now());
+        }
 
         let outcome =
             if !failures.is_empty() && failures.len() == projects.len() && !projects.is_empty() {

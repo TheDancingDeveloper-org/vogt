@@ -116,6 +116,13 @@ pub trait Collector {
     /// `collect`, so it can never move past observations that failed to
     /// persist (D1). Default collectors do nothing.
     fn after_append(&mut self, _at: crate::core::Moment) {}
+
+    /// Whether `after_append` does anything. Python only reads the clock for
+    /// `PostAppend` collectors; reading it for a no-op advances a step clock
+    /// and shifts `finished_at` and the published event one tick later.
+    fn post_append(&self) -> bool {
+        false
+    }
 }
 
 /// A collector that indexes agent transcripts rather than projects.
