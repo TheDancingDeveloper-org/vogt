@@ -1329,6 +1329,13 @@ class SessionSummary(Result):
             "the engine cannot sample."
         ),
     )
+    budget: SessionBudgetParams | None = Field(
+        default=None,
+        description=(
+            "Live from the engine: the limits this session was started with "
+            "(C7). Null when it has none, or when the engine could not be asked."
+        ),
+    )
     conversation_id: str | None = Field(
         default=None,
         description=(
@@ -3926,6 +3933,26 @@ class ConnectResult(Result):
 # -- coding sessions -------------------------------------------------------
 
 
+class SessionBudgetParams(Params):
+    """Limits the engine enforces on one session (C7).
+
+    Each field is one limit; a field left out is a limit not set. Zero is not
+    a limit, so every field is positive when present. On `session.start` the
+    object itself is tri-state: omitted means apply the default, and a present
+    object — even an empty one — means use exactly the limits it names.
+    """
+
+    turns: int | None = Field(default=None, gt=0, description="Turn limit.")
+    context_tokens: int | None = Field(
+        default=None, gt=0, description="Context-window limit, in tokens."
+    )
+    wall_clock_minutes: int | None = Field(
+        default=None,
+        gt=0,
+        description="Wall-clock limit in minutes, counted only while a turn runs.",
+    )
+
+
 class StartSessionParams(Params):
     """Open a terminal for a work item, or for a project.
 
@@ -4086,6 +4113,17 @@ class StartSessionParams(Params):
             "work item ref (e.g. WI-7). Refused when that item has no hand-off "
             "comment, and refused when `work_item` is also given and names a "
             "different item. The brief carries the latest hand-off."
+        ),
+    )
+    budget: SessionBudgetParams | None = Field(
+        default=None,
+        description=(
+            "Limits the engine enforces on this session (C7): a soft warning "
+            "as one is approached, then hibernation (trigger `budget`) when "
+            "one is reached. Omitted means the default for an agent template "
+            "started with a `task` as a worker — 120 turns and 90 minutes of "
+            "wall clock, no context limit — and no budget otherwise. An empty "
+            "object sets no limits, which is how a start declines the default."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")

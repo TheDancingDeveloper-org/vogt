@@ -1004,7 +1004,9 @@ components:
           description: Pinned awake; absent when false.
         autopilot:
           type: boolean
-          description: On autopilot (WI-949) — exempt from the idle policy and re-prompted at its prompt until it prints `AUTOPILOT: DONE`; absent when false.
+          description: >-
+            On autopilot (WI-949) — exempt from the idle policy and re-prompted
+            at its prompt until it prints `AUTOPILOT: DONE`; absent when false.
         autopilot_nudges:
           type: integer
           description: How many times the engine has told it to carry on; absent when none.
@@ -1014,6 +1016,7 @@ components:
           type: string
           description: The work item the session serves (WI-998); absent when bound to none.
         resources: { $ref: "#/components/schemas/SessionResources" }
+        budget: { $ref: "#/components/schemas/SessionBudget" }
         template:
           type: string
           description: The session template it was started from, by the name given; absent for an explicit command.
@@ -1021,6 +1024,17 @@ components:
           type: string
           enum: [accept-edits, bypass]
           description: The permission posture when not the default (docs/ENGINE.md, "Permission posture").
+    SessionBudget:
+      type: object
+      description: >-
+        Limits on one session (WI-1245). A field absent or zero is not a limit.
+        The engine warns once at `ENGINE_BUDGET_SOFT_PCT` of a turn or context
+        limit and hibernates at the limit; `wall_clock_minutes` is hard only,
+        and only while one turn is running.
+      properties:
+        turns: { type: integer, minimum: 1 }
+        context_tokens: { type: integer, minimum: 1 }
+        wall_clock_minutes: { type: integer, minimum: 1 }
     SessionResources:
       type: object
       required: [rss_bytes, cpu_pct, processes, sampled_at]
@@ -1275,6 +1289,11 @@ components:
         cols: { type: integer }
         rows: { type: integer }
         scrollback_bytes: { type: integer }
+        budget:
+          $ref: "#/components/schemas/SessionBudget"
+          description: >-
+            Limits enforced on this session. An empty object sets none. Kept in
+            the hibernation record and restored on wake.
     SessionInput:
       type: object
       required: [text]

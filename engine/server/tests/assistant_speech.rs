@@ -167,6 +167,7 @@ fn test_config() -> Config {
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
         assistant_call: vogt_engine_server::call::CallPolicy::default(),
         autopilot: vogt_engine_server::autopilot::Policy::default(),
+        budget: vogt_engine_server::budget::Policy::default(),
         agent_onboarding: vogt_engine_server::claude_config::Onboarding::default(),
         session_rss_warn_bytes: None,
         metrics_bind: None,

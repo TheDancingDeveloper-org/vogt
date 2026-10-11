@@ -102,6 +102,15 @@ pub struct Record {
     /// record written before the field existed, which wakes without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<SessionPolicy>,
+    /// The budget the session was started with (WI-1245); a wake keeps it,
+    /// and the two flags with it, so a warning already given is not given
+    /// again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<vogt_engine_contract::SessionBudget>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_soft_sent: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub budget_hard_done: bool,
     /// What the session is for (WI-957); a wake keeps it.
     #[serde(default, skip_serializing_if = "SessionRole::is_worker")]
     pub role: SessionRole,
@@ -155,6 +164,9 @@ impl Record {
             keep_awake: false,
             autopilot: false,
             policy: None,
+            budget: None,
+            budget_soft_sent: false,
+            budget_hard_done: false,
             role: SessionRole::Worker,
             work_item: None,
             superseded_by: None,

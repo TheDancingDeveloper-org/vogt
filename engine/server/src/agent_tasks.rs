@@ -1486,6 +1486,7 @@ impl AgentTaskRegistry {
             rows: Some(30),
             scrollback_bytes: None,
             companion: None,
+            budget: None,
         })?;
 
         // Capture the run's starting git position in its own workspace, so the
@@ -5196,6 +5197,7 @@ mod tests {
             hibernation: crate::hibernate_policy::Policy::default(),
             assistant_call: crate::call::CallPolicy::default(),
             autopilot: crate::autopilot::Policy::default(),
+            budget: crate::budget::Policy::default(),
             agent_onboarding: crate::claude_config::Onboarding::default(),
             session_rss_warn_bytes: None,
             metrics_bind: None,

@@ -32,6 +32,8 @@ from vogt.application.models import (
     RegisterProjectParams,
     RelateWorkParams,
     SearchOutputParams,
+    SessionBudgetParams,
+    SessionSummary,
     StartSessionParams,
     StopSessionParams,
     UpdateProjectParams,
@@ -456,6 +458,80 @@ def test_the_enforced_policy_reaches_the_engine_and_guidance_does_not(
         "merge_deploys_prod": True,
         "main_branches": ["main", "release"],
     }
+
+
+def test_a_worker_agent_task_gets_the_default_budget(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1245: an agent template with a task in the worker role is bounded
+    unless the caller says otherwise."""
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt", template="opencode", task="work the backlog", reason=WHY
+        ),
+    )
+    assert engine.last_spec["budget"] == {"turns": 120, "wall_clock_minutes": 90}
+
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            template="opencode",
+            task="one question",
+            budget=SessionBudgetParams(turns=5),
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["budget"] == {"turns": 5}
+
+    # An empty object is the explicit decline, not the default.
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            template="opencode",
+            task="unbounded",
+            budget=SessionBudgetParams(),
+            reason=WHY,
+        ),
+    )
+    assert engine.last_spec["budget"] == {}
+
+    # A shell, a start with no task, and an overseer are not bounded.
+    start_session(wired, StartSessionParams(project="vogt", reason=WHY))
+    assert "budget" not in engine.last_spec
+    start_session(
+        wired,
+        StartSessionParams(project="vogt", template="claude", reason=WHY),
+    )
+    assert "budget" not in engine.last_spec
+    start_session(
+        wired,
+        StartSessionParams(
+            project="vogt",
+            template="opencode",
+            task="watch the others",
+            role="oversight",
+            reason=WHY,
+        ),
+    )
+    assert "budget" not in engine.last_spec
+
+
+def test_the_digest_leaves_the_budget_line_to_the_economics_tailer() -> None:
+    """C7's digest line is built by the economics tailer (WI-1245 A2), not here."""
+    from vogt.application.services.sessions import _digest_of
+
+    digest = _digest_of(
+        SessionSummary(
+            id="ses-1",
+            engine_session_id="eng-1",
+            cwd="/work",
+            budget=SessionBudgetParams(turns=120, context_tokens=200_000),
+        )
+    )
+    assert digest.budget is None
 
 
 def test_a_template_is_sent_by_name_for_the_engine_to_expand(
