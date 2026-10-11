@@ -232,21 +232,26 @@ def _tool_error(code: str, message: str) -> dict[str, Any]:
     }
 
 
-_TEXT_CAP = 200
+def _without_nulls(value: object) -> object:
+    """Drop null-valued keys at every depth; list items are kept as they are."""
+    if isinstance(value, dict):
+        return {k: _without_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_without_nulls(item) for item in value]
+    return value
 
 
 def tool_success(payload: dict[str, Any]) -> dict[str, Any]:
-    """structuredContent plus a one-line text summary (design C1, decision 4).
+    """structuredContent plus the same result as compact text (design C1).
 
-    The text is what a client that ignores structuredContent still reads, so it
-    stays under ~200 characters and drops nulls. structuredContent is the full
-    result, nulls included, so it matches CLI and REST. Errors stay text-only
-    via `_tool_error`.
+    The text is the whole result, never truncated: Klaudia (msp-klaudia
+    `internal/mcp/result.go`) shows the model the text and reads
+    structuredContent only when there is none, so a summary there would hide
+    the result. The saving is in the shape instead: no indentation and no
+    null-valued keys. structuredContent is the full result, nulls included, so
+    it matches CLI and REST. Errors stay text-only via `_tool_error`.
     """
-    summary = {key: value for key, value in payload.items() if value is not None}
-    text = json.dumps(summary, separators=(",", ":"), default=str)
-    if len(text) > _TEXT_CAP:
-        text = text[: _TEXT_CAP - 1] + "…"
+    text = json.dumps(_without_nulls(payload), separators=(",", ":"), default=str)
     return {
         "content": [{"type": "text", "text": text}],
         "structuredContent": payload,
