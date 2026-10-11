@@ -104,6 +104,7 @@ from vogt.application.models import (
 from vogt.application.services import _resolve
 from vogt.application.services._brief import (
     AUTOPILOT,
+    ComposedBrief,
     brief_for_project,
     brief_for_work_item,
 )
@@ -112,7 +113,14 @@ from vogt.application.writes import WriteOutcome, audited_action, audited_write
 from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
-from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
+from vogt.core.entities import (
+    Actor,
+    AgentPolicy,
+    CodingSession,
+    Token,
+    WorkItem,
+    WorkOverlay,
+)
 from vogt.core.session_economics import meter
 from vogt.errors import (
     BypassRefused,
@@ -226,7 +234,10 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             env=_session_env(
                 ctx, session_id, credential.secret, work_item=subject.work_item_ref
             ),
-            brief=_brief_with_task(subject.brief, params.task, autopilot=autopilot),
+            brief=_brief_with_task(
+                subject.brief, params, cwd=subject.cwd, autopilot=autopilot
+            ),
+            companion=subject.brief.companion,
             model=params.model,
             effort=params.effort,
             resume=params.resume,
@@ -2388,7 +2399,8 @@ class _Subject:
         project_slug: str,
         cwd: str,
         work_item: WorkItem | None,
-        brief: str,
+        brief: ComposedBrief,
+        policy: AgentPolicy,
         is_scratch: bool = False,
     ) -> None:
         self.project_id = project_id
@@ -2396,6 +2408,7 @@ class _Subject:
         self.cwd = cwd
         self.work_item = work_item
         self.brief = brief
+        self.policy = policy
         #: Resolved from `session_scratch_project` rather than named by the
         #: caller. Carried so the name and the audit row can say so.
         self.is_scratch = is_scratch
@@ -2482,7 +2495,10 @@ def _resolve_subject(
             project_slug=project.slug,
             cwd=project.root_path,
             work_item=item,
-            brief=brief_for_work_item(view, item, session_id, _ranking(ctx, item.ref)),
+            brief=brief_for_work_item(
+                view, item, session_id, _ranking(ctx, item.ref), project=project
+            ),
+            policy=project.agent_policy,
         )
 
     project = _resolve.project(view, params.project or "")
@@ -2491,7 +2507,8 @@ def _resolve_subject(
         project_slug=project.slug,
         cwd=project.root_path,
         work_item=None,
-        brief=brief_for_project(view, project.slug, session_id),
+        brief=brief_for_project(view, project.slug, session_id, project=project),
+        policy=project.agent_policy,
     )
 
 
@@ -2537,8 +2554,14 @@ def _engine(ctx: AppContext) -> EngineClient:
     return ctx.engine
 
 
-def _brief_with_task(brief: str, task: str | None, *, autopilot: bool = False) -> str:
-    """Fold an explicit task into the session's brief.
+def _brief_with_task(
+    brief: ComposedBrief,
+    params: StartSessionParams,
+    *,
+    cwd: str,
+    autopilot: bool = False,
+) -> str:
+    """Fold an explicit task, and its touch points, into the session's brief.
 
     The brief is context — the project, or the work item and why it ranks —
     and by itself it asks the agent to do nothing (a project brief says so
@@ -2548,14 +2571,106 @@ def _brief_with_task(brief: str, task: str | None, *, autopilot: bool = False) -
     Appended rather than replacing so the agent keeps the context under
     the task.
     """
-    task = (task or "").strip()
+    text = brief.text
     if autopilot:
         # Said in the brief, not enforced: the engine cannot make an agent
         # keep going, but an agent that was told to will (WI-878).
-        brief = f"{brief.rstrip()}\n\n{AUTOPILOT}"
-    if not task:
-        return brief
-    return f"{brief.rstrip()}\n\n## Task\n\n{task}\n"
+        text = f"{text.rstrip()}\n\n{AUTOPILOT}"
+    task = (params.task or "").strip()
+    touch = _touch_points(params, cwd=cwd)
+    if task:
+        text = f"{text.rstrip()}\n\n## Task\n\n{task}\n"
+    if touch:
+        text = f"{text.rstrip()}\n\n{touch}"
+    return text
+
+
+def _touch_points(params: StartSessionParams, *, cwd: str) -> str:
+    """The structured half of a task: files, symbols, done, gates, map.
+
+    Empty when the caller named none of them, so a plain `task` brief is
+    unchanged. The map is a two-level outline of the directories the files
+    sit in, drawn from the working tree and capped — a map, not a listing.
+    """
+    rows: list[str] = []
+    if params.files:
+        rows.append("**Files**")
+        rows.extend(f"- `{one}`" for one in params.files)
+    if params.symbols:
+        rows.append("**Symbols** " + ", ".join(f"`{one}`" for one in params.symbols))
+    if params.done:
+        rows.append("**Done when**")
+        rows.extend(f"- {one}" for one in params.done)
+    if params.gates:
+        rows.append("**Gates**")
+        rows.extend(f"- {one}" for one in params.gates)
+    outline = _repo_map(params, cwd=cwd)
+    if outline:
+        rows += ["**Repo map**", "```", outline, "```"]
+    if not rows:
+        return ""
+    return "## Touch points\n\n" + "\n".join(rows) + "\n"
+
+
+_REPO_MAP_CAP = 2000
+
+
+def _repo_map(params: StartSessionParams, *, cwd: str) -> str:
+    """A two-level outline of the touch-point directories, or nothing.
+
+    Drawn only when the caller asked (`repo_map`) or named files. Each file's
+    directory is listed one level down, and only when it sits inside `cwd`:
+    a path that escapes the working tree is a hint that was wrong, not a
+    directory to go and read. A missing tree is an empty map, never a failed
+    start. Capped, because a map that outgrows the brief has stopped being one.
+    """
+    wanted = params.repo_map
+    if wanted is False or (wanted is None and not params.files):
+        return ""
+    root = Path(cwd).resolve()
+    if not root.is_dir():
+        return ""
+    dirs = {_touch_dir(root, spec) for spec in params.files}
+    dirs.discard(None)
+    lines: list[str] = []
+    for directory in sorted(dirs, key=lambda one: str(one)):
+        assert directory is not None
+        rel = directory.relative_to(root)
+        lines.append(f"{rel}/" if str(rel) != "." else "./")
+        try:
+            children = sorted(directory.iterdir(), key=lambda one: one.name)
+        except OSError:
+            continue
+        for child in children:
+            if child.name.startswith("."):
+                continue
+            mark = "/" if child.is_dir() else ""
+            lines.append(f"  {child.name}{mark}")
+            if sum(len(line) + 1 for line in lines) > _REPO_MAP_CAP:
+                lines.append("  …")
+                return "\n".join(lines)
+    return "\n".join(lines)
+
+
+def _touch_dir(root: Path, spec: str) -> Path | None:
+    """The directory a touch-point file sits in, if it is inside `root`."""
+    raw = spec.split(":", 1)[0].strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    try:
+        resolved = candidate.resolve()
+    except OSError:
+        return None
+    if resolved.is_file():
+        resolved = resolved.parent
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return None
+    return resolved if resolved.is_dir() else None
 
 
 def _autopilot(params: StartSessionParams) -> bool:
@@ -2575,6 +2690,7 @@ def _start_on_engine(
     cwd: str,
     env: dict[str, str],
     brief: str,
+    companion: str = "",
     model: str | None = None,
     effort: str | None = None,
     resume: str | None = None,
@@ -2607,6 +2723,7 @@ def _start_on_engine(
         autopilot=autopilot,
         role=role,
         work_item=work_item,
+        companion=companion or None,
     )
 
 

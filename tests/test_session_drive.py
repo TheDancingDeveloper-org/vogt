@@ -680,7 +680,9 @@ def test_a_session_is_told_where_the_engine_is(
     )
     env = dict(create["body"]["env"])
     assert env["VOGT_ENGINE_URL"] == "http://127.0.0.1:8910"
-    assert DRIVING_OTHER_SESSIONS in create["body"]["prompt"]
+    # The driving instructions moved to the companion; the brief only names it.
+    assert ".guide.md" in create["body"]["prompt"]
+    assert DRIVING_OTHER_SESSIONS in create["body"]["companion"]
 
 
 # -- session.answer (WI-917) ------------------------------------------------

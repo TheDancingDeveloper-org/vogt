@@ -15,12 +15,27 @@ else. Two rules shaped it:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from vogt.application.models import WhyResult
-from vogt.core.entities import WorkItem
+from vogt.core.entities import Project, WorkItem
 from vogt.storage.interface import ReadView
 
-#: How a session reaches the others. Said in the brief because a capability
-#: an agent is not told about is one it goes looking for in engine source.
+#: The deployment's own rules, which are the same for every project and live
+#: in the deployment's settings rather than in this brief. One line, because
+#: copying them in would drift from the file that actually enforces them.
+_DEPLOYMENT_POLICY = (
+    "The deployment's session policy — what an agent may do without asking — "
+    "is the settings file this session was started with, not this brief."
+)
+#: Written beside the brief. That directory is already on the agent's readable
+#: path (`--add-dir`), so one line in the brief is enough to point at it.
+COMPANION_SUFFIX = ".guide.md"
+
+
+#: How a session reaches the others. Said once, in the companion, because a
+#: capability an agent is not told about is one it goes looking for in engine
+#: source.
 DRIVING_OTHER_SESSIONS = (
     "## Driving other sessions\n"
     "\n"
@@ -90,18 +105,115 @@ AUTOPILOT = (
 )
 
 
+@dataclass(frozen=True)
+class ComposedBrief:
+    """A session brief plus the text written beside it.
+
+    The brief stays short: the boilerplate that used to be copied into every
+    one is one file per session, and the brief names it. `companion` is empty
+    when there is nothing to point at, which is only a brief built by hand.
+    """
+
+    text: str
+    companion: str = ""
+
+
+def _policy_section(project: Project | None) -> list[str]:
+    """The project's agent policy, stated as what it recorded.
+
+    Rendered only for the facts the project actually set, so a project with
+    no policy adds nothing — an empty section would read as a rule.
+    """
+    if project is None:
+        return []
+    policy = project.agent_policy
+    rows: list[str] = []
+    if policy.forbidden_text:
+        rendered = ", ".join(f"`{pattern}`" for pattern in policy.forbidden_text)
+        rows.append(
+            f"- **Forbidden text** {rendered} — must not appear in a commit "
+            "message, author, trailer, pull-request text or branch name."
+        )
+    if policy.merge_deploys_prod:
+        branches = ", ".join(f"`{b}`" for b in policy.main_branches) or "`main`"
+        rows.append(
+            "- **Merges deploy production.** Merging a pull request onto "
+            f"{branches} ships it. Do not run `gh pr merge` there; a person "
+            "merges."
+        )
+    if policy.commit_identity:
+        rows.append(f"- **Commit identity** {policy.commit_identity}")
+    if policy.test_recipe:
+        rows.append(f"- **Tests** {policy.test_recipe}")
+    rows.extend(f"- {rule}" for rule in policy.rules)
+    if not rows:
+        return []
+    return [f"## Project policy — {project.slug}", "", *rows, ""]
+
+
+def _companion(session_id: str, *, work_ref: str | None) -> str:
+    """The boilerplate, written once beside the brief instead of into it."""
+    bound = (
+        f"This session is bound to {work_ref} (`VOGT_WORK_ITEM`). If you move "
+        "on to a different item, rebind with `session_bind_work` so the items "
+        "say who is on them; binding never changes an item's state.\n\n"
+        if work_ref is not None
+        else ""
+    )
+    return (
+        "# Session guide\n"
+        "\n"
+        "## Recording what you find\n"
+        "\n"
+        f"This session is `{session_id}` and holds a token bound to its own "
+        "actor, so anything it writes to Vogt is attributed to this session "
+        "rather than to whoever started it.\n"
+        "\n"
+        "Vogt is reachable over MCP at the URL in `VOGT_URL`, with the token "
+        "in `VOGT_HTTP_TOKEN`. The token may read, and may write work items "
+        "and comments — nothing else. Every write needs a reason you have "
+        "actually got: it is stored, and it is what somebody reads later when "
+        "they ask why this changed.\n"
+        "\n" + bound + WHEN_BLOCKED + "\n" + DRIVING_OTHER_SESSIONS
+    )
+
+
+def _pointer(session_id: str, *, work_ref: str | None) -> list[str]:
+    bound = (
+        f" It is bound to {work_ref}; rebind with `session_bind_work` if you move on."
+        if work_ref is not None
+        else ""
+    )
+    # The engine names the brief and the guide for its own session id, which
+    # the core does not know when it writes this; so the guide is named by
+    # its relation to this file rather than by an id that may not be it.
+    return [
+        "## Before you start",
+        "",
+        f"This session is `{session_id}`.{bound} How to record what you find, "
+        "how to say you are blocked, and how to drive another session are in "
+        f"the guide beside this brief: the same file name, ending "
+        f"`{COMPANION_SUFFIX}` instead of `.md`.",
+        "",
+    ]
+
+
 def brief_for_work_item(
     view: ReadView,
     item: WorkItem,
     session_id: str,
     ranking: WhyResult | None = None,
-) -> str:
+    *,
+    project: Project | None = None,
+) -> ComposedBrief:
     """The work item, as a page an agent can read before it starts.
 
     `ranking` is optional because the brief must survive a ranking that
     cannot be computed — an observed subject, a store mid-sweep — and a
     session that refused to start because a score was unavailable would be
-    the tail wagging the dog.
+    the tail wagging the dog. `project` carries the agent policy; without it
+    the brief says nothing about one, which is also what a project with an
+    empty policy says.
     """
     lines: list[str] = [f"# {item.ref} — {item.title}", ""]
 
@@ -163,35 +275,29 @@ def brief_for_work_item(
 
     comments = view.comments_for(item.id, limit=20)
     if comments:
+        # Oldest first, which is all a comment is today. A hand-off is a
+        # comment of a kind this store does not record yet (C11); when it
+        # does, the newest one is rendered here, ahead of the rest.
         lines += ["## Comments", ""]
         for comment in comments:
             lines.append(f"- {comment.body.strip()}")
         lines.append("")
 
-    lines += [
-        "## Recording what you find",
-        "",
-        f"This session is `{session_id}` and holds a token bound to its own "
-        "actor, so anything it writes to Vogt is attributed to this session "
-        "rather than to whoever started it.",
-        "",
-        "Vogt is reachable over MCP at the URL in `VOGT_URL`, with the token "
-        "in `VOGT_HTTP_TOKEN`. The token may read, and may write work items "
-        "and comments — nothing else. Every write needs a reason you have "
-        "actually got: it is stored, and it is what somebody reads later when "
-        "they ask why this changed.",
-        "",
-        f"This session is bound to {item.ref} (`VOGT_WORK_ITEM`). If you move "
-        "on to a different item, rebind with `session_bind_work` so the items "
-        "say who is on them; binding never changes an item's state.",
-        "",
-        WHEN_BLOCKED,
-        DRIVING_OTHER_SESSIONS,
-    ]
-    return "\n".join(lines)
+    lines += _policy_section(project)
+    lines += ["## Deployment policy", "", _DEPLOYMENT_POLICY, ""]
+    lines += _pointer(session_id, work_ref=item.ref)
+    return ComposedBrief(
+        text="\n".join(lines), companion=_companion(session_id, work_ref=item.ref)
+    )
 
 
-def brief_for_project(view: ReadView, project_slug: str, session_id: str) -> str:
+def brief_for_project(
+    view: ReadView,
+    project_slug: str,
+    session_id: str,
+    *,
+    project: Project | None = None,
+) -> ComposedBrief:
     """A terminal opened on a project, which is a plain shell with context.
 
     Deliberately thinner than the work-item brief. Nobody asked for anything
@@ -200,23 +306,30 @@ def brief_for_project(view: ReadView, project_slug: str, session_id: str) -> str
     which is the half of the reversed non-goal that stayed refused.
     """
     del view
-    return (
-        f"# {project_slug}\n"
-        "\n"
+    lines = [
+        f"# {project_slug}",
+        "",
         "A terminal opened on this project. No work item is attached, so "
         "there is no task here beyond what you were asked for directly — "
         "when you take one up, call `session_bind_work` with its ref (and no "
-        "`id`), so the item shows who is on it.\n"
-        "\n"
-        f"This session is `{session_id}`. Vogt is at `VOGT_URL` with the "
-        "token in `VOGT_HTTP_TOKEN`, scoped to read and to write work items.\n"
-        "\n" + WHEN_BLOCKED + "\n" + DRIVING_OTHER_SESSIONS
+        "`id`), so the item shows who is on it.",
+        "",
+        *_policy_section(project),
+        "## Deployment policy",
+        "",
+        _DEPLOYMENT_POLICY,
+        "",
+        *_pointer(session_id, work_ref=None),
+    ]
+    return ComposedBrief(
+        text="\n".join(lines), companion=_companion(session_id, work_ref=None)
     )
 
 
 __all__ = [
     "AUTOPILOT",
     "WHEN_BLOCKED",
+    "ComposedBrief",
     "brief_for_project",
     "brief_for_work_item",
 ]

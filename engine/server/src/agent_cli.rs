@@ -89,7 +89,8 @@ pub struct LaunchRequest<'a> {
     /// `default` and `bypass` only.
     pub permission_mode: Option<&'a str>,
     /// The deployment's driven-session settings (an `autoMode` policy) to
-    /// hand Claude Code with `--settings`, when it has one.
+    /// hand Claude Code with `--settings`, when it has one. Klaudia has no
+    /// `--settings` flag (msp-klaudia #57), so it never receives this.
     pub settings_file: Option<&'a Path>,
     /// Extra directories the agent may read, as `--add-dir`. A fresh Claude
     /// launch derives this from the brief's parent; a wake passes the
@@ -1136,6 +1137,25 @@ mod permission_tests {
         // Claude Code's, and Klaudia would ignore or misread them.
         assert!(out.env.is_empty());
         assert!(!command.iter().any(|a| a.starts_with("--settings")));
+    }
+
+    #[test]
+    fn klaudia_never_takes_settings_even_when_the_deployment_has_one() {
+        // Klaudia has no `--settings` flag (msp-klaudia #57). A deployment
+        // policy that Claude Code would receive must not be handed to it.
+        let out = launch(
+            Some(&cmd(&["klaudia"])),
+            &LaunchRequest {
+                settings_file: Some(Path::new("/state/policy.json")),
+                brief_file: Some(Path::new("/state/sessions/x.md")),
+                ..LaunchRequest::default()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(!out.iter().any(|a| a.starts_with("--settings")));
+        assert!(out.iter().any(|a| a.starts_with("--add-dir=")));
     }
 
     #[test]

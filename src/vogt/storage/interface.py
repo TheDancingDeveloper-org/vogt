@@ -17,6 +17,7 @@ from typing import Protocol
 from vogt.core.entities import (
     Actor,
     ActorPreference,
+    AgentPolicy,
     AuditRecord,
     AuthDecision,
     CodingSession,
@@ -199,6 +200,8 @@ class ProjectUpdate:
     write_back: str | None = None
     link_state: str | None = None
     exclusions: tuple[str, ...] | None = None
+    #: Replaces the project's agent policy wholesale. `None` leaves it alone.
+    agent_policy: AgentPolicy | None = None
     contract_adopted_at: datetime | None = None
     #: Adoption is reversible, and `None` already means "leave alone", so
     #: declining the contract needs a flag of its own rather than a value.

@@ -685,6 +685,7 @@ class EngineClient:
         autopilot: bool = False,
         role: str = "worker",
         work_item: str | None = None,
+        companion: str | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -739,6 +740,10 @@ class EngineClient:
             # The item the session serves (WI-998), as a label the engine
             # keeps with the record and reports back on the summary.
             spec["work_item"] = work_item
+        if companion:
+            # The standing guide written beside the brief (WI-1243). The
+            # brief points at it by name; the engine writes the text.
+            spec["companion"] = companion
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 

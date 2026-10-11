@@ -350,6 +350,17 @@ impl SessionRegistry {
             .filter(|text| !text.is_empty());
         let brief_path = brief.map(|_| prompt_files::session_prompt_path(&self.cfg.state_dir, id));
 
+        // The guide is written before launch: the brief names its path, so it
+        // has to exist first (WI-1243).
+        if let Some(text) = spec
+            .companion
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            prompt_files::write_session_guide(&self.cfg.state_dir, id, text)?;
+        }
+
         // Before the prompt file is written and before anything is spawned:
         // a request naming a model (or a conversation to resume) this command
         // cannot be told about is refused, not started plain. Doing it here
@@ -1073,6 +1084,7 @@ impl SessionRegistry {
             cols: req.cols.or(record.cols),
             rows: req.rows.or(record.rows),
             scrollback_bytes: None,
+            companion: None,
         };
         let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
         self.bus.publish(ServerEvent::SessionWoken { id });
