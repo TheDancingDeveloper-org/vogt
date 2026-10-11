@@ -79,7 +79,7 @@ def test_claude_compaction_marker_counts_wherever_it_sits() -> None:
 def test_klaudia_estimates_and_counts_its_own_compaction_marker() -> None:
     body = "y" * (CHARS_PER_TOKEN * 10)
     lines = [
-        _line({"type": "compact_boundary"}),
+        _line({"type": "system", "subtype": "compact_boundary"}),
         _line({"type": "assistant", "message": {"content": body}}),
     ]
     result = meter(lines, agent="klaudia")
@@ -148,6 +148,94 @@ def test_one_timestamped_turn_has_no_wall_clock() -> None:
     assert meter([line], agent="klaudia").wall_clock.count == 0
 
 
+def test_claude_counts_a_turn_once_across_its_content_blocks() -> None:
+    """Claude writes one assistant entry per content block of one message."""
+
+    def block(index: int, tokens: int) -> str:
+        return _line(
+            {
+                "type": "assistant",
+                "timestamp": f"2026-10-11T01:00:{index:02d}Z",
+                "message": {
+                    "id": "msg_1",
+                    "usage": {"input_tokens": tokens, "output_tokens": 1},
+                    "content": [{"type": "text", "text": "part"}],
+                },
+            }
+        )
+
+    other = _line(
+        {
+            "type": "assistant",
+            "timestamp": "2026-10-11T01:01:00Z",
+            "message": {
+                "id": "msg_2",
+                "usage": {"input_tokens": 9, "output_tokens": 1},
+            },
+        }
+    )
+    result = meter([block(1, 40), block(2, 40), other], agent="claude")
+    assert result.turns == 2
+    # One output reading per turn, not one per content-block entry.
+    assert result.output_tokens == 2
+    assert result.wall_clock.count == 1
+
+
+def test_klaudia_compaction_is_a_system_subtype_and_resets_the_estimate() -> None:
+    archived = "y" * (CHARS_PER_TOKEN * 100)
+    live = "z" * (CHARS_PER_TOKEN * 10)
+    lines = [
+        _line({"type": "assistant", "message": {"content": archived}}),
+        _line({"type": "system", "subtype": "compact_boundary"}),
+        _line({"type": "assistant", "message": {"content": live}}),
+    ]
+    result = meter(lines, agent="klaudia")
+    assert result.compactions == 1
+    assert result.turns == 2
+    live_only = sum(len(line) for line in lines[1:]) // CHARS_PER_TOKEN
+    assert result.context_tokens == live_only
+    assert result.peak_context_tokens > result.context_tokens
+
+
+def test_claude_tool_results_are_named_from_the_tool_use_id() -> None:
+    lines = [
+        _line(
+            {
+                "type": "assistant",
+                "message": {
+                    "id": "msg_1",
+                    "usage": {"input_tokens": 10, "output_tokens": 1},
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "toolu_1",
+                            "name": "Read",
+                            "input": {"file_path": "/a.py"},
+                        }
+                    ],
+                },
+            }
+        ),
+        _line(
+            {
+                "type": "user",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_1",
+                            "content": "contents",
+                        }
+                    ]
+                },
+            }
+        ),
+    ]
+    result = meter(lines, agent="claude")
+    assert result.tool_result_bytes == {"Read": len("contents")}
+    assert result.reads_repeated == 0
+
+
 def test_budget_line_states_what_is_known_and_omits_what_is_not() -> None:
     result = meter(
         [_line({"type": "assistant", "isCompactSummary": True, "message": {}})],
@@ -167,3 +255,29 @@ def test_budget_line_states_what_is_known_and_omits_what_is_not() -> None:
         agent="claude",
     )
     assert measured.budget_line(120, 100) == "1/120 turns, 61% ctx"
+
+
+def test_claude_output_tokens_count_once_per_turn_across_its_blocks() -> None:
+    """Claude repeats one turn's usage on each content-block entry."""
+    usage = {
+        "input_tokens": 10,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 7,
+    }
+    lines = [
+        _line(
+            {
+                "type": "assistant",
+                "message": {"id": "msg_1", "usage": usage, "content": [block]},
+            }
+        )
+        for block in (
+            {"type": "thinking", "thinking": "hm"},
+            {"type": "text", "text": "hello"},
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+        )
+    ]
+    reading = meter(lines, agent="claude")
+    assert reading.turns == 1
+    assert reading.output_tokens == 7

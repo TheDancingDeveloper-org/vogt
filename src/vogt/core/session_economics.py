@@ -21,8 +21,11 @@ Three agents, three shapes, one result:
 
 `context_tokens` is the latest turn's context, not a sum across turns —
 that sum would count the same history once per turn. `peak_context_tokens`
-is the largest such reading. `turns` counts assistant entries only, so a
-user message or a tool result is not a turn.
+is the largest such reading. `turns` counts distinct assistant `message.id`
+values, because Claude writes one assistant entry per content block of a
+single turn. A user message or a tool result is not a turn. An estimate
+counts characters since the latest compaction only: that is the live
+history, not the archived one.
 
 Tool-result bytes and repeated reads count what the model was shown, which
 is the thing that fills the window. A Read of the same path twice counts
@@ -103,14 +106,19 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
     is the one Klaudia also writes.
     """
     measured = agent == "claude"
-    turns = 0
+    turn_ids: set[str] = set()
+    unkeyed_turns = 0
     compactions = 0
     context = 0
     peak = 0
-    output = 0
-    estimated_chars = 0
+    #: Output tokens per turn. Claude repeats one turn's usage on each of its
+    #: content-block entries, so the last reading per message id is the turn's.
+    output_by_turn: dict[str, int] = {}
+    unkeyed_output = 0
+    live_chars = 0
     tools: dict[str, int] = {}
     reads: dict[str, int] = {}
+    tool_names: dict[str, str] = {}
     stamps: list[str] = []
 
     for raw in lines:
@@ -123,53 +131,70 @@ def meter(lines: Iterable[str], *, agent: str) -> SessionEconomics:
             continue
         if not isinstance(entry, dict):
             continue
-        estimated_chars += len(text)
         kind = entry.get("type")
 
         if _is_compaction(entry):
             compactions += 1
+            # The compacted history is no longer in the window.
+            live_chars = 0
+        live_chars += len(text)
 
         if kind == "assistant":
-            turns += 1
-            stamp = entry.get("timestamp")
-            if isinstance(stamp, str) and stamp:
-                stamps.append(stamp)
+            message = entry.get("message")
+            message_id = message.get("id") if isinstance(message, dict) else None
+            if isinstance(message_id, str) and message_id:
+                if message_id not in turn_ids:
+                    stamp = entry.get("timestamp")
+                    if isinstance(stamp, str) and stamp:
+                        stamps.append(stamp)
+                turn_ids.add(message_id)
+            else:
+                unkeyed_turns += 1
+                stamp = entry.get("timestamp")
+                if isinstance(stamp, str) and stamp:
+                    stamps.append(stamp)
+            _remember_tools(entry, tool_names)
             usage = _usage(entry)
             if usage is not None:
                 turn_context = usage[0]
-                output += usage[1]
+                if isinstance(message_id, str) and message_id:
+                    output_by_turn[message_id] = usage[1]
+                else:
+                    unkeyed_output += usage[1]
                 context = turn_context
                 peak = max(peak, turn_context)
             elif not measured:
-                context = estimated_chars // CHARS_PER_TOKEN
+                context = live_chars // CHARS_PER_TOKEN
                 peak = max(peak, context)
         elif not measured and kind in ("user", "tool_result", "turn_context"):
-            context = estimated_chars // CHARS_PER_TOKEN
+            context = live_chars // CHARS_PER_TOKEN
             peak = max(peak, context)
 
-        _count_tools(entry, tools, reads)
+        _count_tools(entry, tools, reads, tool_names)
 
-    if not measured and context == 0 and estimated_chars:
-        context = estimated_chars // CHARS_PER_TOKEN
+    if not measured and context == 0 and live_chars:
+        context = live_chars // CHARS_PER_TOKEN
         peak = context
 
     return SessionEconomics(
-        turns=turns,
+        turns=len(turn_ids) + unkeyed_turns,
         context_tokens=context,
         peak_context_tokens=peak,
         compactions=compactions,
         tool_result_bytes=dict(sorted(tools.items())),
         reads_repeated=sum(1 for n in reads.values() if n > 1),
         wall_clock=_timing(stamps),
-        output_tokens=output,
+        output_tokens=sum(output_by_turn.values()) + unkeyed_output,
         usage_measured=measured and peak > 0,
     )
 
 
 def _is_compaction(entry: Mapping[str, object]) -> bool:
+    """Claude sets `isCompactSummary`; Klaudia writes a system line whose
+    subtype is `compact_boundary`."""
     if entry.get("isCompactSummary") is True:
         return True
-    if entry.get("type") == "compact_boundary":
+    if entry.get("subtype") == "compact_boundary":
         return True
     message = entry.get("message")
     return isinstance(message, dict) and message.get("isCompactSummary") is True
@@ -201,19 +226,42 @@ def _usage(entry: Mapping[str, object]) -> tuple[int, int] | None:
     return context, output
 
 
+def _remember_tools(entry: Mapping[str, object], tool_names: dict[str, str]) -> None:
+    """Map a `tool_use` block's id to its tool name.
+
+    A later `tool_result` carries only `tool_use_id`, so the name has to
+    come from the call that produced it.
+    """
+    for block in _blocks(entry):
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        tool_id = block.get("id")
+        name = block.get("name")
+        if isinstance(tool_id, str) and tool_id and isinstance(name, str) and name:
+            tool_names[tool_id] = name
+
+
 def _count_tools(
-    entry: Mapping[str, object], tools: dict[str, int], reads: dict[str, int]
+    entry: Mapping[str, object],
+    tools: dict[str, int],
+    reads: dict[str, int],
+    tool_names: Mapping[str, str],
 ) -> None:
     """Add one entry's tool results to the byte map and the read counts.
 
     Claude and Klaudia nest results in `message.content`; Codex nests them
-    in `payload`. A result with no tool name is ignored rather than lumped
-    under a made-up one.
+    in `payload`. A result names its tool on the block or, in the real
+    Claude shape, only by `tool_use_id` pointing at an earlier `tool_use`.
+    A result that names nothing is ignored rather than lumped under a
+    made-up name.
     """
     for block in _blocks(entry):
         if not isinstance(block, dict):
             continue
         name = block.get("name") or block.get("tool_name") or block.get("tool")
+        tool_id = block.get("tool_use_id")
+        if not isinstance(name, str) or not name:
+            name = tool_names.get(tool_id) if isinstance(tool_id, str) else None
         if not isinstance(name, str) or not name:
             continue
         size = _block_bytes(block)
