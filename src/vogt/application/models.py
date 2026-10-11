@@ -1032,6 +1032,14 @@ class SessionHibernation(Result):
             "process in the same directory, not where it left off."
         ),
     )
+    superseded_by: str | None = Field(
+        default=None,
+        description=(
+            "The session this one's work was handed to, when the hibernate "
+            "named a successor. A wake is refused (409) while it is set, unless "
+            "forced; send the work to the successor instead."
+        ),
+    )
 
 
 class SessionDigest(Result):
@@ -4258,11 +4266,27 @@ class HibernateSessionParams(Params):
             "shell). It wakes as a fresh process in the same directory."
         ),
     )
+    superseded_by: str | None = Field(
+        default=None,
+        description=(
+            "The session taking over this one's work (ses_… or the engine "
+            "UUID). Recorded on the hibernation, and a later wake is refused "
+            "unless forced — so the work stays with one session."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
 class WakeSessionParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
+    force: bool = Field(
+        default=False,
+        description=(
+            "Wake even though the session was superseded, or another live "
+            "session holds the same work item in the same directory. Off by "
+            "default, and session.input never sets it."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 

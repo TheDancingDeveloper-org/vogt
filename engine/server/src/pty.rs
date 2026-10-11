@@ -109,6 +109,10 @@ pub struct Session {
     template: Mutex<Option<String>>,
     /// The work item it serves (see `SessionSummary::work_item`, WI-998).
     work_item: Mutex<Option<String>>,
+    /// The session its work was handed to (WI-1251). Kept on the live session
+    /// so a later hibernation records the handoff again: the record is
+    /// rewritten from the session, and a forced wake must not forget it.
+    superseded_by: Mutex<Option<String>>,
     /// The permission posture, when not the default (WI-926).
     permission_mode: Mutex<Option<String>>,
     /// Who asked this session to stop, and why, when someone did (WI-913).
@@ -428,6 +432,14 @@ impl Session {
 
     pub fn work_item(&self) -> Option<String> {
         self.work_item.lock().clone()
+    }
+
+    pub fn set_superseded_by(&self, superseded_by: Option<String>) {
+        *self.superseded_by.lock() = superseded_by;
+    }
+
+    pub fn superseded_by(&self) -> Option<String> {
+        self.superseded_by.lock().clone()
     }
 
     pub fn set_resources(&self, resources: Option<vogt_engine_contract::SessionResources>) {
@@ -1035,6 +1047,7 @@ pub fn spawn(
         resources: Mutex::new(None),
         template: Mutex::new(None),
         work_item: Mutex::new(None),
+        superseded_by: Mutex::new(None),
         permission_mode: Mutex::new(None),
         stop: Mutex::new(None),
         launcher: if spawning_agent_auth_helper {

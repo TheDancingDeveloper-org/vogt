@@ -341,8 +341,15 @@ Rules:
   at once with `outcome: "hibernated"` rather than waiting, and reading the
   screen never wakes anything. To free memory from a session you are done
   with for now but may come back to, use `session_hibernate` rather than
-  `session_stop`. `session_keep_awake` pins one that must never be
-  hibernated, such as a long-running driver.
+  `session_stop`. When the work has moved to another session, pass that
+  session as `superseded_by`: a later wake, including the one `session_input`
+  does by itself, is then refused (`409`), and `session_input` never forces
+  past it. `session_wake` is also refused while another live session holds the
+  same work item in the same directory. `force` on `session_wake` is the
+  deliberate override, and only a person or an oversight session may set it; do not reach for it to retry a refusal — send the work
+  to the successor. `session_keep_awake` pins one that must never be
+  hibernated, such as a long-running driver. A pin does not bring a manually
+  hibernated session back at the next restart.
 - **Naming and tidying:** `session_rename` gives a session the name the GUI
   shows (`session_list` returns it as `name`). `session_remove` is the GUI's
   Remove: it kills a session if it still runs and forgets it, output

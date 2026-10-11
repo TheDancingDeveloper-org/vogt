@@ -322,6 +322,11 @@ pub struct Hibernation {
     /// fresh shell in the same directory (`false`, a shell hibernated on
     /// request).
     pub resumable: bool,
+    /// The session this one's work was handed to (WI-1251). While set, a wake
+    /// is refused so the successor is not joined by the session it replaced;
+    /// `WakeRequest::force` overrides it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 /// `POST /api/sessions/{id}/hibernate`.
@@ -334,6 +339,12 @@ pub struct HibernateRequest {
     /// screen kept for reading. Off unless asked for.
     #[serde(default)]
     pub allow_shell: bool,
+    /// The session this one's work was handed to (WI-1251): an engine session
+    /// id the engine already knows, other than this one. A wake is then
+    /// refused until `WakeRequest::force`. Setting it on a session that is
+    /// already hibernated records it without touching the stopped process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 /// `POST /api/sessions/{id}/wake`.
@@ -348,6 +359,11 @@ pub struct WakeRequest {
     pub cols: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rows: Option<u16>,
+    /// Wake even though the session was superseded, or another live session
+    /// is already working on the same work item in the same directory
+    /// (WI-1251). Off unless asked for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
 }
 
 /// What a session is for (WI-957). Absent on the wire means `worker`.

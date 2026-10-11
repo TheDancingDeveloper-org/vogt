@@ -104,6 +104,12 @@ pub struct Record {
     /// The work item it serves (WI-998); a wake and a redeploy keep it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub work_item: Option<String>,
+    /// The session this one's work was handed to (WI-1251): an engine session
+    /// id. Kept on the record itself, so a forced wake does not forget it and
+    /// the next hibernation still says who replaced it. A wake is refused
+    /// while it is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
     /// Set while hibernated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hibernation: Option<Hibernation>,
@@ -136,6 +142,7 @@ impl Record {
             autopilot: false,
             role: SessionRole::Worker,
             work_item: None,
+            superseded_by: None,
             hibernation: None,
             rows: None,
             cols: None,
