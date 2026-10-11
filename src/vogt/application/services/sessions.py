@@ -223,6 +223,23 @@ def start_session(ctx: AppContext, params: StartSessionParams) -> SessionResult:
             "denied action as blocked"
         )
         raise BypassRefused(msg)
+    if (
+        params.role != "worker"
+        and ctx.principal.kind == "agent"
+        and not _is_engine_credential(ctx)
+    ):
+        # The oversight role is a person's nomination (WI-957), and it is what
+        # lets a session commit for others (C14) and ask for grants on their
+        # behalf (WI-973). An agent that could start an overseer would hand
+        # itself that standing by proxy: start one, drive its terminal
+        # (WI-1255). The engine's own credential is not an agent here — it
+        # relays the break-glass operator.
+        msg = (
+            f"only a person starts an oversight session ({ctx.principal.identity_ref} "
+            "is an agent); start a worker, or ask a person to start the "
+            "overseer from the GUI"
+        )
+        raise RoleRefused(msg)
     engine = _engine(ctx)
     session_id = ctx.id_factory("ses")
     subject = _subject(ctx, params, session_id)
@@ -2008,7 +2025,7 @@ def set_session_role(ctx: AppContext, params: SetSessionRoleParams) -> SessionRe
         msg = (
             "only a person nominates an oversight session, or makes one a worker "
             f"again ({ctx.principal.identity_ref} is an agent); ask a person to "
-            "set the role from the GUI, or start the session with role=oversight"
+            "set the role from the GUI"
         )
         raise RoleRefused(msg)
     engine = _engine(ctx)
