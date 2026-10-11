@@ -521,6 +521,9 @@ function defaults(): Routes {
     "GET /work/get": {
       body: { item: workItem(), comments: [], sessions: [] },
     },
+    "GET /work/get-many": (call) => ({
+      body: { items: [], missing: call.query.getAll("refs") },
+    }),
     "GET /projects": {
       body: { projects: [{ slug: "alpha", name: "Alpha" }, { slug: "beta", name: "Beta" }] },
     },

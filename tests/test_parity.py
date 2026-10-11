@@ -243,6 +243,10 @@ SCRIPT: list[tuple[str, StepParams]] = [
     ("forge.onboard", {"project": "parity-project", "reason": WHY}),
     ("work.get", {"ref": "WI-1"}),
     ("work.get", {"ref": "gh:parity-org/parity-project#1"}),
+    (
+        "work.get_many",
+        {"refs": ["WI-1", "gh:parity-org/parity-project#1", "WI-404"]},
+    ),
     ("work.list", {"project": "parity-project"}),
     (
         "board.list",

@@ -110,6 +110,7 @@ from vogt.application.models import (
     ForgePublishResult,
     ForgeReposParams,
     ForgeReposResult,
+    GetManyWorkParams,
     GetProjectParams,
     GetWorkParams,
     HibernateSessionParams,
@@ -242,6 +243,7 @@ from vogt.application.models import (
     WorkflowListParams,
     WorkflowListResult,
     WorkListResult,
+    WorkManyResult,
     WorkResult,
     WriteBackListParams,
     WriteBackListResult,
@@ -487,6 +489,21 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.get_work,
             route=HttpRoute("GET", "/work/get"),
             cli=CliBinding(("work", "get")),
+        ),
+        Operation(
+            name="work.get_many",
+            summary=(
+                "Compact rows (ref, title, kind, state, priority, project) for "
+                "up to 200 refs in one read; refs that name nothing come back "
+                "in `missing`."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=GetManyWorkParams,
+            result_model=WorkManyResult,
+            handler=services.get_many_work,
+            route=HttpRoute("GET", "/work/get-many"),
+            cli=CliBinding(("work", "get-many")),
         ),
         Operation(
             name="work.list",

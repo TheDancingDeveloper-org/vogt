@@ -72,6 +72,12 @@ pub const PROXIED_READS_IN_FLIGHT: usize = 16;
 
 /// What a shed caller is told to wait before asking again, in seconds.
 const RETRY_AFTER_SECONDS: &str = "2";
+
+/// The `error.code` a shed response carries, and nothing else does. A
+/// `Retry-After` alone cannot tell a shed from an outage: the gate's "the core
+/// could not be asked about this bearer" `503` carries one too. The PWA reads
+/// this to render "busy, asking again" rather than "Vogt is down" (WI-1224).
+pub const BUSY_CODE: &str = "front_door_busy";
 pub const MCP_PREFIX: &str = "/mcp";
 
 /// The core's own prefixes, which the ones above map onto.
@@ -614,13 +620,14 @@ fn has_dot_segment(raw_path: &str) -> bool {
 // -- refusals, each with a reason ----------------------------------
 
 /// Too many requests already open against the core. A refusal with a
-/// reason and a `Retry-After`, so a client that backs off can, and one that
-/// does not is at least not queued.
+/// reason, a `Retry-After` and the `BUSY_CODE`, so a client that backs off
+/// can, one that does not is at least not queued, and neither mistakes a
+/// door that is busy for a core that is gone.
 fn busy() -> Response {
     let reason = format!(
         "this front door already has {PROXIED_READS_IN_FLIGHT} requests open against vogt-core; retry shortly"
     );
-    let mut response = unavailable(&reason);
+    let mut response = coded_refusal(StatusCode::SERVICE_UNAVAILABLE, BUSY_CODE, &reason);
     if let Ok(value) = HeaderValue::from_str(RETRY_AFTER_SECONDS) {
         response.headers_mut().insert(header::RETRY_AFTER, value);
     }
@@ -640,7 +647,20 @@ fn bad_gateway(reason: &str) -> Response {
 }
 
 fn refusal(status: StatusCode, reason: &str) -> Response {
-    let mut response = (status, Json(json!({ "error": { "message": reason } }))).into_response();
+    front_door_response(status, json!({ "error": { "message": reason } }))
+}
+
+/// A refusal a client is expected to tell apart by more than its status: the
+/// same body as `refusal`, plus the `code` the core's own errors carry.
+fn coded_refusal(status: StatusCode, code: &str, reason: &str) -> Response {
+    front_door_response(
+        status,
+        json!({ "error": { "code": code, "message": reason } }),
+    )
+}
+
+fn front_door_response(status: StatusCode, body: serde_json::Value) -> Response {
+    let mut response = (status, Json(body)).into_response();
     // Says which half of the product refused, so an operator reading a 503 in
     // a browser console knows whether to look at the engine or the core.
     response.headers_mut().insert(

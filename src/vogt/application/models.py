@@ -1528,6 +1528,45 @@ class WorkItemRow(Result):
         )
 
 
+#: How many refs one `work.get_many` may name: enough for every session a
+#: rail shows at once, few enough that the read stays a handful of indexed
+#: lookups and the query string a sane length.
+WORK_GET_MANY_LIMIT = 200
+
+
+class GetManyWorkParams(Params):
+    refs: list[str] = Field(
+        min_length=1,
+        max_length=WORK_GET_MANY_LIMIT,
+        description=(
+            "Work item references to read, e.g. [WI-7, WI-9]; a subject key "
+            "resolves as it does for `work.get`. A repeated ref is read once."
+        ),
+    )
+
+    @field_validator("refs")
+    @classmethod
+    def _refs_are_refs(cls, refs: list[str]) -> list[str]:
+        for ref in refs:
+            if not ref or len(ref) > 200:
+                msg = "each ref is 1-200 characters"
+                raise ValueError(msg)
+        return refs
+
+
+class WorkManyResult(Result):
+    items: list[WorkItemRow] = Field(
+        description=(
+            "One compact row per ref that names a work item, in the order asked; "
+            "`work.get` with a ref returns the rest of it."
+        )
+    )
+    missing: list[str] = Field(
+        default_factory=list,
+        description="Refs that name no work item, in the order asked.",
+    )
+
+
 class ListWorkParams(Params):
     project: str | None = Field(default=None, description="Project slug.")
     kinds: list[WorkKind] | None = None
