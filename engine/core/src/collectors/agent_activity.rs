@@ -12,8 +12,11 @@ use std::path::{Path, PathBuf};
 use fancy_regex::Regex;
 use serde_json::{json, Value};
 
-use crate::core::{from_iso, Moment, Project};
-use crate::decisions::{dumps_secrets, is_error, result_excerpt, summarize_input, ServiceMatcher};
+use crate::core::{from_iso, py_repr, Moment, Project};
+use crate::decisions::{
+    dumps_secrets, is_error, py_str, python_json_dumps, result_excerpt, summarize_input,
+    ServiceMatcher,
+};
 use crate::storage::observed_types::{
     ActivityBatch, ActivityCall, ActivityResult, TranscriptCursor,
 };
@@ -72,7 +75,7 @@ impl AgentActivityCollector {
             if !AGENTS.contains(&agent.as_str()) {
                 skipped.insert(
                     root.display().to_string(),
-                    format!("unknown transcript format {agent:?}"),
+                    format!("unknown transcript format {}", py_repr(agent)),
                 );
                 continue;
             }
@@ -496,7 +499,7 @@ fn record_call(
     let source = raw.as_ref().unwrap_or(call_input);
     let flat = match source {
         Value::String(text) => text.clone(),
-        other => python_dumps(other, true),
+        other => python_json_dumps(other, true),
     };
     let withheld = dumps_secrets(&flat);
     state.pending.insert(
@@ -615,79 +618,9 @@ fn text_of(content: &Value) -> String {
             .join("\n"),
         Value::Null => String::new(),
         other => {
-            let dumped = python_dumps(other, false);
+            let dumped = python_json_dumps(other, false);
             dumped.chars().take(65_536).collect()
         }
-    }
-}
-
-/// `json.dumps(value)` with Python's defaults: `", "` and `": "` separators
-/// and `ensure_ascii`, so non-ASCII is written as `\uXXXX` (surrogate pairs
-/// above the BMP). `sort_keys` sorts object keys at every depth; serde_json
-/// here keeps insertion order (`preserve_order`), so it is not the default.
-fn python_dumps(value: &Value, sort_keys: bool) -> String {
-    let sorted;
-    let value = if sort_keys {
-        sorted = sort_value(value);
-        &sorted
-    } else {
-        value
-    };
-    let compact = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
-    let mut out = String::with_capacity(compact.len() + 16);
-    let mut in_string = false;
-    let mut escaped = false;
-    for ch in compact.chars() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            if ch.is_ascii() {
-                out.push(ch);
-            } else {
-                let mut units = [0_u16; 2];
-                for unit in ch.encode_utf16(&mut units) {
-                    out.push_str(&format!("\\u{unit:04x}"));
-                }
-            }
-            continue;
-        }
-        out.push(ch);
-        if ch == '"' {
-            in_string = true;
-        } else if ch == ':' || ch == ',' {
-            out.push(' ');
-        }
-    }
-    out
-}
-
-fn sort_value(value: &Value) -> Value {
-    match value {
-        Value::Object(map) => {
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            Value::Object(
-                keys.into_iter()
-                    .map(|key| (key.clone(), sort_value(&map[key])))
-                    .collect(),
-            )
-        }
-        Value::Array(items) => Value::Array(items.iter().map(sort_value).collect()),
-        other => other.clone(),
-    }
-}
-
-fn py_str(value: &Value) -> String {
-    match value {
-        Value::String(text) => text.clone(),
-        Value::Null => "None".to_string(),
-        Value::Bool(flag) => if *flag { "True" } else { "False" }.to_string(),
-        other => other.to_string(),
     }
 }
 
@@ -841,17 +774,17 @@ mod tests {
         let value = json!({"b": [1, "é😀"], "a": {"d": null, "c": true}});
         // json.dumps(value)
         assert_eq!(
-            python_dumps(&value, false),
+            python_json_dumps(&value, false),
             r#"{"b": [1, "\u00e9\ud83d\ude00"], "a": {"d": null, "c": true}}"#
         );
         // json.dumps(value, sort_keys=True)
         assert_eq!(
-            python_dumps(&value, true),
+            python_json_dumps(&value, true),
             r#"{"a": {"c": true, "d": null}, "b": [1, "\u00e9\ud83d\ude00"]}"#
         );
         // Separators inside strings are data, not structure.
         assert_eq!(
-            python_dumps(&json!({"k": "a,b:c"}), false),
+            python_json_dumps(&json!({"k": "a,b:c"}), false),
             r#"{"k": "a,b:c"}"#
         );
     }

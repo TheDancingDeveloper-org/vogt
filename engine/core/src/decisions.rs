@@ -676,7 +676,7 @@ pub fn priority_of(observation: &Observation) -> &'static str {
 
 fn labels_of(observation: &Observation) -> Vec<String> {
     match observation.payload.get("labels") {
-        Some(Value::Array(labels)) => labels.iter().map(|label| py_str(Some(label))).collect(),
+        Some(Value::Array(labels)) => labels.iter().map(py_str).collect(),
         _ => Vec::new(),
     }
 }
@@ -695,7 +695,7 @@ pub fn is_classified(observation: &Observation) -> bool {
 pub fn title_of(observation: &Observation) -> String {
     let payload = &observation.payload;
     if observation.kind == "marker" {
-        let text = py_str(payload.get("text")).trim().to_string();
+        let text = py_str_of(payload.get("text")).trim().to_string();
         let path = py_or(payload.get("path"), "?");
         let line = py_or(payload.get("line"), "?");
         let tag = py_or(payload.get("tag"), "TODO");
@@ -706,9 +706,9 @@ pub fn title_of(observation: &Observation) -> String {
             format!("{marker} — {text}")
         };
     }
-    let title = py_str(payload.get("title")).trim().to_string();
+    let title = py_str_of(payload.get("title")).trim().to_string();
     match (title.is_empty(), payload.get("number")) {
-        (false, Some(number)) if !number.is_null() => format!("#{} {title}", py_str(Some(number))),
+        (false, Some(number)) if !number.is_null() => format!("#{} {title}", py_str(number)),
         (false, _) => title,
         (true, _) => observation.subject_key.clone(),
     }
@@ -716,14 +716,21 @@ pub fn title_of(observation: &Observation) -> String {
 
 /// `str()` of a JSON value the way Python renders one out of a dict payload: a
 /// string is its text, a number its digits, `true`/`false`/`null` become
-/// `True`/`False`/`None`, and a missing key is `""`.
-fn py_str(value: Option<&Value>) -> String {
+/// `True`/`False`/`None`.
+pub fn py_str(value: &Value) -> String {
     match value {
-        Some(Value::String(text)) => text.clone(),
-        Some(Value::Bool(flag)) => if *flag { "True" } else { "False" }.to_string(),
-        Some(Value::Null) => "None".to_string(),
-        Some(Value::Number(number)) => number.to_string(),
-        Some(other) => other.to_string(),
+        Value::String(text) => text.clone(),
+        Value::Bool(flag) => if *flag { "True" } else { "False" }.to_string(),
+        Value::Null => "None".to_string(),
+        Value::Number(number) => python_number(number),
+        other => other.to_string(),
+    }
+}
+
+/// [`py_str`] of a payload field. A missing key is `""`.
+fn py_str_of(value: Option<&Value>) -> String {
+    match value {
+        Some(value) => py_str(value),
         None => String::new(),
     }
 }
@@ -746,7 +753,7 @@ fn py_truthy(value: &Value) -> bool {
 fn py_or(value: Option<&Value>, fallback: &str) -> String {
     match value {
         None => fallback.to_string(),
-        some => py_str(some),
+        Some(value) => py_str(value),
     }
 }
 
@@ -826,7 +833,7 @@ pub fn implemented_targets(observation: &Observation) -> std::collections::BTree
         // value's, not the rendered text's: `0` is falsy, while a subject whose
         // text is literally `"None"` is real and must be kept.
         if let Some(value) = edge.get("subject").filter(|value| py_truthy(value)) {
-            targets.insert(py_str(Some(value)));
+            targets.insert(py_str(value));
         }
     }
     targets
