@@ -410,6 +410,25 @@ pub enum GitOpReq {
         #[serde(default)]
         repo: String,
         message: String,
+        /// When set, commit on behalf of this session (C14): the engine runs
+        /// the oversight checklist and commits in the repo that session's
+        /// working directory belongs to. Absent, this is the GUI's plain
+        /// commit and nothing below applies.
+        #[serde(default)]
+        session: Option<String>,
+        /// Paths to stage before committing. Empty means commit whatever is
+        /// already staged.
+        #[serde(default)]
+        paths: Vec<String>,
+        /// Return the full staged diff, not only the stat. An overseer leaves
+        /// this off so the diff never enters its context unasked.
+        #[serde(default)]
+        full_diff: bool,
+        /// The project's forbidden-text patterns (C13). Checked against the
+        /// message and the branch name. Empty until a project policy exists,
+        /// which makes the check a no-op rather than a guess.
+        #[serde(default)]
+        forbidden_text: Vec<String>,
     },
     Checkout {
         #[serde(default)]
@@ -427,6 +446,238 @@ pub struct GitOpResp {
     pub branch: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// One line naming what was committed, for an overseer that must not read
+    /// the diff (C14). Set only by the session commit path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub digest: Option<String>,
+    /// `git diff --cached --stat` of what was committed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff_stat: Option<String>,
+    /// The full staged diff, only when the caller asked for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diff: Option<String>,
+    /// Hunks a reviewer should look at before trusting the commit: pins,
+    /// `unsafe`, and foreign-function bindings.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub review: Vec<String>,
+}
+
+impl GitOpResp {
+    fn bare() -> Self {
+        Self {
+            ok: true,
+            branch: None,
+            commit: None,
+            digest: None,
+            diff_stat: None,
+            diff: None,
+            review: Vec::new(),
+        }
+    }
+}
+
+/// A line a reviewer should read before trusting a commit made for a worker.
+const REVIEW_PATTERNS: &[(&str, &str)] = &[
+    (
+        "pin",
+        r#"\b(rev|version|sha|commit)\s*[:=]\s*['"]?[0-9a-f]{7,}"#,
+    ),
+    ("unsafe", r"\bunsafe\b"),
+    (
+        "ffi",
+        r#"extern\s+"C"|#\[no_mangle\]|\b(ctypes|cffi|cdll)\b"#,
+    ),
+];
+
+/// Something that must not be committed: a conflict left unresolved, or a
+/// secret staged by mistake. Names and shapes only; a match refuses the commit.
+const REJECT_PATTERNS: &[(&str, &str)] = &[
+    ("conflict marker", r"^(<<<<<<<|>>>>>>>|=======)"),
+    ("private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    (
+        "credential assignment",
+        r#"(?i)\b(api[_-]?key|secret|token|password)\b\s*[:=]\s*["'][^"']{8,}"#,
+    ),
+];
+
+/// The oversight commit (C14). With no `session` this is the GUI's plain
+/// commit: stage nothing, check nothing, commit whatever is staged. With one,
+/// the worker must be idle, hibernated or blocked — never mid-turn — and the
+/// commit lands in the repo that worker's directory belongs to, under that
+/// repo's own identity.
+#[allow(clippy::too_many_arguments)]
+async fn commit_op(
+    state: &Arc<AppState>,
+    repo: String,
+    message: String,
+    session: Option<String>,
+    paths: Vec<String>,
+    full_diff: bool,
+    forbidden_text: Vec<String>,
+) -> Result<Json<GitOpResp>> {
+    let message = message.trim().to_string();
+    if message.is_empty() {
+        return Err(ApiError::BadRequest("message must not be empty".into()));
+    }
+    let repo = match session.as_deref() {
+        Some(id) => session_repo(state, id).await?,
+        None => resolve_repo(state, &repo)
+            .await?
+            .ok_or(ApiError::NotFound)?,
+    };
+    for path in &paths {
+        let path = clean_repo_rel(path)?;
+        run_git(&repo, &["add", "--", &path]).await?;
+    }
+    if session.is_some() {
+        let branch = run_git(&repo, &["rev-parse", "--abbrev-ref", "HEAD"]).await?;
+        check_forbidden(&forbidden_text, &message, branch.trim())?;
+        let staged = run_git(&repo, &["diff", "--cached"]).await?;
+        // A conflicted merge has no cached diff (`* Unmerged path`), so the
+        // working-tree diff is what carries the markers.
+        let conflicts = run_git(&repo, &["diff"]).await?;
+        if let Some(why) = staged_rejection(&format!("{staged}\n{conflicts}")) {
+            return Err(ApiError::BadRequest(why));
+        }
+        // `git add -N` leaves an intent-to-add: status shows ` A`, and
+        // `diff --cached --raw` shows nothing at all for it.
+        let status = run_git(&repo, &["status", "--porcelain"]).await?;
+        if status.lines().any(is_intent_to_add) {
+            return Err(ApiError::BadRequest(
+                "staged diff has an intent-to-add entry (git add -N): add the file's \
+                 contents, or unstage it, before committing"
+                    .into(),
+            ));
+        }
+        let review = review_flags(&staged);
+        let stat = run_git(&repo, &["diff", "--cached", "--stat"]).await?;
+        let digest = digest_line(&stat);
+        run_git(&repo, &["commit", "-m", &message]).await?;
+        let sha = run_git(&repo, &["rev-parse", "HEAD"]).await?;
+        return Ok(Json(GitOpResp {
+            commit: Some(sha.trim().to_string()),
+            digest: Some(digest),
+            diff_stat: Some(stat.trim_end().to_string()),
+            diff: full_diff.then_some(staged),
+            review,
+            ..GitOpResp::bare()
+        }));
+    }
+    run_git(&repo, &["commit", "-m", &message]).await?;
+    let sha = run_git(&repo, &["rev-parse", "HEAD"]).await?;
+    Ok(Json(GitOpResp {
+        commit: Some(sha.trim().to_string()),
+        ..GitOpResp::bare()
+    }))
+}
+
+/// The repo the session works in: its directory, walked up to a git root
+/// inside the workspace. A session the engine does not know is a 404; one
+/// whose directory is not a repo is a 400 naming the directory.
+async fn session_repo(state: &Arc<AppState>, id: &str) -> Result<PathBuf> {
+    let uuid: uuid::Uuid = id
+        .parse()
+        .map_err(|_| ApiError::BadRequest(format!("not a session id: {id}")))?;
+    let summary = match state.sessions.get(uuid) {
+        Ok(session) => session.summary(),
+        Err(ApiError::Conflict(_)) => state
+            .sessions
+            .hibernated_summary(uuid)
+            .ok_or(ApiError::NotFound)?,
+        Err(other) => return Err(other),
+    };
+    let activity = summary.activity;
+    let quiet = matches!(
+        activity,
+        vogt_engine_contract::ActivityState::Idle | vogt_engine_contract::ActivityState::Hibernated
+    ) || summary.blocked.is_some();
+    if !quiet {
+        return Err(ApiError::Conflict(format!(
+            "session {id} is {activity:?}: an oversight commit needs the worker idle, \
+             hibernated or blocked, not mid-turn"
+        )));
+    }
+    let cwd = PathBuf::from(&summary.cwd);
+    find_repo_root(&cwd, &state.config.workspace_root)
+        .await
+        .map_err(|_| {
+            ApiError::BadRequest(format!(
+                "session {id} works in {}, which is not inside a git repo",
+                summary.cwd
+            ))
+        })
+}
+
+/// Reject a message or branch the project's policy forbids. An empty list —
+/// what every project has until C13 lands — refuses nothing.
+fn check_forbidden(patterns: &[String], message: &str, branch: &str) -> Result<()> {
+    for pattern in patterns {
+        let re = regex::Regex::new(pattern).map_err(|e| {
+            ApiError::BadRequest(format!("forbidden_text {pattern:?} is not a regex: {e}"))
+        })?;
+        if re.is_match(message) {
+            return Err(ApiError::BadRequest(format!(
+                "commit message matches the project's forbidden text {pattern:?}"
+            )));
+        }
+        if re.is_match(branch) {
+            return Err(ApiError::BadRequest(format!(
+                "branch {branch:?} matches the project's forbidden text {pattern:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// What must not be in the staged diff: an unresolved conflict or a secret.
+/// `None` when the diff is clean.
+fn staged_rejection(staged: &str) -> Option<String> {
+    for (name, pattern) in REJECT_PATTERNS {
+        let re = regex::Regex::new(pattern).expect("static pattern");
+        if staged.lines().any(|line| {
+            let body = line.trim_start_matches('+');
+            re.is_match(body)
+        }) {
+            return Some(format!(
+                "staged diff has a {name}: resolve it before committing"
+            ));
+        }
+    }
+    None
+}
+
+/// `git status --porcelain` marks an intent-to-add (`git add -N`) as a new
+/// file that is staged but has no content: a leading space, then `A`.
+fn is_intent_to_add(line: &str) -> bool {
+    line.starts_with(" A")
+}
+
+/// Added lines a reviewer should see: dependency pins, `unsafe`, FFI.
+fn review_flags(staged: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for (name, pattern) in REVIEW_PATTERNS {
+        let re = regex::Regex::new(pattern).expect("static pattern");
+        let hits = staged
+            .lines()
+            .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+            .filter(|line| re.is_match(line))
+            .count();
+        if hits > 0 {
+            found.push(format!("{hits} {name}"));
+        }
+    }
+    found
+}
+
+/// `3 files changed, +40 -2` from a diff stat, so the result names the size
+/// without carrying the diff.
+fn digest_line(stat: &str) -> String {
+    stat.lines()
+        .last()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .unwrap_or("nothing staged")
+        .to_string()
 }
 
 pub async fn operate(
@@ -440,11 +691,7 @@ pub async fn operate(
                 .ok_or(ApiError::NotFound)?;
             let path = clean_repo_rel(&path)?;
             run_git(&repo, &["add", "--", &path]).await?;
-            Ok(Json(GitOpResp {
-                ok: true,
-                branch: None,
-                commit: None,
-            }))
+            Ok(Json(GitOpResp::bare()))
         }
         GitOpReq::Unstage { repo, path } => {
             let repo = resolve_repo(&state, &repo)
@@ -452,11 +699,7 @@ pub async fn operate(
                 .ok_or(ApiError::NotFound)?;
             let path = clean_repo_rel(&path)?;
             run_git(&repo, &["reset", "HEAD", "--", &path]).await?;
-            Ok(Json(GitOpResp {
-                ok: true,
-                branch: None,
-                commit: None,
-            }))
+            Ok(Json(GitOpResp::bare()))
         }
         GitOpReq::Discard { repo, path } => {
             let repo = resolve_repo(&state, &repo)
@@ -487,30 +730,26 @@ pub async fn operate(
             } else {
                 run_git(&repo, &["clean", "-fd", "--", &path]).await?;
             }
-            Ok(Json(GitOpResp {
-                ok: true,
-                branch: None,
-                commit: None,
-            }))
+            Ok(Json(GitOpResp::bare()))
         }
-        GitOpReq::Commit { repo, message } => {
-            let repo = resolve_repo(&state, &repo)
-                .await?
-                .ok_or(ApiError::NotFound)?;
-            let message = message.trim();
-            if message.is_empty() {
-                return Err(ApiError::BadRequest("message must not be empty".into()));
-            }
-            run_git(&repo, &["commit", "-m", message]).await?;
-            let commit = run_git(&repo, &["rev-parse", "HEAD"])
-                .await?
-                .trim()
-                .to_string();
-            Ok(Json(GitOpResp {
-                ok: true,
-                branch: None,
-                commit: Some(commit),
-            }))
+        GitOpReq::Commit {
+            repo,
+            message,
+            session,
+            paths,
+            full_diff,
+            forbidden_text,
+        } => {
+            commit_op(
+                &state,
+                repo,
+                message,
+                session,
+                paths,
+                full_diff,
+                forbidden_text,
+            )
+            .await
         }
         GitOpReq::Checkout {
             repo,
@@ -539,9 +778,8 @@ pub async fn operate(
                 run_git(&repo, &["checkout", branch]).await?;
             }
             Ok(Json(GitOpResp {
-                ok: true,
                 branch: Some(branch.to_string()),
-                commit: None,
+                ..GitOpResp::bare()
             }))
         }
     }
@@ -568,5 +806,63 @@ mod tests {
         assert!(clean_repo_rel("").is_err());
         assert!(clean_repo_rel("../outside").is_err());
         assert!(clean_repo_rel("/absolute/path").is_err());
+    }
+
+    #[test]
+    fn staged_diff_rejects_conflicts_and_secrets() {
+        let conflict = staged_rejection("++<<<<<<< HEAD\n+ours\n").unwrap();
+        assert!(conflict.contains("conflict marker"), "{conflict}");
+        assert!(staged_rejection("++=======\n")
+            .unwrap()
+            .contains("conflict"));
+
+        let secret = staged_rejection("+token = \"abcd1234efgh5678\"\n").unwrap();
+        assert!(secret.contains("credential"), "{secret}");
+        let key = staged_rejection("+-----BEGIN OPENSSH PRIVATE KEY-----\n").unwrap();
+        assert!(key.contains("private key"), "{key}");
+
+        assert!(staged_rejection("+fn ordinary() {}\n").is_none());
+    }
+
+    #[test]
+    fn intent_to_add_is_a_zero_mode_new_file() {
+        assert!(is_intent_to_add(" A src/new.rs"));
+        assert!(!is_intent_to_add("A  src/added.rs"));
+        assert!(!is_intent_to_add(" M src/old.rs"));
+    }
+
+    #[test]
+    fn forbidden_text_checks_message_and_branch_and_is_a_noop_when_empty() {
+        check_forbidden(&[], "mentions grok", "feat/grok").unwrap();
+        let patterns = vec!["(?i)grok".to_string()];
+        assert!(check_forbidden(&patterns, "by grok", "feat/x").is_err());
+        assert!(check_forbidden(&patterns, "fine", "feat/grok-thing").is_err());
+        check_forbidden(&patterns, "fine", "feat/x").unwrap();
+        assert!(check_forbidden(&["[".to_string()], "m", "b").is_err());
+    }
+
+    #[test]
+    fn review_flags_count_pins_unsafe_and_ffi() {
+        let diff = concat!(
+            "+++ b/src/lib.rs\n",
+            "+fn safe() {}\n",
+            "+unsafe fn raw() {}\n",
+            "+extern \"C\" fn c_entry() {}\n",
+            "+rev = \"0123456789abcdef\"\n",
+        );
+        let flags = review_flags(diff);
+        assert!(flags.iter().any(|f| f == "1 pin"), "{flags:?}");
+        assert!(flags.iter().any(|f| f == "1 unsafe"), "{flags:?}");
+        assert!(flags.iter().any(|f| f == "1 ffi"), "{flags:?}");
+        assert!(review_flags("+fn plain() {}\n").is_empty());
+    }
+
+    #[test]
+    fn digest_line_is_the_stat_summary() {
+        assert_eq!(
+            digest_line(" a.rs | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"),
+            "1 file changed, 1 insertion(+), 1 deletion(-)"
+        );
+        assert_eq!(digest_line(""), "nothing staged");
     }
 }

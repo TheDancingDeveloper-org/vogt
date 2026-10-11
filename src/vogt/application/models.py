@@ -4231,6 +4231,55 @@ class KeepSessionAwakeParams(Params):
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
+class CommitForSessionParams(Params):
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    message: str = Field(
+        min_length=1,
+        description="The commit message. The repo's own git identity authors it.",
+    )
+    paths: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Paths to stage before committing, relative to the repo. Empty "
+            "commits whatever the worker already staged."
+        ),
+    )
+    full_diff: bool = Field(
+        default=False,
+        description=(
+            "Return the full staged diff. Off by default, so the diff never "
+            "enters a caller's context unasked; the digest and stat always do."
+        ),
+    )
+    forbidden_text: list[str] = Field(
+        default_factory=list,
+        description=(
+            "The project's forbidden-text patterns, matched against the "
+            "message and the branch name. Empty until a project states a "
+            "policy, which checks nothing."
+        ),
+    )
+    reason: Reason = Field(description="Why this write is being made (audited).")
+
+
+class CommitForSessionResult(Result):
+    commit: str = Field(description="The new commit's full SHA.")
+    digest: str = Field(
+        description="One line naming what was committed, e.g. the diff stat summary."
+    )
+    diff_stat: str = Field(description="`git diff --stat` of what was committed.")
+    diff: str | None = Field(
+        default=None, description="The full staged diff, only when full_diff was set."
+    )
+    review: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Hunks to read before trusting the commit: counts of dependency "
+            "pins, `unsafe`, and foreign-function bindings."
+        ),
+    )
+
+
 class RenameSessionParams(Params):
     id: str = Field(description=SESSION_ID_DESCRIPTION)
     name: str = Field(

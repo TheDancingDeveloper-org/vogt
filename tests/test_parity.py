@@ -514,6 +514,14 @@ SCRIPT: list[tuple[str, StepParams]] = [
         },
     ),
     (
+        "session.commit_for",
+        lambda seen: {
+            "id": seen["session.start"]["session"]["id"],
+            "message": "record the session's own commit",
+            "reason": WHY,
+        },
+    ),
+    (
         "session.set_role",
         lambda seen: {
             "id": seen["session.start"]["session"]["id"],
@@ -1100,6 +1108,16 @@ def _stand_in_engine() -> EngineClient:
             ).encode()
         if method == "POST" and url.endswith("/input"):
             return 200, b'{"ok":true}'
+        if method == "POST" and url.endswith("/api/git/op"):
+            return 200, json.dumps(
+                {
+                    "ok": True,
+                    "commit": "abc123def456",
+                    "digest": "1 file changed, 2 insertions(+)",
+                    "diff_stat": " a.rs | 2 ++",
+                    "review": [],
+                }
+            ).encode()
         if method == "POST" and path.endswith("/blocked"):
             blocked = (
                 {
