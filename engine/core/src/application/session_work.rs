@@ -569,7 +569,7 @@ mod tests {
         let engine = EngineClient::new(
             "http://engine",
             None,
-            Some(Box::new(|path, _, body, method| {
+            Some(std::sync::Arc::new(|path, _, body, method| {
                 let answer = if method == "GET" {
                     format!(r#"{{"id":"{path}","alive":true,"role":"worker"}}"#).into_bytes()
                 } else {

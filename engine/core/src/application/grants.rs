@@ -635,7 +635,7 @@ mod tests {
         let engine = EngineClient::new(
             "http://engine",
             None,
-            Some(Box::new(move |path, _, body, method| {
+            Some(std::sync::Arc::new(move |path, _, body, method| {
                 log.lock().unwrap().push(format!("{method} {path}"));
                 let answer = if method == "GET" {
                     br#"{"id":"eng","alive":true,"role":"worker"}"#.to_vec()
@@ -677,7 +677,7 @@ mod tests {
         let engine = EngineClient::new(
             "http://engine",
             None,
-            Some(Box::new(move |path, _, body, method| {
+            Some(std::sync::Arc::new(move |path, _, body, method| {
                 log.lock().unwrap().push(format!("{method} {path}"));
                 let answer = if method == "GET" {
                     br#"{"id":"eng","alive":true,"role":"worker"}"#.to_vec()

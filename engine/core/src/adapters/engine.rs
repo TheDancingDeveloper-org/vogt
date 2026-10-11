@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Map, Value};
@@ -25,7 +26,7 @@ pub const HIBERNATE_TIMEOUT_MARGIN: Duration = Duration::from_secs(10);
 /// How the client actually talks, so tests never need an engine. The body and
 /// method are part of the call because a test of `create_session` has to assert
 /// the spec that was sent.
-pub type Transport = Box<dyn Fn(&str, &BTreeMap<String, String>, &[u8], &str) -> (u16, Vec<u8>)>;
+pub type Transport = Arc<dyn Fn(&str, &BTreeMap<String, String>, &[u8], &str) -> (u16, Vec<u8>)>;
 
 /// Access to one session engine.
 pub struct EngineClient {
@@ -35,6 +36,18 @@ pub struct EngineClient {
     timeout: Duration,
     /// Which engine did not answer, kept out of the token's reach.
     label: String,
+}
+
+impl Clone for EngineClient {
+    fn clone(&self) -> Self {
+        Self {
+            base_url: self.base_url.clone(),
+            token: self.token.clone(),
+            transport: self.transport.clone(),
+            timeout: self.timeout,
+            label: self.label.clone(),
+        }
+    }
 }
 
 impl EngineClient {
@@ -2057,7 +2070,7 @@ mod tests {
     fn scripted(status: u16, body: &'static str) -> (Arc<Mutex<Vec<String>>>, Transport) {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let record = Arc::clone(&seen);
-        let transport: Transport = Box::new(move |url, headers, body_bytes, method| {
+        let transport: Transport = Arc::new(move |url, headers, body_bytes, method| {
             record.lock().unwrap().push(format!(
                 "{method} {url} auth={} body={}",
                 headers.contains_key("Authorization"),

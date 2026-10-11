@@ -2880,7 +2880,7 @@ mod tests {
         EngineClient::new(
             "http://engine",
             None,
-            Some(Box::new(move |path, _, body, method| {
+            Some(std::sync::Arc::new(move |path, _, body, method| {
                 seen.lock().unwrap().push((
                     method.to_string(),
                     path.to_string(),

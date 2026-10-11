@@ -347,7 +347,7 @@ mod tests {
         EngineClient::new(
             "http://engine.test",
             None,
-            Some(Box::new(move |path, _, body, method| {
+            Some(std::sync::Arc::new(move |path, _, body, method| {
                 handler(path, method, body)
             })),
         )

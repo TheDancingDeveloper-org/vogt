@@ -1,8 +1,8 @@
 //! `session-outcomes` — what a run left behind. Ports
 //! `src/vogt/collectors/session_outcomes.py`.
 //!
-//! Not registered on the unnamed sweep. The application adds it only when an
-//! engine is configured, and `requires_network` keeps it out of an offline sweep.
+//! The application adds it only when an engine is configured, and
+//! `requires_network` keeps it out of an offline sweep.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -591,7 +591,9 @@ mod tests {
         EngineClient::new(
             "http://engine.test",
             None,
-            Some(Box::new(move |url, _headers, _body, _method| handler(url))),
+            Some(std::sync::Arc::new(move |url, _headers, _body, _method| {
+                handler(url)
+            })),
         )
     }
 

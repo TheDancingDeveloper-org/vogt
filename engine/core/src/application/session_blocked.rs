@@ -217,7 +217,7 @@ mod tests {
         let engine = EngineClient::new(
             "http://engine",
             None,
-            Some(Box::new(move |path, _, body, method| {
+            Some(std::sync::Arc::new(move |path, _, body, method| {
                 let payload: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
                 calls
                     .lock()
@@ -489,7 +489,7 @@ mod tests {
         let engine = EngineClient::new(
             "http://engine",
             None,
-            Some(Box::new(move |path, _, body, method| {
+            Some(std::sync::Arc::new(move |path, _, body, method| {
                 calls.lock().unwrap().push((
                     method.to_string(),
                     path.to_string(),
