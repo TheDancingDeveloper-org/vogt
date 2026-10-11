@@ -5297,6 +5297,69 @@ class SessionEconomicsResult(Result):
     )
 
 
+class SessionDigestParams(Params):
+    """One session's digest, read from the engine row rather than its transcript."""
+
+    id: str = Field(description=SESSION_ID_DESCRIPTION)
+    context_window: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "The model's context window, in tokens. Given, `context_pct` is "
+            "`context_tokens` over this window; omitted, the percentage is null. "
+            "There is no model table."
+        ),
+    )
+
+
+class SessionDigestResult(Result):
+    """What an overseer reads instead of screen, last reply and git log (C3).
+
+    One engine `get_session`. Numbers come from that row's `economics` when
+    the engine sends one, and are null when it does not — this read does not
+    meter a transcript and does not open a transcript file. `last_reply_excerpt`
+    is likewise only what the row already carries, clipped to 120 characters.
+    `context_pct` needs the caller to name `context_window`. `budget_line` is
+    the same line `session.economics` builds, from those numbers.
+    """
+
+    id: str = Field(description="The id the caller named, as given.")
+    name: str | None = None
+    work_item: str | None = None
+    activity: str | None = None
+    blocked: SessionBlocked | None = Field(
+        default=None,
+        description="The blocked report (reason and items), or null when not blocked.",
+    )
+    last_reply_excerpt: str | None = Field(
+        default=None,
+        description="The row's last-reply excerpt, at most 120 characters.",
+    )
+    turns: int | None = None
+    context_tokens: int | None = None
+    peak_context_tokens: int | None = None
+    compactions: int | None = None
+    output_tokens: int | None = None
+    usage_measured: bool | None = Field(
+        default=None,
+        description="Whether context came from recorded usage; null when unmeasured.",
+    )
+    context_pct: int | None = Field(
+        default=None,
+        description=(
+            "context_tokens / context_window as a rounded percent, or null when "
+            "no window was given or no context was measured."
+        ),
+    )
+    budget_line: str | None = Field(
+        default=None,
+        description="The digest line, e.g. `96 turns, 61% ctx, 2 compactions`.",
+    )
+    updated_at: datetime | None = Field(
+        default=None, description="When the session's activity last changed."
+    )
+
+
 class ReportBlockedParams(Params):
     """An agent's own report that it cannot go on without a person."""
 

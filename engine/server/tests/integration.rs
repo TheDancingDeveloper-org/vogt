@@ -9258,6 +9258,15 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     assert!(!record.contains("first-secret"), "{record}");
     assert!(record.contains("\"KEEP\""), "{record}");
 
+    // A blocked report is part of the session, so hibernating must keep it.
+    let blocked = client
+        .post(format!("{base}/api/sessions/{id}/blocked"))
+        .json(&json!({ "blocked": true, "reason": "needs the bot token", "items": ["create the bot"] }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), StatusCode::OK);
+
     // Hibernate: the whole tree goes, the session stays listed.
     let hibernated = client
         .post(format!("{base}/api/sessions/{id}/hibernate"))
@@ -9272,6 +9281,8 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     assert_eq!(hibernated["hibernation"]["trigger"], "manual");
     assert_eq!(hibernated["hibernation"]["reason"], "idle for a test");
     assert_eq!(hibernated["hibernation"]["resumable"], true);
+    assert_eq!(hibernated["blocked"]["reason"], "needs the bot token");
+    assert_eq!(hibernated["blocked"]["items"], json!(["create the bot"]));
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!pid_alive(helper), "the agent's child should be gone");
 
@@ -9285,6 +9296,7 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
         .unwrap();
     let row = listed.iter().find(|s| s["id"] == id.as_str()).unwrap();
     assert_eq!(row["activity"], "hibernated");
+    assert_eq!(row["blocked"]["reason"], "needs the bot token");
 
     // Its last screen is still readable, and reading it does not wake it.
     let screen: Value = client
@@ -9316,7 +9328,16 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     assert!(typed.text().await.unwrap().contains("wake"));
 
     // Wake under the same id, resuming the conversation, with a new token,
-    // without being told to read the brief again.
+    // without being told to read the brief again. Restoring the blocked report
+    // must not publish it again: the operator was already told, and a publish
+    // is a push.
+    let stream_res = client
+        .get(format!("{base}/api/events"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream_res.status(), StatusCode::OK);
+    let mut stream = stream_res.bytes_stream();
     let woken = client
         .post(format!("{base}/api/sessions/{id}/wake"))
         .json(&json!({ "env": [["VOGT_HTTP_TOKEN", "second-secret"]] }))
@@ -9327,6 +9348,35 @@ async fn a_hibernated_agent_frees_its_processes_and_wakes_into_the_same_conversa
     let woken: Value = woken.json().await.unwrap();
     assert_eq!(woken["id"], id.as_str());
     assert_eq!(woken["alive"], true);
+    assert_eq!(woken["blocked"]["reason"], "needs the bot token");
+    assert_eq!(woken["blocked"]["items"], json!(["create the bot"]));
+    let want = id.clone();
+    let republished = tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            let chunk = stream
+                .next()
+                .await
+                .expect("the event stream ended")
+                .expect("the event stream failed");
+            let text = String::from_utf8_lossy(&chunk);
+            for line in text.lines() {
+                let Some(raw) = line.strip_prefix("data: ") else {
+                    continue;
+                };
+                let Ok(event) = serde_json::from_str::<Value>(raw) else {
+                    continue;
+                };
+                if event["type"] == "session-blocked" && event["id"] == want.as_str() {
+                    return true;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        republished.is_err(),
+        "waking a blocked session must not republish session-blocked"
+    );
     let printed = live_output_containing(&client, &base, &id, &["helper=["]).await;
     assert!(
         printed.contains(&format!("arg=[--resume]\r\narg=[{id}]")),

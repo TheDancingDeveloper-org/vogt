@@ -3257,6 +3257,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.screen` | Operator-only | Unavailable: The assistant reads terminals with its own engine tool (`read_session_tail`); for agents over MCP/CLI/REST. |
 | `session.last_reply` | Operator-only | Unavailable: The assistant reads terminals with its own engine tool (`read_session_tail`); for agents over MCP/CLI/REST. |
 | `session.economics` | Operator-only | Unavailable: A read of the metered transcript (turns, context, compactions); for agents over MCP/CLI/REST, not a voice action. |
+| `session.digest` | Operator-only | Unavailable: One session's digest (activity, blocked report, excerpt, the economics the engine already computed); for agents over MCP/CLI/REST, not a voice action. |
 | `session.wait` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
 | `session.changes` | Operator-only | Unavailable: An oversight delta read (seq, kind, summary); for agents over MCP/CLI/REST. |
 | `session.wait_any` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
