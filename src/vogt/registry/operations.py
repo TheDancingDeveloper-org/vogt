@@ -203,6 +203,8 @@ from vogt.application.models import (
     SessionBlockedResult,
     SessionChangesParams,
     SessionChangesResult,
+    SessionDigestParams,
+    SessionDigestResult,
     SessionEconomicsParams,
     SessionEconomicsResult,
     SessionGrantResult,
@@ -1403,6 +1405,24 @@ def build_operations() -> list[Operation[Any, Any]]:
             handler=services.economics,
             route=HttpRoute("GET", "/sessions/economics"),
             cli=CliBinding(("session", "economics")),
+        ),
+        Operation(
+            name="session.digest",
+            summary=(
+                "Read one session's digest from the engine row: activity, the "
+                "blocked report, a last-reply excerpt the row already carries "
+                "(at most 120 characters), and the economics the engine already "
+                "computed (turns, context, compactions). Numbers are null when "
+                "the row has none — this does not meter a transcript. Pass "
+                "context_window to get context_pct. Takes either id."
+            ),
+            scope="read",
+            mutating=False,
+            params_model=SessionDigestParams,
+            result_model=SessionDigestResult,
+            handler=services.digest,
+            route=HttpRoute("GET", "/sessions/digest"),
+            cli=CliBinding(("session", "digest")),
         ),
         Operation(
             name="session.wait",

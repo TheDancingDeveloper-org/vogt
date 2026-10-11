@@ -79,6 +79,8 @@ from vogt.application.models import (
     SessionChangesParams,
     SessionChangesResult,
     SessionDigest,
+    SessionDigestParams,
+    SessionDigestResult,
     SessionEconomicsParams,
     SessionEconomicsResult,
     SessionHibernation,
@@ -130,6 +132,7 @@ from vogt.core.entities import (
     WorkItem,
     WorkOverlay,
 )
+from vogt.core.session_economics import SessionEconomics as _SessionEconomics
 from vogt.core.session_economics import meter
 from vogt.errors import (
     BypassRefused,
@@ -1064,6 +1067,107 @@ def economics(
             "detail": None,
         }
     )
+
+
+_EXCERPT_LIMIT = 120
+
+
+def _int_or_none(value: object) -> int | None:
+    """An economics counter the engine sent, or None when it did not.
+
+    A bool is an int in Python and is not a count. A float is not a count
+    either. Anything else is absent rather than zero: zero would say the
+    session was measured and did nothing.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def digest(ctx: AppContext, params: SessionDigestParams) -> SessionDigestResult:
+    """One session's digest, from a single engine row plus a transcript tail.
+
+    Numbers come from the row's `economics` when the engine already computed
+    them, and stay null when it did not. This read does not meter a transcript.
+    The excerpt is the same tail read the list digest uses, clipped to 120
+    characters, and null when the transcript cannot be read.
+    """
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    engine_session: EngineSession | None = None
+    if ctx.engine is not None:
+        try:
+            engine_session = ctx.engine.get_session(engine_id)
+        except EngineUnavailable:
+            engine_session = None
+    if engine_session is None and target.session is None:
+        msg = f"no session {params.id!r}"
+        raise NotFound(msg)
+    if engine_session is None:
+        return SessionDigestResult(id=params.id)
+    numbers = engine_session.economics
+    turns = context = peak = compactions = output = None
+    usage_measured: bool | None = None
+    context_pct: int | None = None
+    budget: str | None = None
+    if numbers is not None:
+        turns = _int_or_none(numbers.get("turns"))
+        context = _int_or_none(numbers.get("context_tokens"))
+        peak = _int_or_none(numbers.get("peak_context_tokens"))
+        compactions = _int_or_none(numbers.get("compactions"))
+        output = _int_or_none(numbers.get("output_tokens"))
+        measured = numbers.get("usage_measured")
+        usage_measured = measured if isinstance(measured, bool) else None
+        reading = _SessionEconomics(
+            turns=turns or 0,
+            context_tokens=context or 0,
+            peak_context_tokens=peak or 0,
+            compactions=compactions or 0,
+            output_tokens=output or 0,
+            usage_measured=bool(usage_measured),
+        )
+        budget = reading.budget_line(None, params.context_window)
+        if params.context_window and context is not None:
+            context_pct = min(100, round(100 * context / params.context_window))
+    excerpt = _digest_excerpt(
+        ctx,
+        engine_session,
+        None if target.session is None else target.session.template,
+    )
+    return SessionDigestResult(
+        id=params.id,
+        name=engine_session.name or None,
+        work_item=engine_session.work_item,
+        activity=engine_session.activity,
+        blocked=_blocked(engine_session.blocked),
+        last_reply_excerpt=excerpt,
+        turns=turns,
+        context_tokens=context,
+        peak_context_tokens=peak,
+        compactions=compactions,
+        output_tokens=output,
+        usage_measured=usage_measured,
+        context_pct=context_pct,
+        budget_line=budget,
+        updated_at=_parse_engine_timestamp(engine_session.activity_changed_at),
+    )
+
+
+def _digest_excerpt(
+    ctx: AppContext, engine_session: EngineSession, template: str | None
+) -> str | None:
+    """The list digest's tail read, clipped, and null on any failure.
+
+    A transcript that cannot be found or read is an absent excerpt, never an
+    error that fails the digest.
+    """
+    found = _transcript(ctx, engine_session, template)
+    if found is None:
+        return None
+    excerpt = transcripts.last_reply_excerpt(found)
+    if excerpt is None or len(excerpt) <= _EXCERPT_LIMIT:
+        return excerpt
+    return excerpt[:_EXCERPT_LIMIT]
 
 
 # -- session history ------------------------------------------------
@@ -3310,6 +3414,7 @@ def _parse_engine_timestamp(value: str | None) -> datetime | None:
 __all__ = [
     "answer_session",
     "bind_session_work",
+    "digest",
     "economics",
     "hibernate_session",
     "history_list",

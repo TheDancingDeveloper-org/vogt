@@ -118,6 +118,11 @@ pub struct Record {
     pub rows: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cols: Option<u16>,
+    /// The blocked report the session carried when it was hibernated (C4).
+    /// A wake puts it back on the session, and a restart lists it again.
+    /// Absent on a record written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<vogt_engine_contract::BlockedReport>,
 }
 
 impl Record {
@@ -146,6 +151,7 @@ impl Record {
             hibernation: None,
             rows: None,
             cols: None,
+            blocked: None,
         }
     }
 }
