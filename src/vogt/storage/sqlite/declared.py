@@ -30,6 +30,7 @@ from vogt.core.entities import (
     DriftProposal,
     Event,
     ForgeAccount,
+    HandoffFields,
     InboxTriage,
     Initiative,
     Label,
@@ -795,11 +796,18 @@ class SqliteReadView:
         ).fetchall()
         return [Blocker(ref=str(r["ref"]), state=str(r["state"])) for r in rows]
 
-    def comments_for(self, work_item_id: str, *, limit: int) -> list[Comment]:
+    def comments_for(
+        self, work_item_id: str, *, limit: int, order: str = "oldest"
+    ) -> list[Comment]:
+        # `newest` wants the newest N, newest first. Selecting DESC and
+        # reversing would hand back the newest N oldest-first, which is the
+        # opposite of what a reader paging from the top asked for.
+        direction = "DESC" if order == "newest" else "ASC"
         rows = self._conn.execute(
             "SELECT c.*, a.display_name AS actor_display_name FROM comments c "
             "JOIN actors a ON a.id = c.actor_id "
-            "WHERE c.work_item_id = ? ORDER BY c.created_at, c.id LIMIT ?",
+            f"WHERE c.work_item_id = ? ORDER BY c.created_at {direction}, "
+            f"c.id {direction} LIMIT ?",
             (work_item_id, limit),
         ).fetchall()
         return [_row_to_comment(row) for row in rows]
@@ -1650,14 +1658,19 @@ class SqliteWriteTxn(SqliteReadView):
 
     def insert_comment(self, comment: Comment) -> None:
         self._conn.execute(
-            "INSERT INTO comments (id, work_item_id, actor_id, body, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO comments "
+            "(id, work_item_id, actor_id, body, created_at, kind, data) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
                 comment.id,
                 comment.work_item_id,
                 comment.actor_id,
                 comment.body,
                 to_iso(comment.created_at),
+                comment.kind,
+                None
+                if comment.handoff is None
+                else json.dumps(comment.handoff.model_dump(mode="json")),
             ),
         )
 
@@ -2415,6 +2428,8 @@ def _row_to_initiative(row: sqlite3.Row) -> Initiative:
 
 
 def _row_to_comment(row: sqlite3.Row) -> Comment:
+    raw = row["data"]
+    handoff = None if raw is None else HandoffFields.model_validate_json(str(raw))
     return Comment(
         id=str(row["id"]),
         work_item_id=str(row["work_item_id"]),
@@ -2422,6 +2437,8 @@ def _row_to_comment(row: sqlite3.Row) -> Comment:
         actor_display_name=str(row["actor_display_name"]),
         body=str(row["body"]),
         created_at=from_iso(str(row["created_at"])),
+        kind=row["kind"],
+        handoff=handoff,
     )
 
 

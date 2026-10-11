@@ -314,7 +314,17 @@ class ReadView(Protocol):
         self, work_item_id: str, *, terminal_states: tuple[str, ...]
     ) -> list[Blocker]: ...
 
-    def comments_for(self, work_item_id: str, *, limit: int) -> list[Comment]: ...
+    def comments_for(
+        self, work_item_id: str, *, limit: int, order: str = "oldest"
+    ) -> list[Comment]:
+        """Comments on one item, oldest first unless `order` is `newest`.
+
+        `newest` returns the newest `limit` rows, newest first. `oldest`
+        (the default, what every existing caller asks for) returns the
+        oldest `limit` rows, oldest first. A limit larger than the table
+        returns every row either way.
+        """
+        ...
 
     # -- taxonomy ----------------------------------------------------------
 
