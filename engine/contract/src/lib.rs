@@ -156,6 +156,12 @@ pub struct SessionSpec {
     pub rows: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scrollback_bytes: Option<usize>,
+    /// Limits the engine enforces on this session (WI-1245 / C7): turns,
+    /// context tokens, and a per-turn wall-clock cap. Absent means no budget.
+    /// An empty budget (every field absent) is also no budget — vogt-core
+    /// sends that to refuse the default it would otherwise apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<SessionBudget>,
 }
 
 /// The part of a project's agent policy the engine enforces (WI-1243).
@@ -281,6 +287,26 @@ pub struct SessionSummary {
     /// a session whose conversation the engine does not know.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub economics: Option<SessionEconomics>,
+    /// The budget the session was started with (WI-1245 / C7); absent when
+    /// none was set. The engine reads `economics` against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<SessionBudget>,
+}
+
+/// Limits the engine enforces on one session (WI-1245 / C7). Every field is
+/// optional and independent: a session may be capped on turns and not on
+/// context. Zero is not a limit — the engine treats a missing field and a
+/// zero the same, as no limit on that dimension.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionBudget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turns: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
+    /// Minutes one turn may run before the engine treats it as the looping
+    /// signature and hibernates at once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_minutes: Option<u32>,
 }
 
 /// Wall-clock gaps between consecutive assistant turns, in milliseconds.
@@ -374,6 +400,8 @@ pub enum HibernateTrigger {
     /// Found at boot without a process: the engine stopped without the
     /// chance to hibernate it (a SIGKILL, a crash).
     Recovered,
+    /// A budget reached its hard limit (WI-1245 / C7).
+    Budget,
 }
 
 /// A hibernated session's record of when and why.
@@ -1095,6 +1123,15 @@ pub enum ServerEvent {
         /// Parsed cost in USD when the CLI reported usage, else absent.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_usd: Option<f64>,
+    },
+    /// A session's budget crossed a threshold (WI-1245 / C7). `level` is
+    /// `soft` (the engine typed one hand-off line and the session is still
+    /// working) or `hard` (the engine is about to hibernate it with
+    /// `trigger=budget`). `summary` says which limit and the numbers.
+    SessionBudget {
+        id: Uuid,
+        level: String,
+        summary: String,
     },
 }
 

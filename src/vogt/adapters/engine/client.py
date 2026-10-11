@@ -194,6 +194,9 @@ class EngineSession:
     #: tailer has one. `None` from an engine that predates it, or one that
     #: has not read the transcript yet.
     economics: dict[str, Any] | None = None
+    #: The limits the session was started with (WI-1245), when the row carries
+    #: them. Absent means no budget; the core does not invent one.
+    budget: dict[str, Any] | None = None
 
     @property
     def hibernated(self) -> bool:
@@ -238,6 +241,9 @@ class EngineSession:
             else None,
             economics=payload.get("economics")
             if isinstance(payload.get("economics"), dict)
+            else None,
+            budget=payload["budget"]
+            if isinstance(payload.get("budget"), dict)
             else None,
         )
 
@@ -760,6 +766,7 @@ class EngineClient:
         work_item: str | None = None,
         companion: str | None = None,
         policy: dict[str, Any] | None = None,
+        budget: dict[str, Any] | None = None,
     ) -> EngineSession:
         """Start a terminal, in `cwd`, running `command`.
 
@@ -824,6 +831,10 @@ class EngineClient:
             # without one is byte-for-byte the request this client has always
             # made.
             spec["policy"] = policy
+        if budget is not None:
+            # Present even when empty (WI-1245): `{}` is "no limits", which
+            # the engine reads differently from a start that named no budget.
+            spec["budget"] = budget
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 

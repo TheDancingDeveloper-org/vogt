@@ -1597,6 +1597,54 @@ the bottom of the screen, with no `esc interrupt` (which it shows only while a
 turn runs). Without this, an opencode session was never `ready`, and a driver
 waiting for it to be (`GET /wait?until=ready`) only ever timed out.
 
+#### Session budgets
+
+A session may carry a `budget` (`SessionSpec`; vogt-core sets one by default
+for an agent template given a task and the worker role: 120 turns and 90
+minutes, no context limit). An explicit empty object sets no limits and
+declines that default. Zero is not a limit. The budget is kept on the summary
+and in the hibernation record, so a wake brings the same limits back
+(WI-1245, C7).
+
+The numbers come from the economics the tailer last published on the summary.
+A watcher checks every `ENGINE_BUDGET_TICK_SECS` (default 15; `0` enforces
+nothing) and acts at two levels:
+
+- **soft**, once, at `ENGINE_BUDGET_SOFT_PCT` (default 80) of a turn or context
+  limit: a `budget` change, and — only while the session is at its prompt — one
+  typed line: `[vogt] budget: {what} ({n} of {limit}). Commit your work in
+  progress on your branch, write a hand-off comment (work_comment
+  kind=handoff), then stop.` Mid-turn, the line waits for the next tick that
+  finds it ready. The prompt is read the way autopilot reads it: the session
+  must not be blocked, its agent must be one the engine re-drives, and the
+  prompt must have been quiet for the nudge settle time. A turn or context
+  limit, soft and hard, therefore acts only for the agents the engine re-drives
+  (claude, codex, opencode, klaudia); the wall clock acts for every session.
+- **hard**, once, at the limit: the same change, then the session is hibernated
+  with trigger `budget`. A turn or context limit waits for the prompt first; a
+  wall-clock limit does not. Wall clock is the looping signature — one turn
+  running longer than `wall_clock_minutes` — and it hibernates at once, because
+  that turn may never end. It has no soft level, and a finished turn never
+  counts toward it. Neither does time spent at a permission dialog, blocked on
+  a person, or back at the prompt: each ends the stretch, and the clock starts
+  again from nothing when the session is next seen running, so a dialog that
+  sat for an hour does not count toward the limit once it is answered. A session the engine cannot hibernate (no conversation to resume)
+  stays running; the watcher publishes one `budget` change saying so
+  (`budget exceeded; session cannot be hibernated (no resumable conversation)`)
+  and retries the hibernation once a conversation is pinned.
+
+A missing economics reading counts as zero used, so a limit is not tripped
+before the tailer has published anything.
+
+The hard flag persists in the hibernation record. A manual wake of a
+budget-hibernated session therefore brings it back without its hard limit:
+the watcher will not hibernate it again. Boot wake never does this on its
+own — a session hibernated with trigger `budget` is left hibernated, pinned
+or not.
+
+Auto-split is not implemented. The overseer that reads the `budget` change
+starts the successor itself with `session_start(from_handoff=WI-n)`.
+
 #### Resource use
 
 Every 10 s the engine reads `/proc/*/stat` once and sums, for each live

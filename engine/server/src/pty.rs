@@ -131,6 +131,25 @@ pub struct Session {
     /// snapshot it last produced (WI-1245).
     economics: parking_lot::Mutex<Option<crate::economics::Tail>>,
     economics_snapshot: parking_lot::Mutex<Option<vogt_engine_contract::SessionEconomics>>,
+    /// The budget the session was started with (WI-1245 / C7).
+    budget: Mutex<Option<vogt_engine_contract::SessionBudget>>,
+    /// The soft warning has been typed (or is waiting for the prompt). Once,
+    /// so a tick does not repeat it.
+    budget_soft_sent: AtomicBool,
+    /// The hard limit has been acted on. Once, so a wake does not hibernate
+    /// the session again for a budget it already met.
+    budget_hard_done: AtomicBool,
+    /// The overseer has been told this session cannot be hibernated. In memory
+    /// only: it is a notice, not a decision that must survive a restart, and it
+    /// is deliberately not `budget_soft_sent`, which a soft warning sets first
+    /// and which a wall-clock hard can fire before.
+    budget_refusal_noted: AtomicBool,
+    /// When the budget watcher last saw this session actually running, cleared
+    /// whenever it is idle, at its prompt, at a permission dialog, or blocked.
+    /// The budget's wall clock is measured from this, not from `turn_started_at`:
+    /// a dialog resumes the same turn, so measuring from the turn would count
+    /// the time a person spent answering it.
+    budget_running_since: Mutex<Option<time::OffsetDateTime>>,
 }
 
 impl Session {
@@ -253,6 +272,47 @@ impl Session {
 
     pub fn set_policy(&self, policy: Option<vogt_engine_contract::SessionPolicy>) {
         *self.policy.lock() = policy;
+    }
+
+    pub fn budget(&self) -> Option<vogt_engine_contract::SessionBudget> {
+        self.budget.lock().clone()
+    }
+
+    pub fn set_budget(&self, budget: Option<vogt_engine_contract::SessionBudget>) {
+        *self.budget.lock() = budget;
+    }
+
+    pub fn budget_soft_sent(&self) -> bool {
+        self.budget_soft_sent.load(Ordering::Acquire)
+    }
+
+    pub fn set_budget_soft_sent(&self, sent: bool) {
+        self.budget_soft_sent.store(sent, Ordering::Release);
+    }
+
+    pub fn budget_hard_done(&self) -> bool {
+        self.budget_hard_done.load(Ordering::Acquire)
+    }
+
+    pub fn set_budget_hard_done(&self, done: bool) {
+        self.budget_hard_done.store(done, Ordering::Release);
+    }
+
+    pub fn budget_refusal_noted(&self) -> bool {
+        self.budget_refusal_noted.load(Ordering::Acquire)
+    }
+
+    pub fn set_budget_refusal_noted(&self, noted: bool) {
+        self.budget_refusal_noted.store(noted, Ordering::Release);
+    }
+
+    pub fn budget_running_since(&self) -> Option<time::OffsetDateTime> {
+        *self.budget_running_since.lock()
+    }
+
+    /// Remember or forget when the budget's wall clock started counting.
+    pub fn set_budget_running_since(&self, since: Option<time::OffsetDateTime>) {
+        *self.budget_running_since.lock() = since;
     }
 
     pub fn role(&self) -> vogt_engine_contract::SessionRole {
@@ -399,6 +459,7 @@ impl Session {
             permission_mode: self.permission_mode.lock().clone(),
             stop: self.stop.lock().clone(),
             economics: self.economics_snapshot.lock().clone(),
+            budget: self.budget(),
         }
     }
 
@@ -1108,6 +1169,13 @@ pub fn spawn(
         launch_reported: AtomicBool::new(false),
         economics: parking_lot::Mutex::new(None),
         economics_snapshot: parking_lot::Mutex::new(None),
+        // Set by the registry from the spec, like autopilot: the spawn path
+        // does not see the spec's budget.
+        budget: Mutex::new(None),
+        budget_soft_sent: AtomicBool::new(false),
+        budget_hard_done: AtomicBool::new(false),
+        budget_refusal_noted: AtomicBool::new(false),
+        budget_running_since: Mutex::new(None),
     });
 
     spawn_reader_thread(

@@ -195,6 +195,12 @@ writes a checkpoint before any planned restart. A review session is fresh too:
 its input is the diff plus the hand-off comment, never the worker's screen or
 transcript.
 
+The same hand-off is how a budget ends. A worker session carries a budget
+(120 turns and 90 minutes, unless the start named one), and when it crosses
+the limit the engine hibernates it and emits a `budget` change. Auto-split is
+not done for it: the overseer that reads that change starts the successor
+itself with `session_start(from_handoff=WI-n)`.
+
 ### Search session history — live and archived
 
 Vogt exposes the engine's session history as three reads, so you can find what

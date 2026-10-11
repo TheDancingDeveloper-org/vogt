@@ -289,6 +289,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
     spawn_history_retention_sweeper(Arc::clone(&state));
     crate::hibernate_policy::spawn_watcher(Arc::clone(&state));
     crate::autopilot::spawn_watcher(Arc::clone(&state));
+    crate::budget::spawn_watcher(Arc::clone(&state));
     crate::resources::spawn_sampler(Arc::clone(&state));
     if !state.config.economics_tick.is_zero() {
         let home = state.config.economics_home.clone().unwrap_or_else(|| {

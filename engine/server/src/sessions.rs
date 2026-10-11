@@ -563,6 +563,7 @@ impl SessionRegistry {
         session.set_permission_mode(posture.clone());
         session.set_autopilot(spec.autopilot);
         session.set_policy(spec.policy.clone());
+        session.set_budget(spec.budget.clone());
         session.set_role(spec.role);
         session.set_work_item(spec.work_item.clone());
         // An oversight session is the one that brings the others back, so it
@@ -607,6 +608,7 @@ impl SessionRegistry {
                     .collect();
                 record.autopilot = spec.autopilot;
                 record.policy = spec.policy.clone();
+                record.budget = spec.budget.clone();
                 record.role = spec.role;
                 record.work_item = spec.work_item.clone();
                 record.keep_awake = session.keep_awake();
@@ -619,6 +621,9 @@ impl SessionRegistry {
                 record.hibernation = None;
                 record.name = session.name();
                 session.set_keep_awake(record.keep_awake);
+                session.set_budget(record.budget.clone());
+                session.set_budget_soft_sent(record.budget_soft_sent);
+                session.set_budget_hard_done(record.budget_hard_done);
                 // A forced wake does not undo the handoff. The next hibernation
                 // rebuilds the record from the live session, so the mark has to
                 // live there too.
@@ -761,13 +766,19 @@ impl SessionRegistry {
     /// empty shell in its place. A session whose work was handed to a
     /// successor, and one a person hibernated by hand, stay hibernated
     /// (WI-1251): keep_awake must not bring either back on every restart.
+    /// One the budget watcher hibernated stays hibernated too (WI-1245): its
+    /// hard flag persists, so a boot wake would bring it back unenforced.
     pub fn hibernated_keep_awake(&self) -> Vec<Uuid> {
         self.records
             .iter()
             .filter(|r| {
                 r.keep_awake
                     && r.hibernation.as_ref().is_some_and(|h| {
-                        h.trigger != vogt_engine_contract::HibernateTrigger::Manual
+                        !matches!(
+                            h.trigger,
+                            vogt_engine_contract::HibernateTrigger::Manual
+                                | vogt_engine_contract::HibernateTrigger::Budget
+                        )
                     })
                     && r.superseded_by.is_none()
                     && r.conversation.is_some()
@@ -1081,6 +1092,12 @@ impl SessionRegistry {
         // A handoff survives a forced wake and a later hibernation that does
         // not name one: the live session carries the mark the record had.
         record.superseded_by = superseded_by.or_else(|| session.superseded_by());
+        // The budget and its flags live on the session; a record rebuilt here
+        // would otherwise drop them, and a wake would forget both the limit
+        // and that it had already been reached.
+        record.budget = session.budget();
+        record.budget_soft_sent = session.budget_soft_sent();
+        record.budget_hard_done = session.budget_hard_done();
         record.hibernation = Some(Hibernation {
             at: now_rfc3339(),
             trigger,
@@ -1309,6 +1326,7 @@ impl SessionRegistry {
             rows: req.rows.or(record.rows),
             scrollback_bytes: None,
             companion: None,
+            budget: record.budget.clone(),
         };
         let session = self.create_inner(spec, Creating::Wake(Box::new(record)), None)?;
         self.bus.publish(ServerEvent::SessionWoken { id });
@@ -1804,6 +1822,7 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         permission_mode: record.permission_mode.clone(),
         stop: None,
         economics: None,
+        budget: record.budget.clone(),
     })
 }
 

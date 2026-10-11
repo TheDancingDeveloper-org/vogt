@@ -67,7 +67,7 @@ If no unblocked work is left, say so and end your reply with the autopilot done 
 line your brief describes.";
 
 /// Agents the engine knows how to re-drive at their prompt.
-const REDRIVEN: &[&str] = &["claude", "codex", "opencode", "klaudia"];
+pub const REDRIVEN: &[&str] = &["claude", "codex", "opencode", "klaudia"];
 
 /// Whether the visible screen ends with the agent saying it is done: a line,
 /// among the last ten that are not blank, that reads exactly the marker once

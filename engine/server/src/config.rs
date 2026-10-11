@@ -446,6 +446,11 @@ pub struct Config {
     /// prompt before it is told to carry on, and the most nudges it gets
     /// (`ENGINE_AUTOPILOT_NUDGE_AFTER`, `ENGINE_AUTOPILOT_MAX_NUDGES`).
     pub autopilot: crate::autopilot::Policy,
+    /// Enforcing session budgets (WI-1245 / C7): the percent of a turn or
+    /// context limit that warns, and how often live sessions are checked
+    /// (`ENGINE_BUDGET_SOFT_PCT`, `ENGINE_BUDGET_TICK_SECS`; a tick of 0
+    /// enforces nothing).
+    pub budget: crate::budget::Policy,
     /// Answering Claude Code's per-directory trust questions before a
     /// session starts (`claude_config`). On unless
     /// `ENGINE_AGENT_QUIET_ONBOARDING=0`; off in a hand-built config.
@@ -932,6 +937,7 @@ pub fn load(
         hibernation: hibernation_policy_from_env()?,
         assistant_call: call_policy_from_env()?,
         autopilot: autopilot_policy_from_env()?,
+        budget: budget_policy_from_env()?,
         chat: chat_policy_from_env()?,
         agent_onboarding: crate::claude_config::Onboarding::from_env(),
         session_rss_warn_bytes: match engine_env("ENGINE_SESSION_RSS_WARN") {
@@ -1331,6 +1337,22 @@ fn autopilot_policy_from_env() -> Result<crate::autopilot::Policy> {
         policy.max_nudges = u32::try_from(max).map_err(|_| {
             ApiError::Config(format!("ENGINE_AUTOPILOT_MAX_NUDGES={max} is too large"))
         })?;
+    }
+    Ok(policy)
+}
+
+/// `ENGINE_BUDGET_SOFT_PCT` (default 80) and `ENGINE_BUDGET_TICK_SECS`
+/// (default 15; `0` enforces nothing). A value that does not parse is a
+/// startup error.
+fn budget_policy_from_env() -> Result<crate::budget::Policy> {
+    let mut policy = crate::budget::Policy::default();
+    if let Some(pct) = parse_u64_env("ENGINE_BUDGET_SOFT_PCT")? {
+        policy.soft_pct = u32::try_from(pct)
+            .map_err(|_| ApiError::Config(format!("ENGINE_BUDGET_SOFT_PCT={pct} is too large")))?;
+    }
+    if let Some(secs) = parse_u64_env("ENGINE_BUDGET_TICK_SECS")? {
+        policy.tick = std::time::Duration::from_secs(secs);
+        policy.enabled = secs > 0;
     }
     Ok(policy)
 }
