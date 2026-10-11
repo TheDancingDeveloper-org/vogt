@@ -12,6 +12,7 @@ mod git_local;
 mod mirrored_source;
 pub use mirrored_source::{MirroredSourceCollector, RegisteredProject};
 mod registry;
+mod session_outcomes;
 mod source_markers;
 mod sweeper;
 
