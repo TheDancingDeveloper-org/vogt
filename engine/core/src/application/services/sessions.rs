@@ -505,8 +505,8 @@ pub struct SessionResources {
 pub struct SessionHibernation {
     pub at: String,
     pub trigger: String,
-    pub resumable: bool,
     pub reason: Option<String>,
+    pub resumable: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -520,10 +520,10 @@ pub struct SessionRuntime {
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionSummary {
-    pub id: String,
-    pub engine_session_id: String,
     #[serde(default = "linked_default")]
     pub linked: bool,
+    pub id: String,
+    pub engine_session_id: String,
     pub project: Option<String>,
     pub work_item: Option<String>,
     pub work_item_title: Option<String>,
@@ -542,16 +542,18 @@ pub struct SessionSummary {
     pub last_output_at: Option<String>,
     pub approval: Option<SessionApproval>,
     pub blocked: Option<SessionBlocked>,
+    pub last_reply_excerpt: Option<String>,
     pub hibernation: Option<SessionHibernation>,
-    pub keep_awake: bool,
-    pub autopilot: bool,
-    pub autopilot_nudges: i64,
-    pub role: String,
-    pub conversation_id: Option<String>,
-    pub resources: Option<SessionResources>,
-    pub permission_mode: Option<String>,
+    pub keep_awake: Option<bool>,
+    pub autopilot: Option<bool>,
+    pub autopilot_nudges: Option<i64>,
+    pub role: Option<String>,
     pub stopped_by: Option<String>,
     pub stop_reason: Option<String>,
+    pub permission_mode: Option<String>,
+    pub running: Option<SessionRuntime>,
+    pub resources: Option<SessionResources>,
+    pub conversation_id: Option<String>,
 }
 
 fn linked_default() -> bool {
@@ -587,23 +589,41 @@ pub struct SessionSweepResult {
     pub engine: Option<String>,
 }
 
+/// What `log_tail` says when no session engine is configured at all.
+const NO_ENGINE: &str = "no session engine is configured (VOGT_ENGINE_URL is unset)";
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LogTailResult {
-    pub session_id: String,
+    pub session_id: Option<String>,
     pub text: String,
     pub bytes: i64,
     pub total_bytes: i64,
     pub truncated: bool,
+    pub engine: Option<String>,
+}
+
+impl LogTailResult {
+    /// No output to show: an unknown id or history that is off.
+    fn empty() -> Self {
+        Self {
+            session_id: None,
+            text: String::new(),
+            bytes: 0,
+            total_bytes: 0,
+            truncated: false,
+            engine: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionScreenResult {
     pub id: String,
+    pub engine_session_id: String,
     pub cols: i64,
     pub rows: i64,
     pub lines: Vec<String>,
-    pub cursor_row: Option<i64>,
-    pub cursor_col: Option<i64>,
+    pub cursor: Option<SessionCursor>,
     pub title: Option<String>,
     pub activity: Option<String>,
     pub alive: Option<bool>,
@@ -616,7 +636,15 @@ pub struct SessionScreenResult {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionCursor {
+    pub row: i64,
+    pub col: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionWaitResult {
+    pub id: String,
+    pub engine_session_id: String,
     pub outcome: String,
     pub matched: bool,
     pub waited_ms: i64,
@@ -663,84 +691,135 @@ where
     let actor_ref = format!("agent:session:{session_id}");
     let scopes = session_scopes(ctx)?;
     let (secret, token_hash) = minted_token()?;
-    let now = now(&writing);
-    let actor = Actor {
-        id: fresh(&writing, "act"),
-        kind: ActorKind::Agent,
-        display_name: format!("Session {session_id}"),
-        identity_ref: actor_ref.clone(),
-        disabled: false,
-        created_at: now,
-    };
-    let token = Token {
-        id: fresh(&writing, "tok"),
-        actor_id: actor.id.clone(),
-        actor_identity_ref: Some(actor_ref.clone()),
-        name: format!("session {session_id}"),
-        scopes: scopes.clone(),
-        kind: TokenKind::Api,
-        created_at: now,
-        expires_at: None,
-        last_used_at: None,
-        revoked_at: None,
-        revoked_reason: None,
-    };
     let spec = build_spec(ctx, params, &subject, &secret)?;
-    let declared_branch = subject.work_item_ref.as_ref().map(|work_ref| {
-        crate::branches::default_branch_name(work_ref, &ctx.config.branch_binding_template)
-    });
-    let started = engine.create_session(&spec)?;
-    let recorded = CodingSession {
-        id: session_id.clone(),
-        engine_session_id: started.id.clone(),
-        project_id: subject.project_id.clone(),
-        work_item_id: subject.work_item_id.clone(),
-        actor_id: actor.id.clone(),
-        cwd: subject.cwd.clone(),
-        template: params.template.clone(),
-        model: params.model.clone(),
-        effort: params.effort.clone(),
-        reason: reason.clone(),
-        started_at: now,
-        stopped_at: None,
+    // How long the engine took to accept the session: on the audit row, and
+    // logged, so a slow or refused start is attributable afterwards.
+    let spawn_started = std::time::Instant::now();
+    let started = match engine.create_session(&spec) {
+        Ok(started) => started,
+        Err(error) => {
+            tracing::warn!(
+                target: "vogt.sessions",
+                "session.start failed session_id={session_id} template={} engine_spawn_ms={} error={}",
+                params.template.as_deref().unwrap_or(""),
+                spawn_started.elapsed().as_millis(),
+                error.code(),
+            );
+            return Err(error);
+        }
     };
+    let engine_spawn_ms = spawn_started.elapsed().as_millis() as i64;
+    tracing::info!(
+        target: "vogt.sessions",
+        "session.start session_id={session_id} engine_session_id={} template={} engine_spawn_ms={engine_spawn_ms}",
+        started.id,
+        params.template.as_deref().unwrap_or(""),
+    );
+    // A resumed conversation starts in the directory its transcript records,
+    // which may be below or beside the project root. Record where it actually
+    // runs; every other session runs at the registry's root.
+    let cwd = match (params.resume.is_some(), started.cwd.as_str()) {
+        (true, resumed) if !resumed.is_empty() => resumed.to_string(),
+        _ => subject.cwd.clone(),
+    };
+    let actor_id = fresh(&writing, "act");
+    let token_id = fresh(&writing, "tok");
+    // Read after the ranking tick: `why` consumes one, and every timestamp on
+    // this path — actor, token, session, overlay — shares the next one.
+    let now = now(&writing);
     let stored = {
-        let actor = actor.clone();
-        let token = token.clone();
+        let actor_ref = actor_ref.clone();
+        let scopes = scopes.clone();
         let token_hash = token_hash.clone();
-        let recorded = recorded.clone();
-        let started_summary = json!({
-            "work_item": subject.work_item_ref,
-            "branch": declared_branch,
-            "project": subject.project_slug,
-            "cwd": subject.cwd,
-            "scratch": subject.is_scratch,
-            "model": params.model,
-            "effort": params.effort,
-            "resume": params.resume,
-            "autopilot": spec.autopilot,
-            "role": params.role,
-            "permission_mode": params.permission_mode,
-            "engine_session_id": recorded.engine_session_id,
-        });
-        let overlay_ref = subject.work_item_ref.clone();
-        let overlay_project = subject.project_id.clone();
+        let session_id = session_id.clone();
+        let engine_session_id = started.id.clone();
+        let project_id = subject.project_id.clone();
+        let work_item_id = subject.work_item_id.clone();
+        let template = params.template.clone();
+        let model = params.model.clone();
+        let effort = params.effort.clone();
+        let reason = reason.clone();
+        let work_item_ref = subject.work_item_ref.clone();
+        let project_slug = subject.project_slug.clone();
+        let is_scratch = subject.is_scratch;
+        let resume = params.resume.clone();
+        let role = params.role.clone();
+        let permission_mode = params.permission_mode.clone();
+        let autopilot = spec.autopilot;
         let overlay_template = ctx.config.branch_binding_template.clone();
-        audited_write(&mut writing, SESSION_START, &reason, move |txn, _actor| {
+        audited_write(&mut writing, SESSION_START, &reason.clone(), move |txn, _actor| {
+            let actor = Actor {
+                id: actor_id.clone(),
+                kind: ActorKind::Agent,
+                display_name: format!("Session {session_id}"),
+                identity_ref: actor_ref.clone(),
+                disabled: false,
+                created_at: now,
+            };
+            let token = Token {
+                id: token_id.clone(),
+                actor_id: actor.id.clone(),
+                actor_identity_ref: Some(actor_ref),
+                name: format!("session {session_id}"),
+                scopes,
+                kind: TokenKind::Api,
+                created_at: now,
+                expires_at: None,
+                last_used_at: None,
+                revoked_at: None,
+                revoked_reason: None,
+            };
+            let recorded = CodingSession {
+                id: session_id.clone(),
+                engine_session_id,
+                project_id: project_id.clone(),
+                work_item_id,
+                actor_id: actor.id.clone(),
+                cwd: cwd.clone(),
+                template,
+                model: model.clone(),
+                effort: effort.clone(),
+                reason,
+                started_at: now,
+                stopped_at: None,
+            };
             txn.insert_actor(&actor)?;
             txn.insert_token(&token, &token_hash)?;
             txn.insert_session(&recorded)?;
-            if let Some(work_ref) = &overlay_ref {
-                record_declared_branch(txn, work_ref, &overlay_project, &overlay_template, now)?;
-            }
-            let payload = serde_json::to_value(&recorded).unwrap_or(Value::Null);
+            let payload = audited_payload(&recorded);
+            // The declared half of the branch binding: a session opened for a
+            // work item records the branch it will use. The summary's branch
+            // is what was recorded, which is nothing when there is no item.
+            let declared_branch = match &work_item_ref {
+                Some(work_ref) => Some(record_declared_branch(
+                    txn,
+                    work_ref,
+                    &project_id,
+                    &overlay_template,
+                    now,
+                )?),
+                None => None,
+            };
             Ok(WriteOutcome::new(
-                recorded.id.clone(),
+                recorded,
                 "session",
-                &recorded.id,
+                &session_id,
                 payload,
                 "session.started",
-                started_summary,
+                json!({
+                    "work_item": work_item_ref,
+                    "branch": declared_branch,
+                    "project": project_slug,
+                    "cwd": cwd,
+                    "scratch": is_scratch,
+                    "model": model,
+                    "effort": effort,
+                    "resume": resume,
+                    "autopilot": autopilot,
+                    "role": role,
+                    "permission_mode": permission_mode,
+                    "engine_spawn_ms": engine_spawn_ms,
+                }),
             ))
         })
     };
@@ -755,7 +834,7 @@ where
         return Err(error);
     }
     Ok(SessionResult {
-        session: summarize(ctx, &recorded, Some(&started))?,
+        session: summarize(ctx, &stored?, Some(&started))?,
     })
 }
 
@@ -769,44 +848,60 @@ where
     I: IdFactory + 'static,
 {
     let reason = writes::validate_reason(&params.reason)?;
-    let engine = engine_of(ctx)?;
     let found = resolve_target(ctx, &params.id)?;
     let Some(session) = found.session else {
+        let engine = engine_of(ctx)?;
         return stop_unlinked(ctx, engine, &found.engine_session_id, &reason);
     };
-    if session.stopped_at.is_some() {
-        return Err(VogtError::Conflict(format!(
-            "session {} is already stopped",
-            py_repr(&session.id)
-        )));
-    }
-    let engine_killed = engine
-        .kill_session(
+    // The kill goes first and its failure is not fatal: an engine that has
+    // already forgotten the session, or one that is down, must not leave Vogt
+    // unable to close its own record. Only an unconfigured engine yields no
+    // answer; any other failure is the caller's to see.
+    let engine_killed = match ctx.engine.as_ref() {
+        None => None,
+        Some(engine) => match engine.kill_session(
             &session.engine_session_id,
             Some(&reason),
             Some(&ctx.principal.identity_ref),
-        )
-        .unwrap_or(false);
+        ) {
+            Ok(killed) => Some(killed),
+            // An engine that is down answers nothing; any other failure is
+            // the caller's to see.
+            Err(VogtError::EngineUnavailable(_)) => None,
+            Err(other) => return Err(other),
+        },
+    };
     let mut writing = write_of(ctx);
     let stopped_at = now(&writing);
     let actor_id = session.actor_id.clone();
     let session_id = session.id.clone();
+    let named = params.id.clone();
     let stop_reason = reason.clone();
-    let stopped_engine_id = session.engine_session_id.clone();
     audited_write(&mut writing, SESSION_STOP, &reason, move |txn, _actor| {
+        let current = txn.session_by_id(&session_id)?.ok_or_else(|| {
+            VogtError::NotFound(format!("no session {}", py_repr(&named)))
+        })?;
+        if current.stopped_at.is_some() {
+            return Err(VogtError::Conflict(format!(
+                "session {} was already stopped",
+                py_repr(&named)
+            )));
+        }
         txn.mark_session_stopped(&session_id, stopped_at)?;
         for token in txn.tokens_for_actor(&actor_id, false)? {
             if token.revoked_at.is_none() {
                 txn.revoke_token(&token.id, &stop_reason, stopped_at)?;
             }
         }
+        let mut stopped = current;
+        stopped.stopped_at = Some(stopped_at);
         Ok(WriteOutcome::new(
             session_id.clone(),
             "session",
             &session_id,
-            json!({"stopped_at": stopped_at.to_iso()}),
+            audited_payload(&stopped),
             "session.stopped",
-            json!({"engine_killed": engine_killed, "engine_session_id": stopped_engine_id}),
+            json!({"engine_killed": engine_killed}),
         ))
     })?;
     let stopped = ctx
@@ -831,21 +926,31 @@ where
 {
     let (live, detail) = match ctx.engine.as_ref() {
         None => (
-            std::collections::HashMap::new(),
+            Vec::new(),
             Some("no session engine is configured (VOGT_ENGINE_URL is unset)".to_string()),
         ),
         Some(engine) => match engine.list_sessions() {
-            Ok(rows) => (
-                rows.into_iter().map(|row| (row.id.clone(), row)).collect(),
-                None,
-            ),
-            Err(VogtError::EngineUnavailable(text)) => {
-                (std::collections::HashMap::new(), Some(text))
-            }
+            // Kept as a Vec: the engine's order is the order unlinked rows
+            // append in, and a HashMap would shuffle it.
+            Ok(rows) => (rows, None),
+            Err(VogtError::EngineUnavailable(text)) => (Vec::new(), Some(text)),
             Err(error) => return Err(error),
         },
     };
-    let sessions = rows_of(ctx, params, &live, detail.as_deref())?;
+    let mut sessions = rows_of(ctx, params, &live, detail.as_deref())?;
+    if params.order == "rss" {
+        // Stable: sessions with no sample keep their order, after the
+        // measured ones. Sweep shares rows_of and must not inherit this.
+        sessions.sort_by(|left, right| {
+            let rss =
+                |row: &SessionSummary| row.resources.as_ref().map(|r| r.rss_bytes).unwrap_or(0);
+            match (left.resources.is_none(), right.resources.is_none()) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ => rss(right).cmp(&rss(left)),
+            }
+        });
+    }
     Ok(SessionListResult {
         sessions,
         engine: detail,
@@ -856,7 +961,7 @@ where
 fn rows_of<C, I>(
     ctx: &AppContext<C, I>,
     params: &ListSessionsParams,
-    live: &std::collections::HashMap<String, EngineSession>,
+    live: &[EngineSession],
     detail: Option<&str>,
 ) -> Result<Vec<SessionSummary>, VogtError>
 where
@@ -882,15 +987,7 @@ where
     drop(view);
     let mut summaries = Vec::with_capacity(recorded.len());
     for session in &recorded {
-        let engine_session = live.get(&session.engine_session_id);
-        // An exited session the engine still lists is its leftover, not a
-        // running terminal, unless stopped sessions were asked for.
-        if detail.is_none()
-            && !params.include_stopped
-            && engine_session.is_some_and(|live| !live.alive && !live.hibernated())
-        {
-            continue;
-        }
+        let engine_session = live.iter().find(|row| row.id == session.engine_session_id);
         summaries.push(summarize_asked(
             ctx,
             session,
@@ -901,26 +998,55 @@ where
     let unfiltered = project_id.is_none() && work_item_id.is_none();
     if unfiltered && params.offset == 0 {
         let view = ctx.declared.read()?;
-        for engine_session in live.values() {
+        for engine_session in live {
+            // A hibernated session is asleep, not stopped: listed always. An
+            // exited one is the engine's leftover, listed only when stopped
+            // sessions were asked for. Linked rows are not filtered here —
+            // the declared query already applied include_stopped.
             if !engine_session.alive && !engine_session.hibernated() && !params.include_stopped {
                 continue;
             }
             if view.session_by_engine_id(&engine_session.id)?.is_none() {
-                summaries.push(unlinked_summary(engine_session));
+                summaries.push(unlinked_summary(&view, engine_session)?);
             }
         }
         summaries.truncate(params.limit.max(0) as usize);
     }
-    if params.order == "rss" {
-        summaries.sort_by(|left, right| {
-            let rss =
-                |row: &SessionSummary| row.resources.as_ref().map(|r| r.rss_bytes).unwrap_or(0);
-            match (left.resources.is_none(), right.resources.is_none()) {
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, true) => std::cmp::Ordering::Less,
-                _ => rss(right).cmp(&rss(left)),
+    // Outside the read transaction: this is file I/O, and an excerpt that
+    // cannot be had is a null, never an error. Only a session the engine
+    // still has alive or asleep gets a transcript read.
+    for summary in &mut summaries {
+        let Some(live_session) = live.iter().find(|row| row.id == summary.engine_session_id) else {
+            continue;
+        };
+        if !(live_session.alive || live_session.hibernated()) {
+            continue;
+        }
+        let template = summary
+            .template
+            .clone()
+            .filter(|template| !template.is_empty())
+            .or_else(|| live_session.template.clone());
+        let found = transcript_for(ctx, live_session, template.as_deref());
+        summary.running = running_of(summary, live_session, found.as_ref());
+        if summary.template.is_none()
+            && live_session
+                .template
+                .as_deref()
+                .is_some_and(|template| !template.is_empty())
+        {
+            // An unlinked session's template is the engine's to report.
+            summary.template = live_session.template.clone();
+        }
+        if let Some(found) = found.as_ref() {
+            if let Some(excerpt) = transcripts::last_reply_excerpt(found) {
+                summary.last_reply_excerpt = Some(excerpt);
             }
-        });
+        } else if live_session.conversation_agent.as_deref() == Some("opencode") {
+            if let Some(excerpt) = opencode_excerpt(ctx, &live_session.id) {
+                summary.last_reply_excerpt = Some(excerpt);
+            }
+        }
     }
     Ok(summaries)
 }
@@ -971,9 +1097,9 @@ where
         Err(VogtError::EngineUnavailable(text)) => return Ok(empty(Some(text))),
         Err(error) => return Err(error),
     };
-    let live = entries
+    let live: Vec<EngineSession> = entries
         .iter()
-        .map(|entry| (entry.session.id.clone(), entry.session.clone()))
+        .map(|entry| entry.session.clone())
         .collect();
     let listed = rows_of(
         ctx,
@@ -1068,20 +1194,36 @@ where
     C: Clock + 'static,
     I: IdFactory + 'static,
 {
-    let engine = engine_of(ctx)?;
+    // No engine is an ordinary answer here, not an error: there is no log to
+    // read. A `ses_…` id Vogt has no record of is still a wrong id.
+    let Some(engine) = ctx.engine.as_ref() else {
+        return Ok(LogTailResult {
+            engine: Some(NO_ENGINE.to_string()),
+            ..LogTailResult::empty()
+        });
+    };
     let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
     let bytes = params.tail_bytes.clamp(1, LOG_TAIL_MAX_BYTES);
-    let log = engine
-        .history_log(&engine_id, bytes, params.strip_ansi)?
-        .ok_or_else(|| {
-            VogtError::NotFound(format!("no session with id {}", py_repr(&params.id)))
-        })?;
+    let log = match engine.history_log(&engine_id, bytes, params.strip_ansi) {
+        // A missing log — unknown id, or history off — is an empty answer, not
+        // an error: there is simply no output to show.
+        Ok(None) => return Ok(LogTailResult::empty()),
+        Ok(Some(log)) => log,
+        Err(VogtError::EngineUnavailable(message)) => {
+            return Ok(LogTailResult {
+                engine: Some(message),
+                ..LogTailResult::empty()
+            });
+        }
+        Err(error) => return Err(error),
+    };
     Ok(LogTailResult {
-        session_id: params.id.clone(),
+        session_id: Some(log.session_id),
         text: log.text,
         bytes: log.bytes,
         total_bytes: log.total_bytes,
         truncated: log.truncated,
+        engine: None,
     })
 }
 
@@ -1246,7 +1388,11 @@ where
     let engine = engine_of(ctx)?;
     let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
     let found = engine.session_screen(&engine_id, params.scrollback_lines)?;
-    Ok(screen_result(&require_screen(found, &params.id)?))
+    Ok(screen_result(
+        &params.id,
+        &engine_id,
+        &require_screen(engine, found, &engine_id, &params.id)?,
+    ))
 }
 
 /// Block until a session reaches a state, or the timeout passes.
@@ -1260,19 +1406,61 @@ where
 {
     let engine = engine_of(ctx)?;
     let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
-    let found = engine.wait_session(
+    let until = params.until.replace('_', "-");
+    let found = match engine.wait_session(
         &engine_id,
-        &params.until,
+        &until,
         Duration::from_secs(params.timeout_s.max(0) as u64),
-    )?;
+    ) {
+        // A hibernated session does nothing until somebody wakes it, and a wait
+        // is a read: it does not wake it. Say so at once, with the screen it
+        // kept, rather than holding the caller to a timeout.
+        Err(refused @ VogtError::Conflict(_)) => {
+            let screen = engine.session_screen(&engine_id, 0)?;
+            if screen
+                .as_ref()
+                .is_none_or(|screen| screen.activity.as_deref() != Some("hibernated"))
+            {
+                return Err(refused);
+            }
+            return Ok(SessionWaitResult {
+                id: params.id.clone(),
+                engine_session_id: engine_id.clone(),
+                outcome: "hibernated".to_string(),
+                matched: false,
+                waited_ms: 0,
+                screen: screen_result(&params.id, &engine_id, &screen.expect("checked")),
+            });
+        }
+        other => other?,
+    };
     let waited = found.ok_or_else(|| {
-        VogtError::NotFound(format!("no session with id {}", py_repr(&params.id)))
+        if engine
+            .get_session(&engine_id)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            VogtError::EngineUnavailable(
+                "the session engine does not support wait yet (it has no GET \
+                 /api/sessions/{id}/wait route); upgrade the engine, or poll \
+                 session.screen"
+                    .to_string(),
+            )
+        } else {
+            VogtError::NotFound(format!(
+                "the engine has no live session {}",
+                py_repr(&params.id)
+            ))
+        }
     })?;
     Ok(SessionWaitResult {
+        id: params.id.clone(),
+        engine_session_id: engine_id.clone(),
         outcome: waited.outcome,
         matched: waited.matched,
         waited_ms: waited.waited_ms,
-        screen: screen_result(&waited.screen),
+        screen: screen_result(&params.id, &engine_id, &waited.screen),
     })
 }
 
@@ -1304,7 +1492,10 @@ where
     let updated = engine
         .keep_awake(&engine_id, params.keep_awake)?
         .ok_or_else(|| {
-            VogtError::NotFound(format!("no session with id {}", py_repr(&params.id)))
+            VogtError::NotFound(format!(
+                "the engine has no session {}, or predates hibernation",
+                py_repr(&params.id)
+            ))
         })?;
     let recorded = resolve_target(ctx, &params.id)?;
     let why = recorded
@@ -1314,9 +1505,9 @@ where
         .unwrap_or_else(|| engine_id.clone());
     let mut writing = write_of(ctx);
     let detail = json!({
-        "keep_awake": params.keep_awake,
         "engine_session_id": engine_id.clone(),
         "linked": recorded.session.is_some(),
+        "keep_awake": params.keep_awake,
     });
     audited_action(
         &mut writing,
@@ -1326,11 +1517,11 @@ where
         &why,
         &detail,
         "session.keep_awake",
-        Some(&detail),
+        None,
     )?;
     let summary = match &recorded.session {
         Some(session) => summarize(ctx, session, Some(&updated))?,
-        None => unlinked_summary(&updated),
+        None => unlinked_summary(&ctx.declared.read()?, &updated)?,
     };
     Ok(SessionResult { session: summary })
 }
@@ -1345,16 +1536,22 @@ where
     I: IdFactory + 'static,
 {
     let reason = writes::validate_reason(&params.reason)?;
-    if params.role == "oversight" && ctx.principal.kind == ActorKind::Agent {
-        return Err(VogtError::PersonRequired(
-            "nominating an oversight session can only be done by a person, not by an agent"
-                .to_string(),
-        ));
+    // The role is a person's nomination. An agent that could nominate itself
+    // would hand itself an overseer's standing, and a worker demoting its
+    // overseer is no better. Refused by who is asking, like `bypass`.
+    if ctx.principal.kind == ActorKind::Agent {
+        return Err(VogtError::RoleRefused(format!(
+            "only a person nominates an oversight session, or makes one a worker              again ({} is an agent); ask a person to set the role from the GUI,              or start the session with role=oversight",
+            ctx.principal.identity_ref
+        )));
     }
     let engine = engine_of(ctx)?;
     let engine_id = resolve_target(ctx, &params.id)?.engine_session_id;
     let updated = engine.set_role(&engine_id, &params.role)?.ok_or_else(|| {
-        VogtError::NotFound(format!("no session with id {}", py_repr(&params.id)))
+        VogtError::NotFound(format!(
+            "the engine has no session {}, or predates session roles",
+            py_repr(&params.id)
+        ))
     })?;
     let recorded = resolve_target(ctx, &params.id)?;
     let why = recorded
@@ -1364,9 +1561,10 @@ where
         .unwrap_or_else(|| engine_id.clone());
     let mut writing = write_of(ctx);
     let detail = json!({
-        "role": params.role,
         "engine_session_id": engine_id.clone(),
         "linked": recorded.session.is_some(),
+        "role": params.role,
+        "keep_awake": updated.keep_awake,
     });
     audited_action(
         &mut writing,
@@ -1376,11 +1574,11 @@ where
         &why,
         &detail,
         "session.role_set",
-        Some(&detail),
+        None,
     )?;
     let summary = match &recorded.session {
         Some(session) => summarize(ctx, session, Some(&updated))?,
-        None => unlinked_summary(&updated),
+        None => unlinked_summary(&ctx.declared.read()?, &updated)?,
     };
     Ok(SessionResult { session: summary })
 }
@@ -1527,7 +1725,7 @@ where
             Some(&outcome),
         )?;
         return Ok(SessionResult {
-            session: unlinked_summary(&hibernated),
+            session: unlinked_summary(&ctx.declared.read()?, &hibernated)?,
         });
     };
     let mut writing = write_of(ctx);
@@ -1663,12 +1861,20 @@ where
             None => project.slug.clone(),
         });
     let brief = match &work_item {
-        Some(item) => crate::application::brief::brief_for_work_item(
-            &ctx.declared.read()?,
-            item,
-            session_id,
-            None,
-        )?,
+        // The score explanation is optional on purpose: a brief that refused
+        // to be written because a score could not be computed would make the
+        // ranking a precondition for starting work.
+        Some(item) => {
+            let ranking = crate::application::views::why(ctx, &item.reference)
+                .ok()
+                .and_then(|value| serde_json::from_value(value).ok());
+            crate::application::brief::brief_for_work_item(
+                &ctx.declared.read()?,
+                item,
+                session_id,
+                ranking.as_ref(),
+            )?
+        }
         None => crate::application::brief::brief_for_project(&project.slug, session_id),
     };
     Ok(Subject {
@@ -1771,31 +1977,30 @@ where
     C: Clock,
     I: IdFactory,
 {
-    let found = engine.kill_session(engine_id, Some(reason), Some(&ctx.principal.identity_ref))?;
-    if !found {
-        return Err(VogtError::NotFound(format!(
-            "no session with id {}",
-            py_repr(engine_id)
-        )));
-    }
-    let session = engine
-        .get_session(engine_id)?
-        .ok_or_else(|| VogtError::NotFound(format!("no session with id {}", py_repr(engine_id))))?;
-    let detail = json!({"engine_session_id": engine_id, "linked": false});
+    // Read first: the kill removes the session, and the summary is built from
+    // what the engine said it was, with the stop applied on top.
+    let session = engine.get_session(engine_id)?.ok_or_else(|| {
+        VogtError::NotFound(format!("no session {}", py_repr(engine_id)))
+    })?;
+    let killed = engine.kill_session(engine_id, Some(reason), Some(&ctx.principal.identity_ref))?;
+    let outcome = json!({"engine_session_id": engine_id, "linked": false});
+    let summary_row = json!({"engine_killed": killed, "linked": false});
     let mut writing = write_of(ctx);
+    let stopped_at = now(&writing);
     audited_action(
         &mut writing,
         SESSION_STOP,
         reason,
         "session",
         engine_id,
-        &detail,
+        &outcome,
         "session.stopped",
-        Some(&detail),
+        Some(&summary_row),
     )?;
-    Ok(SessionResult {
-        session: unlinked_summary(&session),
-    })
+    let mut summary = unlinked_summary(&ctx.declared.read()?, &session)?;
+    summary.alive = killed.then_some(false);
+    summary.stopped_at = Some(stopped_at);
+    Ok(SessionResult { session: summary })
 }
 
 /// What the engine was asked to run.
@@ -1955,16 +2160,20 @@ where
         last_output_at: None,
         approval: None,
         blocked: None,
+        last_reply_excerpt: None,
         hibernation: None,
-        keep_awake: false,
-        autopilot: false,
-        autopilot_nudges: 0,
-        role: "worker".to_string(),
-        conversation_id: None,
-        resources: None,
-        permission_mode: None,
+        // None until the engine was asked and answered: an engine that was
+        // not asked has nothing to report, not a default of false/"worker".
+        keep_awake: None,
+        autopilot: None,
+        autopilot_nudges: None,
+        role: None,
         stopped_by: None,
         stop_reason: None,
+        permission_mode: None,
+        running: None,
+        resources: None,
+        conversation_id: None,
     };
     if let Some(live) = live {
         apply_live(&mut summary, live);
@@ -1980,10 +2189,10 @@ fn apply_live(summary: &mut SessionSummary, live: &EngineSession) {
     summary.approval = live.approval.as_ref().map(approval_of);
     summary.blocked = live.blocked.as_ref().map(blocked_of);
     summary.hibernation = live.hibernation.as_ref().map(hibernation_of);
-    summary.keep_awake = live.keep_awake;
-    summary.autopilot = live.autopilot;
-    summary.autopilot_nudges = live.autopilot_nudges;
-    summary.role = live.role.clone();
+    summary.keep_awake = Some(live.keep_awake);
+    summary.autopilot = Some(live.autopilot);
+    summary.autopilot_nudges = Some(live.autopilot_nudges);
+    summary.role = Some(live.role.clone());
     summary.conversation_id = live.conversation_id.clone();
     summary.resources = live.resources.as_ref().map(resources_of);
     summary.permission_mode = live.permission_mode.clone();
@@ -2016,6 +2225,80 @@ where
         Some(started),
         false,
     )
+}
+
+/// The transcript a listed session's conversation is in. Only the id-based
+/// lookups: a list must stay cheap and must not guess which of two agents in
+/// one directory a session is, so no start time and no cwd guess.
+fn transcript_for<C, I>(
+    ctx: &AppContext<C, I>,
+    live: &EngineSession,
+    template: Option<&str>,
+) -> Option<transcripts::Transcript>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    if ctx.config.session_transcript_roots.is_empty() {
+        return None;
+    }
+    let roots: HashMap<&str, &Path> = ctx
+        .config
+        .session_transcript_roots
+        .iter()
+        .map(|(agent, path)| (agent.as_str(), path.as_path()))
+        .collect();
+    transcripts::find(
+        &roots,
+        &live.id,
+        live.command.as_deref(),
+        template,
+        Some(live.cwd.as_str()),
+        None,
+        false,
+    )
+}
+
+/// What the session is actually running: the transcript's latest turn, else
+/// the command's flags, else what was asked. Null when none of the three
+/// says anything.
+fn running_of(
+    summary: &SessionSummary,
+    live: &EngineSession,
+    found: Option<&transcripts::Transcript>,
+) -> Option<SessionRuntime> {
+    let (model, effort) = found.map(transcripts::runtime).unwrap_or((None, None));
+    let resolved = decisions::resolve_runtime(
+        live.command.as_deref(),
+        live.conversation_agent.as_deref(),
+        model.as_deref(),
+        effort.as_deref(),
+        summary.model.as_deref(),
+        summary.effort.as_deref(),
+    );
+    if resolved.agent.is_none() && resolved.model.is_none() && resolved.effort.is_none() {
+        return None;
+    }
+    Some(SessionRuntime {
+        agent: resolved.agent,
+        model: resolved.model,
+        model_basis: resolved.model_basis.map(str::to_string),
+        effort: resolved.effort,
+        effort_basis: resolved.effort_basis.map(str::to_string),
+    })
+}
+
+/// An opencode session's last reply, from the engine: opencode keeps no
+/// transcript file. An engine that cannot be asked, or one that has no such
+/// session, is a null.
+fn opencode_excerpt<C, I>(ctx: &AppContext<C, I>, engine_session_id: &str) -> Option<String>
+where
+    C: Clock,
+    I: IdFactory,
+{
+    let engine = ctx.engine.as_ref()?;
+    let found = engine.session_replies(engine_session_id, 1).ok()??;
+    found.1.last().map(|(text, _at)| transcripts::excerpt(text))
 }
 
 fn runtime_of(
@@ -2082,16 +2365,24 @@ fn hibernation_of(hibernation: &EngineHibernation) -> SessionHibernation {
 }
 
 /// A session the engine has and Vogt never recorded, carrying the engine's id
-/// in both id fields and null for every declared field.
-fn unlinked_summary(session: &EngineSession) -> SessionSummary {
+/// in both id fields and null for every declared field. Its work item, when
+/// the engine named one Vogt knows, contributes its title and state.
+fn unlinked_summary(
+    view: &dyn crate::storage::interface::ReadView,
+    session: &EngineSession,
+) -> Result<SessionSummary, VogtError> {
+    let work_item = match session.work_item.as_deref() {
+        Some(reference) => view.work_item_by_ref(reference)?,
+        None => None,
+    };
     let mut summary = SessionSummary {
         id: session.id.clone(),
         engine_session_id: session.id.clone(),
         linked: false,
         project: None,
         work_item: session.work_item.clone(),
-        work_item_title: None,
-        work_item_state: None,
+        work_item_title: work_item.as_ref().map(|item| item.title.clone()),
+        work_item_state: work_item.map(|item| item.state.to_string()),
         actor: None,
         cwd: session.cwd.clone(),
         template: None,
@@ -2109,29 +2400,37 @@ fn unlinked_summary(session: &EngineSession) -> SessionSummary {
         last_output_at: None,
         approval: None,
         blocked: None,
+        last_reply_excerpt: None,
         hibernation: None,
-        keep_awake: false,
-        autopilot: false,
-        autopilot_nudges: 0,
-        role: "worker".to_string(),
-        conversation_id: None,
-        resources: None,
-        permission_mode: None,
+        keep_awake: None,
+        autopilot: None,
+        autopilot_nudges: None,
+        role: None,
         stopped_by: None,
         stop_reason: None,
+        permission_mode: None,
+        running: None,
+        resources: None,
+        conversation_id: None,
     };
     apply_live(&mut summary, session);
-    summary
+    Ok(summary)
 }
 
-fn screen_result(screen: &EngineScreen) -> SessionScreenResult {
+/// The screen the caller asked about. `named` is the id they used, kept as
+/// given; the engine's own id is reported beside it.
+fn screen_result(named: &str, engine_id: &str, screen: &EngineScreen) -> SessionScreenResult {
+    let cursor = match (screen.cursor_row, screen.cursor_col) {
+        (Some(row), Some(col)) => Some(SessionCursor { row, col }),
+        _ => None,
+    };
     SessionScreenResult {
-        id: screen.id.clone(),
+        id: named.to_string(),
+        engine_session_id: engine_id.to_string(),
         cols: screen.cols,
         rows: screen.rows,
         lines: screen.lines.clone(),
-        cursor_row: screen.cursor_row,
-        cursor_col: screen.cursor_col,
+        cursor,
         title: screen.title.clone(),
         activity: screen.activity.clone(),
         alive: screen.alive,
@@ -2144,8 +2443,27 @@ fn screen_result(screen: &EngineScreen) -> SessionScreenResult {
     }
 }
 
-fn require_screen(screen: Option<EngineScreen>, id: &str) -> Result<EngineScreen, VogtError> {
-    screen.ok_or_else(|| VogtError::NotFound(format!("no session with id {}", py_repr(id))))
+/// A missing screen is either an engine without the route, or a session the
+/// engine no longer holds. The second lookup tells them apart.
+fn require_screen(
+    engine: &EngineClient,
+    screen: Option<EngineScreen>,
+    engine_id: &str,
+    named: &str,
+) -> Result<EngineScreen, VogtError> {
+    if let Some(screen) = screen {
+        return Ok(screen);
+    }
+    if engine.get_session(engine_id)?.is_some() {
+        return Err(VogtError::EngineUnavailable(
+            "the session engine does not support screen yet (it has no GET              /api/sessions/{id}/screen route); upgrade the engine, or read the              output with session.log_tail"
+                .to_string(),
+        ));
+    }
+    Err(VogtError::NotFound(format!(
+        "the engine has no live session {}",
+        py_repr(named)
+    )))
 }
 
 fn bare_acknowledgement(text: &str, keys: &[String], submit: bool) -> bool {
@@ -2248,7 +2566,7 @@ where
         }
         let summary = match &session {
             Some(session) => summarize(ctx, session, Some(&current))?,
-            None => unlinked_summary(&current),
+            None => unlinked_summary(&ctx.declared.read()?, &current)?,
         };
         return Ok(SessionResult { session: summary });
     }
@@ -2269,7 +2587,7 @@ where
             Some(&detail),
         )?;
         return Ok(SessionResult {
-            session: unlinked_summary(&woken),
+            session: unlinked_summary(&ctx.declared.read()?, &woken)?,
         });
     };
     if session.stopped_at.is_some() {

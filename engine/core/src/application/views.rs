@@ -34,7 +34,7 @@ fn now_of<C: Clock>(clock: &Arc<std::sync::Mutex<C>>) -> Moment {
         .now()
 }
 
-fn why<C: Clock, I: IdFactory>(
+pub(crate) fn why<C: Clock, I: IdFactory>(
     ctx: &AppContext<C, I>,
     reference: &str,
 ) -> Result<serde_json::Value, VogtError> {

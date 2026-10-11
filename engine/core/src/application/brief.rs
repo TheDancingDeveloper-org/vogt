@@ -14,7 +14,7 @@ use crate::storage::interface::ReadView;
 
 /// One row of a `WhyResult`: the ranking contribution, exactly as the Python
 /// `ContributionView` carries it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct ContributionView {
     pub input: String,
     pub detail: String,
@@ -25,8 +25,9 @@ pub struct ContributionView {
 
 /// The `work.why` result. `inputs_not_yet_available` names ranking inputs that
 /// cannot fire in this build, so the brief can say absent rather than zero.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct WhyResult {
+    #[serde(rename = "ref")]
     pub reference: String,
     pub title: String,
     pub total: f64,
