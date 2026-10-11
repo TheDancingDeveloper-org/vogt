@@ -179,23 +179,38 @@ pub fn walk_project(
                 }
                 continue;
             }
-            if !extensions.is_empty()
-                && !extensions
-                    .iter()
-                    .any(|extension| entry.to_string_lossy().ends_with(extension.as_str()))
-            {
+            if !extensions.is_empty() && !extension_matches(&entry, extensions) {
                 continue;
             }
-            found.push(entry);
+            // Python counts the file, then returns without yielding once `seen`
+            // has gone past the cap. The extra file is looked at and dropped.
             if found.len() >= max_files {
                 return found;
             }
+            found.push(entry);
         }
         for entry in descend.into_iter().rev() {
             stack.push(entry);
         }
     }
     found
+}
+
+/// Python's `Path.suffix`: the last component's final dot and what follows it.
+///
+/// `.weird` is suffix `.weird`, not `.d`. A name with no dot has no suffix.
+fn extension_matches(path: &Path, extensions: &[String]) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let Some(dot) = name.rfind('.') else {
+        return false;
+    };
+    if dot == 0 {
+        return false;
+    }
+    let suffix = &name[dot..];
+    extensions.iter().any(|extension| extension == suffix)
 }
 
 fn excluded(path: &Path, root: &Path, exclusions: &[String]) -> bool {
@@ -348,6 +363,22 @@ mod tests {
         }
         let walked = walk_project(&root, &[], &[".py".to_string()], 5);
         assert_eq!(walked.len(), 5);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_extension_is_the_real_suffix() {
+        let root = std::env::temp_dir().join(format!("vogt-walk-{}-suffix", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        write(&root.join("a.weird"), "x\n");
+        write(&root.join("b.md"), "x\n");
+        let walked = walk_project(&root, &[], &[".d".to_string(), ".md".to_string()], 20);
+        let names: Vec<String> = walked
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["b.md".to_string()]);
         let _ = std::fs::remove_dir_all(&root);
     }
 
