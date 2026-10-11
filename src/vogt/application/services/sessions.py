@@ -72,6 +72,8 @@ from vogt.application.models import (
     SessionBlocked,
     SessionBlockedResult,
     SessionDigest,
+    SessionEconomicsParams,
+    SessionEconomicsResult,
     SessionHibernation,
     SessionInputParams,
     SessionInputResult,
@@ -111,6 +113,7 @@ from vogt.core import delivery, oversight, runtime
 from vogt.core.auth import Scope, hash_token, issue, parse_scopes
 from vogt.core.branches import default_branch_name
 from vogt.core.entities import Actor, CodingSession, Token, WorkItem, WorkOverlay
+from vogt.core.session_economics import meter
 from vogt.errors import (
     BypassRefused,
     Conflict,
@@ -920,6 +923,106 @@ def last_reply(
             "transcript": str(found.path),
             "messages": [SessionReply(text=r.text, at=r.at) for r in replies],
             "detail": None if replies else "the transcript has no assistant reply yet",
+        }
+    )
+
+
+def economics(
+    ctx: AppContext, params: SessionEconomicsParams
+) -> SessionEconomicsResult:
+    """What the session's agent transcript cost, read whole.
+
+    The same finding as `last_reply`, but the file is metered rather than
+    tailed: context, compactions and tool bytes live anywhere in it, not in
+    the last few megabytes. Cost stays null (no price table) and the worktree
+    is not measured here, so commits and files_changed stay null rather than
+    claiming a clean tree.
+    """
+    target = _target(ctx, params.id)
+    engine_id = target.engine_session_id
+    engine_session: EngineSession | None = None
+    if ctx.engine is not None:
+        try:
+            engine_session = ctx.engine.get_session(engine_id)
+        except EngineUnavailable:
+            engine_session = None
+    declared = target.session
+    if engine_session is None and declared is None:
+        msg = f"no session {params.id!r}"
+        raise NotFound(msg)
+    result = SessionEconomicsResult(id=params.id, engine_session_id=engine_id)
+    if engine_session is not None and engine_session.conversation_agent == "opencode":
+        return result.model_copy(
+            update={
+                "agent": "opencode",
+                "basis": "engine-id",
+                "detail": "opencode transcripts are not metered",
+            }
+        )
+    roots = ctx.config.session_transcript_roots
+    if not roots:
+        return result.model_copy(
+            update={"detail": "session_transcript_roots is empty: reading is off"}
+        )
+    started = (
+        declared.started_at
+        if declared is not None
+        else _parse_engine_timestamp(
+            None if engine_session is None else engine_session.created_at
+        )
+    )
+    found = transcripts.find(
+        roots,
+        engine_session_id=engine_id,
+        command=None if engine_session is None else engine_session.command,
+        template=None if declared is None else declared.template,
+        cwd=(engine_session.cwd if engine_session is not None else None)
+        or (declared.cwd if declared is not None else None),
+        started_at=started,
+        allow_cwd_guess=True,
+    )
+    if found is None:
+        return result.model_copy(
+            update={
+                "detail": (
+                    "no agent transcript found for this session (a plain shell, "
+                    "an agent started by hand in another directory, or "
+                    "transcripts this process cannot read)"
+                )
+            }
+        )
+    try:
+        text = found.path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return result.model_copy(
+            update={
+                "agent": found.agent,
+                "conversation_id": found.conversation_id,
+                "basis": found.basis,
+                "transcript": str(found.path),
+                "detail": "the transcript could not be read",
+            }
+        )
+    reading = meter(text.splitlines(), agent=found.agent)
+    return result.model_copy(
+        update={
+            "agent": found.agent,
+            "conversation_id": found.conversation_id,
+            "basis": found.basis,
+            "transcript": str(found.path),
+            "turns": reading.turns,
+            "context_tokens": reading.context_tokens,
+            "peak_context_tokens": reading.peak_context_tokens,
+            "compactions": reading.compactions,
+            "tool_result_bytes": dict(reading.tool_result_bytes),
+            "reads_repeated": reading.reads_repeated,
+            "wall_clock_count": reading.wall_clock.count,
+            "wall_clock_max_ms": reading.wall_clock.max_ms,
+            "wall_clock_mean_ms": reading.wall_clock.mean_ms,
+            "output_tokens": reading.output_tokens,
+            "usage_measured": reading.usage_measured,
+            "budget_line": reading.budget_line(None, None),
+            "detail": None,
         }
     )
 
@@ -2744,6 +2847,7 @@ def _parse_engine_timestamp(value: str | None) -> datetime | None:
 __all__ = [
     "answer_session",
     "bind_session_work",
+    "economics",
     "hibernate_session",
     "history_list",
     "keep_session_awake",

@@ -806,6 +806,7 @@ class SqliteObservedStore:
                 for tag in _tags(row["services"]):
                     per_service[tag] = per_service.get(tag, 0) + int(row["n"])
             cwds: dict[str, str | None] = {}
+            transcripts: dict[str, str | None] = {}
             for session_id in ids:
                 newest = conn.execute(
                     "SELECT cwd FROM agent_activity WHERE agent_session_id = ? "
@@ -813,6 +814,16 @@ class SqliteObservedStore:
                     (session_id,),
                 ).fetchone()
                 cwds[session_id] = None if newest is None else newest["cwd"]
+                # Newest file cursor. The index does not store context or
+                # compaction counts; the path is what a live meter reads.
+                transcript = conn.execute(
+                    "SELECT path FROM agent_activity_files "
+                    "WHERE agent_session_id = ? ORDER BY updated_at DESC LIMIT 1",
+                    (session_id,),
+                ).fetchone()
+                transcripts[session_id] = (
+                    None if transcript is None else transcript["path"]
+                )
         return [
             ActivitySessionRow(
                 agent=str(row["agent"]),
@@ -826,6 +837,7 @@ class SqliteObservedStore:
                 wait_ms=int(row["wait_ms"] or 0),
                 tools=_ranked(tools.get(str(row["agent_session_id"]), {})),
                 services=_ranked(services.get(str(row["agent_session_id"]), {})),
+                transcript_path=transcripts.get(str(row["agent_session_id"])),
             )
             for row in groups
         ]
