@@ -397,7 +397,9 @@ export interface RankedEntry {
   project_slug?: string | null;
   trust_state?: TrustState;
   labels?: string[];
-  score: number;
+  /** Absent on a work.list search hit: that row was not ranked, so the
+   *  surface shows a dash rather than a made-up score. */
+  score?: number;
   updated_at: string;
   item?: WorkItem | null;
 }
@@ -773,6 +775,8 @@ export const listWork = (
   call<{
     items: WorkItem[];
     total?: number;
+    /** Null on the last page; the next `offset` to ask for otherwise. */
+    next_offset?: number | null;
     /** "unlinked" on a project scope is the link-or-publish marker. */
     link_state?: "linked" | "unlinked" | null;
   }>("work.list", { mode: "full", ...params }, "GET", signal);

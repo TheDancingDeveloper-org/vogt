@@ -105,6 +105,7 @@ import {
   VogtUnavailable,
   createWork,
   listBoard,
+  listWork,
   liveSessionsWarning,
   transitionWork,
   type BoardCellPage,
@@ -677,6 +678,15 @@ function humanState(state: string): string {
   return state.replace(/_/g, " ");
 }
 
+/** How long a keystroke waits before the search is committed to the URL and
+ *  the server. Short enough that the results feel live, long enough that a
+ *  word is one request rather than one per letter. */
+const SEARCH_DEBOUNCE_MS = 200;
+
+/** A page of `work.list` while a search is active. The board has no cell
+ *  cursors on this path; "load more" advances `offset`. */
+const SEARCH_PAGE_SIZE = 100;
+
 /** Free-text match for the board search: title first, then body/ref, so
  *  a search finds the card whether the reader remembers its name or a phrase
  *  from its description. Case-insensitive; the caller lower-cases `needle`. */
@@ -993,11 +1003,39 @@ const Board: Component<Props> = (props) => {
     setFilters(next);
   };
 
+  // The search box types into its own signal. The URL (and therefore the
+  // refetch) follows after a pause, so a word is one request. Esc clears
+  // immediately — clearing is a decision, not a keystroke to debounce.
+  const [searchDraft, setSearchDraft] = createSignal(filters().q);
+  let searchTimer: number | undefined;
+  const commitSearch = (value: string) => {
+    window.clearTimeout(searchTimer);
+    searchTimer = undefined;
+    setSearchDraft(value);
+    if (value !== filters().q) applyFilters({ ...filters(), q: value });
+  };
+  const onSearchInput = (value: string) => {
+    setSearchDraft(value);
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => commitSearch(value), SEARCH_DEBOUNCE_MS);
+  };
+  onCleanup(() => window.clearTimeout(searchTimer));
+  // A pasted link or the back button writes `q` from outside the box.
+  createEffect(() => {
+    const committed = filters().q;
+    if (searchTimer === undefined) setSearchDraft(committed);
+  });
+
   const patch = (next: Partial<Filters>) => applyFilters({ ...filters(), ...next });
 
   const [workflows, setWorkflows] = createSignal<Workflow[] | null>(null);
   const [metadataReady, setMetadataReady] = createSignal(false);
   const [items, setItems] = createSignal<WorkItem[]>([]);
+  /** Items `work.list` returned for the committed search, or null when no
+   *  search is active (the board then draws the paged cells as usual). */
+  const [searchItems, setSearchItems] = createSignal<WorkItem[] | null>(null);
+  const [searchNextOffset, setSearchNextOffset] = createSignal<number | null>(null);
+  const [searchTotal, setSearchTotal] = createSignal<number | null>(null);
   const [total, setTotal] = createSignal(0);
   // The honesty pair: how many things the Backlog would consider for
   // this scope, and how many of those are the declared work the Board draws.
@@ -1254,6 +1292,51 @@ const Board: Component<Props> = (props) => {
     page_size: CELL_PAGE_SIZE,
   });
 
+  /** The same scope the board asks `board.list` for, as `work.list` takes it.
+   *  Search reuses that scope rather than inventing a second filter. */
+  const workListParams = (active: Filters, offset: number) => ({
+    query: active.q.trim(),
+    project: active.project || undefined,
+    kinds: active.kinds.length ? active.kinds : undefined,
+    states: active.states.length ? active.states : undefined,
+    label: active.label || undefined,
+    initiative: active.initiative || undefined,
+    assignee: active.assignee || undefined,
+    include_finished: true,
+    limit: SEARCH_PAGE_SIZE,
+    offset,
+  });
+
+  const loadSearch = async (offset: number, append: boolean) => {
+    const seq = ++loadSeq;
+    if (!append) setLoading(true);
+    const active = filters();
+    const query = active.q.trim();
+    if (!query) {
+      setSearchItems(null);
+      setSearchNextOffset(null);
+      setSearchTotal(null);
+      if (!append) setLoading(false);
+      return;
+    }
+    try {
+      const answer = await listWork(workListParams(active, offset));
+      if (seq !== loadSeq || filters().q.trim() !== query) return;
+      const page = answer.items ?? [];
+      setSearchItems(append ? [...(searchItems() ?? []), ...page] : page);
+      setSearchNextOffset(answer.next_offset ?? null);
+      setSearchTotal(typeof answer.total === "number" ? answer.total : page.length);
+      setScopeUnlinked(answer.link_state === "unlinked");
+      setOutage(null);
+      setLoadError(null);
+    } catch (e) {
+      if (seq !== loadSeq) return;
+      noteFailure(e, "Failed to search work items");
+    } finally {
+      if (seq === loadSeq && !append) setLoading(false);
+    }
+  };
+
   const mergeCellPage = (
     previous: Map<string, CellPageState>,
     page: BoardCellPage,
@@ -1405,7 +1488,13 @@ const Board: Component<Props> = (props) => {
   const reload = async () => {
     await Promise.all([loadWorkflows(), loadTaxonomy()]);
     setMetadataReady(true);
-    await loadItems();
+    if (filters().q.trim()) await loadSearch(0, false);
+    else {
+      setSearchItems(null);
+      setSearchNextOffset(null);
+      setSearchTotal(null);
+      await loadItems();
+    }
   };
 
   onMount(() => {
@@ -1429,12 +1518,19 @@ const Board: Component<Props> = (props) => {
       active.initiative,
       active.assignee,
       active.lanes,
+      active.q.trim(),
       phone() ? active.column : "",
       workflows()?.map((workflow) => [workflow.kind, workflow.states]),
       projects().map((project) => project.slug),
       initiatives().map((initiative) => initiative.id),
     ]);
-    if (metadataReady() && previous !== undefined && previous !== key) void loadItems();
+    if (metadataReady() && previous !== undefined && previous !== key) {
+      if (filters().q.trim()) void loadSearch(0, false);
+      else {
+        setSearchItems(null);
+        void loadItems();
+      }
+    }
     return key;
   });
 
@@ -1451,7 +1547,8 @@ const Board: Component<Props> = (props) => {
       // breaker is open, so skip until the event stream has replaced it (#681).
       if (isCircuitOpen()) return;
       if (pending()) return; // never race a write the user is composing
-      void loadItems(true);
+      if (filters().q.trim()) void loadSearch(0, false);
+      else void loadItems(true);
     }, seconds * 1000);
     onCleanup(() => window.clearInterval(timer));
   });
@@ -1468,7 +1565,13 @@ const Board: Component<Props> = (props) => {
   // clause; the board's visibility handler used to sit alongside this one and
   // is `onVogtLive`'s second half now, which also gives it the composer guard
   // it never had.
-  onVogtLive(() => void loadItems(true), { when: () => !pending() });
+  onVogtLive(
+    () => {
+      if (filters().q.trim()) void loadSearch(0, false);
+      else void loadItems(true);
+    },
+    { when: () => !pending() },
+  );
 
   // -- the model the board draws -------------------------------------------
 
@@ -1560,21 +1663,22 @@ const Board: Component<Props> = (props) => {
   };
 
   /**
-   * The cards left after the two client-side filters.
+   * The cards left after the client-side exclusion, drawn from the search
+   * result when a query is committed and from the loaded cells otherwise.
    *
-   * Search and exclusion are applied here, over the loaded set, rather than in
-   * `board.list`: the board pages each cell server-side and has no free-text or
-   * negative parameter, so narrowing what was loaded is the honest reach —
-   * the summary counts loaded matches, and the server totals still describe the
-   * server-side scope. `board.list` gaining a `q`/`not_*` parameter is the way
-   * to make this search past the loaded page; see the PR notes.
+   * A search is `work.list` with the board's scope plus `query`, so it reaches
+   * items the paged cells have not loaded. Exclusion stays here: `work.list`
+   * has no negative parameters. The text match is the server's; the local
+   * matcher only re-checks the loaded page when no search is active.
    */
   const visibleItems = createMemo<WorkItem[]>(() => {
     const active = filters();
-    const needle = active.q.trim().toLowerCase();
+    const searching = searchItems();
+    const source = searching ?? items();
+    const needle = searching ? "" : active.q.trim().toLowerCase();
     const ex = active.exclude;
-    if (!needle && excludeCount(ex) === 0) return items();
-    return items().filter((item) => {
+    if (!needle && excludeCount(ex) === 0) return source;
+    return source.filter((item) => {
       if (needle && !itemMatchesText(item, needle)) return false;
       if (ex.projects.length && item.project_slug && ex.projects.includes(item.project_slug))
         return false;
@@ -1607,6 +1711,7 @@ const Board: Component<Props> = (props) => {
    */
   const boardEmpty = createMemo(() => {
     if (loading() || outage() || scopeUnlinked()) return false;
+    if (searchItems() !== null) return visibleItems().length === 0;
     if (total() === 0) return true;
     // Client-side search/exclusion can empty the loaded set even
     // when the server counted matches; say "no matching work" once rather than
@@ -1748,6 +1853,11 @@ const Board: Component<Props> = (props) => {
     projection().cells.get(cellKey(lane.key, state)) ?? NO_CARDS;
 
   const columnCount = (state: string) => {
+    // While a search is drawn, column heads count the cards on screen. The
+    // last `board.list` totals describe a different set.
+    if (searchItems() !== null) {
+      return visibleItems().filter((item) => displayState(item) === state).length;
+    }
     const base = columnTotals()[state] ?? 0;
     const move = pending();
     // A pick move has not relocated the card (see `placement`), so the counts
@@ -1756,11 +1866,17 @@ const Board: Component<Props> = (props) => {
     return base + (move.to === state ? 1 : 0) - (move.from === state ? 1 : 0);
   };
 
-  const laneCount = (laneKey: string) => laneTotals()[laneKey] ?? 0;
+  const laneCount = (laneKey: string) => {
+    if (searchItems() !== null) {
+      return visibleItems().filter((item) => laneOf(item).key === laneKey).length;
+    }
+    return laneTotals()[laneKey] ?? 0;
+  };
 
   const itemByRef = createMemo(() => {
     const index = new Map<string, WorkItem>();
     for (const item of items()) index.set(item.ref, item);
+    for (const item of searchItems() ?? []) index.set(item.ref, item);
     return index;
   });
 
@@ -2460,7 +2576,21 @@ const Board: Component<Props> = (props) => {
               class={`board-freshness board-freshness--${freshness().tone}`}
             /></strong>
             <span>{visibleItems().length} loaded</span>
-            <span>of {total()} matching</span>
+            <span>
+              of {searchItems() !== null ? (searchTotal() ?? visibleItems().length) : total()}{" "}
+              matching
+            </span>
+            <Show when={searchItems() !== null && searchNextOffset() !== null}>
+              <button
+                type="button"
+                onClick={() => {
+                  const next = searchNextOffset();
+                  if (next !== null) void loadSearch(next, true);
+                }}
+              >
+                Load more
+              </button>
+            </Show>
             <span>{columns().length} columns</span>
           </div>
         )}
@@ -2616,10 +2746,16 @@ const Board: Component<Props> = (props) => {
           <input
             type="search"
             class="board-search"
-            placeholder="Match title or body"
+            placeholder="Match title, body or WI number"
             aria-label="Search work items"
-            value={filters().q}
-            onInput={(event) => patch({ q: event.currentTarget.value })}
+            value={searchDraft()}
+            onInput={(event) => onSearchInput(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                commitSearch("");
+              }
+            }}
           />
         </label>
 

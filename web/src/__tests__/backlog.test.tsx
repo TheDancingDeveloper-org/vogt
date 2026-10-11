@@ -5,7 +5,7 @@
 // write can be called without a reason, and cannot prove that the form
 // refuses to submit without one. That gap is what these fill.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { fireEvent, waitFor } from "@solidjs/testing-library";
 import Backlog from "../Backlog";
 import {
@@ -831,3 +831,58 @@ describe("the `why` panel is the contributions, not a second copy of the score",
     expect(explainPanel(container).querySelector("tbody")).toBeNull();
   });
 });
+
+describe("free-text search asks work.list instead of filtering the ranked page", () => {
+  function searchBox(container: HTMLElement): HTMLInputElement {
+    const found = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Search work items"]',
+    );
+    if (!found) throw new Error("no search box");
+    return found;
+  }
+
+  it("debounces into the URL, renders work.list rows without a score, and Esc clears", async () => {
+    vi.useFakeTimers();
+    const vogt = fakeVogt({
+      ...TWO,
+      "GET /work": {
+        body: {
+          items: [
+            workItem({
+              ref: "WI-1241",
+              title: "Search the backlog",
+              body: "match the body too",
+            }),
+          ],
+          total: 1,
+          next_offset: null,
+        },
+      },
+    });
+    const { container, url } = backlog();
+    await vi.waitFor(() => expect(rows(container)).toHaveLength(2));
+
+    fireEvent.input(searchBox(container), { target: { value: "1241" } });
+    expect(url()).not.toContain("q=1241");
+
+    await vi.advanceTimersByTimeAsync(200);
+    await vi.waitFor(() => expect(url()).toContain("q=1241"));
+    await vi.waitFor(() =>
+      expect(
+        vogt.calls.filter((call) => call.method === "GET" && call.path === "/work"),
+      ).not.toHaveLength(0),
+    );
+    const sent = vogt.calls.filter((call) => call.method === "GET" && call.path === "/work");
+    expect(sent.at(-1)?.query.get("query")).toBe("1241");
+    await vi.waitFor(() => expect(rows(container)).toHaveLength(1));
+    expect(container.textContent).toContain("WI-1241");
+    expect(container.querySelector(".vogt-backlog-cell-score [title='Not ranked']")).not.toBeNull();
+    expect(container.textContent).toContain("of 1 matching");
+
+    fireEvent.keyDown(searchBox(container), { key: "Escape" });
+    await vi.waitFor(() => expect(url()).not.toContain("q="));
+    await vi.waitFor(() => expect(rows(container)).toHaveLength(2));
+    vi.useRealTimers();
+  });
+});
+

@@ -43,6 +43,7 @@ import {
   backlog,
   bugs,
   createWork,
+  listWork,
   startSession,
   suppressSubject,
   liveSessionsWarning,
@@ -51,6 +52,7 @@ import {
   why,
   type RankedEntry,
   type RankedView,
+  type WorkItem,
 } from "./vogtApi";
 import { taxonomy } from "./taxonomyCache";
 import { openWorkItemTab } from "./tabs";
@@ -542,13 +544,34 @@ function describeFilter(filter: Filter): string {
   return parts.join(" · ");
 }
 
-/** Free-text match for the backlog search: the ranked row's title and
- *  ref, and the adopted work item's body when the ranking carried it. */
+/** Free-text match over a ranked page when no server search is active.
+ *  A committed query goes to `work.list` instead; this stays for the case
+ *  where the box is mid-keystroke and the URL has not caught up. */
 function entryMatchesText(entry: RankedEntry, needle: string): boolean {
   if (!needle) return true;
   const haystack = `${entry.title ?? ""} ${entry.ref ?? ""} ${entry.item?.body ?? ""}`;
   return haystack.toLowerCase().includes(needle);
 }
+
+/** A `work.list` hit drawn as a backlog row. Origin is declared so it
+ *  opens; score is omitted because the list was not ranked. */
+function searchEntry(item: WorkItem): RankedEntry {
+  return {
+    origin: "declared",
+    ref: item.ref,
+    title: item.title,
+    kind: item.kind,
+    state: item.state,
+    priority: item.priority,
+    project_slug: item.project_slug,
+    labels: item.labels,
+    updated_at: item.updated_at,
+    item,
+  };
+}
+
+const SEARCH_DEBOUNCE_MS = 200;
+const SEARCH_PAGE_SIZE = 100;
 
 // -- the default lens ------------------------------------------------
 //
@@ -802,6 +825,86 @@ const Backlog: Component<Props> = (props) => {
 
   const entries = createMemo<RankedEntry[]>(() => view()?.items ?? []);
 
+  // A committed query leaves the ranked page and asks `work.list`, which
+  // matches title, body and ref (including a bare WI number). Null means
+  // no search is active and the ranked rows stay in charge.
+  const [searchItems, setSearchItems] = createSignal<WorkItem[] | null>(null);
+  const [searchNextOffset, setSearchNextOffset] = createSignal<number | null>(null);
+  const [searchTotal, setSearchTotal] = createSignal<number | null>(null);
+  const [searchLoading, setSearchLoading] = createSignal(false);
+  const [searchOutage, setSearchOutage] = createSignal<string | null>(null);
+  let searchSeq = 0;
+
+  const searchParams = (active: Filter, offset: number) => ({
+    query: active.q.trim(),
+    project: active.project || undefined,
+    kinds: active.view === "bugs" ? ["bug"] : active.kinds.length ? active.kinds : undefined,
+    states: active.states.length ? active.states : undefined,
+    label: active.label || undefined,
+    initiative: active.view === "bugs" ? undefined : active.initiative || undefined,
+    assignee: active.actor || undefined,
+    include_finished: true,
+    limit: SEARCH_PAGE_SIZE,
+    offset,
+  });
+
+  const loadSearch = async (offset: number, append: boolean) => {
+    const seq = ++searchSeq;
+    if (!append) setSearchLoading(true);
+    const active = filter();
+    const text = active.q.trim();
+    if (!text) {
+      setSearchItems(null);
+      setSearchNextOffset(null);
+      setSearchTotal(null);
+      setSearchOutage(null);
+      if (!append) setSearchLoading(false);
+      return;
+    }
+    const result = await attempt(() => listWork(searchParams(active, offset)));
+    if (seq !== searchSeq || filter().q.trim() !== text) return;
+    if (!result.ok) {
+      setSearchOutage(result.message);
+      if (!append) setSearchLoading(false);
+      return;
+    }
+    const page = result.value.items ?? [];
+    setSearchItems(append ? [...(searchItems() ?? []), ...page] : page);
+    setSearchNextOffset(result.value.next_offset ?? null);
+    setSearchTotal(typeof result.value.total === "number" ? result.value.total : page.length);
+    setSearchOutage(null);
+    if (!append) setSearchLoading(false);
+  };
+
+  createEffect(() => {
+    const text = filter().q.trim();
+    // Read the scope the query is scoped by, so a project or kind change
+    // refetches the same words rather than keeping the previous page.
+    filter().project;
+    filter().kinds;
+    filter().states;
+    filter().label;
+    filter().initiative;
+    filter().actor;
+    filter().view;
+    if (!text) {
+      searchSeq += 1;
+      setSearchItems(null);
+      setSearchNextOffset(null);
+      setSearchTotal(null);
+      setSearchOutage(null);
+      setSearchLoading(false);
+      return;
+    }
+    void loadSearch(0, false);
+  });
+
+  const searching = () => filter().q.trim() !== "";
+
+  const searchRows = createMemo<RankedEntry[]>(() =>
+    (searchItems() ?? []).map(searchEntry),
+  );
+
   // The link-or-publish CTA: a project scope whose server answer says
   // "unlinked" has no backlog — the items are empty because linking or
   // publishing is the way forward, not because there is nothing to do.
@@ -819,13 +922,23 @@ const Backlog: Component<Props> = (props) => {
    */
   const visible = createMemo<RankedEntry[]>(() => {
     const active = filter();
-    const needle = active.q.trim().toLowerCase();
     const ex = active.exclude;
+    if (searching()) {
+      // work.list already applied the text and the scope. Exclusion is
+      // still a client filter; it has no server parameter.
+      return searchRows().filter((entry) => {
+        if (ex.projects.length && entry.project_slug && ex.projects.includes(entry.project_slug))
+          return false;
+        if (ex.kinds.includes(entry.kind)) return false;
+        if (ex.states.includes(entry.state)) return false;
+        if (ex.labels.length && (entry.labels ?? []).some((one) => ex.labels.includes(one)))
+          return false;
+        return true;
+      });
+    }
+    const needle = active.q.trim().toLowerCase();
     const wanted = active.states.length ? new Set(active.states) : null;
     if (!wanted && !needle && excludeCount(ex) === 0) return entries();
-    // Search and exclusion join the page-only state filter over
-    // the loaded ranked page: the ranked views take no free-text or negative
-    // parameter, so this narrows what was loaded, and the count line says so.
     return entries().filter((entry) => {
       if (wanted && !wanted.has(entry.state)) return false;
       if (needle && !entryMatchesText(entry, needle)) return false;
@@ -839,11 +952,13 @@ const Backlog: Component<Props> = (props) => {
     });
   });
 
-  /** Whether a client-side filter (state, search, or exclusion) is narrowing
-   *  the loaded page — so the count line can say "N of M loaded". */
+  /** Whether a client-side filter (state or exclusion) is narrowing the
+   *  loaded ranked page. A committed search is not one of those: it asked
+   *  the estate, and the count line says the total `work.list` returned. */
   const pageNarrowed = () => {
     const active = filter();
-    return Boolean(active.states.length || active.q || excludeCount(active.exclude) > 0);
+    if (searching()) return excludeCount(active.exclude) > 0;
+    return Boolean(active.states.length || excludeCount(active.exclude) > 0);
   };
 
   const stateOptions = createMemo(() => {
@@ -1577,6 +1692,28 @@ const Backlog: Component<Props> = (props) => {
     setFilter({ ...filter(), [key]: value });
   };
 
+  // The search box types into its own signal. The URL (and therefore the
+  // work.list fetch) follows after a pause, so a word is one request. Esc
+  // clears immediately — clearing is a decision, not a keystroke to debounce.
+  const [searchDraft, setSearchDraft] = createSignal(filter().q);
+  let searchTimer: number | undefined;
+  const commitSearch = (value: string) => {
+    window.clearTimeout(searchTimer);
+    searchTimer = undefined;
+    setSearchDraft(value);
+    if (value !== filter().q) update("q", value);
+  };
+  const onSearchInput = (value: string) => {
+    setSearchDraft(value);
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => commitSearch(value), SEARCH_DEBOUNCE_MS);
+  };
+  onCleanup(() => window.clearTimeout(searchTimer));
+  createEffect(() => {
+    const committed = filter().q;
+    if (searchTimer === undefined) setSearchDraft(committed);
+  });
+
   const toggleIn = (key: "kinds" | "states", value: string) => {
     const current = filter()[key];
     update(
@@ -1639,7 +1776,7 @@ const Backlog: Component<Props> = (props) => {
         label: `Actor: ${actorLabel(active.actor)}`,
         title: active.actor,
       });
-    if (active.q) chips.push({ key: "q", label: `Search: “${active.q}” · this page only` });
+    if (active.q) chips.push({ key: "q", label: `Search: “${active.q}”` });
     const ex = active.exclude;
     // Exclusions read as negations, so a reader never mistakes one for
     // the inclusion it is the opposite of.
@@ -1669,7 +1806,9 @@ const Backlog: Component<Props> = (props) => {
       case "label": update("label", ""); break;
       case "initiative": update("initiative", ""); break;
       case "actor": update("actor", ""); break;
-      case "q": update("q", ""); break;
+      case "q":
+        commitSearch("");
+        break;
       case "not:project": patchExclude({ projects: [] }); break;
       case "not:kind": patchExclude({ kinds: [] }); break;
       case "not:state": patchExclude({ states: [] }); break;
@@ -1851,16 +1990,20 @@ const Backlog: Component<Props> = (props) => {
       >
         <label class="vogt-backlog-field vogt-backlog-field-wide">
           <span>Search</span>
-          {/* Free text over the loaded page's titles (and adopted item
-              bodies). A filter like every other — it deep-links and saves into
-              a lens — so it is in the URL, not a separate box. */}
+          {/* Free text over titles, bodies and WI refs, asked of work.list
+              once the reader pauses. It deep-links like every other filter. */}
           <input
             type="search"
             class="vogt-backlog-search"
-            placeholder="Match title or body — this page only"
-            aria-label="Search ranked work"
-            value={filter().q}
-            onInput={(event) => update("q", event.currentTarget.value)}
+            placeholder="Match title, body or WI number"
+            aria-label="Search work items"
+            value={searchDraft()}
+            onInput={(event) => onSearchInput(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape") return;
+              event.preventDefault();
+              commitSearch("");
+            }}
           />
         </label>
 
@@ -2108,26 +2251,54 @@ const Backlog: Component<Props> = (props) => {
           {(summary) => (
             <span>
               <Show
-                when={pageNarrowed()}
-                fallback={<>{visible().length} shown</>}
+                when={searching()}
+                fallback={
+                  <>
+                    <Show
+                      when={pageNarrowed()}
+                      fallback={<>{visible().length} shown</>}
+                    >
+                      {/* State and exclusion are page-only on the ranked view, so
+                          the count says so: N of the M rows this page loaded. */}
+                      {visible().length} of {entries().length} loaded rows
+                    </Show>
+                    <Show when={summary().considered !== null}>
+                      {" "}
+                      · {summary().considered} considered
+                    </Show>
+                    <Show when={summary().declared !== null}>
+                      {" "}
+                      · {summary().declared} declared, {summary().observed} observed,{" "}
+                      {summary().suppressed} suppressed
+                    </Show>
+                  </>
+                }
               >
-                {/* State, search and exclusion are page-only, so the count says
-                    so out loud: N of the M rows this page loaded. */}
-                {visible().length} of {entries().length} loaded rows
-              </Show>
-              <Show when={summary().considered !== null}>
-                {" "}
-                · {summary().considered} considered
-              </Show>
-              <Show when={summary().declared !== null}>
-                {" "}
-                · {summary().declared} declared, {summary().observed} observed,{" "}
-                {summary().suppressed} suppressed
+                {/* A committed search asked work.list, so the count is the
+                    estate's total, not a slice of the ranked page. The ranked
+                    considered/declared numbers would describe a different set. */}
+                {searchLoading() && searchItems() === null
+                  ? "Searching…"
+                  : `${visible().length}${
+                      searchTotal() !== null ? ` of ${searchTotal()} matching` : " matching"
+                    }`}
               </Show>
             </span>
           )}
         </Show>
-        <Show when={entries().length >= limit()}>
+        <Show when={searching() && searchNextOffset() !== null}>
+          <button
+            type="button"
+            disabled={searchLoading()}
+            onClick={() => {
+              const next = searchNextOffset();
+              if (next !== null) void loadSearch(next, true);
+            }}
+          >
+            {searchLoading() ? "Loading…" : "Load more"}
+          </button>
+        </Show>
+        <Show when={!searching() && entries().length >= limit()}>
           <span class="vogt-backlog-muted">
             {limit() >= MAX_PAGE_SIZE
               ? "this is the largest page the ranked views serve — narrow the filters to see further down the estate"
@@ -2136,7 +2307,28 @@ const Backlog: Component<Props> = (props) => {
         </Show>
       </div>
 
-      <Show when={outage()}>
+      <Show when={searching() && searchOutage()}>
+        {(message) => (
+          <div class="vogt-backlog-outage" role="alert">
+            <h3>Search failed to load</h3>
+            <p>{message()}</p>
+            <p class="vogt-backlog-muted">
+              No matches are shown because the search was not read. An empty
+              result and an unreachable one are not the same answer.
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                void loadSearch(0, false);
+              }}
+            >
+              Try again
+            </button>
+          </div>
+        )}
+      </Show>
+
+      <Show when={!searching() && outage()}>
         {(failure) => (
           <div class="vogt-backlog-outage" role="alert">
             <h3>
@@ -2156,7 +2348,7 @@ const Backlog: Component<Props> = (props) => {
         )}
       </Show>
 
-      <Show when={!outage() && scopeUnlinked()}>
+      <Show when={!searching() && !outage() && scopeUnlinked()}>
         <div class="board-banner board-banner--candidates" role="note">
           <strong>
             This project is not linked to a forge, so it has no backlog.
@@ -2175,7 +2367,7 @@ const Backlog: Component<Props> = (props) => {
         </div>
       </Show>
 
-      <Show when={!outage()}>
+      <Show when={searching() ? !searchOutage() : !outage()}>
         <div class="vogt-backlog-listwrap">
           <div class="vogt-backlog-headrow">
             <label class="vogt-backlog-cell-select vogt-tickbox">
@@ -2191,9 +2383,11 @@ const Backlog: Component<Props> = (props) => {
             </label>
             {/* The rows are no longer columns, so neither is this: it says
                 what a row carries rather than naming cells that moved. */}
-            <span>Rank</span>
+            <span>{searching() ? "Match" : "Rank"}</span>
             <span class="vogt-backlog-headnote">
-                Vogt's order · every row keeps its ref, trust, age and score
+              {searching()
+                ? "work.list order · title, body and WI number · not ranked"
+                : "Vogt's order · every row keeps its ref, trust, age and score"}
             </span>
           </div>
 
@@ -2208,30 +2402,41 @@ const Backlog: Component<Props> = (props) => {
               fallback={
                 <div class="vogt-backlog-empty">
                   <Show
-                    when={!ranked.loading && !entries().length}
+                    when={searching()}
                     fallback={
-                      <p>
-                        {ranked.loading
-                          ? "Loading the ranked view…"
-                          : "Nothing on this page is in the selected states."}
-                      </p>
+                      <Show
+                        when={!ranked.loading && !entries().length}
+                        fallback={
+                          <p>
+                            {ranked.loading
+                              ? "Loading the ranked view…"
+                              : "Nothing on this page is in the selected states."}
+                          </p>
+                        }
+                      >
+                        {/* An empty ranking that offers a way forward: it
+                            names the collector freshness so "nothing ranked" and
+                            "nothing has looked" stop reading alike, then offers the
+                            one write that changes it. */}
+                        <p>Nothing is ranked here.</p>
+                        <p class={`vogt-backlog-empty-freshness ${freshness().status}`}>
+                          {freshness().text}
+                        </p>
+                        <button
+                          type="button"
+                          class="vogt-backlog-empty-action"
+                          onClick={openQuickCreate}
+                        >
+                          Quick create
+                        </button>
+                      </Show>
                     }
                   >
-                    {/* An empty ranking that offers a way forward: it
-                        names the collector freshness so "nothing ranked" and
-                        "nothing has looked" stop reading alike, then offers the
-                        one write that changes it. */}
-                    <p>Nothing is ranked here.</p>
-                    <p class={`vogt-backlog-empty-freshness ${freshness().status}`}>
-                      {freshness().text}
+                    <p>
+                      {searchLoading()
+                        ? "Searching…"
+                        : `No work items match “${filter().q.trim()}”.`}
                     </p>
-                    <button
-                      type="button"
-                      class="vogt-backlog-empty-action"
-                      onClick={openQuickCreate}
-                    >
-                      Quick create
-                    </button>
                   </Show>
                 </div>
               }
@@ -2335,15 +2540,24 @@ const Backlog: Component<Props> = (props) => {
                             <span class="vogt-backlog-cell-state">{entry.state}</span>
                             <span class="vogt-backlog-age">{formatWhen(entry.updated_at)}</span>
                             <span class="vogt-backlog-cell-score">
-                              <button
-                                type="button"
-                                class="vogt-backlog-score"
-                                title="Why is this ranked here?"
-                                onClick={() => toggleWhy(entry.ref)}
+                              <Show
+                                when={typeof entry.score === "number"}
+                                fallback={
+                                  <span class="vogt-backlog-muted" title="Not ranked">
+                                    —
+                                  </span>
+                                }
                               >
-                                {entry.score.toFixed(2)}
-                                <span class="vogt-backlog-why">why</span>
-                              </button>
+                                <button
+                                  type="button"
+                                  class="vogt-backlog-score"
+                                  title="Why is this ranked here?"
+                                  onClick={() => toggleWhy(entry.ref)}
+                                >
+                                  {entry.score!.toFixed(2)}
+                                  <span class="vogt-backlog-why">why</span>
+                                </button>
+                              </Show>
                             </span>
                             <div class="vogt-backlog-row-quick">
                               {/* A declared row's most common act is reachable
