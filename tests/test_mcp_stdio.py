@@ -19,6 +19,7 @@ from vogt.adapters.mcp.stdio import (
     PARSE_ERROR,
     SUPPORTED_PROTOCOL_VERSIONS,
     StdioServer,
+    tool_success,
 )
 from vogt.adapters.mcp.surface import McpSurface
 from vogt.application.context import AppContext
@@ -226,3 +227,23 @@ def test_structurally_invalid_messages_are_rejected(
     ).serve()
     response = json.loads(stdout.getvalue().splitlines()[0])
     assert "error" in response
+
+
+def test_a_success_carries_the_whole_result_as_compact_text() -> None:
+    """C1: the text is the full result (Klaudia reads only the text when
+    there is any), compact and without null keys; structuredContent keeps
+    the nulls so it matches CLI and REST."""
+    payload = {
+        "rows": [{"id": "ses_1", "note": None, "tail": ["x" * 300]}],
+        "engine": None,
+        "counts": {"total": 1},
+    }
+    result = tool_success(payload)
+    text = result["content"][0]["text"]
+    assert json.loads(text) == {
+        "rows": [{"id": "ses_1", "tail": ["x" * 300]}],
+        "counts": {"total": 1},
+    }
+    assert "\n" not in text
+    assert result["structuredContent"] == payload
+    assert result["isError"] is False
