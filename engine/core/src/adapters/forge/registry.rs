@@ -198,28 +198,37 @@ pub fn unsupported_reason(repo_url: Option<&str>, config: Option<&VogtConfig>) -
 /// together on purpose — both mean "do not read". The caller that needs to
 /// tell a person why reaches for [`unsupported_reason`], which answers the
 /// first case without a token.
+///
+/// `transport` is the caller's stand-in for the network, the same seam
+/// `provider_for_token` and `identity_for` already take. `None` is the real
+/// path: the client talks HTTP. A service test passes its fixture so the
+/// credential resolved from the token file is exercised without a socket.
 pub fn provider_for(
     repo_url: Option<&str>,
     config: &VogtConfig,
+    transport: Option<Transport>,
 ) -> Result<Option<ForgeClient>, VogtError> {
     let Some(matched) = match_repo(repo_url, Some(config)) else {
         return Ok(None);
     };
-    build(matched.kind, &matched.repo.host, config, None)
+    build(matched.kind, &matched.repo.host, config, transport)
 }
 
 /// Resolve a configured host to its credentialed provider, if available.
 ///
 /// A host named in `forge_token_files` is supported even when its token file
 /// is absent; `None` then means not configured rather than unsupported.
+/// `transport` is the caller's stand-in, as for [`provider_for`]. `None`
+/// talks HTTP.
 pub fn provider_for_host(
     host: &str,
     config: &VogtConfig,
+    transport: Option<Transport>,
 ) -> Result<Option<ForgeClient>, VogtError> {
     let Some(kind) = kind_for_host(host, Some(config)) else {
         return Ok(None);
     };
-    build(kind, host, config, None)
+    build(kind, host, config, transport)
 }
 
 /// Build a provider from an explicitly resolved actor token.
@@ -266,10 +275,13 @@ pub fn github_identity() -> GitHubProvider<GitHubClient> {
 /// Import and write-back ask for the concrete provider by name rather than
 /// resolving one per URL. It still goes through the same token resolution as
 /// everything else.
+/// `transport` is the caller's stand-in, as for [`provider_for`]. `None`
+/// talks HTTP.
 pub fn github_provider(
     config: &VogtConfig,
+    transport: Option<Transport>,
 ) -> Result<Option<GitHubProvider<GitHubClient>>, VogtError> {
-    match build(ForgeKind::GitHub, GITHUB_HOST, config, None)? {
+    match build(ForgeKind::GitHub, GITHUB_HOST, config, transport)? {
         Some(ForgeClient::GitHub(provider)) => Ok(Some(provider)),
         _ => Ok(None),
     }
@@ -774,22 +786,64 @@ mod tests {
             Some(file.to_str().unwrap()),
         );
         assert!(
-            provider_for(Some("https://github.com/acme/widget"), &config)
+            provider_for(Some("https://github.com/acme/widget"), &config, None)
                 .unwrap()
                 .is_some()
         );
         // Declared, but its token file is not there: not collected, not an error.
         assert!(
-            provider_for(Some("https://forge.example/acme/widget"), &config)
+            provider_for(Some("https://forge.example/acme/widget"), &config, None)
                 .unwrap()
                 .is_none()
         );
         // Nobody reads gitlab, token or not.
         assert!(
-            provider_for(Some("https://gitlab.com/acme/widget"), &config)
+            provider_for(Some("https://gitlab.com/acme/widget"), &config, None)
                 .unwrap()
                 .is_none()
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_credentialed_resolvers_pass_the_callers_transport_through() {
+        let dir = std::env::temp_dir().join(format!("vogt-forge-transport-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let github_file = dir.join("github");
+        let forgejo_file = dir.join("forgejo");
+        std::fs::write(&github_file, "gh-token\n").unwrap();
+        std::fs::write(&forgejo_file, "fj-token\n").unwrap();
+        let config = config_with(
+            vec![("forge.example", forgejo_file.to_str().unwrap())],
+            Some(github_file.to_str().unwrap()),
+        );
+
+        // The token comes from the file; the transport is the caller's. A
+        // resolver that dropped the transport would authenticate as nobody and
+        // the scripted exchange would answer 401.
+        let by_url = provider_for(
+            Some("https://github.com/acme/widget"),
+            &config,
+            Some(scripted("Bearer gh-token")),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(by_url.identity().unwrap().unwrap().0, "ada");
+
+        let by_host = provider_for_host("forge.example", &config, Some(scripted("token fj-token")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(by_host.identity().unwrap().unwrap().0, "ada");
+
+        let github = github_provider(&config, Some(scripted("Bearer gh-token")))
+            .unwrap()
+            .unwrap();
+        assert_eq!(github.identity().unwrap().unwrap().0, "ada");
+
+        // An unknown host is still nothing, transport or not.
+        assert!(provider_for_host("gitlab.com", &config, None)
+            .unwrap()
+            .is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
