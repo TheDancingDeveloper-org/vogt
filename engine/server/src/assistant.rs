@@ -1029,7 +1029,8 @@ impl AssistantRuntime {
     async fn vocabulary_for(&self, caller: &Caller) -> Option<String> {
         let mut sessions: Vec<String> = self
             .sessions
-            .list()
+            .list(false)
+            .sessions
             .into_iter()
             .filter_map(|session| vocabulary_session(&session.name, session.role))
             .collect();
@@ -1177,7 +1178,8 @@ impl AssistantRuntime {
         };
         let mut names: Vec<String> = self
             .sessions
-            .list()
+            .list(false)
+            .sessions
             .into_iter()
             .filter(|s| {
                 s.id != target.id && !s.name.trim().eq_ignore_ascii_case(target.name.trim())
@@ -2194,7 +2196,8 @@ impl AssistantRuntime {
                 let wanted_role = args.get("role").and_then(Value::as_str);
                 let summaries = self
                     .sessions
-                    .list()
+                    .list(false)
+                    .sessions
                     .into_iter()
                     .filter(|session| {
                         wanted_name.is_none_or(|name| session.name.eq_ignore_ascii_case(name))
@@ -3154,6 +3157,7 @@ mod tests {
             vogt_core_token: None,
             agent_clis: crate::agent_clis::AgentCliPaths::default(),
             hibernation: crate::hibernate_policy::Policy::default(),
+            session_list_retain_after: None,
             assistant_call: crate::call::CallPolicy::default(),
             autopilot: crate::autopilot::Policy::default(),
             budget: crate::budget::Policy::default(),

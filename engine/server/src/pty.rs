@@ -104,8 +104,14 @@ pub struct Session {
     /// the session ending, so its record is kept and its history row says
     /// `hibernated`.
     hibernating: AtomicBool,
-    /// When input was last written to the PTY.
+    /// When input was last written to the PTY. Every writer moves this,
+    /// person or agent: the quiet clock and autopilot read it, and it
+    /// cannot tell them apart.
     last_input: Mutex<Option<Instant>>,
+    /// When a person last typed (WI-1289). Only the WebSocket path and a
+    /// person-gated HTTP `/input` set it. Agent input does not, so it
+    /// cannot keep a finished session on the default list.
+    last_person_input_at: Mutex<Option<time::OffsetDateTime>>,
     /// The process tree's last resource sample (`resources`).
     resources: Mutex<Option<vogt_engine_contract::SessionResources>>,
     /// The template it was started from, when one was named.
@@ -446,6 +452,8 @@ impl Session {
             activity_changed_at: format_rfc3339(*self.activity_changed_at.lock()),
             turn_started_at: self.turn_started_at.lock().map(format_rfc3339),
             last_output_at: self.last_output_at.lock().map(format_rfc3339),
+            last_event_at: None,
+            last_person_input_at: self.last_person_input_at.lock().map(format_rfc3339),
             approval: self.approval_prompt(),
             blocked: self.blocked(),
             conversation: self.conversation(),
@@ -735,6 +743,18 @@ impl Session {
         let mut w = self.writer.lock();
         w.write_all(data)?;
         w.flush()
+    }
+
+    /// Stamp that a person typed. Called only by the paths that already
+    /// know the caller is a person (the WebSocket, and HTTP `/input` after
+    /// `person_gate::is_person`). Agent writes go through `write_input`
+    /// alone and leave this clock where it is.
+    pub fn note_person_input(&self) {
+        *self.last_person_input_at.lock() = Some(time::OffsetDateTime::now_utc());
+    }
+
+    pub fn last_person_input_at(&self) -> Option<time::OffsetDateTime> {
+        *self.last_person_input_at.lock()
     }
 
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
@@ -1167,6 +1187,7 @@ pub fn spawn(
         oversight: AtomicBool::new(false),
         hibernating: AtomicBool::new(false),
         last_input: Mutex::new(None),
+        last_person_input_at: Mutex::new(None),
         resources: Mutex::new(None),
         template: Mutex::new(None),
         work_item: Mutex::new(None),

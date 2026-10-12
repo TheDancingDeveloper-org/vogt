@@ -235,6 +235,20 @@ pub struct SessionSummary {
     /// byte, and from older engines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_output_at: Option<String>,
+    /// The latest of the clocks the list sorts and hides by (WI-1289):
+    /// activity change, last output, last person input, a blocked or
+    /// approval change, and an exit or hibernation. RFC 3339. The engine
+    /// computes it; clients sort by it and do not recompute it. Absent from
+    /// an engine that predates the field, which a client treats as never.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_at: Option<String>,
+    /// When a person last typed into this session: a WebSocket keystroke, or
+    /// `POST /input` from a caller the person gate counts as a person.
+    /// Agent `session.input` and an agent's `/input` do not move it, so a
+    /// session an agent keeps typing into still ages out of the default
+    /// list (WI-1289). RFC 3339; absent until a person types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_person_input_at: Option<String>,
     /// The permission dialog the session shows, while its activity is
     /// `awaiting-approval`; absent otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,6 +315,17 @@ pub struct SessionSummary {
     /// none was set. The engine reads `economics` against it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<SessionBudget>,
+}
+
+/// `GET /api/sessions` (WI-1289). `sessions` is the visible set unless the
+/// caller passed `?include=hidden`; `hidden_count` is how many the default
+/// list left out, so a client can offer to show them without a second read.
+/// Pagination counts the visible set; `hidden_count` is separate from it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionList {
+    pub sessions: Vec<SessionSummary>,
+    #[serde(default)]
+    pub hidden_count: u64,
 }
 
 /// Limits the engine enforces on one session (WI-1245 / C7). Every field is

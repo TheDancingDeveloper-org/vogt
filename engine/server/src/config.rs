@@ -446,6 +446,10 @@ pub struct Config {
     /// `ENGINE_HIBERNATE_IDLE_AFTER` or `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW`
     /// is set (`hibernate_policy`).
     pub hibernation: crate::hibernate_policy::Policy,
+    /// How long a quiet, finished session stays on the default list
+    /// (WI-1289). `None` (`ENGINE_SESSION_LIST_RETAIN_AFTER=off`) never hides
+    /// one. The default is six hours.
+    pub session_list_retain_after: Option<std::time::Duration>,
     /// The live call's switch and turn-taking timings (WI-960). A call is
     /// offered only when this is enabled *and* the assistant, STT and TTS
     /// are all configured.
@@ -971,6 +975,7 @@ pub fn load(
         vogt_core_token: vogt_core_token.filter(|s| !s.trim().is_empty()),
         agent_clis: crate::agent_clis::AgentCliPaths::from_env(),
         hibernation: hibernation_policy_from_env()?,
+        session_list_retain_after: session_list_retain_from_env()?,
         assistant_call: call_policy_from_env()?,
         autopilot: autopilot_policy_from_env()?,
         budget: budget_policy_from_env()?,
@@ -1367,6 +1372,32 @@ fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
         memavailable_below,
         live_cap,
     })
+}
+
+/// `ENGINE_SESSION_LIST_RETAIN_AFTER` (WI-1289). Unset is six hours. `off`
+/// (or `0`) never hides a session from the default list. Anything else is a
+/// duration (`6h`, `30m`, seconds) and a value that does not parse is a
+/// startup error.
+fn session_list_retain_from_env() -> Result<Option<std::time::Duration>> {
+    use crate::hibernate_policy::parse_duration;
+    match engine_env("ENGINE_SESSION_LIST_RETAIN_AFTER") {
+        Ok(v) => {
+            let v = v.trim();
+            if v.eq_ignore_ascii_case("off") || v == "0" {
+                Ok(None)
+            } else {
+                parse_duration(v).map(Some).ok_or_else(|| {
+                    ApiError::Config(format!(
+                        "ENGINE_SESSION_LIST_RETAIN_AFTER={v:?} is not a duration like 6h, 30m or 21600, or off"
+                    ))
+                })
+            }
+        }
+        Err(std::env::VarError::NotPresent) => Ok(Some(std::time::Duration::from_secs(6 * 3600))),
+        Err(e) => Err(ApiError::Config(format!(
+            "reading ENGINE_SESSION_LIST_RETAIN_AFTER: {e}"
+        ))),
+    }
 }
 
 /// `ENGINE_AUTOPILOT_NUDGE_AFTER` (`60s`, `2m`; default one minute) and
