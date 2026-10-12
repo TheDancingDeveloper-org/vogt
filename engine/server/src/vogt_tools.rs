@@ -119,6 +119,9 @@ pub const CURATED_WRITES: &[&str] = &[
     "drift.detect",
     "drift.resolve",
     "session.stop",
+    "session.input",
+    "session.bind_work",
+    "session.wake",
     "forge.onboard",
     "inbox.archive",
     "inbox.snooze",
@@ -174,7 +177,7 @@ pub struct Caller {
     /// break-glass token.
     pub core_token: Option<String>,
     /// Whether this caller answers as a person (`person_gate::is_person`).
-    /// An approved `send_input` card is typed as this caller, so it may land
+    /// An approved `session.input` is typed as this caller, so it may land
     /// on a permission prompt only when this is true (WI-983).
     pub person: bool,
 }
