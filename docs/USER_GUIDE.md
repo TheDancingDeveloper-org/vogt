@@ -215,7 +215,12 @@ being squeezed behind a separately scrolling session list; when visible it
 keeps a 260px minimum containing its heading, search, rows and controls. The
 rail's footer — **Settings**, **Sign out** and the connection indicator — is
 pinned to the bottom of that scroller, so it stays reachable however long the
-session list grows. You can drag the rail's right edge to resize it and
+session list grows. Finished sessions, and sub-agent sessions, drop out of
+the default list six hours after their last event, and only when nobody has
+typed in them in that time; a session that is running, waiting, blocked,
+oversight, or pinned **Keep awake** stays. The footer then says how many are
+hidden and offers **Show**, which lists them again until you hide them. The
+list itself is ordered oversight first, then most recently active. You can drag the rail's right edge to resize it and
 double-click that edge (or press **Home** with it focused) to return it to the
 default width; **Ctrl/Cmd+B** hides and shows the rail. The compact Files
 header keeps **New file** and **Refresh** on one row, while **New
