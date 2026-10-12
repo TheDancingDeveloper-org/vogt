@@ -10788,6 +10788,7 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         settings_file: None,
         opencode_config: None,
         accounts: Vec::new(),
+        codex_policy: Ok(None),
     };
     let state_dir = cfg.state_dir.clone();
     let workspace = cfg.workspace_root.clone();
@@ -10863,6 +10864,7 @@ async fn a_named_claude_account_runs_the_session_in_its_own_config_dir() {
             "acct2={}",
             acct2.display()
         ))),
+        codex_policy: Ok(None),
     };
     let stub = tmp.path().join("bin").join("claude");
     std::fs::write(
