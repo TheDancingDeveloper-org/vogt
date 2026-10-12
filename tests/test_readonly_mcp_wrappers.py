@@ -699,10 +699,18 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(tmp_path: Pa
     assert parsed["model_provider"] == "litellm"
     litellm = parsed["model_providers"]["litellm"]
     assert litellm["base_url"] == "http://100.92.54.45:4000/v1"
-    assert litellm["wire_api"] == "responses"
+    assert litellm["wire_api"] == "chat"
     assert litellm["env_key"] == "HOMELAB_LITELLM_SESSION_KEY"
     assert litellm["web_search"] == "disabled"
     assert "experimental_bearer_token" not in litellm
+    # grok is not in Codex's bundled catalog, so bootstrap hands it one:
+    # apply_patch freeform, and no tool_mode (code mode stays off).
+    catalog_path = codex_home / "vogt-model-catalog.json"
+    assert parsed["model_catalog_json"] == str(catalog_path)
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    assert [model["slug"] for model in catalog["models"]] == ["grok"]
+    assert catalog["models"][0]["apply_patch_tool_type"] == "freeform"
+    assert "tool_mode" not in catalog["models"][0]
     clawbay = parsed["model_providers"]["theclawbay"]
     assert clawbay["base_url"] == "https://api.theclawbay.com/backend-api/codex"
     assert clawbay["wire_api"] == "responses"
@@ -742,6 +750,21 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(tmp_path: Pa
     assert parsed["model_provider"] == "dlab"
     assert parsed["other"] == {"kept": True}
     assert "litellm" in parsed["model_providers"]
+    # No catalog was configured, so grok's is written. One the operator
+    # already chose is not replaced, and the file is not written for it.
+    assert parsed["model_catalog_json"] == str(codex_home / "vogt-model-catalog.json")
+    chosen = codex_home / "operator-catalog.json"
+    config.write_text(
+        f'model = "gpt-5.6"\nmodel_provider = "dlab"\n'
+        f'model_catalog_json = "{chosen}"\n',
+        encoding="utf-8",
+    )
+    (codex_home / "vogt-model-catalog.json").unlink()
+    foreign = _codex_bootstrap(tmp_path, {})
+    assert foreign.returncode == 0, foreign.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["model_catalog_json"] == str(chosen)
+    assert not (codex_home / "vogt-model-catalog.json").exists()
 
     # Invalid TOML is not rewritten.
     duplicate = "[model_providers.litellm]\n[model_providers.litellm]\n"

@@ -353,17 +353,23 @@ PY
     ) 9>"$lockdir/.config.toml.lock"
 }
 
-# Route Codex through the estate LiteLLM router (WI-1147). Codex speaks the
-# Responses API only, and the router exposes it at /v1. The session key is the
-# env var named by env_key — never a token written into this file. theclawbay
-# stays as a fallback profile and is not given a bearer here: a profile this
-# script did not write is left as the operator has it, and one it did write
-# carries no secret.
+# Route Codex through the estate LiteLLM router (WI-1147). The estate fork
+# (WI-1286) speaks the Chat Completions wire as well as Responses, and grok
+# returns tool calls only over chat, so the router is used with
+# wire_api = "chat". The session key is the env var named by env_key — never a
+# token written into this file. theclawbay stays as a fallback profile and is
+# not given a bearer here: a profile this script did not write is left as the
+# operator has it, and one it did write carries no secret.
 #
-# Top-level model and model_provider are set only when absent or when they
-# already name this bundle (litellm, or theclawbay as the provider). An
-# operator's other provider and model are left alone. A config that does not
-# parse is left alone, same as the other writers above.
+# grok has no entry in Codex's bundled catalog, and the fallback metadata
+# offers no apply_patch tool and does not turn code mode off. Alongside the
+# provider this writes a one-model catalog (apply_patch freeform, tool_mode
+# omitted) and points model_catalog_json at it. That key is set only when
+# absent or when it already names the file this writer owns; an operator's
+# catalog is left alone. Top-level model and model_provider are set only when
+# absent or when they already name this bundle (litellm, or theclawbay as the
+# provider). An operator's other provider and model are left alone. A config
+# that does not parse is left alone, same as the other writers above.
 codex_litellm_provider() {
     local config="$1" lockdir
     lockdir="$(dirname "$config")"
@@ -371,9 +377,38 @@ codex_litellm_provider() {
     (
         flock 9
         CODEX_CONFIG="$config" python3 - <<'PY'
-import os, sys, tempfile
+import json, os, sys, tempfile
 
 path = os.environ["CODEX_CONFIG"]
+# The catalog Codex deserializes as ModelsResponse (protocol openai_models.rs).
+# One model, the router's grok group. apply_patch_tool_type "freeform" is what
+# makes Codex offer the apply_patch tool; tool_mode is omitted, which is code
+# mode off. The remaining fields are what ModelInfo requires to parse.
+CATALOG = {
+    "models": [
+        {
+            "slug": "grok",
+            "display_name": "grok",
+            "description": "Estate LiteLLM grok group.",
+            "supported_reasoning_levels": [],
+            "shell_type": "unified_exec",
+            "visibility": "list",
+            "supported_in_api": True,
+            "priority": 1,
+            "upgrade": None,
+            "model_messages": None,
+            "default_reasoning_summary": "none",
+            "support_verbosity": False,
+            "default_verbosity": None,
+            "apply_patch_tool_type": "freeform",
+            "truncation_policy": {"mode": "bytes", "limit": 10000},
+            "context_window": 256000,
+            "effective_context_window_percent": 95,
+            "experimental_supported_tools": [],
+        }
+    ]
+}
+catalog_path = os.path.join(os.path.dirname(path), "vogt-model-catalog.json")
 try:
     with open(path, encoding="utf-8") as fh:
         text = fh.read()
@@ -398,7 +433,7 @@ LITELLM = (
     "[model_providers.litellm]\n"
     'name = "LiteLLM"\n'
     'base_url = "http://100.92.54.45:4000/v1"\n'
-    'wire_api = "responses"\n'
+    'wire_api = "chat"\n'
     "requires_openai_auth = false\n"
     "supports_websockets = false\n"
     'env_key = "HOMELAB_LITELLM_SESSION_KEY"\n'
@@ -503,15 +538,45 @@ def _set_root(key: str, value: str, when: set[str | None]) -> None:
 _set_root("model_provider", "litellm", {None, "litellm", "theclawbay"})
 if _root_value("model_provider") == "litellm":
     _set_root("model", "grok", {None, "grok", "grok-4.7"})
+# Point at the catalog this writer owns. A path an operator chose stays.
+_set_root("model_catalog_json", catalog_path, {None, catalog_path})
 
 body = "".join(lines).rstrip("\n")
 extra = LITELLM + ("\n" + CLAWBAY if write_clawbay else "")
 new = f"{body}\n\n{extra}" if body else extra
 if not new.endswith("\n"):
     new += "\n"
-if new == text:
+catalog_text = json.dumps(CATALOG, indent=2) + "\n"
+try:
+    with open(catalog_path, encoding="utf-8") as fh:
+        catalog_current = fh.read()
+except FileNotFoundError:
+    catalog_current = None
+except OSError as exc:
+    print(
+        f"mcp-bootstrap: cannot read {catalog_path} ({exc}); left alone",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+# The catalog is only rewritten while config points at it. An operator who
+# keeps their own model_catalog_json is not handed a file they did not ask for.
+owns_catalog = _root_value("model_catalog_json") == catalog_path
+if new == text and (not owns_catalog or catalog_current == catalog_text):
     sys.exit(0)
 directory = os.path.dirname(path) or "."
+if owns_catalog and catalog_current != catalog_text:
+    fd, tmp = tempfile.mkstemp(prefix=".vogt-model-catalog.json.", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(catalog_text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, catalog_path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+if new == text:
+    sys.exit(0)
 fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
 try:
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
