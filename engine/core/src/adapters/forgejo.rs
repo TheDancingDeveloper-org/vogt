@@ -68,22 +68,20 @@ impl ForgejoClient {
     /// Build a client, or `None` when this host is not configured. `None` is
     /// the ordinary case: no token file means the host's subjects are not
     /// collected.
+    ///
+    /// A missing path, a path that is not a file, and an empty file are all
+    /// `Ok(None)`. A file that exists but cannot be read, or is not valid
+    /// UTF-8, is an error: swallowing it would report a configured forge as
+    /// unconfigured.
     pub fn from_token_file(
         host: impl Into<String>,
         path: Option<&Path>,
         transport: Option<Transport>,
-    ) -> Option<Self> {
-        let path = path?;
-        let resolved = expand_user(path);
-        if !resolved.is_file() {
-            return None;
-        }
-        let token = std::fs::read_to_string(resolved).ok()?;
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return None;
-        }
-        Some(Self::new(host, Some(token), transport))
+    ) -> Result<Option<Self>, VogtError> {
+        let Some(token) = read_token_file(path)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self::new(host, Some(token), transport)))
     }
 
     pub fn get(&self, path: &str, query: &[(&str, String)]) -> Result<ForgeResponse, VogtError> {
@@ -256,6 +254,31 @@ fn quote(text: &str) -> String {
     out
 }
 
+/// The token a file holds.
+///
+/// `Ok(None)` is the ordinary case: no path, a missing path, a path that is not
+/// a file, or an empty file. A file that exists but cannot be read, or is not
+/// valid UTF-8, is an error rather than a silent "not configured".
+fn read_token_file(path: Option<&Path>) -> Result<Option<String>, VogtError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let resolved = expand_user(path);
+    if !resolved.is_file() {
+        return Ok(None);
+    }
+    let token = std::fs::read_to_string(&resolved).map_err(|error| {
+        VogtError::ForgejoUnavailable(format!(
+            "cannot read token file {}: {error}",
+            resolved.display()
+        ))
+    })?;
+    let token = token.trim().to_string();
+    Ok((!token.is_empty()).then_some(token))
+}
+
+/// `~/x` to `{home}/x`; anything else unchanged. A missing home leaves the
+/// tilde in place, so the later read fails honestly rather than guessing.
 fn expand_user(path: &Path) -> std::path::PathBuf {
     let text = path.to_string_lossy();
     if let Some(rest) = text.strip_prefix("~/") {
@@ -352,9 +375,12 @@ mod tests {
 
     #[test]
     fn from_token_file_is_none_for_a_missing_or_empty_file() {
-        assert!(ForgejoClient::from_token_file("forge.example", None, None).is_none());
+        assert!(ForgejoClient::from_token_file("forge.example", None, None)
+            .unwrap()
+            .is_none());
         assert!(
             ForgejoClient::from_token_file("forge.example", Some(Path::new("/no/such")), None)
+                .unwrap()
                 .is_none()
         );
 
@@ -362,12 +388,31 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let empty = dir.join("empty");
         std::fs::write(&empty, "  \n").unwrap();
-        assert!(ForgejoClient::from_token_file("forge.example", Some(&empty), None).is_none());
+        assert!(
+            ForgejoClient::from_token_file("forge.example", Some(&empty), None)
+                .unwrap()
+                .is_none()
+        );
+        // A directory is a path, but not a token file.
+        assert!(
+            ForgejoClient::from_token_file("forge.example", Some(&dir), None)
+                .unwrap()
+                .is_none()
+        );
 
         let present = dir.join("token");
         std::fs::write(&present, "  fj-token \n").unwrap();
-        let built = ForgejoClient::from_token_file("forge.example", Some(&present), None).unwrap();
+        let built = ForgejoClient::from_token_file("forge.example", Some(&present), None)
+            .unwrap()
+            .unwrap();
         assert_eq!(built.token(), Some("fj-token"));
+
+        let bad = dir.join("bad");
+        std::fs::write(&bad, [0xff, 0xfe]).unwrap();
+        let Err(error) = ForgejoClient::from_token_file("forge.example", Some(&bad), None) else {
+            panic!("a non-UTF-8 token file must be an error");
+        };
+        assert!(error.to_string().contains("valid UTF-8"), "{error}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

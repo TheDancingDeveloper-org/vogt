@@ -56,7 +56,7 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
     // Forge and deploy-lane collectors are not ported. Python registers them
     // whenever one is configured, so a sweep that quietly omitted them would
     // answer differently from Python on every real deployment that has one.
-    if crate::adapters::forge::has_configured_forge(&ctx.config) {
+    if crate::adapters::forge::has_configured_forge(&ctx.config)? {
         return Err(VogtError::InvalidRequest(
             "sweep cannot run while a forge is configured: the forge collectors (forge-issues, forge-prs, forge-checks, forge-releases, forge-posture, forge-notifications, forge-labels) are not ported yet"
                 .to_string(),

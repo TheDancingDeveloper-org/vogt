@@ -66,14 +66,19 @@ impl GitHubClient {
 
     /// Build a client, or `None` when the adapter is not configured. `None` is
     /// the ordinary case: no token file means forge subjects are not collected.
-    pub fn from_token_file(path: Option<&Path>, transport: Option<Transport>) -> Option<Self> {
-        let path = path?;
-        let token = std::fs::read_to_string(expand_user(path)).ok()?;
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return None;
-        }
-        Some(Self::new(Some(token), transport))
+    ///
+    /// A missing path, a path that is not a file, and an empty file are all
+    /// `Ok(None)`. A file that exists but cannot be read, or is not valid
+    /// UTF-8, is an error: swallowing it would report a configured forge as
+    /// unconfigured.
+    pub fn from_token_file(
+        path: Option<&Path>,
+        transport: Option<Transport>,
+    ) -> Result<Option<Self>, VogtError> {
+        let Some(token) = read_token_file(path)? else {
+            return Ok(None);
+        };
+        Ok(Some(Self::new(Some(token), transport)))
     }
 
     /// A client with an explicit token, or none. A token-less client is what
@@ -288,6 +293,31 @@ fn quote(text: &str) -> String {
     out
 }
 
+/// The token a file holds.
+///
+/// `Ok(None)` is the ordinary case: no path, a missing path, a path that is not
+/// a file, or an empty file. A file that exists but cannot be read, or is not
+/// valid UTF-8, is an error rather than a silent "not configured".
+fn read_token_file(path: Option<&Path>) -> Result<Option<String>, VogtError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let resolved = expand_user(path);
+    if !resolved.is_file() {
+        return Ok(None);
+    }
+    let token = std::fs::read_to_string(&resolved).map_err(|error| {
+        VogtError::GitHubUnavailable(format!(
+            "cannot read token file {}: {error}",
+            resolved.display()
+        ))
+    })?;
+    let token = token.trim().to_string();
+    Ok((!token.is_empty()).then_some(token))
+}
+
+/// `~/x` to `{home}/x`; anything else unchanged. A missing home leaves the
+/// tilde in place, so the later read fails honestly rather than guessing.
 fn expand_user(path: &Path) -> std::path::PathBuf {
     let text = path.to_string_lossy();
     if let Some(rest) = text.strip_prefix("~/") {
@@ -409,6 +439,23 @@ mod tests {
 
     #[test]
     fn no_token_file_means_no_client() {
-        assert!(GitHubClient::from_token_file(None, None).is_none());
+        assert!(GitHubClient::from_token_file(None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn from_token_file_errors_when_the_file_cannot_be_read() {
+        let dir = std::env::temp_dir().join(format!("vogt-github-token-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A directory is a path, but not a token file.
+        assert!(GitHubClient::from_token_file(Some(&dir), None)
+            .unwrap()
+            .is_none());
+        let bad = dir.join("bad");
+        std::fs::write(&bad, [0xff, 0xfe]).unwrap();
+        let Err(error) = GitHubClient::from_token_file(Some(&bad), None) else {
+            panic!("a non-UTF-8 token file must be an error");
+        };
+        assert!(error.to_string().contains("valid UTF-8"), "{error}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

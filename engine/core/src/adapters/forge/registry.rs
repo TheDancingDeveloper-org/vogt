@@ -34,6 +34,7 @@ use super::transport::ForgeTransport;
 use crate::adapters::github::GitHubClient;
 use crate::adapters::{forgejo::ForgejoClient, github::Transport};
 use crate::config::VogtConfig;
+use crate::errors::VogtError;
 
 /// The two credentialed providers this build can speak.
 ///
@@ -129,17 +130,31 @@ pub fn token_file_for<'a>(config: &'a VogtConfig, host: &str) -> Option<&'a Path
         })
 }
 
-/// The token a file holds, or `None` when there is nothing usable.
+/// The token a file holds.
 ///
-/// `None` is the ordinary case, not an error: no file, a missing file or an
-/// empty one all mean the host's subjects are simply not collected. The path
-/// is expanded the way the Python client expands it, so `~` names the home
-/// directory rather than a literal directory.
-pub fn read_token(path: Option<&Path>) -> Option<String> {
-    let resolved = expand_user(path?);
-    let token = std::fs::read_to_string(resolved).ok()?;
+/// `Ok(None)` is the ordinary case, not an error: no file, a missing file, a
+/// path that is not a file, or an empty file all mean the host's subjects are
+/// simply not collected. A file that exists but cannot be read, or is not valid
+/// UTF-8, is an error: reporting it as unconfigured would hide a deployment
+/// that is configured but unreadable. The path is expanded the way the Python
+/// client expands it, so `~` names the home directory rather than a literal
+/// directory.
+pub fn read_token(path: Option<&Path>) -> Result<Option<String>, VogtError> {
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let resolved = expand_user(path);
+    if !resolved.is_file() {
+        return Ok(None);
+    }
+    let token = std::fs::read_to_string(&resolved).map_err(|error| {
+        VogtError::GitHubUnavailable(format!(
+            "cannot read token file {}: {error}",
+            resolved.display()
+        ))
+    })?;
     let token = token.trim().to_owned();
-    (!token.is_empty()).then_some(token)
+    Ok((!token.is_empty()).then_some(token))
 }
 
 /// Why no forge can read this repository, or `None` if one can.
@@ -183,8 +198,13 @@ pub fn unsupported_reason(repo_url: Option<&str>, config: Option<&VogtConfig>) -
 /// together on purpose — both mean "do not read". The caller that needs to
 /// tell a person why reaches for [`unsupported_reason`], which answers the
 /// first case without a token.
-pub fn provider_for(repo_url: Option<&str>, config: &VogtConfig) -> Option<ForgeClient> {
-    let matched = match_repo(repo_url, Some(config))?;
+pub fn provider_for(
+    repo_url: Option<&str>,
+    config: &VogtConfig,
+) -> Result<Option<ForgeClient>, VogtError> {
+    let Some(matched) = match_repo(repo_url, Some(config)) else {
+        return Ok(None);
+    };
     build(matched.kind, &matched.repo.host, config, None)
 }
 
@@ -192,8 +212,13 @@ pub fn provider_for(repo_url: Option<&str>, config: &VogtConfig) -> Option<Forge
 ///
 /// A host named in `forge_token_files` is supported even when its token file
 /// is absent; `None` then means not configured rather than unsupported.
-pub fn provider_for_host(host: &str, config: &VogtConfig) -> Option<ForgeClient> {
-    let kind = kind_for_host(host, Some(config))?;
+pub fn provider_for_host(
+    host: &str,
+    config: &VogtConfig,
+) -> Result<Option<ForgeClient>, VogtError> {
+    let Some(kind) = kind_for_host(host, Some(config)) else {
+        return Ok(None);
+    };
     build(kind, host, config, None)
 }
 
@@ -241,10 +266,12 @@ pub fn github_identity() -> GitHubProvider<GitHubClient> {
 /// Import and write-back ask for the concrete provider by name rather than
 /// resolving one per URL. It still goes through the same token resolution as
 /// everything else.
-pub fn github_provider(config: &VogtConfig) -> Option<GitHubProvider<GitHubClient>> {
-    match build(ForgeKind::GitHub, GITHUB_HOST, config, None) {
-        Some(ForgeClient::GitHub(provider)) => Some(provider),
-        _ => None,
+pub fn github_provider(
+    config: &VogtConfig,
+) -> Result<Option<GitHubProvider<GitHubClient>>, VogtError> {
+    match build(ForgeKind::GitHub, GITHUB_HOST, config, None)? {
+        Some(ForgeClient::GitHub(provider)) => Ok(Some(provider)),
+        _ => Ok(None),
     }
 }
 
@@ -263,13 +290,18 @@ fn build(
     host: &str,
     config: &VogtConfig,
     transport: Option<Transport>,
-) -> Option<ForgeClient> {
+) -> Result<Option<ForgeClient>, VogtError> {
     match kind {
-        ForgeKind::GitHub => GitHubClient::from_token_file(token_file_for(config, host), transport)
-            .map(|client| ForgeClient::GitHub(GitHubProvider::new(client))),
+        ForgeKind::GitHub => Ok(GitHubClient::from_token_file(
+            token_file_for(config, host),
+            transport,
+        )?
+        .map(|client| ForgeClient::GitHub(GitHubProvider::new(client)))),
         ForgeKind::Forgejo => {
-            ForgejoClient::from_token_file(host, token_file_for(config, host), transport)
-                .map(|client| ForgeClient::Forgejo(ForgejoProvider::new(client, host)))
+            Ok(
+                ForgejoClient::from_token_file(host, token_file_for(config, host), transport)?
+                    .map(|client| ForgeClient::Forgejo(ForgejoProvider::new(client, host))),
+            )
         }
     }
 }
@@ -592,11 +624,15 @@ impl ForgeProvider for ForgeClient {
 ///
 /// Goes through [`build`] rather than a direct file read, so a host counts as
 /// configured exactly when a provider can be built for it.
-pub fn has_configured_forge(config: &VogtConfig) -> bool {
-    supported_hosts(Some(config)).iter().any(|host| {
-        kind_for_host(host, Some(config))
-            .is_some_and(|kind| build(kind, host, config, None).is_some())
-    })
+pub fn has_configured_forge(config: &VogtConfig) -> Result<bool, VogtError> {
+    for host in supported_hosts(Some(config)) {
+        if let Some(kind) = kind_for_host(&host, Some(config)) {
+            if build(kind, &host, config, None)?.is_some() {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// `~/x` to `{home}/x`; anything else unchanged. A missing home leaves the
@@ -698,12 +734,17 @@ mod tests {
 
         let mut present = config_with(vec![], None);
         present.github_token_file = Some(file.clone());
-        assert_eq!(read_token(Some(&file)).as_deref(), Some("secret-token"));
-        assert!(has_configured_forge(&present));
+        assert_eq!(
+            read_token(Some(&file)).unwrap().as_deref(),
+            Some("secret-token")
+        );
+        assert!(has_configured_forge(&present).unwrap());
 
         let absent = config_with(vec![("forge.example", "/no/such/file")], None);
-        assert!(read_token(Some(Path::new("/no/such/file"))).is_none());
-        assert!(!has_configured_forge(&absent));
+        assert!(read_token(Some(Path::new("/no/such/file")))
+            .unwrap()
+            .is_none());
+        assert!(!has_configured_forge(&absent).unwrap());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -732,11 +773,23 @@ mod tests {
             vec![("forge.example", "/no/such")],
             Some(file.to_str().unwrap()),
         );
-        assert!(provider_for(Some("https://github.com/acme/widget"), &config).is_some());
+        assert!(
+            provider_for(Some("https://github.com/acme/widget"), &config)
+                .unwrap()
+                .is_some()
+        );
         // Declared, but its token file is not there: not collected, not an error.
-        assert!(provider_for(Some("https://forge.example/acme/widget"), &config).is_none());
+        assert!(
+            provider_for(Some("https://forge.example/acme/widget"), &config)
+                .unwrap()
+                .is_none()
+        );
         // Nobody reads gitlab, token or not.
-        assert!(provider_for(Some("https://gitlab.com/acme/widget"), &config).is_none());
+        assert!(
+            provider_for(Some("https://gitlab.com/acme/widget"), &config)
+                .unwrap()
+                .is_none()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
