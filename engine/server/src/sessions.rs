@@ -1736,7 +1736,10 @@ impl SessionRegistry {
             .collect()
     }
 
-    pub fn list(&self) -> Vec<SessionSummary> {
+    /// Every session the registry knows, newest activity first, with how many
+    /// the default list leaves out (WI-1289). `include_hidden` returns the
+    /// aged-out rows too; `hidden_count` counts them either way.
+    pub fn list(&self, include_hidden: bool) -> vogt_engine_contract::SessionList {
         let mut out: Vec<_> = self
             .sessions
             .iter()
@@ -1753,8 +1756,22 @@ impl SessionRegistry {
                 .into_iter()
                 .filter_map(|id| self.hibernated_summary(id)),
         );
-        out.sort_by_key(|s| s.created_at.clone());
-        out
+        let now = time::OffsetDateTime::now_utc();
+        for summary in &mut out {
+            summary.last_event_at = Some(latest_event_at(summary));
+        }
+        let hidden_count = out
+            .iter()
+            .filter(|s| session_is_hidden(s, self.cfg.session_list_retain_after, now))
+            .count() as u64;
+        if !include_hidden {
+            out.retain(|s| !session_is_hidden(s, self.cfg.session_list_retain_after, now));
+        }
+        out.sort_by(session_list_order);
+        vogt_engine_contract::SessionList {
+            sessions: out,
+            hidden_count,
+        }
     }
 
     /// A configured session template matched by name (case-insensitive) or,
@@ -1852,6 +1869,95 @@ fn now_rfc3339() -> String {
         .unwrap_or_default()
 }
 
+/// The latest clock a summary carries, as RFC 3339 (WI-1289). A clock that
+/// does not parse is ignored. With none at all the session sorts as never,
+/// which is its `created_at` only as a last resort so the order stays total.
+fn latest_event_at(summary: &SessionSummary) -> String {
+    let mut clocks = vec![
+        summary.activity_changed_at.as_str(),
+        summary.created_at.as_str(),
+    ];
+    if let Some(at) = summary.last_output_at.as_deref() {
+        clocks.push(at);
+    }
+    if let Some(at) = summary.last_person_input_at.as_deref() {
+        clocks.push(at);
+    }
+    if let Some(blocked) = summary.blocked.as_ref() {
+        clocks.push(blocked.since.as_str());
+    }
+    if let Some(approval) = summary.approval.as_ref() {
+        clocks.push(approval.detected_at.as_str());
+    }
+    if let Some(stop) = summary.stop.as_ref() {
+        clocks.push(stop.at.as_str());
+    }
+    if let Some(hibernation) = summary.hibernation.as_ref() {
+        clocks.push(hibernation.at.as_str());
+    }
+    clocks
+        .into_iter()
+        .filter(|at| !at.is_empty())
+        .max_by_key(|at| parse_rfc3339(at).unwrap_or(time::OffsetDateTime::UNIX_EPOCH))
+        .unwrap_or(summary.created_at.as_str())
+        .to_string()
+}
+
+fn parse_rfc3339(raw: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339).ok()
+}
+
+/// Whether the default list leaves this session out (WI-1289). A session
+/// stays listed when any of these hold: it is oversight or pinned awake; a
+/// turn is running, a dialog is open, or it is blocked; it is waiting for a
+/// person; it is still alive and idle (a live agent between turns); a person
+/// typed within the window; or its latest event is inside the window.
+/// `retain` of `None` (`ENGINE_SESSION_LIST_RETAIN_AFTER=off`) hides nothing.
+fn session_is_hidden(
+    summary: &SessionSummary,
+    retain: Option<std::time::Duration>,
+    now: time::OffsetDateTime,
+) -> bool {
+    let Some(retain) = retain else {
+        return false;
+    };
+    if summary.role == SessionRole::Oversight || summary.keep_awake {
+        return false;
+    }
+    if matches!(
+        summary.activity,
+        ActivityState::Running | ActivityState::AwaitingApproval | ActivityState::WaitingForInput
+    ) || summary.blocked.is_some()
+        || summary.approval.is_some()
+    {
+        return false;
+    }
+    // A live idle session is an agent between turns. Only a session that has
+    // finished — exited, stopped, hibernated, or idle with no process — ages
+    // out, and only once both clocks are past the window.
+    if summary.alive && summary.activity == ActivityState::Idle {
+        return false;
+    }
+    let window_start = now - retain;
+    let recent = |at: &str| parse_rfc3339(at).is_some_and(|t| t >= window_start);
+    if summary.last_person_input_at.as_deref().is_some_and(recent) {
+        return false;
+    }
+    !summary.last_event_at.as_deref().is_some_and(recent)
+}
+
+/// Oversight first, then the latest event, then the newer session, then id.
+/// `last_event_at` is filled before this runs, so a missing one sorts last.
+fn session_list_order(a: &SessionSummary, b: &SessionSummary) -> std::cmp::Ordering {
+    let rank = |s: &SessionSummary| u8::from(s.role != SessionRole::Oversight);
+    rank(a).cmp(&rank(b)).then_with(|| {
+        b.last_event_at
+            .cmp(&a.last_event_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.id.cmp(&b.id))
+    })
+}
+
 /// A hibernated record as the wire lists it.
 fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSummary> {
     let hibernation = record.hibernation.clone()?;
@@ -1868,6 +1974,8 @@ fn hibernated_summary(record: &Record, screen_bytes: u64) -> Option<SessionSumma
         activity_changed_at: hibernation.at.clone(),
         turn_started_at: None,
         last_output_at: None,
+        last_event_at: None,
+        last_person_input_at: None,
         approval: None,
         blocked: record.blocked.clone(),
         conversation: record.conversation.clone(),
@@ -2166,5 +2274,191 @@ mod tests {
                 .name,
             "Alpha Agent"
         );
+    }
+
+    use vogt_engine_contract::SessionSummary;
+
+    fn aged(id: u128, activity: vogt_engine_contract::ActivityState) -> SessionSummary {
+        use vogt_engine_contract::SessionSummary;
+        SessionSummary {
+            id: uuid::Uuid::from_u128(id),
+            name: format!("s{id}"),
+            activity,
+            exit_code: None,
+            alive: false,
+            scrollback_bytes: 0,
+            cwd: String::new(),
+            command: None,
+            created_at: "2020-01-01T00:00:00Z".into(),
+            activity_changed_at: "2020-01-01T00:00:00Z".into(),
+            turn_started_at: None,
+            last_output_at: None,
+            last_event_at: Some("2020-01-01T00:00:00Z".into()),
+            last_person_input_at: None,
+            approval: None,
+            blocked: None,
+            conversation: None,
+            hibernation: None,
+            keep_awake: false,
+            autopilot: false,
+            autopilot_nudges: 0,
+            role: vogt_engine_contract::SessionRole::Worker,
+            work_item: None,
+            resources: None,
+            template: None,
+            permission_mode: None,
+            stop: None,
+            economics: None,
+            budget: None,
+        }
+    }
+
+    fn now() -> time::OffsetDateTime {
+        time::OffsetDateTime::parse(
+            "2026-10-12T12:00:00Z",
+            &time::format_description::well_known::Rfc3339,
+        )
+        .unwrap()
+    }
+
+    fn retain() -> Option<std::time::Duration> {
+        Some(std::time::Duration::from_secs(6 * 60 * 60))
+    }
+
+    fn hidden(summary: &SessionSummary) -> bool {
+        super::session_is_hidden(summary, retain(), now())
+    }
+
+    #[test]
+    fn a_finished_session_past_the_window_hides() {
+        for activity in [
+            vogt_engine_contract::ActivityState::Exited,
+            vogt_engine_contract::ActivityState::Stopped,
+            vogt_engine_contract::ActivityState::Hibernated,
+            vogt_engine_contract::ActivityState::Errored,
+        ] {
+            assert!(hidden(&aged(1, activity)), "{activity:?} should hide");
+        }
+        let mut idle = aged(1, vogt_engine_contract::ActivityState::Idle);
+        assert!(hidden(&idle), "idle with no process hides");
+        idle.alive = true;
+        assert!(!hidden(&idle), "a live idle agent stays listed");
+    }
+
+    #[test]
+    fn exemptions_stay_listed() {
+        let mut oversight = aged(1, vogt_engine_contract::ActivityState::Exited);
+        oversight.role = vogt_engine_contract::SessionRole::Oversight;
+        assert!(!hidden(&oversight));
+
+        let mut pinned = aged(1, vogt_engine_contract::ActivityState::Hibernated);
+        pinned.keep_awake = true;
+        assert!(!hidden(&pinned));
+
+        for activity in [
+            vogt_engine_contract::ActivityState::Running,
+            vogt_engine_contract::ActivityState::AwaitingApproval,
+            vogt_engine_contract::ActivityState::WaitingForInput,
+        ] {
+            assert!(!hidden(&aged(1, activity)), "{activity:?} stays listed");
+        }
+
+        let mut blocked = aged(1, vogt_engine_contract::ActivityState::Idle);
+        blocked.blocked = Some(vogt_engine_contract::BlockedReport {
+            reason: "needs a person".into(),
+            items: vec![],
+            since: "2020-01-01T00:00:00Z".into(),
+        });
+        assert!(!hidden(&blocked));
+
+        let mut approval = aged(1, vogt_engine_contract::ActivityState::Idle);
+        approval.approval = Some(vogt_engine_contract::ApprovalPrompt {
+            question: "go?".into(),
+            command_excerpt: String::new(),
+            deadline_seconds: None,
+            deadline_at: None,
+            detected_at: "2020-01-01T00:00:00Z".into(),
+            kind: "permission".into(),
+            options: vec![],
+        });
+        assert!(!hidden(&approval));
+    }
+
+    #[test]
+    fn a_recent_person_keeps_a_finished_session_and_an_old_one_does_not() {
+        let mut recent = aged(1, vogt_engine_contract::ActivityState::Exited);
+        recent.last_person_input_at = Some("2026-10-12T11:00:00Z".into());
+        assert!(!hidden(&recent), "a person within the window keeps it");
+
+        let mut old = aged(1, vogt_engine_contract::ActivityState::Exited);
+        old.last_person_input_at = Some("2026-10-11T00:00:00Z".into());
+        assert!(hidden(&old), "person input outside the window does not");
+
+        // An agent's writes never land on this clock, so a session whose only
+        // recent activity is agent input — last_event_at and last_person_input_at
+        // both old — still hides.
+        assert!(hidden(&aged(
+            1,
+            vogt_engine_contract::ActivityState::Exited
+        )));
+    }
+
+    #[test]
+    fn a_recent_event_keeps_it_and_off_disables_hiding() {
+        let mut fresh = aged(1, vogt_engine_contract::ActivityState::Exited);
+        fresh.last_event_at = Some("2026-10-12T10:00:00Z".into());
+        assert!(!hidden(&fresh));
+
+        let old = aged(1, vogt_engine_contract::ActivityState::Exited);
+        assert!(
+            !super::session_is_hidden(&old, None, now()),
+            "retain off hides nothing"
+        );
+    }
+
+    #[test]
+    fn latest_event_is_the_newest_clock() {
+        let mut summary = aged(1, vogt_engine_contract::ActivityState::Exited);
+        summary.last_output_at = Some("2026-10-12T01:00:00Z".into());
+        summary.blocked = Some(vogt_engine_contract::BlockedReport {
+            reason: "x".into(),
+            items: vec![],
+            since: "2026-10-12T09:00:00Z".into(),
+        });
+        summary.last_person_input_at = Some("2026-10-12T08:00:00Z".into());
+        assert_eq!(super::latest_event_at(&summary), "2026-10-12T09:00:00Z");
+    }
+
+    #[test]
+    fn the_list_orders_oversight_first_then_the_latest_event() {
+        let mut old_oversight = aged(1, vogt_engine_contract::ActivityState::Idle);
+        old_oversight.role = vogt_engine_contract::SessionRole::Oversight;
+        old_oversight.last_event_at = Some("2020-01-01T00:00:00Z".into());
+
+        let mut newer = aged(3, vogt_engine_contract::ActivityState::Idle);
+        newer.last_event_at = Some("2026-10-12T11:00:00Z".into());
+        newer.created_at = "2026-01-01T00:00:00Z".into();
+
+        let mut older = aged(2, vogt_engine_contract::ActivityState::Idle);
+        older.last_event_at = Some("2026-10-12T09:00:00Z".into());
+
+        let mut tied_later = aged(5, vogt_engine_contract::ActivityState::Idle);
+        tied_later.last_event_at = Some("2026-10-12T09:00:00Z".into());
+        tied_later.created_at = "2026-06-01T00:00:00Z".into();
+
+        let mut tied_same = aged(4, vogt_engine_contract::ActivityState::Idle);
+        tied_same.last_event_at = Some("2026-10-12T09:00:00Z".into());
+        tied_same.created_at = "2026-06-01T00:00:00Z".into();
+
+        let mut rows = vec![
+            tied_same.clone(),
+            older.clone(),
+            newer.clone(),
+            tied_later.clone(),
+            old_oversight.clone(),
+        ];
+        rows.sort_by(super::session_list_order);
+        let ids: Vec<u128> = rows.iter().map(|s| s.id.as_u128()).collect();
+        assert_eq!(ids, vec![1, 3, 4, 5, 2]);
     }
 }

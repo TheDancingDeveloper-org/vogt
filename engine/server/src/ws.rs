@@ -533,6 +533,12 @@ async fn handle_socket(
                     if writer_session.write_input(&data).is_err() {
                         break;
                     }
+                    // The socket already passed `may_type`. A person's
+                    // keystroke moves the retention clock; an agent's
+                    // (allowed while no permission dialog shows) does not.
+                    if crate::person_gate::is_person(Some(&identity), None) {
+                        writer_session.note_person_input();
+                    }
                 }
                 Message::Text(s) => {
                     // Try to decode a control frame; fall back to raw text input.
@@ -561,6 +567,9 @@ async fn handle_socket(
                             }
                             if writer_session.write_input(s.as_bytes()).is_err() {
                                 break;
+                            }
+                            if crate::person_gate::is_person(Some(&identity), None) {
+                                writer_session.note_person_input();
                             }
                         }
                     }

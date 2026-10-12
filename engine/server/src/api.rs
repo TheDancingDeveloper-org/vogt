@@ -11,12 +11,24 @@ use futures_util::Stream;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use uuid::Uuid;
-use vogt_engine_contract::{OkResponse, SessionDetail, SessionScreen, SessionSummary};
+use vogt_engine_contract::{OkResponse, SessionDetail, SessionList, SessionScreen, SessionSummary};
 
 use crate::{app::AppState, error::Result, pty::SessionSpec};
 
-pub async fn list_sessions(State(state): State<Arc<AppState>>) -> Json<Vec<SessionSummary>> {
-    Json(state.sessions.list())
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    /// `hidden` returns the sessions the default list leaves out as well as
+    /// the ones it shows (WI-1289). Anything else, including absent, is the
+    /// visible set. `hidden_count` is reported either way.
+    pub include: Option<String>,
+}
+
+pub async fn list_sessions(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<ListQuery>,
+) -> Json<SessionList> {
+    let include_hidden = q.include.as_deref() == Some("hidden");
+    Json(state.sessions.list(include_hidden))
 }
 
 #[derive(Debug, Deserialize)]
@@ -831,6 +843,10 @@ pub struct SweepQuery {
     /// Include sessions whose process has exited (default false).
     #[serde(default)]
     pub include_exited: bool,
+    /// Include sessions the default list hides (WI-1289). Off by default, so
+    /// a sweep is the same set the rail shows.
+    #[serde(default)]
+    pub include_hidden: bool,
 }
 
 /// Every session at once, each with the tail of its screen: the oversight
@@ -849,7 +865,8 @@ pub async fn sweep_sessions(
     }
     let wanted: Vec<SessionSummary> = state
         .sessions
-        .list()
+        .list(q.include_hidden)
+        .sessions
         .into_iter()
         .filter(|s| {
             s.alive
@@ -973,7 +990,8 @@ pub async fn session_input(
     }
     let session = state.sessions.get(id)?;
     let identity = identity.map(|axum::Extension(identity)| identity);
-    if !crate::person_gate::is_person(identity.as_ref(), req.person) {
+    let person = crate::person_gate::is_person(identity.as_ref(), req.person);
+    if !person {
         let reading = Arc::clone(&session);
         let person = req.person;
         tokio::task::spawn_blocking(move || {
@@ -994,6 +1012,12 @@ pub async fn session_input(
     session
         .write_input(&bytes)
         .map_err(|e| crate::error::ApiError::Pty(format!("write input: {e}")))?;
+    // Only a person moves the retention clock. An agent's `/input` — the
+    // common case, and what `session.input` relays with `person: false` —
+    // writes the PTY and leaves `last_person_input_at` where it was.
+    if person {
+        session.note_person_input();
+    }
     Ok(Json(OkResponse::new(true)))
 }
 
@@ -1240,7 +1264,7 @@ pub async fn operational_status(
         source_ref: crate::product::SOURCE_REF,
         source_sha: crate::product::SOURCE_SHA,
         release_url: crate::product::release_url(),
-        session_count: state.sessions.list().len(),
+        session_count: state.sessions.list(false).sessions.len(),
         event_lag: state.bus.lags(),
         chats: match state.chats.clone() {
             Some(chats) => {
