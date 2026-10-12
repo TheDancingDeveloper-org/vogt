@@ -189,6 +189,7 @@ pub async fn router(cfg: Config) -> (Router, Arc<AppState>) {
         Arc::clone(&sessions),
         Arc::clone(&agent_tasks),
         Arc::clone(&push),
+        bus.clone(),
         assistant_log.clone(),
     );
     if assistant.is_some() {
