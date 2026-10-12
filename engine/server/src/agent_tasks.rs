@@ -5197,6 +5197,7 @@ mod tests {
             vogt_core_token: None,
             agent_clis: crate::agent_clis::AgentCliPaths::default(),
             hibernation: crate::hibernate_policy::Policy::default(),
+            session_list_retain_after: None,
             assistant_call: crate::call::CallPolicy::default(),
             autopilot: crate::autopilot::Policy::default(),
             budget: crate::budget::Policy::default(),

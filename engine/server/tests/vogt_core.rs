@@ -219,6 +219,7 @@ fn base_config() -> Config {
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
+        session_list_retain_after: None,
         assistant_call: vogt_engine_server::call::CallPolicy::default(),
         autopilot: vogt_engine_server::autopilot::Policy::default(),
         budget: vogt_engine_server::budget::Policy::default(),
