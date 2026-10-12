@@ -408,6 +408,22 @@ impl SessionRegistry {
             Creating::Wake(record) => Some(record),
             Creating::Fresh(_) => None,
         };
+        // Codex loads `/etc/codex/requirements.toml` itself; the engine does
+        // not pass a flag for it. When a policy was *named* and cannot be
+        // read, refuse the launch (400) instead of starting with no hook and
+        // instead of falling through to bypass (WI-1143). Claude and opencode
+        // do not consult this field. A deployment with the file unset, or
+        // `ENGINE_AGENT_CODEX_POLICY=off`, is `Ok` and launches.
+        if base_command
+            .as_deref()
+            .and_then(agent_cli::agent_name)
+            .as_deref()
+            == Some("codex")
+        {
+            if let Err(why) = &self.cfg.agent_onboarding.codex_policy {
+                return Err(ApiError::BadRequest(why.clone()));
+            }
+        }
         let launch = agent_cli::launch(
             spec.command.as_deref(),
             &agent_cli::LaunchRequest {
