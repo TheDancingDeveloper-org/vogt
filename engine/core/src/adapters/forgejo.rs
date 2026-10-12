@@ -228,13 +228,9 @@ impl ForgejoClient {
             let (status, body, response_headers) = transport(url, headers, body, method);
             return Ok((status, body, response_headers));
         }
-        match super::engine::http1::exchange(url, method, headers, body, self.timeout) {
-            Ok((status, body)) => Ok((status, body, BTreeMap::new())),
-            Err(error) => Err(VogtError::ForgejoUnavailable(format!(
-                "{} unreachable: {error}",
-                self.host
-            ))),
-        }
+        super::engine::http1::exchange(url, method, headers, body, self.timeout).map_err(|error| {
+            VogtError::ForgejoUnavailable(format!("{} unreachable: {error}", self.host))
+        })
     }
 }
 

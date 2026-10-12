@@ -932,7 +932,7 @@ impl EngineClient {
         // std, as Python uses urllib: this adapter makes a handful of requests
         // and the core stays free of an HTTP dependency.
         match http1::exchange(url, method, headers, body, timeout.unwrap_or(self.timeout)) {
-            Ok(response) => Ok(response),
+            Ok((status, body, _headers)) => Ok((status, body)),
             Err(error) => Err(VogtError::EngineUnavailable(format!(
                 "the {} is not answering: {}",
                 self.label,
@@ -1612,6 +1612,10 @@ pub mod http1 {
 
     use super::BTreeMap;
 
+    /// Status, body, and response headers (names lower-cased, last value wins).
+    /// Named so the five exchange signatures do not each spell the triple out.
+    pub(crate) type Exchange = Result<(u16, Vec<u8>, BTreeMap<String, String>), String>;
+
     /// The most of a response body kept. A peer or a misbehaving engine must
     /// not be able to grow memory without bound.
     const MAX_BODY: usize = 8 * 1024 * 1024;
@@ -1622,7 +1626,7 @@ pub mod http1 {
         headers: &BTreeMap<String, String>,
         body: &[u8],
         timeout: Duration,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Exchange {
         exchange_limited(url, method, headers, body, timeout, MAX_BODY)
     }
 
@@ -1636,7 +1640,7 @@ pub mod http1 {
         body: &[u8],
         timeout: Duration,
         limit: usize,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Exchange {
         if url.starts_with("https://") {
             return exchange_tls(url, method, headers, body, timeout, limit);
         }
@@ -1650,7 +1654,7 @@ pub mod http1 {
         body: &[u8],
         timeout: Duration,
         limit: usize,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Exchange {
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(timeout)
             .timeout(timeout)
@@ -1671,13 +1675,22 @@ pub mod http1 {
             Err(error) => return Err(error.to_string()),
         };
         let status = response.status();
+        // Names are already lower-cased. Read them before `into_reader`, which
+        // consumes the response. A value that is not UTF-8 comes back `None`
+        // while the name is still listed; skip it rather than invent a value.
+        let mut response_headers = BTreeMap::new();
+        for name in response.headers_names() {
+            if let Some(value) = response.header(&name) {
+                response_headers.insert(name, value.to_owned());
+            }
+        }
         let mut buf = Vec::new();
         response
             .into_reader()
             .take(limit as u64)
             .read_to_end(&mut buf)
             .map_err(|error| error.to_string())?;
-        Ok((status, buf))
+        Ok((status, buf, response_headers))
     }
 
     /// Trust the platform certificate store, plus `SSL_CERT_FILE` when it is set.
@@ -1891,7 +1904,7 @@ pub mod http1 {
         body: &[u8],
         timeout: Duration,
         limit: usize,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Exchange {
         let (host, port, path) = split_http_url(url)?;
         // `connect` waits for the OS default, which is minutes on a blackholed
         // address. Python's urllib bounds the connect by the same timeout as the
@@ -1964,19 +1977,20 @@ pub mod http1 {
         Ok((host, port, format!("/{path}")))
     }
 
-    fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
+    pub(crate) fn parse_response(raw: &[u8]) -> Exchange {
         let split = raw
             .windows(4)
             .position(|mark| mark == b"\r\n\r\n")
             .ok_or("no response headers")?;
         let head = std::str::from_utf8(&raw[..split])
             .map_err(|_| "response headers are not UTF-8".to_string())?;
-        let status = head
-            .lines()
+        let mut lines = head.lines();
+        let status = lines
             .next()
             .and_then(|line| line.split_whitespace().nth(1))
             .and_then(|code| code.parse().ok())
             .ok_or_else(|| "no status line".to_string())?;
+        let headers = header_map(lines);
         let mut body = raw[split + 4..].to_vec();
         if head
             .lines()
@@ -1984,7 +1998,24 @@ pub mod http1 {
         {
             body = decode_chunks(&body)?;
         }
-        Ok((status, body))
+        Ok((status, body, headers))
+    }
+
+    /// `Name: value` lines after the status line. Names are lower-cased and
+    /// values trimmed; a repeated name keeps the last value, matching a map.
+    pub(crate) fn header_map<'a>(lines: impl Iterator<Item = &'a str>) -> BTreeMap<String, String> {
+        let mut headers = BTreeMap::new();
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            if name.is_empty() {
+                continue;
+            }
+            headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+        }
+        headers
     }
 
     fn decode_chunks(raw: &[u8]) -> Result<Vec<u8>, String> {
@@ -2232,6 +2263,25 @@ mod tests {
         assert!(sent[1].contains(r#""option":1"#));
         assert!(sent[1].contains(r#""expect_question":"allow?""#));
         assert!(!sent[1].contains("label"));
+    }
+
+    #[test]
+    fn a_plain_response_keeps_its_headers_lower_cased_and_last_wins() {
+        // No socket: the plain path is a byte parser. The chunked body is
+        // decoded after the headers, so the two do not interfere.
+        let raw = b"HTTP/1.1 200 OK\r\nX-OAuth-Scopes: first\r\nX-OAuth-Scopes: repo, user\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        let (status, body, headers) = http1::parse_response(raw).unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, b"hello");
+        assert_eq!(
+            headers.get("x-oauth-scopes").map(String::as_str),
+            Some("repo, user")
+        );
+        assert_eq!(
+            headers.get("transfer-encoding").map(String::as_str),
+            Some("chunked")
+        );
+        assert!(http1::header_map(std::iter::once("not a header")).is_empty());
     }
 
     #[test]

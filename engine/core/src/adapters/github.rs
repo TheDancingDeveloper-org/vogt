@@ -32,8 +32,7 @@ pub const SUPPORTED_HOST: &str = "github.com";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitHubIdentity {
     pub login: String,
-    /// The raw `X-OAuth-Scopes` header. Empty through a transport fake, which
-    /// cannot carry response headers, and populated on the real network path.
+    /// The raw `X-OAuth-Scopes` header. Empty when the response carries none.
     pub scopes: String,
 }
 
@@ -233,17 +232,11 @@ impl GitHubClient {
         method: &str,
     ) -> Result<(u16, Vec<u8>, BTreeMap<String, String>), VogtError> {
         if let Some(transport) = &self.transport {
-            // The transport seam carries no response headers, so a caller that
-            // needs one degrades honestly.
             let (status, body, response_headers) = transport(url, headers, body, method);
             return Ok((status, body, response_headers));
         }
-        match super::engine::http1::exchange(url, method, headers, body, self.timeout) {
-            Ok((status, body)) => Ok((status, body, BTreeMap::new())),
-            Err(error) => Err(VogtError::GitHubUnavailable(format!(
-                "GitHub unreachable: {error}"
-            ))),
-        }
+        super::engine::http1::exchange(url, method, headers, body, self.timeout)
+            .map_err(|error| VogtError::GitHubUnavailable(format!("GitHub unreachable: {error}")))
     }
 }
 

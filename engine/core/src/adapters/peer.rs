@@ -113,7 +113,7 @@ impl PeerClient {
             self.timeout,
             MAX_RESPONSE_BYTES,
         ) {
-            Ok((status, body)) => Ok((status, body)),
+            Ok((status, body, _headers)) => Ok((status, body)),
             Err(error) => Err(peer_error(
                 "unreachable",
                 format!("the peer is not answering: {error}"),
