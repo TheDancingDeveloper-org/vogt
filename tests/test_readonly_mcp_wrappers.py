@@ -671,8 +671,82 @@ def test_daemon_flag_merges_into_an_existing_features_table(tmp_path: Path) -> N
     assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
     assert parsed["daemon_auto_start"] is True
 
-    # Already off: the file is not rewritten.
-    before = config.read_text(encoding="utf-8")
+    # Already off: the LiteLLM provider was written by the run above, and a
+    # later bootstrap leaves the file byte-for-byte.
+    settled = config.read_text(encoding="utf-8")
+    assert "model_providers.litellm" in settled
     third = _codex_bootstrap(tmp_path, {})
     assert third.returncode == 0, third.stderr
-    assert config.read_text(encoding="utf-8") == before
+    assert config.read_text(encoding="utf-8") == settled
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_codex_litellm_provider_is_the_default_and_stores_no_secret(tmp_path: Path) -> None:
+    """WI-1147: Codex sessions default to the estate router. The session key
+    is named, never written, and an operator's other provider survives."""
+    import tomllib
+
+    codex_home = tmp_path / "codex"
+    config = codex_home / "config.toml"
+
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["model"] == "grok"
+    assert parsed["model_provider"] == "litellm"
+    litellm = parsed["model_providers"]["litellm"]
+    assert litellm["base_url"] == "http://100.92.54.45:4000/v1"
+    assert litellm["wire_api"] == "responses"
+    assert litellm["env_key"] == "HOMELAB_LITELLM_SESSION_KEY"
+    assert litellm["web_search"] == "disabled"
+    assert "experimental_bearer_token" not in litellm
+    clawbay = parsed["model_providers"]["theclawbay"]
+    assert clawbay["base_url"] == "https://api.theclawbay.com/backend-api/codex"
+    assert clawbay["wire_api"] == "responses"
+    assert "experimental_bearer_token" not in clawbay
+    assert "HOMELAB_LITELLM" not in config.read_text(encoding="utf-8").replace(
+        'env_key = "HOMELAB_LITELLM_SESSION_KEY"', ""
+    )
+
+    # A theclawbay default, including the old pinned model id, moves to the router.
+    config.write_text(
+        'model = "grok-4.7"\nmodel_provider = "theclawbay"\n\n'
+        "[model_providers.theclawbay]\n"
+        'base_url = "https://api.theclawbay.com/backend-api/codex"\n'
+        'experimental_bearer_token = "operator-token"\n',
+        encoding="utf-8",
+    )
+    moved = _codex_bootstrap(tmp_path, {})
+    assert moved.returncode == 0, moved.stderr
+    text = config.read_text(encoding="utf-8")
+    parsed = tomllib.loads(text)
+    assert parsed["model"] == "grok"
+    assert parsed["model_provider"] == "litellm"
+    assert parsed["model_providers"]["theclawbay"]["experimental_bearer_token"] == (
+        "operator-token"
+    )
+    assert text.count("[model_providers.theclawbay]") == 1
+
+    # Some other provider and model are the operator's choice.
+    config.write_text(
+        'model = "gpt-5.6"\nmodel_provider = "dlab"\n\n[other]\nkept = true\n',
+        encoding="utf-8",
+    )
+    kept = _codex_bootstrap(tmp_path, {})
+    assert kept.returncode == 0, kept.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["model"] == "gpt-5.6"
+    assert parsed["model_provider"] == "dlab"
+    assert parsed["other"] == {"kept": True}
+    assert "litellm" in parsed["model_providers"]
+
+    # Invalid TOML is not rewritten.
+    duplicate = "[model_providers.litellm]\n[model_providers.litellm]\n"
+    config.write_text(duplicate, encoding="utf-8")
+    broken = _codex_bootstrap(tmp_path, {})
+    assert broken.returncode == 0, broken.stderr
+    assert "not valid TOML" in broken.stderr
+    assert config.read_text(encoding="utf-8") == duplicate

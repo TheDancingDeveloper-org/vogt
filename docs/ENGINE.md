@@ -783,6 +783,8 @@ engine turns them into that CLI's own flags (`agent_cli.rs`):
 |---|---|---|
 | `claude` | `--model <id>` | `--effort <level>` |
 | `codex` | `-m <id>` | `-c model_reasoning_effort=<level>` |
+
+**Codex's default model is the estate LiteLLM router** (WI-1147). Codex speaks the Responses API only, so `vogt-mcp-bootstrap` writes `[model_providers.litellm]` into `~/.codex/config.toml` (`${CODEX_HOME}` when set) with `base_url = "http://100.92.54.45:4000/v1"`, `wire_api = "responses"` and `env_key = "HOMELAB_LITELLM_SESSION_KEY"`. The key is that environment variable, exported by the agent-auth manifest (§9); the config never contains it. When `model` and `model_provider` are absent, or already name this bundle (`litellm`, or `theclawbay` with model `grok` / `grok-4.7`), bootstrap sets `model_provider = "litellm"` and `model = "grok"` — the router's `grok` group, not a pinned model id. A session that passes `-m <id>` still overrides `model` for that process. `[model_providers.theclawbay]` is written as a fallback profile with no bearer token; a profile an operator already wrote under that name (one carrying `experimental_bearer_token`) is left untouched, as is any other provider and model an operator set. The rewrite uses the same flock and atomic rename as the read-only server tables, and a config that does not parse is left alone. The manifest line that exports `HOMELAB_LITELLM_SESSION_KEY` is an ops overlay change (Forgejo `indexarr/ops` pull 52), not part of this repository.
 | `opencode` | `--model <provider/id>` | *refused — it has no effort control* |
 | `klaudia` | `--model <id>` | *refused — it has no effort control* |
 

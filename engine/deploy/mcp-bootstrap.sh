@@ -319,13 +319,195 @@ while index < len(lines):
     index += 1
 
 if not found_table:
-    prefix = "[features]\ndaemon_auto_start = false\n"
-    body = "".join(out).rstrip("\n")
-    new = f"{prefix}\n{body}\n" if body else prefix
+    # After the root keys, not before them: a table header swallows every
+    # following assignment until the next header, and model/model_provider
+    # live at the root.
+    split_at = next(
+        (i for i, row in enumerate(out) if row.lstrip().startswith("[")),
+        len(out),
+    )
+    table = "[features]\ndaemon_auto_start = false\n"
+    head = "".join(out[:split_at]).rstrip("\n")
+    tail = "".join(out[split_at:]).rstrip("\n")
+    parts = [part for part in (head, table.rstrip("\n"), tail) if part]
+    new = "\n\n".join(parts) + "\n"
 else:
     new = "".join(out)
     if not new.endswith("\n"):
         new += "\n"
+if new == text:
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
+# Route Codex through the estate LiteLLM router (WI-1147). Codex speaks the
+# Responses API only, and the router exposes it at /v1. The session key is the
+# env var named by env_key — never a token written into this file. theclawbay
+# stays as a fallback profile and is not given a bearer here: a profile this
+# script did not write is left as the operator has it, and one it did write
+# carries no secret.
+#
+# Top-level model and model_provider are set only when absent or when they
+# already name this bundle (litellm, or theclawbay as the provider). An
+# operator's other provider and model are left alone. A config that does not
+# parse is left alone, same as the other writers above.
+codex_litellm_provider() {
+    local config="$1" lockdir
+    lockdir="$(dirname "$config")"
+    mkdir -p "$lockdir"
+    (
+        flock 9
+        CODEX_CONFIG="$config" python3 - <<'PY'
+import os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+LITELLM = (
+    "[model_providers.litellm]\n"
+    'name = "LiteLLM"\n'
+    'base_url = "http://100.92.54.45:4000/v1"\n'
+    'wire_api = "responses"\n'
+    "requires_openai_auth = false\n"
+    "supports_websockets = false\n"
+    'env_key = "HOMELAB_LITELLM_SESSION_KEY"\n'
+    "web_search = \"disabled\"\n"
+)
+CLAWBAY = (
+    "[model_providers.theclawbay]\n"
+    'name = "OpenAI"\n'
+    'base_url = "https://api.theclawbay.com/backend-api/codex"\n'
+    'wire_api = "responses"\n'
+    "requires_openai_auth = false\n"
+    "supports_websockets = false\n"
+)
+
+def _drop(lines: list[str], header: str) -> list[str]:
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        stripped = lines[index].strip()
+        if stripped == header or stripped.startswith(header + "."):
+            index += 1
+            while index < len(lines) and not lines[index].lstrip().startswith("["):
+                index += 1
+            continue
+        kept.append(lines[index])
+        index += 1
+    return kept
+
+lines = text.splitlines(keepends=True)
+# Keep an operator-written theclawbay profile (it may hold their own auth).
+# Replace only a profile this writer owns: no experimental_bearer_token.
+owns_clawbay = False
+in_clawbay = False
+clawbay_body: list[str] = []
+for row in lines:
+    stripped = row.strip()
+    if stripped.startswith("["):
+        if in_clawbay and not any(
+            part.strip().startswith("experimental_bearer_token")
+            for part in clawbay_body
+        ):
+            owns_clawbay = True
+        in_clawbay = stripped == "[model_providers.theclawbay]"
+        clawbay_body = []
+        continue
+    if in_clawbay:
+        clawbay_body.append(row)
+if in_clawbay and not any(
+    part.strip().startswith("experimental_bearer_token") for part in clawbay_body
+):
+    owns_clawbay = True
+
+lines = _drop(lines, "[model_providers.litellm]")
+if owns_clawbay or not any(
+    row.strip() == "[model_providers.theclawbay]" for row in lines
+):
+    lines = _drop(lines, "[model_providers.theclawbay]")
+    write_clawbay = True
+else:
+    write_clawbay = False
+
+def _in_table(index: int) -> bool:
+    for earlier in range(index - 1, -1, -1):
+        stripped = lines[earlier].strip()
+        if stripped.startswith("["):
+            return True
+    return False
+
+def _root_slots(key: str) -> list[int]:
+    slots: list[int] = []
+    for index, row in enumerate(lines):
+        if _in_table(index) or "=" not in row or row.lstrip().startswith("#"):
+            continue
+        if row.split("=", 1)[0].strip() == key:
+            slots.append(index)
+    return slots
+
+def _root_value(key: str) -> str | None:
+    slots = _root_slots(key)
+    if not slots:
+        return None
+    return lines[slots[-1]].split("=", 1)[1].strip().strip('"').strip("'")
+
+def _set_root(key: str, value: str, when: set[str | None]) -> None:
+    current = _root_value(key)
+    if current not in when:
+        return
+    rendered = f'{key} = "{value}"\n'
+    slots = _root_slots(key)
+    if slots:
+        lines[slots[-1]] = rendered
+        return
+    # A key appended after the last table belongs to that table. Root keys
+    # that are new go before the first header.
+    at = next(
+        (i for i, row in enumerate(lines) if row.lstrip().startswith("[")),
+        len(lines),
+    )
+    lines.insert(at, rendered)
+
+# Switch the default only when it is unset or already one of ours.
+_set_root("model_provider", "litellm", {None, "litellm", "theclawbay"})
+if _root_value("model_provider") == "litellm":
+    _set_root("model", "grok", {None, "grok", "grok-4.7"})
+
+body = "".join(lines).rstrip("\n")
+extra = LITELLM + ("\n" + CLAWBAY if write_clawbay else "")
+new = f"{body}\n\n{extra}" if body else extra
+if not new.endswith("\n"):
+    new += "\n"
 if new == text:
     sys.exit(0)
 directory = os.path.dirname(path) or "."
@@ -443,6 +625,8 @@ install_vogt_klaudia || printf 'mcp-bootstrap: klaudia registration of vogt fail
 if command -v codex >/dev/null 2>&1; then
     codex_disable_daemon "${CODEX_HOME:-$HOME/.codex}/config.toml" \
         || printf 'mcp-bootstrap: could not disable the Codex app-server daemon\n' >&2
+    codex_litellm_provider "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not write the Codex LiteLLM provider\n' >&2
 fi
 install_readonly_servers
 
