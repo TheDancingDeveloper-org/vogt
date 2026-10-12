@@ -599,9 +599,16 @@ impl Session {
     /// The dialog on the screen right now, read fresh from a render rather
     /// than from the last activity pass, so an answer is aimed at what is
     /// actually showing.
+    ///
+    /// When the rendered screen shows no dialog but the window title says the
+    /// agent is awaiting approval, a synthetic permission dialog stands in
+    /// (WI-1145, and WI-1279 for Klaudia). It carries no options, so an answer
+    /// refuses before any key is written: the guard only needs to know a
+    /// person must decide, not which choice to press.
     pub fn current_dialog(&self) -> Option<crate::approval::Detected> {
         let (rendered, scrollback) = self.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
         crate::approval::detect(&rendered.lines, &scrollback)
+            .or_else(|| title_approval_dialog(self.title().as_deref()))
     }
 
     /// When the current turn began.
@@ -1613,6 +1620,33 @@ fn wake_activity_watcher(session: &Session) {
 /// redraw of them is always recent output.
 const APPROVAL_SCAN_BYTES: usize = 4096;
 
+/// Whether the window title announces exactly this state, for either agent
+/// whose title this engine reads.
+fn title_says(title: Option<&str>, state: crate::screen::AgentTitle) -> bool {
+    crate::screen::agent_title(title).is_some_and(|(_, found)| found == state)
+}
+
+/// A permission dialog inferred from the window title alone, when the rendered
+/// screen showed none.
+///
+/// The WI-1127 fork's `agent-state` title and Klaudia's `awaiting approval`
+/// both name a dialog the screen parser does not always see (WI-1145,
+/// WI-1279). It is a `permission`, which is what the person gate refuses an
+/// agent for, and it offers no options: answering it fails before any key is
+/// written into the PTY, so a title cannot be used to press a choice.
+fn title_approval_dialog(title: Option<&str>) -> Option<crate::approval::Detected> {
+    title_says(title, crate::screen::AgentTitle::AwaitingApproval).then(|| {
+        crate::approval::Detected {
+            question: "awaiting approval".to_string(),
+            command_excerpt: String::new(),
+            deadline_seconds: None,
+            kind: "permission",
+            options: Vec::new(),
+            horizontal: false,
+        }
+    })
+}
+
 fn compute_activity(session: &Arc<Session>) -> ActivityState {
     let tail = {
         let sb = session.scrollback.lock();
@@ -1635,16 +1669,17 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
         *session.approval.lock() = None;
         return session.terminal_state().unwrap_or(state);
     }
-    // Klaudia says when it is at rest in its title (WI-1090), and its word
-    // outranks output recency: whatever it still draws there is not a turn.
-    // Only ever towards rest — a `running` the title would force could not
-    // collapse when the output stops, and the watcher would spin on it.
-    // A title anything in the session could have set is checked against the
-    // screen: no working line or question showing under it.
+    // Klaudia (WI-1090) and the WI-1127 Codex fork (WI-1145) say when they are
+    // at rest in the window title, and that word outranks output recency:
+    // whatever the TUI still draws there is not a turn. Only ever towards
+    // rest — a `running` the title would force could not collapse when the
+    // output stops, and the watcher would spin on it. A title anything in the
+    // session could have set is checked against the screen: no working line or
+    // question showing under it. Codex has no marker of its own, so it shares
+    // Klaudia's.
     let state = if state == ActivityState::Running
-        && crate::screen::klaudia_title(session.title().as_deref())
-            == Some(crate::screen::KlaudiaTitle::Ready)
-        && session.agent().as_deref() == Some("klaudia")
+        && title_says(session.title().as_deref(), crate::screen::AgentTitle::Ready)
+        && matches!(session.agent().as_deref(), Some("klaudia" | "codex"))
         && !crate::screen::klaudia_busy(&session.render_screen(0).0.lines)
     {
         ActivityState::Idle
@@ -1657,7 +1692,10 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     // answer it rather than type at it. Confirmed on the rendered screen —
     // only rendered when the raw tail mentions a dialog — so one that was
     // answered and redrawn over is not reported from text lingering in the
-    // tail.
+    // tail. When the screen shows nothing but the title says the agent is
+    // awaiting approval, the title stands in: the fork's `agent-state` title
+    // and Klaudia's `awaiting approval` both name dialogs the screen parser
+    // does not always recognise.
     let detected = if crate::approval::mentions_approval(&strip_ansi(&tail)) {
         let (rendered, scrollback) =
             session.render_screen(crate::approval::SCROLLBACK_CONTEXT_LINES);
@@ -1665,6 +1703,7 @@ fn compute_activity(session: &Arc<Session>) -> ActivityState {
     } else {
         None
     };
+    let detected = detected.or_else(|| title_approval_dialog(session.title().as_deref()));
     let mut pending = session.approval.lock();
     match detected {
         Some(found) => {
