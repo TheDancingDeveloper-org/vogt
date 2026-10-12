@@ -580,10 +580,16 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
     A session started outside Vogt — or one whose link Vogt lost — is still
     running, and an agent asking "what sessions are here" must be able to see
     it: reporting only Vogt's own links is why one session could not see
-    another. Such unlinked sessions are appended (with `linked=False` and null
-    declared fields) after the declared page. They carry no project or work
-    item, so a `project`/`work_item` filter excludes them; and because they
-    have no stable page position, they are appended only on the first page.
+    another. Such unlinked sessions are joined (with `linked=False` and null
+    declared fields) before any page is cut. They carry no project or work
+    item, so a `project`/`work_item` filter excludes them.
+
+    The page is cut last. A state filter applied after `limit` rows of
+    hibernated links have already filled the page hides every live session
+    past it and returns a near-empty list with no sign that more existed
+    (WI-1266). The joined set is filtered (digest mode; full mode returns
+    every state, as before), then ordered, then sliced, and
+    `total`/`truncated` say whether the page is the whole answer.
     """
     live: dict[str, EngineSession] = {}
     detail: str | None = None
@@ -594,26 +600,39 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
             live = {row.id: row for row in ctx.engine.list_sessions()}
         except EngineUnavailable as exc:
             detail = str(exc)
-    summaries = _rows(ctx, params, live, detail)
+    joined = _rows(ctx, params, live, detail)
+    now = ctx.clock()
+    stall_after = timedelta(minutes=params.stall_after_minutes)
+    kept = [
+        summary
+        for summary in joined
+        if params.mode == "full"
+        or _kept(
+            summary,
+            _attention_of(summary, now=now, stall_after=stall_after).attention,
+            params.states,
+        )
+    ]
     if params.order == "rss":
         # Stable: sessions with no sample keep their order, after the
         # measured ones.
-        summaries.sort(
+        kept.sort(
             key=lambda s: (1, 0) if s.resources is None else (0, -s.resources.rss_bytes)
         )
+    total = len(kept)
+    page = kept[params.offset : params.offset + params.limit]
+    truncated = params.offset + len(page) < total
     if params.mode == "full":
-        return SessionListResult(sessions=summaries, engine=detail)
-    now = ctx.clock()
-    stall_after = timedelta(minutes=params.stall_after_minutes)
-    digests: list[SessionDigest] = []
-    for summary in summaries:
-        verdict = _attention_of(summary, now=now, stall_after=stall_after)
-        if not _kept(summary, verdict.attention, params.states):
-            continue
+        return SessionListResult(
+            sessions=page, engine=detail, total=total, truncated=truncated
+        )
+    digests = []
+    for summary in page:
+        attention = _attention_of(summary, now=now, stall_after=stall_after).attention
         digests.append(
             _digest_of(
                 summary,
-                attention=verdict.attention,
+                attention=attention,
                 ready=summary.activity == "waiting-for-input",
                 fields=params.fields,
                 budget=_budget_of(
@@ -623,7 +642,9 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
                 ),
             )
         )
-    return SessionListResult(digests=digests, engine=detail)
+    return SessionListResult(
+        digests=digests, engine=detail, total=total, truncated=truncated
+    )
 
 
 def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweepResult:
@@ -665,7 +686,9 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
     tails = {entry.session.id: entry for entry in entries}
     summaries = _rows(
         ctx,
-        ListSessionsParams(project=params.project, limit=500),
+        ListSessionsParams(
+            project=params.project, include_stopped=True, limit=500, offset=0
+        ),
         live,
         None,
     )
@@ -769,8 +792,11 @@ def _rows(
             project_id=project_id,
             work_item_id=work_item_id,
             include_stopped=params.include_stopped,
-            limit=params.limit,
-            offset=params.offset,
+            # The page is cut after the state filter, so the declared half
+            # has to be the whole filtered set. 500 is the operation's own
+            # ceiling (`ListSessionsParams.limit`).
+            limit=500,
+            offset=0,
         )
         summaries = [
             _summarize(
@@ -782,15 +808,17 @@ def _rows(
             for session in sessions
         ]
 
-        # Append live engine sessions Vogt never linked. A project/work-item
+        # Append engine sessions Vogt never linked. A project/work-item
         # filter is a filter on the declared half, which these do not have, so
-        # they surface only when neither filter is set; and they are appended
-        # only on the first page, having no stable position to paginate by.
+        # they surface only when neither filter is set. The caller pages the
+        # joined set afterwards, so they are not sliced here: slicing to the
+        # page size before the state filter drops a live unlinked session
+        # behind a page of hibernated links (WI-1266).
         # An unlinked session whose process has exited is the engine's
         # leftover, not a running terminal: it is listed only when stopped
         # sessions were asked for, as a linked one Vogt stopped would be.
         unfiltered = project_id is None and work_item_id is None
-        if unfiltered and params.offset == 0:
+        if unfiltered:
             for engine_session in live.values():
                 # A hibernated session is asleep, not stopped: listed always.
                 if (
@@ -801,7 +829,6 @@ def _rows(
                     continue
                 if view.session_by_engine_id(engine_session.id) is None:
                     summaries.append(_summarize_engine_only(engine_session, view))
-            summaries = summaries[: params.limit]
 
         templates = {
             summary.engine_session_id: summary.template for summary in summaries

@@ -4581,9 +4581,10 @@ class ListSessionsParams(Params):
     order: Literal["started", "rss"] = Field(
         default="started",
         description=(
-            "`started` (default): newest first, Vogt's links then unlinked "
+            "`started` (default): newest Vogt links first, then unlinked "
             "sessions. `rss`: heaviest process tree first, to find the "
-            "session holding the memory."
+            "session holding the memory. Either order is applied to the "
+            "joined set before the page is cut."
         ),
     )
     work_item: str | None = Field(default=None, description="Work item ref.")
@@ -4633,6 +4634,17 @@ class SessionListResult(Result):
             "still returned: Vogt's record of what it started does not depend "
             "on the engine being up."
         ),
+    )
+    total: int = Field(
+        default=0,
+        description=(
+            "How many sessions match the filters, before `limit`/`offset`. "
+            "`truncated` is set when this page is not all of them."
+        ),
+    )
+    truncated: bool = Field(
+        default=False,
+        description="More sessions match than this page returns.",
     )
 
 
