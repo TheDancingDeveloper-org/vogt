@@ -292,7 +292,7 @@ const Sessions: Component<Props> = (props) => {
                 <section class={`sessions-pending ${isDeepLink() ? "sessions-pending-current" : "sessions-pending-stale"}`} aria-label="Pending approval">
                   <div>
                     <p class="place-kicker">Approval required</p>
-                    <h2>{current.kind === "vogt_write" ? `${current.operation} · ${current.target}` : `Input · ${current.session_name}`}</h2>
+                    <h2>{current.kind === "vogt_write" ? `${current.destructive ? "Destructive · " : ""}${current.operation} · ${current.target}` : `Input · ${current.session_name}`}</h2>
                     {current.kind === "vogt_write" ? (
                       <label class="sessions-pending-reason">
                         <span>Reason for the audited write</span>

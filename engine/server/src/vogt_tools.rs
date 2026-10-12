@@ -668,7 +668,7 @@ fn terse(error: &reqwest::Error) -> &'static str {
     }
 }
 
-fn truncate_utf8(text: &str, max: usize) -> String {
+pub(crate) fn truncate_utf8(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }

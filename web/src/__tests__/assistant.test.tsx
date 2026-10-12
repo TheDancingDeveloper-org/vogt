@@ -468,6 +468,58 @@ describe("replies are spoken, and approval is never one of them", () => {
     }
   });
 
+  it("names the session a stop acts on, on the card and aloud (WI-1267)", async () => {
+    // The card that stopped the wrong worker said only "id ses_01M4…". A
+    // session write must show and say the session's name, its work item and
+    // what it is doing, mark a stop destructive, and flag a reason that is
+    // about a different session.
+    const speech = captureSpeech();
+    localStorage.setItem(TTS_KEY, "1");
+    const opaque = "ses_01M4PA6M9PGXRE0HVZ9127X526";
+    const { container } = await mountAssistant({
+      "POST /api/assistant/message": {
+        body: {
+          reply: null,
+          pending_action: {
+            id: "act_02",
+            kind: "vogt_write",
+            operation: "session.stop",
+            target: `session "rustnzb-beta-driver" · WI-178 · running · id ${opaque}`,
+            reason: "The user asked to pause the oversight session",
+            payload: "{}",
+            destructive: true,
+            session: {
+              id: "4f1c2d3e-0000-4000-8000-000000000178",
+              name: "rustnzb-beta-driver",
+              activity: "running",
+              work_item: "WI-178",
+              cwd: "/workspace/rustnzb",
+            },
+            reason_names: ["oversight"],
+          },
+          tool_trace: [],
+        },
+      },
+    });
+    await say(container, "stop it");
+
+    const card = container.querySelector(".assistant-pending-card");
+    expect(card).not.toBeNull();
+    const target = card!.querySelector('[aria-label="Target session"]');
+    expect(target?.textContent).toContain("rustnzb-beta-driver");
+    expect(target?.textContent).toContain("WI-178");
+    expect(target?.textContent).toContain("running");
+    expect(card!.querySelector(".assistant-pending-destructive")).not.toBeNull();
+    expect(card!.querySelector(".assistant-pending-mismatch")?.textContent).toContain(
+      "oversight",
+    );
+
+    const said = speech.spoken().join(" ");
+    expect(said).toContain("rustnzb-beta-driver");
+    expect(said).toContain("WI-178");
+    expect(said).not.toContain(opaque);
+  });
+
   it("stops speaking when the next thing is said", async () => {
     // A reply still being read aloud while the user is already asking
     // something else is the phone talking over its owner.

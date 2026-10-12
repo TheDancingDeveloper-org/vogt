@@ -1388,6 +1388,24 @@ export interface AssistantVogtWriteAction {
   target: string;
   reason: string;
   payload: string;
+  /** Approving it ends something for good (a session stop or remove). */
+  destructive?: boolean;
+  /**
+   * The session a session write acts on, resolved by the engine. Present for
+   * every session write: a card that showed only the id asked for approval
+   * of an opaque string (WI-1267).
+   */
+  session?: AssistantSessionTarget;
+  /** Other sessions the reason names: a sign the request was misheard. */
+  reason_names?: string[];
+}
+
+export interface AssistantSessionTarget {
+  id: string;
+  name: string;
+  activity: string;
+  work_item?: string;
+  cwd: string;
 }
 
 /** The exact card returned after a Vogt-write reason preview/update. */

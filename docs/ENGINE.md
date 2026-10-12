@@ -1991,7 +1991,18 @@ and a client must not render one as the other:
   "reason": string, "payload": string}` — a mutating Vogt operation (e.g.
   `work.transition`), the arguments pretty-printed in `payload`, and the
   `reason` Vogt will store in its audit log, surfaced on its own because it is
-  the part of the approval that outlives it.
+  the part of the approval that outlives it. It also carries `destructive`
+  (bool: true for `session.stop` and `session.remove`) and, for a write that
+  acts on one session (`session.stop`, `.remove`, `.hibernate`, `.wake`,
+  `.input`, `.answer`, `.bind_work`, `.rename`, `.set_role`, `.keep_awake`),
+  `session: {"id": uuid, "name", "activity", "work_item"?, "cwd"}` — the
+  session the `id` argument names, resolved by the engine from either id form
+  — and `reason_names?: [string]`, other sessions the reason mentions. A
+  session write whose `id` names no session the engine knows is refused back
+  to the model and never carded: a card that names a session only by an opaque
+  id is not an approval anyone can check (WI-1267). A session stop or remove
+  is also refused when the user's turn says "pause" or "pass" and not stop,
+  kill or end: pausing a session is hibernating it.
 
 Both await approval at `POST /api/assistant/actions/:id`, one at a time. The
 identity on *that* request is the credential a Vogt write is made with: the
