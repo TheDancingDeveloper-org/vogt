@@ -78,8 +78,8 @@ voice interface, so keep replies short, conversational, and speakable — no \
 markdown, no code blocks unless the user asks to hear code.\n\
 \"What's going on\", \"what needs me\" and \"how's the roster\" are \
 vogt_session_sweep: pass mode \"digest\", pass attention (\"needs_you\" when \
-the question is what needs a person) and keep screen_lines at 5 or fewer — \
-a longer screen is not speakable. For one named session use \
+the question is what needs a person) and keep screen_lines at 5 — \
+a longer screen is not speakable, and omitting it still reads five lines. For one named session use \
 vogt_session_digest or vogt_session_last_reply, and vogt_session_screen when \
 the question is what is on its screen. Use list_sessions only to look up a \
 session by name or role (it returns at most 32), and read_session_tail for \
@@ -2460,10 +2460,20 @@ fn sweep_args(operation: &str, args: &Value) -> Value {
     }
     let mut object = args.as_object().cloned().unwrap_or_default();
     object.insert("mode".into(), Value::String("digest".into()));
+    // A model sends a whole number as a JSON float (`5.0`), which as_u64
+    // refuses. Anything that is not a finite non-negative line count —
+    // missing, fractional, negative — is the speakable default of 5, not 0:
+    // 0 asks the core for no screen at all.
     let lines = object
         .get("screen_lines")
         .and_then(Value::as_u64)
-        .unwrap_or(0)
+        .or_else(|| {
+            object
+                .get("screen_lines")
+                .and_then(Value::as_f64)
+                .and_then(|n| (n.is_finite() && n >= 0.0 && n.fract() == 0.0).then_some(n as u64))
+        })
+        .unwrap_or(5)
         .min(5);
     object.insert("screen_lines".into(), json!(lines));
     Value::Object(object)
@@ -4231,7 +4241,7 @@ mod tests {
         ] {
             assert!(prompt.contains(tool), "the prompt lost {tool}");
         }
-        assert!(prompt.contains("screen_lines at 5 or fewer"), "{prompt}");
+        assert!(prompt.contains("screen_lines at 5"), "{prompt}");
         assert!(
             prompt.contains("needs_you"),
             "the attention filter is unstated"
@@ -4249,7 +4259,28 @@ mod tests {
         assert_eq!(clamped["mode"], "digest");
         assert_eq!(clamped["screen_lines"], 5);
         assert_eq!(clamped["attention"], json!(["needs_you"]));
-        assert_eq!(sweep_args("session.sweep", &json!({}))["screen_lines"], 0);
+        // Missing, fractional, or negative is the speakable default, not "no screen".
+        assert_eq!(sweep_args("session.sweep", &json!({}))["screen_lines"], 5);
+        assert_eq!(
+            sweep_args("session.sweep", &json!({"screen_lines": 3.0}))["screen_lines"],
+            3
+        );
+        assert_eq!(
+            sweep_args("session.sweep", &json!({"screen_lines": 5.0}))["screen_lines"],
+            5
+        );
+        assert_eq!(
+            sweep_args("session.sweep", &json!({"screen_lines": 2.5}))["screen_lines"],
+            5
+        );
+        assert_eq!(
+            sweep_args("session.sweep", &json!({"screen_lines": -1}))["screen_lines"],
+            5
+        );
+        assert_eq!(
+            sweep_args("session.sweep", &json!({"screen_lines": 0}))["screen_lines"],
+            0
+        );
     }
 
     #[test]
