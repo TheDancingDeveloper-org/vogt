@@ -223,26 +223,7 @@ fn verified_manifest<C: Clock, I: IdFactory>(
         )));
     }
     for name in ["declared.sqlite3", "observed.sqlite3"] {
-        let path = source.join(name);
-        if !path.is_file() {
-            return Err(VogtError::NotFound(format!(
-                "{source} is missing {name}",
-                source = source.display()
-            )));
-        }
-        // A symlink is not a file we own. Following it would let a backup copy
-        // something that is not part of the backup, or overwrite somewhere else
-        // when the copy lands. Checked before the file is opened.
-        if path
-            .symlink_metadata()
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Err(VogtError::InvalidRequest(format!(
-                "{path} is a symlink; a backup's store must be a regular file",
-                path = path.display()
-            )));
-        }
-        validate_store(&path)?;
+        verify_store(source, name)?;
     }
     let current = ctx.declared.schema_version();
     if manifest.declared_schema_version > current {
@@ -255,49 +236,67 @@ fn verified_manifest<C: Clock, I: IdFactory>(
     Ok(manifest)
 }
 
-/// Prove a file is a Vogt store worth copying in. SQLite's own quick check
-/// catches a torn or corrupt database, and the migrations table is what makes it
-/// a Vogt store rather than any SQLite file. A failure here is cheaper than one
-/// discovered after the live store has been replaced.
-fn validate_store(path: &Path) -> Result<(), VogtError> {
-    let conn =
-        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|err| {
-                VogtError::InvalidRequest(format!(
-                    "opening {path} failed: {err}",
-                    path = path.display()
-                ))
-            })?;
-    let check: String = conn
-        .query_row("PRAGMA quick_check", [], |row| row.get(0))
-        .map_err(|err| {
-            VogtError::InvalidRequest(format!(
-                "{path} is not a readable SQLite database: {err}",
-                path = path.display()
-            ))
-        })?;
-    if check != "ok" {
+/// Every Vogt store, declared or observed, carries these two tables from its
+/// first migration: `meta` (0001_foundation) and `migrations` (the migrator's
+/// own bookkeeping). A database without them is somebody else's.
+const STORE_TABLES: [&str; 2] = ["meta", "migrations"];
+
+/// Refuse a store file that must never be copied over the live one.
+///
+/// WI-1066. Restore and clone used to copy whatever sat at the store's name: a
+/// symlink (which a copy follows, so the restore reads a file outside the
+/// backup), a torn or corrupt database, or any SQLite file at all. Each is
+/// refused here, before anything is touched. The messages match the Python
+/// port exactly.
+fn verify_store(source: &Path, name: &str) -> Result<(), VogtError> {
+    let path = source.join(name);
+    if path
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+    {
         return Err(VogtError::InvalidRequest(format!(
-            "{path} failed SQLite's quick check: {check}",
-            path = path.display()
+            "{name} is a symlink; refusing to restore it"
         )));
     }
-    let vogt: bool = conn
-        .query_row(
-            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'migrations'",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|err| {
-            VogtError::InvalidRequest(format!(
-                "reading {path} failed: {err}",
-                path = path.display()
-            ))
-        })?;
-    if !vogt {
+    if !path.is_file() {
+        return Err(VogtError::NotFound(format!(
+            "{source} is missing {name}",
+            source = source.display()
+        )));
+    }
+    let corrupt = format!("{name} failed its integrity check; refusing to restore it");
+    // Read-only and immutable: checking a backup must never write to it, not
+    // even the -wal/-shm files a WAL-mode database would otherwise get.
+    let absolute = path.canonicalize().unwrap_or_else(|_| path.clone());
+    let uri = format!(
+        "file:{}?mode=ro&immutable=1",
+        absolute.to_string_lossy().replace('?', "%3f")
+    );
+    let conn = rusqlite::Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|_| VogtError::InvalidRequest(corrupt.clone()))?;
+    let rows = conn
+        .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+        .map(|value| vec![value])
+        .map_err(|_| VogtError::InvalidRequest(corrupt.clone()))?;
+    if rows != ["ok"] {
+        return Err(VogtError::InvalidRequest(corrupt));
+    }
+    let mut tables = std::collections::HashSet::new();
+    let mut statement = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map_err(|_| VogtError::InvalidRequest(corrupt.clone()))?;
+    let names = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| VogtError::InvalidRequest(corrupt.clone()))?;
+    for table in names {
+        tables.insert(table.map_err(|_| VogtError::InvalidRequest(corrupt.clone()))?);
+    }
+    if !STORE_TABLES.iter().all(|table| tables.contains(*table)) {
         return Err(VogtError::InvalidRequest(format!(
-            "{path} is not a Vogt store: it has no migrations table",
-            path = path.display()
+            "{name} is not a Vogt store; refusing to restore it"
         )));
     }
     Ok(())
@@ -810,24 +809,20 @@ mod tests {
     }
 
     /// A backup whose stores pass, with one of them replaced by `plant`.
-    fn planted(plant: impl FnOnce(&std::path::Path)) -> (Built, Value) {
+    fn planted(name: &str, plant: impl FnOnce(&std::path::Path)) -> (Built, Value) {
         let source = opened();
         let taken = backup(
             ctx(&source),
             &json!({"destination": ctx(&source).config.resolved_data_dir().join("snap").display().to_string(), "reason": "why"}),
         )
         .unwrap();
-        plant(&PathBuf::from(taken["path"].as_str().unwrap()).join("declared.sqlite3"));
+        plant(&PathBuf::from(taken["path"].as_str().unwrap()).join(name));
         (source, taken)
     }
 
-    #[test]
-    fn restore_refuses_a_symlinked_store_and_touches_nothing() {
-        let (source, taken) = planted(|store| {
-            let real = store.with_extension("real");
-            std::fs::rename(store, &real).unwrap();
-            std::os::unix::fs::symlink(&real, store).unwrap();
-        });
+    /// Restore must refuse with exactly this message, and the target's live data
+    /// must survive.
+    fn refused(source: Built, taken: &Value, message: &str) {
         let target = opened();
         let before = ctx(&target).declared.read().unwrap().instance_id().unwrap();
         let error = restore(
@@ -836,7 +831,8 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(error, VogtError::InvalidRequest(message) if message.contains("is a symlink"))
+            matches!(error, VogtError::InvalidRequest(ref got) if got == message),
+            "got {error:?}, wanted {message}"
         );
         let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
         assert_eq!(after, before, "the live store was not replaced");
@@ -844,41 +840,89 @@ mod tests {
     }
 
     #[test]
-    fn restore_refuses_a_corrupt_store_and_touches_nothing() {
-        let (source, taken) = planted(|store| {
-            std::fs::write(store, "this is not a database").unwrap();
+    fn restore_refuses_a_symlinked_store_and_touches_nothing() {
+        let (source, taken) = planted("declared.sqlite3", |store| {
+            let real = store.with_extension("real");
+            std::fs::rename(store, &real).unwrap();
+            std::os::unix::fs::symlink(&real, store).unwrap();
         });
-        let target = opened();
-        let before = ctx(&target).declared.read().unwrap().instance_id().unwrap();
-        let error = restore(
-            ctx(&target),
-            &json!({"source": taken["path"], "confirm": true, "reason": "why"}),
-        )
-        .unwrap_err();
-        assert!(matches!(
-            error,
-            VogtError::InvalidRequest(message) if message.contains("not a readable SQLite database")
-        ));
-        let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
-        assert_eq!(after, before, "the live store was not replaced");
-        drop(source);
+        refused(
+            source,
+            &taken,
+            "declared.sqlite3 is a symlink; refusing to restore it",
+        );
+    }
+
+    #[test]
+    fn restore_refuses_a_corrupt_store_and_touches_nothing() {
+        let (source, taken) = planted("observed.sqlite3", |store| {
+            std::fs::write(store, "not a database".repeat(512)).unwrap();
+        });
+        refused(
+            source,
+            &taken,
+            "observed.sqlite3 failed its integrity check; refusing to restore it",
+        );
+    }
+
+    #[test]
+    fn restore_refuses_a_damaged_store_and_touches_nothing() {
+        // A valid header over damaged pages fails quick_check too.
+        let (source, taken) = planted("declared.sqlite3", |store| {
+            let mut data = std::fs::read(store).unwrap();
+            let page_size = u16::from_be_bytes([data[16], data[17]]) as usize;
+            for byte in data.iter_mut().skip(page_size) {
+                *byte = 0xA5;
+            }
+            std::fs::write(store, data).unwrap();
+        });
+        refused(
+            source,
+            &taken,
+            "declared.sqlite3 failed its integrity check; refusing to restore it",
+        );
     }
 
     #[test]
     fn restore_refuses_a_database_that_is_not_a_vogt_store() {
-        let (source, taken) = planted(|store| {
+        let (source, taken) = planted("observed.sqlite3", |store| {
             std::fs::remove_file(store).unwrap();
             let conn = rusqlite::Connection::open(store).unwrap();
-            conn.execute_batch("CREATE TABLE notes (body TEXT)")
+            conn.execute_batch("CREATE TABLE something_else (x INTEGER)")
                 .unwrap();
         });
-        let error = restore(
+        refused(
+            source,
+            &taken,
+            "observed.sqlite3 is not a Vogt store; refusing to restore it",
+        );
+    }
+
+    #[test]
+    fn a_good_store_restores_and_leaves_no_wal_behind() {
+        let source = opened();
+        let taken = backup(
             ctx(&source),
+            &json!({"destination": ctx(&source).config.resolved_data_dir().join("snap").display().to_string(), "reason": "why"}),
+        )
+        .unwrap();
+        let target = opened();
+        restore(
+            ctx(&target),
             &json!({"source": taken["path"], "confirm": true, "reason": "why"}),
         )
-        .unwrap_err();
+        .unwrap();
+        let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        assert_eq!(after, taken["instance_id"].as_str().unwrap());
+        let backup_dir = PathBuf::from(taken["path"].as_str().unwrap());
+        let leftovers: Vec<_> = std::fs::read_dir(&backup_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with("-wal") || name.ends_with("-shm"))
+            .collect();
         assert!(
-            matches!(error, VogtError::InvalidRequest(message) if message.contains("not a Vogt store"))
+            leftovers.is_empty(),
+            "validating a backup leaves nothing behind in it: {leftovers:?}"
         );
     }
 
