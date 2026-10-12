@@ -9,9 +9,11 @@ export interface RailSections {
   running: boolean;
   recent: boolean;
   files: boolean;
+  /** Show sessions the engine hides from the default list (WI-1289). */
+  showHidden: boolean;
 }
 
-const DEFAULTS: RailSections = { running: true, recent: true, files: false };
+const DEFAULTS: RailSections = { running: true, recent: true, files: false, showHidden: false };
 
 function read(): RailSections {
   try {
@@ -22,6 +24,7 @@ function read(): RailSections {
       running: typeof parsed.running === "boolean" ? parsed.running : DEFAULTS.running,
       recent: typeof parsed.recent === "boolean" ? parsed.recent : DEFAULTS.recent,
       files: typeof parsed.files === "boolean" ? parsed.files : DEFAULTS.files,
+      showHidden: typeof parsed.showHidden === "boolean" ? parsed.showHidden : DEFAULTS.showHidden,
     };
   } catch {
     return { ...DEFAULTS };
@@ -37,7 +40,12 @@ export function setRailSection(key: keyof RailSections, value: boolean): void {
   try {
     localStorage.setItem(
       KEY,
-      JSON.stringify({ running: store.running, recent: store.recent, files: store.files }),
+      JSON.stringify({
+        running: store.running,
+        recent: store.recent,
+        files: store.files,
+        showHidden: store.showHidden,
+      }),
     );
   } catch {
     // Private mode or a full quota: the toggle still works, just does not

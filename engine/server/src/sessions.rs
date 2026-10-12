@@ -2369,7 +2369,7 @@ mod tests {
         tied_same.last_event_at = Some("2026-10-12T09:00:00Z".into());
         tied_same.created_at = "2026-06-01T00:00:00Z".into();
 
-        let mut rows = vec![
+        let mut rows = [
             tied_same.clone(),
             older.clone(),
             newer.clone(),

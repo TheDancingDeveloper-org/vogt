@@ -649,8 +649,22 @@ stated reason it has none, in `src/vogt/registry/engine_routes.py`
 should use those operations — they take either id and are audited — rather
 than these routes.
 
-- `GET /api/sessions` -> `SessionSummary[]` — any valid bearer. Exited
-  sessions are included until deleted; filter on `alive`.
+- `GET /api/sessions[?include=hidden]` -> `SessionList` — any valid bearer.
+  `sessions` is the visible set; `hidden_count` is how many the default list
+  left out, counted separately from pagination. `?include=hidden` returns
+  those rows as well. A session is hidden only when all of these hold: it is
+  not oversight and not pinned with `keep_awake`; it is not running a turn,
+  awaiting approval, blocked, or waiting for input; its state is exited,
+  stopped, hibernated, or idle-and-not-alive; `now - last_event_at` is at
+  least `ENGINE_SESSION_LIST_RETAIN_AFTER` (default `6h`; `off` or `0`
+  disables hiding); and no person typed in that window. Agent input does not
+  count as a person typing. Hiding is a list filter: `GET /api/sessions/:id`
+  still resolves the session, and History and search are unaffected. The
+  list is ordered oversight first, then `last_event_at` descending, then
+  `created_at` descending, then id. The PWA rail keeps that order, with
+  bookmarked sessions between oversight and the rest; the phone terminal
+  pager is the exception and still orders by attention. Exited sessions stay
+  listed until they age out or are deleted.
 - `POST /api/sessions` `SessionSpec` -> `SessionSummary` (requires the
   `sessions` capability)
 - `GET /api/sessions/:id[?tail_bytes=N]` -> `SessionDetail` — the raw
