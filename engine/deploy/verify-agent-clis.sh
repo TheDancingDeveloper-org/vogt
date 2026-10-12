@@ -162,7 +162,7 @@ if [[ -r "$tools_table" ]]; then
         case "${kind:-npm}" in
             npm) check_package "$package" "$(expected_version "$tool")" "$tool" "$binary" ;;
             go-dist) check_go_dist "$(expected_version "$tool")" "$tool" "$binary" ;;
-            go-src) check_go_src "$(expected_version "$tool")" "$tool" ;;
+            go-src|github-release) check_go_src "$(expected_version "$tool")" "$tool" ;;
         esac
     done < "$tools_table"
 else

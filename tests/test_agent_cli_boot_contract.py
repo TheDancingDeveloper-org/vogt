@@ -566,3 +566,136 @@ def test_a_runtime_build_from_another_commit_than_the_manifest_is_fatal(
     checked = sandbox.verify()
     assert checked.returncode == 78
     assert "was built from" in checked.stderr
+
+
+FORK_SHA = "c2d74d2d9f05d0fef63fa0ab2d29055f20b1bb94"
+OTHER_SHA = "a" * 40
+
+
+class ReleaseSandbox:
+    """A github-release row whose `curl` is a local directory of assets."""
+
+    def __init__(self, base: Path) -> None:
+        self.base = base
+        self.root = base / "root"
+        self.share = base / "share"
+        self.releases = base / "releases"
+        self.bin = base / "bin"
+        for path in (self.root, self.share, self.releases, self.bin):
+            path.mkdir(parents=True)
+        (self.share / "agent-versions.resolved").write_text(
+            f"codex={FORK_SHA}\n", encoding="utf-8"
+        )
+        (self.share / "agent-clis.tools").write_text(
+            "codex\thttps://example.invalid/codex\tcodex\tVOGT_CODEX_SHA\tgithub-release\n",
+            encoding="utf-8",
+        )
+        curl = self.bin / "curl"
+        curl.write_text(
+            "#!/bin/sh\n"
+            "out=\n"
+            "url=\n"
+            "while [ $# -gt 0 ]; do\n"
+            '  case "$1" in\n'
+            "    -o) out=$2; shift 2 ;;\n"
+            '    -*) shift ;;\n'
+            '    *) url=$1; shift ;;\n'
+            "  esac\n"
+            "done\n"
+            'name=$(basename "$url")\n'
+            'tag=$(printf %s "$url" | sed -n "s#.*/download/\\([^/]*\\)/.*#\\1#p")\n'
+            f'src="{self.releases}/$tag/$name"\n'
+            '[ -f "$src" ] || exit 22\n'
+            'cp "$src" "$out"\n',
+            encoding="utf-8",
+        )
+        curl.chmod(0o755)
+
+    def publish(self, sha: str, member: bytes, *, sums: str | None = None) -> None:
+        import hashlib
+        import io
+        import tarfile
+
+        tag = self.releases / f"fork-{sha}"
+        tag.mkdir(parents=True, exist_ok=True)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as archive:
+            info = tarfile.TarInfo("codex")
+            info.size = len(member)
+            info.mode = 0o755
+            archive.addfile(info, io.BytesIO(member))
+        asset = tag / "codex-x86_64-unknown-linux-musl.tar.gz"
+        asset.write_bytes(buf.getvalue())
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        (tag / "SHA256SUMS").write_text(
+            sums if sums is not None else f"{digest}  {asset.name}\n",
+            encoding="utf-8",
+        )
+
+    def install(self, version: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.update(
+            {
+                "PATH": f"{self.bin}:{env['PATH']}",
+                "VOGT_AGENT_CLI_ROOT": str(self.root),
+                "VOGT_AGENT_CLI_BAKED_MANIFEST": str(self.share / "agent-versions.resolved"),
+                "VOGT_AGENT_CLI_TOOLS": str(self.share / "agent-clis.tools"),
+                "VOGT_CODEX_SHA": FORK_SHA,
+            }
+        )
+        return subprocess.run(
+            [str(INSTALL), "codex", version],
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+
+    def current(self) -> str | None:
+        link = self.root / "codex" / "current"
+        return link.readlink().name if link.is_symlink() else None
+
+
+@pytest.fixture
+def release_sandbox(tmp_path: Path) -> ReleaseSandbox:
+    return ReleaseSandbox(tmp_path)
+
+
+def test_a_checksum_mismatch_fails_closed_and_leaves_current(
+    release_sandbox: ReleaseSandbox,
+) -> None:
+    # The baked pin is the image copy, so the install under test is a different
+    # commit: a good one first, then one whose published sums do not match.
+    prior = "b" * 40
+    release_sandbox.publish(prior, b"#!/bin/sh\nprintf 'codex-fork\\n'\nexit 0\n")
+    assert release_sandbox.install(prior).returncode == 0
+    assert release_sandbox.current() == prior
+
+    release_sandbox.publish(
+        OTHER_SHA,
+        b"#!/bin/sh\nprintf 'other\\n'\n",
+        sums="0" * 64 + "  codex-x86_64-unknown-linux-musl.tar.gz\n",
+    )
+    failed = release_sandbox.install(OTHER_SHA)
+    assert failed.returncode == 1
+    assert "does not match the SHA256SUMS" in failed.stderr
+    assert release_sandbox.current() == prior
+    assert not (release_sandbox.root / "codex" / OTHER_SHA).exists()
+    assert not list((release_sandbox.root / "codex").glob(".tmp-*"))
+
+
+def test_the_baked_sha_resolves_to_the_image_copy(
+    release_sandbox: ReleaseSandbox,
+) -> None:
+    release_sandbox.publish(FORK_SHA, b"#!/bin/sh\necho baked\n")
+    for requested in ("image", FORK_SHA):
+        resolved = release_sandbox.install(requested)
+        assert resolved.returncode == 0, resolved.stderr
+        assert "image copy" in resolved.stderr
+        assert release_sandbox.current() is None
+
+
+def test_a_short_sha_is_not_a_release_pin(release_sandbox: ReleaseSandbox) -> None:
+    refused = release_sandbox.install(FORK_SHA[:12])
+    assert refused.returncode == 64
+    assert "full commit" in refused.stderr
