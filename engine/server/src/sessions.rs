@@ -416,6 +416,7 @@ impl SessionRegistry {
                 resume: spec.resume.as_deref(),
                 brief_file: brief_path.as_deref(),
                 session_id: Some(id),
+                codex_session_id: self.cfg.codex_session_id,
                 permission_mode: spec.permission_mode.as_deref(),
                 // A wake replays the posture recorded at the first start. The
                 // deployment's settings may have changed since, and reading
@@ -488,7 +489,12 @@ impl SessionRegistry {
         };
         let conversation = match &creating {
             Creating::Fresh(Origin::AgentTask) => None,
-            _ => agent_cli::conversation(base_command.as_deref(), spec.resume.as_deref(), id),
+            _ => agent_cli::conversation(
+                base_command.as_deref(),
+                spec.resume.as_deref(),
+                id,
+                self.cfg.codex_session_id,
+            ),
         };
         // opencode mints its own conversation id, so a fresh opencode session
         // is found in opencode's store once it has started (WI-930).
@@ -1081,9 +1087,9 @@ impl SessionRegistry {
         if record.conversation.is_none() && !allow_shell {
             return Some(
                 "the engine does not know an agent conversation to resume for this session \
-                 (a shell, or an agent CLI whose conversation id it did not pin — a fresh \
-                 Codex or OpenCode session); pass allow_shell to hibernate it anyway, and \
-                 it will wake as a fresh process in the same directory"
+                 (a shell, or an agent CLI whose conversation id it did not pin — stock \
+                 Codex, or a fresh OpenCode session); pass allow_shell to hibernate it \
+                 anyway, and it will wake as a fresh process in the same directory"
                     .into(),
             );
         }
