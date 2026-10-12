@@ -63,8 +63,8 @@ impl<T: ForgeTransport> GitHubProvider<T> {
 }
 
 impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
-    fn capabilities(&self) -> &ForgeCapabilities {
-        &self.capabilities
+    fn capabilities(&self) -> ForgeCapabilities {
+        self.capabilities.clone()
     }
 
     fn list_repos(&self) -> Result<Vec<ForgeRepo>, VogtError> {
@@ -158,8 +158,8 @@ impl<T: ForgeTransport> ForgeProvider for GitHubProvider<T> {
         )
     }
 
-    fn clone_token(&self) -> Option<&str> {
-        self.transport.token()
+    fn clone_token(&self) -> Option<String> {
+        self.transport.token().map(str::to_owned)
     }
 
     fn identity(&self) -> Result<Option<(String, String)>, VogtError> {

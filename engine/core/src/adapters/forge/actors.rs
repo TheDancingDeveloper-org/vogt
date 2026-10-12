@@ -271,8 +271,14 @@ mod tests {
     }
 
     impl ForgeProvider for Stub {
-        fn capabilities(&self) -> &super::super::models::ForgeCapabilities {
-            unimplemented!("the resolver never reads capabilities")
+        fn capabilities(&self) -> super::super::models::ForgeCapabilities {
+            super::super::models::ForgeCapabilities {
+                hosts: Vec::new(),
+                supports_since: false,
+                supports_posture: false,
+                supports_notifications: false,
+                supports_webhooks: false,
+            }
         }
         fn list_repos(&self) -> Result<Vec<super::super::models::ForgeRepo>, VogtError> {
             Ok(Vec::new())
@@ -298,7 +304,7 @@ mod tests {
         ) -> Result<Option<serde_json::Map<String, Value>>, VogtError> {
             Ok(None)
         }
-        fn clone_token(&self) -> Option<&str> {
+        fn clone_token(&self) -> Option<String> {
             None
         }
         fn identity(&self) -> Result<Option<(String, String)>, VogtError> {

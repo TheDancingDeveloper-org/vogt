@@ -19,7 +19,11 @@ pub trait ForgeProvider {
     // -- identity ----------------------------------------------------------
 
     /// What this forge can do, for a caller to read before it asks.
-    fn capabilities(&self) -> &ForgeCapabilities;
+    ///
+    /// Owned, not borrowed: the value is a handful of flags, and returning it by
+    /// value is what keeps [`ForgeProvider`] object-safe, so a directory can hand
+    /// a provider back as `&dyn ForgeProvider`.
+    fn capabilities(&self) -> ForgeCapabilities;
 
     /// Repositories the credential can see. A provider with no usable
     /// credential yields nothing; the caller tells that apart from "the
@@ -49,7 +53,10 @@ pub trait ForgeProvider {
     ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, VogtError>;
 
     /// The token a git clone should use, if one is configured.
-    fn clone_token(&self) -> Option<&str>;
+    ///
+    /// Owned for the same reason as [`capabilities`](Self::capabilities): a
+    /// borrowed token would make the trait unusable behind a trait object.
+    fn clone_token(&self) -> Option<String>;
 
     /// The token owner and reported scopes, or `None` when invalid.
     fn identity(&self) -> Result<Option<(String, String)>, VogtError>;
