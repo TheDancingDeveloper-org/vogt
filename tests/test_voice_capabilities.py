@@ -40,6 +40,30 @@ def test_engine_sets_match_matrix_classes() -> None:
     assert not reads & writes
 
 
+VOICE_SESSION_READS = (
+    "session.sweep",
+    "session.digest",
+    "session.last_reply",
+    "session.screen",
+)
+
+
+def test_voice_session_reads_are_offered_and_need_no_approval() -> None:
+    """The roster and the per-session reads the raw tail cannot stand in for
+    are voice-readable, so the assistant offers them and runs them without
+    the on-screen approval a write waits for."""
+    if not ENGINE.exists():
+        pytest.skip("engine subtree is intentionally absent in core-only CI")
+    rows = dict(ROW.findall(DOC.read_text()))
+    registry = default_registry()
+    for name in VOICE_SESSION_READS:
+        assert rows[name] == "Voice-readable", name
+        assert name in _const("CURATED_READS"), name
+        operation = registry.get(name)
+        assert not operation.mutating, name
+        assert "mcp" in registry.transports_for(name), name
+
+
 def test_voice_classes_agree_with_registry_mutations_and_mcp_availability() -> None:
     registry = default_registry()
     for name, classification in ROW.findall(DOC.read_text()):
