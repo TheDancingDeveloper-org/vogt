@@ -382,7 +382,9 @@ path = os.environ["CODEX_CONFIG"]
 # The catalog Codex deserializes as ModelsResponse (protocol openai_models.rs).
 # One model, the router's grok group. apply_patch_tool_type "freeform" is what
 # makes Codex offer the apply_patch tool; tool_mode is omitted, which is code
-# mode off. The remaining fields are what ModelInfo requires to parse.
+# mode off. availability_nux has no serde default, so it must be present (null).
+# The catalog deserializer rejects a model with neither base_instructions nor
+# model_messages.instructions_template, so the template is a short non-empty string.
 CATALOG = {
     "models": [
         {
@@ -394,8 +396,18 @@ CATALOG = {
             "visibility": "list",
             "supported_in_api": True,
             "priority": 1,
+            "availability_nux": None,
             "upgrade": None,
-            "model_messages": None,
+            "model_messages": {
+                "instructions_template": (
+                    "You are Codex, running through the estate LiteLLM router as grok."
+                ),
+                "approvals": None,
+                "collaboration_modes": None,
+                "auto_review": None,
+                "permissions": None,
+                "multi_agent": None,
+            },
             "default_reasoning_summary": "none",
             "support_verbosity": False,
             "default_verbosity": None,
