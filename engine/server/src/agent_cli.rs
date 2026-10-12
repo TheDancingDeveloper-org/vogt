@@ -357,6 +357,18 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 // rather than a trick.
                 rewritten.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
             }
+            // The WI-1127 fork reads its state back through the window title
+            // (WI-1145). Stock Codex accepts `-c` and ignores a `tui` key it
+            // does not know, so every launch asks for the `agent-state` title
+            // and turns the animations off — they repaint without changing the
+            // screen, which keeps a finished turn reading as busy. The values
+            // are TOML: an array needs its brackets and quotes, a bool does not.
+            rewritten.extend([
+                "-c".to_string(),
+                "tui.terminal_title=[\"agent-state\"]".to_string(),
+                "-c".to_string(),
+                "tui.animations=false".to_string(),
+            ]);
             // Fresh only, and only the fork (WI-1126): stock Codex refuses an
             // unknown flag. A resume already names its id via the subcommand,
             // and a template with arguments of its own is left alone.
@@ -609,7 +621,11 @@ mod tests {
                 "-m",
                 "gpt-5.6",
                 "-c",
-                "model_reasoning_effort=medium"
+                "model_reasoning_effort=medium",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
             ])
         );
     }
@@ -645,7 +661,18 @@ mod tests {
         let out = apply(Some(&cmd(&["/usr/local/bin/codex"])), Some("gpt-5.6"), None)
             .unwrap()
             .unwrap();
-        assert_eq!(out, cmd(&["/usr/local/bin/codex", "-m", "gpt-5.6"]));
+        assert_eq!(
+            out,
+            cmd(&[
+                "/usr/local/bin/codex",
+                "-m",
+                "gpt-5.6",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
+            ])
+        );
     }
 
     #[test]
@@ -749,8 +776,16 @@ mod tests {
             .unwrap()
             .command
             .unwrap();
-        assert_eq!(codex.len(), 5);
-        assert!(codex[4].contains(BRIEF));
+        // The brief stays last; the two `-c` pairs that ask the fork for its
+        // `agent-state` title sit ahead of it (WI-1145).
+        assert_eq!(codex.len(), 9);
+        assert!(codex[8].contains(BRIEF));
+        assert!(codex
+            .windows(2)
+            .any(|w| w == ["-c", "tui.terminal_title=[\"agent-state\"]"]));
+        assert!(codex
+            .windows(2)
+            .any(|w| w == ["-c", "tui.animations=false"]));
 
         let opencode = launch(Some(&protected("opencode")), &with_brief())
             .unwrap()
@@ -812,20 +847,44 @@ mod tests {
             [protected("claude"), cmd(&["--model", "m1", "--resume", id])].concat()
         );
         // `resume` is a codex subcommand, so it sits straight after the
-        // binary, ahead of the flags.
+        // binary, ahead of the flags, and the title overrides follow.
         assert_eq!(
             launch(Some(&protected("codex")), &req)
                 .unwrap()
                 .command
                 .unwrap(),
-            [protected("codex"), cmd(&["resume", id, "-m", "m1"])].concat()
+            [
+                protected("codex"),
+                cmd(&[
+                    "resume",
+                    id,
+                    "-m",
+                    "m1",
+                    "-c",
+                    "tui.terminal_title=[\"agent-state\"]",
+                    "-c",
+                    "tui.animations=false"
+                ])
+            ]
+            .concat()
         );
         assert_eq!(
             launch(Some(&cmd(&["codex", "--search"])), &req)
                 .unwrap()
                 .command
                 .unwrap(),
-            cmd(&["codex", "resume", id, "--search", "-m", "m1"])
+            cmd(&[
+                "codex",
+                "resume",
+                id,
+                "--search",
+                "-m",
+                "m1",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
+            ])
         );
         assert_eq!(
             launch(
@@ -911,12 +970,28 @@ mod tests {
         .command
         .unwrap();
         assert!(!resumed.contains(&"--session-id".to_string()));
-        // Stock Codex refuses `--session-id`, so nothing is added unless the
-        // deployment says its binary is the fork (WI-1126 / WI-1144).
-        assert!(launch(Some(&protected("codex")), &req)
+        // Stock Codex refuses `--session-id`, so that flag is added only when
+        // the deployment says its binary is the fork (WI-1126 / WI-1144). The
+        // `agent-state` title overrides are added either way (WI-1145): stock
+        // Codex accepts `-c` and ignores a `tui` key it does not know.
+        let titled = launch(Some(&protected("codex")), &req)
             .unwrap()
             .command
-            .is_none());
+            .unwrap();
+        assert_eq!(
+            titled,
+            [
+                protected("codex"),
+                cmd(&[
+                    "-c",
+                    "tui.terminal_title=[\"agent-state\"]",
+                    "-c",
+                    "tui.animations=false"
+                ])
+            ]
+            .concat()
+        );
+        assert!(!titled.iter().any(|arg| arg == "--session-id"));
         let forked = LaunchRequest {
             codex_session_id: true,
             ..req
@@ -926,14 +1001,30 @@ mod tests {
                 .unwrap()
                 .command
                 .unwrap(),
-            [protected("codex"), cmd(&["--session-id", &sid.to_string()])].concat()
+            [
+                protected("codex"),
+                cmd(&[
+                    "-c",
+                    "tui.terminal_title=[\"agent-state\"]",
+                    "-c",
+                    "tui.animations=false",
+                    "--session-id",
+                    &sid.to_string()
+                ])
+            ]
+            .concat()
         );
-        // Not when the template carries arguments of its own, and not when
-        // resuming: `codex resume <id>` already names the conversation.
-        assert!(launch(Some(&cmd(&["codex", "--search"])), &forked)
+        // `--session-id` is not added when the template carries arguments of
+        // its own, nor when resuming: `codex resume <id>` already names the
+        // conversation. The title overrides still are.
+        let searching = launch(Some(&cmd(&["codex", "--search"])), &forked)
             .unwrap()
             .command
-            .is_none());
+            .unwrap();
+        assert!(!searching.iter().any(|arg| arg == "--session-id"));
+        assert!(searching
+            .windows(2)
+            .any(|w| w == ["-c", "tui.animations=false"]));
         let resumed = launch(
             Some(&protected("codex")),
             &LaunchRequest {
@@ -946,6 +1037,9 @@ mod tests {
         .unwrap();
         assert!(!resumed.iter().any(|arg| arg == "--session-id"));
         assert!(resumed.windows(2).any(|w| w == ["resume", "abc"]));
+        assert!(resumed
+            .windows(2)
+            .any(|w| w == ["-c", "tui.terminal_title=[\"agent-state\"]"]));
     }
 
     #[test]
@@ -1133,7 +1227,8 @@ mod permission_tests {
             );
             assert!(refused.is_err(), "{command:?}");
         }
-        // A policy file alone is not an ask: Codex starts without it.
+        // A policy file alone is not an ask: Codex starts without it, and still
+        // gets the title overrides every Codex launch carries.
         assert_eq!(
             launch(
                 Some(&cmd(&["codex"])),
@@ -1142,8 +1237,16 @@ mod permission_tests {
                     ..LaunchRequest::default()
                 }
             )
+            .unwrap()
+            .command
             .unwrap(),
-            Launch::default()
+            cmd(&[
+                "codex",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
+            ])
         );
     }
 

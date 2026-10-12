@@ -132,14 +132,15 @@ pub fn exemption(registry: &SessionRegistry, session: &Session) -> Option<String
     if session.output_quiet_for() < session.idle_after() {
         return Some("output is still arriving".into());
     }
-    // Klaudia says in its title when a turn is running, and when it waits
-    // on a permission ask, question or plan approval, none of which are
-    // dialogs the engine recognises (WI-1090).
-    if session.agent().as_deref() == Some("klaudia") {
-        use crate::screen::{klaudia_title, KlaudiaTitle};
-        match klaudia_title(session.title().as_deref()) {
-            Some(KlaudiaTitle::Working) => return Some("a turn is running".into()),
-            Some(KlaudiaTitle::AwaitingApproval) => {
+    // Klaudia (WI-1090) and the WI-1127 Codex fork (WI-1145) say in the window
+    // title when a turn is running, and when they wait on a permission ask,
+    // question or plan approval — none of which are dialogs the engine
+    // recognises from the screen.
+    if matches!(session.agent().as_deref(), Some("klaudia" | "codex")) {
+        use crate::screen::{agent_title, AgentTitle};
+        match agent_title(session.title().as_deref()) {
+            Some((_, AgentTitle::Working)) => return Some("a turn is running".into()),
+            Some((_, AgentTitle::AwaitingApproval)) => {
                 return Some("a permission dialog is open".into())
             }
             _ => {}
