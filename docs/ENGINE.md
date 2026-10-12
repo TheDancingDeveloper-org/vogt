@@ -828,9 +828,15 @@ resumes the newest conversation in its directory. Its brief pointer goes in with
 `--prompt-interactive=<text>`, never as a positional prompt: Klaudia reads a
 positional prompt as `-p` (answer once, then exit), so the session would end
 after its first turn. The pinned Klaudia must have that flag (msp-klaudia
-WI-953); a runtime pin to an older commit starts and refuses it. Codex
-and OpenCode cannot be told an id at launch. Codex's is not knowable to the
-engine; find it with `codex resume` (its picker) inside the pod. OpenCode's
+WI-953); a runtime pin to an older commit starts and refuses it. A bare
+Codex launch is pinned the same way — `--session-id <engine session id>` —
+only when the deployment's Codex is the fork that accepts the flag
+(`VOGT_CODEX_SESSION_ID=true`; the WI-1126 fork, pinned by WI-1142). Stock
+Codex refuses an unknown flag, so with the setting off (the default) a fresh
+Codex session still mints its own id, which the engine does not guess; find
+it with `codex resume` (its picker) inside the pod. A Codex resume keeps
+`codex resume <id>` and does not also pass `--session-id`. OpenCode cannot
+be told an id at launch. OpenCode's
 is **captured** after launch (WI-930): the engine reads opencode's own store
 (`$XDG_DATA_HOME/opencode/opencode.db`, read-only) for the session whose first
 prompt names this engine session's brief, which tells apart several sessions
@@ -1482,8 +1488,9 @@ engine id (WI-912; the design is `docs/design/session-hibernation.md`).
   pinned to the session id (`--session-id`), or any agent started with
   `resume`. The summary's `conversation` names it. A fresh OpenCode session
   can hibernate once its id is captured (a few seconds after launch; see
-  "Which conversation id a session has"). A fresh Codex session mints its own id, and the
-  engine does not guess it. A shell
+  "Which conversation id a session has"). A fresh Codex session is pinned to
+  the engine id only when `VOGT_CODEX_SESSION_ID=true`; otherwise it mints
+  its own id, and the engine does not guess it. A shell
   hibernates only with `allow_shell`, and wakes as a fresh process in the
   same directory (`hibernation.resumable: false`). An agent-task run is
   never hibernated. A refusal is `409` with the reason.
