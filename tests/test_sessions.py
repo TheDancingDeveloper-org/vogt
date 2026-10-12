@@ -867,14 +867,46 @@ def test_unlinked_sessions_are_not_repeated_across_pages(
 ) -> None:
     engine.unlinked["eng-foreign"] = "running"
 
-    first = list_sessions(
-        wired, ListSessionsParams(mode="full", limit=50, offset=0)
-    ).sessions
-    later = list_sessions(
-        wired, ListSessionsParams(mode="full", limit=50, offset=50)
-    ).sessions
-    assert "eng-foreign" in {row.id for row in first}
-    assert "eng-foreign" not in {row.id for row in later}
+    first = list_sessions(wired, ListSessionsParams(mode="full", limit=50, offset=0))
+    later = list_sessions(wired, ListSessionsParams(mode="full", limit=50, offset=50))
+    assert "eng-foreign" in {row.id for row in first.sessions}
+    assert "eng-foreign" not in {row.id for row in later.sessions}
+    assert first.total == 1 and first.truncated is False
+    assert later.total == 1 and later.sessions == []
+
+
+def test_a_page_of_hibernated_links_does_not_hide_a_live_unlinked_session(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1266: filter, then page.
+
+    A declared page that is already full of hibernated links used to be
+    sliced to `limit` before the digest state filter ran, so the one live
+    session the engine held unlinked never appeared and digest mode then
+    dropped the hibernated rows, returning nothing.
+    """
+    for _ in range(51):
+        started = start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+        engine_id = started.session.engine_session_id
+        assert engine_id is not None
+        engine.alive[engine_id] = "hibernated"
+    engine.unlinked["eng-live"] = "running"
+
+    digest = list_sessions(wired, ListSessionsParams())
+    assert [row.id for row in digest.digests] == ["eng-live"]
+    assert digest.total == 1 and digest.truncated is False
+    assert digest.sessions == []
+
+    # Full mode does not apply the digest state filter, so the hibernated
+    # links lead and the live unlinked session is on the next page.
+    full = list_sessions(wired, ListSessionsParams(mode="full"))
+    assert "eng-live" not in {row.id for row in full.sessions}
+    assert full.total == 52 and full.truncated is True
+    assert len(full.sessions) == 50
+
+    page = list_sessions(wired, ListSessionsParams(mode="full", limit=50, offset=50))
+    assert [row.id for row in page.sessions] == ["ses_0001", "eng-live"]
+    assert page.total == 52 and page.truncated is False
 
 
 def test_a_dead_engine_hides_no_unlinked_sessions(wired: AppContext) -> None:
