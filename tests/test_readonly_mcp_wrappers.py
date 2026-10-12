@@ -709,8 +709,14 @@ def test_codex_litellm_provider_is_the_default_and_stores_no_secret(tmp_path: Pa
     assert parsed["model_catalog_json"] == str(catalog_path)
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     assert [model["slug"] for model in catalog["models"]] == ["grok"]
-    assert catalog["models"][0]["apply_patch_tool_type"] == "freeform"
-    assert "tool_mode" not in catalog["models"][0]
+    model = catalog["models"][0]
+    assert model["apply_patch_tool_type"] == "freeform"
+    assert "tool_mode" not in model
+    # ModelsResponse rejects a missing availability_nux (no serde default) and a
+    # model with neither base_instructions nor model_messages.instructions_template.
+    assert model["availability_nux"] is None
+    template = model["model_messages"]["instructions_template"]
+    assert isinstance(template, str) and template.strip()
     clawbay = parsed["model_providers"]["theclawbay"]
     assert clawbay["base_url"] == "https://api.theclawbay.com/backend-api/codex"
     assert clawbay["wire_api"] == "responses"
