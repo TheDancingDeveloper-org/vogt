@@ -11817,6 +11817,10 @@ a.vogt-projects-tag:hover {
   .assistant-pending-head { display: flex; align-items: center; gap: 8px; color: var(--activity-running); font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
   .assistant-pending-copy { color: var(--fg-bright); font-size: 14px; line-height: 1.45; }
   .assistant-keystroke { padding: 1px 6px; border-radius: 5px; background: color-mix(in srgb, var(--activity-idle) 20%, transparent); }
+  .assistant-pending-destructive, .assistant-pending-mismatch { padding: 6px 8px; border-radius: 6px; color: var(--danger); background: var(--danger-soft); font-size: 13px; font-weight: 600; }
+  .assistant-pending-session { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 2px 10px; margin: 0; font-size: 13px; }
+  .assistant-pending-session dt { color: var(--activity-idle); }
+  .assistant-pending-session dd { margin: 0; color: var(--fg-bright); overflow-wrap: anywhere; }
   .assistant-pending-payload { display: block; max-height: 180px; overflow: auto; padding: 6px 8px; border-radius: 5px; background: var(--term-bg); white-space: pre-wrap; word-break: break-all; }
   .assistant-pending-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .assistant-pending-actions button { flex: 1; min-height: 44px; border-radius: 10px; font-size: 14px; font-weight: 600; }

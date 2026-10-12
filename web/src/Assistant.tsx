@@ -309,9 +309,19 @@ function asVogtWrite(
  * approval is an on-screen act, so a misheard "yes" authorises nothing
  */
 function announce(action: AssistantPendingAction): string {
-  return action.kind === "send_input"
-    ? `I'd like to type into session ${action.session_name}. Approve on screen.`
-    : `I'd like to make a Vogt change: ${action.operation} on ${action.target}. Approve on screen.`;
+  if (action.kind === "send_input") {
+    return `I'd like to type into session ${action.session_name}. Approve on screen.`;
+  }
+  // A session write is said by the session's name, never its id: an id is
+  // nothing a listener can check before tapping approve (WI-1267).
+  const session = action.session;
+  if (session) {
+    const verb = action.operation.replace(/^session\./, "").replace(/_/g, " ");
+    const onItem = session.work_item ? `, on ${session.work_item}` : "";
+    const ends = action.destructive ? " That ends its current turn." : "";
+    return `I'd like to ${verb} session ${session.name}${onItem}, now ${session.activity}.${ends} Approve on screen.`;
+  }
+  return `I'd like to make a Vogt change: ${action.operation} on ${action.target}. Approve on screen.`;
 }
 
 export default function Assistant(props: AssistantProps) {
@@ -1908,10 +1918,41 @@ export default function Assistant(props: AssistantProps) {
               <Show when={asVogtWrite(action())}>
                 {(write) => (
                   <>
+                    <Show when={write().destructive}>
+                      <div class="assistant-pending-destructive" role="alert">
+                        Destructive: this ends the session's current turn and cannot be undone.
+                      </div>
+                    </Show>
                     <div class="assistant-pending-copy">
                       Write to Vogt: <strong>{write().operation}</strong> on{" "}
                       <strong>{write().target}</strong>
                     </div>
+                    {/*
+                      The session a session write acts on, by the name a
+                      person knows it by. An id alone is not something
+                      anyone can check before approving (WI-1267).
+                    */}
+                    <Show when={write().session}>
+                      {(session) => (
+                        <dl class="assistant-pending-session" aria-label="Target session">
+                          <dt>Session</dt>
+                          <dd>{session().name}</dd>
+                          <dt>Work item</dt>
+                          <dd>{session().work_item ?? "none"}</dd>
+                          <dt>Activity</dt>
+                          <dd>{session().activity}</dd>
+                          <dt>Directory</dt>
+                          <dd>{session().cwd}</dd>
+                        </dl>
+                      )}
+                    </Show>
+                    <Show when={(write().reason_names ?? []).length > 0}>
+                      <div class="assistant-pending-mismatch" role="alert">
+                        The reason names {(write().reason_names ?? []).join(", ")}, but this
+                        acts on {write().session?.name ?? "another session"}. Check which
+                        session you meant.
+                      </div>
+                    </Show>
                     {/*
                       The reason gets its own line above the payload because
                       Vogt stores it and someone reads it back later — it is
