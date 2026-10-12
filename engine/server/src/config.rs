@@ -300,6 +300,9 @@ pub struct Config {
     pub assistant_model: String,
     /// Upper bound on tool-call rounds per user message.
     pub assistant_max_tool_calls: u32,
+    /// How many sessions the assistant may start per conversation per rolling
+    /// hour. Counted when a start is delivered, not when it is proposed.
+    pub assistant_starts_per_hour: u32,
     /// Optional `reasoning_effort` forwarded to the backend (e.g. "minimal").
     pub assistant_reasoning_effort: Option<String>,
     /// Send `claude-*` model ids to the OpenAI-compatible backend anyway.
@@ -505,6 +508,7 @@ struct FileConfig {
     assistant_model: Option<String>,
     assistant_allow_claude_proxy: Option<bool>,
     assistant_max_tool_calls: Option<u32>,
+    assistant_starts_per_hour: Option<u32>,
     assistant_reasoning_effort: Option<String>,
     assistant_profiles: Option<Vec<AssistantProfile>>,
     assistant_default_profile: Option<String>,
@@ -858,6 +862,19 @@ pub fn load(
         assistant_max_tool_calls: parse_u32_env("ENGINE_ASSISTANT_MAX_TOOL_CALLS")?
             .or(from_file.assistant_max_tool_calls)
             .unwrap_or(8),
+        assistant_starts_per_hour: {
+            let value = parse_u32_env("ENGINE_ASSISTANT_STARTS_PER_HOUR")?
+                .or(from_file.assistant_starts_per_hour)
+                .unwrap_or(3);
+            if value == 0 {
+                return Err(ApiError::Config(
+                    "assistant_starts_per_hour / ENGINE_ASSISTANT_STARTS_PER_HOUR \
+                     must be a positive integer"
+                        .into(),
+                ));
+            }
+            value
+        },
         assistant_reasoning_effort: from_file
             .assistant_reasoning_effort
             .or_else(|| engine_env("ENGINE_ASSISTANT_REASONING_EFFORT").ok())
@@ -1284,6 +1301,11 @@ fn call_policy_from_env() -> Result<crate::call::CallPolicy> {
 /// `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` (`2GiB`, `512M`, bytes). Unset or
 /// empty is off; a value that does not parse is a startup error, not a policy
 /// quietly left off.
+///
+/// `ENGINE_HIBERNATE_LIVE_CAP` is a positive integer, and unset means the
+/// assistant does not count live sessions before starting one. It is parsed
+/// here because it belongs with the hibernation knobs, but it does not turn
+/// the watcher on: the watcher only acts on idle and memory.
 fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
     use crate::hibernate_policy::{parse_duration, parse_size, Policy};
     let read = |name: &str| match engine_env(name) {
@@ -1307,9 +1329,24 @@ fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
             ))
         })?),
     };
+    let live_cap = match read("ENGINE_HIBERNATE_LIVE_CAP")? {
+        None => None,
+        Some(v) => Some(
+            v.trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| {
+                    ApiError::Config(format!(
+                        "ENGINE_HIBERNATE_LIVE_CAP={v:?} is not a positive integer"
+                    ))
+                })?,
+        ),
+    };
     Ok(Policy {
         idle_after,
         memavailable_below,
+        live_cap,
     })
 }
 

@@ -3380,7 +3380,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `agent_activity.summary` | Operator-only | Unavailable: Agent transcript activity is not curated for the voice assistant; read it over MCP, REST or the CLI. |
 | `session.search_output` | Voice-readable | Available: Search session output (live sessions included). |
 | `session.log_tail` | Voice-readable | Available: Read the tail of a session's output log, readable. |
-| `session.input` | Operator-only | Unavailable: The assistant types into terminals with its own engine tool (`send_input`, approval-gated); not offered twice. |
+| `session.input` | Confirmation-gated | Available after approval: Type into a coding session (either id form). The assistant's own 4 KiB cap applies; the core's person gate still decides a permission prompt. |
 | `session.screen` | Voice-readable | Available: The readable screen of one session (either id). `read_session_tail` is the raw scrollback; this is the screen a person would see. |
 | `session.last_reply` | Voice-readable | Available: What one session's agent last said (either id). The raw tail does not pick the reply out. |
 | `session.economics` | Operator-only | Unavailable: A read of the metered transcript (turns, context, compactions); for agents over MCP/CLI/REST, not a voice action. |
@@ -3394,13 +3394,13 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.token` | Operator-only | Unavailable: the session engine's own HTTP call to mint and revoke engine-started agent sessions' credentials; not a voice action. |
 | `session.sweep` | Voice-readable | Available: The voice roster — one digest line per session, the attention filter, a short screen. Accepts either id. This, not `session.list`, answers "what's going on". |
 | `session.hibernate` | Operator-only | Unavailable: Stops a session's processes; for the GUI and for agents over MCP/CLI/REST. |
-| `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
+| `session.wake` | Confirmation-gated | Available after approval: Start a hibernated session's processes again. Hibernating a live session stays Operator-only. |
 | `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |
 | `session.commit_for` | Operator-only | Unavailable: Commits a worker's staged work on its behalf (oversight or a person only); for agents over MCP/CLI/REST, not a voice action. |
 | `session.set_role` | Operator-only | Unavailable: Nominates the overseeing session; for the GUI and for agents over MCP/CLI/REST. |
 | `session.rename` | Operator-only | Unavailable: Renames a session as the GUI does; for the GUI and for agents over MCP/CLI/REST. |
 | `session.remove` | Operator-only | Unavailable: Kills and forgets a session as the GUI's Remove does; for the GUI and for agents over MCP/CLI/REST. |
-| `session.bind_work` | Operator-only | Unavailable: Declares which work item a session serves; for the GUI and for agents over MCP/CLI/REST. |
+| `session.bind_work` | Confirmation-gated | Available after approval: Declare which work item a session serves. |
 | `session.grant_request` | Operator-only | Unavailable: Asks a person to approve a credential for a session; for agents over MCP/CLI/REST. |
 | `session.grant_decide` | Operator-only | Unavailable: A person's approval of a grant, made deliberately in the Inbox, never by voice. |
 | `session.grant_revoke` | Operator-only | Unavailable: Revoking a grant; for the GUI and for agents over MCP/CLI/REST. |

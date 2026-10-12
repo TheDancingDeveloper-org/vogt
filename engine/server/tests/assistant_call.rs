@@ -186,6 +186,7 @@ fn test_config(stub: &str) -> Config {
         assistant_base_url: stub.to_string(),
         assistant_model: "test-model".into(),
         assistant_max_tool_calls: 8,
+        assistant_starts_per_hour: 3,
         assistant_allow_claude_proxy: false,
         assistant_reasoning_effort: None,
         assistant_profiles: vec![],

@@ -53,6 +53,7 @@ fn test_config() -> Config {
         assistant_base_url: "https://api.example.com/v1".into(),
         assistant_model: "gpt-5.4-mini".into(),
         assistant_max_tool_calls: 8,
+        assistant_starts_per_hour: 3,
         assistant_allow_claude_proxy: false,
         assistant_reasoning_effort: None,
         assistant_profiles: vec![],
@@ -9884,6 +9885,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
         &Policy {
             idle_after: Some(Duration::from_millis(500)),
             memavailable_below: None,
+            live_cap: None,
         },
     )
     .await;
