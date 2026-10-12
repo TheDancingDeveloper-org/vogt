@@ -115,11 +115,7 @@ pub fn approval_decision(request_id: &str, allow: bool) -> String {
 /// argv for `codex app-server --stdio`, from a resolved binary (or a command
 /// whose first word is `codex`). TUI flags are not appended.
 pub fn app_server_argv(binary: &str) -> Vec<String> {
-    vec![
-        binary.to_string(),
-        "app-server".into(),
-        "--stdio".into(),
-    ]
+    vec![binary.to_string(), "app-server".into(), "--stdio".into()]
 }
 
 /// `config.toml` for a per-chat `CODEX_HOME`. `env_key` is the one variable
@@ -191,9 +187,17 @@ pub enum CodexEvent {
     /// Assistant text.
     Assistant(String),
     /// A tool the agent is about to run.
-    ToolCall { id: String, name: String, summary: String },
+    ToolCall {
+        id: String,
+        name: String,
+        summary: String,
+    },
     /// A tool finished.
-    ToolResult { id: String, text: String, is_error: bool },
+    ToolResult {
+        id: String,
+        text: String,
+        is_error: bool,
+    },
     /// A turn ended. `error` is set when the turn failed.
     TurnEnd { error: Option<String> },
     /// The server asks a person to approve something.
@@ -234,11 +238,7 @@ fn parse_notification(msg: &Value, method: &str) -> CodexEvent {
     let params = msg.get("params").cloned().unwrap_or(Value::Null);
     if APPROVAL_METHODS.contains(&method) {
         let request_id = str_field(msg, "id").unwrap_or("").to_string();
-        let tool = method
-            .split('/')
-            .nth(1)
-            .unwrap_or("tool")
-            .to_string();
+        let tool = method.split('/').nth(1).unwrap_or("tool").to_string();
         let summary = params
             .get("command")
             .or_else(|| params.get("reason"))
@@ -282,9 +282,7 @@ fn parse_notification(msg: &Value, method: &str) -> CodexEvent {
                 .to_string();
             CodexEvent::ToolCall { id, name, summary }
         }
-        "item/commandExecution/completed"
-        | "item/fileChange/completed"
-        | "item/tool/completed" => {
+        "item/commandExecution/completed" | "item/fileChange/completed" | "item/tool/completed" => {
             let id = str_field(&params, "itemId")
                 .or_else(|| str_field(&params, "id"))
                 .unwrap_or("")
@@ -304,7 +302,11 @@ fn parse_notification(msg: &Value, method: &str) -> CodexEvent {
         "turn/completed" => {
             let error = params
                 .get("error")
-                .and_then(|e| e.get("message").and_then(Value::as_str).or_else(|| e.as_str()))
+                .and_then(|e| {
+                    e.get("message")
+                        .and_then(Value::as_str)
+                        .or_else(|| e.as_str())
+                })
                 .map(str::to_string);
             CodexEvent::TurnEnd { error }
         }
@@ -330,7 +332,9 @@ fn parse_response(msg: &Value) -> CodexEvent {
     if result.get("threadId").is_some() || result.get("thread").is_some() {
         return CodexEvent::ThreadReady;
     }
-    if result.get("userAgent").is_some() || result.get("capabilities").is_some() || result.is_object()
+    if result.get("userAgent").is_some()
+        || result.get("capabilities").is_some()
+        || result.is_object()
     {
         return CodexEvent::Initialized;
     }
@@ -355,7 +359,11 @@ mod tests {
     fn approval_is_not_auto_allowed() {
         let line = r#"{"jsonrpc":"2.0","id":"a1","method":"item/commandExecution/requestApproval","params":{"command":"rm -rf /"}}"#;
         match parse_line(line) {
-            CodexEvent::Approval { request_id, tool, summary } => {
+            CodexEvent::Approval {
+                request_id,
+                tool,
+                summary,
+            } => {
                 assert_eq!(request_id, "a1");
                 assert_eq!(tool, "commandExecution");
                 assert!(summary.contains("rm -rf"));
