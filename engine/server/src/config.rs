@@ -278,6 +278,11 @@ pub struct Config {
     pub auto_agent_auth: bool,
     /// Helper executable used when `auto_agent_auth` is enabled.
     pub agent_auth_helper: std::path::PathBuf,
+    /// The installed Codex accepts `--session-id` (the WI-1126 fork, pinned
+    /// by WI-1142). Stock Codex refuses an unknown flag, so a fresh Codex
+    /// launch is pinned to the engine session id only when this is true.
+    /// `VOGT_CODEX_SESSION_ID`, default false.
+    pub codex_session_id: bool,
     /// `ENGINE_AGENT_AUTH_SECRETS`, parsed: what a deployment declared for
     /// sessions, and therefore the policy the on-demand secret broker
     /// enforces. Empty when nothing is declared, which turns the
@@ -502,6 +507,7 @@ struct FileConfig {
     allowed_origins: Option<Vec<String>>,
     auto_agent_auth: Option<bool>,
     agent_auth_helper: Option<String>,
+    codex_session_id: Option<bool>,
     session_templates: Option<Vec<SessionTemplate>>,
     assistant_api_key: Option<String>,
     assistant_base_url: Option<String>,
@@ -662,6 +668,18 @@ pub fn load(
         .or_else(|_| std::env::current_dir().and_then(|d| d.canonicalize()))
         .unwrap_or(workspace_root_candidate);
 
+    let codex_session_id = match std::env::var("VOGT_CODEX_SESSION_ID") {
+        Ok(value) => Some(parse_bool_env("VOGT_CODEX_SESSION_ID", &value)?),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => {
+            return Err(ApiError::Config(format!(
+                "reading VOGT_CODEX_SESSION_ID: {error}"
+            )));
+        }
+    }
+    .or(from_file.codex_session_id)
+    .unwrap_or(false);
+
     let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
         Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
         Err(std::env::VarError::NotPresent) => None,
@@ -819,6 +837,7 @@ pub fn load(
         ),
         auto_agent_auth,
         agent_auth_helper,
+        codex_session_id,
         agent_auth_secrets,
         agent_grant_projects: engine_env("ENGINE_AGENT_GRANT_PROJECTS")
             .map(|text| {
