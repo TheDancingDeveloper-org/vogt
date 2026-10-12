@@ -1,5 +1,6 @@
 //! Quick chat (WI-1097): a persistent text conversation with an agent CLI
-//! driven over its stream-json protocol rather than in a terminal.
+//! driven over Klaudia's stream-json protocol, or Codex's app-server JSON-RPC
+//! when `ENGINE_CHAT_DRIVER=codex` (WI-1148), rather than in a terminal.
 //!
 //! A chat is not a session. It has no PTY, no scrollback and no activity
 //! heuristic: the agent says when a turn ends (`result`), asks for approval
@@ -23,7 +24,7 @@ pub struct ChatModel {
 /// A program that can drive a chat, and the models it offers.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatDriver {
-    /// `klaudia`: the only driver this engine knows how to speak to.
+    /// `klaudia` (stream-json) or `codex` (app-server JSON-RPC).
     pub name: String,
     pub label: String,
     /// Empty means the picker offers only the driver's own default model.
