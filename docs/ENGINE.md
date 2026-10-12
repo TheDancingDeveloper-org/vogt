@@ -141,8 +141,10 @@ volume when that pin is set. Codex's row is kind `github-release`: a runtime
 `VOGT_CODEX_SHA` is another full commit, downloaded the same way and checked
 against the release's `SHA256SUMS` before `current` moves. The wrapper runs
 the binary with `--no-daemon`, and bootstrap writes
-`daemon_auto_start = false`, so the app-server daemon does not copy the
-binary out from under the pin.
+`daemon_auto_start = false` into `$CODEX_HOME/config.toml` whenever `codex`
+is installed — merging the key into an existing `[features]` table and
+forcing a `true` already there to `false` — so a client that does not go
+through the wrapper still does not copy the binary out from under the pin.
 The image also carries a Go toolchain (WI-951), unconditionally: the release
 `engine/agent-versions.env` pins as `VOGT_GO_VERSION`, checked against the
 sha256s recorded beside it, unpacked to `/usr/local/go` and linked as
