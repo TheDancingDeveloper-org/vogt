@@ -110,28 +110,19 @@ describe("attention order", () => {
     expect(input.map((s) => s.id)).toEqual(["idle-old", "idle-new", "waiting"]);
   });
 
-  it("partitions bookmarks without rebuilding bookmark state per comparison", () => {
+  it("keeps the server's order, lifting bookmarks between oversight and the rest (WI-1289)", () => {
     const rows = [
-      session({ id: "idle-old", activity: "idle", activity_changed_at: "2026-08-18T08:00:00Z" }),
-      session({ id: "waiting", activity: "waiting-for-input" }),
-      session({ id: "idle-new", activity: "idle", activity_changed_at: "2026-08-18T09:00:00Z" }),
-    ];
-    expect(sortSessionsForRail(rows, new Set(["idle-old"])).map((row) => row.id))
-      .toEqual(["idle-old", "waiting", "idle-new"]);
-  });
-
-  it("lists oversight sessions first, ahead of bookmarks and attention (WI-957)", () => {
-    const rows = [
-      session({ id: "waiting", activity: "waiting-for-input" }),
-      session({ id: "bookmarked", activity: "idle" }),
       session({ id: "overseer", activity: "idle", role: "oversight" }),
-      session({ id: "worker", activity: "running", role: "worker" }),
       session({ id: "overseer-busy", activity: "waiting-for-input", role: "oversight" }),
+      session({ id: "recent", activity: "idle" }),
+      session({ id: "bookmarked", activity: "idle" }),
+      session({ id: "older", activity: "running", role: "worker" }),
     ];
+    // Attention would have put waiting first; the rail must not.
     expect(sortSessionsForRail(rows, new Set(["bookmarked"])).map((row) => row.id))
-      .toEqual(["overseer-busy", "overseer", "bookmarked", "waiting", "worker"]);
-    expect(isOversight(rows[2]!)).toBe(true);
-    expect(isOversight(rows[0]!)).toBe(false);
+      .toEqual(["overseer", "overseer-busy", "bookmarked", "recent", "older"]);
+    expect(isOversight(rows[0]!)).toBe(true);
+    expect(isOversight(rows[2]!)).toBe(false);
   });
 });
 

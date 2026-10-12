@@ -1081,6 +1081,11 @@ textarea {
   z-index: 2;
   background: var(--bg-elev);
 }
+.rail-hidden-toggle {
+  text-align: left;
+  color: var(--fg-dim, var(--fg));
+  font-size: 0.85em;
+}
 .rail-connection {
   display: inline-flex;
   align-items: center;

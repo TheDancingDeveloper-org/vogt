@@ -92,7 +92,7 @@ function liveSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
 
 /** Drive the global live-session store the History list unions in. */
 async function setLiveSessions(list: SessionSummary[]): Promise<void> {
-  vi.spyOn(api, "listSessions").mockResolvedValue(list);
+  vi.spyOn(api, "listSessions").mockResolvedValue({ sessions: list, hidden_count: 0 });
   await refreshSessions();
 }
 

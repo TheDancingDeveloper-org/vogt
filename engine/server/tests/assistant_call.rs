@@ -212,6 +212,7 @@ fn test_config(stub: &str) -> Config {
         vogt_core_token: None,
         agent_clis: vogt_engine_server::agent_clis::AgentCliPaths::default(),
         hibernation: vogt_engine_server::hibernate_policy::Policy::default(),
+        session_list_retain_after: None,
         assistant_call: vogt_engine_server::call::CallPolicy {
             // Captions re-transcribe on a timer; off here so each turn makes
             // exactly the transcription calls the test expects.

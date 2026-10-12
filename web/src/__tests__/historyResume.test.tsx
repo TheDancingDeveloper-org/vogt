@@ -95,7 +95,7 @@ function renderHistory(onOpenSession = vi.fn(), overseer = lostOverseer) {
 
 afterEach(async () => {
   vi.restoreAllMocks();
-  vi.spyOn(api, "listSessions").mockResolvedValue([]);
+  vi.spyOn(api, "listSessions").mockResolvedValue({ sessions: [], hidden_count: 0 });
   await refreshSessions();
   vi.restoreAllMocks();
 });
@@ -148,7 +148,7 @@ describe("History identity and resume (WI-962)", () => {
   });
 
   it("offers no resume for a session that is still running", async () => {
-    vi.spyOn(api, "listSessions").mockResolvedValue([
+    vi.spyOn(api, "listSessions").mockResolvedValue({ sessions: [
       {
         id: lostOverseer.id,
         name: "Oversight",
@@ -161,7 +161,7 @@ describe("History identity and resume (WI-962)", () => {
         role: "oversight",
         conversation: { agent: "claude", id: CONVERSATION },
       },
-    ]);
+    ], hidden_count: 0 });
     await refreshSessions();
     renderHistory();
     const row = (await screen.findByText("oversight · claude · 6c1f0d2e…")).closest("button");

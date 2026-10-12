@@ -9,11 +9,14 @@ import type {
 import { api, subscribeEvents } from "./api";
 import { recordTransportSuccess } from "./connectionHealth";
 import { getStoragePrefs } from "./storagePrefs";
+import { railSections } from "./railSections";
 import { noteForeground, onWake, reconcile, type Wake } from "./wakeCoordinator";
 
 interface SessionsStore {
   sessions: Record<string, SessionSummary>;
   order: string[];
+  /** How many the engine left out of the default list (WI-1289). */
+  hiddenCount: number;
   /** True once we've loaded the initial list at least once. */
   ready: boolean;
   /** Timestamp of the last successful list or stream answer. */
@@ -23,6 +26,7 @@ interface SessionsStore {
 const [store, setStore] = createStore<SessionsStore>({
   sessions: {},
   order: [],
+  hiddenCount: 0,
   ready: false,
   lastAnswerAt: null,
 });
@@ -81,7 +85,7 @@ function sessionListPending(): boolean {
 export async function refreshSessions(signal?: AbortSignal): Promise<void> {
   armStallTimer();
   try {
-    const list = await api.listSessions(signal);
+    const list = await api.listSessions(signal, railSections.showHidden);
     // Superseded by a newer read, not answered: say nothing, and leave the
     // stall timer armed so *some* list still has to land.
     if (signal?.aborted) return;
@@ -90,10 +94,11 @@ export async function refreshSessions(signal?: AbortSignal): Promise<void> {
       produce((s) => {
         s.sessions = {};
         s.order = [];
-        for (const sess of list) {
+        for (const sess of list.sessions) {
           s.sessions[sess.id] = sess;
           s.order.push(sess.id);
         }
+        s.hiddenCount = list.hidden_count;
         s.ready = true;
       }),
     );

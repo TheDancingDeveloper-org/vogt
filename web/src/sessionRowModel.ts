@@ -158,21 +158,23 @@ export function isOversight(s: Pick<SessionSummary, "role">): boolean {
   return s.role === "oversight";
 }
 
-/** Attention order plus two stable partitions for the Places rail: oversight
- *  sessions first (WI-957) — the one a reader goes to for the state of
- *  everything else — then bookmarks, then the rest. Within each partition the
- *  attention order holds. */
+/** Places-rail order (WI-1289). The engine already sorts the list: oversight
+ *  first, then `last_event_at` descending. This keeps that order and only
+ *  lifts bookmarked workers into the partition between oversight and the rest,
+ *  stable, so a bookmark does not lose its place among other bookmarks.
+ *  Attention is a badge on the row, not a reshuffle — except the phone pager,
+ *  which still calls `sortSessionsByAttention` on purpose. */
 export function sortSessionsForRail(
   sessions: SessionSummary[],
   bookmarked: ReadonlySet<string>,
 ): SessionSummary[] {
   const partition = (s: SessionSummary) => (isOversight(s) ? 0 : bookmarked.has(s.id) ? 1 : 2);
-  return sortSessionsByAttention(sessions).sort((left, right) => partition(left) - partition(right));
+  return [...sessions].sort((left, right) => partition(left) - partition(right));
 }
 
-/** Attention order with oversight sessions floated first (WI-957, WI-1091):
- *  the Sessions list, which has no bookmarks partition. The phone's terminal
- *  pager stays in plain attention order. */
+/** The engine's order, with oversight already first (WI-957, WI-1289): the
+ *  Sessions list, which has no bookmarks partition. The phone's terminal
+ *  pager stays in plain attention order and does not use this. */
 export function sortSessionsOversightFirst(sessions: SessionSummary[]): SessionSummary[] {
   return sortSessionsForRail(sessions, new Set());
 }

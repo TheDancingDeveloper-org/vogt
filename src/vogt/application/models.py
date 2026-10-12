@@ -4622,6 +4622,15 @@ class ListSessionsParams(Params):
             "classified `stalled` on a digest row."
         ),
     )
+    include_hidden: bool = Field(
+        default=False,
+        description=(
+            "Also return sessions the engine hides from its default list "
+            "(WI-1289): aged out, finished or idle-and-not-alive, with no "
+            "recent person input. Off by default. `hidden_count` on the "
+            "result counts them either way, and session.get still resolves one."
+        ),
+    )
     limit: int = Field(default=50, ge=1, le=500)
     offset: int = Field(default=0, ge=0)
 
@@ -4655,6 +4664,15 @@ class SessionListResult(Result):
     truncated: bool = Field(
         default=False,
         description="More sessions match than this page returns.",
+    )
+    hidden_count: int = Field(
+        default=0,
+        description=(
+            "How many sessions the engine left out of its default list "
+            "(WI-1289), counted before this operation's own filters and "
+            "paging. 0 from an engine that does not report it. Those "
+            "sessions are in `sessions` only when `include_hidden` was set."
+        ),
     )
 
 
