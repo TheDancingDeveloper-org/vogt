@@ -19,6 +19,12 @@ else
     codex_real=/usr/local/libexec/codex-real
 fi
 
+# The app-server daemon (WI-1142) copies this binary into $CODEX_HOME and
+# execs that copy, which then sits outside the pin. `--no-daemon` keeps the
+# process the one just resolved; `daemon_auto_start=false` is written into
+# Codex config by mcp-bootstrap so a client that omits the flag still does not
+# start one.
 exec "$codex_real" \
+    --no-daemon \
     --dangerously-bypass-approvals-and-sandbox \
     "$@"

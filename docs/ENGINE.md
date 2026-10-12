@@ -123,15 +123,28 @@ repository root is a separate build rather than a stage of this one: it is
 the hardened input this image lifts its core from, not something to deploy on
 its own (`DEPLOYMENT.md`).
 
-Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `codex`,
-`claude` and `opencode` CLIs at the Renovate-pinned versions in
-`engine/agent-versions.env`, and `klaudia` (WI-950), a Go coding agent no
+Build arguments worth knowing: `INSTALL_AI_CLIENTS=true` bakes in the `claude`
+and `opencode` CLIs at the Renovate-pinned versions in
+`engine/agent-versions.env`, `codex` (WI-1142) from the fork release asset for
+the full commit `VOGT_CODEX_SHA` of `VOGT_CODEX_SOURCE` (tag `fork-<sha>`,
+asset `codex-<target>.tar.gz`, checked against the sha256 recorded beside the
+pin), and `klaudia` (WI-950), a Go coding agent no
 registry publishes, built with the image's Go from the commit pinned there
 (`VOGT_KLAUDIA_VERSION`, a full commit id of `VOGT_KLAUDIA_SOURCE`); it is off by default for a local build and on in
 the published image. That baked copy is the baseline, and the version a
 running pod uses can be moved without a rebuild by the runtime pin described
 in [`DEPLOYMENT.md`](DEPLOYMENT.md) §3 (`VOGT_CLAUDE_CODE_VERSION` and
-friends, applied by `vogt-agent-cli-install` at container start).
+friends, applied by `vogt-agent-cli-install` at container start). Stock npm
+Codex stays selectable for rollback: `VOGT_CODEX_VERSION` still names
+`@openai/codex`, and the `codex-npm` row (kind `npm`) installs it into the
+volume when that pin is set. Codex's row is kind `github-release`: a runtime
+`VOGT_CODEX_SHA` is another full commit, downloaded the same way and checked
+against the release's `SHA256SUMS` before `current` moves. The wrapper runs
+the binary with `--no-daemon`, and bootstrap writes
+`daemon_auto_start = false` into `$CODEX_HOME/config.toml` whenever `codex`
+is installed — merging the key into an existing `[features]` table and
+forcing a `true` already there to `false` — so a client that does not go
+through the wrapper still does not copy the binary out from under the pin.
 The image also carries a Go toolchain (WI-951), unconditionally: the release
 `engine/agent-versions.env` pins as `VOGT_GO_VERSION`, checked against the
 sha256s recorded beside it, unpacked to `/usr/local/go` and linked as
@@ -171,7 +184,7 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
-| `codex` wrapper | `deploy/codex-full-access.sh` | runs Codex without its nested sandbox, because the pod is the isolation boundary | only with `INSTALL_AI_CLIENTS` |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs Codex without its nested sandbox and without the app-server daemon (`--no-daemon`; `daemon_auto_start` off), because the pod is the isolation boundary and the daemon would copy the binary out of the pin | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with
