@@ -81,10 +81,16 @@ pub struct LaunchRequest<'a> {
     /// Where the session's brief will be written, when it has one. The agent
     /// is told to read it as its first prompt.
     pub brief_file: Option<&'a Path>,
-    /// The engine's id for the session. A fresh, bare Claude Code launch uses
-    /// it as the conversation id, so the conversation can later be resumed by
-    /// the id every session and history listing already shows.
+    /// The engine's id for the session. A fresh, bare Claude Code, Klaudia or
+    /// fork-Codex launch uses it as the conversation id, so the conversation
+    /// can later be resumed by the id every session and history listing
+    /// already shows. Stock Codex does not take `--session-id`, so it is
+    /// pinned only when [`LaunchRequest::codex_session_id`] is set.
     pub session_id: Option<Uuid>,
+    /// The Codex binary accepts `--session-id` (the WI-1126 fork). Stock
+    /// Codex refuses an unknown flag and would not start, so a fresh Codex
+    /// launch is pinned only when this is true.
+    pub codex_session_id: bool,
     /// `default` / `accept-edits` / `bypass` (WI-926). Klaudia takes
     /// `default` and `bypass` only.
     pub permission_mode: Option<&'a str>,
@@ -351,6 +357,14 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 // rather than a trick.
                 rewritten.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
             }
+            // Fresh only, and only the fork (WI-1126): stock Codex refuses an
+            // unknown flag. A resume already names its id via the subcommand,
+            // and a template with arguments of its own is left alone.
+            if resume.is_none() && bare && req.codex_session_id {
+                if let Some(id) = req.session_id {
+                    rewritten.extend(["--session-id".to_string(), id.to_string()]);
+                }
+            }
             // Positional, and last: `codex [PROMPT]` / `codex resume [ID] [PROMPT]`.
             if let Some(prompt) = prompt {
                 rewritten.push(prompt);
@@ -434,14 +448,16 @@ pub fn agent_name(command: &[String]) -> Option<String> {
 
 /// The agent conversation a session started with `command` runs, when its
 /// id is known before the CLI says anything: the one it resumes, or — for a
-/// bare Claude Code launch, which [`launch`] pins with `--session-id` — the
-/// engine's own id for the session. `None` for anything else, including a
-/// fresh Codex or OpenCode session, whose id the CLI mints itself: resuming
-/// by a guess could continue somebody else's conversation.
+/// bare launch [`launch`] pins with `--session-id` — the engine's own id for
+/// the session. Claude Code and Klaudia are always pinned that way. Codex is
+/// pinned only when `codex_session_id` is set (the WI-1126 fork); stock Codex
+/// and OpenCode mint their own id, and guessing one could continue somebody
+/// else's conversation.
 pub fn conversation(
     command: Option<&[String]>,
     resume: Option<&str>,
     session_id: Uuid,
+    codex_session_id: bool,
 ) -> Option<vogt_engine_contract::AgentConversation> {
     let command = command.filter(|c| !c.is_empty())?;
     let (binary_idx, binary) = agent_binary(command);
@@ -456,12 +472,12 @@ pub fn conversation(
             id: id.to_string(),
         });
     }
-    (matches!(binary.as_str(), "claude" | "klaudia") && binary_idx + 1 == command.len()).then(
-        || vogt_engine_contract::AgentConversation {
-            agent: binary,
-            id: session_id.to_string(),
-        },
-    )
+    let pinned = matches!(binary.as_str(), "claude" | "klaudia")
+        || (binary.as_str() == "codex" && codex_session_id);
+    (pinned && binary_idx + 1 == command.len()).then(|| vogt_engine_contract::AgentConversation {
+        agent: binary,
+        id: session_id.to_string(),
+    })
 }
 
 /// Whether `value` is a well-formed conversation id (see
@@ -895,11 +911,41 @@ mod tests {
         .command
         .unwrap();
         assert!(!resumed.contains(&"--session-id".to_string()));
-        // Codex cannot be told an id, so nothing is added for it.
+        // Stock Codex refuses `--session-id`, so nothing is added unless the
+        // deployment says its binary is the fork (WI-1126 / WI-1144).
         assert!(launch(Some(&protected("codex")), &req)
             .unwrap()
             .command
             .is_none());
+        let forked = LaunchRequest {
+            codex_session_id: true,
+            ..req
+        };
+        assert_eq!(
+            launch(Some(&protected("codex")), &forked)
+                .unwrap()
+                .command
+                .unwrap(),
+            [protected("codex"), cmd(&["--session-id", &sid.to_string()])].concat()
+        );
+        // Not when the template carries arguments of its own, and not when
+        // resuming: `codex resume <id>` already names the conversation.
+        assert!(launch(Some(&cmd(&["codex", "--search"])), &forked)
+            .unwrap()
+            .command
+            .is_none());
+        let resumed = launch(
+            Some(&protected("codex")),
+            &LaunchRequest {
+                resume: Some("abc"),
+                ..forked
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(!resumed.iter().any(|arg| arg == "--session-id"));
+        assert!(resumed.windows(2).any(|w| w == ["resume", "abc"]));
     }
 
     #[test]
@@ -1001,25 +1047,33 @@ mod conversation_tests {
     fn a_bare_claude_runs_the_engines_id_and_a_resume_runs_its_own() {
         let id = Uuid::new_v4();
         let wrapped = argv(&["vogt-agent-auth", "run", "--", "claude"]);
-        let found = conversation(Some(&wrapped), None, id).unwrap();
+        let found = conversation(Some(&wrapped), None, id, false).unwrap();
         assert_eq!((found.agent.as_str(), found.id), ("claude", id.to_string()));
 
-        let resumed = conversation(Some(&wrapped), Some("abc-123"), id).unwrap();
+        let resumed = conversation(Some(&wrapped), Some("abc-123"), id, false).unwrap();
         assert_eq!(resumed.id, "abc-123");
-        let codex = conversation(Some(&argv(&["codex"])), Some("r1"), id).unwrap();
+        let codex = conversation(Some(&argv(&["codex"])), Some("r1"), id, false).unwrap();
         assert_eq!((codex.agent.as_str(), codex.id.as_str()), ("codex", "r1"));
     }
 
     #[test]
     fn an_unknown_id_is_none_not_a_guess() {
         let id = Uuid::new_v4();
-        // Codex mints its own id; a claude with arguments of its own may
-        // carry `--continue` or a session id the engine did not pin.
-        assert!(conversation(Some(&argv(&["codex"])), None, id).is_none());
-        assert!(conversation(Some(&argv(&["claude", "--continue"])), None, id).is_none());
-        assert!(conversation(Some(&argv(&["bash"])), Some("x"), id).is_none());
-        assert!(conversation(None, None, id).is_none());
-        assert!(conversation(Some(&argv(&["claude"])), Some("-bad"), id).is_none());
+        // Stock Codex mints its own id. The fork (codex_session_id) is pinned
+        // to the engine id when the command is bare, and not when it carries
+        // arguments of its own. A claude with arguments of its own may carry
+        // `--continue` or a session id the engine did not pin.
+        assert!(conversation(Some(&argv(&["codex"])), None, id, false).is_none());
+        let forked = conversation(Some(&argv(&["codex"])), None, id, true).unwrap();
+        assert_eq!(
+            (forked.agent.as_str(), forked.id.as_str()),
+            ("codex", id.to_string().as_str())
+        );
+        assert!(conversation(Some(&argv(&["codex", "--search"])), None, id, true).is_none());
+        assert!(conversation(Some(&argv(&["claude", "--continue"])), None, id, false).is_none());
+        assert!(conversation(Some(&argv(&["bash"])), Some("x"), id, false).is_none());
+        assert!(conversation(None, None, id, false).is_none());
+        assert!(conversation(Some(&argv(&["claude"])), Some("-bad"), id, false).is_none());
     }
 }
 
@@ -1253,7 +1307,7 @@ mod permission_tests {
     #[test]
     fn a_bare_klaudia_launch_runs_the_engines_conversation() {
         let id = Uuid::new_v4();
-        let conversation = conversation(Some(&cmd(&["klaudia"])), None, id).unwrap();
+        let conversation = conversation(Some(&cmd(&["klaudia"])), None, id, false).unwrap();
         assert_eq!(conversation.agent, "klaudia");
         assert_eq!(conversation.id, id.to_string());
         assert_eq!(

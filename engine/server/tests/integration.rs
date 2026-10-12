@@ -41,6 +41,7 @@ fn test_config() -> Config {
         allowed_origins: vec![],
         auto_agent_auth: false,
         agent_auth_helper: "/usr/local/bin/vogt-agent-auth".into(),
+        codex_session_id: false,
         agent_auth_secrets: vec![],
         agent_grant_projects: vec![],
         // The synthetic agent CLI is registered as a session preset in the
