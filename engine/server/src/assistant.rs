@@ -2478,13 +2478,17 @@ impl AssistantRuntime {
                 caught_up = false;
                 continue;
             };
-            // A dropped ring, or a page cut inside this session's own
-            // changes, means a later matching delta was not read. Other
-            // sessions' events sit in the same ring and must not pin the
-            // cursor: `changes` already advanced past them when this
-            // session's page was complete.
-            let own = page.changes.last().map(|change| change.seq);
-            let cut = page.truncated || own.is_some_and(|seq| page.next_cursor == seq);
+            // A dropped ring, or a page the limit cut inside this session's
+            // own changes, means a later matching delta was not read. A
+            // complete page is not that cut: `changes` sets `next_cursor` to
+            // the last row whenever the unfiltered ring is longer than the
+            // filtered page, which is also true when this session's own last
+            // change is the bus head. Treating that as a cut would pin the
+            // conversation cursor forever. `since` is exclusive, so resuming
+            // at that row still returns the next one; the page is caught up
+            // when the ring was not dropped and fewer than the limit of this
+            // session's own changes came back.
+            let cut = page.truncated || page.changes.len() == 50;
             if cut {
                 caught_up = false;
                 watch.since = page.next_cursor;
@@ -3846,6 +3850,59 @@ mod tests {
                 .iter()
                 .any(|body| body.contains("cat: activity ready")),
             "the first watch's reply must survive the second watch, got: {bodies:?}"
+        );
+    }
+
+    /// A watched session that owns the bus head is still caught up: the next
+    /// matching change after that briefing must be briefed once, not pinned
+    /// behind a cursor that never advances.
+    #[tokio::test]
+    async fn a_second_reply_after_the_watched_session_was_the_head_is_briefed() {
+        let sessions = test_registry();
+        let cat = spawn_cat(&sessions);
+        let _kill = KillOnDrop(Arc::clone(&sessions), cat.id);
+        let rt = runtime_with_script(
+            sessions,
+            vec![
+                tool_call_reply("watch_session", json!({"session_id": cat.id.to_string()})),
+                final_reply("watching"),
+                final_reply("first reply"),
+                final_reply("second reply"),
+                final_reply("nothing new"),
+            ],
+        );
+        rt.handle_message(terminal_caller(), "watch it".into(), None, None)
+            .await
+            .unwrap();
+
+        publish_ready(&rt, cat.id);
+        let second = rt
+            .handle_message(terminal_caller(), "anything back?".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(second.reply.as_deref(), Some("first reply"));
+
+        publish_ready(&rt, cat.id);
+        let third = rt
+            .handle_message(terminal_caller(), "and again?".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(third.reply.as_deref(), Some("second reply"));
+        assert_eq!(
+            stored_system_containing(&rt, "<session-changes>\n").await,
+            2,
+            "the reply after the watched session was the bus head must be briefed"
+        );
+
+        let fourth = rt
+            .handle_message(terminal_caller(), "and now?".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(fourth.reply.as_deref(), Some("nothing new"));
+        assert_eq!(
+            stored_system_containing(&rt, "<session-changes>\n").await,
+            2,
+            "a turn with no new change must not brief again"
         );
     }
 
