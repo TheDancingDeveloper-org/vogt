@@ -847,10 +847,34 @@ class EngineClient:
         payload = self._call("/api/sessions", method="POST", payload=spec)
         return EngineSession.from_payload(payload if isinstance(payload, dict) else {})
 
-    def list_sessions(self) -> list[EngineSession]:
-        payload = self._call("/api/sessions")
-        rows = payload if isinstance(payload, list) else []
-        return [EngineSession.from_payload(row) for row in rows]
+    def list_sessions(
+        self, *, include_hidden: bool = False
+    ) -> tuple[list[EngineSession], int]:
+        """The engine's sessions, and how many the default list hides.
+
+        `include_hidden` asks for the aged-out rows as well (`?include=hidden`,
+        WI-1289). The default is the visible set, which is what every caller
+        that does not name the flag has always read.
+
+        The engine answers `{sessions, hidden_count}`. An older engine answers
+        a bare list and says nothing about what it hid, so `hidden_count` is 0
+        there: absence is not a count of hidden sessions.
+        """
+        path = "/api/sessions?include=hidden" if include_hidden else "/api/sessions"
+        payload = self._call(path)
+        if isinstance(payload, dict):
+            rows = payload.get("sessions")
+            hidden = payload.get("hidden_count")
+            count = hidden if isinstance(hidden, int) and hidden >= 0 else 0
+        else:
+            rows = payload
+            count = 0
+        if not isinstance(rows, list):
+            rows = []
+        return (
+            [EngineSession.from_payload(row) for row in rows if isinstance(row, dict)],
+            count,
+        )
 
     def sweep_sessions(self, *, screen_lines: int = 8) -> list[EngineSweepEntry] | None:
         """Every live and hibernated session with its screen's last lines,
