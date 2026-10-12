@@ -7,6 +7,11 @@
 //! pod is below it. Both keep every exemption, and each exemption is a reason
 //! a person can read — the same sentence the watcher logs.
 //!
+//! `ENGINE_HIBERNATE_LIVE_CAP` is not a watcher trigger. It is the number of
+//! live sessions at which the assistant refuses to start another one (WI-1269).
+//! Set on its own it leaves the watcher off: idle and memory are still what
+//! hibernate a session.
+//!
 //! What is never hibernated by policy:
 //!
 //! - a session that cannot be at all (no conversation to resume, an
@@ -53,9 +58,15 @@ pub struct Policy {
     /// the pod (its cgroup limit minus usage, or else the host's
     /// `MemAvailable`) is below this many bytes.
     pub memavailable_below: Option<u64>,
+    /// How many live sessions the assistant will start up to. Not a watcher
+    /// trigger: `is_off` ignores it, and the watcher never reads it. Unset
+    /// means the assistant does not count live sessions before a start.
+    pub live_cap: Option<usize>,
 }
 
 impl Policy {
+    /// Whether the watcher has nothing to do. A live cap alone does not turn
+    /// it on: the cap is enforced at the assistant's start gate, not here.
     pub fn is_off(&self) -> bool {
         self.idle_after.is_none() && self.memavailable_below.is_none()
     }
@@ -476,6 +487,7 @@ mod tests {
         let idle = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: None,
+            live_cap: None,
         };
         let chosen: Vec<_> = choose(&idle, &candidates, None)
             .into_iter()
@@ -486,6 +498,7 @@ mod tests {
         let both = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: Some(2 << 30),
+            live_cap: None,
         };
         let chosen: Vec<_> = choose(&both, &candidates, Some(1 << 30))
             .into_iter()
@@ -513,6 +526,7 @@ mod tests {
         let idle_only = Policy {
             idle_after: Some(mins(120)),
             memavailable_below: None,
+            live_cap: None,
         };
         let chosen: Vec<_> = choose(&idle_only, &candidates, None)
             .into_iter()
@@ -526,11 +540,28 @@ mod tests {
         let pressure = Policy {
             idle_after: None,
             memavailable_below: Some(2 << 30),
+            live_cap: None,
         };
         let chosen: Vec<_> = choose(&pressure, &candidates, Some(1 << 30))
             .into_iter()
             .map(|(id, t, _)| (id, t))
             .collect();
         assert_eq!(chosen, vec![(looping, HibernateTrigger::Memory)]);
+    }
+
+    #[test]
+    fn a_live_cap_alone_does_not_turn_the_watcher_on() {
+        let capped = Policy {
+            live_cap: Some(3),
+            ..Policy::default()
+        };
+        assert!(capped.is_off());
+        assert!(Policy::default().is_off());
+        assert!(!Policy {
+            idle_after: Some(Duration::from_secs(60)),
+            live_cap: Some(3),
+            ..Policy::default()
+        }
+        .is_off());
     }
 }

@@ -1284,6 +1284,11 @@ fn call_policy_from_env() -> Result<crate::call::CallPolicy> {
 /// `ENGINE_HIBERNATE_MEMAVAILABLE_BELOW` (`2GiB`, `512M`, bytes). Unset or
 /// empty is off; a value that does not parse is a startup error, not a policy
 /// quietly left off.
+///
+/// `ENGINE_HIBERNATE_LIVE_CAP` is a positive integer, and unset means the
+/// assistant does not count live sessions before starting one. It is parsed
+/// here because it belongs with the hibernation knobs, but it does not turn
+/// the watcher on: the watcher only acts on idle and memory.
 fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
     use crate::hibernate_policy::{parse_duration, parse_size, Policy};
     let read = |name: &str| match engine_env(name) {
@@ -1307,9 +1312,24 @@ fn hibernation_policy_from_env() -> Result<crate::hibernate_policy::Policy> {
             ))
         })?),
     };
+    let live_cap = match read("ENGINE_HIBERNATE_LIVE_CAP")? {
+        None => None,
+        Some(v) => Some(
+            v.trim()
+                .parse::<usize>()
+                .ok()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| {
+                    ApiError::Config(format!(
+                        "ENGINE_HIBERNATE_LIVE_CAP={v:?} is not a positive integer"
+                    ))
+                })?,
+        ),
+    };
     Ok(Policy {
         idle_after,
         memavailable_below,
+        live_cap,
     })
 }
 
