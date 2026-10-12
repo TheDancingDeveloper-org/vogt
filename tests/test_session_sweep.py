@@ -52,7 +52,9 @@ class Engine:
             self.rows[engine_id] = self.row(engine_id)
             return 200, json.dumps(self.rows[engine_id]).encode()
         if method == "GET" and path == "/api/sessions":
-            return 200, json.dumps(list(self.rows.values())).encode()
+            return 200, json.dumps(
+                {"sessions": list(self.rows.values()), "hidden_count": 0}
+            ).encode()
         if method == "GET" and path == "/api/sessions/sweep":
             if not self.sweep_supported:
                 return 404, b""

@@ -202,7 +202,8 @@ class SessionOutcomeCollector:
 
     def _live_sessions(self) -> dict[str, EngineSession]:
         if self._live is None:
-            self._live = {row.id: row for row in self._engine.list_sessions()}
+            rows, _hidden = self._engine.list_sessions()
+            self._live = {row.id: row for row in rows}
         return self._live
 
     # -- what a bound task's run found -------------------------------------

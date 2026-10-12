@@ -92,6 +92,8 @@ class StandInEngine:
         #: Engine role of a session id, for GET /api/sessions/{id}. A session
         #: that is not named here is a worker.
         self.roles: dict[str, str] = {}
+        #: How many the engine says it hid from the default list (WI-1289).
+        self.hidden_count: int = 0
         #: A resumed session starts back in the directory its transcript
         #: records; tests that assert that set this.
         self.resume_cwd: str | None = None
@@ -143,20 +145,24 @@ class StandInEngine:
             self.killed.append(engine_id)
             existed = self.alive.pop(engine_id, None) is not None
             return (200, b'{"ok":true}') if existed else (404, b"")
-        if method == "GET" and url.endswith("/api/sessions"):
+        if method == "GET" and url.split("?", 1)[0].endswith("/api/sessions"):
+            rows = [
+                {
+                    "id": key,
+                    "name": key,
+                    "activity": state,
+                    "cwd": ROOT,
+                    "created_at": "2026-01-03T00:00:00Z",
+                    "exit_code": self.exit_codes.get(key),
+                    "alive": key not in self.exit_codes,
+                }
+                for key, state in {**self.alive, **self.unlinked}.items()
+            ]
+            # The engine's list is `{sessions, hidden_count}` (WI-1289). The
+            # bare-list shape an older engine still answers is covered by the
+            # client's own reader; this stand-in speaks the current one.
             return 200, json.dumps(
-                [
-                    {
-                        "id": key,
-                        "name": key,
-                        "activity": state,
-                        "cwd": ROOT,
-                        "created_at": "2026-01-03T00:00:00Z",
-                        "exit_code": self.exit_codes.get(key),
-                        "alive": key not in self.exit_codes,
-                    }
-                    for key, state in {**self.alive, **self.unlinked}.items()
-                ]
+                {"sessions": rows, "hidden_count": self.hidden_count}
             ).encode()
         if method == "GET" and "/api/sessions/" in url:
             engine_id = url.rstrip("/").rsplit("/", 1)[-1]
@@ -968,6 +974,27 @@ def test_with_no_engine_the_links_still_list(wired: AppContext) -> None:
     assert listed.engine is not None and "VOGT_ENGINE_URL" in listed.engine
     assert listed.sessions[0].alive is None, (
         "unasked is not the same answer as not running"
+    )
+    assert listed.hidden_count == 0
+
+
+def test_the_engines_hidden_count_is_reported_and_the_flag_is_forwarded(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """The rail's "N older sessions hidden" reads the engine's count, and
+    Show asks for the rows it left out (`?include=hidden`, WI-1289)."""
+    engine.hidden_count = 4
+    start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    listed = list_sessions(wired, ListSessionsParams(mode="full"))
+    assert len(listed.sessions) == 1
+    assert listed.hidden_count == 4
+    assert all("include=hidden" not in row["url"] for row in engine.sent)
+
+    shown = list_sessions(wired, ListSessionsParams(mode="full", include_hidden=True))
+    assert shown.hidden_count == 4
+    assert any(
+        row["url"].endswith("/api/sessions?include=hidden") for row in engine.sent
     )
 
 
