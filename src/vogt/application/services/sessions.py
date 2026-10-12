@@ -593,11 +593,18 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
     """
     live: dict[str, EngineSession] = {}
     detail: str | None = None
+    # The engine's count of rows it hid before this list (WI-1289). Zero when
+    # the caller asked for them, when no engine answered, or when the engine
+    # is older than the object response and says nothing about what it hid.
+    hidden_count = 0
     if ctx.engine is None:
         detail = "no session engine is configured (VOGT_ENGINE_URL is unset)"
     else:
         try:
-            live = {row.id: row for row in ctx.engine.list_sessions()}
+            rows, hidden_count = ctx.engine.list_sessions(
+                include_hidden=params.include_hidden
+            )
+            live = {row.id: row for row in rows}
         except EngineUnavailable as exc:
             detail = str(exc)
     joined, declared_overflow = _rows(ctx, params, live, detail)
@@ -631,7 +638,11 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
         total += 1
     if params.mode == "full":
         return SessionListResult(
-            sessions=page, engine=detail, total=total, truncated=truncated
+            sessions=page,
+            engine=detail,
+            total=total,
+            truncated=truncated,
+            hidden_count=hidden_count,
         )
     digests = []
     for summary in page:
@@ -650,7 +661,11 @@ def list_sessions(ctx: AppContext, params: ListSessionsParams) -> SessionListRes
             )
         )
     return SessionListResult(
-        digests=digests, engine=detail, total=total, truncated=truncated
+        digests=digests,
+        engine=detail,
+        total=total,
+        truncated=truncated,
+        hidden_count=hidden_count,
     )
 
 
@@ -680,9 +695,10 @@ def sweep_sessions(ctx: AppContext, params: SweepSessionsParams) -> SessionSweep
         if entries is None:
             # An engine that predates the sweep route: the same table, from
             # the list, without screens.
+            live_rows, _hidden = ctx.engine.list_sessions()
             entries = [
                 EngineSweepEntry(session=row)
-                for row in ctx.engine.list_sessions()
+                for row in live_rows
                 if row.alive or row.hibernated
             ]
     except EngineUnavailable as exc:

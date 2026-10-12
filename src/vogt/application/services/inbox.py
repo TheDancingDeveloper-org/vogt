@@ -537,7 +537,7 @@ def _collect_live(
     live: list[EngineSession] = []
     if ctx.engine is not None:
         try:
-            live = ctx.engine.list_sessions()
+            live, _hidden = ctx.engine.list_sessions()
         except EngineUnavailable:
             live = []
 
