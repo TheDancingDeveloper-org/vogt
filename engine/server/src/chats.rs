@@ -1242,6 +1242,13 @@ impl ChatRuntime {
                     ));
                 }
             }
+            Responder::Codex { request_id } => {
+                let line = crate::chat_codex::approval_decision(&request_id, allow);
+                let stdin = handle.live.lock().proc.as_ref().map(|p| p.stdin.clone());
+                if let Some(stdin) = stdin {
+                    let _ = stdin.send(line);
+                }
+            }
         }
         let verb = match status {
             "allowed" => "Allowed",
