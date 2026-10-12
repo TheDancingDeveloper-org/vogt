@@ -84,6 +84,14 @@ pub const CURATED_READS: &[&str] = &[
     "session.history_list",
     "session.search_output",
     "session.log_tail",
+    // Voice roster and the per-session reads the raw tail cannot stand in
+    // for: blocked report, last-reply excerpt, already-computed economics,
+    // and the readable screen. Reads, so no approval. Sweep is the roster;
+    // the prompt clamps it to digest mode and a short screen.
+    "session.sweep",
+    "session.digest",
+    "session.last_reply",
+    "session.screen",
     "forge.account_status",
     "forge.repos",
     "forge.actions",

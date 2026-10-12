@@ -3195,7 +3195,7 @@ process's surface onto its own PTYs:
 
 | Tool | Effect |
 |---|---|
-| `list_sessions` | id, name, command, activity state, exit code, cwd, created_at for every session |
+| `list_sessions` | a bounded name/role lookup (optional `name`, optional `role`, at most 32 rows): id, name, role, activity, command, exit code, cwd, created_at. The roster for "what's going on" is `vogt_session_sweep`, not this |
 | `read_session_tail` | last N bytes of a session's scrollback (default 4 KiB, max 16 KiB), ANSI-stripped by default |
 | `send_input` | type text (max 4 KiB) into a session's PTY, optional Enter |
 | `steer_agent_task` | queue a steer (`{task_id, text, interrupt?, reason?}`) for a task's in-flight run, delivered at its next prompt boundary |
@@ -3370,10 +3370,10 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.search_output` | Voice-readable | Available: Search session output (live sessions included). |
 | `session.log_tail` | Voice-readable | Available: Read the tail of a session's output log, readable. |
 | `session.input` | Operator-only | Unavailable: The assistant types into terminals with its own engine tool (`send_input`, approval-gated); not offered twice. |
-| `session.screen` | Operator-only | Unavailable: The assistant reads terminals with its own engine tool (`read_session_tail`); for agents over MCP/CLI/REST. |
-| `session.last_reply` | Operator-only | Unavailable: The assistant reads terminals with its own engine tool (`read_session_tail`); for agents over MCP/CLI/REST. |
+| `session.screen` | Voice-readable | Available: The readable screen of one session (either id). `read_session_tail` is the raw scrollback; this is the screen a person would see. |
+| `session.last_reply` | Voice-readable | Available: What one session's agent last said (either id). The raw tail does not pick the reply out. |
 | `session.economics` | Operator-only | Unavailable: A read of the metered transcript (turns, context, compactions); for agents over MCP/CLI/REST, not a voice action. |
-| `session.digest` | Operator-only | Unavailable: One session's digest (activity, blocked report, excerpt, the economics the engine already computed); for agents over MCP/CLI/REST, not a voice action. |
+| `session.digest` | Voice-readable | Available: One session's digest (activity, blocked report, last-reply excerpt, the economics the engine already computed) from the engine row; either id. It does not meter a transcript. |
 | `session.wait` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
 | `session.changes` | Operator-only | Unavailable: An oversight delta read (seq, kind, summary); for agents over MCP/CLI/REST. |
 | `session.wait_any` | Operator-only | Unavailable: Blocks for up to ten minutes; a voice turn cannot wait that long. For agents over MCP/CLI/REST. |
@@ -3381,7 +3381,7 @@ can affect the forge; the same approval gate and core writeback policy apply.
 | `session.report_unblocked` | Operator-only | Unavailable: An agent's report about its own session; for agents over MCP/CLI/REST. |
 | `session.answer` | Operator-only | Unavailable: The assistant answers permission dialogs through its own approval flow; for drivers over MCP/CLI/REST. |
 | `session.token` | Operator-only | Unavailable: the session engine's own HTTP call to mint and revoke engine-started agent sessions' credentials; not a voice action. |
-| `session.sweep` | Operator-only | Unavailable: An oversight table of every session's screen; for drivers over MCP/CLI/REST and the GUI board. |
+| `session.sweep` | Voice-readable | Available: The voice roster — one digest line per session, the attention filter, a short screen. Accepts either id. This, not `session.list`, answers "what's going on". |
 | `session.hibernate` | Operator-only | Unavailable: Stops a session's processes; for the GUI and for agents over MCP/CLI/REST. |
 | `session.wake` | Operator-only | Unavailable: Starts a hibernated session's processes again; for the GUI and for agents over MCP/CLI/REST. |
 | `session.keep_awake` | Operator-only | Unavailable: A pin against the idle policy; for the GUI and for agents over MCP/CLI/REST. |
