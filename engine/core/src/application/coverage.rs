@@ -18,13 +18,13 @@ use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 /// The collectors this instance can run, in the order Python's registry yields
 /// them once sorted by name.
 ///
-/// This lists what `sweep` actually registers. The core collectors are always
-/// present. Session-outcomes registers only when an engine is configured, and
-/// agent-activity only when transcript roots are. The forge collectors and
-/// deploy-lanes are not ported, and a sweep refuses while either is configured,
-/// so they are not listed here: coverage must not claim a collector the
-/// registry does not load.
-fn collector_names<C, I>(ctx: &AppContext<C, I>) -> Vec<&'static str>
+/// The core collectors are always present. Session-outcomes registers only when
+/// an engine is configured, and agent-activity only when transcript roots are.
+/// The forge collectors and deploy-lanes are not ported, so a sweep refuses
+/// while either is configured, but coverage still lists them: Python registers
+/// them whenever a forge or a lane is configured, and an omitted name reads as
+/// "not configured" rather than "never run".
+fn collector_names<C, I>(ctx: &AppContext<C, I>) -> Result<Vec<&'static str>, VogtError>
 where
     C: Clock,
     I: IdFactory,
@@ -42,8 +42,22 @@ where
     if !ctx.config.agent_activity_roots.is_empty() {
         names.push("agent-activity");
     }
+    if crate::adapters::forge::has_configured_forge(&ctx.config)? {
+        names.extend([
+            "forge-checks",
+            "forge-issues",
+            "forge-labels",
+            "forge-notifications",
+            "forge-posture",
+            "forge-prs",
+            "forge-releases",
+        ]);
+    }
+    if !ctx.config.deploy_lanes.is_empty() {
+        names.push("deploy-lanes");
+    }
     names.sort_unstable();
-    names
+    Ok(names)
 }
 
 /// What has looked at what.
@@ -71,7 +85,7 @@ fn coverage<C: Clock, I: IdFactory>(ctx: &AppContext<C, I>) -> Result<Value, Vog
 
     let mut swept: BTreeSet<String> = BTreeSet::new();
     let mut entries = Vec::new();
-    for name in collector_names(ctx) {
+    for name in collector_names(ctx)? {
         let seen = ever.get(name).cloned().unwrap_or_default();
         swept.extend(seen.keys().cloned());
         let Some(sweep) = newest.get(name) else {

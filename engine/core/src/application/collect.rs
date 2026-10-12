@@ -774,6 +774,99 @@ mod tests {
         assert!(message.contains("deploy-lanes"), "{message}");
     }
 
+    /// Coverage lists the unported collectors as `never_run` while a forge or a
+    /// deploy lane is configured. Omitting them reads as "not configured", which
+    /// is what Python says only when neither is.
+    #[test]
+    fn coverage_lists_unported_collectors_as_never_run() {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-coverage-names-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut clock = Some(StepClock::new(moment()));
+        let mut ids = Some(SequentialIds::new(None).unwrap());
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
+        let token = dir.join("forge-token");
+        std::fs::write(&token, "secret-token\n").unwrap();
+
+        let forged = build_context(
+            VogtConfig {
+                data_dir: dir.clone(),
+                github_token_file: Some(token),
+                ..VogtConfig::default()
+            },
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let answer = crate::application::coverage::coverage_op(&forged, json!({})).unwrap();
+        let names: Vec<&str> = answer["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry["collector"].as_str().unwrap())
+            .collect();
+        for name in [
+            "forge-checks",
+            "forge-issues",
+            "forge-labels",
+            "forge-notifications",
+            "forge-posture",
+            "forge-prs",
+            "forge-releases",
+        ] {
+            let entry = answer["collectors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|entry| entry["collector"] == name)
+                .unwrap_or_else(|| panic!("{name} missing from {names:?}"));
+            assert_eq!(entry["status"], "never_run", "{name}");
+        }
+        assert!(
+            !names.contains(&"deploy-lanes"),
+            "no lane is configured: {names:?}"
+        );
+
+        let laned = build_context(
+            VogtConfig {
+                data_dir: dir,
+                deploy_lanes: vec![crate::config::DeployLane {
+                    name: "dev".to_string(),
+                    project: "alpha".to_string(),
+                    branch: "main".to_string(),
+                    receipt_repo: None,
+                    receipt_path: None,
+                    version_url: None,
+                }],
+                ..VogtConfig::default()
+            },
+            Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
+            Some(StepClock::new(moment())),
+            Some(SequentialIds::new(None).unwrap()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let answer = crate::application::coverage::coverage_op(&laned, json!({})).unwrap();
+        let entry = answer["collectors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["collector"] == "deploy-lanes")
+            .expect("deploy-lanes missing");
+        assert_eq!(entry["status"], "never_run");
+    }
+
     /// An unnamed sweep over a project holding one `TODO(vogt)` runs
     /// source-markers, rebuilds the projections, and publishes exactly one
     /// `sweep.completed`. A second sweep finds the marker unchanged and reads
