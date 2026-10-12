@@ -1,5 +1,6 @@
 //! Quick chats (WI-1097): persistent text conversations with an agent CLI,
-//! driven over its stream-json protocol instead of a terminal.
+//! driven over Klaudia's stream-json protocol or Codex's app-server JSON-RPC
+//! (`ENGINE_CHAT_DRIVER`, default `klaudia`) instead of a terminal.
 //!
 //! ## Shape
 //!
@@ -136,6 +137,10 @@ pub struct ChatPolicy {
     /// `ENGINE_CHAT_MAX_RSS` (2GiB): a chat whose process tree's resident
     /// memory passes this is killed.
     pub max_rss_bytes: u64,
+    /// `ENGINE_CHAT_DRIVER`: which driver a new chat uses when the request
+    /// does not name one. `klaudia` (default) or `codex`. Klaudia stays
+    /// selectable either way.
+    pub driver: String,
 }
 
 impl Default for ChatPolicy {
@@ -152,6 +157,7 @@ impl Default for ChatPolicy {
             max_per_creator: 2,
             turn_timeout: Duration::from_secs(20 * 60),
             max_rss_bytes: 2 << 30,
+            driver: DRIVER.into(),
         }
     }
 }
@@ -191,12 +197,20 @@ impl ChatPolicy {
                 );
             }
         }
+        if self.driver != DRIVER && self.driver != CODEX_DRIVER {
+            return Err(format!(
+                "ENGINE_CHAT_DRIVER={:?} is not klaudia or codex",
+                self.driver
+            ));
+        }
         Ok(())
     }
 }
 
-/// The only driver this engine speaks to.
+/// Klaudia stream-json, the original driver. Still selectable.
 const DRIVER: &str = "klaudia";
+/// Codex app-server JSON-RPC (WI-1148).
+const CODEX_DRIVER: &str = "codex";
 const DEFAULT_TITLE: &str = "New chat";
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// A tool result is kept to this many characters in Vogt's copy; the
@@ -491,38 +505,68 @@ const CHAT_ENV_ALLOWLIST: &[&str] = &[
     "KLAUDIA_CONFIG_DIR",
 ];
 
-fn resolve_launch(
+fn resolve_named(
     policy: &ChatPolicy,
     templates: &[crate::config::SessionTemplate],
+    agent: &str,
 ) -> Option<Launch> {
     if !policy.enabled {
         return None;
     }
     if let Some(argv) = policy.command.clone() {
-        return (crate::agent_cli::agent_name(&argv).as_deref() == Some(DRIVER)).then_some(
-            Launch {
+        // A named command is the whole answer: it either is this agent, or
+        // chats for this agent are off. Falling through would launch Klaudia
+        // (or Codex) under a command the operator set to something else.
+        if crate::agent_cli::agent_name(&argv).as_deref() == Some(agent) {
+            return Some(Launch {
                 driver: driver_of(&argv),
                 argv,
                 template: None,
-            },
-        );
+            });
+        }
+        return None;
     }
-    let template = match policy.template.as_deref() {
-        Some(name) => crate::sessions::resolve_template_in(templates, name).ok()?,
-        None => templates.iter().find(|t| {
-            t.command
-                .as_deref()
-                .and_then(crate::agent_cli::agent_name)
-                .as_deref()
-                == Some(DRIVER)
-        })?,
-    };
+    if let Some(name) = policy.template.as_deref() {
+        if let Ok(template) = crate::sessions::resolve_template_in(templates, name) {
+            if let Some(argv) = template.command.clone() {
+                if crate::agent_cli::agent_name(&argv).as_deref() == Some(agent) {
+                    return Some(Launch {
+                        driver: driver_of(&argv),
+                        argv,
+                        template: Some(template.name.clone()),
+                    });
+                }
+            }
+        }
+    }
+    let template = templates.iter().find(|t| {
+        t.command
+            .as_deref()
+            .and_then(crate::agent_cli::agent_name)
+            .as_deref()
+            == Some(agent)
+    })?;
     let argv = template.command.clone()?;
-    (crate::agent_cli::agent_name(&argv).as_deref() == Some(DRIVER)).then(|| Launch {
+    Some(Launch {
         driver: driver_of(&argv),
         argv,
         template: Some(template.name.clone()),
     })
+}
+
+/// Klaudia launch, unchanged for a Klaudia-only deployment.
+fn resolve_launch(
+    policy: &ChatPolicy,
+    templates: &[crate::config::SessionTemplate],
+) -> Option<Launch> {
+    resolve_named(policy, templates, DRIVER)
+}
+
+fn resolve_codex(
+    policy: &ChatPolicy,
+    templates: &[crate::config::SessionTemplate],
+) -> Option<Launch> {
+    resolve_named(policy, templates, CODEX_DRIVER)
 }
 
 /// Who answers a pending approval, and how the answer gets back.
@@ -531,6 +575,8 @@ enum Responder {
     Gate(oneshot::Sender<Option<String>>),
     /// Klaudia asked with a `can_use_tool` control request.
     Driver { request_id: String },
+    /// Codex app-server asked with a JSON-RPC request id.
+    Codex { request_id: String },
 }
 
 struct Pending {
@@ -596,6 +642,9 @@ pub struct ChatRuntime {
     bus: EventBus,
     sessions: Arc<SessionRegistry>,
     launch: Launch,
+    /// Present when a Codex template or command is configured. Absent, the
+    /// engine still drives Klaudia exactly as before.
+    codex: Option<Launch>,
     handles: DashMap<Uuid, Arc<ChatHandle>>,
     launching: tokio::sync::Mutex<()>,
     generation: AtomicU64,
@@ -612,13 +661,15 @@ fn gate_block(reason: &str) -> Value {
 }
 
 impl ChatRuntime {
-    /// `None` when chats are off or no Klaudia launch is configured.
+    /// `None` when chats are off or neither driver resolves.
     pub async fn from_config(
         cfg: Arc<Config>,
         bus: EventBus,
         sessions: Arc<SessionRegistry>,
     ) -> Option<Arc<Self>> {
-        let launch = resolve_launch(&cfg.chat, &cfg.session_templates)?;
+        let launch = resolve_launch(&cfg.chat, &cfg.session_templates);
+        let codex = resolve_codex(&cfg.chat, &cfg.session_templates);
+        let launch = launch.or_else(|| codex.clone())?;
         let store = match ChatStore::new(&cfg.state_dir).await {
             Ok(store) => store,
             Err(e) => {
@@ -631,7 +682,7 @@ impl ChatRuntime {
         // A previous engine's chat processes have no reader now: end them.
         sweep_orphans(&cfg.state_dir.join("chats"));
         Some(Self::with_parts(
-            cfg, store, bus, sessions, launch, gate_base,
+            cfg, store, bus, sessions, launch, codex, gate_base,
         ))
     }
 
@@ -641,6 +692,7 @@ impl ChatRuntime {
         bus: EventBus,
         sessions: Arc<SessionRegistry>,
         launch: Launch,
+        codex: Option<Launch>,
         gate_base: String,
     ) -> Arc<Self> {
         let runtime = Arc::new(Self {
@@ -649,6 +701,7 @@ impl ChatRuntime {
             bus,
             sessions,
             launch,
+            codex,
             handles: DashMap::new(),
             launching: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
@@ -665,15 +718,27 @@ impl ChatRuntime {
         *self.gate_base.write() = base;
     }
 
-    /// What `/api/config` advertises.
+    /// What `/api/config` advertises. Klaudia when that launch resolved; Codex
+    /// as well when a Codex template or command did.
     pub fn info(&self) -> ChatConfigInfo {
-        ChatConfigInfo {
-            drivers: vec![ChatDriver {
+        let mut drivers = Vec::new();
+        if resolve_launch(&self.cfg.chat, &self.cfg.session_templates).is_some()
+            || self.codex.is_none()
+        {
+            drivers.push(ChatDriver {
                 name: DRIVER.into(),
                 label: "Klaudia".into(),
                 models: self.cfg.chat.models.clone(),
-            }],
+            });
         }
+        if self.codex.is_some() {
+            drivers.push(ChatDriver {
+                name: CODEX_DRIVER.into(),
+                label: "Codex".into(),
+                models: self.cfg.chat.models.clone(),
+            });
+        }
+        ChatConfigInfo { drivers }
     }
 
     fn handle(&self, id: Uuid) -> Arc<ChatHandle> {
@@ -774,18 +839,27 @@ impl ChatRuntime {
         req: ChatCreateRequest,
         creator: String,
     ) -> Result<ChatSendResult> {
-        if let Some(driver) = req
+        let requested = req
             .driver
             .as_deref()
             .map(str::trim)
             .filter(|d| !d.is_empty())
-        {
-            if driver != DRIVER {
+            .unwrap_or(self.cfg.chat.driver.as_str());
+        let driver = match requested {
+            DRIVER => DRIVER,
+            CODEX_DRIVER if self.codex.is_some() => CODEX_DRIVER,
+            CODEX_DRIVER => {
+                return Err(ApiError::BadRequest(
+                    "driver \"codex\" is not configured; no Codex template or command resolved"
+                        .into(),
+                ));
+            }
+            other => {
                 return Err(ApiError::BadRequest(format!(
-                    "driver {driver:?} is not available; this engine drives chats with {DRIVER}"
+                    "driver {other:?} is not available; this engine drives chats with {DRIVER} or {CODEX_DRIVER}"
                 )));
             }
-        }
+        };
         let model = match req.model.as_deref() {
             Some(m) => self.validate_model(m)?,
             None => self.cfg.chat.models.first().map(|m| m.id.clone()),
@@ -803,7 +877,7 @@ impl ChatRuntime {
         let record = ChatRecord {
             id: Uuid::new_v4(),
             title,
-            driver: DRIVER.into(),
+            driver: driver.into(),
             model,
             creator,
             created_at: now.clone(),
@@ -941,7 +1015,11 @@ impl ChatRuntime {
                 return Err(e);
             }
         };
-        let line = json!({"type": "user", "message": {"role": "user", "content": text}});
+        let line = if record.driver == CODEX_DRIVER {
+            crate::chat_codex::turn_start(&format!("turn-{}", Uuid::new_v4()), id, text)
+        } else {
+            json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
+        };
         {
             let mut live = handle.live.lock();
             live.turns += 1;
@@ -950,7 +1028,7 @@ impl ChatRuntime {
             }
             live.last_activity = Some(Instant::now());
         }
-        if stdin.send(line.to_string()).is_err() {
+        if stdin.send(line).is_err() {
             handle.live.lock().turns = 0;
             self.note(
                 id,
@@ -1004,13 +1082,21 @@ impl ChatRuntime {
             .get(&id)
             .and_then(|h| h.live.lock().proc.as_ref().map(|p| p.stdin.clone()));
         if let Some(stdin) = stdin {
-            // From the next turn; a relaunch passes `--model` instead.
-            let request = json!({
-                "type": "control_request",
-                "request_id": format!("model-{}", Uuid::new_v4()),
-                "request": {"subtype": "set_model", "model": model.as_deref().unwrap_or("default")},
-            });
-            let _ = stdin.send(request.to_string());
+            let request = if record.driver == CODEX_DRIVER {
+                crate::chat_codex::settings_update(
+                    &format!("model-{}", Uuid::new_v4()),
+                    id,
+                    model.as_deref().unwrap_or("default"),
+                )
+            } else {
+                json!({
+                    "type": "control_request",
+                    "request_id": format!("model-{}", Uuid::new_v4()),
+                    "request": {"subtype": "set_model", "model": model.as_deref().unwrap_or("default")},
+                })
+                .to_string()
+            };
+            let _ = stdin.send(request);
         }
         self.note(
             id,
@@ -1045,12 +1131,17 @@ impl ChatRuntime {
                 .await;
         }
         if let Some(stdin) = stdin {
-            let request = json!({
-                "type": "control_request",
-                "request_id": format!("stop-{}", Uuid::new_v4()),
-                "request": {"subtype": "interrupt"},
-            });
-            let _ = stdin.send(request.to_string());
+            let request = if record.driver == CODEX_DRIVER {
+                crate::chat_codex::turn_interrupt(&format!("stop-{}", Uuid::new_v4()), id)
+            } else {
+                json!({
+                    "type": "control_request",
+                    "request_id": format!("stop-{}", Uuid::new_v4()),
+                    "request": {"subtype": "interrupt"},
+                })
+                .to_string()
+            };
+            let _ = stdin.send(request);
         }
         self.changed(id).await;
         Ok(self.summary_of(&self.record(id).await?))
@@ -1148,6 +1239,13 @@ impl ChatRuntime {
                         pending.input.clone(),
                         Instant::now(),
                     ));
+                }
+            }
+            Responder::Codex { request_id } => {
+                let line = crate::chat_codex::approval_decision(&request_id, allow);
+                let stdin = handle.live.lock().proc.as_ref().map(|p| p.stdin.clone());
+                if let Some(stdin) = stdin {
+                    let _ = stdin.send(line);
                 }
             }
         }
@@ -1318,11 +1416,21 @@ impl ChatRuntime {
         // One writer per transcript: the chat's process goes before the
         // session resumes the same conversation.
         self.stop_process(id, Duration::from_secs(10)).await;
+        let codex = record.driver == CODEX_DRIVER;
+        let launch = if codex {
+            self.codex.as_ref().ok_or_else(|| {
+                ApiError::BadGateway(
+                    "the Codex driver is not configured, so this chat cannot be promoted".into(),
+                )
+            })?
+        } else {
+            &self.launch
+        };
         let template = req
             .template
             .clone()
             .filter(|t| !t.trim().is_empty())
-            .or_else(|| self.launch.template.clone());
+            .or_else(|| launch.template.clone());
         let name = req
             .name
             .clone()
@@ -1330,7 +1438,7 @@ impl ChatRuntime {
             .unwrap_or_else(|| format!("chat: {}", truncate_chars(&record.title, 40)));
         let spec = SessionSpec {
             name,
-            command: template.is_none().then(|| self.launch.argv.clone()),
+            command: template.is_none().then(|| launch.argv.clone()),
             template,
             cwd: req.cwd.clone(),
             resume: Some(id.to_string()),
@@ -1380,40 +1488,67 @@ impl ChatRuntime {
         let record = self.record(id).await?;
         self.make_room(&record.creator).await?;
         let dir = self.chat_dir(id);
-        std::fs::create_dir_all(dir.join(".klaudia"))?;
-        std::fs::write(
-            dir.join(".klaudia").join("config.toml"),
-            hook_config(self.cfg.chat.approval_timeout),
-        )?;
+        std::fs::create_dir_all(&dir)?;
+        let codex = record.driver == CODEX_DRIVER;
 
-        let mut argv = self.launch.driver.clone();
-        argv.extend(
-            [
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--permission-mode",
-                "autonomous",
-                "--trusted-project-config",
-            ]
-            .map(str::to_string),
-        );
-        argv.push(format!(
-            "--ask-timeout={}s",
-            self.cfg.chat.approval_timeout.as_secs()
-        ));
-        if record.started {
-            argv.extend(["--resume".to_string(), id.to_string()]);
+        let (argv, gate_token) = if codex {
+            let binary = self
+                .codex
+                .as_ref()
+                .and_then(|l| l.driver.first().cloned())
+                .ok_or_else(|| {
+                    ApiError::BadGateway(
+                        "the Codex driver is not configured, so this chat cannot start".into(),
+                    )
+                })?;
+            let home = dir.join("codex-home");
+            std::fs::create_dir_all(&home)?;
+            let key_name = self.cfg.chat.provider_key.as_deref().unwrap_or("");
+            std::fs::write(
+                home.join("config.toml"),
+                crate::chat_codex::home_config(key_name),
+            )?;
+            std::fs::write(
+                home.join("vogt-model-catalog.json"),
+                crate::chat_codex::model_catalog(),
+            )?;
+            (crate::chat_codex::app_server_argv(&binary), String::new())
         } else {
-            argv.extend(["--session-id".to_string(), id.to_string()]);
-        }
-        if let Some(model) = record.model.as_deref() {
-            argv.extend(["--model".to_string(), model.to_string()]);
-        }
+            std::fs::create_dir_all(dir.join(".klaudia"))?;
+            std::fs::write(
+                dir.join(".klaudia").join("config.toml"),
+                hook_config(self.cfg.chat.approval_timeout),
+            )?;
+            let mut argv = self.launch.driver.clone();
+            argv.extend(
+                [
+                    "--input-format",
+                    "stream-json",
+                    "--output-format",
+                    "stream-json",
+                    "--verbose",
+                    "--permission-mode",
+                    "autonomous",
+                    "--trusted-project-config",
+                ]
+                .map(str::to_string),
+            );
+            argv.push(format!(
+                "--ask-timeout={}s",
+                self.cfg.chat.approval_timeout.as_secs()
+            ));
+            if record.started {
+                argv.extend(["--resume".to_string(), id.to_string()]);
+            } else {
+                argv.extend(["--session-id".to_string(), id.to_string()]);
+            }
+            if let Some(model) = record.model.as_deref() {
+                argv.extend(["--model".to_string(), model.to_string()]);
+            }
+            let gate_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+            (argv, gate_token)
+        };
 
-        let gate_token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let generation = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..])
@@ -1437,16 +1572,28 @@ impl ChatRuntime {
         if let Some((name, value)) = self.provider_key().await {
             cmd.env(name, value);
         }
-        let base = self.gate_base.read().clone();
-        cmd.env("VOGT_CHAT_ID", id.to_string())
-            .env("VOGT_CHAT_GATE_URL", format!("{base}/api/chats/{id}/gate"))
-            .env("VOGT_CHAT_GATE_TOKEN", &gate_token);
+        if codex {
+            // Per-chat home, this process only. Not on the shared allowlist.
+            cmd.env("CODEX_HOME", dir.join("codex-home"));
+        } else {
+            let base = self.gate_base.read().clone();
+            cmd.env("VOGT_CHAT_ID", id.to_string())
+                .env("VOGT_CHAT_GATE_URL", format!("{base}/api/chats/{id}/gate"))
+                .env("VOGT_CHAT_GATE_TOKEN", &gate_token);
+        }
         #[cfg(unix)]
         cmd.process_group(0);
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| ApiError::Internal(format!("launching {}: {e}", argv[0])))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                ApiError::BadGateway(format!(
+                    "the chat driver {} was not found; install it and try again",
+                    argv[0]
+                ))
+            } else {
+                ApiError::Internal(format!("launching {}: {e}", argv[0]))
+            }
+        })?;
         let pid = child.id();
         if let Some(pid) = pid {
             write_pidfile(&dir, pid);
@@ -1524,6 +1671,24 @@ impl ChatRuntime {
                 .on_exit(id, generation, status.and_then(|s| s.code()), stderr)
                 .await;
         });
+        if codex {
+            // The engine asked for this thread id. `parse_line` cannot tell an
+            // empty thread/start success from initialize, so mark started when
+            // the request is queued; a later ThreadReady is the same fact.
+            let handshake = if record.started {
+                crate::chat_codex::thread_resume("resume", id)
+            } else {
+                crate::chat_codex::thread_start("start", id, record.model.as_deref())
+            };
+            let _ = tx.send(crate::chat_codex::initialize("init"));
+            let _ = tx.send(handshake);
+            if !record.started {
+                if let Ok(mut stored) = self.record(id).await {
+                    stored.started = true;
+                    let _ = self.store.update_chat(&stored).await;
+                }
+            }
+        }
         Ok(tx)
     }
 
@@ -1621,6 +1786,14 @@ impl ChatRuntime {
         let Some(handle) = self.current(id, generation) else {
             return;
         };
+        if self
+            .record(id)
+            .await
+            .is_ok_and(|r| r.driver == CODEX_DRIVER)
+        {
+            self.on_codex_line(id, &handle, line).await;
+            return;
+        }
         // Not JSON (a wrapper's banner): not part of the protocol.
         let Ok(msg) = serde_json::from_str::<Value>(line) else {
             return;
@@ -1911,6 +2084,94 @@ impl ChatRuntime {
         named_ours
             && std::fs::read_to_string(&own).ok().as_deref()
                 == Some(hook_config(self.cfg.chat.approval_timeout).as_str())
+    }
+
+    async fn on_codex_line(self: &Arc<Self>, id: Uuid, handle: &ChatHandle, line: &str) {
+        use crate::chat_codex::{parse_line, CodexEvent};
+        handle.live.lock().last_activity = Some(Instant::now());
+        match parse_line(line) {
+            CodexEvent::Initialized | CodexEvent::Ignore => {}
+            CodexEvent::ThreadReady => {
+                if let Ok(mut record) = self.record(id).await {
+                    if !record.started {
+                        record.started = true;
+                        let _ = self.store.update_chat(&record).await;
+                    }
+                }
+            }
+            CodexEvent::Assistant(text) => {
+                if !text.trim().is_empty() {
+                    let _ = self
+                        .append(id, entry("assistant", text, None, None, false, false, None))
+                        .await;
+                }
+            }
+            CodexEvent::ToolCall {
+                id: use_id,
+                name,
+                summary,
+            } => {
+                let _ = self
+                    .append(
+                        id,
+                        entry(
+                            "tool-call",
+                            summary,
+                            Some(name),
+                            Some(use_id).filter(|s| !s.is_empty()),
+                            false,
+                            false,
+                            None,
+                        ),
+                    )
+                    .await;
+            }
+            CodexEvent::ToolResult {
+                id: use_id,
+                text,
+                is_error,
+            } => {
+                let _ = self
+                    .append(
+                        id,
+                        entry(
+                            "tool-result",
+                            truncate_chars(&text, RESULT_CHARS),
+                            None,
+                            Some(use_id).filter(|s| !s.is_empty()),
+                            is_error,
+                            false,
+                            None,
+                        ),
+                    )
+                    .await;
+            }
+            CodexEvent::Approval {
+                request_id,
+                tool,
+                summary,
+            } => {
+                self.raise(
+                    id,
+                    &tool,
+                    &json!({ "summary": summary }),
+                    Responder::Codex { request_id },
+                    "codex",
+                )
+                .await;
+            }
+            CodexEvent::TurnEnd { error } => {
+                let msg = match error {
+                    Some(text) => json!({ "is_error": true, "result": text }),
+                    None => json!({ "is_error": false }),
+                };
+                self.on_result(id, handle, &msg).await;
+            }
+            CodexEvent::Notice(text) => {
+                self.note(id, "notice", truncate_chars(&text, INPUT_CHARS), false)
+                    .await;
+            }
+        }
     }
 
     async fn on_result(self: &Arc<Self>, id: Uuid, handle: &ChatHandle, msg: &Value) {

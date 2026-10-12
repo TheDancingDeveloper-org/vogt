@@ -2250,11 +2250,20 @@ WAV file and no microphone.
 ### Quick chat APIs
 
 A **quick chat** (WI-1097) is a persistent text conversation with an agent
-CLI, run without a terminal. The agent is Klaudia, driven over its stream-json
-protocol (msp-klaudia `docs/embedding.md`): each message is a `user` line on
-its stdin, and its replies, tool calls and the `result` that ends a turn come
-back on stdout. The engine picks the conversation id, which is the chat's own
-id: `--session-id` on the first launch and `--resume` on every later one. A
+CLI, run without a terminal. The default agent is Klaudia, driven over its
+stream-json protocol (msp-klaudia `docs/embedding.md`): each message is a
+`user` line on its stdin, and its replies, tool calls and the `result` that
+ends a turn come back on stdout. `ENGINE_CHAT_DRIVER=codex` (WI-1148) uses
+the Codex app-server instead: JSON-RPC lines (`initialize`, then
+`thread/start` or `thread/resume` with the chat id as `threadId`, then
+`turn/start`). Codex approvals arrive as JSON-RPC requests and are answered
+on stdin; they do not use the Klaudia hook gate. A Codex chat writes a
+per-chat `CODEX_HOME` under `state_dir/chats/<id>/codex-home` (that process
+only; `CODEX_HOME` is not on the shared allowlist). Promotion of a Codex chat
+starts a terminal with `codex resume <chat id>` and no app-server flags.
+Klaudia stays the default and the fallback. The engine picks the conversation
+id, which is the chat's own id: `--session-id` on the first Klaudia launch
+and `--resume` on every later one. A
 chat's process is therefore disposable. It is stopped after
 `ENGINE_CHAT_IDLE_AFTER`, and on the next message it is relaunched with the
 whole conversation. Chats are kept for good in `state_dir/chats.db`. There is
@@ -2357,6 +2366,7 @@ vetted, so the engine assumes its agent can be talked into anything:
 | Setting | Default | Meaning |
 |---|---|---|
 | `ENGINE_CHAT_ENABLED` | `1` | `0` turns chats off |
+| `ENGINE_CHAT_DRIVER` | `klaudia` | `klaudia` (stream-json) or `codex` (app-server JSON-RPC). Anything else fails startup |
 | `ENGINE_CHAT_TEMPLATE` | first Klaudia template | the session template whose driver a chat runs, and that promotion uses |
 | `ENGINE_CHAT_COMMAND` | — | the driver command instead (words, or a JSON array) |
 | `ENGINE_CHAT_MODELS_JSON` | `[]` | `[{"id","label"}]` for the model picker; the first is a new chat's default; empty offers only the driver's own default |
