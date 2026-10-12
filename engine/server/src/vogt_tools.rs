@@ -361,10 +361,16 @@ impl VogtTools {
 
     /// `tools/call` one operation. `Ok` is whatever the core said — including
     /// a tool-level error, which is the core's answer and gets delimited like
-    /// any other. `Err` is this side failing to get an answer at all.
-    pub async fn call(&self, token: &str, mcp_name: &str, args: &Value) -> Result<String, String> {
-        let text = self.call_untruncated(token, mcp_name, args).await?;
-        Ok(truncate_utf8(&text, MAX_RESULT_BYTES))
+    /// any other — plus whether the core set `isError`. `Err` is this side
+    /// failing to get an answer at all.
+    pub async fn call(
+        &self,
+        token: &str,
+        mcp_name: &str,
+        args: &Value,
+    ) -> Result<(String, bool), String> {
+        let (text, is_error) = self.call_untruncated(token, mcp_name, args).await?;
+        Ok((truncate_utf8(&text, MAX_RESULT_BYTES), is_error))
     }
 
     /// The project slugs the core knows, for the dictation vocabulary the
@@ -373,7 +379,7 @@ impl VogtTools {
     /// answer that is not the expected shape yields no names rather than
     /// an error — vocabulary is a courtesy, not a dependency.
     pub async fn project_slugs(&self, token: &str) -> Result<Vec<String>, String> {
-        let text = self
+        let (text, _) = self
             .call_untruncated(token, &mcp_tool_name("project.list"), &json!({}))
             .await?;
         Ok(project_slugs_in(&text))
@@ -386,7 +392,7 @@ impl VogtTools {
         token: &str,
         mcp_name: &str,
         args: &Value,
-    ) -> Result<String, String> {
+    ) -> Result<(String, bool), String> {
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -410,7 +416,11 @@ impl VogtTools {
                     .map(|body| serde_json::to_string_pretty(body).unwrap_or_default())
             })
             .ok_or_else(|| "vogt-core returned a result with no content".to_string())?;
-        Ok(text)
+        // The core reports a rejected tool call as a result with `isError`,
+        // not as a JSON-RPC error, so the text alone cannot say whether the
+        // operation happened. Callers that count a success have to read this.
+        let is_error = result.get("isError").and_then(Value::as_bool) == Some(true);
+        Ok((text, is_error))
     }
 
     async fn fetch_tool_list(&self, token: &str) -> Result<Vec<Value>, String> {
@@ -720,12 +730,16 @@ pub mod stub {
         tools: Arc<Vec<Value>>,
         calls: Arc<Mutex<Vec<StubCall>>>,
         answers: Arc<Mutex<std::collections::HashMap<String, String>>>,
+        /// Tools whose answer is a tool-level error (`isError: true`): the
+        /// core's shape for a call it rejected rather than failed to carry.
+        errors: Arc<Mutex<std::collections::HashSet<String>>>,
     }
 
     pub struct StubCore {
         pub base_url: String,
         calls: Arc<Mutex<Vec<StubCall>>>,
         answers: Arc<Mutex<std::collections::HashMap<String, String>>>,
+        errors: Arc<Mutex<std::collections::HashSet<String>>>,
     }
 
     impl StubCore {
@@ -737,6 +751,14 @@ pub mod stub {
                 .unwrap()
                 .insert(tool.to_string(), text.to_string());
         }
+
+        /// Answer `tool` as a tool-level error, the way the core reports a
+        /// call it rejected (`isError: true`) rather than one it carried out.
+        pub fn fail(&self, tool: &str, text: &str) {
+            self.answer(tool, text);
+            self.errors.lock().unwrap().insert(tool.to_string());
+        }
+
         pub fn calls(&self) -> Vec<StubCall> {
             self.calls.lock().unwrap().clone()
         }
@@ -841,7 +863,7 @@ pub mod stub {
                 });
                 json!({
                     "content": [{"type": "text", "text": text}],
-                    "isError": false,
+                    "isError": state.errors.lock().unwrap().contains(name),
                 })
             }
             other => {
@@ -859,10 +881,12 @@ pub mod stub {
     pub async fn start(tools: Vec<Value>) -> StubCore {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let answers = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let errors = Arc::new(Mutex::new(std::collections::HashSet::new()));
         let state = StubState {
             tools: Arc::new(tools),
             calls: Arc::clone(&calls),
             answers: Arc::clone(&answers),
+            errors: Arc::clone(&errors),
         };
         let app = Router::new().route("/mcp", post(handler)).with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -876,6 +900,7 @@ pub mod stub {
             base_url: format!("http://{addr}"),
             calls,
             answers,
+            errors,
         }
     }
 }
