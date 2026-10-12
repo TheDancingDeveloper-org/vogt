@@ -8,6 +8,7 @@ pub mod auth_gate;
 pub mod cli;
 pub mod engine;
 pub mod forge;
+pub mod forgejo;
 pub mod git;
 pub mod github;
 pub mod http;

@@ -74,21 +74,24 @@ impl GitHubClient {
         if token.is_empty() {
             return None;
         }
-        Some(Self {
-            token: Some(token),
+        Some(Self::new(Some(token), transport))
+    }
+
+    /// A client with an explicit token, or none. A token-less client is what
+    /// identity and public-import use; it never reads a file. An empty token
+    /// is the same as none.
+    pub fn new(token: Option<String>, transport: Option<Transport>) -> Self {
+        Self {
+            token: token.filter(|token| !token.is_empty()),
             api_root: API_ROOT.to_string(),
             transport,
             timeout: DEFAULT_TIMEOUT,
-        })
+        }
     }
 
+    /// A token-less client whose requests go through `transport`.
     pub fn with_transport(transport: Transport) -> Self {
-        Self {
-            token: None,
-            api_root: API_ROOT.to_string(),
-            transport: Some(transport),
-            timeout: DEFAULT_TIMEOUT,
-        }
+        Self::new(None, Some(transport))
     }
 
     /// GET one resource. A 404 is `Missing`, a 204 is `Empty`, and a 403 is

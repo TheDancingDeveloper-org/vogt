@@ -17,19 +17,33 @@
 //!   honesty mechanism: an always-present collector that fails on the network
 //!   would pin the whole estate's freshness to `partial`.
 //!
-//! What this does not do is build the provider. The HTTP client that turns a
-//! token file into a [`ForgeTransport`](super::transport::ForgeTransport) is
-//! WI-1064's, and the providers are generic over that trait, so this layer
-//! resolves the host, the repository and the token file and stops. The
-//! [`ForgeDirectory`](super::sync::ForgeDirectory) the collectors ask is the
-//! thin wrapper a caller builds once it holds the transports.
+//! What this layer builds is a [`ForgeClient`]: the two concrete credentialed
+//! providers, owned, so a directory can hand one out and a collector can
+//! borrow it through the object-safe [`ForgeProvider`] trait. A caller that
+//! needs a transport fake passes one; the real path passes `None` and the
+//! client talks HTTP.
 
 use std::path::{Path, PathBuf};
 
 use super::forgejo::parse_repo_url;
-use super::github::{repo_of, HOST as GITHUB_HOST};
+use super::forgejo::ForgejoProvider;
+use super::github::{repo_of, GitHubProvider, HOST as GITHUB_HOST};
 use super::models::RepoRef;
+use super::provider::ForgeProvider;
+use super::transport::ForgeTransport;
+use crate::adapters::github::GitHubClient;
+use crate::adapters::{forgejo::ForgejoClient, github::Transport};
 use crate::config::VogtConfig;
+
+/// The two credentialed providers this build can speak.
+///
+/// Owned, so a directory can hand one out and a collector can borrow it. The
+/// transport is the real client; a test that needs a fake builds its own
+/// provider rather than substituting one in here.
+pub enum ForgeClient {
+    GitHub(GitHubProvider<GitHubClient>),
+    Forgejo(ForgejoProvider<ForgejoClient>),
+}
 
 /// Every host some registered provider can read under `config`.
 ///
@@ -163,16 +177,426 @@ pub fn unsupported_reason(repo_url: Option<&str>, config: Option<&VogtConfig>) -
     ))
 }
 
-/// Whether any registered forge has a usable token file.
+/// The provider for `repo_url`, or `None` when there is not one.
 ///
+/// `None` folds "no forge hosts this" and "the forge is not configured"
+/// together on purpose — both mean "do not read". The caller that needs to
+/// tell a person why reaches for [`unsupported_reason`], which answers the
+/// first case without a token.
+pub fn provider_for(repo_url: Option<&str>, config: &VogtConfig) -> Option<ForgeClient> {
+    let matched = match_repo(repo_url, Some(config))?;
+    build(matched.kind, &matched.repo.host, config, None)
+}
+
+/// Resolve a configured host to its credentialed provider, if available.
+///
+/// A host named in `forge_token_files` is supported even when its token file
+/// is absent; `None` then means not configured rather than unsupported.
+pub fn provider_for_host(host: &str, config: &VogtConfig) -> Option<ForgeClient> {
+    let kind = kind_for_host(host, Some(config))?;
+    build(kind, host, config, None)
+}
+
+/// Build a provider from an explicitly resolved actor token.
+///
+/// This is what `forge.account_link` uses to validate a pasted token: the
+/// token is the caller's, not a file's. `None` means the host is not one this
+/// build reads.
+pub fn provider_for_token(
+    host: &str,
+    token: &str,
+    config: Option<&VogtConfig>,
+    transport: Option<Transport>,
+) -> Option<ForgeClient> {
+    let kind = kind_for_host(host, config)?;
+    Some(build_token(kind, host, token, transport))
+}
+
+/// Resolve repository identity without requiring a forge token.
+///
+/// GitHub is always an identity host. Forgejo identities are available for
+/// hosts declared in `forge_token_files`. The token-less provider builds
+/// canonical URLs and clones public repositories; the credentialed provider
+/// remains the gate for consolidation.
+pub fn identity_for(
+    repo_url: Option<&str>,
+    config: &VogtConfig,
+    transport: Option<Transport>,
+) -> Option<(ForgeClient, RepoRef)> {
+    let matched = match_repo(repo_url, Some(config))?;
+    Some((
+        identity(matched.kind, &matched.repo.host, transport),
+        matched.repo,
+    ))
+}
+
+/// A token-less GitHub provider for pure identity work — parsing a reference,
+/// building clone and web URLs — which needs no credential.
+pub fn github_identity() -> GitHubProvider<GitHubClient> {
+    GitHubProvider::new(GitHubClient::new(None, None))
+}
+
+/// The github.com provider specifically, for the GitHub-only paths.
+///
+/// Import and write-back ask for the concrete provider by name rather than
+/// resolving one per URL. It still goes through the same token resolution as
+/// everything else.
+pub fn github_provider(config: &VogtConfig) -> Option<GitHubProvider<GitHubClient>> {
+    match build(ForgeKind::GitHub, GITHUB_HOST, config, None) {
+        Some(ForgeClient::GitHub(provider)) => Some(provider),
+        _ => None,
+    }
+}
+
+fn kind_for_host(host: &str, config: Option<&VogtConfig>) -> Option<ForgeKind> {
+    if host == GITHUB_HOST {
+        Some(ForgeKind::GitHub)
+    } else if forgejo_hosts(config).iter().any(|named| named == host) {
+        Some(ForgeKind::Forgejo)
+    } else {
+        None
+    }
+}
+
+fn build(
+    kind: ForgeKind,
+    host: &str,
+    config: &VogtConfig,
+    transport: Option<Transport>,
+) -> Option<ForgeClient> {
+    match kind {
+        ForgeKind::GitHub => GitHubClient::from_token_file(token_file_for(config, host), transport)
+            .map(|client| ForgeClient::GitHub(GitHubProvider::new(client))),
+        ForgeKind::Forgejo => {
+            ForgejoClient::from_token_file(host, token_file_for(config, host), transport)
+                .map(|client| ForgeClient::Forgejo(ForgejoProvider::new(client, host)))
+        }
+    }
+}
+
+fn build_token(
+    kind: ForgeKind,
+    host: &str,
+    token: &str,
+    transport: Option<Transport>,
+) -> ForgeClient {
+    let token = Some(token.to_owned());
+    match kind {
+        ForgeKind::GitHub => {
+            ForgeClient::GitHub(GitHubProvider::new(GitHubClient::new(token, transport)))
+        }
+        ForgeKind::Forgejo => ForgeClient::Forgejo(ForgejoProvider::new(
+            ForgejoClient::new(host, token, transport),
+            host,
+        )),
+    }
+}
+
+fn identity(kind: ForgeKind, host: &str, transport: Option<Transport>) -> ForgeClient {
+    match kind {
+        ForgeKind::GitHub => {
+            ForgeClient::GitHub(GitHubProvider::new(GitHubClient::new(None, transport)))
+        }
+        ForgeKind::Forgejo => ForgeClient::Forgejo(ForgejoProvider::new(
+            ForgejoClient::new(host, None, transport),
+            host,
+        )),
+    }
+}
+
+impl ForgeProvider for ForgeClient {
+    fn capabilities(&self) -> super::models::ForgeCapabilities {
+        match self {
+            Self::GitHub(provider) => provider.capabilities(),
+            Self::Forgejo(provider) => provider.capabilities(),
+        }
+    }
+
+    fn list_repos(&self) -> Result<Vec<super::models::ForgeRepo>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.list_repos(),
+            Self::Forgejo(provider) => provider.list_repos(),
+        }
+    }
+
+    fn parse(&self, repo_url: Option<&str>) -> Option<RepoRef> {
+        match self {
+            Self::GitHub(provider) => provider.parse(repo_url),
+            Self::Forgejo(provider) => provider.parse(repo_url),
+        }
+    }
+
+    fn subject_key(&self, repo: &RepoRef, number: i64) -> String {
+        match self {
+            Self::GitHub(provider) => provider.subject_key(repo, number),
+            Self::Forgejo(provider) => provider.subject_key(repo, number),
+        }
+    }
+
+    fn number_of(&self, subject_key: Option<&str>) -> Option<i64> {
+        match self {
+            Self::GitHub(provider) => provider.number_of(subject_key),
+            Self::Forgejo(provider) => provider.number_of(subject_key),
+        }
+    }
+
+    fn clone_url(&self, repo: &RepoRef) -> String {
+        match self {
+            Self::GitHub(provider) => provider.clone_url(repo),
+            Self::Forgejo(provider) => provider.clone_url(repo),
+        }
+    }
+
+    fn web_url(&self, repo: &RepoRef) -> String {
+        match self {
+            Self::GitHub(provider) => provider.web_url(repo),
+            Self::Forgejo(provider) => provider.web_url(repo),
+        }
+    }
+
+    fn describe(
+        &self,
+        repo: &RepoRef,
+    ) -> Result<Option<serde_json::Map<String, serde_json::Value>>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.describe(repo),
+            Self::Forgejo(provider) => provider.describe(repo),
+        }
+    }
+
+    fn clone_token(&self) -> Option<String> {
+        match self {
+            Self::GitHub(provider) => provider.clone_token(),
+            Self::Forgejo(provider) => provider.clone_token(),
+        }
+    }
+
+    fn identity(&self) -> Result<Option<(String, String)>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.identity(),
+            Self::Forgejo(provider) => provider.identity(),
+        }
+    }
+
+    fn issues_updated_since(
+        &self,
+        repo: &RepoRef,
+        since: Option<&str>,
+    ) -> Result<Vec<super::models::ForgeIssue>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.issues_updated_since(repo, since),
+            Self::Forgejo(provider) => provider.issues_updated_since(repo, since),
+        }
+    }
+
+    fn pulls_updated_since(
+        &self,
+        repo: &RepoRef,
+        since: Option<&str>,
+    ) -> Result<Vec<super::models::ForgePull>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.pulls_updated_since(repo, since),
+            Self::Forgejo(provider) => provider.pulls_updated_since(repo, since),
+        }
+    }
+
+    fn releases(
+        &self,
+        repo: &RepoRef,
+    ) -> Result<Vec<super::models::ForgeRelease>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.releases(repo),
+            Self::Forgejo(provider) => provider.releases(repo),
+        }
+    }
+
+    fn checks(
+        &self,
+        repo: &RepoRef,
+    ) -> Result<Vec<super::models::ForgeCheck>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.checks(repo),
+            Self::Forgejo(provider) => provider.checks(repo),
+        }
+    }
+
+    fn watched_ref_checks(
+        &self,
+        repo: &RepoRef,
+    ) -> Result<Vec<super::models::ForgeCheck>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.watched_ref_checks(repo),
+            Self::Forgejo(provider) => provider.watched_ref_checks(repo),
+        }
+    }
+
+    fn failed_jobs(
+        &self,
+        repo: &RepoRef,
+        run_id: i64,
+    ) -> Result<Vec<super::models::ForgeJob>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.failed_jobs(repo, run_id),
+            Self::Forgejo(provider) => provider.failed_jobs(repo, run_id),
+        }
+    }
+
+    fn read_file(
+        &self,
+        repo: &RepoRef,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.read_file(repo, path),
+            Self::Forgejo(provider) => provider.read_file(repo, path),
+        }
+    }
+
+    fn compare(
+        &self,
+        repo: &RepoRef,
+        base: &str,
+        head: &str,
+    ) -> Result<Option<super::models::ForgeComparison>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.compare(repo, base, head),
+            Self::Forgejo(provider) => provider.compare(repo, base, head),
+        }
+    }
+
+    fn labels(
+        &self,
+        repo: &RepoRef,
+    ) -> Result<Vec<super::models::ForgeLabel>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.labels(repo),
+            Self::Forgejo(provider) => provider.labels(repo),
+        }
+    }
+
+    fn posture(
+        &self,
+        repo: &RepoRef,
+    ) -> Result<super::models::ForgePosture, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.posture(repo),
+            Self::Forgejo(provider) => provider.posture(repo),
+        }
+    }
+
+    fn notifications(
+        &self,
+        repo: &RepoRef,
+    ) -> Result<Vec<super::models::ForgeNotification>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.notifications(repo),
+            Self::Forgejo(provider) => provider.notifications(repo),
+        }
+    }
+
+    fn resolve_actor(
+        &self,
+        api_url: &str,
+    ) -> Result<Option<super::models::ForgeActor>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.resolve_actor(api_url),
+            Self::Forgejo(provider) => provider.resolve_actor(api_url),
+        }
+    }
+
+    fn org_members(&self, owner: &str) -> Result<Option<Vec<String>>, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.org_members(owner),
+            Self::Forgejo(provider) => provider.org_members(owner),
+        }
+    }
+
+    fn comment(
+        &self,
+        repo: &RepoRef,
+        number: i64,
+        body: &str,
+    ) -> Result<super::writeback::WriteBackResult, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.comment(repo, number, body),
+            Self::Forgejo(provider) => provider.comment(repo, number, body),
+        }
+    }
+
+    fn create_issue(
+        &self,
+        repo: &RepoRef,
+        title: &str,
+        body: &str,
+        labels: Option<&[String]>,
+    ) -> Result<super::writeback::WriteBackResult, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.create_issue(repo, title, body, labels),
+            Self::Forgejo(provider) => provider.create_issue(repo, title, body, labels),
+        }
+    }
+
+    fn add_labels(
+        &self,
+        repo: &RepoRef,
+        number: i64,
+        labels: &[String],
+    ) -> Result<super::writeback::WriteBackResult, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.add_labels(repo, number, labels),
+            Self::Forgejo(provider) => provider.add_labels(repo, number, labels),
+        }
+    }
+
+    fn set_state(
+        &self,
+        repo: &RepoRef,
+        number: i64,
+        state: &str,
+    ) -> Result<super::writeback::WriteBackResult, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.set_state(repo, number, state),
+            Self::Forgejo(provider) => provider.set_state(repo, number, state),
+        }
+    }
+
+    fn update_issue_body(
+        &self,
+        repo: &RepoRef,
+        number: i64,
+        body: &str,
+    ) -> Result<super::writeback::WriteBackResult, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.update_issue_body(repo, number, body),
+            Self::Forgejo(provider) => provider.update_issue_body(repo, number, body),
+        }
+    }
+
+    fn create_repo(
+        &self,
+        name: &str,
+        private: bool,
+        description: Option<&str>,
+    ) -> Result<super::models::ForgeRepo, crate::errors::VogtError> {
+        match self {
+            Self::GitHub(provider) => provider.create_repo(name, private, description),
+            Self::Forgejo(provider) => provider.create_repo(name, private, description),
+        }
+    }
+}
+
 /// The conditional-registration gate for the per-project sync collectors: an
 /// always-registered collector that fails on the network would pin the whole
 /// estate's freshness to `partial`, so "no forge configured" means "not
 /// registered", not "registered and failing".
+///
+/// Goes through [`build`] rather than a direct file read, so a host counts as
+/// configured exactly when a provider can be built for it.
 pub fn has_configured_forge(config: &VogtConfig) -> bool {
-    supported_hosts(Some(config))
-        .iter()
-        .any(|host| read_token(token_file_for(config, host)).is_some())
+    supported_hosts(Some(config)).iter().any(|host| {
+        kind_for_host(host, Some(config))
+            .is_some_and(|kind| build(kind, host, config, None).is_some())
+    })
 }
 
 /// `~/x` to `{home}/x`; anything else unchanged. A missing home leaves the
@@ -281,5 +705,87 @@ mod tests {
         assert!(read_token(Some(Path::new("/no/such/file"))).is_none());
         assert!(!has_configured_forge(&absent));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scripted(expect_auth: &'static str) -> Transport {
+        Box::new(move |_url, headers, _body, _method| {
+            let auth = headers.get("Authorization").map(String::as_str);
+            let (status, login) = if auth == Some(expect_auth) {
+                (200, br#"{"login":"ada"}"#.to_vec())
+            } else {
+                (401, br#"{"message":"bad credentials"}"#.to_vec())
+            };
+            let mut response_headers = std::collections::BTreeMap::new();
+            response_headers.insert("x-oauth-scopes".to_owned(), "repo".to_owned());
+            (status, login, response_headers)
+        })
+    }
+
+    #[test]
+    fn provider_for_builds_only_a_host_with_a_usable_token() {
+        let dir = std::env::temp_dir().join(format!("vogt-forge-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("token");
+        std::fs::write(&file, "gh-token\n").unwrap();
+
+        let config = config_with(
+            vec![("forge.example", "/no/such")],
+            Some(file.to_str().unwrap()),
+        );
+        assert!(provider_for(Some("https://github.com/acme/widget"), &config).is_some());
+        // Declared, but its token file is not there: not collected, not an error.
+        assert!(provider_for(Some("https://forge.example/acme/widget"), &config).is_none());
+        // Nobody reads gitlab, token or not.
+        assert!(provider_for(Some("https://gitlab.com/acme/widget"), &config).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn provider_for_token_validates_a_pasted_token_and_refuses_an_unknown_host() {
+        let github = provider_for_token(
+            "github.com",
+            "ghp_pasted",
+            None,
+            Some(scripted("Bearer ghp_pasted")),
+        )
+        .unwrap();
+        assert_eq!(github.identity().unwrap().unwrap().0, "ada");
+        assert_eq!(github.clone_token().as_deref(), Some("ghp_pasted"));
+
+        let forgejo = provider_for_token(
+            "forge.example",
+            "fj_pasted",
+            Some(&config_with(vec![("forge.example", "/t")], None)),
+            Some(scripted("token fj_pasted")),
+        )
+        .unwrap();
+        assert_eq!(forgejo.identity().unwrap().unwrap().0, "ada");
+
+        // A host this build does not read resolves to nothing.
+        assert!(provider_for_token("gitlab.com", "anything", None, None).is_none());
+        // An empty paste is not a credential: the client drops it, so identity
+        // fails rather than authenticating as nobody.
+        let empty = provider_for_token("github.com", "", None, Some(scripted("Bearer "))).unwrap();
+        assert!(empty.clone_token().is_none());
+        assert!(empty.identity().unwrap().is_none());
+    }
+
+    #[test]
+    fn identity_for_needs_no_token_and_only_declared_forgejo_hosts() {
+        let config = config_with(vec![("forge.example", "/no/such")], None);
+        let (provider, repo) =
+            identity_for(Some("https://github.com/acme/widget"), &config, None).unwrap();
+        assert_eq!(repo.slug(), "acme/widget");
+        assert!(provider.clone_token().is_none());
+        assert!(provider
+            .parse(Some("https://github.com/acme/widget"))
+            .is_some());
+
+        let (provider, repo) =
+            identity_for(Some("https://forge.example/acme/widget.git"), &config, None).unwrap();
+        assert_eq!(repo.host, "forge.example");
+        assert!(provider.clone_token().is_none());
+
+        assert!(identity_for(Some("https://gitlab.com/acme/widget"), &config, None).is_none());
     }
 }
