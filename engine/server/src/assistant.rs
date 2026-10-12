@@ -412,6 +412,10 @@ struct Conversation {
     /// approval that continued on a different model would hand the tool
     /// results of one conversation to another.
     profile: Option<String>,
+    /// When each `session.start` this conversation delivered was approved.
+    /// The hourly cap counts deliveries, not proposals: a card that was never
+    /// approved started nothing.
+    starts: Vec<Instant>,
 }
 
 /// One resolved backend route the loop may run a turn against.
@@ -664,6 +668,13 @@ pub struct AssistantRuntime {
     /// Index into `profiles` for a request that names none.
     default_profile: usize,
     max_tool_calls: u32,
+    /// How many `session.start`s one conversation may deliver per rolling
+    /// hour. Counted at delivery, so a denied card costs nothing.
+    starts_per_hour: u32,
+    /// The hibernation policy's live-session cap, copied here so a start can
+    /// be refused when the engine is already at it. `None` means no cap. It
+    /// does not arm the hibernation watcher; that stays idle-and-memory only.
+    live_cap: Option<usize>,
     /// Serializes turns: one user message / action resolution at a time.
     conversation: tokio::sync::Mutex<Conversation>,
     /// Project slugs for the dictation vocabulary, fetched from the core and
@@ -775,6 +786,8 @@ impl AssistantRuntime {
             profiles,
             default_profile,
             max_tool_calls: cfg.assistant_max_tool_calls,
+            starts_per_hour: cfg.assistant_starts_per_hour,
+            live_cap: cfg.hibernation.live_cap,
             conversation: tokio::sync::Mutex::new(Conversation::default()),
             project_names: parking_lot::Mutex::new(None),
             log,
@@ -1318,7 +1331,22 @@ impl AssistantRuntime {
         let outcome = if approve {
             match &pending.view {
                 PendingActionView::VogtWrite(view) => match &pending.vogt {
-                    Some(write) => self.deliver_vogt_write(view, write, &turn.caller).await,
+                    Some(write) => {
+                        if let Some(refusal) =
+                            self.start_refusal(&mut convo, &write.operation)
+                        {
+                            refusal
+                        } else {
+                            let outcome =
+                                self.deliver_vogt_write(view, write, &turn.caller).await;
+                            if write.operation == "session.start"
+                                && outcome.starts_with("<vogt-data ")
+                            {
+                                self.record_start(&mut convo);
+                            }
+                            outcome
+                        }
+                    }
                     // A view with no payload cannot happen — they are built
                     // together — but the type allows it, so it refuses rather
                     // than guessing at what to send the core.
@@ -1401,6 +1429,49 @@ impl AssistantRuntime {
             Ok(text) => vogt_tools::delimit(&write.operation, &text),
             Err(reason) => format!("not delivered: {reason}"),
         }
+    }
+
+    /// Why this `session.start` may not be delivered now, or `None`.
+    ///
+    /// Checked at delivery rather than proposal: the hourly counter counts
+    /// starts that happened, and the live count can move between the card and
+    /// the approval. A refusal here spends the approval but starts nothing.
+    fn start_refusal(&self, convo: &mut Conversation, operation: &str) -> Option<String> {
+        if operation != "session.start" {
+            return None;
+        }
+        let hour_ago = Instant::now() - Duration::from_secs(60 * 60);
+        let recent = convo
+            .starts
+            .iter()
+            .filter(|at| **at > hour_ago)
+            .count();
+        if recent >= self.starts_per_hour as usize {
+            return Some(format!(
+                "not delivered: this conversation already started {} session{} \
+                 in the last hour, and the limit is {}",
+                recent,
+                if recent == 1 { "" } else { "s" },
+                self.starts_per_hour
+            ));
+        }
+        if let Some(cap) = self.live_cap {
+            let live = self.sessions.live_sessions().len();
+            if live >= cap {
+                return Some(format!(
+                    "not delivered: {live} session{} already live, and the \
+                     hibernation policy's live cap is {cap}",
+                    if live == 1 { " is" } else { "s are" }
+                ));
+            }
+        }
+        None
+    }
+
+    fn record_start(&self, convo: &mut Conversation) {
+        let hour_ago = Instant::now() - Duration::from_secs(60 * 60);
+        convo.starts.retain(|at| *at > hour_ago);
+        convo.starts.push(Instant::now());
     }
 
     async fn deny_pending_locked(&self, convo: &mut Conversation, reason: &str) {
@@ -2391,6 +2462,9 @@ fn parse_vogt_write(
     if def.operation == "session.input" {
         apply_session_input_voice(&mut args)?;
     }
+    if def.operation == "session.start" {
+        apply_session_start_voice(&args)?;
+    }
     let target = match &session {
         Some(session) => session_target_line(session, &args),
         None => vogt_tools::describe_target(&args),
@@ -2437,6 +2511,42 @@ fn apply_session_input_voice(args: &mut Value) -> Result<()> {
     }
     if !object.contains_key("submit") {
         object.insert("submit".to_string(), Value::Bool(true));
+    }
+    Ok(())
+}
+
+/// The assistant's own rules for a `session.start` it is about to card.
+///
+/// A start without a work item is a session nobody can find afterwards, so
+/// the card is never offered. `role=oversight` is refused even for a person:
+/// the core would allow it, because the write runs as the approver, but a
+/// person nominates oversight from the GUI (WI-957). The assistant only
+/// starts workers.
+fn apply_session_start_voice(args: &Value) -> Result<()> {
+    let object = args.as_object().expect("checked by the caller");
+    let work_item = object
+        .get("work_item")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if work_item.is_none() {
+        return Err(ApiError::BadRequest(
+            "session.start needs a work_item: the assistant starts a session \
+             for a work item, not a free-standing one"
+                .into(),
+        ));
+    }
+    let role = object
+        .get("role")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if role.eq_ignore_ascii_case("oversight") {
+        return Err(ApiError::BadRequest(
+            "session.start refused: the assistant starts worker sessions only. \
+             A person nominates an oversight session from the GUI"
+                .into(),
+        ));
     }
     Ok(())
 }
@@ -2709,6 +2819,7 @@ mod tests {
             assistant_base_url: "http://unused.invalid".into(),
             assistant_model: "test-model".into(),
             assistant_max_tool_calls: 8,
+            assistant_starts_per_hour: 3,
             assistant_allow_claude_proxy: false,
             assistant_reasoning_effort: None,
             assistant_profiles: vec![],
@@ -2758,6 +2869,8 @@ mod tests {
             profiles: vec![test_profile("default", "test-model")],
             default_profile: 0,
             max_tool_calls: 8,
+            starts_per_hour: 3,
+            live_cap: None,
             conversation: tokio::sync::Mutex::new(Conversation::default()),
             project_names: parking_lot::Mutex::new(None),
             log: None,
@@ -4506,6 +4619,7 @@ mod tests {
                 tool_call_reply(
                     "vogt_session_start",
                     json!({
+                        "work_item": "WI-4",
                         "model": "gpt-5.6",
                         "effort": "medium",
                         "reason": "Sam wants somewhere to research a dinner question",
@@ -4621,6 +4735,146 @@ mod tests {
         // And the id it was carrying is spent, so a late approval of it 404s
         // rather than delivering what the conversation has moved on from.
         assert!(rt.resolve_action(paired_caller(), id, true).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_oversight_start_is_refused_before_a_card() {
+        // A person nominates oversight from the GUI (WI-957). The write would
+        // run as the approver, so the core would allow it; the assistant must
+        // not offer the card at all.
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({
+                        "work_item": "WI-12",
+                        "role": "oversight",
+                        "reason": "Sam asked for an oversight session",
+                    }),
+                ),
+                final_reply("I cannot start an oversight session."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        let out = rt
+            .handle_message(
+                paired_caller(),
+                "start an oversight session for WI-12".into(),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.pending_action.is_none(),
+            "an oversight start must not reach a card"
+        );
+        assert!(
+            tool_names_called(&core).is_empty(),
+            "an oversight start must not reach the core"
+        );
+        let shown = tool_results(&rt).await.join("\n");
+        assert!(
+            shown.contains("worker sessions only"),
+            "the model was not told why: {shown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_hourly_start_cap_stops_the_second_delivery() {
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let mut rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({"work_item": "WI-1", "reason": "the first one"}),
+                ),
+                final_reply("First."),
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({"work_item": "WI-2", "reason": "the second one"}),
+                ),
+                final_reply("Second."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        rt.starts_per_hour = 1;
+
+        let first = rt
+            .handle_message(paired_caller(), "start one".into(), None, None)
+            .await
+            .unwrap();
+        let card = first.pending_action.expect("the first start is carded");
+        rt.resolve_action(paired_caller(), card.id(), true)
+            .await
+            .unwrap();
+
+        let second = rt
+            .handle_message(paired_caller(), "start another".into(), None, None)
+            .await
+            .unwrap();
+        let card = second
+            .pending_action
+            .expect("the cap is checked at delivery, not proposal");
+        rt.resolve_action(paired_caller(), card.id(), true)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            tool_names_called(&core),
+            vec!["session_start".to_string()],
+            "the second start must not reach the core"
+        );
+        let shown = tool_results(&rt).await.join("\n");
+        assert!(
+            shown.contains("the limit is 1"),
+            "the refusal must name the cap: {shown}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_live_cap_stops_a_start_when_the_pod_is_full() {
+        let sessions = test_registry();
+        let live = spawn_cat(&sessions);
+        let _guard = KillOnDrop(sessions.clone(), live.id);
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        let mut rt = runtime_with_vogt(
+            sessions,
+            vec![
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({"work_item": "WI-3", "reason": "one more"}),
+                ),
+                final_reply("Refused."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        rt.live_cap = Some(1);
+
+        let out = rt
+            .handle_message(paired_caller(), "start another".into(), None, None)
+            .await
+            .unwrap();
+        let card = out.pending_action.expect("the start is still carded");
+        rt.resolve_action(paired_caller(), card.id(), true)
+            .await
+            .unwrap();
+
+        assert!(
+            tool_names_called(&core).is_empty(),
+            "a start past the live cap must not reach the core"
+        );
+        let shown = tool_results(&rt).await.join("\n");
+        assert!(
+            shown.contains("live cap is 1"),
+            "the refusal must name the cap: {shown}"
+        );
     }
 
     // -- The notifications question --------------------------------
