@@ -223,12 +223,26 @@ fn verified_manifest<C: Clock, I: IdFactory>(
         )));
     }
     for name in ["declared.sqlite3", "observed.sqlite3"] {
-        if !source.join(name).is_file() {
+        let path = source.join(name);
+        if !path.is_file() {
             return Err(VogtError::NotFound(format!(
                 "{source} is missing {name}",
                 source = source.display()
             )));
         }
+        // A symlink is not a file we own. Following it would let a backup copy
+        // something that is not part of the backup, or overwrite somewhere else
+        // when the copy lands. Checked before the file is opened.
+        if path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(VogtError::InvalidRequest(format!(
+                "{path} is a symlink; a backup's store must be a regular file",
+                path = path.display()
+            )));
+        }
+        validate_store(&path)?;
     }
     let current = ctx.declared.schema_version();
     if manifest.declared_schema_version > current {
@@ -239,6 +253,54 @@ fn verified_manifest<C: Clock, I: IdFactory>(
         )));
     }
     Ok(manifest)
+}
+
+/// Prove a file is a Vogt store worth copying in. SQLite's own quick check
+/// catches a torn or corrupt database, and the migrations table is what makes it
+/// a Vogt store rather than any SQLite file. A failure here is cheaper than one
+/// discovered after the live store has been replaced.
+fn validate_store(path: &Path) -> Result<(), VogtError> {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|err| {
+                VogtError::InvalidRequest(format!(
+                    "opening {path} failed: {err}",
+                    path = path.display()
+                ))
+            })?;
+    let check: String = conn
+        .query_row("PRAGMA quick_check", [], |row| row.get(0))
+        .map_err(|err| {
+            VogtError::InvalidRequest(format!(
+                "{path} is not a readable SQLite database: {err}",
+                path = path.display()
+            ))
+        })?;
+    if check != "ok" {
+        return Err(VogtError::InvalidRequest(format!(
+            "{path} failed SQLite's quick check: {check}",
+            path = path.display()
+        )));
+    }
+    let vogt: bool = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|err| {
+            VogtError::InvalidRequest(format!(
+                "reading {path} failed: {err}",
+                path = path.display()
+            ))
+        })?;
+    if !vogt {
+        return Err(VogtError::InvalidRequest(format!(
+            "{path} is not a Vogt store: it has no migrations table",
+            path = path.display()
+        )));
+    }
+    Ok(())
 }
 
 /// Verify the manifest, then replace the data directory's stores. Verification
@@ -745,6 +807,79 @@ mod tests {
         );
         let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
         assert_eq!(after, before, "the live store was not replaced");
+    }
+
+    /// A backup whose stores pass, with one of them replaced by `plant`.
+    fn planted(plant: impl FnOnce(&std::path::Path)) -> (Built, Value) {
+        let source = opened();
+        let taken = backup(
+            ctx(&source),
+            &json!({"destination": ctx(&source).config.resolved_data_dir().join("snap").display().to_string(), "reason": "why"}),
+        )
+        .unwrap();
+        plant(&PathBuf::from(taken["path"].as_str().unwrap()).join("declared.sqlite3"));
+        (source, taken)
+    }
+
+    #[test]
+    fn restore_refuses_a_symlinked_store_and_touches_nothing() {
+        let (source, taken) = planted(|store| {
+            let real = store.with_extension("real");
+            std::fs::rename(store, &real).unwrap();
+            std::os::unix::fs::symlink(&real, store).unwrap();
+        });
+        let target = opened();
+        let before = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        let error = restore(
+            ctx(&target),
+            &json!({"source": taken["path"], "confirm": true, "reason": "why"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(message) if message.contains("is a symlink"))
+        );
+        let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        assert_eq!(after, before, "the live store was not replaced");
+        drop(source);
+    }
+
+    #[test]
+    fn restore_refuses_a_corrupt_store_and_touches_nothing() {
+        let (source, taken) = planted(|store| {
+            std::fs::write(store, "this is not a database").unwrap();
+        });
+        let target = opened();
+        let before = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        let error = restore(
+            ctx(&target),
+            &json!({"source": taken["path"], "confirm": true, "reason": "why"}),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            VogtError::InvalidRequest(message) if message.contains("not a readable SQLite database")
+        ));
+        let after = ctx(&target).declared.read().unwrap().instance_id().unwrap();
+        assert_eq!(after, before, "the live store was not replaced");
+        drop(source);
+    }
+
+    #[test]
+    fn restore_refuses_a_database_that_is_not_a_vogt_store() {
+        let (source, taken) = planted(|store| {
+            std::fs::remove_file(store).unwrap();
+            let conn = rusqlite::Connection::open(store).unwrap();
+            conn.execute_batch("CREATE TABLE notes (body TEXT)")
+                .unwrap();
+        });
+        let error = restore(
+            ctx(&source),
+            &json!({"source": taken["path"], "confirm": true, "reason": "why"}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, VogtError::InvalidRequest(message) if message.contains("not a Vogt store"))
+        );
     }
 
     #[test]
