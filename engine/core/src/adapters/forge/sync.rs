@@ -117,8 +117,8 @@ struct ReceiptArgs<'a> {
 ///
 /// `None` means no configured forge reads that URL. `unsupported_reason` names
 /// why, so a receipt can tell "no forge reads this" from "reads it, but no
-/// token". The registry that implements this lands with the next chunk; the
-/// collectors only need the seam.
+/// token". [`super::registry::ForgeClients`] is the owned directory a sweep
+/// holds; a test supplies its own.
 pub trait ForgeDirectory {
     fn provider_for(&self, repo_url: Option<&str>) -> Option<&dyn ForgeProvider>;
     fn unsupported_reason(&self, repo_url: Option<&str>) -> String;
