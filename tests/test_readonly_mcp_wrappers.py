@@ -584,6 +584,7 @@ def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
     assert servers["github-ro"]["args"] == ["github"]
     assert "GITHUB_MCP_TOKEN" in servers["github-ro"]["env_vars"]
     assert tomllib.loads(text)["other"] == {"kept": True}
+    assert tomllib.loads(text)["features"]["daemon_auto_start"] is False
 
     # A second wave replaces the tables in place instead of appending copies.
     again = subprocess.run(
@@ -611,3 +612,67 @@ def test_parallel_codex_bootstraps_write_one_table_each(tmp_path: Path) -> None:
     assert broken.returncode == 0, broken.stderr
     assert "not valid TOML" in broken.stderr
     assert config.read_text(encoding="utf-8") == duplicate
+
+
+def _codex_bootstrap(tmp_path: Path, extra: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    bindir = tmp_path / "bin"
+    bindir.mkdir(exist_ok=True)
+    codex = bindir / "codex"
+    if not codex.exists():
+        codex.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        codex.chmod(0o755)
+    return subprocess.run(
+        ["bash", str(BOOTSTRAP)],
+        env={
+            "PATH": f"{bindir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+            "HOME": str(tmp_path),
+            "CODEX_HOME": str(tmp_path / "codex"),
+            "VOGT_SRC": str(tmp_path / "absent"),
+            **extra,
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(
+    shutil.which("python3") is None or shutil.which("flock") is None,
+    reason="the Codex config rewrite needs python3 and flock",
+)
+def test_daemon_flag_merges_into_an_existing_features_table(tmp_path: Path) -> None:
+    """WI-1142: a client that skips --no-daemon still must not start the
+    app-server daemon. An existing [features] table used to hide the key."""
+    import tomllib
+
+    codex_home = tmp_path / "codex"
+    config = codex_home / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        "[features]\napprovals = true\n\n[other]\nkept = true\n",
+        encoding="utf-8",
+    )
+    proc = _codex_bootstrap(tmp_path, {})
+    assert proc.returncode == 0, proc.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
+    assert parsed["other"] == {"kept": True}
+    assert "mcp_servers" not in parsed
+
+    # A key an operator set to true is forced off: the pin depends on it.
+    config.write_text(
+        "daemon_auto_start = true\n\n[features]\napprovals = true\n",
+        encoding="utf-8",
+    )
+    again = _codex_bootstrap(tmp_path, {})
+    assert again.returncode == 0, again.stderr
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["features"] == {"approvals": True, "daemon_auto_start": False}
+    assert parsed["daemon_auto_start"] is True
+
+    # Already off: the file is not rewritten.
+    before = config.read_text(encoding="utf-8")
+    third = _codex_bootstrap(tmp_path, {})
+    assert third.returncode == 0, third.stderr
+    assert config.read_text(encoding="utf-8") == before
