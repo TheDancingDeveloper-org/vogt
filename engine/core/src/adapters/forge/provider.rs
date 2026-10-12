@@ -20,9 +20,9 @@ pub trait ForgeProvider {
 
     /// What this forge can do, for a caller to read before it asks.
     ///
-    /// Owned, not borrowed: the value is a handful of flags, and returning it by
-    /// value is what keeps [`ForgeProvider`] object-safe, so a directory can hand
-    /// a provider back as `&dyn ForgeProvider`.
+    /// Returned owned because the value is a handful of flags and a caller may
+    /// want to keep it. Object-safety does not require it: `ForgeCapabilities`
+    /// is `'static`, so a borrow would be object-safe too.
     fn capabilities(&self) -> ForgeCapabilities;
 
     /// Repositories the credential can see. A provider with no usable
@@ -54,8 +54,9 @@ pub trait ForgeProvider {
 
     /// The token a git clone should use, if one is configured.
     ///
-    /// Owned for the same reason as [`capabilities`](Self::capabilities): a
-    /// borrowed token would make the trait unusable behind a trait object.
+    /// Returned owned so the caller can keep it after the provider borrow ends.
+    /// That copies the secret, which is accepted; a borrow would be object-safe
+    /// as well.
     fn clone_token(&self) -> Option<String>;
 
     /// The token owner and reported scopes, or `None` when invalid.
