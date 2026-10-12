@@ -321,9 +321,17 @@ fn parse_response(msg: &Value) -> CodexEvent {
             .get("message")
             .and_then(Value::as_str)
             .unwrap_or("codex request failed");
-        return CodexEvent::TurnEnd {
-            error: Some(message.to_string()),
-        };
+        // Only `turn/start` failing ends the in-flight turn. `set_model` and
+        // `interrupt` send their own requests while a turn can be running, and
+        // reading their rejection as a turn boundary would drop the real turn
+        // (ids are `turn-`, `model-`, `stop-`, `init`, `start`, `resume`).
+        let id = str_field(msg, "id").unwrap_or("");
+        if id.starts_with("turn-") {
+            return CodexEvent::TurnEnd {
+                error: Some(message.to_string()),
+            };
+        }
+        return CodexEvent::Notice(message.to_string());
     }
     let result = msg.get("result").cloned().unwrap_or(Value::Null);
     // initialize / thread/start / thread/resume all look like a successful
@@ -378,6 +386,24 @@ mod tests {
     fn turn_completed_ends_the_turn() {
         let line = r#"{"jsonrpc":"2.0","method":"turn/completed","params":{}}"#;
         assert_eq!(parse_line(line), CodexEvent::TurnEnd { error: None });
+    }
+
+    #[test]
+    fn only_a_turn_error_ends_the_turn() {
+        let turn = r#"{"jsonrpc":"2.0","id":"turn-1","error":{"message":"rejected"}}"#;
+        assert_eq!(
+            parse_line(turn),
+            CodexEvent::TurnEnd {
+                error: Some("rejected".into())
+            }
+        );
+        let model = r#"{"jsonrpc":"2.0","id":"model-1","error":{"message":"unknown model"}}"#;
+        assert_eq!(
+            parse_line(model),
+            CodexEvent::Notice("unknown model".into())
+        );
+        let stop = r#"{"jsonrpc":"2.0","id":"stop-1","error":{"message":"no turn"}}"#;
+        assert_eq!(parse_line(stop), CodexEvent::Notice("no turn".into()));
     }
 
     #[test]
