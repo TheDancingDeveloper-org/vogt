@@ -888,18 +888,6 @@ export const getWorkMany = (refs: string[], signal?: AbortSignal) =>
     missing: string[];
   }>("work.get_many", { refs }, "GET", signal);
 
-/** The most refs one `work.get_many` takes (`WORK_GET_MANY_LIMIT` in the
- *  core's models); a caller with more asks in pages of this size. */
-export const WORK_GET_MANY_LIMIT = 200;
-
-/** Compact rows for a set of refs in one read (WI-1224): what the session
- *  rail's chips ask, rather than one search per ref. */
-export const getWorkMany = (refs: string[], signal?: AbortSignal) =>
-  call<{
-    items: Pick<WorkItem, "ref" | "title" | "kind" | "state" | "priority" | "project_slug">[];
-    missing: string[];
-  }>("work.get_many", { refs }, "GET", signal);
-
 export const backlog = (params: Record<string, unknown> = {}) =>
   call<RankedView>("backlog", { mode: "full", ...params });
 
