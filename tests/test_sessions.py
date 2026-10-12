@@ -909,6 +909,29 @@ def test_a_page_of_hibernated_links_does_not_hide_a_live_unlinked_session(
     assert page.total == 52 and page.truncated is False
 
 
+def test_more_declared_links_than_the_read_cap_is_reported_truncated(
+    wired: AppContext, engine: StandInEngine
+) -> None:
+    """WI-1266 review: the declared half is capped, and the cap must not look
+    complete. One past the 500 links that are read makes `truncated` stay true
+    and `total` a floor, on the last page and on an empty page past it."""
+    for _ in range(501):
+        start_session(wired, StartSessionParams(work_item="WI-1", reason=WHY))
+
+    last = list_sessions(
+        wired, ListSessionsParams(mode="full", states=[], limit=500, offset=0)
+    )
+    assert len(last.sessions) == 500
+    assert last.truncated is True and last.total == 501
+
+    beyond = list_sessions(
+        wired, ListSessionsParams(mode="full", states=[], limit=500, offset=500)
+    )
+    assert beyond.sessions == []
+    assert beyond.truncated is True and beyond.total == 501
+    assert "eng-1" not in {row.engine_session_id for row in last.sessions}
+
+
 def test_a_dead_engine_hides_no_unlinked_sessions(wired: AppContext) -> None:
     """With the engine unreachable there is nothing to enumerate, and the
     declared links still list — the unlinked pass simply has no input."""
