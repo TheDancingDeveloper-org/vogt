@@ -97,10 +97,27 @@ const OVERLAP_SECONDS: i64 = 60;
 /// the receipt says so and the next sweep continues from where this one reached.
 const PAGE: usize = 100;
 
+/// Commit the bookkeeping a sync staged: each project's watermark, then its
+/// confirmed subjects.
+pub fn commit_sync<S: SyncBook>(
+    store: &S,
+    collector: &str,
+    pending: &BTreeMap<String, PendingSync>,
+    at: Moment,
+) -> Result<(), VogtError> {
+    for (project_id, pending) in pending {
+        if let Some(watermark) = &pending.watermark {
+            store.set_watermark(collector, project_id, Some(watermark), at)?;
+        }
+        store.touch_subjects(&pending.subject_keys, at)?;
+    }
+    Ok(())
+}
+
 /// A project's watermark advance and confirmed subjects, awaiting commit.
-struct Pending {
-    watermark: Option<String>,
-    subject_keys: Vec<String>,
+pub struct PendingSync {
+    pub watermark: Option<String>,
+    pub subject_keys: Vec<String>,
 }
 
 struct ReceiptArgs<'a> {
@@ -136,7 +153,7 @@ pub struct ForgeSyncCollector<'a, S: SyncBook> {
     kind: SyncKind,
     store: &'a S,
     directory: &'a dyn ForgeDirectory,
-    pending: BTreeMap<String, Pending>,
+    pending: BTreeMap<String, PendingSync>,
 }
 
 impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
@@ -165,6 +182,11 @@ impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
 
     pub fn requires_network(&self) -> bool {
         true
+    }
+
+    /// The collector's registered name.
+    pub fn name(&self) -> &'static str {
+        self.name
     }
 
     /// One project's findings, receipt last. A provider error propagates: the
@@ -212,7 +234,7 @@ impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
         };
         self.pending.insert(
             project.id.clone(),
-            Pending {
+            PendingSync {
                 watermark: advanced.map(to_iso),
                 subject_keys,
             },
@@ -232,17 +254,18 @@ impl<'a, S: SyncBook> ForgeSyncCollector<'a, S> {
 
     /// Commit each project's watermark and confirmations post-append.
     pub fn after_append(&mut self, at: Moment) -> Result<(), VogtError> {
-        for (project_id, pending) in &self.pending {
-            if let Some(watermark) = &pending.watermark {
-                self.store
-                    .set_watermark(self.name, project_id, Some(watermark), at)?;
-            }
-            self.store.touch_subjects(&pending.subject_keys, at)?;
+        let result = commit_sync(self.store, self.name, &self.pending, at);
+        if result.is_ok() {
+            self.pending.clear();
         }
-        self.pending.clear();
-        Ok(())
+        result
     }
 
+    /// Hand back the bookkeeping `collect` staged, so an owner that builds a
+    /// fresh collector per project can commit it itself.
+    pub fn take_pending(&mut self) -> BTreeMap<String, PendingSync> {
+        std::mem::take(&mut self.pending)
+    }
     /// Forget progress for one project, so the next sync backfills it.
     ///
     /// `forge onboard` is exactly "reset the watermark and sync now": the same

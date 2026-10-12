@@ -29,11 +29,12 @@ mod transport;
 mod urls;
 mod writeback;
 
+pub use directory::ForgeClients;
 pub use edges::{parse_edges, ParsedEdge, FROM_BODY, FROM_BRANCH, FROM_TITLE};
 pub use github::repo_of;
 pub use kinds::{
-    current_collector, COLLECTOR_ALIASES, COLLECTOR_CHECKS, COLLECTOR_NOTIFICATIONS, KIND_CHECK,
-    KIND_DEPLOY_LANE, KIND_NOTIFICATION,
+    current_collector, COLLECTOR_ALIASES, COLLECTOR_CHECKS, COLLECTOR_ISSUES,
+    COLLECTOR_NOTIFICATIONS, COLLECTOR_PULLS, KIND_CHECK, KIND_DEPLOY_LANE, KIND_NOTIFICATION,
 };
 pub use models::{
     ForgeActor, ForgeCapabilities, ForgeCheck, ForgeComparison, ForgeIssue, ForgeJob, ForgeLabel,
@@ -42,5 +43,6 @@ pub use models::{
 pub use payloads::{comparison, decoded_content, quote_path};
 pub use provider::ForgeProvider;
 pub use registry::has_configured_forge;
+pub use sync::{commit_sync, ForgeSyncCollector, PendingSync};
 pub use transport::{api_path, ForgeResponse, ForgeTransport};
 pub use writeback::{permits, WriteBackAction, WriteBackOutcome, WriteBackPolicy, WriteBackResult};

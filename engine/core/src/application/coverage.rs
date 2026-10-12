@@ -20,10 +20,10 @@ use crate::storage::interface::{DeclaredStore, ObservedStore, ReadView};
 ///
 /// The core collectors are always present. Session-outcomes registers only when
 /// an engine is configured, and agent-activity only when transcript roots are.
-/// The forge collectors and deploy-lanes are not ported, so a sweep refuses
-/// while either is configured, but coverage still lists them: Python registers
-/// them whenever a forge or a lane is configured, and an omitted name reads as
-/// "not configured" rather than "never run".
+/// forge-issues and forge-prs run when a forge is configured. The five forge
+/// read collectors and deploy-lanes are not ported, but coverage still lists
+/// them: Python registers them whenever a forge or a lane is configured, and an
+/// omitted name reads as "not configured" rather than "never run".
 fn collector_names<C, I>(ctx: &AppContext<C, I>) -> Result<Vec<&'static str>, VogtError>
 where
     C: Clock,

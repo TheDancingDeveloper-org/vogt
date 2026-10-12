@@ -39,6 +39,22 @@ pub struct SqliteObservedStore<C, I> {
     has_evidence_cached: Cell<bool>,
 }
 
+impl<C, I> Clone for SqliteObservedStore<C, I> {
+    /// Another handle on the same file, clock and id factory. Every method
+    /// opens its own connection, so two handles do not share a transaction.
+    /// The evidence-table cache is per handle: a clone re-reads it once rather
+    /// than trusting a sibling's answer.
+    fn clone(&self) -> Self {
+        Self {
+            path: self.path.clone(),
+            clock: Arc::clone(&self.clock),
+            ids: Arc::clone(&self.ids),
+            synchronous: self.synchronous.clone(),
+            has_evidence_cached: Cell::new(false),
+        }
+    }
+}
+
 impl<C, I> SqliteObservedStore<C, I>
 where
     C: Clock,

@@ -4,14 +4,17 @@
 //! Scope is always the registered project list, optionally narrowed to one
 //! project and never widened by looking around. An unnamed sweep runs the core
 //! collectors that are not on-demand: dep-refs, git-local, source-markers and
-//! mirrored-source, plus session-outcomes when an engine is configured and
-//! agent-activity when transcript roots are. Contract-checker runs only when
-//! named. Forge and deploy-lane collectors are not ported: a sweep refuses
-//! while either is configured rather than answering as if they did not exist.
-//! CI watch is not started here.
+//! mirrored-source, plus session-outcomes when an engine is configured,
+//! agent-activity when transcript roots are, and forge-issues and forge-prs
+//! when a forge is configured. Contract-checker runs only when named. The five
+//! forge read collectors are not ported, so coverage lists them as `never_run`
+//! while a forge is configured rather than omitting them. Deploy-lanes is not
+//! ported either: a sweep refuses while a lane is configured rather than
+//! answering as if it did not exist. CI watch is not started here.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 use serde_json::{json, Value};
 
@@ -53,15 +56,12 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    // Forge and deploy-lane collectors are not ported. Python registers them
-    // whenever one is configured, so a sweep that quietly omitted them would
-    // answer differently from Python on every real deployment that has one.
-    if crate::adapters::forge::has_configured_forge(&ctx.config)? {
-        return Err(VogtError::InvalidRequest(
-            "sweep cannot run while a forge is configured: the forge collectors (forge-issues, forge-prs, forge-checks, forge-releases, forge-posture, forge-notifications, forge-labels) are not ported yet"
-                .to_string(),
-        ));
-    }
+    // Deploy-lanes is not ported. Python registers it whenever a lane is
+    // configured, so a sweep that quietly omitted it would answer differently
+    // from Python on every deployment that has one. The five forge read
+    // collectors are not ported either, but they are read-only and coverage
+    // still lists them as `never_run`; forge-issues and forge-prs are real and
+    // registered below.
     if !ctx.config.deploy_lanes.is_empty() {
         return Err(VogtError::InvalidRequest(
             "sweep cannot run while a deploy lane is configured: the deploy-lanes collector is not ported yet"
@@ -124,6 +124,9 @@ fn sweep<C: Clock + 'static, I: IdFactory + 'static>(
         registry
             .add(Registered::Indexer(Box::new(indexer)))
             .map_err(VogtError::InvalidRequest)?;
+    }
+    if crate::adapters::forge::has_configured_forge(&ctx.config)? {
+        register_forge_sync(&mut registry, ctx)?;
     }
     let mut selected: Vec<String> = registry
         .select(&named, offline_only)?
@@ -243,7 +246,129 @@ fn count_of(counts: &BTreeMap<String, i64>, key: &str) -> i64 {
     counts.get(key).copied().unwrap_or(0)
 }
 
-/// The declared reads `session-outcomes` needs, done on its behalf.
+/// Register forge-issues and forge-prs, sharing one directory opened once.
+///
+/// The directory resolves every configured host at `open`, so neither collector
+/// re-reads a token file mid-sweep. Both hold the same `Arc`: the registry
+/// stores owned collectors, and a directory cannot be borrowed by two of them.
+fn register_forge_sync<C: Clock + 'static, I: IdFactory + 'static>(
+    registry: &mut CollectorRegistry,
+    ctx: &AppContext<C, I>,
+) -> Result<(), VogtError> {
+    let directory = Rc::new(crate::adapters::forge::ForgeClients::open(
+        ctx.config.clone(),
+        None,
+    )?);
+    for kind in [ForgeSyncKind::Issues, ForgeSyncKind::Pulls] {
+        registry
+            .add(Registered::Collector(Box::new(OwnedForgeSync::new(
+                kind,
+                ctx.observed.clone(),
+                Rc::clone(&directory),
+            ))))
+            .map_err(VogtError::InvalidRequest)?;
+    }
+    Ok(())
+}
+
+/// Which read an [`OwnedForgeSync`] performs.
+enum ForgeSyncKind {
+    Issues,
+    Pulls,
+}
+
+/// The forge sync collector as the sweep registry holds it.
+///
+/// [`crate::adapters::forge::sync::ForgeSyncCollector`] borrows its store and
+/// its directory, which is what its tests use. The registry keeps owned
+/// `'static` collectors, so this owns both and calls the same reads and the
+/// same post-append bookkeeping through them: another handle on the context's
+/// observed store, and a share of the directory opened once for the sweep.
+struct OwnedForgeSync<C: Clock + 'static, I: IdFactory + 'static> {
+    name: &'static str,
+    kind: ForgeSyncKind,
+    store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
+    directory: Rc<crate::adapters::forge::ForgeClients>,
+    pending: BTreeMap<String, crate::adapters::forge::PendingSync>,
+}
+
+impl<C: Clock + 'static, I: IdFactory + 'static> OwnedForgeSync<C, I> {
+    fn new(
+        kind: ForgeSyncKind,
+        store: crate::storage::sqlite::observed::SqliteObservedStore<C, I>,
+        directory: Rc<crate::adapters::forge::ForgeClients>,
+    ) -> Self {
+        let name = match kind {
+            ForgeSyncKind::Issues => crate::adapters::forge::COLLECTOR_ISSUES,
+            ForgeSyncKind::Pulls => crate::adapters::forge::COLLECTOR_PULLS,
+        };
+        Self {
+            name,
+            kind,
+            store,
+            directory,
+            pending: BTreeMap::new(),
+        }
+    }
+}
+
+impl<C: Clock + 'static, I: IdFactory + 'static> crate::collectors::Collector
+    for OwnedForgeSync<C, I>
+{
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn requires_network(&self) -> bool {
+        true
+    }
+
+    fn collect(
+        &mut self,
+        _ctx: &mut CollectorContext<'_>,
+        project: &crate::core::Project,
+        _now: &mut dyn FnMut() -> crate::core::Moment,
+    ) -> crate::collectors::Collection {
+        let mut inner = match self.kind {
+            ForgeSyncKind::Issues => {
+                crate::adapters::forge::ForgeSyncCollector::issues(&self.store, &*self.directory)
+            }
+            ForgeSyncKind::Pulls => {
+                crate::adapters::forge::ForgeSyncCollector::pulls(&self.store, &*self.directory)
+            }
+        };
+        let found = inner.collect(project);
+        self.pending.extend(
+            inner
+                .take_pending()
+                .into_values()
+                .map(|entry| (project.id.clone(), entry)),
+        );
+        found.into()
+    }
+
+    fn after_append(&mut self, at: crate::core::Moment) {
+        // The trait returns `()` and the sweeper does not look at this. A
+        // watermark that failed to advance must not read as advanced, so the
+        // failure is logged rather than swallowed silently: the next sweep
+        // re-reads the window, and digest dedup absorbs the replay.
+        let pending = std::mem::take(&mut self.pending);
+        if let Err(error) =
+            crate::adapters::forge::commit_sync(&self.store, self.name, &pending, at)
+        {
+            tracing::warn!(
+                target: "vogt.collect",
+                "forge sync bookkeeping did not commit: collector={} error={}",
+                self.name,
+                error.message(),
+            );
+        }
+    }
+
+    fn post_append(&self) -> bool {
+        true
+    }
+}
 ///
 /// Collectors never touch declared data. This holds another handle on the same
 /// store and re-reads per project, the way Python's `_DeclaredSessions` does.
@@ -703,49 +828,84 @@ mod tests {
         register_op(built, params).unwrap();
     }
 
-    /// A configured forge or deploy lane refuses the whole sweep, and the
-    /// refusal names the collectors that are not ported yet.
+    /// A configured forge no longer refuses the sweep: forge-issues and
+    /// forge-prs run. A project with no repository is the unsupported receipt,
+    /// which needs no network, so this stays offline.
     #[test]
-    fn a_configured_forge_or_deploy_lane_refuses_the_sweep() {
+    fn a_configured_forge_sweeps_its_sync_collectors_offline() {
         let dir = std::env::temp_dir().join(format!(
-            "vogt-collect-refuse-{}-{}",
+            "vogt-collect-forge-{}-{}",
             std::process::id(),
             unique()
         ));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let token = dir.join("forge-token");
         std::fs::write(&token, "secret-token\n").unwrap();
-        let config = VogtConfig {
-            data_dir: dir.clone(),
-            github_token_file: Some(token),
-            ..VogtConfig::default()
-        };
+        let mut clock = Some(StepClock::new(moment()));
+        let mut ids = Some(SequentialIds::new(None).unwrap());
+        crate::application::instance::init(&dir, &mut clock, &mut ids).unwrap();
         let forged = build_context(
-            config,
+            VogtConfig {
+                data_dir: dir.clone(),
+                github_token_file: Some(token),
+                ..VogtConfig::default()
+            },
             Some(Principal::new("local:test-user", ActorKind::Human, "Test").unwrap()),
-            Some(StepClock::new(moment())),
-            Some(SequentialIds::new(None).unwrap()),
+            clock,
+            ids,
             None,
             None,
             None,
             None,
         )
         .unwrap();
-        let refused = sweep_op(&forged, json!({})).unwrap_err();
-        let message = refused.to_string();
-        assert!(matches!(refused, VogtError::InvalidRequest(_)), "{message}");
-        for name in [
-            "forge-issues",
-            "forge-prs",
-            "forge-checks",
-            "forge-releases",
-            "forge-posture",
-            "forge-notifications",
-            "forge-labels",
-        ] {
-            assert!(message.contains(name), "{message}");
+        register(&forged, "bare", &dir, None);
+
+        let swept = sweep_op(&forged, json!({})).unwrap();
+        let names: Vec<&str> = swept["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|report| report["collector"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"forge-issues"), "{names:?}");
+        assert!(names.contains(&"forge-prs"), "{names:?}");
+        for report in swept["reports"].as_array().unwrap() {
+            if matches!(
+                report["collector"].as_str(),
+                Some("forge-issues" | "forge-prs")
+            ) {
+                assert_eq!(report["outcome"], "ok", "{report}");
+                assert_eq!(report["failures"], json!({}), "{report}");
+            }
         }
 
+        // Both reach the network, so an offline sweep drops them.
+        let offline = sweep_op(&forged, json!({"offline_only": true})).unwrap();
+        let offline_names: Vec<&str> = offline["reports"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|report| report["collector"].as_str().unwrap())
+            .collect();
+        assert!(
+            !offline_names.contains(&"forge-issues"),
+            "{offline_names:?}"
+        );
+        assert!(!offline_names.contains(&"forge-prs"), "{offline_names:?}");
+    }
+
+    /// A deploy lane still refuses the whole sweep, and the refusal names the
+    /// collector that is not ported yet.
+    #[test]
+    fn a_configured_deploy_lane_refuses_the_sweep() {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-collect-refuse-{}-{}",
+            std::process::id(),
+            unique()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let config = VogtConfig {
             data_dir: dir,
             deploy_lanes: vec![crate::config::DeployLane {
@@ -771,6 +931,7 @@ mod tests {
         .unwrap();
         let refused = sweep_op(&laned, json!({})).unwrap_err();
         let message = refused.to_string();
+        assert!(matches!(refused, VogtError::InvalidRequest(_)), "{message}");
         assert!(message.contains("deploy-lanes"), "{message}");
     }
 

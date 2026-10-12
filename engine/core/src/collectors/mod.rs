@@ -21,6 +21,6 @@ pub use session_outcomes::{
 mod source_markers;
 mod sweeper;
 
-pub use base::CollectorContext;
+pub use base::{Collection, Collector, CollectorContext};
 pub use registry::{CollectorRegistry, Registered};
 pub use sweeper::Sweeper;
