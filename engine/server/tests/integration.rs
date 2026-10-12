@@ -9884,6 +9884,7 @@ async fn the_idle_policy_hibernates_only_what_no_exemption_covers() {
         &Policy {
             idle_after: Some(Duration::from_millis(500)),
             memavailable_below: None,
+            live_cap: None,
         },
     )
     .await;
