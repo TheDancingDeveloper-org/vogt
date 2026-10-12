@@ -329,6 +329,7 @@ RUN set -eu; \
 
 ARG INSTALL_AI_CLIENTS
 ARG CODEX_VERSION
+ARG CODEX_SHA
 ARG CLAUDE_CODE_VERSION
 ARG OPENCODE_VERSION
 ARG KLAUDIA_VERSION
@@ -377,20 +378,19 @@ ENV PATH=/opt/vogt/agent-clis/bin:$PATH
 # of the pin self-verifying instead of hopeful.
 RUN set -eu; \
     . /usr/local/share/vogt/agent-versions.env; \
-    codex_version="${CODEX_VERSION:-${VOGT_CODEX_VERSION}}"; \
+    codex_sha="${CODEX_SHA:-${VOGT_CODEX_SHA}}"; \
     claude_code_version="${CLAUDE_CODE_VERSION:-${VOGT_CLAUDE_CODE_VERSION}}"; \
     opencode_version="${OPENCODE_VERSION:-${VOGT_OPENCODE_VERSION}}"; \
     go_version="$(go version | sed -n 's/^go version go\([^ ]*\) .*/\1/p')"; \
     klaudia_version="${KLAUDIA_VERSION:-${VOGT_KLAUDIA_VERSION}}"; \
     printf 'codex=%s\nclaude-code=%s\nopencode=%s\ngo=%s\nklaudia=%s\n' \
-        "$codex_version" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
+        "$codex_sha" "$claude_code_version" "$opencode_version" "$go_version" "$klaudia_version" \
         > /usr/local/share/vogt/agent-versions.resolved; \
-    printf 'codex\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
-        "$VOGT_KLAUDIA_SOURCE" \
+    printf 'codex\t%s\tcodex\tVOGT_CODEX_SHA\tgithub-release\ncodex-npm\t@openai/codex\tcodex\tVOGT_CODEX_VERSION\tnpm\nclaude-code\t@anthropic-ai/claude-code\tclaude\tVOGT_CLAUDE_CODE_VERSION\tnpm\nopencode\topencode-ai\topencode\tVOGT_OPENCODE_VERSION\tnpm\ngo\thttps://go.dev/dl\tgo\tVOGT_GO_VERSION\tgo-dist\nklaudia\t%s\tklaudia\tVOGT_KLAUDIA_VERSION\tgo-src\n' \
+        "$VOGT_CODEX_SOURCE" "$VOGT_KLAUDIA_SOURCE" \
         > /usr/local/share/vogt/agent-clis.tools; \
     pkgs=""; \
     if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
-        pkgs="$pkgs @openai/codex@${codex_version}"; \
         pkgs="$pkgs @anthropic-ai/claude-code@${claude_code_version}"; \
         pkgs="$pkgs opencode-ai@${opencode_version}"; \
         # The pod base's unpinned copy (its `curl | bash` installer) is
@@ -406,10 +406,40 @@ RUN set -eu; \
         || { echo "claude is not $claude_code_version — a stub install" >&2; exit 1; } \
         && /usr/local/bin/opencode --version | grep -qF "$opencode_version" \
         || { echo "opencode is not $opencode_version — the platform binary did not install" >&2; exit 1; } \
-        && install -d /usr/local/libexec \
-        && codex_target="$(readlink -f /usr/local/bin/codex)" \
-        && ln -s "$codex_target" /usr/local/libexec/codex-real \
-        && ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex ; \
+        && install -d /usr/local/libexec; \
+    fi
+# Codex (WI-1142) is the fork's release asset, not the npm package. The tag is
+# `fork-<sha>` and the asset is `codex-<target>.tar.gz`; the recorded sha256 is
+# of the `codex` member inside it (the same one a runtime pin checks against
+# SHA256SUMS), so a CODEX_SHA that is not the pin has nothing to be checked
+# against and is refused. Stock npm Codex stays selectable: pin
+# VOGT_CODEX_VERSION at runtime and the `codex-npm` row installs it.
+RUN set -eu; \
+    if [ "$INSTALL_AI_CLIENTS" = "true" ]; then \
+        . /usr/local/share/vogt/agent-versions.env; \
+        codex_sha="${CODEX_SHA:-${VOGT_CODEX_SHA}}"; \
+        if [ "$codex_sha" != "$VOGT_CODEX_SHA" ]; then \
+            echo "CODEX_SHA=$codex_sha has no recorded checksum; edit engine/agent-versions.env instead" >&2; \
+            exit 1; \
+        fi; \
+        case "$(dpkg --print-architecture)" in \
+            amd64) target=x86_64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_AMD64" ;; \
+            arm64) target=aarch64-unknown-linux-musl; codex_sum="$VOGT_CODEX_SHA256_LINUX_ARM64" ;; \
+            *) echo "no pinned Codex for $(dpkg --print-architecture)" >&2; exit 1 ;; \
+        esac; \
+        asset="codex-${target}.tar.gz"; \
+        curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/${asset}" -o "/tmp/${asset}"; \
+        curl -fsSL "$VOGT_CODEX_SOURCE/releases/download/fork-${codex_sha}/SHA256SUMS" -o /tmp/SHA256SUMS; \
+        (cd /tmp && grep -F "  ${asset}" SHA256SUMS | sha256sum -c -); \
+        tar -xzf "/tmp/${asset}" -C /tmp; \
+        echo "$codex_sum  /tmp/codex" | sha256sum -c -; \
+        install -d /usr/local/libexec; \
+        install -m 0755 /tmp/codex /usr/local/libexec/codex-real; \
+        install -m 0755 /tmp/bwrap /usr/local/libexec/bwrap; \
+        install -m 0755 /tmp/codex-code-mode-host /usr/local/libexec/codex-code-mode-host; \
+        rm -f "/tmp/${asset}" /tmp/SHA256SUMS /tmp/codex /tmp/bwrap /tmp/codex-code-mode-host; \
+        ln -sfn /usr/local/bin/codex-full-access /usr/local/bin/codex; \
+        /usr/local/libexec/codex-real --version; \
     fi
 
 # Klaudia (WI-950), built from the pinned commit with the pinned Go: no

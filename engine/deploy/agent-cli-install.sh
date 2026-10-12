@@ -36,6 +36,13 @@
 #   go-dist   source is a Go release mirror (https://go.dev/dl); the version's
 #             linux tarball, checked against the sha256 the mirror's own
 #             release index gives for it (WI-951). The prefix is a GOROOT.
+#   github-release
+#             source is a GitHub repository; the version is a full commit and
+#             the asset is `<binary>-<target>.tar.gz` under the tag
+#             `fork-<commit>`, checked against the SHA256SUMS published beside
+#             it and, when the image recorded one, against that member's own
+#             sha256 (WI-1142). The prefix records `source`
+#             (`<repository>@<commit>`), the same shape as `go-src`.
 #   go-src    source is a git repository of a Go program whose main package
 #             is `./cmd/<binary>`; the version is a full commit id, fetched
 #             alone and built with the `go` on PATH, CGO off (WI-950). The
@@ -186,7 +193,7 @@ smoke_check() {
     local tool="$1" version="$2" prefix="$3" binary output
     binary="$(binary_for "$tool")"
     [[ -x "$prefix/bin/$binary" ]] || { log "$prefix/bin/$binary is missing or not executable"; return 1; }
-    if [[ "$(kind_for "$tool")" == "go-src" ]]; then
+    if [[ "$(kind_for "$tool")" == "go-src" || "$(kind_for "$tool")" == "github-release" ]]; then
         # A program built from a commit names its own release, not the
         # commit: a clean `--version` is the check.
         output="$("$prefix/bin/$binary" --version 2>&1)" || { log "$binary --version failed: ${output:-<no output>}"; return 1; }
@@ -310,6 +317,84 @@ install_go_src() {
     rm -rf "$src" "$src.gocache" "$build_log"
 }
 
+# The rustc target triple this machine's musl release is built for.
+musl_target() {
+    case "$(uname -m)" in
+        x86_64|amd64) echo x86_64-unknown-linux-musl ;;
+        aarch64|arm64) echo aarch64-unknown-linux-musl ;;
+        *) return 1 ;;
+    esac
+}
+
+# The sha256 the image recorded for this tool's release member, if any.
+# VOGT_CODEX_SHA256_LINUX_AMD64 / _ARM64, named off the binary.
+recorded_member_sha() {
+    local binary="$1" arch var
+    case "$(uname -m)" in
+        x86_64|amd64) arch=AMD64 ;;
+        aarch64|arm64) arch=ARM64 ;;
+        *) return 0 ;;
+    esac
+    var="VOGT_$(printf '%s' "$binary" | tr '[:lower:]-' '[:upper:]_')_SHA256_LINUX_${arch}"
+    printf '%s' "${!var:-}"
+}
+
+# Unpack one `fork-<commit>` release into `prefix/bin`. The archive is checked
+# against the SHA256SUMS published beside it, and the binary member against the
+# sha256 the image recorded, when it recorded one for this commit. A mismatch
+# deletes the archive and leaves `current` untouched: the caller only flips
+# after this returns.
+install_github_release() {
+    local tool="$1" version="$2" prefix="$3" source binary target asset sums_url dir sum recorded
+    source="$(package_for "$tool")"
+    binary="$(binary_for "$tool")"
+    target="$(musl_target)" || { log "no $tool release for $(uname -m)"; return 1; }
+    asset="${binary}-${target}.tar.gz"
+    dir="$(mktemp -d "$prefix.dl.XXXXXX")"
+    if ! curl -fsSL --max-time 600 \
+            "$source/releases/download/fork-${version}/${asset}" -o "$dir/$asset"; then
+        log "could not download $source fork-$version $asset"
+        rm -rf "$dir"
+        return 1
+    fi
+    sums_url="$source/releases/download/fork-${version}/SHA256SUMS"
+    if ! curl -fsSL --max-time 60 "$sums_url" -o "$dir/SHA256SUMS"; then
+        log "could not download $sums_url"
+        rm -rf "$dir"
+        return 1
+    fi
+    sum="$(awk -v asset="$asset" '$2 == asset { print $1; exit }' "$dir/SHA256SUMS")"
+    if [[ -z "$sum" ]] || ! echo "$sum  $dir/$asset" | sha256sum -c - >/dev/null 2>&1; then
+        log "$asset does not match the SHA256SUMS published for fork-$version"
+        rm -rf "$dir"
+        return 1
+    fi
+    if ! tar -xzf "$dir/$asset" -C "$dir"; then
+        log "$asset did not unpack"
+        rm -rf "$dir"
+        return 1
+    fi
+    recorded="$(recorded_member_sha "$binary")"
+    if [[ "$version" == "${VOGT_CODEX_SHA:-}" && -n "$recorded" ]]; then
+        if ! echo "$recorded  $dir/$binary" | sha256sum -c - >/dev/null 2>&1; then
+            log "$binary does not match the sha256 recorded for $version"
+            rm -rf "$dir"
+            return 1
+        fi
+    elif [[ ! -x "$dir/$binary" ]]; then
+        log "$asset carries no $binary"
+        rm -rf "$dir"
+        return 1
+    fi
+    mkdir -p "$prefix/bin"
+    install -m 0755 "$dir/$binary" "$prefix/bin/$binary"
+    [[ -f "$dir/bwrap" ]] && install -m 0755 "$dir/bwrap" "$prefix/bin/bwrap"
+    [[ -f "$dir/codex-code-mode-host" ]] && \
+        install -m 0755 "$dir/codex-code-mode-host" "$prefix/bin/codex-code-mode-host"
+    printf '%s@%s\n' "$source" "$version" > "$prefix/source"
+    rm -rf "$dir"
+}
+
 # Fetch `version` of `tool` into the fresh directory `prefix`, by its kind.
 fetch_into() {
     local tool="$1" version="$2" prefix="$3" package log_file
@@ -331,6 +416,10 @@ fetch_into() {
             ;;
         go-src)
             install_go_src "$tool" "$version" "$prefix"
+            ;;
+        github-release)
+            log "installing $tool $version from $(package_for "$tool") fork-$version"
+            install_github_release "$tool" "$version" "$prefix"
             ;;
         *)
             log "'$(kind_for "$tool")' is not a kind of tool this installer knows"
@@ -370,7 +459,7 @@ main() {
             log "$tool $requested resolves to $version"
             ;;
         *)
-            if [[ "$kind" == "go-src" ]]; then
+            if [[ "$kind" == "go-src" || "$kind" == "github-release" ]]; then
                 # A commit, in full: a short id is a prefix a later commit can
                 # share, and a branch or tag can move under the pin.
                 if [[ ! "$requested" =~ ^[0-9a-f]{40}$ ]]; then
