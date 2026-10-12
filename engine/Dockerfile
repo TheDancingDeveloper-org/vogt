@@ -337,9 +337,11 @@ ARG KLAUDIA_VERSION
 # /home/sprooty/.npm-global) so these survive the runtime /home/sprooty bind
 # mount — same reasoning as the system pnpm install in the base. The dev pod is
 # the trusted isolation boundary, so install the real Codex entry point under
-# libexec and expose the codex-full-access wrapper as `codex`. This overrides
-# persisted per-user workspace-write/network restrictions for every repo under
-# ~/Working.
+# libexec and expose the codex-full-access wrapper as `codex`. The wrapper no
+# longer forces --dangerously-bypass-approvals-and-sandbox (WI-1143): posture
+# flags come from the engine, and the nested sandbox stays the one those flags
+# name (`danger-full-access` for default and accept-edits; bypass is the only
+# posture that skips it, and only when a person asked).
 COPY --chmod=755 engine/deploy/codex-full-access.sh /usr/local/bin/codex-full-access
 # The driven-session permission policy (WI-926): auto-mode rules every
 # engine-launched Claude session gets with --settings. A deployment replaces it
@@ -348,6 +350,13 @@ COPY engine/deploy/driven-session-settings.json /usr/local/share/vogt/driven-ses
 # Its opencode half (WI-932), given as OPENCODE_CONFIG_CONTENT; replaced with
 # ENGINE_AGENT_OPENCODE_CONFIG.
 COPY engine/deploy/driven-session-opencode.json /usr/local/share/vogt/driven-session-opencode.json
+# Codex requirements (WI-1143, WI-1146). Stock Codex reads
+# /etc/codex/requirements.toml with no flag; the image copy is what
+# ENGINE_AGENT_CODEX_POLICY resolves to when unset. The file is comments only
+# until the gitguard hook table is confirmed on the installed Codex — see the
+# file. Do not add a flag Codex does not have.
+COPY engine/deploy/driven-session-codex-requirements.toml /usr/local/share/vogt/driven-session-codex-requirements.toml
+COPY engine/deploy/driven-session-codex-requirements.toml /etc/codex/requirements.toml
 # The pin below is the *baked baseline*. A deployment may name a different
 # version per tool at runtime (`VOGT_CLAUDE_CODE_VERSION` and friends in the
 # container's environment; `agent-clis.tools`, written below, is the

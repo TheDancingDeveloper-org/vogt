@@ -92,7 +92,9 @@ pub struct LaunchRequest<'a> {
     /// launch is pinned only when this is true.
     pub codex_session_id: bool,
     /// `default` / `accept-edits` / `bypass` (WI-926). Klaudia takes
-    /// `default` and `bypass` only.
+    /// `default` and `bypass` only. Codex takes all three (WI-1143); its
+    /// sandbox is `danger-full-access` because the pod cannot create the user
+    /// namespace `workspace-write` needs.
     pub permission_mode: Option<&'a str>,
     /// The deployment's driven-session settings (an `autoMode` policy) to
     /// hand Claude Code with `--settings`, when it has one. Klaudia has no
@@ -140,6 +142,46 @@ pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
             "acceptEdits".to_string(),
         ])),
         Some("bypass") => Ok(Some(vec!["--dangerously-skip-permissions".to_string()])),
+        Some(other) => Err(ApiError::BadRequest(format!(
+            "permission_mode {other:?} is not one of default, accept-edits, bypass"
+        ))),
+    }
+}
+
+/// A permission posture as Codex flags (WI-1143).
+///
+/// The pod is the isolation boundary and cannot create a user namespace, so
+/// `workspace-write` (and `--approve-for-me`, which hard-wires it) would fail
+/// the launch. Every posture therefore uses `-s danger-full-access`. Default
+/// still asks (`-a on-request`); accept-edits routes those asks through
+/// Codex's automatic reviewer without changing the sandbox; bypass drops both
+/// approvals and the sandbox and is a person's grant only.
+///
+/// `None` means the caller did not ask for a posture. That is not the default
+/// posture: the wrapper used to force bypass, and a launch that omitted the
+/// flags would look like it had applied one.
+pub fn codex_permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
+    let sandbox = ["-s".to_string(), "danger-full-access".to_string()];
+    match mode.map(str::trim).filter(|m| !m.is_empty()) {
+        None => Ok(None),
+        Some("default") => Ok(Some(
+            ["-a".to_string(), "on-request".to_string()]
+                .into_iter()
+                .chain(sandbox)
+                .collect(),
+        )),
+        Some("accept-edits") | Some("accept_edits") => Ok(Some(
+            [
+                "-c".to_string(),
+                "approvals_reviewer=\"auto_review\"".to_string(),
+            ]
+            .into_iter()
+            .chain(sandbox)
+            .collect(),
+        )),
+        Some("bypass") => Ok(Some(vec![
+            "--dangerously-bypass-approvals-and-sandbox".to_string()
+        ])),
         Some(other) => Err(ApiError::BadRequest(format!(
             "permission_mode {other:?} is not one of default, accept-edits, bypass"
         ))),
@@ -210,7 +252,12 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
         validate_conversation_id(value)?;
     }
     let permission = permission_flags(req.permission_mode)?;
-    let asked = model.is_some() || effort.is_some() || resume.is_some() || permission.is_some();
+    let codex_permission = codex_permission_flags(req.permission_mode)?;
+    let asked = model.is_some()
+        || effort.is_some()
+        || resume.is_some()
+        || permission.is_some()
+        || codex_permission.is_some();
 
     let Some(command) = command.filter(|c| !c.is_empty()) else {
         if asked {
@@ -235,14 +282,6 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             )));
         }
         return Ok(Launch::default());
-    }
-    if permission.is_some() && binary == "codex" {
-        // Named rather than dropped: a posture that silently did not apply
-        // is the failure this refusal exists against.
-        return Err(ApiError::BadRequest(format!(
-            "permission_mode is applied to Claude Code, opencode and Klaudia; `{binary}` has \
-             its own approval settings in its launcher and is not told one per session"
-        )));
     }
     if binary == "klaudia"
         && matches!(
@@ -357,6 +396,17 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
                 // rather than a trick.
                 rewritten.extend(["-c".to_string(), format!("model_reasoning_effort={effort}")]);
             }
+            // WI-1143. A launch that names no posture still gets the default:
+            // the wrapper no longer forces bypass, and omitting the flags would
+            // look like the session had applied one. An explicit posture is
+            // never dropped onto that default.
+            let flags = codex_permission.unwrap_or_else(|| {
+                codex_permission_flags(Some("default"))
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default()
+            });
+            rewritten.extend(flags);
             // The WI-1127 fork reads its state back through the window title
             // (WI-1145). Stock Codex accepts `-c` and ignores a `tui` key it
             // does not know, so every launch asks for the `agent-state` title
@@ -622,6 +672,10 @@ mod tests {
                 "gpt-5.6",
                 "-c",
                 "model_reasoning_effort=medium",
+                "-a",
+                "on-request",
+                "-s",
+                "danger-full-access",
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
@@ -667,6 +721,10 @@ mod tests {
                 "/usr/local/bin/codex",
                 "-m",
                 "gpt-5.6",
+                "-a",
+                "on-request",
+                "-s",
+                "danger-full-access",
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
@@ -776,10 +834,13 @@ mod tests {
             .unwrap()
             .command
             .unwrap();
-        // The brief stays last; the two `-c` pairs that ask the fork for its
-        // `agent-state` title sit ahead of it (WI-1145).
-        assert_eq!(codex.len(), 9);
-        assert!(codex[8].contains(BRIEF));
+        // The brief stays last. Ahead of it: the default posture (WI-1143)
+        // and the two `-c` pairs that ask the fork for its `agent-state` title
+        // (WI-1145).
+        assert_eq!(codex.len(), 13);
+        assert!(codex[12].contains(BRIEF));
+        assert!(codex.windows(2).any(|w| w == ["-a", "on-request"]));
+        assert!(codex.windows(2).any(|w| w == ["-s", "danger-full-access"]));
         assert!(codex
             .windows(2)
             .any(|w| w == ["-c", "tui.terminal_title=[\"agent-state\"]"]));
@@ -860,6 +921,10 @@ mod tests {
                     id,
                     "-m",
                     "m1",
+                    "-a",
+                    "on-request",
+                    "-s",
+                    "danger-full-access",
                     "-c",
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
@@ -880,6 +945,10 @@ mod tests {
                 "--search",
                 "-m",
                 "m1",
+                "-a",
+                "on-request",
+                "-s",
+                "danger-full-access",
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",
@@ -983,6 +1052,10 @@ mod tests {
             [
                 protected("codex"),
                 cmd(&[
+                    "-a",
+                    "on-request",
+                    "-s",
+                    "danger-full-access",
                     "-c",
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
@@ -1004,6 +1077,10 @@ mod tests {
             [
                 protected("codex"),
                 cmd(&[
+                    "-a",
+                    "on-request",
+                    "-s",
+                    "danger-full-access",
                     "-c",
                     "tui.terminal_title=[\"agent-state\"]",
                     "-c",
@@ -1114,17 +1191,28 @@ mod opencode_posture_tests {
     }
 
     #[test]
-    fn codex_is_still_not_told_a_posture() {
+    fn codex_bypass_is_its_own_flag_and_not_claudes_settings() {
         let command = vec!["codex".to_string()];
-        let err = launch(
+        let got = launch(
             Some(&command),
             &LaunchRequest {
                 permission_mode: Some("bypass"),
                 ..LaunchRequest::default()
             },
         )
-        .expect_err("codex has no per-session posture");
-        assert!(err.to_string().contains("codex"), "{err}");
+        .expect("codex takes a posture");
+        assert_eq!(
+            got.command.unwrap(),
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false",
+            ]
+        );
+        assert!(got.env.is_empty(), "codex is not given claude settings");
     }
 }
 
@@ -1192,6 +1280,25 @@ mod permission_tests {
             Some(cmd(&["--dangerously-skip-permissions"]))
         );
         assert!(permission_flags(Some("yolo")).is_err());
+        assert!(codex_permission_flags(Some("yolo")).is_err());
+        assert_eq!(codex_permission_flags(None).unwrap(), None);
+        assert_eq!(
+            codex_permission_flags(Some("default")).unwrap(),
+            Some(cmd(&["-a", "on-request", "-s", "danger-full-access"]))
+        );
+        assert_eq!(
+            codex_permission_flags(Some("accept_edits")).unwrap(),
+            Some(cmd(&[
+                "-c",
+                "approvals_reviewer=\"auto_review\"",
+                "-s",
+                "danger-full-access"
+            ]))
+        );
+        assert_eq!(
+            codex_permission_flags(Some("bypass")).unwrap(),
+            Some(cmd(&["--dangerously-bypass-approvals-and-sandbox"]))
+        );
     }
 
     #[test]
@@ -1216,19 +1323,49 @@ mod permission_tests {
             out.contains(&format!("--settings={}", policy.display())),
             "{out:?}"
         );
-        // Codex and a plain shell are refused a posture, never started plain.
-        for command in [cmd(&["codex"]), cmd(&["bash"])] {
-            let refused = launch(
-                Some(&command),
-                &LaunchRequest {
-                    permission_mode: Some("bypass"),
-                    ..LaunchRequest::default()
-                },
-            );
-            assert!(refused.is_err(), "{command:?}");
-        }
-        // A policy file alone is not an ask: Codex starts without it, and still
-        // gets the title overrides every Codex launch carries.
+        // A plain shell is refused a posture, never started plain. Codex is
+        // told its own flags (WI-1143) and is not handed Claude's settings file.
+        let refused = launch(
+            Some(&cmd(&["bash"])),
+            &LaunchRequest {
+                permission_mode: Some("bypass"),
+                ..LaunchRequest::default()
+            },
+        );
+        assert!(refused.is_err(), "bash");
+        let codex = launch(
+            Some(&cmd(&["codex"])),
+            &LaunchRequest {
+                permission_mode: Some("bypass"),
+                settings_file: Some(policy),
+                ..LaunchRequest::default()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(codex.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
+        assert!(!codex
+            .iter()
+            .any(|arg| arg.contains("driven-session-settings")));
+        assert!(!codex.iter().any(|arg| arg == "--approve-for-me"));
+        let edits = launch(
+            Some(&cmd(&["codex"])),
+            &LaunchRequest {
+                permission_mode: Some("accept-edits"),
+                ..LaunchRequest::default()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(edits
+            .windows(2)
+            .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]));
+        assert!(edits.windows(2).any(|w| w == ["-s", "danger-full-access"]));
+        // A policy file alone is not an ask of the caller, but a Codex launch
+        // that names no posture still starts on the default one: the wrapper
+        // no longer forces bypass, so omitting the flags would look like it had.
         assert_eq!(
             launch(
                 Some(&cmd(&["codex"])),
@@ -1242,6 +1379,10 @@ mod permission_tests {
             .unwrap(),
             cmd(&[
                 "codex",
+                "-a",
+                "on-request",
+                "-s",
+                "danger-full-access",
                 "-c",
                 "tui.terminal_title=[\"agent-state\"]",
                 "-c",

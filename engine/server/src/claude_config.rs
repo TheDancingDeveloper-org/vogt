@@ -32,7 +32,7 @@ const KEYS: &[&str] = &[
 /// Whether, and where, the engine answers the questions. Off by default —
 /// which is what a test's hand-built config gets, so a test never writes the
 /// real `~/.claude.json` — and read from the environment by `config::load`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Onboarding {
     pub enabled: bool,
     /// The directory Claude Code's `.claude.json` is in when a session does
@@ -48,6 +48,12 @@ pub struct Onboarding {
     /// default posture, as `OPENCODE_CONFIG_CONTENT`. Read and checked once,
     /// at start. See [`opencode_config_from`].
     pub opencode_config: Option<String>,
+    /// The Codex half (WI-1143 / WI-1146): the managed requirements file Codex
+    /// reads from `/etc/codex/requirements.toml`, or a deployment's own path.
+    /// Unlike the opencode policy, a named file that is missing or unreadable
+    /// is an error the launch must refuse — never a reason to start without
+    /// the gitguard hook. See [`codex_policy_from`].
+    pub codex_policy: Result<Option<PathBuf>, String>,
 }
 
 /// `ENGINE_AGENT_CLAUDE_SETTINGS`, read: a path names a deployment's own
@@ -67,6 +73,16 @@ pub const IMAGE_SETTINGS_FILE: &str = "/usr/local/share/vogt/driven-session-sett
 
 /// Where the image installs the default opencode driven-session policy.
 pub const IMAGE_OPENCODE_CONFIG: &str = "/usr/local/share/vogt/driven-session-opencode.json";
+
+/// Where the image installs the default Codex requirements file. The same
+/// bytes are also copied to [`CODEX_REQUIREMENTS_FILE`], which is the path
+/// stock Codex reads without a flag.
+pub const IMAGE_CODEX_POLICY: &str = "/usr/local/share/vogt/driven-session-codex-requirements.toml";
+
+/// The managed requirements path Codex reads. A deployment that points
+/// `ENGINE_AGENT_CODEX_POLICY` elsewhere still has to put that file where
+/// Codex will load it; the engine only checks the named path exists.
+pub const CODEX_REQUIREMENTS_FILE: &str = "/etc/codex/requirements.toml";
 
 /// The permission values opencode accepts. Anything else makes opencode
 /// refuse its whole configuration and fail to start, so a policy with one is
@@ -91,6 +107,49 @@ pub fn opencode_config_from(value: Option<&str>) -> Option<String> {
             tracing::warn!(path = %path.display(), reason = %why, "opencode driven-session policy ignored");
             None
         }
+    }
+}
+
+/// `ENGINE_AGENT_CODEX_POLICY`, read like `ENGINE_AGENT_CLAUDE_SETTINGS` (a
+/// path, empty for the image's requirements file when it is installed, `off`).
+///
+/// Fail closed (WI-1143) when a policy is named. A path that is missing,
+/// empty, or unreadable is `Err`: the session must not start, and must not
+/// start with bypass because the hook could not be loaded. Unset or empty
+/// tries the image copy, then `/etc/codex/requirements.toml`; if neither
+/// exists the result is `Ok(None)` ("no policy configured") so a checkout or
+/// a pod built before the file existed still starts. `off` is the only way a
+/// deployment that *has* the file starts Codex without it. OpenCode's
+/// broken-policy warning is deliberately not copied.
+pub fn codex_policy_from(value: Option<&str>) -> Result<Option<PathBuf>, String> {
+    match value.map(str::trim) {
+        Some("off") => Ok(None),
+        Some(path) if !path.is_empty() => readable_policy(PathBuf::from(path)),
+        _ => match readable_policy(PathBuf::from(IMAGE_CODEX_POLICY)) {
+            Ok(path) => Ok(path),
+            Err(_) => match readable_policy(PathBuf::from(CODEX_REQUIREMENTS_FILE)) {
+                Ok(path) => Ok(path),
+                // A checkout, a unit test, or a pod built before the policy
+                // existed has neither file. That is "no policy configured",
+                // which launch treats as off. A deployment that *names* a
+                // missing file still fails above.
+                Err(_) => Ok(None),
+            },
+        },
+    }
+}
+
+fn readable_policy(path: PathBuf) -> Result<Option<PathBuf>, String> {
+    match std::fs::read(&path) {
+        Ok(bytes) if !bytes.is_empty() => Ok(Some(path)),
+        Ok(_) => Err(format!(
+            "Codex driven-session policy {} is empty; refusing to start a Codex session without the gitguard hook",
+            path.display()
+        )),
+        Err(e) => Err(format!(
+            "Codex driven-session policy {} cannot be read ({e}); refusing to start a Codex session without the gitguard hook",
+            path.display()
+        )),
     }
 }
 
@@ -123,6 +182,20 @@ pub fn check_opencode_config(text: &str) -> std::result::Result<(), String> {
     Ok(())
 }
 
+impl Default for Onboarding {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_dir: None,
+            settings_file: None,
+            opencode_config: None,
+            // A hand-built config has no policy. A named missing file is the
+            // error; "not configured" is not.
+            codex_policy: Ok(None),
+        }
+    }
+}
+
 impl Onboarding {
     /// On unless `ENGINE_AGENT_QUIET_ONBOARDING=0`.
     pub fn from_env() -> Self {
@@ -141,6 +214,9 @@ impl Onboarding {
                 std::env::var("ENGINE_AGENT_OPENCODE_CONFIG")
                     .ok()
                     .as_deref(),
+            ),
+            codex_policy: codex_policy_from(
+                std::env::var("ENGINE_AGENT_CODEX_POLICY").ok().as_deref(),
             ),
         }
     }
@@ -284,6 +360,7 @@ mod tests {
             default_dir: Some(PathBuf::from("/home/pod")),
             settings_file: None,
             opencode_config: None,
+            codex_policy: Ok(None),
         };
         let env = vec![("CLAUDE_CONFIG_DIR".to_string(), "/cfg".to_string())];
         assert_eq!(
@@ -707,5 +784,53 @@ mod driven_policy_tests {
                 "{probe} should match {command}"
             );
         }
+    }
+
+    /// A throwaway file the policy resolver can be pointed at. The value is
+    /// passed in; these tests do not touch process env.
+    fn policy_file(bytes: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-codex-policy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("requirements.toml");
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn codex_policy_off_is_none() {
+        assert_eq!(super::codex_policy_from(Some("off")).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("  off  ")).unwrap(), None);
+    }
+
+    #[test]
+    fn codex_policy_named_file_must_be_readable_and_non_empty() {
+        let (dir, path) = policy_file(b"# requirements\n");
+        let got = super::codex_policy_from(Some(path.to_str().unwrap()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, path);
+        std::fs::remove_dir_all(dir).ok();
+
+        let (dir, empty_path) = policy_file(b"");
+        let err = super::codex_policy_from(Some(empty_path.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+        let missing = dir.join("missing.toml");
+        let err = super::codex_policy_from(Some(missing.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("cannot be read"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn codex_policy_unset_without_image_files_is_unconfigured() {
+        // Neither the image path nor /etc/codex/requirements.toml exists in
+        // the unit-test tree. Unset and empty are "no policy configured",
+        // not a refusal — a named missing path is the error, above.
+        assert_eq!(super::codex_policy_from(None).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("")).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("   ")).unwrap(), None);
     }
 }

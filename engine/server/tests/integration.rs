@@ -10787,6 +10787,7 @@ async fn a_claude_session_starts_with_its_directory_trusted_and_its_brief_readab
         default_dir: Some(claude_home.clone()),
         settings_file: None,
         opencode_config: None,
+        codex_policy: Ok(None),
     };
     let state_dir = cfg.state_dir.clone();
     let workspace = cfg.workspace_root.clone();

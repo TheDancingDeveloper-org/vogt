@@ -184,7 +184,7 @@ The helper scripts the image installs under `/usr/local/bin/vogt-*`:
 | `vogt-klaudia-mcp` | `deploy/klaudia-mcp.sh` | `set [-e KEY=VALUE]…`/`remove` a stdio server in Klaudia's `.mcp.json` (`~/.klaudia`, or `KLAUDIA_CONFIG_DIR`), which Klaudia has no `mcp` command to write; `vogt-mcp-bootstrap` uses it, and a derivative image's bootstrap may (§4) | only with `klaudia` present |
 | `git-forgejo` | `deploy/git-forgejo.sh` | git with a Gitea/Forgejo token header that cannot be word-split (§4) | optional |
 | `vogt-git-askpass` | `deploy/git-askpass.sh` | `GIT_ASKPASS` shim for brokered credentials | optional |
-| `codex` wrapper | `deploy/codex-full-access.sh` | runs Codex without its nested sandbox and without the app-server daemon (`--no-daemon`; `daemon_auto_start` off), because the pod is the isolation boundary and the daemon would copy the binary out of the pin | only with `INSTALL_AI_CLIENTS` |
+| `codex` wrapper | `deploy/codex-full-access.sh` | runs the pinned Codex with `--no-daemon` (`daemon_auto_start` off), because the daemon would copy the binary out of the pin. It does **not** pass `--dangerously-bypass-approvals-and-sandbox` (WI-1143): the engine's posture flags name the sandbox (`-s danger-full-access` for default and accept-edits; bypass is the only posture that skips approvals and the sandbox, and only when a person asked). `--approve-for-me` is not used — it hard-wires workspace-write. Stock Codex reads `/etc/codex/requirements.toml` with no flag; the image copies `deploy/driven-session-codex-requirements.toml` there and to `/usr/local/share/vogt/`. On stock Codex 0.160.0 that file is comments only: the gitguard hook table and destructive-git prefix rules are not a shape that has been shown to load (WI-1146) | only with `INSTALL_AI_CLIENTS` |
 | `vogt-agent-auth` | `deploy/agent-auth.sh` | reference `ENGINE_AGENT_AUTH_HELPER`: brokers service credentials from a secrets manager into a session (`check`, `run -- <cmd>`, `shell`, `fetch`, `store`), driven entirely by an env manifest with no baked addresses or secret names | **optional and pluggable** — one example helper; see §9 |
 
 Nothing in the engine itself depends on `agent-auth`: with
@@ -1438,20 +1438,51 @@ checks decide what it can finish on its own (WI-926; the design is
   takes `bypass` the same way; its default posture is its own `autonomous`
   mode (finish the task, ask before changing the machine) behind its host
   guardrail, and `accept-edits` is `400` for it: Klaudia's `acceptEdits` is
-  only an alias for `autonomous`, so it would not mean what was asked. For
-  opencode, see below. Codex is `400`, as is a posture on a plain shell. The posture
-  shows on the summary (`permission_mode`, absent for the default), is kept
-  in the hibernation record, and is reapplied on wake. vogt-core grants
-  `bypass` only to a person; an agent asking for it is refused. An
-  agent in a session the engine started itself (the GUI, a protected
-  template) counts as an agent too: the engine gives every Claude Code,
-  Codex or opencode session it launches without a credential of its own a
-  token minted for it by vogt-core (`session.token`, bound to
-  `agent:engine:<id>`, revoked when the session ends; each mint is logged
-  as `event="session.identity"`), not the pod's brokered token, which is
-  bound to a person. A plain shell keeps the pod's token. An agent a person
-  starts by hand inside such a shell inherits the shell's token: the person
-  started it.
+  only an alias for `autonomous`, so it would not mean what was asked. A
+  posture on a plain shell is `400`. The posture shows on the summary
+  (`permission_mode`, absent for the default), is kept in the hibernation
+  record, and is reapplied on wake. vogt-core grants `bypass` only to a
+  person; an agent asking for it is refused. An agent in a session the
+  engine started itself (the GUI, a protected template) counts as an agent
+  too: the engine gives every Claude Code, Codex or opencode session it
+  launches without a credential of its own a token minted for it by
+  vogt-core (`session.token`, bound to `agent:engine:<id>`, revoked when
+  the session ends; each mint is logged as `event="session.identity"`),
+  not the pod's brokered token, which is bound to a person. A plain shell
+  keeps the pod's token. An agent a person starts by hand inside such a
+  shell inherits the shell's token: the person started it.
+- **Codex** (WI-1143) does not take Claude's `--settings` or
+  `--permission-mode`. The engine maps the same three postures onto Codex
+  flags, and unknown values are `400`:
+  - **default** (and a missing posture): `-a on-request -s danger-full-access`.
+  - **accept-edits** (`accept-edits` or `accept_edits`): `-c
+    approvals_reviewer="auto_review"` plus `-s danger-full-access`.
+  - **bypass**: `--dangerously-bypass-approvals-and-sandbox` and nothing
+    else. A person's grant only, as for Claude Code.
+  `--approve-for-me` is not used: it hard-wires workspace-write. Default
+  and accept-edits use sandbox `danger-full-access` because `bwrap` does
+  not work in the pod. Stock Codex reads `/etc/codex/requirements.toml`
+  itself; the engine does not pass a requirements flag. The image copies
+  `engine/deploy/driven-session-codex-requirements.toml` to that path and
+  to `/usr/local/share/vogt/driven-session-codex-requirements.toml`.
+  `ENGINE_AGENT_CODEX_POLICY` names a deployment's own file (the engine
+  checks that the named path exists and is non-empty, then still lets Codex
+  load `/etc/codex/requirements.toml` — a deployment that points elsewhere
+  has to put the file where Codex reads it). Empty tries the image path,
+  then `/etc/codex/requirements.toml`; if neither exists the session starts
+  with no policy. `off` is the only way a deployment that has the file
+  starts Codex without that check. A *named* path that is missing, empty
+  or unreadable is `400`, and the session does not fall through to bypass.
+  On stock Codex 0.160.0 the shipped file is comments only. The gitguard
+  managed hook (`klaudia hook gitguard` on `SessionStart` / `PreToolUse`)
+  and the destructive-git execpolicy prefix rules are not a requirements
+  shape that has been shown to load: hooks are parsed from an
+  enterprise-managed layer whose table was not confirmed, prefix rules are
+  Starlark (`prefix_rule`) rather than a TOML table, requirements reject
+  decision `allow`, and `failClosed` is a fork key (WI-1129) that stock
+  does not have. Acceptance of that hook waits on the fork image (WI-1142)
+  and on WI-1136 / WI-1128. Claude and opencode launches are not blocked by
+  a Codex policy error.
 - **opencode** (WI-932) has its own permission model, a `permission` block
   in its config. Unconfigured, it stops at "Access external directory —
   Allow once / Allow always / Reject" with nobody there to answer. The
