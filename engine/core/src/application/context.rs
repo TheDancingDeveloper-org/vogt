@@ -66,6 +66,21 @@ pub struct AppContext<C, I> {
     /// A peer instance `instance.diagnostics` can ask about itself, or `None`.
     pub peer: Option<PeerClient>,
     pub public_identity: PublicIdentity,
+    /// The stand-in for the forge network, or `None` when the clients talk HTTP.
+    ///
+    /// Private to the crate: the resolvers take the boxed form, and
+    /// [`Self::forge_transport`] hands one back. A test installs one with
+    /// [`Self::with_forge_transport`].
+    ///
+    /// Linking a per-actor PAT validates it against the forge, and the write path
+    /// builds a provider from a linked PAT. Both would otherwise reach the forge,
+    /// which a test cannot depend on. `None` is the deployed shape.
+    ///
+    /// Held behind `Arc` because [`github::Transport`] is a boxed closure and not
+    /// `Clone`, while a context is rebuilt from a borrow (`with_stores_at`) and
+    /// one request spends the stand-in on more than one provider. The resolvers
+    /// take the boxed form, so [`Self::forge_transport`] hands one back.
+    pub(crate) forge_transport: Option<super::forge_transport::SharedForgeTransport>,
 }
 
 /// The wall clock. Reads the system; it holds no state of its own.
@@ -354,6 +369,7 @@ where
         engine,
         peer,
         public_identity: public_identity.unwrap_or_else(|| identity_of(&config)),
+        forge_transport: None,
         config,
     }
 }
@@ -427,6 +443,7 @@ where
         engine: None,
         peer: None,
         public_identity: ctx.public_identity.clone(),
+        forge_transport: ctx.forge_transport.clone(),
     }
 }
 
