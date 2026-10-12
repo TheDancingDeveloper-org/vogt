@@ -17,6 +17,7 @@ pub mod budget;
 pub mod call;
 pub mod changes;
 pub mod chat_api;
+pub mod chat_codex;
 pub mod chat_store;
 pub mod chats;
 pub mod claude_config;
