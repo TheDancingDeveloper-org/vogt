@@ -188,6 +188,105 @@ def test_an_incomplete_backup_is_refused(populated: AppContext, tmp_path: Path) 
         )
 
 
+# -- WI-1066: a store is validated before it is copied in --------------------
+
+
+def _guarded_restore(target: AppContext, source: str, match: str) -> None:
+    """Restore must refuse, and the target's live data must survive."""
+    create_work(target, CreateWorkParams(kind="chore", title="Precious", reason=WHY))
+    with pytest.raises(InvalidRequest, match=match):
+        restore(target, RestoreParams(source=source, confirm=True, reason=WHY))
+    survivors = [item.title for item in list_work(target, ListWorkParams()).items]
+    assert survivors == ["Precious"], "the live data is untouched"
+
+
+def test_a_symlinked_store_is_refused(populated: AppContext, tmp_path: Path) -> None:
+    taken = backup(
+        populated, BackupParams(destination=str(tmp_path / "snap"), reason=WHY)
+    )
+    store = Path(taken.path) / "declared.sqlite3"
+    elsewhere = tmp_path / "elsewhere.sqlite3"
+    store.rename(elsewhere)
+    store.symlink_to(elsewhere)
+
+    _guarded_restore(
+        _fresh(tmp_path, "target"),
+        taken.path,
+        r"^declared\.sqlite3 is a symlink; refusing to restore it$",
+    )
+
+
+def test_a_corrupt_store_is_refused(populated: AppContext, tmp_path: Path) -> None:
+    taken = backup(
+        populated, BackupParams(destination=str(tmp_path / "snap"), reason=WHY)
+    )
+    (Path(taken.path) / "observed.sqlite3").write_bytes(b"not a database" * 512)
+
+    _guarded_restore(
+        _fresh(tmp_path, "target"),
+        taken.path,
+        r"^observed\.sqlite3 failed its integrity check; refusing to restore it$",
+    )
+
+
+def test_a_damaged_store_is_refused(populated: AppContext, tmp_path: Path) -> None:
+    """A valid header over damaged pages fails `quick_check`, too."""
+    taken = backup(
+        populated, BackupParams(destination=str(tmp_path / "snap"), reason=WHY)
+    )
+    store = Path(taken.path) / "declared.sqlite3"
+    data = bytearray(store.read_bytes())
+    page_size = int.from_bytes(data[16:18], "big")
+    # Scribble over every page after the schema page.
+    for offset in range(page_size, len(data)):
+        data[offset] = 0xA5
+    store.write_bytes(bytes(data))
+
+    _guarded_restore(
+        _fresh(tmp_path, "target"),
+        taken.path,
+        r"^declared\.sqlite3 failed its integrity check; refusing to restore it$",
+    )
+
+
+def test_a_database_that_is_not_a_vogt_store_is_refused(
+    populated: AppContext, tmp_path: Path
+) -> None:
+    import sqlite3
+
+    taken = backup(
+        populated, BackupParams(destination=str(tmp_path / "snap"), reason=WHY)
+    )
+    store = Path(taken.path) / "observed.sqlite3"
+    store.unlink()
+    conn = sqlite3.connect(store)
+    conn.execute("CREATE TABLE something_else (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    _guarded_restore(
+        _fresh(tmp_path, "target"),
+        taken.path,
+        r"^observed\.sqlite3 is not a Vogt store; refusing to restore it$",
+    )
+
+
+def test_a_good_store_passes_validation_and_restores(
+    populated: AppContext, tmp_path: Path
+) -> None:
+    taken = backup(
+        populated, BackupParams(destination=str(tmp_path / "snap"), reason=WHY)
+    )
+    target = _fresh(tmp_path, "target")
+    restore(target, RestoreParams(source=taken.path, confirm=True, reason=WHY))
+    restored = [item.title for item in list_work(target, ListWorkParams()).items]
+    assert restored == ["Worth keeping"]
+    leftovers = sorted(p.name for p in Path(taken.path).iterdir())
+    assert not [n for n in leftovers if n.endswith(("-wal", "-shm"))], (
+        "validating a backup leaves nothing behind in it"
+    )
+
+
 def test_restore_leaves_no_stale_wal_behind(
     populated: AppContext, tmp_path: Path
 ) -> None:
