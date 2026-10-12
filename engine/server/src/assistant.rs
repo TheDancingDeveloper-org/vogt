@@ -493,6 +493,10 @@ struct Watch {
     session: Uuid,
     name: String,
     until: WatchUntil,
+    /// Bus head when this watch was registered. Events at or below it belong
+    /// to before the watch existed, even if the conversation's cursor is older
+    /// because another watch was registered earlier.
+    since: u64,
     /// When the watch lapses.
     expires: Instant,
 }
@@ -2422,12 +2426,13 @@ impl AssistantRuntime {
                 session: session.id,
                 name: name.clone(),
                 until,
+                // This session only. The conversation cursor stays where the
+                // last briefing left it, so registering a second watch does
+                // not drop a delta already published for the first.
+                since: self.bus.head(),
                 expires: now + WATCH_TTL,
             });
         }
-        // A watch hears what happens after it is registered, not the bus
-        // position the turn started at. The turn's own briefing already ran.
-        convo.changes_cursor = Some(self.bus.head());
         tool_trace.push(format!("watching \"{name}\" until {}", until.as_str()));
         Ok(format!(
             "Watching \"{name}\" until it {} (lapses in 2 hours). A change is read \
@@ -2443,6 +2448,10 @@ impl AssistantRuntime {
     /// Tell the model what its watches heard since the last turn, once, before
     /// the loop. A conversation with no cursor yet starts at the bus head and
     /// hears nothing: changes from before it existed are not its briefing.
+    ///
+    /// Each watch is read on its own. Paging the whole bus and filtering
+    /// afterwards would move the cursor past a matching change that sat
+    /// beyond a page of other sessions' deltas.
     fn brief_watches(&self, convo: &mut Conversation) {
         let now = Instant::now();
         convo.watches.retain(|watch| watch.expires > now);
@@ -2453,32 +2462,42 @@ impl AssistantRuntime {
                 return;
             }
         };
-        let Ok(page) = crate::changes::changes(&self.bus, cursor, None, Some(50)) else {
-            return;
-        };
-        let lines: Vec<String> = page
-            .changes
-            .iter()
-            .filter(|change| {
-                convo.watches.iter().any(|watch| {
-                    watch.session == change.session && watch.until.matches(&change.kind)
-                })
-            })
-            .map(|change| {
-                let name = convo
-                    .watches
-                    .iter()
-                    .find(|watch| watch.session == change.session)
-                    .map(|watch| watch.name.as_str())
-                    .unwrap_or("a session");
-                format!("{name}: {}", change.summary)
-            })
-            .collect();
-        // `next_cursor` is the bus head when this page was not cut short, and
-        // the seq of the last change when it was. `since` returns events whose
-        // seq is greater than the cursor, so the head is past everything just
-        // read, and a cut page resumes exactly after its last change.
-        convo.changes_cursor = Some(page.next_cursor);
+        let head = self.bus.head();
+        let mut lines = Vec::new();
+        let mut caught_up = true;
+        for watch in &mut convo.watches {
+            // A watch registered after the conversation cursor must not be
+            // briefed on deltas from before it existed.
+            let since = cursor.max(watch.since);
+            let Ok(page) = crate::changes::changes(
+                &self.bus,
+                since,
+                Some(&watch.session.to_string()),
+                Some(50),
+            ) else {
+                caught_up = false;
+                continue;
+            };
+            // A dropped ring, or a page cut inside this session's own
+            // changes, means a later matching delta was not read. Other
+            // sessions' events sit in the same ring and must not pin the
+            // cursor: `changes` already advanced past them when this
+            // session's page was complete.
+            let own = page.changes.last().map(|change| change.seq);
+            let cut = page.truncated || own.is_some_and(|seq| page.next_cursor == seq);
+            if cut {
+                caught_up = false;
+                watch.since = page.next_cursor;
+            }
+            for change in &page.changes {
+                if watch.until.matches(&change.kind) {
+                    lines.push(format!("{}: {}", watch.name, change.summary));
+                }
+            }
+        }
+        if caught_up {
+            convo.changes_cursor = Some(head);
+        }
         if lines.is_empty() {
             return;
         }
@@ -3683,6 +3702,7 @@ mod tests {
                     session: session.id,
                     name: session.name(),
                     until: WatchUntil::Reply,
+                    since: 0,
                     expires: Instant::now() + WATCH_TTL,
                 });
             }
@@ -3712,6 +3732,122 @@ mod tests {
             "the sixth watch must come back as a tool error, got: {results:?}"
         );
         assert_eq!(rt.conversation.lock().await.watches.len(), 5);
+    }
+
+    fn publish_ready(rt: &AssistantRuntime, id: Uuid) {
+        rt.bus.publish(vogt_engine_contract::ServerEvent::Activity {
+            id,
+            state: vogt_engine_contract::ActivityState::WaitingForInput,
+            activity_changed_at: String::new(),
+            approval: None,
+            turn_started_at: None,
+        });
+    }
+
+    /// A watched reply that sits past a page of other sessions' changes is
+    /// still briefed, and registering a second watch does not drop a delta
+    /// the first watch already earned.
+    #[tokio::test]
+    async fn a_watched_reply_past_other_sessions_is_still_briefed() {
+        let sessions = test_registry();
+        let watched = spawn_cat(&sessions);
+        let mut _kills = vec![KillOnDrop(Arc::clone(&sessions), watched.id)];
+        let others: Vec<_> = (0..50)
+            .map(|_| {
+                let spawned = spawn_cat(&sessions);
+                _kills.push(KillOnDrop(Arc::clone(&sessions), spawned.id));
+                spawned
+            })
+            .collect();
+        let rt = runtime_with_script(
+            sessions,
+            vec![
+                tool_call_reply(
+                    "watch_session",
+                    json!({"session_id": watched.id.to_string()}),
+                ),
+                final_reply("watching"),
+                final_reply("it replied"),
+            ],
+        );
+        let first = rt
+            .handle_message(terminal_caller(), "watch it".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(first.reply.as_deref(), Some("watching"));
+
+        // Fifty other sessions publish first. A page of 50 that then advanced
+        // the cursor would move past the watched reply forever.
+        for other in &others {
+            publish_ready(&rt, other.id);
+        }
+        publish_ready(&rt, watched.id);
+
+        let second = rt
+            .handle_message(terminal_caller(), "anything back?".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(second.reply.as_deref(), Some("it replied"));
+        let bodies = system_bodies_containing(&rt, "<session-changes>\n");
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.contains("cat: activity ready")),
+            "the watched reply past the other sessions must be briefed, got: {bodies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_watch_does_not_drop_the_first() {
+        let sessions = test_registry();
+        let first_cat = spawn_cat(&sessions);
+        let second_cat = spawn_cat(&sessions);
+        let _kills = [
+            KillOnDrop(Arc::clone(&sessions), first_cat.id),
+            KillOnDrop(Arc::clone(&sessions), second_cat.id),
+        ];
+        let rt = runtime_with_script(
+            sessions,
+            vec![
+                tool_call_reply(
+                    "watch_session",
+                    json!({"session_id": first_cat.id.to_string()}),
+                ),
+                final_reply("watching the first"),
+                tool_call_reply(
+                    "watch_session",
+                    json!({"session_id": second_cat.id.to_string()}),
+                ),
+                final_reply("watching both"),
+                final_reply("the first replied"),
+            ],
+        );
+        rt.handle_message(terminal_caller(), "watch the first".into(), None, None)
+            .await
+            .unwrap();
+        publish_ready(&rt, first_cat.id);
+        // This turn registers the second watch after the first's reply landed.
+        // Resetting the shared cursor to the bus head here would lose it.
+        rt.handle_message(terminal_caller(), "watch another".into(), None, None)
+            .await
+            .unwrap();
+        let third = rt
+            .handle_message(terminal_caller(), "anything back?".into(), None, None)
+            .await
+            .unwrap();
+        assert_eq!(third.reply.as_deref(), Some("the first replied"));
+        assert_eq!(
+            stored_system_containing(&rt, "<session-changes>\n").await,
+            1,
+            "the first watch's reply must be briefed once, not dropped or repeated"
+        );
+        let bodies = system_bodies_containing(&rt, "<session-changes>\n");
+        assert!(
+            bodies
+                .iter()
+                .any(|body| body.contains("cat: activity ready")),
+            "the first watch's reply must survive the second watch, got: {bodies:?}"
+        );
     }
 
     #[tokio::test]
