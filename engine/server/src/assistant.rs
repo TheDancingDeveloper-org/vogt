@@ -1347,11 +1347,14 @@ impl AssistantRuntime {
                         {
                             refusal
                         } else {
-                            let outcome =
+                            let (outcome, is_error) =
                                 self.deliver_vogt_write(view, write, &turn.caller).await;
-                            if write.operation == "session.start"
-                                && outcome.starts_with("<vogt-data ")
-                            {
+                            // Count a start the core accepted, not one it
+                            // rejected. The core reports a rejected tool call
+                            // as a result with `isError`, which `delimit` wraps
+                            // in `<vogt-data>` exactly like a success, so the
+                            // prefix cannot say whether a session exists.
+                            if write.operation == "session.start" && !is_error {
                                 self.record_start(&mut convo);
                             }
                             outcome
@@ -1418,13 +1421,16 @@ impl AssistantRuntime {
         view: &VogtWriteView,
         write: &PendingVogtWrite,
         caller: &Caller,
-    ) -> String {
+    ) -> (String, bool) {
         let Some(vogt) = self.vogt.as_ref() else {
-            return "not delivered: this front door has no vogt-core configured".to_string();
+            return (
+                "not delivered: this front door has no vogt-core configured".to_string(),
+                true,
+            );
         };
         let token = match vogt.write_token(caller) {
             Ok(token) => token,
-            Err(reason) => return format!("not delivered: {reason}"),
+            Err(reason) => return (format!("not delivered: {reason}"), true),
         };
         // The engine's own trail of who approved what, beside the core's audit
         // row. Names the token, never its value or the core token behind it.
@@ -1436,8 +1442,13 @@ impl AssistantRuntime {
             "assistant vogt write approved"
         );
         match vogt.call(&token, &write.mcp_name, &write.args).await {
-            Ok(text) => vogt_tools::delimit(&write.operation, &text),
-            Err(reason) => format!("not delivered: {reason}"),
+            // `is_error` is the core saying the operation did not happen. The
+            // text is still the core's answer and still delimited, but a
+            // caller that counts successes must be able to tell.
+            Ok((text, is_error)) => {
+                (vogt_tools::delimit(&write.operation, &text), is_error)
+            }
+            Err(reason) => (format!("not delivered: {reason}"), true),
         }
     }
 
@@ -2222,7 +2233,7 @@ impl AssistantRuntime {
         tool_trace.push(format!("read {} from Vogt", def.operation));
         let args = sweep_args(&def.operation, args);
         match vogt.call(&token, &def.mcp_name, &args).await {
-            Ok(text) => Ok(vogt_tools::delimit(&def.operation, &text)),
+            Ok((text, _)) => Ok(vogt_tools::delimit(&def.operation, &text)),
             Err(reason) => Err(ApiError::BadGateway(reason)),
         }
     }
@@ -3839,6 +3850,10 @@ mod tests {
                     args["text"] = json!("line");
                     args["submit"] = json!(true);
                 }
+                if *operation == "session.start" {
+                    // A start is carded only when it names a work item.
+                    args["work_item"] = json!("WI-1");
+                }
                 let rt = runtime_with_vogt(
                     sessions.clone(),
                     vec![
@@ -4960,6 +4975,58 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_start_the_core_rejects_does_not_spend_the_hourly_cap() {
+        // The core reports a rejected tool call as a result with `isError`,
+        // which is delimited exactly like a success. Counting that as a start
+        // locks the conversation after N failed approvals and tells the model
+        // a session exists that does not.
+        let core = vogt_tools::stub::start(vogt_tools::stub::full_tool_list()).await;
+        core.fail("session_start", "{\"error\": \"no such work item\"}");
+        let mut rt = runtime_with_vogt(
+            test_registry(),
+            vec![
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({"work_item": "WI-9", "reason": "the core will reject this"}),
+                ),
+                final_reply("Rejected."),
+                tool_call_reply(
+                    "vogt_session_start",
+                    json!({"work_item": "WI-9", "reason": "the same again"}),
+                ),
+                final_reply("Rejected again."),
+            ],
+            &core.base_url,
+            Some("shared-core-token"),
+        );
+        rt.starts_per_hour = 1;
+
+        for utterance in ["start one", "start another"] {
+            let out = rt
+                .handle_message(paired_caller(), utterance.into(), None, None)
+                .await
+                .unwrap();
+            let card = out
+                .pending_action
+                .expect("a rejected start is still carded");
+            rt.resolve_action(paired_caller(), card.id(), true)
+                .await
+                .unwrap();
+        }
+
+        assert_eq!(
+            tool_names_called(&core),
+            vec!["session_start".to_string(), "session_start".to_string()],
+            "the cap must not stop a delivery the core has not accepted"
+        );
+        let shown = tool_results(&rt).await.join("\n");
+        assert!(
+            !shown.contains("the limit is"),
+            "a rejected start was counted against the cap: {shown}"
+        );
+    }
+
     // -- The notifications question --------------------------------
 
     #[tokio::test]
@@ -5296,7 +5363,7 @@ mod tests {
         for (index, tail) in sites.iter().enumerate() {
             // The `Ok` arm is what carries the core's words into the
             // conversation. Look only as far as the end of that match arm.
-            let window: String = tail.chars().take(200).collect();
+            let window: String = tail.chars().take(600).collect();
             let ok_arm = window
                 .find("Ok(")
                 .map(|at| &window[at..])
