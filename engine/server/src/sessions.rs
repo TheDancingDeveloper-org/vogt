@@ -378,16 +378,10 @@ impl SessionRegistry {
         // instead of falling through to bypass (WI-1143). Claude and opencode
         // do not consult this field. A deployment with the file unset, or
         // `ENGINE_AGENT_CODEX_POLICY=off`, is `Ok` and launches.
-        if base_command
-            .as_deref()
-            .and_then(agent_cli::agent_name)
-            .as_deref()
-            == Some("codex")
-        {
-            if let Err(why) = &self.cfg.agent_onboarding.codex_policy {
-                return Err(ApiError::BadRequest(why.clone()));
-            }
-        }
+        codex_policy_refusal(
+            base_command.as_deref(),
+            &self.cfg.agent_onboarding.codex_policy,
+        )?;
         let launch = agent_cli::launch(
             spec.command.as_deref(),
             &agent_cli::LaunchRequest {
@@ -1920,6 +1914,24 @@ fn normalize_session_name(name: &str) -> Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// A Codex launch whose named policy cannot be read (WI-1143). Claude and
+/// opencode never consult the field, and `Ok` (unset, or
+/// `ENGINE_AGENT_CODEX_POLICY=off`) launches. Split out so the refusal is
+/// testable without spawning a PTY. The policy type is `std::result::Result`
+/// on purpose: this crate's `Result` alias is `Result<T, ApiError>`.
+fn codex_policy_refusal(
+    command: Option<&[String]>,
+    policy: &std::result::Result<Option<std::path::PathBuf>, String>,
+) -> Result<()> {
+    if command.and_then(agent_cli::agent_name).as_deref() != Some("codex") {
+        return Ok(());
+    }
+    match policy {
+        Err(why) => Err(ApiError::BadRequest(why.clone())),
+        Ok(_) => Ok(()),
+    }
+}
+
 /// The settings file a launch hands the agent (WI-1250). A wake replays the
 /// one recorded at the first start, so a later change to the deployment's
 /// config does not quietly move the session onto another policy. A record
@@ -1948,6 +1960,30 @@ fn wake_settings_file<'a>(
 #[cfg(test)]
 mod tests {
     use super::normalize_session_name;
+
+    #[test]
+    fn a_named_missing_codex_policy_refuses_a_codex_launch_and_only_codex() {
+        let missing: std::result::Result<Option<std::path::PathBuf>, String> =
+            Err("Codex driven-session policy /no/such/requirements.toml cannot be read".into());
+        let codex = |cmd: &[&str]| cmd.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let err = super::codex_policy_refusal(Some(&codex(&["codex"])), &missing).unwrap_err();
+        assert!(
+            matches!(&err, crate::error::ApiError::BadRequest(msg) if msg.contains("cannot be read")),
+            "{err}"
+        );
+        // The wrapper the protected template actually runs still names Codex.
+        let wrapped = super::codex_policy_refusal(
+            Some(&codex(&["vogt-agent-auth", "run", "--", "codex"])),
+            &missing,
+        )
+        .unwrap_err();
+        assert!(matches!(wrapped, crate::error::ApiError::BadRequest(_)));
+        // Claude and opencode do not consult the field, so the same error
+        // does not refuse them. Unset (`Ok`) does not refuse Codex either.
+        assert!(super::codex_policy_refusal(Some(&codex(&["claude"])), &missing).is_ok());
+        assert!(super::codex_policy_refusal(Some(&codex(&["opencode"])), &missing).is_ok());
+        assert!(super::codex_policy_refusal(Some(&codex(&["codex"])), &Ok(None),).is_ok());
+    }
 
     #[test]
     fn a_wake_replays_the_recorded_settings_unless_the_file_is_gone() {

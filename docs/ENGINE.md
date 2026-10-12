@@ -1455,8 +1455,15 @@ checks decide what it can finish on its own (WI-926; the design is
   `--permission-mode`. The engine maps the same three postures onto Codex
   flags, and unknown values are `400`:
   - **default** (and a missing posture): `-a on-request -s danger-full-access`.
-  - **accept-edits** (`accept-edits` or `accept_edits`): `-c
-    approvals_reviewer="auto_review"` plus `-s danger-full-access`.
+    A `codex exec` launch omits `-a` (that subcommand rejects it) and keeps
+    the sandbox.
+  - **accept-edits** (`accept-edits` or `accept_edits`): `-a on-request -c
+    approvals_reviewer="auto_review" -s danger-full-access`. The `-a` pin is
+    what stops a user's `~/.codex/config.toml` `approval_policy = "never"`
+    from turning approvals off while the sandbox is `danger-full-access`;
+    the reviewer then answers the asks that pin produces. A `codex exec`
+    launch omits `-a` (that subcommand rejects it) and keeps the reviewer
+    and the sandbox.
   - **bypass**: `--dangerously-bypass-approvals-and-sandbox` and nothing
     else. A person's grant only, as for Claude Code.
   `--approve-for-me` is not used: it hard-wires workspace-write. Default

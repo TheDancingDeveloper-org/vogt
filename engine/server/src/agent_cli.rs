@@ -153,31 +153,38 @@ pub fn permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
 /// The pod is the isolation boundary and cannot create a user namespace, so
 /// `workspace-write` (and `--approve-for-me`, which hard-wires it) would fail
 /// the launch. Every posture therefore uses `-s danger-full-access`. Default
-/// still asks (`-a on-request`); accept-edits routes those asks through
-/// Codex's automatic reviewer without changing the sandbox; bypass drops both
-/// approvals and the sandbox and is a person's grant only.
+/// still asks (`-a on-request`). Accept-edits pins the same `-a on-request`,
+/// so a user's `~/.codex/config.toml` with `approval_policy = "never"` cannot
+/// turn approvals off under `danger-full-access`, and then routes those asks
+/// through Codex's automatic reviewer (`-c approvals_reviewer="auto_review"`)
+/// without changing the sandbox. Bypass drops both approvals and the sandbox
+/// and is a person's grant only.
+///
+/// `exec` is a `codex exec` launch. That subcommand rejects `-a`, so the
+/// approval pin is left off; the sandbox, and for accept-edits the reviewer,
+/// stay.
 ///
 /// `None` means the caller did not ask for a posture. That is not the default
 /// posture: the wrapper used to force bypass, and a launch that omitted the
 /// flags would look like it had applied one.
-pub fn codex_permission_flags(mode: Option<&str>) -> Result<Option<Vec<String>>> {
+pub fn codex_permission_flags(mode: Option<&str>, exec: bool) -> Result<Option<Vec<String>>> {
     let sandbox = ["-s".to_string(), "danger-full-access".to_string()];
+    let ask = if exec {
+        Vec::new()
+    } else {
+        vec!["-a".to_string(), "on-request".to_string()]
+    };
     match mode.map(str::trim).filter(|m| !m.is_empty()) {
         None => Ok(None),
-        Some("default") => Ok(Some(
-            ["-a".to_string(), "on-request".to_string()]
-                .into_iter()
+        Some("default") => Ok(Some(ask.into_iter().chain(sandbox).collect())),
+        Some("accept-edits") | Some("accept_edits") => Ok(Some(
+            ask.into_iter()
+                .chain([
+                    "-c".to_string(),
+                    "approvals_reviewer=\"auto_review\"".to_string(),
+                ])
                 .chain(sandbox)
                 .collect(),
-        )),
-        Some("accept-edits") | Some("accept_edits") => Ok(Some(
-            [
-                "-c".to_string(),
-                "approvals_reviewer=\"auto_review\"".to_string(),
-            ]
-            .into_iter()
-            .chain(sandbox)
-            .collect(),
         )),
         Some("bypass") => Ok(Some(vec![
             "--dangerously-bypass-approvals-and-sandbox".to_string()
@@ -252,7 +259,13 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
         validate_conversation_id(value)?;
     }
     let permission = permission_flags(req.permission_mode)?;
-    let codex_permission = codex_permission_flags(req.permission_mode)?;
+    // `codex exec` rejects `-a`. The binary is not known yet, so the pin is
+    // decided from the word after it and only the codex arm reads the result.
+    let codex_exec = command.filter(|c| !c.is_empty()).is_some_and(|c| {
+        let (idx, binary) = agent_binary(c);
+        binary == "codex" && c.get(idx + 1).is_some_and(|arg| arg == "exec")
+    });
+    let codex_permission = codex_permission_flags(req.permission_mode, codex_exec)?;
     let asked = model.is_some()
         || effort.is_some()
         || resume.is_some()
@@ -399,9 +412,10 @@ pub fn launch(command: Option<&[String]>, req: &LaunchRequest<'_>) -> Result<Lau
             // WI-1143. A launch that names no posture still gets the default:
             // the wrapper no longer forces bypass, and omitting the flags would
             // look like the session had applied one. An explicit posture is
-            // never dropped onto that default.
+            // never dropped onto that default. `codex exec` rejects `-a`, so
+            // that launch keeps the sandbox and the reviewer but not the pin.
             let flags = codex_permission.unwrap_or_else(|| {
-                codex_permission_flags(Some("default"))
+                codex_permission_flags(Some("default"), codex_exec)
                     .ok()
                     .flatten()
                     .unwrap_or_default()
@@ -1280,15 +1294,20 @@ mod permission_tests {
             Some(cmd(&["--dangerously-skip-permissions"]))
         );
         assert!(permission_flags(Some("yolo")).is_err());
-        assert!(codex_permission_flags(Some("yolo")).is_err());
-        assert_eq!(codex_permission_flags(None).unwrap(), None);
+        assert!(codex_permission_flags(Some("yolo"), false).is_err());
+        assert_eq!(codex_permission_flags(None, false).unwrap(), None);
         assert_eq!(
-            codex_permission_flags(Some("default")).unwrap(),
+            codex_permission_flags(Some("default"), false).unwrap(),
             Some(cmd(&["-a", "on-request", "-s", "danger-full-access"]))
         );
+        // Accept-edits pins `-a on-request` too, so a user config of
+        // `approval_policy = "never"` cannot drop the asks the reviewer is
+        // meant to answer.
         assert_eq!(
-            codex_permission_flags(Some("accept_edits")).unwrap(),
+            codex_permission_flags(Some("accept_edits"), false).unwrap(),
             Some(cmd(&[
+                "-a",
+                "on-request",
                 "-c",
                 "approvals_reviewer=\"auto_review\"",
                 "-s",
@@ -1296,8 +1315,22 @@ mod permission_tests {
             ]))
         );
         assert_eq!(
-            codex_permission_flags(Some("bypass")).unwrap(),
+            codex_permission_flags(Some("bypass"), false).unwrap(),
             Some(cmd(&["--dangerously-bypass-approvals-and-sandbox"]))
+        );
+        // `codex exec` rejects `-a`. The sandbox and the reviewer stay.
+        assert_eq!(
+            codex_permission_flags(Some("default"), true).unwrap(),
+            Some(cmd(&["-s", "danger-full-access"]))
+        );
+        assert_eq!(
+            codex_permission_flags(Some("accept-edits"), true).unwrap(),
+            Some(cmd(&[
+                "-c",
+                "approvals_reviewer=\"auto_review\"",
+                "-s",
+                "danger-full-access"
+            ]))
         );
     }
 
@@ -1359,6 +1392,7 @@ mod permission_tests {
         .unwrap()
         .command
         .unwrap();
+        assert!(edits.windows(2).any(|w| w == ["-a", "on-request"]));
         assert!(edits
             .windows(2)
             .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]));
@@ -1381,6 +1415,39 @@ mod permission_tests {
                 "codex",
                 "-a",
                 "on-request",
+                "-s",
+                "danger-full-access",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false"
+            ])
+        );
+        // `codex exec` rejects `-a`, so neither a default launch nor an
+        // accept-edits launch emits it. The sandbox and the reviewer stay.
+        let exec = launch(
+            Some(&cmd(&["codex", "exec"])),
+            &LaunchRequest {
+                permission_mode: Some("accept-edits"),
+                ..LaunchRequest::default()
+            },
+        )
+        .unwrap()
+        .command
+        .unwrap();
+        assert!(!exec.iter().any(|arg| arg == "-a"), "{exec:?}");
+        assert!(exec
+            .windows(2)
+            .any(|w| w == ["-c", "approvals_reviewer=\"auto_review\""]));
+        assert!(exec.windows(2).any(|w| w == ["-s", "danger-full-access"]));
+        assert_eq!(
+            launch(Some(&cmd(&["codex", "exec"])), &LaunchRequest::default())
+                .unwrap()
+                .command
+                .unwrap(),
+            cmd(&[
+                "codex",
+                "exec",
                 "-s",
                 "danger-full-access",
                 "-c",
