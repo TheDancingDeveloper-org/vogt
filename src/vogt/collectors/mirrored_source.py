@@ -115,7 +115,11 @@ class MirroredSourceCollector:
             return
         exclusions = tuple(project.exclusions)
 
-        for path in walk_project(root, exclusions=exclusions):
+        # Walk the canonical root, not the stored one. Every member below is
+        # canonicalised with `resolve()`, so a root stored with `..` or under
+        # a symlinked parent (/home -> /data) must be canonicalised the same
+        # way, or `relative_to` raises and the whole project fails (WI-1071).
+        for path in walk_project(resolved_root, exclusions=exclusions):
             if path.name not in MANIFESTS:
                 continue
             try:
