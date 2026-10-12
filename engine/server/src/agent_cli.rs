@@ -1191,17 +1191,28 @@ mod opencode_posture_tests {
     }
 
     #[test]
-    fn codex_is_still_not_told_a_posture() {
+    fn codex_bypass_is_its_own_flag_and_not_claudes_settings() {
         let command = vec!["codex".to_string()];
-        let err = launch(
+        let got = launch(
             Some(&command),
             &LaunchRequest {
                 permission_mode: Some("bypass"),
                 ..LaunchRequest::default()
             },
         )
-        .expect_err("codex has no per-session posture");
-        assert!(err.to_string().contains("codex"), "{err}");
+        .expect("codex takes a posture");
+        assert_eq!(
+            got.command.unwrap(),
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "-c",
+                "tui.terminal_title=[\"agent-state\"]",
+                "-c",
+                "tui.animations=false",
+            ]
+        );
+        assert!(got.env.is_empty(), "codex is not given claude settings");
     }
 }
 

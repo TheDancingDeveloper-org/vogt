@@ -4037,9 +4037,16 @@ class StartSessionParams(Params):
             "`accept_edits`: file edits auto-accepted, everything else asks. "
             "`bypass`: no permission checks at all, for one trusted task — "
             "only a person may grant it (an agent is refused), and it is "
-            "audited. Claude Code, opencode and Klaudia templates; Klaudia "
-            "takes `default` and `bypass` only (its `acceptEdits` is an alias "
-            "for its default autonomous mode, so `accept_edits` is refused)."
+            "audited. Claude Code, Codex, opencode and Klaudia templates. "
+            "Codex maps the same three postures: `default` is "
+            "`-a on-request -s danger-full-access`; `accept_edits` adds "
+            "`approvals_reviewer=\"auto_review\"`; `bypass` is "
+            "`--dangerously-bypass-approvals-and-sandbox` and stays "
+            "people-only. A named Codex requirements file that is missing, "
+            "empty or unreadable refuses the Codex launch (400) and does not "
+            "fall through to bypass. Klaudia takes `default` and `bypass` "
+            "only (its `acceptEdits` is an alias for its default autonomous "
+            "mode, so `accept_edits` is refused)."
         ),
     )
     resume: str | None = Field(
