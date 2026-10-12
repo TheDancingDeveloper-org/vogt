@@ -241,13 +241,92 @@ while index < len(lines):
     index += 1
 
 body = "".join(kept).rstrip("\n")
+new = f"{body}\n\n{block}" if body else block
+if new == text:
+    sys.exit(0)
+directory = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(prefix=".config.toml.", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(new)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+PY
+    ) 9>"$lockdir/.config.toml.lock"
+}
+
 # The app-server daemon (WI-1142) copies the invoking binary into
 # $CODEX_HOME/packages and execs that copy, which then sits outside the pin.
-# Off unless an operator already chose otherwise.
-features = "[features]\ndaemon_auto_start = false\n"
-if "[features]" not in body and "daemon_auto_start" not in body:
-    body = f"{features}\n{body}" if body else features.rstrip("\n")
-new = f"{body}\n\n{block}" if body else block
+# Written on its own path: a session with no read-only server still needs it,
+# and an existing [features] table must gain the key rather than hide it.
+codex_disable_daemon() {
+    local config="$1" lockdir
+    lockdir="$(dirname "$config")"
+    mkdir -p "$lockdir"
+    (
+        flock 9
+        CODEX_CONFIG="$config" python3 - <<'PY'
+import os, sys, tempfile
+
+path = os.environ["CODEX_CONFIG"]
+try:
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+except FileNotFoundError:
+    text = ""
+except OSError as exc:
+    print(f"mcp-bootstrap: cannot read {path} ({exc}); left alone", file=sys.stderr)
+    sys.exit(1)
+
+if text.strip():
+    try:
+        import tomllib
+        tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        print(
+            f"mcp-bootstrap: {path} is not valid TOML ({exc}); left alone",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+lines = text.splitlines(keepends=True)
+out: list[str] = []
+index = 0
+found_table = False
+found_key = False
+while index < len(lines):
+    stripped = lines[index].strip()
+    if stripped == "[features]":
+        found_table = True
+        out.append(lines[index])
+        index += 1
+        while index < len(lines) and not lines[index].lstrip().startswith("["):
+            row = lines[index]
+            key = row.split("=", 1)[0].strip() if "=" in row else ""
+            if key == "daemon_auto_start":
+                found_key = True
+                out.append("daemon_auto_start = false\n")
+            else:
+                out.append(row)
+            index += 1
+        if not found_key:
+            out.append("daemon_auto_start = false\n")
+        continue
+    out.append(lines[index])
+    index += 1
+
+if not found_table:
+    prefix = "[features]\ndaemon_auto_start = false\n"
+    body = "".join(out).rstrip("\n")
+    new = f"{prefix}\n{body}\n" if body else prefix
+else:
+    new = "".join(out)
+    if not new.endswith("\n"):
+        new += "\n"
 if new == text:
     sys.exit(0)
 directory = os.path.dirname(path) or "."
@@ -362,6 +441,10 @@ install_vogt_codex
 install_vogt_claude
 install_vogt_opencode
 install_vogt_klaudia || printf 'mcp-bootstrap: klaudia registration of vogt failed\n' >&2
+if command -v codex >/dev/null 2>&1; then
+    codex_disable_daemon "${CODEX_HOME:-$HOME/.codex}/config.toml" \
+        || printf 'mcp-bootstrap: could not disable the Codex app-server daemon\n' >&2
+fi
 install_readonly_servers
 
 # stderr, like every other message in this script, because of who calls it.
