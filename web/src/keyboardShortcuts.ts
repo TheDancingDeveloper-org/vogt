@@ -33,12 +33,17 @@ export interface KeyboardShortcut {
 export const KEYBOARD_SHORTCUTS: readonly KeyboardShortcut[] = [
   {
     id: "open-command-palette",
-    keys: ["Ctrl/Cmd", "K"],
+    // Shift is load-bearing. Firefox claims bare Ctrl+K ("Search the web") in
+    // its own shortcut layer and never delivers the keydown to the page, so
+    // preventDefault on the bubble listener cannot win it. Ctrl/Cmd+Shift+K is
+    // not reserved there (or by Chrome's omnibox Ctrl+K) and still reaches a
+    // focused terminal, because xterm only claims unmodified Ctrl+letter.
+    keys: ["Ctrl/Cmd", "Shift", "K"],
     description: "Open command palette",
     category: "Navigation",
     context: "global",
     contextLabel: "Anywhere",
-    binding: { key: "k", ctrlOrMeta: true, alt: false, shift: false },
+    binding: { key: "k", ctrlOrMeta: true, alt: false, shift: true },
   },
   {
     id: "new-terminal-session",

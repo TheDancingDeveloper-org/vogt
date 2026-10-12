@@ -999,7 +999,7 @@ button to point the app at a different server.
 
 | Shortcut | Action |
 |---|---|
-| `Ctrl/Cmd+K` | Command palette |
+| `Ctrl/Cmd+Shift+K` | Command palette (bare Ctrl+K is the browser's own search shortcut and never reaches the page) |
 | `Ctrl/Cmd+B` | Show or hide the Places rail (desktop) |
 | `Ctrl/Cmd+Shift+T` | New terminal session |
 | `Ctrl/Cmd+Shift+W` | Close active tab |

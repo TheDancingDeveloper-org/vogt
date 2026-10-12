@@ -56,9 +56,12 @@ describe("the declared shortcut registry", () => {
   it("still matches the declared global palette binding from an input", () => {
     const input = document.createElement("input");
     document.body.append(input);
-    expect(matchedFrom(input, { key: "k", ctrlKey: true })?.id).toBe(
+    expect(matchedFrom(input, { key: "k", ctrlKey: true, shiftKey: true })?.id).toBe(
       "open-command-palette",
     );
+    // Bare Ctrl+K is Firefox's "Search the web" and is never delivered to the
+    // page, so it must not be the binding.
+    expect(matchedFrom(input, { key: "k", ctrlKey: true })).toBeUndefined();
     input.remove();
   });
 });

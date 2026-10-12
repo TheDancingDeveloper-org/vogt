@@ -21,7 +21,7 @@ export const GoToButton: Component<{ class?: string }> = (props) => {
           type="button"
           class={`go-to-inline${props.class ? ` ${props.class}` : ""}`}
           aria-label="Go to… (command palette)"
-          title="Go to… (Ctrl/Cmd+K)"
+          title="Go to… (Ctrl/Cmd+Shift+K)"
           onClick={() => actions().openCommandPalette()}
         >
           <svg viewBox="0 0 24 24" aria-hidden="true">

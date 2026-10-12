@@ -1632,7 +1632,7 @@ const App: Component = () => {
               «
             </button>
           </div>
-          <button type="button" class="rail-go-to" title="Go to… (Ctrl/Cmd+K)" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
+          <button type="button" class="rail-go-to" title="Go to… (Ctrl/Cmd+Shift+K)" onClick={() => setCommandPaletteOpen(true)}>Go to…</button>
           {/* B1: a pointer, not a second WaitingSession. Outage wins ties over
               a waiting session; "running" never earns a card. Click routes to
               the one waiting session's own terminal, or to Sessions when
@@ -2071,7 +2071,7 @@ const App: Component = () => {
               with no header of its own: a route outcome (loading, not found,
               unavailable). */}
           <Show when={routeProblem()}>
-            <button type="button" class="mobile-go-to" title="Go to… (Ctrl/Cmd+K)" onClick={() => setCommandPaletteOpen(true)}>
+            <button type="button" class="mobile-go-to" title="Go to… (Ctrl/Cmd+Shift+K)" onClick={() => setCommandPaletteOpen(true)}>
               Go to…
             </button>
           </Show>
