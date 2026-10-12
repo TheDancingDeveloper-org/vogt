@@ -270,6 +270,58 @@ def backup(ctx: AppContext, params: BackupParams) -> BackupResult:
     )
 
 
+STORE_FILES = ("declared.sqlite3", "observed.sqlite3")
+
+# Every Vogt store, declared or observed, carries these two tables from its
+# first migration: `meta` (0001_foundation) and `migrations` (the migrator's
+# own bookkeeping). A database without them is somebody else's.
+_STORE_TABLES = ("meta", "migrations")
+
+
+def _verify_store(source: Path, name: str) -> None:
+    """Refuse a store file that must never be copied over the live one.
+
+    WI-1066. Restore and clone used to copy whatever sat at the store's name:
+    a symlink (which `copy2` follows, so the restore reads a file outside the
+    backup), a torn or corrupt database, or any SQLite file at all. Each is
+    refused here, before anything is touched. The messages are stable: the
+    Rust port reproduces them exactly.
+    """
+    path = source / name
+    if path.is_symlink():
+        msg = f"{name} is a symlink; refusing to restore it"
+        raise InvalidRequest(msg)
+    if not path.is_file():
+        msg = f"{source} is missing {name}"
+        raise NotFound(msg)
+    corrupt = f"{name} failed its integrity check; refusing to restore it"
+    try:
+        # Read-only and immutable: checking a backup must never write to it,
+        # not even the -wal/-shm files a WAL-mode database would otherwise get.
+        conn = sqlite3.connect(
+            f"{path.absolute().as_uri()}?mode=ro&immutable=1", uri=True
+        )
+        try:
+            rows = conn.execute("PRAGMA quick_check").fetchall()
+            tables = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        # Not a database at all ("file is not a database") or one too damaged
+        # to read ("malformed") — both are a store that fails the check.
+        raise InvalidRequest(corrupt) from exc
+    if [tuple(row) for row in rows] != [("ok",)]:
+        raise InvalidRequest(corrupt)
+    if not all(table in tables for table in _STORE_TABLES):
+        msg = f"{name} is not a Vogt store; refusing to restore it"
+        raise InvalidRequest(msg)
+
+
 def _verified_manifest(ctx: AppContext, source: Path) -> Manifest:
     """Read a backup's manifest and refuse anything this build cannot take.
 
@@ -293,10 +345,8 @@ def _verified_manifest(ctx: AppContext, source: Path) -> Manifest:
     if manifest.manifest_version < 1:
         msg = f"backup manifest version {manifest.manifest_version} is not readable"
         raise InvalidRequest(msg)
-    for name in ("declared.sqlite3", "observed.sqlite3"):
-        if not (source / name).is_file():
-            msg = f"{source} is missing {name}"
-            raise NotFound(msg)
+    for name in STORE_FILES:
+        _verify_store(source, name)
 
     current_declared = ctx.declared.schema_version()
     if manifest.declared_schema_version > current_declared:
@@ -330,7 +380,7 @@ def restore(ctx: AppContext, params: RestoreParams) -> RestoreResult:
     data_dir = ctx.config.resolved_data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     _forget_live_stores()
-    for name in ("declared.sqlite3", "observed.sqlite3"):
+    for name in STORE_FILES:
         shutil.copy2(source / name, data_dir / name)
         # WAL and shm files belong to the replaced database, not the new one.
         for suffix in ("-wal", "-shm"):
