@@ -241,6 +241,12 @@ while index < len(lines):
     index += 1
 
 body = "".join(kept).rstrip("\n")
+# The app-server daemon (WI-1142) copies the invoking binary into
+# $CODEX_HOME/packages and execs that copy, which then sits outside the pin.
+# Off unless an operator already chose otherwise.
+features = "[features]\ndaemon_auto_start = false\n"
+if "[features]" not in body and "daemon_auto_start" not in body:
+    body = f"{features}\n{body}" if body else features.rstrip("\n")
 new = f"{body}\n\n{block}" if body else block
 if new == text:
     sys.exit(0)
