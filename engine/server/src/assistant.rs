@@ -2082,7 +2082,7 @@ impl AssistantRuntime {
             ))
         })?;
         tool_trace.push(format!("read {} from Vogt", def.operation));
-        let args = sweep_args(def.operation, args);
+        let args = sweep_args(&def.operation, args);
         match vogt.call(&token, &def.mcp_name, &args).await {
             Ok(text) => Ok(vogt_tools::delimit(&def.operation, &text)),
             Err(reason) => Err(ApiError::BadGateway(reason)),
@@ -2458,11 +2458,7 @@ fn sweep_args(operation: &str, args: &Value) -> Value {
     if operation != "session.sweep" {
         return args.clone();
     }
-    let mut args = args.clone();
-    let object = args.as_object_mut().unwrap_or_else(|| {
-        args = json!({});
-        args.as_object_mut().expect("a fresh object")
-    });
+    let mut object = args.as_object().cloned().unwrap_or_default();
     object.insert("mode".into(), Value::String("digest".into()));
     let lines = object
         .get("screen_lines")
@@ -2470,7 +2466,7 @@ fn sweep_args(operation: &str, args: &Value) -> Value {
         .unwrap_or(0)
         .min(5);
     object.insert("screen_lines".into(), json!(lines));
-    args
+    Value::Object(object)
 }
 
 /// The engine's own tools. Literals, because they are this crate's surface
@@ -3462,7 +3458,14 @@ mod tests {
             let calls = core.tool_calls();
             assert_eq!(calls.len(), 1, "{operation}");
             assert_eq!(calls[0].tool.as_deref(), Some(mcp_name.as_str()));
-            assert_eq!(calls[0].arguments, args);
+            // session.sweep is the one read the assistant rewrites: digest
+            // mode, and at most five screen lines. Every other read is sent
+            // exactly as the model asked.
+            assert_eq!(
+                calls[0].arguments,
+                sweep_args(operation, &args),
+                "{operation}"
+            );
             assert_eq!(
                 calls[0].authorization.as_deref(),
                 Some("Bearer phone-core-token")
@@ -4229,7 +4232,10 @@ mod tests {
             assert!(prompt.contains(tool), "the prompt lost {tool}");
         }
         assert!(prompt.contains("screen_lines at 5 or fewer"), "{prompt}");
-        assert!(prompt.contains("needs_you"), "the attention filter is unstated");
+        assert!(
+            prompt.contains("needs_you"),
+            "the attention filter is unstated"
+        );
     }
 
     #[test]
