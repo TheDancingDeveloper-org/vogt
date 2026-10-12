@@ -785,4 +785,52 @@ mod driven_policy_tests {
             );
         }
     }
+
+    /// A throwaway file the policy resolver can be pointed at. The value is
+    /// passed in; these tests do not touch process env.
+    fn policy_file(bytes: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "vogt-codex-policy-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("requirements.toml");
+        std::fs::write(&path, bytes).unwrap();
+        (dir, path)
+    }
+
+    #[test]
+    fn codex_policy_off_is_none() {
+        assert_eq!(super::codex_policy_from(Some("off")).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("  off  ")).unwrap(), None);
+    }
+
+    #[test]
+    fn codex_policy_named_file_must_be_readable_and_non_empty() {
+        let (dir, path) = policy_file(b"# requirements\n");
+        let got = super::codex_policy_from(Some(path.to_str().unwrap()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(got, path);
+        std::fs::remove_dir_all(dir).ok();
+
+        let (dir, empty_path) = policy_file(b"");
+        let err = super::codex_policy_from(Some(empty_path.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+        let missing = dir.join("missing.toml");
+        let err = super::codex_policy_from(Some(missing.to_str().unwrap())).unwrap_err();
+        assert!(err.contains("cannot be read"), "{err}");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn codex_policy_unset_without_image_files_is_unconfigured() {
+        // Neither the image path nor /etc/codex/requirements.toml exists in
+        // the unit-test tree. Unset and empty are "no policy configured",
+        // not a refusal — a named missing path is the error, above.
+        assert_eq!(super::codex_policy_from(None).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("")).unwrap(), None);
+        assert_eq!(super::codex_policy_from(Some("   ")).unwrap(), None);
+    }
 }

@@ -1,0 +1,28 @@
+# Driven-session Codex requirements (WI-1143, WI-1146).
+#
+# Stock Codex 0.160.0 reads this path (`/etc/codex/requirements.toml`) with no
+# flag. The engine does not pass one: it only checks that a named policy file
+# exists and is non-empty, then lets Codex load this path itself.
+#
+# This file is intentionally comments only. On stock 0.160.0 the gitguard hook
+# table and the destructive-git prefix rules are not a requirements.toml shape
+# that has been shown to load:
+#
+# - Managed hooks (`SessionStart` / `PreToolUse`, command `klaudia hook
+#   gitguard`) are parsed from an enterprise-managed requirements layer. The
+#   exact table (`[[hooks.SessionStart]]` versus `[[hooks]]`) was not confirmed
+#   by a rejecting load, and a live `codex exec` did not prove a candidate
+#   table was parsed. Shipping an invented table would either be ignored or
+#   refuse every Codex session.
+# - `codex execpolicy check` rules are Starlark (`prefix_rule(...)`), not a
+#   TOML `[[prefix_rule]]` or `[[rules]]` table. Requirements reject decision
+#   `allow` ("use 'prompt' or 'forbidden'"). Destructive-git prefix rules are
+#   therefore not embedded here.
+# - `failClosed` is a fork key (WI-1129) and is not a string in the stock
+#   binary. `allow_managed_hooks_only` is undecided. Neither is set.
+#
+# Until the fork image is what the pod runs (WI-1142) and the hook load is
+# confirmed (WI-1136, WI-1128), acceptance of the gitguard hook is a recorded
+# gap, not a behaviour this file claims. A deployment that needs Codex to
+# refuse a missing hook sets `ENGINE_AGENT_CODEX_POLICY` to a path that is
+# absent: the engine then returns 400 and does not launch.
