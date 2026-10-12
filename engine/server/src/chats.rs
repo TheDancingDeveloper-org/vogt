@@ -136,6 +136,10 @@ pub struct ChatPolicy {
     /// `ENGINE_CHAT_MAX_RSS` (2GiB): a chat whose process tree's resident
     /// memory passes this is killed.
     pub max_rss_bytes: u64,
+    /// `ENGINE_CHAT_DRIVER`: which driver a new chat uses when the request
+    /// does not name one. `klaudia` (default) or `codex`. Klaudia stays
+    /// selectable either way.
+    pub driver: String,
 }
 
 impl Default for ChatPolicy {
@@ -152,6 +156,7 @@ impl Default for ChatPolicy {
             max_per_creator: 2,
             turn_timeout: Duration::from_secs(20 * 60),
             max_rss_bytes: 2 << 30,
+            driver: DRIVER.into(),
         }
     }
 }
@@ -191,12 +196,20 @@ impl ChatPolicy {
                 );
             }
         }
+        if self.driver != DRIVER && self.driver != CODEX_DRIVER {
+            return Err(format!(
+                "ENGINE_CHAT_DRIVER={:?} is not klaudia or codex",
+                self.driver
+            ));
+        }
         Ok(())
     }
 }
 
-/// The only driver this engine speaks to.
+/// Klaudia stream-json, the original driver. Still selectable.
 const DRIVER: &str = "klaudia";
+/// Codex app-server JSON-RPC (WI-1148).
+const CODEX_DRIVER: &str = "codex";
 const DEFAULT_TITLE: &str = "New chat";
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 /// A tool result is kept to this many characters in Vogt's copy; the
@@ -491,38 +504,64 @@ const CHAT_ENV_ALLOWLIST: &[&str] = &[
     "KLAUDIA_CONFIG_DIR",
 ];
 
-fn resolve_launch(
+fn resolve_named(
     policy: &ChatPolicy,
     templates: &[crate::config::SessionTemplate],
+    agent: &str,
 ) -> Option<Launch> {
     if !policy.enabled {
         return None;
     }
     if let Some(argv) = policy.command.clone() {
-        return (crate::agent_cli::agent_name(&argv).as_deref() == Some(DRIVER)).then_some(
-            Launch {
+        if crate::agent_cli::agent_name(&argv).as_deref() == Some(agent) {
+            return Some(Launch {
                 driver: driver_of(&argv),
                 argv,
                 template: None,
-            },
-        );
+            });
+        }
     }
-    let template = match policy.template.as_deref() {
-        Some(name) => crate::sessions::resolve_template_in(templates, name).ok()?,
-        None => templates.iter().find(|t| {
-            t.command
-                .as_deref()
-                .and_then(crate::agent_cli::agent_name)
-                .as_deref()
-                == Some(DRIVER)
-        })?,
-    };
+    if let Some(name) = policy.template.as_deref() {
+        if let Ok(template) = crate::sessions::resolve_template_in(templates, name) {
+            if let Some(argv) = template.command.clone() {
+                if crate::agent_cli::agent_name(&argv).as_deref() == Some(agent) {
+                    return Some(Launch {
+                        driver: driver_of(&argv),
+                        argv,
+                        template: Some(template.name.clone()),
+                    });
+                }
+            }
+        }
+    }
+    let template = templates.iter().find(|t| {
+        t.command
+            .as_deref()
+            .and_then(crate::agent_cli::agent_name)
+            .as_deref()
+            == Some(agent)
+    })?;
     let argv = template.command.clone()?;
-    (crate::agent_cli::agent_name(&argv).as_deref() == Some(DRIVER)).then(|| Launch {
+    Some(Launch {
         driver: driver_of(&argv),
         argv,
         template: Some(template.name.clone()),
     })
+}
+
+/// Klaudia launch, unchanged for a Klaudia-only deployment.
+fn resolve_launch(
+    policy: &ChatPolicy,
+    templates: &[crate::config::SessionTemplate],
+) -> Option<Launch> {
+    resolve_named(policy, templates, DRIVER)
+}
+
+fn resolve_codex(
+    policy: &ChatPolicy,
+    templates: &[crate::config::SessionTemplate],
+) -> Option<Launch> {
+    resolve_named(policy, templates, CODEX_DRIVER)
 }
 
 /// Who answers a pending approval, and how the answer gets back.
@@ -531,6 +570,8 @@ enum Responder {
     Gate(oneshot::Sender<Option<String>>),
     /// Klaudia asked with a `can_use_tool` control request.
     Driver { request_id: String },
+    /// Codex app-server asked with a JSON-RPC request id.
+    Codex { request_id: String },
 }
 
 struct Pending {
@@ -596,6 +637,9 @@ pub struct ChatRuntime {
     bus: EventBus,
     sessions: Arc<SessionRegistry>,
     launch: Launch,
+    /// Present when a Codex template or command is configured. Absent, the
+    /// engine still drives Klaudia exactly as before.
+    codex: Option<Launch>,
     handles: DashMap<Uuid, Arc<ChatHandle>>,
     launching: tokio::sync::Mutex<()>,
     generation: AtomicU64,
@@ -612,13 +656,15 @@ fn gate_block(reason: &str) -> Value {
 }
 
 impl ChatRuntime {
-    /// `None` when chats are off or no Klaudia launch is configured.
+    /// `None` when chats are off or neither driver resolves.
     pub async fn from_config(
         cfg: Arc<Config>,
         bus: EventBus,
         sessions: Arc<SessionRegistry>,
     ) -> Option<Arc<Self>> {
-        let launch = resolve_launch(&cfg.chat, &cfg.session_templates)?;
+        let launch = resolve_launch(&cfg.chat, &cfg.session_templates);
+        let codex = resolve_codex(&cfg.chat, &cfg.session_templates);
+        let launch = launch.or_else(|| codex.clone())?;
         let store = match ChatStore::new(&cfg.state_dir).await {
             Ok(store) => store,
             Err(e) => {
@@ -631,7 +677,13 @@ impl ChatRuntime {
         // A previous engine's chat processes have no reader now: end them.
         sweep_orphans(&cfg.state_dir.join("chats"));
         Some(Self::with_parts(
-            cfg, store, bus, sessions, launch, gate_base,
+            cfg,
+            store,
+            bus,
+            sessions,
+            launch,
+            codex,
+            gate_base,
         ))
     }
 
@@ -641,6 +693,7 @@ impl ChatRuntime {
         bus: EventBus,
         sessions: Arc<SessionRegistry>,
         launch: Launch,
+        codex: Option<Launch>,
         gate_base: String,
     ) -> Arc<Self> {
         let runtime = Arc::new(Self {
@@ -649,6 +702,7 @@ impl ChatRuntime {
             bus,
             sessions,
             launch,
+            codex,
             handles: DashMap::new(),
             launching: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
@@ -665,15 +719,27 @@ impl ChatRuntime {
         *self.gate_base.write() = base;
     }
 
-    /// What `/api/config` advertises.
+    /// What `/api/config` advertises. Klaudia when that launch resolved; Codex
+    /// as well when a Codex template or command did.
     pub fn info(&self) -> ChatConfigInfo {
-        ChatConfigInfo {
-            drivers: vec![ChatDriver {
+        let mut drivers = Vec::new();
+        if resolve_launch(&self.cfg.chat, &self.cfg.session_templates).is_some()
+            || self.codex.is_none()
+        {
+            drivers.push(ChatDriver {
                 name: DRIVER.into(),
                 label: "Klaudia".into(),
                 models: self.cfg.chat.models.clone(),
-            }],
+            });
         }
+        if self.codex.is_some() {
+            drivers.push(ChatDriver {
+                name: CODEX_DRIVER.into(),
+                label: "Codex".into(),
+                models: self.cfg.chat.models.clone(),
+            });
+        }
+        ChatConfigInfo { drivers }
     }
 
     fn handle(&self, id: Uuid) -> Arc<ChatHandle> {
@@ -774,18 +840,27 @@ impl ChatRuntime {
         req: ChatCreateRequest,
         creator: String,
     ) -> Result<ChatSendResult> {
-        if let Some(driver) = req
+        let requested = req
             .driver
             .as_deref()
             .map(str::trim)
             .filter(|d| !d.is_empty())
-        {
-            if driver != DRIVER {
+            .unwrap_or(self.cfg.chat.driver.as_str());
+        let driver = match requested {
+            DRIVER => DRIVER,
+            CODEX_DRIVER if self.codex.is_some() => CODEX_DRIVER,
+            CODEX_DRIVER => {
+                return Err(ApiError::BadRequest(
+                    "driver \"codex\" is not configured; no Codex template or command resolved"
+                        .into(),
+                ));
+            }
+            other => {
                 return Err(ApiError::BadRequest(format!(
-                    "driver {driver:?} is not available; this engine drives chats with {DRIVER}"
+                    "driver {other:?} is not available; this engine drives chats with {DRIVER} or {CODEX_DRIVER}"
                 )));
             }
-        }
+        };
         let model = match req.model.as_deref() {
             Some(m) => self.validate_model(m)?,
             None => self.cfg.chat.models.first().map(|m| m.id.clone()),
@@ -803,7 +878,7 @@ impl ChatRuntime {
         let record = ChatRecord {
             id: Uuid::new_v4(),
             title,
-            driver: DRIVER.into(),
+            driver: driver.into(),
             model,
             creator,
             created_at: now.clone(),
@@ -941,7 +1016,11 @@ impl ChatRuntime {
                 return Err(e);
             }
         };
-        let line = json!({"type": "user", "message": {"role": "user", "content": text}});
+        let line = if record.driver == CODEX_DRIVER {
+            crate::chat_codex::turn_start(&format!("turn-{}", Uuid::new_v4()), id, text)
+        } else {
+            json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
+        };
         {
             let mut live = handle.live.lock();
             live.turns += 1;
@@ -950,7 +1029,7 @@ impl ChatRuntime {
             }
             live.last_activity = Some(Instant::now());
         }
-        if stdin.send(line.to_string()).is_err() {
+        if stdin.send(line).is_err() {
             handle.live.lock().turns = 0;
             self.note(
                 id,
@@ -1004,13 +1083,21 @@ impl ChatRuntime {
             .get(&id)
             .and_then(|h| h.live.lock().proc.as_ref().map(|p| p.stdin.clone()));
         if let Some(stdin) = stdin {
-            // From the next turn; a relaunch passes `--model` instead.
-            let request = json!({
-                "type": "control_request",
-                "request_id": format!("model-{}", Uuid::new_v4()),
-                "request": {"subtype": "set_model", "model": model.as_deref().unwrap_or("default")},
-            });
-            let _ = stdin.send(request.to_string());
+            let request = if record.driver == CODEX_DRIVER {
+                crate::chat_codex::settings_update(
+                    &format!("model-{}", Uuid::new_v4()),
+                    id,
+                    model.as_deref().unwrap_or("default"),
+                )
+            } else {
+                json!({
+                    "type": "control_request",
+                    "request_id": format!("model-{}", Uuid::new_v4()),
+                    "request": {"subtype": "set_model", "model": model.as_deref().unwrap_or("default")},
+                })
+                .to_string()
+            };
+            let _ = stdin.send(request);
         }
         self.note(
             id,
@@ -1045,12 +1132,17 @@ impl ChatRuntime {
                 .await;
         }
         if let Some(stdin) = stdin {
-            let request = json!({
-                "type": "control_request",
-                "request_id": format!("stop-{}", Uuid::new_v4()),
-                "request": {"subtype": "interrupt"},
-            });
-            let _ = stdin.send(request.to_string());
+            let request = if record.driver == CODEX_DRIVER {
+                crate::chat_codex::turn_interrupt(&format!("stop-{}", Uuid::new_v4()), id)
+            } else {
+                json!({
+                    "type": "control_request",
+                    "request_id": format!("stop-{}", Uuid::new_v4()),
+                    "request": {"subtype": "interrupt"},
+                })
+                .to_string()
+            };
+            let _ = stdin.send(request);
         }
         self.changed(id).await;
         Ok(self.summary_of(&self.record(id).await?))
