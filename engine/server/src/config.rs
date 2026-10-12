@@ -1454,6 +1454,12 @@ fn chat_policy_from_env() -> Result<crate::chats::ChatPolicy> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
+    if let Ok(v) = engine_env("ENGINE_CHAT_DRIVER") {
+        let v = v.trim();
+        if !v.is_empty() {
+            policy.driver = v.to_string();
+        }
+    }
     if let Some(n) = parse_usize_env("ENGINE_CHAT_MAX_PROCESSES")? {
         policy.max_processes = n;
     }
