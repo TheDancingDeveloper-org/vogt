@@ -124,34 +124,21 @@ impl ForgejoClient {
         })
     }
 
-    /// Who this token is, or `None` when it is invalid (401/403/404).
+    /// Who this token is. A rejected token is an error, the same one `get` raises;
+    /// `None` is only a 404 or a body with no login. Forgejo reports no scope
+    /// header, so the second half stays empty.
     pub fn identity(&self) -> Result<Option<(String, String)>, VogtError> {
-        let url = self.url("/user", &[]);
-        let (status, body, headers) = self.fetch(&url, &self.headers(false), b"", "GET")?;
-        if matches!(status, 401 | 403 | 404) {
+        // The same read the provider makes: 401 and 403 come back as errors
+        // through `get`, and only a missing user or a body with no login is
+        // `None`. Forgejo reports no scope header, so the second half is empty.
+        let ForgeResponse::Json(Value::Object(user)) = self.get("/user", &[])? else {
             return Ok(None);
-        }
-        if status >= 400 {
-            return Err(VogtError::ForgejoUnavailable(format!(
-                "{} returned {status} for /user",
-                self.host
-            )));
-        }
-        let payload: Value = if body.iter().all(u8::is_ascii_whitespace) {
-            Value::Object(serde_json::Map::new())
-        } else {
-            serde_json::from_slice(&body).unwrap_or(Value::Null)
         };
-        let login = payload
+        Ok(user
             .get("login")
             .and_then(Value::as_str)
-            .filter(|login| !login.is_empty());
-        Ok(login.map(|login| {
-            (
-                login.to_string(),
-                headers.get("x-oauth-scopes").cloned().unwrap_or_default(),
-            )
-        }))
+            .filter(|login| !login.is_empty())
+            .map(|login| (login.to_owned(), String::new())))
     }
 
     fn read_outcome(
@@ -336,11 +323,13 @@ mod tests {
     }
 
     #[test]
-    fn identity_is_none_for_a_rejected_token() {
-        assert!(client(answering(401, br#"{"message":"bad"}"#))
+    fn identity_follows_get_so_a_rejected_token_is_an_error() {
+        // 401 is not "no identity": `get` raises, and this read goes through it.
+        let rejected = client(answering(401, br#"{"message":"bad"}"#))
             .identity()
-            .unwrap()
-            .is_none());
+            .unwrap_err();
+        assert!(rejected.to_string().contains("401"), "{rejected}");
+        // Forgejo reports no scope header, so a known user still has empty scopes.
         let known = client(Box::new(|_url, _headers, _body, _method| {
             let mut headers = BTreeMap::new();
             headers.insert("x-oauth-scopes".to_owned(), "read:user".to_owned());
@@ -348,8 +337,9 @@ mod tests {
         }));
         assert_eq!(
             known.identity().unwrap(),
-            Some(("ada".to_owned(), "read:user".to_owned()))
+            Some(("ada".to_owned(), String::new()))
         );
+        assert!(client(answering(404, b"")).identity().unwrap().is_none());
     }
 
     #[test]
