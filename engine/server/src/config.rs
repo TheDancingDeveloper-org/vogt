@@ -300,6 +300,9 @@ pub struct Config {
     pub assistant_model: String,
     /// Upper bound on tool-call rounds per user message.
     pub assistant_max_tool_calls: u32,
+    /// How many sessions the assistant may start per conversation per rolling
+    /// hour. Counted when a start is delivered, not when it is proposed.
+    pub assistant_starts_per_hour: u32,
     /// Optional `reasoning_effort` forwarded to the backend (e.g. "minimal").
     pub assistant_reasoning_effort: Option<String>,
     /// Send `claude-*` model ids to the OpenAI-compatible backend anyway.
@@ -505,6 +508,7 @@ struct FileConfig {
     assistant_model: Option<String>,
     assistant_allow_claude_proxy: Option<bool>,
     assistant_max_tool_calls: Option<u32>,
+    assistant_starts_per_hour: Option<u32>,
     assistant_reasoning_effort: Option<String>,
     assistant_profiles: Option<Vec<AssistantProfile>>,
     assistant_default_profile: Option<String>,
@@ -858,6 +862,19 @@ pub fn load(
         assistant_max_tool_calls: parse_u32_env("ENGINE_ASSISTANT_MAX_TOOL_CALLS")?
             .or(from_file.assistant_max_tool_calls)
             .unwrap_or(8),
+        assistant_starts_per_hour: {
+            let value = parse_u32_env("ENGINE_ASSISTANT_STARTS_PER_HOUR")?
+                .or(from_file.assistant_starts_per_hour)
+                .unwrap_or(3);
+            if value == 0 {
+                return Err(ApiError::Config(
+                    "assistant_starts_per_hour / ENGINE_ASSISTANT_STARTS_PER_HOUR \
+                     must be a positive integer"
+                        .into(),
+                ));
+            }
+            value
+        },
         assistant_reasoning_effort: from_file
             .assistant_reasoning_effort
             .or_else(|| engine_env("ENGINE_ASSISTANT_REASONING_EFFORT").ok())
