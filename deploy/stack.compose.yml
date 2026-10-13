@@ -285,6 +285,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # Opt-in Prometheus scrape, same idea as ENGINE_METRICS_ADDR on the engine:
+    # its own listener, off when empty, never the API port. Publish the port
+    # from an overlay only where the scraper sits.
+    environment:
+      VOGT_VOICE_METRICS_ADDR: "${VOGT_VOICE_METRICS_ADDR:-}"
 
 volumes:
   engine-home:
