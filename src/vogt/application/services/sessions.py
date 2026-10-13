@@ -1485,7 +1485,16 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     reason = writes.validate_reason(params.reason)
     text = params.text or ""
     keys = list(params.keys or [])
-    if not text and not keys and not params.submit:
+    # `submit` defaults to pressing Enter after text. `draft` is the opt-out
+    # for typing without sending, and an explicit `submit=false` means the
+    # same thing. A call that names only keys keeps its old behaviour: the
+    # keys are pressed and nothing else, unless `submit` is given explicitly.
+    submit = (
+        params.submit
+        and not params.draft
+        and (bool(text) or "submit" in params.model_fields_set)
+    )
+    if not text and not keys and not submit:
         msg = "nothing to send: give text, keys, or submit"
         raise InvalidRequest(msg)
     size = len(text.encode("utf-8"))
@@ -1504,11 +1513,11 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
     if text:
         writes_in_order.append((text, False))
     writes_in_order.extend((SESSION_KEYS[key], False) for key in keys)
-    if params.submit:
+    if submit:
         writes_in_order.append(("", True))
     # Enter by either route is a submit: `keys: ["enter"]` used to report
     # `submitted: false` (WI-918).
-    submitted = params.submit or "enter" in keys
+    submitted = submit or "enter" in keys
     confirming = submitted and params.confirm
     before: str | None = None
     if confirming:
@@ -1571,7 +1580,8 @@ def session_input(ctx: AppContext, params: SessionInputParams) -> SessionInputRe
             "linked": linked,
             "bytes": size,
             "keys": list(keys),
-            "submit": params.submit,
+            "submit": submit,
+            "draft": params.draft,
             "submitted": submitted,
             "delivery": verdict.delivery,
             "woke": woke,

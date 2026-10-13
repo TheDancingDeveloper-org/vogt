@@ -1075,8 +1075,10 @@ def build_operations() -> list[Operation[Any, Any]]:
             name="session.input",
             summary=(
                 "Type into a session: text, then named keys (enter, esc, tab, "
-                "arrows, ctrl-c, ctrl-d, backspace), then Enter if submit. "
-                "Takes either id: ses_… or the engine UUID. Read "
+                "arrows, ctrl-c, ctrl-d, backspace), then Enter. Enter is "
+                "pressed by default; pass draft=true (or submit=false) to type "
+                "without sending. Takes either id: ses_… or the engine UUID. "
+                "Read "
                 "session_screen first and never send a blind Enter: at a "
                 "menu it accepts whatever is highlighted (dismiss with esc). "
                 "While a permission prompt shows, only a person's input is "

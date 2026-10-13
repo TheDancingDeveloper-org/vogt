@@ -5244,8 +5244,21 @@ class SessionInputParams(Params):
         ),
     )
     submit: bool = Field(
+        default=True,
+        description=(
+            "Press Enter last, after the text and keys. The default when text "
+            "is given: the line is sent, not left sitting in the input. A "
+            "call that names only keys does not press Enter unless this is "
+            "set. `draft` or an explicit `false` types without pressing Enter."
+        ),
+    )
+    draft: bool = Field(
         default=False,
-        description="Press Enter last, after the text and keys.",
+        description=(
+            "Type but do not press Enter: the text (and any keys) sit in the "
+            "input. Forces `submit` off. Use it to compose a line without "
+            "sending it."
+        ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
     confirm: bool = Field(
