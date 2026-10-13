@@ -4212,8 +4212,8 @@ class StartSessionParams(Params):
             "object sets no limits, which is how a start declines the default."
         ),
     )
-    worktree: bool = Field(
-        default=False,
+    worktree: bool | None = Field(
+        default=None,
         description=(
             "Start the session in a git worktree of its own rather than in the "
             "project's shared checkout (WI-1298). The engine cuts the worktree "
@@ -4224,7 +4224,9 @@ class StartSessionParams(Params):
             "worktree. The shared checkout is never written to, so a dirty "
             "tree there cannot leak into the session and the session cannot "
             "disturb it. Requires a project, or a work item that belongs to "
-            "one. `false` (default) opens the session in the project's checkout."
+            "one. Unset, the purpose's dispatch profile decides (WI-1323), and "
+            "with no purpose the session opens in the project's checkout, as "
+            "`false` does. Recorded on the audit row."
         ),
     )
     reason: Reason = Field(description="Why this write is being made (audited).")
@@ -4237,14 +4239,6 @@ class StartSessionParams(Params):
             "effort, budget, worktree, repo_map and autopilot wherever this "
             "start leaves them unset; a value given here wins and is audited "
             "as an override. Recorded on the session."
-        ),
-    )
-    worktree: bool | None = Field(
-        default=None,
-        description=(
-            "Run in a worktree of the project's checkout (WI-1298). Resolved "
-            "from the purpose's profile when unset and recorded on the audit "
-            "row; cutting the worktree itself is WI-1298's."
         ),
     )
 
