@@ -4150,6 +4150,21 @@ class StartSessionParams(Params):
             "object sets no limits, which is how a start declines the default."
         ),
     )
+    worktree: bool = Field(
+        default=False,
+        description=(
+            "Start the session in a git worktree of its own rather than in the "
+            "project's shared checkout (WI-1298). The engine cuts the worktree "
+            "from the project's integration branch — `agent_policy.base_branch` "
+            "when the project states one, otherwise `main` — onto a new branch "
+            "`<work item>-<session>` (or `<project>-<session>` when no work "
+            "item is given), and the session's working directory is that "
+            "worktree. The shared checkout is never written to, so a dirty "
+            "tree there cannot leak into the session and the session cannot "
+            "disturb it. Requires a project, or a work item that belongs to "
+            "one. `false` (default) opens the session in the project's checkout."
+        ),
+    )
     reason: Reason = Field(description="Why this write is being made (audited).")
 
 
