@@ -105,6 +105,11 @@ class AgentPolicy(Entity):
     commit_identity: str = ""
     #: The short named block that says how this project is tested.
     test_recipe: str = ""
+    #: How the project actually runs where it is deployed — separate
+    #: services, split topologies — in the project's own words. A reviewer is
+    #: shown it, because a test that passes in-process says nothing about a
+    #: deployment that runs the same code as a separate service.
+    deployed_setup: str = ""
     #: Free-text rules. Guidance only; a hook never reads these.
     rules: list[str] = []
 
