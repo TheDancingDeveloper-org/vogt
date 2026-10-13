@@ -10426,11 +10426,21 @@ async fn the_economics_tailer_reports_a_live_transcript_and_the_scrape_records_t
     };
     assert!(ended["exit_code"].is_number(), "{ended}");
 
-    let text = vogt_engine_server::metrics::metrics().render();
-    assert!(
-        text.contains("vogt_session_turns_count{template=\"unknown\"}"),
-        "{text}"
-    );
+    // The exit code is stored before the waiter observes the economics, and
+    // that observation runs on the blocking pool. Under CI load the scrape
+    // can land in the gap, so wait for the series rather than reading once.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let text = loop {
+        let text = vogt_engine_server::metrics::metrics().render();
+        if text.contains("vogt_session_turns_count{template=\"unknown\"}") {
+            break text;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the exit was recorded but the scrape never showed the session's turns: {text}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     assert!(
         text.contains("vogt_session_peak_context_tokens_sum"),
         "{text}"
