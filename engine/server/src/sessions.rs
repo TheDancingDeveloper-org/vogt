@@ -1167,6 +1167,7 @@ impl SessionRegistry {
         }
         self.sessions.remove(&id);
         self.secret_broker.revoke(id);
+        self.clean_worktree(&session.cwd);
         self.bus
             .publish(ServerEvent::SessionHibernated { id, trigger });
         tracing::info!(session = %id, ?trigger, "session hibernated");
@@ -1780,7 +1781,27 @@ impl SessionRegistry {
             s.request_stop(request);
         }
         s.kill()?;
+        self.clean_worktree(&s.cwd);
         Ok(())
+    }
+
+    /// Drop regenerable build output in a session's linked worktree, when the
+    /// deployment asked for it (WI-1304). Off unless
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` is set. Best-effort and off the
+    /// runtime: a cleanup that fails must not fail the hibernation or stop.
+    fn clean_worktree(&self, cwd: &str) {
+        if !self.cfg.worktree_clean_on_hibernate {
+            return;
+        }
+        let cwd = std::path::PathBuf::from(cwd);
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn_blocking(move || crate::worktree_clean::clean(&cwd));
+            }
+            Err(_) => {
+                crate::worktree_clean::clean(&cwd);
+            }
+        }
     }
 
     pub fn remove(&self, id: Uuid) -> Result<()> {
@@ -1803,7 +1824,9 @@ impl SessionRegistry {
             return Err(ApiError::NotFound);
         }
         if let Some(s) = live {
+            let cwd = s.cwd.clone();
             let _ = s.kill();
+            self.clean_worktree(&cwd);
         }
         // Forgetting the session forgets its leave to ask the broker.
         self.secret_broker.revoke(id);

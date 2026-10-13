@@ -1734,6 +1734,23 @@ counted, the same as in `ps --forest`. `ENGINE_SESSION_RSS_WARN` (`8GiB`)
 sets `resources.over_threshold` on any session at or over it. The core's
 `session.list` takes `order: "rss"` to put the heaviest first.
 
+#### Worktree build output
+
+A finished worker's build output is what fills the host disk: `target/`,
+`node_modules` and `.venv` in a worktree nobody is using. With
+`ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` set, hibernating or stopping a session
+whose directory is a linked git worktree removes those directories. A repo's
+main checkout is never touched — only a directory `git worktree add` created —
+and neither is a symlink or a file git tracks. A `target` directory counts only
+when a `Cargo.toml` sits beside it, so a directory of notes named `target` is
+left alone. The cleanup is best-effort: a failure is logged and the session
+still hibernates or stops.
+
+`sweep` and `engine.status` report the workspace volume as `disk`: its size,
+what is free, the percent used, and `needs_attention` once that passes
+`ENGINE_DISK_WARN_PERCENT` (`85`). A deployment with no engine reports no row,
+which is a different fact from a volume that is fine.
+
 #### Launch timing, logs and metrics
 
 A session's launch explains itself in the engine log and on `/metrics`

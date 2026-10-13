@@ -2304,6 +2304,13 @@ class SweepResult(Result):
     subjects: int
     dep_refs: int
     reports: list[SweepReportView]
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume, when a session engine answers. "
+            "needs_attention once used space passes its threshold."
+        ),
+    )
 
 
 class CoverageParams(Params):
@@ -4779,6 +4786,17 @@ class EngineStatusParams(Params):
     pass
 
 
+class EngineDiskStatus(Result):
+    """The workspace volume's usage, as the engine reports it (WI-1304)."""
+
+    path: str | None = None
+    total_bytes: int | None = None
+    free_bytes: int | None = None
+    used_percent: int | None = None
+    threshold_percent: int | None = None
+    needs_attention: bool = False
+
+
 class EngineHistoryStatus(Result):
     """The engine's session-history archive, when it keeps one."""
 
@@ -4844,6 +4862,13 @@ class EngineStatusResult(Result):
         description=(
             "Event subscribers that fell behind since the engine started, by "
             "name. Empty is healthy."
+        ),
+    )
+    disk: EngineDiskStatus | None = Field(
+        default=None,
+        description=(
+            "The workspace volume. needs_attention once used space passes the "
+            "engine's threshold (85% by default)."
         ),
     )
 

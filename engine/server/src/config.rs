@@ -472,6 +472,14 @@ pub struct Config {
     /// summary (`resources`). Unset flags nothing; usage is reported either
     /// way.
     pub session_rss_warn_bytes: Option<u64>,
+    /// `ENGINE_WORKTREE_CLEAN_ON_HIBERNATE` (off by default): when a session
+    /// is hibernated or stopped and its directory is a linked git worktree,
+    /// remove regenerable build output there (`worktree_clean`). Never a
+    /// repo's main checkout.
+    pub worktree_clean_on_hibernate: bool,
+    /// `ENGINE_DISK_WARN_PERCENT` (85): the workspace volume's used percent
+    /// above which sweep and status carry a needs-attention disk row.
+    pub disk_warn_percent: u8,
     /// `ENGINE_METRICS_ADDR` (`0.0.0.0:9464`): where `GET /metrics` is
     /// served, on a listener of its own (`crate::metrics`). Unset, nothing
     /// listens.
@@ -990,6 +998,20 @@ pub fn load(
                 })?)
             }
             _ => None,
+        },
+        worktree_clean_on_hibernate: match engine_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE") {
+            Ok(v) if !v.trim().is_empty() => {
+                parse_bool_env("ENGINE_WORKTREE_CLEAN_ON_HIBERNATE", &v)?
+            }
+            _ => false,
+        },
+        disk_warn_percent: match engine_env("ENGINE_DISK_WARN_PERCENT") {
+            Ok(v) if !v.trim().is_empty() => v.trim().parse::<u8>().map_err(|_| {
+                ApiError::Config(format!(
+                    "ENGINE_DISK_WARN_PERCENT={v:?} is not a whole percent from 1 to 100"
+                ))
+            })?,
+            _ => 85,
         },
         metrics_bind: match engine_env("ENGINE_METRICS_ADDR") {
             Ok(v) if !v.trim().is_empty() => Some(v.trim().parse().map_err(|_| {

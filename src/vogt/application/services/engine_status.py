@@ -18,6 +18,7 @@ from vogt.adapters.engine import EngineUnavailable
 from vogt.application.context import AppContext
 from vogt.application.models import (
     EngineAgentTaskStatus,
+    EngineDiskStatus,
     EngineHistoryStatus,
     EngineLag,
     EngineStatusParams,
@@ -64,6 +65,7 @@ def engine_status(ctx: AppContext, params: EngineStatusParams) -> EngineStatusRe
             for name, lag in _object(payload.get("event_lag")).items()
             if isinstance(lag, dict)
         },
+        disk=_disk(payload.get("disk")),
     )
 
 
@@ -81,3 +83,10 @@ def _count(value: object) -> int | None:
 
 def _flag(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
+
+
+def _disk(value: object) -> EngineDiskStatus | None:
+    """The workspace volume, when the engine reports one (WI-1304)."""
+    if not isinstance(value, dict):
+        return None
+    return EngineDiskStatus.model_validate(value)

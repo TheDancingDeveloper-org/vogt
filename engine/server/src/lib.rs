@@ -59,6 +59,7 @@ pub mod vogt_tools;
 pub mod wait;
 pub mod workflow_engine;
 pub mod workspace_path;
+pub mod worktree_clean;
 pub mod ws;
 
 pub use app::{router, serve_forever};
