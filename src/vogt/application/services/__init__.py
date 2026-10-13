@@ -47,6 +47,12 @@ from vogt.application.services.contracts import (
     contract_evaluate,
     contract_inapplicable,
 )
+from vogt.application.services.decisions import (
+    answer_decision,
+    ask_decision,
+    list_decisions,
+    withdraw_decision,
+)
 from vogt.application.services.deployed import deployed_versions
 from vogt.application.services.drift_service import (
     detect_drift,
@@ -180,8 +186,10 @@ __all__ = [
     "adopt",
     "agent_cli_list",
     "agent_cli_update",
+    "answer_decision",
     "answer_session",
     "archive_inbox",
+    "ask_decision",
     "backlog",
     "backup",
     "bind_branch",
@@ -246,6 +254,7 @@ __all__ = [
     "list_audit",
     "list_auth_decisions",
     "list_board",
+    "list_decisions",
     "list_drift",
     "list_events",
     "list_forge_repos",
@@ -321,4 +330,5 @@ __all__ = [
     "wake_session",
     "whoami",
     "why",
+    "withdraw_decision",
 ]

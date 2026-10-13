@@ -27,6 +27,9 @@ from vogt.core.entities import (
     CodingSession,
     Comment,
     ContractExemption,
+    Decision,
+    DecisionAnswer,
+    DecisionOption,
     DriftProposal,
     Event,
     ForgeAccount,
@@ -1227,6 +1230,37 @@ class SqliteReadView:
         ).fetchone()
         return None if row is None else _row_to_session_grant(row)
 
+    def decision(self, decision_id: str) -> Decision | None:
+        row = self._conn.execute(
+            "SELECT * FROM decisions WHERE id = ?", (decision_id,)
+        ).fetchone()
+        return None if row is None else _row_to_decision(row)
+
+    def list_decisions(
+        self,
+        *,
+        state: str | None = None,
+        work_item_id: str | None = None,
+        asker_actor_id: str | None = None,
+        limit: int = 200,
+    ) -> list[Decision]:
+        clauses: list[str] = []
+        params: list[object] = []
+        for column, value in (
+            ("state", state),
+            ("work_item_id", work_item_id),
+            ("asker_actor_id", asker_actor_id),
+        ):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
+        rows = self._conn.execute(
+            f"SELECT * FROM decisions {where}ORDER BY created_at DESC, id DESC LIMIT ?",
+            (*params, limit),
+        ).fetchall()
+        return [_row_to_decision(row) for row in rows]
+
     def list_session_grants(
         self,
         *,
@@ -2035,6 +2069,43 @@ class SqliteWriteTxn(SqliteReadView):
             ),
         )
 
+    def insert_decision(self, decision: Decision) -> None:
+        self._conn.execute(
+            "INSERT INTO decisions (id, asker_actor_id, asker_session, "
+            "work_item_id, question, options_json, context, state, answer_json, "
+            "answered_by_actor_id, created_at, answered_at, expires_at, reason) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                decision.id,
+                decision.asker_actor_id,
+                decision.asker_session,
+                decision.work_item_id,
+                decision.question,
+                json.dumps([o.model_dump(mode="json") for o in decision.options]),
+                decision.context,
+                decision.state,
+                _decision_answer_json(decision),
+                decision.answered_by_actor_id,
+                to_iso(decision.created_at),
+                _iso_or_none(decision.answered_at),
+                to_iso(decision.expires_at),
+                decision.reason,
+            ),
+        )
+
+    def update_decision(self, decision: Decision) -> None:
+        self._conn.execute(
+            "UPDATE decisions SET state = ?, answer_json = ?, "
+            "answered_by_actor_id = ?, answered_at = ? WHERE id = ?",
+            (
+                decision.state,
+                _decision_answer_json(decision),
+                decision.answered_by_actor_id,
+                _iso_or_none(decision.answered_at),
+                decision.id,
+            ),
+        )
+
     def update_session_grant(self, grant: SessionGrant) -> None:
         self._conn.execute(
             "UPDATE session_grants SET state = ?, decided_by = ?, decided_at = ?, "
@@ -2780,6 +2851,36 @@ def _opt(row: sqlite3.Row, column: str) -> str | None:
 def _opt_time(row: sqlite3.Row, column: str) -> datetime | None:
     value = row[column]
     return None if value is None else from_iso(str(value))
+
+
+def _decision_answer_json(decision: Decision) -> str | None:
+    if decision.answer is None:
+        return None
+    return json.dumps(decision.answer.model_dump(mode="json"))
+
+
+def _row_to_decision(row: sqlite3.Row) -> Decision:
+    answer = row["answer_json"]
+    return Decision(
+        id=str(row["id"]),
+        asker_actor_id=str(row["asker_actor_id"]),
+        asker_session=_opt(row, "asker_session"),
+        work_item_id=_opt(row, "work_item_id"),
+        question=str(row["question"]),
+        options=[
+            DecisionOption.model_validate(o) for o in json.loads(row["options_json"])
+        ],
+        context=str(row["context"]),
+        state=row["state"],
+        answer=None
+        if answer is None
+        else DecisionAnswer.model_validate(json.loads(str(answer))),
+        answered_by_actor_id=_opt(row, "answered_by_actor_id"),
+        created_at=from_iso(str(row["created_at"])),
+        answered_at=_opt_time(row, "answered_at"),
+        expires_at=from_iso(str(row["expires_at"])),
+        reason=str(row["reason"]),
+    )
 
 
 def _row_to_session_grant(row: sqlite3.Row) -> SessionGrant:

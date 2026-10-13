@@ -26,6 +26,7 @@ from vogt.adapters.forge.kinds import (
 from vogt.application.context import AppContext
 from vogt.application.memo import StoreMemo
 from vogt.application.models import (
+    DecisionView,
     InboxAction,
     InboxArchiveParams,
     InboxCoverage,
@@ -44,6 +45,7 @@ from vogt.application.services.ci_watch import (
     bound_branches,
     index_by_branch,
 )
+from vogt.application.services.decisions import pending_decisions
 from vogt.application.services.grants import pending_grants
 from vogt.application.services.views import trust_for
 from vogt.application.writes import WriteOutcome, audited_write
@@ -549,6 +551,10 @@ def _collect_live(
     live_by_id = {session.id: session for session in live}
     for grant in pending_grants(view, ctx):
         entries.append(_grant_entry(ctx, grant, view, projects, live_by_id))
+    # Decisions waiting for a person (WI-1321): one entry per question,
+    # answered by choosing one of its options on the entry itself.
+    for decision in pending_decisions(view, ctx):
+        entries.append(_decision_entry(decision, view))
 
     if ctx.engine is not None:
         try:
@@ -984,6 +990,68 @@ def _grant_entry(
         actor_kind="human"
         if requester is not None and requester.kind == "human"
         else "bot",
+        actor_relation="org_member",
+    )
+
+
+def _decision_entry(decision: DecisionView, view: ReadView) -> InboxEntry:
+    """A question an agent asked and a person has yet to answer (WI-1321).
+
+    The question, options and context are the asking agent's text —
+    untrusted, shown verbatim, never acted on. Nothing is applied when the
+    person answers; the asker reads the answer.
+    """
+    recommended = next(
+        (o.label for o in decision.options if o.recommended), decision.options[0].label
+    )
+    options = " | ".join(
+        o.label + (" (recommended)" if o.recommended else "") for o in decision.options
+    )
+    summary = (f"{decision.asker} asks: {decision.question} Options: {options}.")[:1000]
+    item = (
+        None
+        if decision.work_item is None
+        else view.work_item_by_ref(decision.work_item)
+    )
+    project = (
+        None
+        if item is None or item.project_id is None
+        else view.project_by_id(item.project_id)
+    )
+    asker = view.actor_by_identity(decision.asker)
+    return InboxEntry(
+        entry_key=f"agent:decision:{decision.id}",
+        source=AGENT_KIND,
+        kind="decision.pending",
+        occurred_at=decision.created_at,
+        observed_at=None,
+        title=f"Decision: {decision.question[:120]}",
+        summary=summary,
+        project_slug=None if project is None else project.slug,
+        work_item_ref=decision.work_item,
+        session_id=decision.asker_session,
+        source_subject_key=decision.id,
+        trust_state="unverified",
+        freshness="live",
+        provisional=True,
+        action=InboxAction(
+            kind="decision",
+            decision_id=decision.id,
+            session_id=decision.asker_session,
+        ),
+        evidence_snapshot={
+            "decision_id": decision.id,
+            "asker": decision.asker,
+            "asker_session": decision.asker_session,
+            "work_item": decision.work_item,
+            "question": decision.question,
+            "options": [o.model_dump(mode="json") for o in decision.options],
+            "recommended": recommended,
+            "context": decision.context,
+            "expires_at": decision.expires_at.isoformat(),
+        },
+        actor_login=decision.asker,
+        actor_kind="human" if asker is not None and asker.kind == "human" else "bot",
         actor_relation="org_member",
     )
 
