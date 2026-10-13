@@ -1954,6 +1954,35 @@ First output can come earlier than that (the wrapper prints as it goes), so
 The engine logs without colour when its stdout is not a terminal, so these
 `key=value` fields reach the log pipeline intact.
 
+The resource sampler (every 10 s, the same sample a session's `resources`
+field carries) also writes per-session gauges to `/metrics` (WI-1373). They
+are there to show which session holds the pod's memory; they are not limits.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `vogt_session_rss_bytes` | gauge | `session`, `template`, `agent`, `model`, `project` |
+| `vogt_session_cpu_percent` | gauge | the same |
+| `vogt_session_processes` | gauge | the same |
+| `vogt_sessions_rss_bytes` | gauge | none: the sum over every live session's tree |
+| `vogt_pod_rss_bytes` | gauge | none: every process the engine sees, so the whole pod |
+
+These are the exception to the rule above: they carry the session's engine
+UUID. Cardinality stays bounded because the sampler replaces the whole set
+every round. A session that stops, exits or hibernates has no series from the
+next round on, so the series count is the number of sessions alive now.
+
+A missing label reads `unknown`:
+- `model` is the `--model` in the launch command.
+- `agent` is the conversation's agent, or the CLI named in the command.
+- `project` is the directory name of the repository's main checkout. A linked
+  worktree is named after the repository whose `.git/worktrees` holds it.
+  The engine does not know the core's project slug, so for estate checkouts
+  that directory name is the slug.
+
+`vogt_pod_rss_bytes` counts shared pages once per process, like
+`resources.rss_bytes`. It is RSS, not cgroup memory: to compare anon with
+file cache, use cAdvisor's `container_memory_rss` and `container_memory_cache`.
+
 #### Session economics
 
 A live session that has reported a conversation is metered from its own

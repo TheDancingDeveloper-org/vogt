@@ -1357,7 +1357,7 @@ fn spawn_reader_thread(
 /// The `--model` (or `-m`) the session's command was launched with, if it
 /// names one. Read from the command the engine spawned, so it is the model
 /// the session actually runs rather than a guess from its transcript.
-fn launched_model(session: &Session) -> Option<String> {
+pub(crate) fn launched_model(session: &Session) -> Option<String> {
     let command = session.command()?;
     let args: Vec<&str> = command.split_whitespace().collect();
     let mut last = None;
