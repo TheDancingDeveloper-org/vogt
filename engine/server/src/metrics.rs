@@ -36,7 +36,7 @@ const LAUNCH_BUCKETS: &[f64] = &[
     0.1, 0.25, 0.5, 1.0, 2.0, 3.0, 5.0, 10.0, 20.0, 30.0, 60.0, 120.0, 300.0,
 ];
 
-type Labels = Vec<(&'static str, String)>;
+pub type Labels = Vec<(&'static str, String)>;
 
 struct Histogram {
     buckets: &'static [f64],
@@ -249,6 +249,40 @@ impl CounterVec {
     }
 }
 
+/// A gauge family whose whole series set is replaced at once (WI-1373). The
+/// per-session resource gauges are written this way by the sampler every
+/// round, so a session that stops or hibernates drops out of the next scrape
+/// instead of leaving a stale series behind: the series count is bounded by
+/// the sessions alive now, not by every session the engine has ever run.
+pub struct GaugeVec {
+    name: &'static str,
+    help: &'static str,
+    series: Mutex<BTreeMap<Labels, f64>>,
+}
+
+impl GaugeVec {
+    fn new(name: &'static str, help: &'static str) -> Self {
+        Self {
+            name,
+            help,
+            series: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Replace every series with `values`.
+    pub fn replace(&self, values: impl IntoIterator<Item = (Labels, f64)>) {
+        *self.series.lock() = values.into_iter().collect();
+    }
+
+    fn render(&self, out: &mut String) {
+        let _ = writeln!(out, "# HELP {} {}", self.name, self.help);
+        let _ = writeln!(out, "# TYPE {} gauge", self.name);
+        for (labels, value) in self.series.lock().iter() {
+            let _ = writeln!(out, "{}{} {value}", self.name, format_labels(labels));
+        }
+    }
+}
+
 fn format_bound(bound: f64) -> String {
     let text = format!("{bound}");
     if text.contains('.') {
@@ -298,6 +332,18 @@ pub struct Metrics {
     pub session_peak_context: ValueHistogramVec,
     /// Compactions a session performed.
     pub session_compactions: ValueHistogramVec,
+    /// Resident memory of each live session's process tree, from the
+    /// resource sampler, by session, template, agent, model and project.
+    pub session_rss: GaugeVec,
+    /// CPU of each live session's tree over the last sampling interval.
+    pub session_cpu: GaugeVec,
+    /// Processes in each live session's tree.
+    pub session_processes: GaugeVec,
+    /// Resident memory summed over every live session's tree (unlabelled).
+    pub sessions_rss_total: GaugeVec,
+    /// Resident memory of every process the engine can see: in a container,
+    /// the whole pod, sessions or not (unlabelled).
+    pub pod_rss: GaugeVec,
 }
 
 impl Metrics {
@@ -349,6 +395,26 @@ impl Metrics {
                 "Compactions a session performed, by template and model.",
                 &[0.0, 1.0, 2.0, 3.0, 5.0, 10.0, 25.0, 50.0],
             ),
+            session_rss: GaugeVec::new(
+                "vogt_session_rss_bytes",
+                "Resident memory of a live session's process tree, in bytes.",
+            ),
+            session_cpu: GaugeVec::new(
+                "vogt_session_cpu_percent",
+                "CPU of a live session's process tree over the last sample, in percent of one core.",
+            ),
+            session_processes: GaugeVec::new(
+                "vogt_session_processes",
+                "Processes in a live session's process tree.",
+            ),
+            sessions_rss_total: GaugeVec::new(
+                "vogt_sessions_rss_bytes",
+                "Resident memory summed over every live session's process tree, in bytes.",
+            ),
+            pod_rss: GaugeVec::new(
+                "vogt_pod_rss_bytes",
+                "Resident memory summed over every process the engine can see (the pod), in bytes.",
+            ),
         }
     }
 
@@ -363,6 +429,11 @@ impl Metrics {
         self.session_turns.render(&mut out);
         self.session_peak_context.render(&mut out);
         self.session_compactions.render(&mut out);
+        self.session_rss.render(&mut out);
+        self.session_cpu.render(&mut out);
+        self.session_processes.render(&mut out);
+        self.sessions_rss_total.render(&mut out);
+        self.pod_rss.render(&mut out);
         out
     }
 }
@@ -453,5 +524,24 @@ mod tests {
         c.render(&mut out);
         assert!(out.contains("t_total{outcome=\"ok\"} 2"), "{out}");
         assert!(out.contains("t_total{outcome=\"a\\\"b\"} 1"), "{out}");
+    }
+
+    #[test]
+    fn a_gauge_replace_drops_series_that_are_not_given_again() {
+        let g = GaugeVec::new("t_bytes", "help");
+        g.replace([
+            (vec![("session", "a".to_string())], 10.0),
+            (vec![("session", "b".to_string())], 20.0),
+        ]);
+        let mut out = String::new();
+        g.render(&mut out);
+        assert!(out.contains("# TYPE t_bytes gauge"), "{out}");
+        assert!(out.contains("t_bytes{session=\"a\"} 10"), "{out}");
+        assert!(out.contains("t_bytes{session=\"b\"} 20"), "{out}");
+        g.replace([(vec![("session", "b".to_string())], 30.0)]);
+        let mut out = String::new();
+        g.render(&mut out);
+        assert!(!out.contains("session=\"a\""), "{out}");
+        assert!(out.contains("t_bytes{session=\"b\"} 30"), "{out}");
     }
 }
