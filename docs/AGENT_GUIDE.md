@@ -161,7 +161,7 @@ A project can carry an **agent policy** (`project.update --agent-policy`). The
 brief states all of it: text that must not appear in a commit, branch or PR
 (`forbidden_text`, regexes checked when the policy is saved), whether merging
 deploys production (`merge_deploys_prod`, with `main_branches`; an empty list
-means `main`), `commit_identity`, `test_recipe` and `rules`. Today all of it
+means `main`), `commit_identity`, `test_recipe`, `deployed_setup` and `rules`. Today all of it
 is guidance. The brief says it and nothing refuses it; enforcement hooks are
 a follow-up.
 
@@ -196,14 +196,25 @@ and it is started as one: `session_start(review_of=WI-n)` (a template and a
 model on top, the same as any other start). Its brief is not the worker's. It
 carries the item's own description under **Done means** — the acceptance
 criteria the item itself states — and **The diff**, taken from the latest
-hand-off's branch and base (`git diff <base>...<head>`). It does not carry the
-ranking, the comment thread, or an instruction to continue the work, and a
+hand-off's branch, base and head, rendered as the real command
+(`git diff <base>...<head sha>`, or the branch when the hand-off names no sha,
+which the brief flags). It does not carry the ranking, the comment thread, the
+project's worker landing rules, or an instruction to continue the work, and a
 `task` given alongside lands under **Also asked** rather than as a Task to go
-and do. The hand-off's own words are quoted as what the worker claims, which
-the review checks rather than trusts. When the item has no hand-off, or the
-hand-off names no branch and base, the brief says there is no diff to review
-and the reviewer reports that and stops. A reviewer reads the diff and that
-brief, never the worker's screen or transcript.
+and do. The review is read-only: no edits, commits, pushes, merges or deploys.
+Every hand-off field — done, remaining, gates run, blockers and the free text —
+sits under **What the worker claims**, marked as a claim, not evidence. The
+brief also carries the project's gates (`test_recipe`) and **Deployed setup**
+(`agent_policy.deployed_setup`, or a line saying none is recorded), and the
+verdict format: a first line of `no blockers (head <sha>)` or
+`blockers (head <sha>):` with a numbered list, then which deployment paths the
+tests cover. When the item has no hand-off, or the hand-off names no branch
+and base, the brief says there is no diff to review and the reviewer reports
+that and stops. A reviewer reads the diff and that brief, never the worker's
+screen or transcript.
+
+A worker brief pastes only the remarks made since the latest hand-off; the
+thread before it — old root causes, old verdicts — is superseded by it.
 
 The same hand-off is how a budget ends. A worker session carries a budget
 (120 turns and 90 minutes, unless the start named one), and when it crosses

@@ -8,6 +8,7 @@ because the forge thread has no kind to keep.
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -37,7 +38,7 @@ from vogt.application.services._brief import (
     brief_for_work_item,
     review_brief_for_work_item,
 )
-from vogt.core.entities import HandoffFields
+from vogt.core.entities import AgentPolicy, HandoffFields, Project
 from vogt.errors import InvalidRequest
 
 from tests.conftest import native_work_item
@@ -151,6 +152,9 @@ def test_the_brief_leads_with_the_latest_handoff(instance: AppContext) -> None:
             reason=WHY,
         ),
     )
+    comment_work(
+        instance, CommentParams(ref=item.ref, body="after the hand-off", reason=WHY)
+    )
 
     with instance.declared.read() as view:
         stored = view.work_item_by_ref(item.ref)
@@ -162,7 +166,9 @@ def test_the_brief_leads_with_the_latest_handoff(instance: AppContext) -> None:
     assert "new-branch" in brief
     assert "second stop, the one that counts" in brief
     assert "old-branch" not in brief
-    assert "a later remark" in brief
+    # A remark made before the latest hand-off is superseded by it.
+    assert "a later remark" not in brief
+    assert "after the hand-off" in brief
 
 
 def test_from_handoff_opens_on_the_item(instance: AppContext) -> None:
@@ -314,7 +320,9 @@ def test_a_review_brief_checks_the_diff_against_the_items_own_criteria(
     assert "## The diff" in review
     assert "wi-1299-review-brief" in review
     assert "integrate/vogt-next" in review
-    assert "git diff" in review
+    # The real base and head, not placeholders.
+    assert "`git diff integrate/vogt-next...abc123`" in review
+    assert "<base>" not in review and "<head>" not in review
     # The worker's claim is quoted as a claim. The remark thread and the
     # ranking — both of which read as "carry on" — are not the review.
     assert "I finished the composer" in review
@@ -322,6 +330,131 @@ def test_a_review_brief_checks_the_diff_against_the_items_own_criteria(
     assert "## Why this is ranked" not in review
     assert "## Comments" not in review
     assert "## Hand-off" in worker and "## The diff" not in worker
+
+
+def _review_of(
+    instance: AppContext,
+    *,
+    project: Project | None = None,
+    **fields: object,
+) -> str:
+    item = native_work_item(
+        instance, title="Review me", project="vogt", body="Done means X."
+    )
+    comment_work(
+        instance,
+        CommentParams(
+            ref=item.ref,
+            body="all green, trust me",
+            kind="handoff",
+            handoff=_fields(**fields),
+            reason=WHY,
+        ),
+    )
+    with instance.declared.read() as view:
+        stored = view.work_item_by_ref(item.ref)
+        assert stored is not None
+        return review_brief_for_work_item(view, stored, "ses-1", project=project).text
+
+
+def _policied(**policy: object) -> Project:
+    return Project(
+        id="p1",
+        slug="vogt",
+        name="Vogt",
+        root_path=ROOT,
+        created_at=datetime(2026, 10, 13, tzinfo=UTC),
+        updated_at=datetime(2026, 10, 13, tzinfo=UTC),
+        agent_policy=AgentPolicy.model_validate(policy),
+    )
+
+
+def test_a_review_brief_states_the_verdict_format(instance: AppContext) -> None:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    review = _review_of(instance, base="main")
+
+    assert "`no blockers (head <sha>)`" in review
+    assert "`blockers (head <sha>):` followed by a numbered list" in review
+    assert "which deployment paths the tests cover" in review
+    assert "Do not write `no blockers` while describing a regression" in review
+
+
+def test_a_review_brief_is_read_only_and_carries_no_worker_landing_policy(
+    instance: AppContext,
+) -> None:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    project = _policied(
+        commit_identity="sprooty <sprooty@sprooty.com>",
+        test_recipe="uv run pytest",
+        rules=["Commit after every step and push after every commit."],
+    )
+    review = _review_of(instance, project=project, base="main")
+
+    assert "This review is read-only" in review
+    for forbidden in ("edits", "commits, pushes, merges or deploys"):
+        assert forbidden in review
+    # The worker's landing rules are not the reviewer's.
+    assert "## Project policy" not in review
+    assert "Commit after every step" not in review
+    assert "**Commit identity**" not in review
+    # The gates are still useful to a reviewer.
+    assert "- **Tests** uv run pytest" in review
+
+
+def test_every_handoff_field_is_rendered_as_a_claim(instance: AppContext) -> None:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    review = _review_of(
+        instance,
+        base="main",
+        done=["composer done"],
+        remaining=["phase 2"],
+        gates_run=["pytest green"],
+        blockers=["none really"],
+    )
+
+    claims = review[review.index("## What the worker claims") :]
+    assert "a claim, not evidence" in claims
+    for value in ("composer done", "phase 2", "pytest green", "none really"):
+        assert f"claimed, not verified: {value}" in claims
+        # Nowhere outside the claims section.
+        assert value not in review[: review.index("## What the worker claims")]
+    assert "all green, trust me" in claims
+
+
+def test_a_review_brief_fills_in_the_real_diff_command(instance: AppContext) -> None:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    pinned = _review_of(instance, branch="wi-9-x", head_sha="deadbeef", base="b0")
+    assert "`git diff b0...deadbeef`" in pinned
+    assert "`git rev-parse wi-9-x`" in pinned
+    assert "review `deadbeef`" in pinned
+
+    unpinned = _review_of(instance, branch="wi-9-y", head_sha=None, base="b0")
+    assert "`git diff b0...wi-9-y`" in unpinned
+    assert "The hand-off names no head sha" in unpinned
+
+
+def test_a_review_brief_renders_the_deployed_setup(instance: AppContext) -> None:
+    register_project(
+        instance, RegisterProjectParams(name="Vogt", root_path=ROOT, reason=WHY)
+    )
+    split = "AWS runs the sessions service as a separate container."
+    with_notes = _review_of(
+        instance, project=_policied(deployed_setup=split), base="main"
+    )
+    assert "## Deployed setup" in with_notes
+    assert split in with_notes
+
+    without = _review_of(instance, project=_policied(), base="main")
+    assert "## Deployed setup" in without
+    assert "records no deployed-setup notes" in without
 
 
 def test_a_review_with_no_handoff_says_there_is_no_diff(instance: AppContext) -> None:
