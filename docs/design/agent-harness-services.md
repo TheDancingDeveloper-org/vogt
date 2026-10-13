@@ -4,7 +4,9 @@ Design for WI-1317 (2026-10-13). Challenge of oversight's draft in
 `aidevenv/docs/reviews/2026-10-13-vogt-harness-services-brief.md`, written
 against the engine and core on `integrate/vogt-next` at `99355800`, the
 installed helpers in `/usr/local/bin/vogt-*`, msp-klaudia `be8cd0b`, and work
-items WI-1279, WI-1281, WI-1291 and WI-1298 to WI-1316.
+items WI-1279, WI-1281, WI-1291 and WI-1298 to WI-1316. Revised after the
+Opus-low design review of 2026-10-13 (five blockers, all addressed here;
+the review is on WI-1317).
 
 The initiative that carries the work is `agent-harness-services`. The item
 refs in §9 are the Vogt items created from this doc (WI-1318 to WI-1338,
@@ -80,26 +82,34 @@ worktree cut from the project's landing base, named
 it is still the project root.
 
 **Record (engine).** A `workspace` block on the session record and the
-hibernation `Record`:
+hibernation `Record`, written for **every session whose cwd is inside a git
+repository**, not only for engine-cut worktrees (design review, blocker 3):
 
 ```
 workspace {
-  path:           "/home/sprooty/Working/Active/vogt-1298"
-  repo_root:      "/home/sprooty/Working/Active/vogt"     # the checkout it was cut from
+  kind:           "worktree" | "checkout"
+  path:           "/home/sprooty/Working/Active/vogt-1298"   # the worktree toplevel
+  repo_root:      "/home/sprooty/Working/Active/vogt"        # worktree: the checkout it was cut from; checkout: == path
   branch:         "wi-1298-session-worktree"
-  base_ref:       "origin/integrate/vogt-next"
-  base_sha:       "99355800…"
+  base_ref:       "origin/integrate/vogt-next" | null        # worktree only
+  base_sha:       "99355800…" | null
   created_at:     RFC 3339
-  baseline_dirty: []        # paths dirty at creation; empty for a fresh worktree
+  baseline_dirty: []        # paths dirty at first spawn; empty for a fresh worktree
   build_dirs:     ["engine/target", "web/node_modules"]   # what `clean` removes
   cleaned_at:     RFC 3339 | null
 }
 ```
 
-`baseline_dirty` is what the git guard (§2.2) protects. For a worktree cut
-by the engine it is empty **by construction**, which is what removes the
-false positives of WI-1300's second comment: there is nothing to protect, so
-nothing is refused.
+`baseline_dirty` is what the git guard (§2.2) protects, captured **once** at
+first spawn (a wake reuses it). For a worktree cut by the engine it is empty
+**by construction**, which is what removes the false positives of WI-1300's
+second comment: there is nothing to protect, so nothing is refused. For a
+`checkout` session (oversight, an ad hoc session, a person's shell on the
+project root) it is the root's real dirty set, so the guard still protects
+pre-existing work there once Klaudia's own guard defers (§7). The engine
+exports `VOGT_ENGINE_WORKSPACE=<kind>` and `VOGT_ENGINE_WORKSPACE_PATH` into
+the session environment exactly when the block exists; that is the signal a
+CLI reads to stand its own guard down.
 
 **Ops.**
 
@@ -107,9 +117,9 @@ nothing is refused.
   engine cuts the worktree, records the block, and starts the agent with
   `cwd = path`. A wake returns to the same path. A later session on the same
   work item reuses the worktree when the branch matches.
-- `workspace.list(project?, state?)` — every workspace the engine knows,
-  with its session, branch, base, size on disk, and whether the branch is
-  merged (from the branch collector's `observed` rows). Read scope.
+- `workspace.list(project?, alive?)` — every workspace the engine knows,
+  with its session, kind, branch, base, size on disk, and whether the branch
+  is merged (from the branch collector's `observed` rows). Read scope.
 - `workspace.clean(id | path, mode=build_output | remove)` — `build_output`
   deletes `build_dirs` (WI-1304's `worktree_clean.rs`, exposed); `remove`
   runs `git worktree remove` and is refused while a live session has it as
@@ -124,9 +134,11 @@ refused on a live cwd. Core: `session.start` with `purpose=implement` (§2.4)
 defaults `worktree=true` for projects whose policy names a landing base.
 
 **Not enforced here.** Reading or building in the shared checkout. The
-policy check (§2.2) refuses git *writes* whose repo resolves to another
-session's `repo_root`; reads are the agent's business, and once cwd is the
-worktree the incentive is gone.
+policy check (§2.2) refuses git *writes* from a **worktree** session whose
+repo resolves to a registered project's root checkout; reads are the agent's
+business, and once cwd is the worktree the incentive is gone. A `checkout`
+session is never refused by that rule (§2.2), so oversight, ad hoc sessions
+and person shells keep committing where they do today.
 
 ### 2.2 Change and review gate
 
@@ -139,6 +151,13 @@ Four records and two refusals.
   [str], reviewer_session}`. The only place a review result lives. The
   review brief (WI-1299) tells the reviewer to post exactly this. A verdict
   whose `head_sha` is not the branch tip is stale, and `work.land` says so.
+  **Who may post one** (design review, blocker 1): a person, or a session
+  whose recorded `purpose` is `review` (`session.start(purpose=review)`,
+  §2.4; `review_of=<item>` from WI-1299 counts too) and that is not the
+  session named in the item's latest hand-off. The core fills
+  `reviewer_session` from the acting token and ignores a supplied value, so
+  a worker cannot post a `no_blockers` verdict on its own branch and
+  `work.land` cannot be fed a forged one.
 - `work.comment kind=verification` with `VerificationFields {head_sha, lane:
   "vogt-dev" | "vogt-prod" | …, what, evidence, by}`. A functional check of
   the change in the deployed setup, posted by a person or by a session that
@@ -157,9 +176,11 @@ refused. The core:
 1. reads the project's `agent_policy.landing` (§2.4): `merge_by` must be
    `oversight`, otherwise the op refuses with "this project's merges are the
    operator's" (msp-agent, msp-klaudia, Versent);
-2. requires a `verdict` comment with `verdict=no_blockers` and `head_sha`
-   equal to the branch tip the engine reports; a verdict at another SHA is
-   named in the refusal;
+2. requires the latest `verdict` comment to have `verdict=no_blockers`,
+   `head_sha` equal to the branch tip the engine reports, and a
+   `reviewer_session` that is not the worker's (the latest hand-off's
+   session); a verdict at another SHA or from the worker is named in the
+   refusal;
 3. asks the engine for `GitOpReq::Land {repo, branch, head_sha, onto,
    mode}` where `onto` is `landing.base_branch` and `mode` is
    `landing.merge_mode` (`fast_forward` or `rebase`; never `merge`).
@@ -192,22 +213,55 @@ from `SessionPolicy`, which `_enforced_policy` fills from
 
 Credentials stay where they are. In `brokered` mode `GH_TOKEN` is a manifest
 line; a token for another org (`Versent/*`, brief #14) is a grant
-(`session.grant_request kind=credential`), and `vogt-git-askpass` learns one
-thing: when the prompt names a host whose token is not in the environment, it
-runs `vogt-agent-auth fetch <VAR>` for the VAR the grant named, so an
-approved grant is usable by plain `git push` with no agent step. That is a
-ten-line change to the askpass and the design's only credential change.
+(`session.grant_request kind=credential`, with a `reason` that starts
+`git:<host>` or `gh:<org>/<repo> …`). Two small additions make a grant usable
+without an agent copying a value anywhere (design review, blocker 4a: a
+running agent's environment is fixed at spawn, so nothing can be exported
+into it after a grant is approved):
+
+- `vogt-git-askpass` asks the broker **at prompt time**: on a password prompt
+  for a host with no token in the environment it calls a new broker route,
+  `GET /api/agent-auth/git-credential?host=<host>`, which finds the session's
+  live grant for that host, resolves it through the helper exactly as `fetch`
+  does (a `once` grant is spent), audits it with the grant id, and answers the
+  username and token (WI-1331).
+- `vogt-agent-auth with VAR[=ENVNAME] … -- <cmd>` fetches granted or manifest
+  values and `exec`s the command with them in the **child's** environment
+  only, so `gh pr create` against `Versent/*` runs with `GH_TOKEN` set from a
+  grant and nothing else sees the value (WI-1343).
+
+Both are meaningful only in `brokered` mode. This deployment runs `identity`
+mode today, so the flip is its own item (WI-1342): a manifest-coverage audit
+of every credential name sessions reached for in the last 14 days, then dev,
+then prod a week later (operator decision 5, §10).
 
 **Commit policy.** Already one place: `session.commit_for` and the hook both
 apply `forbidden_text`; `commit_identity` is rendered into the brief. What
-moves here is the **discard guard**: `policy.rs` refuses `git checkout --
-<path>`, `git restore`, `git reset --hard`, `git clean -f`, `git stash` and
-`git rm -f` when a path they reach is in the session workspace's
-`baseline_dirty` (or when the paths cannot be read, as Klaudia's gitguard
-does). With `baseline_dirty` empty for every engine-cut worktree the guard
-costs nothing in the common case and still protects a session opened on a
-dirty checkout. msp-klaudia's `gitguard` then defers to the engine when
-`VOGT_ENGINE_BROKER_URL` is set (§7).
+moves here are two rules in `policy.rs` (WI-1326):
+
+- the **discard guard**: refuse `git checkout -- <path>`, `git restore`,
+  `git reset --hard`, `git clean -f`, `git stash` and `git rm -f` when a path
+  they reach is in the session workspace's `baseline_dirty` (or when the
+  paths cannot be read, as Klaudia's gitguard does). It applies to every
+  session with a baseline, `worktree` or `checkout`. With `baseline_dirty`
+  empty for every engine-cut worktree it costs nothing in the common case,
+  and a session opened on a dirty checkout is protected because §2.1 now
+  captures that checkout's baseline too (design review, blocker 3).
+- the **protected-checkout rule**: refuse any git write whose repo resolves
+  to a registered project's root checkout **when the session's workspace
+  kind is `worktree`**. A `checkout` session or a session with no workspace
+  block is never refused by it (design review, blocker 2), so oversight
+  commits, `session.commit_for`, ad hoc sessions and a person's hand-typed
+  shell on the project root all keep working in phase 2. Who may write to
+  the root checkout is therefore: anyone who is not a worker in a worktree.
+
+For both rules the repo a command touches is `git -C <dir> rev-parse
+--show-toplevel` (the worktree toplevel, never the common git dir),
+canonicalised and compared with the session's `workspace.path` and the
+registered roots; a lookup that fails resolves to "unknown", which never
+refuses. msp-klaudia's `gitguard` then defers to the engine when the broker
+environment **and** `VOGT_ENGINE_WORKSPACE` are both present (§7), and keeps
+its own baseline otherwise.
 
 **Grants.** `session_grant_*` stays the way a session gets a credential or,
 in milestone 2, a capability. This design adds no grant kind. "Merge",
@@ -272,6 +326,10 @@ Ops, all audited:
 - `decision.list(state?, work_item?, asker?)` — read scope.
 - `decision.withdraw(id, reason)` — the asker or a person.
 
+When to start a review is not a service here: it stays oversight's call,
+made after a hand-off lands (grok review §3.2), which is consistent with
+ENGINE.md §8 and is stated here so the gap is a decision, not an omission.
+
 The asking session does not block: it records the decision, carries on with
 whatever does not depend on it, and reads the answer when it lands. An
 oversight question that waits eight hours (brief #16) no longer stalls the
@@ -314,7 +372,11 @@ verification {
 The 2026-10-13 landing matrix (grok review §3.3) is these fields for five
 projects. `_policy_section` renders them as the brief's "Landing rule"
 block; `_enforced_policy` ships `landing` to the engine as the push and PR
-rules of §2.2.
+rules of §2.2. Those rules apply only to a session whose role is `worker`
+**and** that is bound to a work item (so `{n}` is known); a session with no
+role (a person's hand-typed shell, one the engine could not classify) or
+with the `oversight` role is not a worker and sees only the rules that exist
+today (design review: the role-None case is defined, not implied).
 
 **Per deployment — a dispatch table in the preference store** (keys
 `dispatch.*`, edited with `preference_set`, read by `session.start`):
@@ -391,16 +453,16 @@ Extensions of `ci_watch.py`, in the same pure-core style:
 
 | Record | Layer | New or changed |
 | --- | --- | --- |
-| `workspace` block on the session record and hibernation `Record` | engine (`pty.rs`, `hibernation.rs`) | new; WI-1298 adds `worktree` on the spawn spec, this adds the record |
-| `CodingSession.workspace_path`, `base_sha` | core (`entities.py`) | new fields, nullable |
+| `workspace` block on the session record and hibernation `Record`, for every repo cwd (`kind` worktree or checkout) | engine (`pty.rs`, `hibernation.rs`) | new; WI-1298 adds `worktree` on the spawn spec, WI-1324 adds the record |
+| `CodingSession.workspace_kind`, `workspace_path`, `purpose`, `started_by_session` | core (`entities.py`, one migration for the new columns) | new fields, nullable |
 | `AgentPolicy.landing`, `.review`, `.verification` | core (`entities.py`, `project.update` validation) | new optional blocks |
-| `SessionPolicy.branch_pattern`, `.open_pr_allowed`, `.discard_baseline[]`, `.protected_checkouts[]` | engine contract (`engine/contract/src/lib.rs`) | new optional fields |
-| `CommentKind` = `note \| handoff \| verdict \| verification`; `VerdictFields`, `VerificationFields` | core (`entities.py`, `models.py`, `work.py`) | new kinds and field sets |
+| `SessionPolicy.branch_pattern`, `.open_pr_allowed`, `.session_role`, `.landing_mains[]`, `.discard_baseline[]`, `.workspace_kind`, `.workspace_path`, `.protected_checkouts[]` | engine contract (`engine/contract/src/lib.rs`) | new optional fields; the workspace ones are filled by the engine, the rest by core |
+| `CommentKind` = `note \| handoff \| verdict \| verification`; `VerdictFields`, `VerificationFields` | core (`entities.py`, `models.py`, `work.py`) | new kinds and field sets; `verdict` only from a review-purpose session or a person, `verification` never from the worker |
 | `Decision` | core (new table, migration), `services/decisions.py` | new entity |
 | `dispatch.*` preferences | core preference store | new keys with defaults in code |
 | `delivery` projection | core `work.get` | computed, not stored |
 | Inbox kinds `decision.pending`, `dispatch.override`, `ci.run_hung`, `workspace.disk` | core `inbox.py` | new rows |
-| Audit events `work.land`, `decision.asked\|answered\|withdrawn`, `workspace.clean`, `dispatch.override` | core audit | new |
+| Audit events `work.land`, `git.land`, `decision.asked\|answered\|withdrawn`, `workspace.clean`, `dispatch.override`, `agent-auth git-credential` | core and engine audit | new |
 
 ## 4. MCP tools added or changed
 
@@ -411,7 +473,7 @@ Extensions of `ci_watch.py`, in the same pure-core style:
 | `session.hibernate` | `work.write` | `superseded_by` accepts either id form (WI-1316) |
 | `workspace.list` | `read` | new |
 | `workspace.clean` | `work.write` | new |
-| `work.comment` | `work.write` | kinds `verdict` and `verification` with their field sets |
+| `work.comment` | `work.write` | kinds `verdict` and `verification` with their field sets; posting restricted as §2.2 says |
 | `work.land` | `git-write` | new |
 | `work.get` | `read` | `+delivery` |
 | `work.transition` | `work.write` | agent-only refusal to `done` when verification is required |
@@ -422,9 +484,11 @@ Extensions of `ci_watch.py`, in the same pure-core style:
 
 Engine routes added, each with an `ENGINE_COUNTERPARTS` entry:
 `GET /api/workspaces` → `workspace.list`; `POST /api/workspaces/clean` →
-`workspace.clean`; the `Land` variant on `POST /api/git/op` → `work.land`;
-`POST /api/sessions/{id}/notice` (the typed notice `ci_watch` already sends
-through `session.input`) stays on `session.input`.
+`workspace.clean`; the `Land` variant on `POST /api/git/op` → `work.land`
+(callable only with the core's own credential, like a grant apply);
+`GET /api/agent-auth/git-credential` is `ENGINE_ONLY` (a session-local
+credential fetch whose MCP counterpart is `session.grant_request`). The typed
+notice `ci_watch` already sends goes through `session.input`.
 
 ## 5. Enforcement points
 
@@ -433,10 +497,12 @@ Where each rule runs, and what a refusal says.
 | Rule | Runs in | Refuses with |
 | --- | --- | --- |
 | Worktree per worker; cwd = worktree | engine `sessions.rs` spawn | "a worktree needs the checkout it is cut from as cwd" / wrong project |
-| Discard guard over `baseline_dirty` | engine `policy.rs` via the hook | "refusing: `git restore` reaches a path that was dirty before this session" |
-| Branch ownership on push; no PR where the policy says push-only | engine `policy.rs` via the hook | names the pattern or the landing rule |
+| Discard guard over `baseline_dirty` (any session with a baseline) | engine `policy.rs` via the hook | "refusing: `git restore` reaches a path that was dirty before this session" |
+| Protected checkouts (worktree sessions only) | engine `policy.rs` via the hook | "refusing: a worktree session does not write to a project's root checkout" |
+| Branch ownership on push; no PR where the policy says push-only (workers with a work item only) | engine `policy.rs` via the hook | names the pattern or the landing rule |
+| Verdict only from a review-purpose session or a person | core `work.comment` | "a verdict is posted by a review session or a person" |
 | Forbidden text; merge deploys prod | engine `policy.rs` (exists) | names the rule, never the match |
-| Land only at a `no_blockers` verdict for the tip; never a merge commit | core `work.land` then engine `GitOpReq::Land` | names the verdict SHA vs tip, or the merge commit |
+| Land only at a `no_blockers` verdict from a review session for the tip; never a merge commit; only oversight or a person | core `work.land` then engine `GitOpReq::Land` (core credential only) | names the verdict SHA vs tip, the reviewer, or the merge commit |
 | Verification from the worker's own session | core `work.comment` | "a verification is posted by someone other than the worker" |
 | Agent closes without verification | core `work.transition` | "post a verification comment, or ask a person" |
 | Model routing, worker cap, review-by-oversight | core `session.start` | names the profile or cap; `override` for oversight only |
@@ -467,6 +533,7 @@ from doing so (§7).
 | A5 | **Report through MCP**: `work.comment handoff`, `session.report_blocked`, `decision.ask` | via Vogt MCP | via `vogt-klaudia-mcp` | via Vogt MCP | via Vogt MCP |
 | A6 | **Conversation link** (only when a person types the CLI into a shell) | `SessionStart`/`SessionEnd` hook | not needed (engine pins) | not needed | not needed |
 | A7 | **Tools resolve paths against cwd** and say so; Grep returns content by default | yes | Grep defaults to files only (WI-1311) — **fix** | n/a | n/a |
+| A8 | **Stand down a built-in git guard** when the engine signals it holds the baseline (`VOGT_ENGINE_WORKSPACE` set, broker env set, hook installed); keep it otherwise | no built-in guard | `gitguard` defers under that condition (WI-1332) | none | none |
 
 A2 is the whole of attention correctness: the engine's `oversight.classify`
 reads only what A2 yields. A3 is the whole of per-command enforcement. A5 is
@@ -479,7 +546,7 @@ line).
 
 | Today | After | When |
 | --- | --- | --- |
-| Klaudia `gitguard` captures a dirty baseline at process start, in the session cwd (the main checkout), and refuses by relative path (WI-1300, false positives on 2026-10-13) | Engine captures `baseline_dirty` per workspace at creation; `policy.rs` enforces the discard rules; Klaudia's `gitguard` is **off when `VOGT_ENGINE_BROKER_URL` is set** and on otherwise (a Klaudia outside Vogt keeps its guard) | phase 3, after the engine discard guard is live and reviewed |
+| Klaudia `gitguard` captures a dirty baseline at process start, in the session cwd (the main checkout), and refuses by relative path (WI-1300, false positives on 2026-10-13) | Engine captures `baseline_dirty` for every repo cwd at first spawn (worktree or checkout); `policy.rs` enforces the discard rules; Klaudia's `gitguard` is **off only when the broker env, the hook and `VOGT_ENGINE_WORKSPACE` are all present** and on otherwise (a Klaudia outside Vogt, or on a non-repo cwd, keeps its guard) | phase 3, after the engine discard guard is live and reviewed on dev |
 | Claude classifier refuses approved force-pushes, flags branch pushes as deploys (brief #15) | Unchanged classifier; the approval becomes a `Decision`, the action a `work.land` or a person's own shell. No agent force-push exists to approve. | phase 1–2 |
 | Oversight merges in its shell; merge commits reach `integrate/*` (WI-1315) | `work.land` fast-forwards or rebases; CI check backstops a person's shell | phase 2 |
 | Briefs retype rules, budgets and landing per session | `agent_policy.landing` + `dispatch.profiles` render once; budgets only from the engine | phase 1 |
@@ -487,6 +554,8 @@ line).
 | Blocked flags cleared by hand (WI-1314) | Engine clears on the next turn after input, on `AUTOPILOT: DONE`, or on a person's answer | phase 3 |
 | `session_input` without Enter; `superseded_by` wants the engine UUID; no-item workers cannot hand off (WI-1316) | `submit` default true; either id everywhere; `session.start(purpose=implement)` without `work_item` creates a `local_only` chore named after the session | phase 0 |
 | Operator decisions as lines in status updates; sweep blocked for hours | `decision.ask` → Inbox card on the phone → typed answer | phase 1 |
+| `gh pr create` on `Versent/*` needs the operator's token | `vogt-agent-auth with GRANT=GH_TOKEN -- gh pr create …` with a person-approved grant (WI-1343) | phase 2, after the dev brokered flip |
+| `identity` mode on dev and prod | manifest-coverage audit, dev flip, prod a week later (WI-1342) | phase 2 |
 | Codex and opencode run with no policy hook | Codex managed hook once the fork image is the pod (WI-1142); opencode keeps the pattern deny and is documented as a gap | later; not in this initiative |
 
 Nothing is removed before its replacement is verified on dev. Each phase
@@ -496,17 +565,20 @@ below is independently shippable.
 
 With this design live, a driven agent session (any CLI, default posture):
 
-1. cannot start in, or `git`-write to, the shared main checkout: its cwd is
-   its worktree and the policy check refuses writes whose repo resolves to a
-   `protected_checkouts` path;
+1. cannot, as a worker in a worktree, `git`-write to the shared main
+   checkout: its cwd is its worktree and the policy check refuses writes
+   whose repo resolves to a `protected_checkouts` path (a `checkout`
+   session is exempt by design, §2.2);
 2. cannot discard changes that pre-date its session (`baseline_dirty`), nor
    be refused for discarding its own (the baseline is empty for a fresh
    worktree);
 3. cannot push to `main_branches`, to another item's branch, or with
    `--force`; cannot open a PR where the project lands by branch push;
-4. cannot land its own branch (`work.land` is oversight or a person), and
-   oversight cannot land without a `no_blockers` verdict at the exact tip,
-   nor leave a merge commit on `integrate/*`;
+4. cannot land its own branch (`work.land` is oversight or a person), cannot
+   post the `no_blockers` verdict that would let it be landed (verdicts come
+   from a review-purpose session or a person, never the worker), and
+   oversight cannot land without such a verdict at the exact tip, nor leave
+   a merge commit on `integrate/*`;
 5. cannot post the verification of its own work, nor close an item that
    needs one;
 6. cannot run past its turn or wall-clock budget, or be nudged forever;
@@ -517,8 +589,8 @@ With this design live, a driven agent session (any CLI, default posture):
    through `session.answer` on a person-only dialog;
 9. holds no credential beyond the manifest and its live grants in `brokered`
    mode. In `identity` mode (this deployment today) it holds the machine
-   identity, so 9 does not hold here until the operator moves to `brokered`
-   (oversight-grants.md open question 6).
+   identity, so 9 does not hold here until WI-1342 flips dev and then prod
+   to `brokered` (operator decision 5; oversight-grants.md open question 6).
 
 What it still can do, by design: read anywhere it is given, build and test
 in its worktree, commit on its branch, push its branch, post hand-offs,
@@ -530,45 +602,66 @@ the kernel: everything in §5's honest limits.
 Each phase leaves every existing flow working. Items are sized for one
 session; the model tag says who runs it. **Opus low** marks investigation,
 design or security-sensitive work where grok or Haiku is not appropriate.
-Every H-item below names its Vogt ref; the initiative is `agent-harness-services` (ini_01M4SKSTT8WGPB3XQHTT8A4WAH). Labels `model:haiku`, `model:grok`, `model:opus-low` carry the tag; `ci:flaky` marks the flaky register.
+Every H-item below names its Vogt ref; the initiative is
+`agent-harness-services` (ini_01M4SKSTT8WGPB3XQHTT8A4WAH). Labels
+`model:haiku`, `model:grok`, `model:opus-low` carry the tag; `ci:flaky`
+marks the flaky register. **Nothing in the initiative starts before this
+design has a `no blockers` review verdict** (operator decision 8, §10).
 
 **Phase 0 — land what is cut (this week).**
 Finish and land the in-progress grok branches: WI-1298 worktree start,
 WI-1304 build-output cleanup and disk status, WI-1281 budget enforcement,
 WI-1299 review brief (its six blockers). Fix the MCP footguns (WI-1316 split
 into three: WI-1316 submit default, WI-1337 either id form, WI-1338 a local
-item for unbound autopilot workers), the CI job timeouts and `if: always()` (WI-1312), and document
-the landing flows (WI-1302). Ship WI-1279's host-change detection and verify
-it on dev.
+item for unbound autopilot workers), the CI job timeouts and `if: always()`
+(WI-1312), and document the landing flows (WI-1302). Ship WI-1279's
+host-change detection and verify it on dev (Opus low).
 
 **Phase 1 — records and policy as data.**
-`agent_policy.landing/review/verification` (H1 (WI-1318)); `verdict` and
-`verification` comment kinds (H2 (WI-1319)); brief composer renders the latest
-hand-off and verdict only (H3 (WI-1320)); `Decision` entity and ops (H4 (WI-1321), Opus low:
-first slice of a new subsystem); Inbox card and typed answer (H5 (WI-1322)); dispatch
-profiles and `purpose` on `session.start` (H6 (WI-1323)).
+`agent_policy.landing/review/verification` plus the five-project roll-out
+with decision 2 applied (H1, WI-1318); `verdict` and `verification` comment
+kinds with the posting rules (H2, WI-1319); brief composer renders person
+notes, the latest hand-off and the latest verdict only (H3, WI-1320);
+`Decision` entity and ops (H4, WI-1321, Opus low: first slice of a new
+subsystem); typed answer and `decision` change kind (H5, WI-1322); PWA
+decision card (H5b, WI-1339); dispatch profiles and `purpose` on
+`session.start` (H6, WI-1323).
 
 **Phase 2 — gates.**
-Workspace record and `workspace.list` (H7 (WI-1324)); `workspace.clean` and
-merged-branch removal (H8 (WI-1325)); engine discard guard (H9 (WI-1326), Opus low); branch
-ownership and PR rules in `policy.rs` (H10 (WI-1327), Opus low); `work.land` (H11 (WI-1328),
-Opus low); linear-history CI check (WI-1315, re-scoped); dispatch
-enforcement at `session.start` (H12 (WI-1329)); `delivery` projection and the
-agent-only done gate (H13 (WI-1330)); askpass fetches a granted token (H14 (WI-1331)).
+Workspace record for every repo cwd (H7, WI-1324); `GET /api/workspaces` and
+`workspace.list` (H7b, WI-1340); `workspace.clean` and merged-branch removal
+(H8, WI-1325); engine discard guard and the worktree-only protected-checkout
+rule (H9, WI-1326, Opus low); branch ownership and PR rules in `policy.rs`
+for workers with a work item (H10, WI-1327, Opus low); engine
+`GitOpReq::Land` (H11a, WI-1341, Opus low); `work.land` core op (H11b,
+WI-1328, Opus low); linear-history CI check (WI-1315, re-scoped, Haiku);
+dispatch enforcement at `session.start` (H12, WI-1329); `delivery`
+projection and the agent-only done gate (H13, WI-1330); askpass asks the
+broker at prompt time (H14, WI-1331, Opus low); brokered-mode flip with the
+manifest audit, dev then prod (WI-1342, Opus low); `vogt-agent-auth with` for
+`gh pr create` on another org (WI-1343, Opus low).
 
 **Phase 3 — adapters converge.**
-Klaudia `gitguard` defers to the engine (H15 (WI-1332), Opus low, msp-klaudia); Klaudia
-Grep content default (WI-1311, re-scoped); blocked auto-clear (WI-1314,
-re-scoped); autopilot trail-off investigation (WI-1313, Opus low); Klaudia
-in-loop trail-off nudge (WI-1301); adapter contract documented in ENGINE.md
-(H16 (WI-1333)).
+Klaudia `gitguard` defers to the engine on the `VOGT_ENGINE_WORKSPACE`
+signal (H15, WI-1332, Opus low, msp-klaudia); Klaudia Grep content default
+(WI-1311, re-scoped); blocked auto-clear (WI-1314, re-scoped); autopilot
+trail-off investigation (WI-1313, Opus low); Klaudia in-loop trail-off nudge
+(WI-1301); adapter contract documented in ENGINE.md (H16, WI-1333, Haiku).
 
 **Phase 4 — CI watcher.**
-Hung-run detection (H17 (WI-1334)); flaky register (H18 (WI-1335)); person-armed rerun recipe
-(H19 (WI-1336)). Flaky items WI-1305, WI-1309, WI-1310 are labelled `ci:flaky`.
+Hung-run detection, with `run_started_at` added to the check payload first
+(H17, WI-1334); flaky register over failed job and step names (H18,
+WI-1335); person-armed rerun recipe (H19, WI-1336, Haiku). Flaky items
+WI-1305, WI-1309, WI-1310 are labelled `ci:flaky`.
 
-Dependencies: H2 (WI-1319) → H3 (WI-1320), H11 (WI-1328), H13 (WI-1330); H1 (WI-1318) → H10 (WI-1327), H11 (WI-1328), H12 (WI-1329), H13 (WI-1330); H4 (WI-1321) → H5 (WI-1322); H6 (WI-1323) →
-H12 (WI-1329); WI-1298 → H7 (WI-1324) → H8 (WI-1325), H9 (WI-1326), H15 (WI-1332); WI-1304 → H8 (WI-1325); H9 (WI-1326) → H15 (WI-1332); WI-1312 → H17 (WI-1334), H18 (WI-1335).
+Dependencies (all recorded as `depends_on` in Vogt): WI-1323 → WI-1319 →
+WI-1320, WI-1328, WI-1329, WI-1330; WI-1318 → WI-1327, WI-1328, WI-1329,
+WI-1330; WI-1321 → WI-1322, WI-1339; WI-1323 → WI-1329; WI-1298 → WI-1324 →
+WI-1340 → WI-1325, and WI-1324 → WI-1326, WI-1332; WI-1304 → WI-1325;
+WI-1326 → WI-1332; WI-1341 → WI-1328; WI-1331 → WI-1342 → WI-1343. The
+brokered sequence is: WI-1331 merges → WI-1342 step 1 (audit) and step 2
+(dev flip) → WI-1331 and WI-1343 verified on brokered dev → WI-1342 step 3
+(prod, a week later).
 
 ## 10. Operator decisions (answered 2026-10-13)
 
@@ -584,11 +677,17 @@ grok/Haiku items. Decisions, in order:
    with an Inbox row.
 4. Klaudia's gitguard turns itself off inside Vogt sessions once the engine
    discard guard (WI-1326) is live on dev.
-5. Agent-auth mode: vogt-dev moves to `brokered` once WI-1331 is verified;
-   prod a week later.
+5. Agent-auth mode: vogt-dev moves to `brokered`, prod a week later. The
+   design review corrected the order within that decision: WI-1331's
+   deployed check only means something in brokered mode, so the manifest
+   audit and the dev flip (WI-1342) come first, then WI-1331 is verified on
+   dev, then prod.
 6. Decisions expire at 24 h with no implied answer; the asker decides what
    expiry means. Maximum TTL 7 days.
 7. `dispatch.max_workers_per_overseer` defaults to 5.
+8. Sequencing: an Opus-low review of this design before any item starts.
+   The first review (head 9d895a28) found five blockers; this revision
+   addresses them and goes back for re-review.
 
 The questions as asked, kept for the record:
 
@@ -625,6 +724,7 @@ The questions as asked, kept for the record:
 - No per-CLI reimplementation of any rule in §5; a CLI without A3 is a
   documented gap, not a second enforcement.
 - No workflow-state changes; `verified` is a record and a projection.
-- No credential proxy for `git push`; credentials stay manifest lines and
-  grants, with one askpass change.
+- No credential proxy for `git push` or `gh`; credentials stay manifest
+  lines and grants, reached at prompt time by the askpass (WI-1331) or
+  handed to one child process by `vogt-agent-auth with` (WI-1343).
 - No Vale or other prose linting (WI-1297 §1).
