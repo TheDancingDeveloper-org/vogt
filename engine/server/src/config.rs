@@ -279,9 +279,11 @@ pub struct Config {
     /// Helper executable used when `auto_agent_auth` is enabled.
     pub agent_auth_helper: std::path::PathBuf,
     /// The installed Codex accepts `--session-id` (the WI-1126 fork, pinned
-    /// by WI-1142). Stock Codex refuses an unknown flag, so a fresh Codex
-    /// launch is pinned to the engine session id only when this is true.
-    /// `VOGT_CODEX_SESSION_ID`, default false.
+    /// by WI-1142). The image bakes that fork, so a fresh Codex launch is
+    /// pinned to the engine session id by default (WI-1354): without the pin
+    /// the engine does not know the conversation and hibernation is refused.
+    /// Set `VOGT_CODEX_SESSION_ID=false` when the binary is stock npm Codex,
+    /// which refuses an unknown flag and would not start.
     pub codex_session_id: bool,
     /// `ENGINE_AGENT_AUTH_SECRETS`, parsed: what a deployment declared for
     /// sessions, and therefore the policy the on-demand secret broker
@@ -690,7 +692,7 @@ pub fn load(
         }
     }
     .or(from_file.codex_session_id)
-    .unwrap_or(false);
+    .unwrap_or(true);
 
     let auto_agent_auth = match engine_env("ENGINE_AUTO_AGENT_AUTH") {
         Ok(v) => Some(parse_bool_env("ENGINE_AUTO_AGENT_AUTH", &v)?),
@@ -2046,6 +2048,7 @@ mod prefix_tests {
         let clear = || unsafe {
             std::env::remove_var("ENGINE_TOKEN");
             std::env::remove_var("ENGINE_BIND");
+            std::env::remove_var("VOGT_CODEX_SESSION_ID");
         };
         clear();
 
@@ -2069,6 +2072,17 @@ mod prefix_tests {
         )
         .unwrap();
         assert_eq!(cfg.token.as_deref(), Some("cli-flag-token-0123456789"));
+
+        // WI-1354: the image bakes the fork, so a fresh Codex launch is pinned
+        // unless the deployment opts out. The old default (false) left a fresh
+        // session with no conversation id and hibernation refused it.
+        assert!(
+            cfg.codex_session_id,
+            "the pin is on when nothing says otherwise"
+        );
+        unsafe { std::env::set_var("VOGT_CODEX_SESSION_ID", "false") };
+        let cfg = load(Some(&cfg_path), None, None).unwrap();
+        assert!(!cfg.codex_session_id, "stock npm Codex opts out explicitly");
 
         clear();
     }
