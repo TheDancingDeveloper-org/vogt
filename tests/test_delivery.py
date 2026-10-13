@@ -121,6 +121,7 @@ def test_session_input_says_what_became_of_it(
         ctx, SessionInputParams(id=ses_id, text="go on", keys=["enter"], reason=WHY)
     )
     assert result.submitted is True, "Enter as a key is a submit"
+    assert engine.inputs == 2, "the text and the Enter key, no second Enter"
     assert result.delivery == delivery
     assert result.delivery_evidence
 
